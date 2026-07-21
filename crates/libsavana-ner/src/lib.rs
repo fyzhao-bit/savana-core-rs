@@ -12,6 +12,8 @@ pub mod decode_zh;
 pub mod infer_en;
 pub mod infer_zh;
 pub mod ontology;
+pub mod pdp_tool;
+pub mod sink_policy;
 pub mod wordpiece;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

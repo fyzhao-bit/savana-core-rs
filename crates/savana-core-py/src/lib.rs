@@ -2,6 +2,8 @@ use libsavana_ner::attempt_classifier::{self, AttemptPolicyProfile};
 use libsavana_ner::capabilities::{self, Capability, Readers, Source};
 use libsavana_ner::dataflow_policy::{self, ArgTaint, DataflowPolicyProfile};
 use libsavana_ner::ontology::{self, Store as OntologyStoreData, Value as OntologyValue};
+use libsavana_ner::pdp_tool::{self, ToolSpecLite};
+use libsavana_ner::sink_policy::{self, BridgedVerdict, SecurityVerdict, SinkPolicyProfile};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -209,6 +211,172 @@ fn ontology_evaluate_constraints(
     ontology::evaluate_constraints(&constraints, &args, &store)
 }
 
+/// `(verdict, reason, resolved_attempt, trace)` — the return shape of
+/// [`sink_unified_check`]; `trace` is the ordered `[(gate, outcome), ...]`
+/// decision path. Aliased to keep the signature under clippy's
+/// `type_complexity` bar.
+type SinkVerdictOut = (String, String, String, Vec<(String, String)>);
+
+/// Unified PDP sink verdict — PyO3 surface over
+/// [`libsavana_ner::sink_policy`] (the Rust port of the pure verdict
+/// adjudication of `server/security/sink_policy.py`'s `unified_sink_check`,
+/// composing the already-ported G3 `check_policy` and G4 `validate`).
+///
+/// All profile fields are the already-resolved `SinkPolicyProfile` (dataflow +
+/// attempts sub-profiles), passed as flat lists exactly like
+/// `dataflow_check_policy`/`attempt_validate`:
+///   - `args`: `[(name, is_trusted, is_public), ...]` in ORIGINAL kwargs order,
+///   - dataflow sets: `no_side_effect_tools`/`consent_overridable_tools`/
+///     `high_risk_tools`,
+///   - attempts profile: `valid_pairs`/`limits`/`cloud_blocked`,
+///   - `g5_results`: the Python-side shell/vision/cloud validator outputs,
+///     already bridged to `(verdict, reason_value)` and in evaluation order
+///     (empty for the DOCUMENT pack). `verdict` must be one of
+///     `"allowed"`/`"rejected"`/`"blocked"` (else `ValueError`).
+///
+/// `attempt` is the DECLARED attempt (resolving an omitted attempt via
+/// `infer_attempt` stays Python — see the module docs). Returns
+/// `(verdict, reason, resolved_attempt, trace)` where `verdict`/`reason` are
+/// the `SecurityVerdict.value`/`RejectReason.value` wire strings and `trace`
+/// is the ordered `[(gate, outcome), ...]` decision path.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn sink_unified_check(
+    tool_name: &str,
+    attempt: &str,
+    args: Vec<(String, bool, bool)>,
+    attempt_counts: Vec<(String, i64)>,
+    provider: &str,
+    no_side_effect_tools: Vec<String>,
+    consent_overridable_tools: Vec<String>,
+    high_risk_tools: Vec<String>,
+    valid_pairs: Vec<(String, String)>,
+    limits: Vec<(String, i64)>,
+    cloud_blocked: Vec<String>,
+    g5_results: Vec<(String, String)>,
+) -> PyResult<SinkVerdictOut> {
+    let profile = SinkPolicyProfile {
+        dataflow: DataflowPolicyProfile {
+            no_side_effect_tools: no_side_effect_tools.into_iter().collect(),
+            consent_overridable_tools: consent_overridable_tools.into_iter().collect(),
+            high_risk_tools: high_risk_tools.into_iter().collect(),
+        },
+        attempts: AttemptPolicyProfile {
+            valid_pairs: valid_pairs.into_iter().collect(),
+            limits: limits.into_iter().collect(),
+            cloud_blocked: cloud_blocked.into_iter().collect(),
+        },
+    };
+    let args: Vec<ArgTaint> = args
+        .into_iter()
+        .map(|(name, is_trusted, is_public)| ArgTaint {
+            name,
+            is_trusted,
+            is_public,
+        })
+        .collect();
+    let attempt_counts = attempt_counts.into_iter().collect();
+    let g5_results: Vec<BridgedVerdict> = g5_results
+        .into_iter()
+        .map(|(verdict, reason)| -> PyResult<BridgedVerdict> {
+            let verdict = SecurityVerdict::from_wire(&verdict)
+                .ok_or_else(|| PyValueError::new_err(format!("invalid verdict: {verdict}")))?;
+            Ok(BridgedVerdict { verdict, reason })
+        })
+        .collect::<PyResult<_>>()?;
+
+    let out = sink_policy::unified_sink_check(
+        tool_name,
+        attempt,
+        &args,
+        &attempt_counts,
+        provider,
+        &profile,
+        &g5_results,
+    );
+    Ok((
+        out.verdict.as_str().to_string(),
+        out.reason,
+        out.attempt,
+        out.trace,
+    ))
+}
+
+/// One injected active-set entry — the four `ToolSpec` fields the G4 triple
+/// reads: `(name, attempt, constraints, limits_items)`. Aliased to keep
+/// [`pdp_adjudicate_tool_call`]'s signature under clippy's `type_complexity`
+/// bar.
+type ActiveToolEntry = (String, String, Vec<String>, Vec<(String, i64)>);
+
+/// PDP control-plane tool-call adjudication — PyO3 surface over
+/// [`libsavana_ner::pdp_tool`] (the Rust port of `server/security/pdp_tool.py`'s
+/// `adjudicate_tool_call`, the G4 whitelist/ontology/limit triple), reusing the
+/// already-ported ontology engine for step ②.
+///
+/// The caller resolves the active tool set (packs + MCP discovery, role-scoped)
+/// and passes it as `active` = `[(name, attempt, constraints, limits), ...]`.
+/// The ontology store is the same two-list shape as
+/// `ontology_evaluate_constraints`, gated by `ontology_available`
+/// (`False` ⇒ Python's `ontology is None` — the fail-closed
+/// "constraints required but ontology unavailable" branch). `real_args` is the
+/// rehydrated `name -> str(value)` argument map. Returns
+/// `(allowed, reason, attempt)`.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn pdp_adjudicate_tool_call(
+    tool_name: &str,
+    real_args: Vec<(String, String)>,
+    role: &str,
+    active: Vec<ActiveToolEntry>,
+    ontology_available: bool,
+    store_scalars: Vec<(String, String, String, String)>,
+    store_collections: Vec<(String, String, String, Vec<String>)>,
+    attempt_counts: Vec<(String, i64)>,
+) -> (bool, String, String) {
+    let active: Vec<ToolSpecLite> = active
+        .into_iter()
+        .map(|(name, attempt, constraints, limits)| ToolSpecLite {
+            name,
+            attempt,
+            constraints,
+            limits: limits.into_iter().collect(),
+        })
+        .collect();
+    let real_args = real_args.into_iter().collect();
+    let attempt_counts = attempt_counts.into_iter().collect();
+    let store = if ontology_available {
+        let mut store: OntologyStoreData = OntologyStoreData::new();
+        for (ns, key, field, value) in store_scalars {
+            store
+                .entry(ns)
+                .or_default()
+                .entry(key)
+                .or_default()
+                .insert(field, OntologyValue::Str(value));
+        }
+        for (ns, key, field, values) in store_collections {
+            store
+                .entry(ns)
+                .or_default()
+                .entry(key)
+                .or_default()
+                .insert(field, OntologyValue::Collection(values));
+        }
+        Some(store)
+    } else {
+        None
+    };
+    let v = pdp_tool::adjudicate_tool_call(
+        tool_name,
+        &real_args,
+        role,
+        &active,
+        store.as_ref(),
+        &attempt_counts,
+    );
+    (v.allowed, v.reason, v.attempt)
+}
+
 #[pymodule]
 fn savana_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
@@ -220,5 +388,7 @@ fn savana_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(attempt_validate, m)?)?;
     m.add_function(wrap_pyfunction!(attempt_consent_required, m)?)?;
     m.add_function(wrap_pyfunction!(ontology_evaluate_constraints, m)?)?;
+    m.add_function(wrap_pyfunction!(sink_unified_check, m)?)?;
+    m.add_function(wrap_pyfunction!(pdp_adjudicate_tool_call, m)?)?;
     Ok(())
 }
