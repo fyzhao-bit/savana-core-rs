@@ -415,7 +415,11 @@ fn pythonize(pat: &str) -> String {
     out
 }
 
-fn build_fancy(pat: &str, ignorecase: bool) -> Fancy {
+/// Compile a Python `re` pattern to a byte-exact fancy-regex (CPython 15.0.0
+/// `\b`/`\s`/`\d`/`\w` semantics via [`pythonize`] over the ONE vendored table
+/// source). `pub(crate)` so sibling deterministic ports (`body_pipeline`) reuse
+/// the SAME pinned-Unicode regex machinery instead of re-vendoring it.
+pub(crate) fn build_fancy(pat: &str, ignorecase: bool) -> Fancy {
     let body = pythonize(pat);
     let full = if ignorecase {
         format!("(?i){body}")
@@ -540,7 +544,8 @@ pub fn redact_pii(text: &str) -> String {
 }
 
 /// Python `re.escape` (3.7+): escape exactly the 24 "special" chars.
-fn py_re_escape(s: &str) -> String {
+/// `pub(crate)` — reused by `body_pipeline`'s leak-gate vault-value regex.
+pub(crate) fn py_re_escape(s: &str) -> String {
     const SPECIAL: &[char] = &[
         '(', ')', '[', ']', '{', '}', '?', '*', '+', '-', '|', '^', '$', '\\', '.', '&', '~', '#',
         ' ', '\t', '\n', '\r', '\u{0b}', '\u{0c}',

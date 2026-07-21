@@ -5,6 +5,8 @@ use std::path::Path;
 pub mod amount_tokens;
 pub mod assets;
 pub mod attempt_classifier;
+pub mod body_pipeline;
+pub mod camel_interpreter;
 pub mod canonical;
 pub mod capabilities;
 pub mod chars;

@@ -1,0 +1,3398 @@
+{
+  "resolve_args": [
+    {
+      "args": {
+        "bad": {
+          "$from": "sX"
+        },
+        "body": "mail <EMAIL_1>",
+        "n": 42,
+        "to": {
+          "$from": "s1"
+        }
+      },
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "resolved": {
+          "body": {
+            "kind": "value",
+            "raw": "mail bob@corp.com",
+            "readers": [
+              "user"
+            ],
+            "sources": [
+              "user"
+            ]
+          },
+          "n": {
+            "kind": "value",
+            "raw": 42,
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "to": {
+            "kind": "value",
+            "raw": "OUT",
+            "readers": [
+              "tool:browser_read"
+            ],
+            "sources": [
+              "tool"
+            ]
+          }
+        },
+        "unresolved": [
+          {
+            "path": "sX",
+            "reason": "step is unavailable"
+          }
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "mixed",
+      "page_vault": null,
+      "vault": {
+        "<EMAIL_1>": "bob@corp.com"
+      }
+    },
+    {
+      "args": {},
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "resolved": {},
+        "unresolved": []
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "empty",
+      "page_vault": null,
+      "vault": {}
+    },
+    {
+      "args": {
+        "a": {
+          "$from": "sX"
+        },
+        "b": {
+          "$from": "sY.f"
+        },
+        "c": {
+          "$from": "1bad"
+        }
+      },
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "resolved": {},
+        "unresolved": [
+          {
+            "path": "sX",
+            "reason": "step is unavailable"
+          },
+          {
+            "path": "sY.f",
+            "reason": "field is unavailable"
+          },
+          {
+            "path": "",
+            "reason": "invalid_reference"
+          }
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "two_unresolved_order",
+      "page_vault": null,
+      "vault": {}
+    },
+    {
+      "args": {
+        "x": {
+          "$from": "s1.name"
+        },
+        "y": "plain",
+        "z": {
+          "$from": "s2"
+        }
+      },
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "resolved": {
+          "x": {
+            "kind": "value",
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          },
+          "y": {
+            "kind": "value",
+            "raw": "plain",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "z": {
+            "kind": "value",
+            "raw": 123,
+            "readers": null,
+            "sources": [
+              "user"
+            ]
+          }
+        },
+        "unresolved": []
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "all_resolved",
+      "page_vault": null,
+      "vault": {}
+    }
+  ],
+  "resolve_one": [
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": "OUT",
+        "readers": [
+          "tool:browser_read"
+        ],
+        "sources": [
+          "tool"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "env_hit",
+      "page_vault": null,
+      "v": {
+        "$from": "s1"
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": 123,
+        "readers": null,
+        "sources": [
+          "user"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "env_hit_scalar",
+      "page_vault": null,
+      "v": {
+        "$from": "s2"
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": {
+          "nested": [
+            1,
+            2
+          ]
+        },
+        "readers": [
+          "tool"
+        ],
+        "sources": [
+          "qllm",
+          "tool"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "env_hit_nested",
+      "page_vault": null,
+      "v": {
+        "$from": "s3"
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": "MAXID",
+        "readers": null,
+        "sources": [
+          "planner"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "env_hit_maxid",
+      "page_vault": null,
+      "v": {
+        "$from": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "unresolved",
+        "path": "sX",
+        "reason": "step is unavailable"
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "env_miss",
+      "page_vault": null,
+      "v": {
+        "$from": "sX"
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": "Bob",
+        "readers": [
+          "tool"
+        ],
+        "sources": [
+          "qllm"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "field_hit",
+      "page_vault": null,
+      "v": {
+        "$from": "s1.name"
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": "42",
+        "readers": null,
+        "sources": [
+          "constant"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "field_hit2",
+      "page_vault": null,
+      "v": {
+        "$from": "s1.amount"
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "unresolved",
+        "path": "s1.zzz",
+        "reason": "field is unavailable"
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "field_miss_fname",
+      "page_vault": null,
+      "v": {
+        "$from": "s1.zzz"
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "unresolved",
+        "path": "sZ.name",
+        "reason": "field is unavailable"
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "field_miss_sid",
+      "page_vault": null,
+      "v": {
+        "$from": "sZ.name"
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "unresolved",
+        "path": "nope.x",
+        "reason": "field is unavailable"
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "field_miss_empty_sid_fields",
+      "page_vault": null,
+      "v": {
+        "$from": "nope.x"
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": "OUT",
+        "readers": [
+          "tool:browser_read"
+        ],
+        "sources": [
+          "tool"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "dollarfrom_plus_junk",
+      "page_vault": null,
+      "v": {
+        "$from": "s1",
+        "junk": 1
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "unresolved",
+        "path": "",
+        "reason": "invalid_reference"
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "bad_ref_leading_digit",
+      "page_vault": null,
+      "v": {
+        "$from": "1abc"
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "unresolved",
+        "path": "",
+        "reason": "invalid_reference"
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "bad_ref_hyphen",
+      "page_vault": null,
+      "v": {
+        "$from": "a-b"
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "unresolved",
+        "path": "",
+        "reason": "invalid_reference"
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "bad_ref_two_dots",
+      "page_vault": null,
+      "v": {
+        "$from": "a.b.c"
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "unresolved",
+        "path": "",
+        "reason": "invalid_reference"
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "bad_ref_empty",
+      "page_vault": null,
+      "v": {
+        "$from": ""
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "unresolved",
+        "path": "",
+        "reason": "invalid_reference"
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "bad_ref_space",
+      "page_vault": null,
+      "v": {
+        "$from": "a b"
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "unresolved",
+        "path": "",
+        "reason": "invalid_reference"
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "bad_ref_nonstr_int",
+      "page_vault": null,
+      "v": {
+        "$from": 123
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "unresolved",
+        "path": "",
+        "reason": "invalid_reference"
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "bad_ref_nonstr_null",
+      "page_vault": null,
+      "v": {
+        "$from": null
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "unresolved",
+        "path": "",
+        "reason": "invalid_reference"
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "bad_ref_nonstr_list",
+      "page_vault": null,
+      "v": {
+        "$from": [
+          "s1"
+        ]
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "unresolved",
+        "path": "",
+        "reason": "invalid_reference"
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "bad_ref_too_long_ident",
+      "page_vault": null,
+      "v": {
+        "$from": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "unresolved",
+        "path": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "reason": "step is unavailable"
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "valid_ref_maxlen_env_miss",
+      "page_vault": null,
+      "v": {
+        "$from": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "unresolved",
+        "path": "",
+        "reason": "invalid_reference"
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "valid_ref_trailing_newline",
+      "page_vault": null,
+      "v": {
+        "$from": "s1\n"
+      },
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": "mail bob@corp.com now",
+        "readers": [
+          "user"
+        ],
+        "sources": [
+          "user"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "lit_hydrate",
+      "page_vault": null,
+      "v": "mail <EMAIL_1> now",
+      "vault": {
+        "<EMAIL_1>": "bob@corp.com"
+      }
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": "hi Alice and bob@corp.com",
+        "readers": [
+          "user"
+        ],
+        "sources": [
+          "user"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "lit_hydrate_pv_and_vault",
+      "page_vault": {
+        "<NAME_1>": "Alice"
+      },
+      "v": "hi <NAME_1> and <EMAIL_1>",
+      "vault": {
+        "<EMAIL_1>": "bob@corp.com"
+      }
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": "val L2VAL end",
+        "readers": [
+          "user"
+        ],
+        "sources": [
+          "user"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "lit_vault_precedence_clash",
+      "page_vault": {
+        "<X_1>": "PAGEVAL"
+      },
+      "v": "val <X_1> end",
+      "vault": {
+        "<X_1>": "L2VAL"
+      }
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": "real",
+        "readers": [
+          "user"
+        ],
+        "sources": [
+          "user"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "lit_rehydrate_chained_order",
+      "page_vault": null,
+      "v": "<A_1>",
+      "vault": {
+        "<A_1>": "<B_1>",
+        "<B_1>": "real"
+      }
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": "hey Alice",
+        "readers": [
+          "user"
+        ],
+        "sources": [
+          "user"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "lit_pv_only",
+      "page_vault": {
+        "<NAME_1>": "Alice"
+      },
+      "v": "hey <NAME_1>",
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": "x <NAME_1> y",
+        "readers": null,
+        "sources": [
+          "constant"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "lit_placeholder_no_match",
+      "page_vault": null,
+      "v": "x <NAME_1> y",
+      "vault": {
+        "<EMAIL_1>": "bob@corp.com"
+      }
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": "x <NAME_1> y",
+        "readers": null,
+        "sources": [
+          "constant"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "lit_lt_but_empty_vault",
+      "page_vault": null,
+      "v": "x <NAME_1> y",
+      "vault": {}
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": "has < angle",
+        "readers": null,
+        "sources": [
+          "constant"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "lit_lt_but_no_placeholder_key",
+      "page_vault": null,
+      "v": "has < angle",
+      "vault": {
+        "<EMAIL_1>": "z"
+      }
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": 42,
+        "readers": null,
+        "sources": [
+          "constant"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "lit_int",
+      "page_vault": null,
+      "v": 42,
+      "vault": {
+        "<E_1>": "z"
+      }
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": true,
+        "readers": null,
+        "sources": [
+          "constant"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "lit_bool",
+      "page_vault": null,
+      "v": true,
+      "vault": {
+        "<E_1>": "z"
+      }
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": null,
+        "readers": null,
+        "sources": [
+          "constant"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "lit_null",
+      "page_vault": null,
+      "v": null,
+      "vault": {
+        "<E_1>": "z"
+      }
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": 3.5,
+        "readers": null,
+        "sources": [
+          "constant"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "lit_float",
+      "page_vault": null,
+      "v": 3.5,
+      "vault": {
+        "<E_1>": "z"
+      }
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": [
+          1,
+          2,
+          "<E_1>"
+        ],
+        "readers": null,
+        "sources": [
+          "constant"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "lit_list",
+      "page_vault": null,
+      "v": [
+        1,
+        2,
+        "<E_1>"
+      ],
+      "vault": {
+        "<E_1>": "z"
+      }
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": {
+          "a": 1,
+          "b": "<E_1>"
+        },
+        "readers": null,
+        "sources": [
+          "constant"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "lit_dict_no_from",
+      "page_vault": null,
+      "v": {
+        "a": 1,
+        "b": "<E_1>"
+      },
+      "vault": {
+        "<E_1>": "z"
+      }
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": "plain text",
+        "readers": null,
+        "sources": [
+          "constant"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "lit_plain_str",
+      "page_vault": null,
+      "v": "plain text",
+      "vault": {
+        "<E_1>": "z"
+      }
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": "",
+        "readers": null,
+        "sources": [
+          "constant"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "lit_empty_str",
+      "page_vault": null,
+      "v": "",
+      "vault": {
+        "<E_1>": "z"
+      }
+    },
+    {
+      "env": {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+          "raw": "MAXID",
+          "readers": null,
+          "sources": [
+            "planner"
+          ]
+        },
+        "s1": {
+          "raw": "OUT",
+          "readers": [
+            "tool:browser_read"
+          ],
+          "sources": [
+            "tool"
+          ]
+        },
+        "s2": {
+          "raw": 123,
+          "readers": null,
+          "sources": [
+            "user"
+          ]
+        },
+        "s3": {
+          "raw": {
+            "nested": [
+              1,
+              2
+            ]
+          },
+          "readers": [
+            "tool"
+          ],
+          "sources": [
+            "qllm",
+            "tool"
+          ]
+        }
+      },
+      "expect": {
+        "kind": "value",
+        "raw": "打给 王小明",
+        "readers": [
+          "user"
+        ],
+        "sources": [
+          "user"
+        ]
+      },
+      "fields": {
+        "s1": {
+          "amount": {
+            "raw": "42",
+            "readers": null,
+            "sources": [
+              "constant"
+            ]
+          },
+          "name": {
+            "raw": "Bob",
+            "readers": [
+              "tool"
+            ],
+            "sources": [
+              "qllm"
+            ]
+          }
+        }
+      },
+      "name": "lit_cjk_hydrate",
+      "page_vault": null,
+      "v": "打给 <NAME_1>",
+      "vault": {
+        "<NAME_1>": "王小明"
+      }
+    }
+  ],
+  "safe_policy_detail": [
+    {
+      "expect": "source=unknown; reason=unknown; verdict=unknown",
+      "reason": null,
+      "source": null,
+      "verdict": null
+    },
+    {
+      "expect": "source=unknown; reason=unknown; verdict=unknown",
+      "reason": null,
+      "source": "",
+      "verdict": null
+    },
+    {
+      "expect": "source=G6; reason=policy_violation; verdict=REJECTED",
+      "reason": "policy_violation",
+      "source": "G6",
+      "verdict": "REJECTED"
+    },
+    {
+      "expect": "source=L2; reason=; verdict=",
+      "reason": "",
+      "source": "L2",
+      "verdict": ""
+    },
+    {
+      "expect": "source=host; reason=unknown; verdict=BLOCKED",
+      "reason": null,
+      "source": "host",
+      "verdict": "BLOCKED"
+    },
+    {
+      "expect": "source=host; reason=consent; verdict=unknown",
+      "reason": "consent",
+      "source": "host",
+      "verdict": null
+    },
+    {
+      "expect": "source=cloud_validator; reason=untrusted_flow; verdict=ALLOWED",
+      "reason": "untrusted_flow",
+      "source": "cloud_validator",
+      "verdict": "ALLOWED"
+    }
+  ]
+}
