@@ -3,12 +3,15 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub mod assets;
+pub mod attempt_classifier;
 pub mod capabilities;
 pub mod chars;
+pub mod dataflow_policy;
 pub mod decode_en;
 pub mod decode_zh;
 pub mod infer_en;
 pub mod infer_zh;
+pub mod ontology;
 pub mod wordpiece;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
