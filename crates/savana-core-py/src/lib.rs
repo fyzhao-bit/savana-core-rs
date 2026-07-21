@@ -2,8 +2,12 @@ use libsavana_ner::attempt_classifier::{self, AttemptPolicyProfile};
 use libsavana_ner::body_pipeline;
 use libsavana_ner::capabilities::{self, Capability, Readers, Source};
 use libsavana_ner::dataflow_policy::{self, ArgTaint, DataflowPolicyProfile};
+use libsavana_ner::doc_masker::{
+    DetectedEntity, NerDetect, NerDetectError, Observation, RawPage, StrictDocumentMasker,
+};
 use libsavana_ner::ontology::{self, Store as OntologyStoreData, Value as OntologyValue};
 use libsavana_ner::pdp_tool::{self, ToolSpecLite};
+use libsavana_ner::scoped_vault::ScopedDocumentVault;
 use libsavana_ner::sink_policy::{self, BridgedVerdict, SecurityVerdict, SinkPolicyProfile};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -397,11 +401,154 @@ fn pdp_adjudicate_tool_call(
     (v.allowed, v.reason, v.attempt)
 }
 
+/// A [`NerDetect`] that calls back into an injected Python detector — the bridge
+/// that lets the Rust document masker honor whatever `ner_detector` the Python
+/// `StrictDocumentMasker` was constructed with (a deterministic test stub, or
+/// the real fail-closed gate). The callback is `Callable[[str],
+/// Sequence[Entity]]` where each `Entity` exposes `.type`/`.start`/`.end`
+/// (char offsets into the window text); `.text` is unused (the pipeline
+/// recomputes the raw from offsets). ANY failure — the callback raising, a bad
+/// return shape, a non-`usize` offset — becomes [`NerDetectError`], which the
+/// pipeline maps to a terminal `MASK_BOUNDARY_FAILED`, exactly as Python's
+/// `_detect` try/except does; the Python delegation then falls back to its own
+/// pipeline, so the outcome stays identical and fail-closed.
+struct PyCallbackDetector {
+    callback: PyObject,
+}
+
+impl NerDetect for PyCallbackDetector {
+    fn detect(&mut self, text: &str) -> Result<Vec<DetectedEntity>, NerDetectError> {
+        Python::with_gil(|py| {
+            let result = self
+                .callback
+                .call1(py, (text,))
+                .map_err(|_| NerDetectError)?;
+            let bound = result.bind(py);
+            let mut out: Vec<DetectedEntity> = Vec::new();
+            for item in bound.iter().map_err(|_| NerDetectError)? {
+                let item = item.map_err(|_| NerDetectError)?;
+                let kind: String = item
+                    .getattr("type")
+                    .and_then(|v| v.extract())
+                    .map_err(|_| NerDetectError)?;
+                let start: usize = item
+                    .getattr("start")
+                    .and_then(|v| v.extract())
+                    .map_err(|_| NerDetectError)?;
+                let end: usize = item
+                    .getattr("end")
+                    .and_then(|v| v.extract())
+                    .map_err(|_| NerDetectError)?;
+                out.push(DetectedEntity { start, end, kind });
+            }
+            Ok(out)
+        })
+    }
+}
+
+/// One input page for [`mask_pages`]: `(page_number, source, text,
+/// [(obs_text, obs_confidence), ...])`. Aliased to keep the signature under
+/// clippy's `type_complexity` bar.
+type MaskPageInput = (i64, String, String, Vec<(String, f64)>);
+
+/// Strict full-page document masker — PyO3 surface over
+/// [`libsavana_ner::doc_masker`] (the byte-exact port of
+/// `server/documents/masking.py`'s `StrictDocumentMasker._mask_pages`) driving
+/// the authenticated vault mint (`scoped_vault::ScopedDocumentVault::put`).
+///
+/// Inputs are plain Python types: `pages` is `[(page_number, source, text,
+/// [(obs_text, obs_confidence), ...]), ...]`, `key` is the vault's signing
+/// secret (`vault._secret`, so the Rust mint reproduces the SAME HMAC tags),
+/// and `mask_version` is the vault's mask version (checked against
+/// `doc-mask-v1`). The NER backend is injected: pass a Python `detector`
+/// callable to reuse the Python masker's exact `ner_detector` (the equivalence
+/// path — required so a stubbed detector yields identical output), or `None` to
+/// build the real Rust `NerGate` from the ONNX `assets` dir and run NER
+/// internally (the production default path).
+///
+/// Returns a dict capturing the `MaskedDocument` plus the minted vault so the
+/// Python delegation can rebuild `MaskedDocument` AND repopulate the passed
+/// `ScopedDocumentVault` (replaying `put` re-mints identical tokens):
+///   - `"pages"`:   `[(page_number, masked_text), ...]`
+///   - `"chunks"`:  `[(chunk_id, page_start, page_end, masked_text), ...]`
+///   - `"entries"`: `[(token, kind, raw, [pages...]), ...]` in mint order.
+///
+/// A masking failure surfaces as a `RuntimeError` carrying the stable code
+/// (`MASK_BOUNDARY_FAILED` / `OCR_LOW_CONFIDENCE` /
+/// `UNSUPPORTED_DOCUMENT_LANGUAGE`); the Python delegation catches it and falls
+/// back to the Python pipeline, which re-derives the identical outcome.
+#[pyfunction]
+#[pyo3(signature = (pages, artifact_id, generation, mask_version, key, detector=None, assets=""))]
+#[allow(clippy::too_many_arguments)]
+fn mask_pages(
+    py: Python<'_>,
+    pages: Vec<MaskPageInput>,
+    artifact_id: &str,
+    generation: u32,
+    mask_version: &str,
+    key: &[u8],
+    detector: Option<PyObject>,
+    assets: &str,
+) -> PyResult<Py<PyDict>> {
+    let raw_pages: Vec<RawPage> = pages
+        .into_iter()
+        .map(|(page_number, source, text, observations)| RawPage {
+            page_number,
+            source,
+            text,
+            observations: observations
+                .into_iter()
+                .map(|(text, confidence)| Observation { text, confidence })
+                .collect(),
+        })
+        .collect();
+
+    let mut vault = ScopedDocumentVault::new(key, artifact_id, generation, mask_version);
+    let masker = StrictDocumentMasker::new();
+
+    let doc = match detector {
+        Some(callback) => {
+            let mut det = PyCallbackDetector { callback };
+            masker.mask_pages(&mut det, artifact_id, generation, &raw_pages, &mut vault)
+        }
+        None => {
+            let mut gate = libsavana_ner::NerGate::load(Path::new(assets))
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            masker.mask_pages(&mut gate, artifact_id, generation, &raw_pages, &mut vault)
+        }
+    }
+    .map_err(|e| PyRuntimeError::new_err(e.code))?;
+
+    let out = PyDict::new_bound(py);
+    let pages_out: Vec<(i64, String)> = doc
+        .pages
+        .iter()
+        .map(|p| (p.page_number, p.masked_text.clone()))
+        .collect();
+    out.set_item("pages", pages_out)?;
+    let chunks_out: Vec<(String, i64, i64, String)> = doc
+        .chunks
+        .iter()
+        .map(|c| {
+            (
+                c.chunk_id.clone(),
+                c.page_start,
+                c.page_end,
+                c.masked_text.clone(),
+            )
+        })
+        .collect();
+    out.set_item("chunks", chunks_out)?;
+    out.set_item("entries", vault.entries_full())?;
+    Ok(out.unbind())
+}
+
 #[pymodule]
 fn savana_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(detect_strict, m)?)?;
     m.add_function(wrap_pyfunction!(leak_gate, m)?)?;
+    m.add_function(wrap_pyfunction!(mask_pages, m)?)?;
     m.add_function(wrap_pyfunction!(capabilities_combine, m)?)?;
     m.add_function(wrap_pyfunction!(capability_is_public, m)?)?;
     m.add_function(wrap_pyfunction!(capability_is_trusted, m)?)?;

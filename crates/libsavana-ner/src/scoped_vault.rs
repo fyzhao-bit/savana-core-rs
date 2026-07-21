@@ -157,12 +157,16 @@ fn decode_tag(tag: &str) -> Option<[u8; 8]> {
 }
 
 /// One stored value. The token string is the key; the raw is the payload.
-/// `kind`/`chunks` mirror `_VaultEntry` — `kind` feeds the masker's active
-/// "mask once → mask everywhere" sweep (`value_entries` → first-seen kind), and
-/// `chunks` records which serialized chunks carried the token (`record_chunks`).
+/// `kind`/`pages`/`chunks` mirror `_VaultEntry` — `kind` feeds the masker's
+/// active "mask once → mask everywhere" sweep (`value_entries` → first-seen
+/// kind), `pages` accretes every source page the value was `put` from (Python's
+/// `_VaultEntry.pages`; consumed by `describe`/`entries_full` so the Python
+/// delegation can rebuild `TokenInfo.pages` faithfully), and `chunks` records
+/// which serialized chunks carried the token (`record_chunks`).
 struct Entry {
     raw: String,
     kind: String,
+    pages: HashSet<u32>,
     chunks: HashSet<String>,
 }
 
@@ -243,13 +247,19 @@ impl ScopedDocumentVault {
     }
 
     /// Port of `put`: dedup by `(kind, raw)`, monotonic per-kind counter, build
-    /// the authenticated token. (No JSON escaping needed for the grammars.)
-    pub fn put(&mut self, kind: &str, raw: &str, _pages: &[u32]) -> Result<String, VaultError> {
+    /// the authenticated token. (No JSON escaping needed for the grammars.) The
+    /// same `(kind, raw)` accretes source `pages` onto its existing entry, exactly
+    /// as Python's `self._entries[existing].pages.update(page_numbers)`.
+    pub fn put(&mut self, kind: &str, raw: &str, pages: &[u32]) -> Result<String, VaultError> {
         if !is_kind(kind) || raw.is_empty() {
             return Err(VaultError::invalid());
         }
         if let Some(tok) = self.by_value.get(&(kind.to_string(), raw.to_string())) {
-            return Ok(tok.clone());
+            let tok = tok.clone();
+            if let Some(entry) = self.entries.get_mut(&tok) {
+                entry.pages.extend(pages.iter().copied());
+            }
+            return Ok(tok);
         }
         let counter = self.counters.get(kind).copied().unwrap_or(0) + 1;
         self.counters.insert(kind.to_string(), counter);
@@ -263,6 +273,7 @@ impl ScopedDocumentVault {
             Entry {
                 raw: raw.to_string(),
                 kind: kind.to_string(),
+                pages: pages.iter().copied().collect(),
                 chunks: HashSet::new(),
             },
         );
@@ -300,6 +311,25 @@ impl ScopedDocumentVault {
         self.order
             .iter()
             .map(|t| (t.clone(), self.entries[t].raw.clone()))
+            .collect()
+    }
+
+    /// `(token, kind, raw, sorted_pages)` for every entry in first-put order —
+    /// the FULL entry shape the PyO3 `mask_pages` surface returns so the Python
+    /// delegation can rebuild the Python vault faithfully: replaying
+    /// `vault.put(kind, raw, pages)` in this order re-mints the identical tokens
+    /// (same per-kind counters) and reconstructs `_by_value`/`_counters`/the
+    /// folded indices AND `_VaultEntry.pages`. Pages are sorted to match Python's
+    /// `describe()` (`tuple(sorted(entry.pages))`), though the target is a set.
+    pub fn entries_full(&self) -> Vec<(String, String, String, Vec<u32>)> {
+        self.order
+            .iter()
+            .map(|t| {
+                let e = &self.entries[t];
+                let mut pages: Vec<u32> = e.pages.iter().copied().collect();
+                pages.sort_unstable();
+                (t.clone(), e.kind.clone(), e.raw.clone(), pages)
+            })
             .collect()
     }
 
