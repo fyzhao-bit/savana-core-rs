@@ -23,7 +23,13 @@ fn tokenize_matches_python_golden() {
         eprintln!("SKIP: empty");
         return;
     }
-    let assets = std::env::var("SAVANA_NER_ASSETS").expect("SAVANA_NER_ASSETS for golden tests");
+    let assets = match std::env::var("SAVANA_NER_ASSETS") {
+        Ok(a) => a,
+        Err(_) => {
+            eprintln!("SKIP: SAVANA_NER_ASSETS unset (no-asset tier)");
+            return;
+        }
+    };
     let wp = WordPiece::from_vocab_file(Path::new(&assets).join("en/vocab.txt")).unwrap();
     for row in rows {
         let got = wp.encode(&row.text);
