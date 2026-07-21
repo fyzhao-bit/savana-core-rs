@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/libsavana-ner", "crates/savana-core-py"]
+
+[workspace.package]
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.dependencies]
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ndarray = "0.16"
+# ort is added in Phase 4 (deferred).
