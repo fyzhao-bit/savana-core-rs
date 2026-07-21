@@ -1,0 +1,116 @@
+[
+  {
+    "text": "tell John Smith I'll be at Acme Corp on Friday",
+    "needs_en": true,
+    "needs_zh": false,
+    "raises": false
+  },
+  {
+    "text": "Barack Obama visited Berlin and met Angela Merkel",
+    "needs_en": true,
+    "needs_zh": false,
+    "raises": false
+  },
+  {
+    "text": "email from O'Brien about the London office",
+    "needs_en": true,
+    "needs_zh": false,
+    "raises": false
+  },
+  {
+    "text": "no entities here just words",
+    "needs_en": true,
+    "needs_zh": false,
+    "raises": false
+  },
+  {
+    "text": "请告诉张伟我周五在北京的阿里巴巴总部",
+    "needs_en": false,
+    "needs_zh": true,
+    "raises": false
+  },
+  {
+    "text": "李娜和王芳去了上海腾讯大厦",
+    "needs_en": false,
+    "needs_zh": true,
+    "raises": false
+  },
+  {
+    "text": "这句话没有实体只有普通词语",
+    "needs_en": false,
+    "needs_zh": true,
+    "raises": false
+  },
+  {
+    "text": "tell 张伟 I'll meet at Acme 北京 office",
+    "needs_en": true,
+    "needs_zh": true,
+    "raises": false
+  },
+  {
+    "text": "Contact 李娜 or John at Google",
+    "needs_en": true,
+    "needs_zh": true,
+    "raises": false
+  },
+  {
+    "text": "",
+    "needs_en": false,
+    "needs_zh": false,
+    "raises": false
+  },
+  {
+    "text": "   ",
+    "needs_en": false,
+    "needs_zh": false,
+    "raises": false
+  },
+  {
+    "text": "a",
+    "needs_en": false,
+    "needs_zh": false,
+    "raises": false
+  },
+  {
+    "text": "ab",
+    "needs_en": false,
+    "needs_zh": false,
+    "raises": false
+  },
+  {
+    "text": "abc",
+    "needs_en": true,
+    "needs_zh": false,
+    "raises": false
+  },
+  {
+    "text": "٠١٢ SSN",
+    "needs_en": true,
+    "needs_zh": false,
+    "raises": false
+  },
+  {
+    "text": "café Straße naïve",
+    "needs_en": true,
+    "needs_zh": false,
+    "raises": false
+  },
+  {
+    "text": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "needs_en": true,
+    "needs_zh": false,
+    "raises": false
+  },
+  {
+    "text": "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word ",
+    "needs_en": true,
+    "needs_zh": false,
+    "raises": false
+  },
+  {
+    "text": "word1word2",
+    "needs_en": true,
+    "needs_zh": false,
+    "raises": false
+  }
+]

@@ -1,0 +1,249 @@
+[
+  {
+    "text": "tell John Smith I'll be at Acme Corp on Friday",
+    "error": null,
+    "spans": [
+      {
+        "type": "NAME",
+        "text": "John Smith",
+        "start": 5,
+        "end": 15
+      },
+      {
+        "type": "ORG",
+        "text": "Acme Corp",
+        "start": 27,
+        "end": 36
+      }
+    ]
+  },
+  {
+    "text": "Barack Obama visited Berlin and met Angela Merkel",
+    "error": null,
+    "spans": [
+      {
+        "type": "NAME",
+        "text": "Barack Obama",
+        "start": 0,
+        "end": 12
+      },
+      {
+        "type": "PLACE",
+        "text": "Berlin",
+        "start": 21,
+        "end": 27
+      },
+      {
+        "type": "NAME",
+        "text": "Angela Merkel",
+        "start": 36,
+        "end": 49
+      }
+    ]
+  },
+  {
+    "text": "email from O'Brien about the London office",
+    "error": null,
+    "spans": [
+      {
+        "type": "NAME",
+        "text": "O'Brien",
+        "start": 11,
+        "end": 18
+      },
+      {
+        "type": "PLACE",
+        "text": "London",
+        "start": 29,
+        "end": 35
+      }
+    ]
+  },
+  {
+    "text": "no entities here just words",
+    "error": null,
+    "spans": []
+  },
+  {
+    "text": "请告诉张伟我周五在北京的阿里巴巴总部",
+    "error": null,
+    "spans": [
+      {
+        "type": "NAME",
+        "text": "张伟",
+        "start": 3,
+        "end": 5
+      },
+      {
+        "type": "TIME",
+        "text": "周五",
+        "start": 6,
+        "end": 8
+      },
+      {
+        "type": "PLACE",
+        "text": "北京",
+        "start": 9,
+        "end": 11
+      },
+      {
+        "type": "ORG",
+        "text": "阿里巴巴",
+        "start": 12,
+        "end": 16
+      }
+    ]
+  },
+  {
+    "text": "李娜和王芳去了上海腾讯大厦",
+    "error": null,
+    "spans": [
+      {
+        "type": "NAME",
+        "text": "李娜",
+        "start": 0,
+        "end": 2
+      },
+      {
+        "type": "NAME",
+        "text": "王芳",
+        "start": 3,
+        "end": 5
+      },
+      {
+        "type": "PLACE",
+        "text": "上海",
+        "start": 7,
+        "end": 9
+      },
+      {
+        "type": "PLACE",
+        "text": "腾讯大厦",
+        "start": 9,
+        "end": 13
+      }
+    ]
+  },
+  {
+    "text": "这句话没有实体只有普通词语",
+    "error": null,
+    "spans": []
+  },
+  {
+    "text": "tell 张伟 I'll meet at Acme 北京 office",
+    "error": null,
+    "spans": [
+      {
+        "type": "MISC",
+        "text": "tell",
+        "start": 0,
+        "end": 4
+      },
+      {
+        "type": "NAME",
+        "text": "张伟",
+        "start": 5,
+        "end": 7
+      },
+      {
+        "type": "ORG",
+        "text": "Acme 北京",
+        "start": 21,
+        "end": 28
+      },
+      {
+        "type": "MISC",
+        "text": "office",
+        "start": 29,
+        "end": 35
+      }
+    ]
+  },
+  {
+    "text": "Contact 李娜 or John at Google",
+    "error": null,
+    "spans": [
+      {
+        "type": "MISC",
+        "text": "Contact",
+        "start": 0,
+        "end": 7
+      },
+      {
+        "type": "NAME",
+        "text": "李娜",
+        "start": 8,
+        "end": 10
+      },
+      {
+        "type": "NAME",
+        "text": "John",
+        "start": 14,
+        "end": 18
+      },
+      {
+        "type": "MISC",
+        "text": "Google",
+        "start": 22,
+        "end": 28
+      }
+    ]
+  },
+  {
+    "text": "",
+    "error": null,
+    "spans": []
+  },
+  {
+    "text": "   ",
+    "error": null,
+    "spans": []
+  },
+  {
+    "text": "a",
+    "error": null,
+    "spans": []
+  },
+  {
+    "text": "ab",
+    "error": null,
+    "spans": []
+  },
+  {
+    "text": "abc",
+    "error": null,
+    "spans": []
+  },
+  {
+    "text": "٠١٢ SSN",
+    "error": null,
+    "spans": []
+  },
+  {
+    "text": "café Straße naïve",
+    "error": null,
+    "spans": [
+      {
+        "type": "PLACE",
+        "text": "Straße",
+        "start": 5,
+        "end": 11
+      }
+    ]
+  },
+  {
+    "text": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "error": null,
+    "spans": []
+  },
+  {
+    "text": "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word ",
+    "error": null,
+    "spans": []
+  },
+  {
+    "text": "word1word2",
+    "error": null,
+    "spans": []
+  }
+]
