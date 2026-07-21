@@ -54,19 +54,15 @@ struct SpanRow {
     spans: Vec<GoldenSpan>,
 }
 
-/// Returns true if `s` contains a Han (CJK unified ideograph) character — those
-/// rows exercise the Chinese backend, which this phase does not wire.
-fn has_cjk(s: &str) -> bool {
-    s.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
-}
-
-/// Byte-exact parity check for the English backend: `NerGate::detect_strict`
+/// Byte-exact parity check for the FULL pipeline: `NerGate::detect_strict`
 /// must reproduce the golden spans generated from the LIVE Python NER pipeline
-/// for every non-CJK row. Requires `SAVANA_NER_ASSETS` (model/vocab/config) and
-/// `ORT_DYLIB_PATH` (the same libonnxruntime Python uses); skips gracefully
-/// when the assets are absent (the no-asset CI tier), like the tokenize test.
+/// for EVERY row — English, Chinese, AND mixed EN+ZH — including the script
+/// router and the cross-script overlap merge. Requires `SAVANA_NER_ASSETS`
+/// (both backends' assets) and `ORT_DYLIB_PATH` (the same libonnxruntime
+/// Python uses); skips gracefully when the assets are absent (the no-asset CI
+/// tier), like the tokenize test.
 #[test]
-fn en_spans_match_python_golden() {
+fn all_spans_match_python_golden() {
     let path = vectors_dir().join("spans.json");
     if !path.exists() {
         eprintln!("SKIP: no spans.json");
@@ -88,13 +84,10 @@ fn en_spans_match_python_golden() {
 
     let mut asserted = 0usize;
     for row in &rows {
-        if has_cjk(&row.text) {
-            continue; // Chinese rows exercise the zh backend (not this phase).
-        }
         let got = gate.detect_strict(&row.text);
         match (&row.error, got) {
-            // The English golden corpus contains no error rows, but honour the
-            // schema: an error row must map to a fail-closed Err.
+            // The golden corpus contains no error rows, but honour the schema:
+            // an error row must map to a fail-closed Err.
             (Some(_), Ok(spans)) => {
                 panic!("expected error for {:?}, got spans {:?}", row.text, spans)
             }
@@ -111,14 +104,47 @@ fn en_spans_match_python_golden() {
                         end: g.end,
                     })
                     .collect();
-                assert_eq!(spans, want, "EN span divergence on {:?}", row.text);
+                assert_eq!(spans, want, "span divergence on {:?}", row.text);
                 asserted += 1;
             }
         }
     }
-    assert!(
-        asserted > 0,
-        "no English rows asserted — golden corpus empty?"
+    assert!(asserted > 0, "no rows asserted — golden corpus empty?");
+    eprintln!("all_spans_match_python_golden: asserted {asserted} rows (EN + ZH + mixed)");
+}
+
+#[derive(serde::Deserialize)]
+struct ReadinessRow {
+    text: String,
+    needs_en: bool,
+    needs_zh: bool,
+}
+
+/// Byte-exact parity check for the readiness heuristic: `readiness_flags` must
+/// return `(needs_en, needs_zh)` from the LIVE Python
+/// `NerGate._require_backends_ready` for every row. This is MODEL-FREE (pure
+/// script counting), so — unlike the span goldens — it runs in the no-asset CI
+/// tier with no dylib or ONNX assets required.
+#[test]
+fn readiness_matches_python_golden() {
+    let path = vectors_dir().join("readiness.json");
+    if !path.exists() {
+        eprintln!("SKIP: no readiness.json");
+        return;
+    }
+    let rows: Vec<ReadinessRow> = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert!(!rows.is_empty(), "readiness.json is empty");
+    for row in &rows {
+        let got = libsavana_ner::readiness_flags(&row.text);
+        assert_eq!(
+            got,
+            (row.needs_en, row.needs_zh),
+            "readiness divergence on {:?}",
+            row.text
+        );
+    }
+    eprintln!(
+        "readiness_matches_python_golden: asserted {} rows (model-free)",
+        rows.len()
     );
-    eprintln!("en_spans_match_python_golden: asserted {asserted} English rows");
 }
