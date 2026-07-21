@@ -1,0 +1,186 @@
+{
+  "vectors": [
+    {
+      "id": "empty_args",
+      "allow_no_tool": false,
+      "tools": [
+        {
+          "name": "ping",
+          "input_schema": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      ],
+      "grammar": "root ::= invocation\ninvocation ::= invocation-0\ninvocation-0 ::= \"{\" ws \"\\\"tool\\\":\" ws \"\\\"ping\\\"\" ws \",\" ws \"\\\"args\\\":\" ws args-0 ( ws \",\" ws \"\\\"body_span\\\":\" ws str )? ws \"}\"\nargs-0 ::= \"{\" ws \"}\"\nobj ::= \"{\" ws ( member ( ws \",\" ws member )* )? ws \"}\"\nmember ::= str ws \":\" ws value\nvalue ::= str | obj | array | number | boolean | \"null\"\narray ::= \"[\" ws ( value ( ws \",\" ws value )* )? ws \"]\"\nnumber ::= \"-\"? ( \"0\" | [1-9] [0-9]* ) ( \".\" [0-9]+ )? ( [eE] [+-]? [0-9]+ )?\nboolean ::= \"true\" | \"false\"\nstr ::= \"\\\"\" char* \"\\\"\"\nchar ::= [^\"\\\\\\x00-\\x1F] | \"\\\\\" escape\nescape ::= [\"\\\\/bfnrt] | \"u\" hex hex hex hex\nhex ::= [0-9a-fA-F]\nws ::= [ \\t\\n]*"
+    },
+    {
+      "id": "all_optional",
+      "allow_no_tool": false,
+      "tools": [
+        {
+          "name": "search",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string"
+              },
+              "limit": {
+                "type": "integer"
+              },
+              "lang": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "grammar": "root ::= invocation\ninvocation ::= invocation-0\ninvocation-0 ::= \"{\" ws \"\\\"tool\\\":\" ws \"\\\"search\\\"\" ws \",\" ws \"\\\"args\\\":\" ws args-0 ( ws \",\" ws \"\\\"body_span\\\":\" ws str )? ws \"}\"\nargs-0 ::= \"{\" ws ( args-0-options-0 )? ws \"}\"\nargs-0-options-0 ::= \"\\\"query\\\"\" ws \":\" ws value ( ws \",\" ws args-0-options-1 )? | args-0-options-1\nargs-0-options-1 ::= \"\\\"limit\\\"\" ws \":\" ws value ( ws \",\" ws args-0-options-2 )? | args-0-options-2\nargs-0-options-2 ::= \"\\\"lang\\\"\" ws \":\" ws value\nobj ::= \"{\" ws ( member ( ws \",\" ws member )* )? ws \"}\"\nmember ::= str ws \":\" ws value\nvalue ::= str | obj | array | number | boolean | \"null\"\narray ::= \"[\" ws ( value ( ws \",\" ws value )* )? ws \"]\"\nnumber ::= \"-\"? ( \"0\" | [1-9] [0-9]* ) ( \".\" [0-9]+ )? ( [eE] [+-]? [0-9]+ )?\nboolean ::= \"true\" | \"false\"\nstr ::= \"\\\"\" char* \"\\\"\"\nchar ::= [^\"\\\\\\x00-\\x1F] | \"\\\\\" escape\nescape ::= [\"\\\\/bfnrt] | \"u\" hex hex hex hex\nhex ::= [0-9a-fA-F]\nws ::= [ \\t\\n]*"
+    },
+    {
+      "id": "required_middle",
+      "allow_no_tool": false,
+      "tools": [
+        {
+          "name": "send_email",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "cc": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              },
+              "subject": {
+                "type": "string"
+              },
+              "body": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "to",
+              "body"
+            ]
+          }
+        }
+      ],
+      "grammar": "root ::= invocation\ninvocation ::= invocation-0\ninvocation-0 ::= \"{\" ws \"\\\"tool\\\":\" ws \"\\\"send_email\\\"\" ws \",\" ws \"\\\"args\\\":\" ws args-0 ( ws \",\" ws \"\\\"body_span\\\":\" ws str )? ws \"}\"\nargs-0 ::= \"{\" ws ( \"\\\"cc\\\"\" ws \":\" ws value ws \",\" ws )? \"\\\"to\\\"\" ws \":\" ws value ( ws \",\" ws \"\\\"subject\\\"\" ws \":\" ws value )? ws \",\" ws \"\\\"body\\\"\" ws \":\" ws value ws \"}\"\nobj ::= \"{\" ws ( member ( ws \",\" ws member )* )? ws \"}\"\nmember ::= str ws \":\" ws value\nvalue ::= str | obj | array | number | boolean | \"null\"\narray ::= \"[\" ws ( value ( ws \",\" ws value )* )? ws \"]\"\nnumber ::= \"-\"? ( \"0\" | [1-9] [0-9]* ) ( \".\" [0-9]+ )? ( [eE] [+-]? [0-9]+ )?\nboolean ::= \"true\" | \"false\"\nstr ::= \"\\\"\" char* \"\\\"\"\nchar ::= [^\"\\\\\\x00-\\x1F] | \"\\\\\" escape\nescape ::= [\"\\\\/bfnrt] | \"u\" hex hex hex hex\nhex ::= [0-9a-fA-F]\nws ::= [ \\t\\n]*"
+    },
+    {
+      "id": "required_first",
+      "allow_no_tool": false,
+      "tools": [
+        {
+          "name": "read_doc",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "encoding": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        }
+      ],
+      "grammar": "root ::= invocation\ninvocation ::= invocation-0\ninvocation-0 ::= \"{\" ws \"\\\"tool\\\":\" ws \"\\\"read_doc\\\"\" ws \",\" ws \"\\\"args\\\":\" ws args-0 ( ws \",\" ws \"\\\"body_span\\\":\" ws str )? ws \"}\"\nargs-0 ::= \"{\" ws \"\\\"path\\\"\" ws \":\" ws value ( ws \",\" ws \"\\\"encoding\\\"\" ws \":\" ws value )? ws \"}\"\nobj ::= \"{\" ws ( member ( ws \",\" ws member )* )? ws \"}\"\nmember ::= str ws \":\" ws value\nvalue ::= str | obj | array | number | boolean | \"null\"\narray ::= \"[\" ws ( value ( ws \",\" ws value )* )? ws \"]\"\nnumber ::= \"-\"? ( \"0\" | [1-9] [0-9]* ) ( \".\" [0-9]+ )? ( [eE] [+-]? [0-9]+ )?\nboolean ::= \"true\" | \"false\"\nstr ::= \"\\\"\" char* \"\\\"\"\nchar ::= [^\"\\\\\\x00-\\x1F] | \"\\\\\" escape\nescape ::= [\"\\\\/bfnrt] | \"u\" hex hex hex hex\nhex ::= [0-9a-fA-F]\nws ::= [ \\t\\n]*"
+    },
+    {
+      "id": "additional_props_false",
+      "allow_no_tool": false,
+      "tools": [
+        {
+          "name": "t",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "a"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ],
+      "grammar": "root ::= invocation\ninvocation ::= invocation-0\ninvocation-0 ::= \"{\" ws \"\\\"tool\\\":\" ws \"\\\"t\\\"\" ws \",\" ws \"\\\"args\\\":\" ws args-0 ( ws \",\" ws \"\\\"body_span\\\":\" ws str )? ws \"}\"\nargs-0 ::= \"{\" ws \"\\\"a\\\"\" ws \":\" ws value ws \"}\"\nobj ::= \"{\" ws ( member ( ws \",\" ws member )* )? ws \"}\"\nmember ::= str ws \":\" ws value\nvalue ::= str | obj | array | number | boolean | \"null\"\narray ::= \"[\" ws ( value ( ws \",\" ws value )* )? ws \"]\"\nnumber ::= \"-\"? ( \"0\" | [1-9] [0-9]* ) ( \".\" [0-9]+ )? ( [eE] [+-]? [0-9]+ )?\nboolean ::= \"true\" | \"false\"\nstr ::= \"\\\"\" char* \"\\\"\"\nchar ::= [^\"\\\\\\x00-\\x1F] | \"\\\\\" escape\nescape ::= [\"\\\\/bfnrt] | \"u\" hex hex hex hex\nhex ::= [0-9a-fA-F]\nws ::= [ \\t\\n]*"
+    },
+    {
+      "id": "multi_allow_no_tool",
+      "allow_no_tool": true,
+      "tools": [
+        {
+          "name": "ping",
+          "input_schema": {
+            "type": "object",
+            "properties": {}
+          }
+        },
+        {
+          "name": "search",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        },
+        {
+          "name": "send_email",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "to": {
+                "type": "string"
+              },
+              "body": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "to",
+              "body"
+            ]
+          }
+        }
+      ],
+      "grammar": "root ::= \"NO_TOOL\" | invocation\ninvocation ::= invocation-0 | invocation-1 | invocation-2\ninvocation-0 ::= \"{\" ws \"\\\"tool\\\":\" ws \"\\\"ping\\\"\" ws \",\" ws \"\\\"args\\\":\" ws args-0 ( ws \",\" ws \"\\\"body_span\\\":\" ws str )? ws \"}\"\nargs-0 ::= \"{\" ws \"}\"\ninvocation-1 ::= \"{\" ws \"\\\"tool\\\":\" ws \"\\\"search\\\"\" ws \",\" ws \"\\\"args\\\":\" ws args-1 ( ws \",\" ws \"\\\"body_span\\\":\" ws str )? ws \"}\"\nargs-1 ::= \"{\" ws \"\\\"query\\\"\" ws \":\" ws value ws \"}\"\ninvocation-2 ::= \"{\" ws \"\\\"tool\\\":\" ws \"\\\"send_email\\\"\" ws \",\" ws \"\\\"args\\\":\" ws args-2 ( ws \",\" ws \"\\\"body_span\\\":\" ws str )? ws \"}\"\nargs-2 ::= \"{\" ws \"\\\"to\\\"\" ws \":\" ws value ws \",\" ws \"\\\"body\\\"\" ws \":\" ws value ws \"}\"\nobj ::= \"{\" ws ( member ( ws \",\" ws member )* )? ws \"}\"\nmember ::= str ws \":\" ws value\nvalue ::= str | obj | array | number | boolean | \"null\"\narray ::= \"[\" ws ( value ( ws \",\" ws value )* )? ws \"]\"\nnumber ::= \"-\"? ( \"0\" | [1-9] [0-9]* ) ( \".\" [0-9]+ )? ( [eE] [+-]? [0-9]+ )?\nboolean ::= \"true\" | \"false\"\nstr ::= \"\\\"\" char* \"\\\"\"\nchar ::= [^\"\\\\\\x00-\\x1F] | \"\\\\\" escape\nescape ::= [\"\\\\/bfnrt] | \"u\" hex hex hex hex\nhex ::= [0-9a-fA-F]\nws ::= [ \\t\\n]*"
+    },
+    {
+      "id": "unicode_names",
+      "allow_no_tool": false,
+      "tools": [
+        {
+          "name": "发送邮件",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "收件人": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "收件人"
+            ]
+          }
+        }
+      ],
+      "grammar": "root ::= invocation\ninvocation ::= invocation-0\ninvocation-0 ::= \"{\" ws \"\\\"tool\\\":\" ws \"\\\"发送邮件\\\"\" ws \",\" ws \"\\\"args\\\":\" ws args-0 ( ws \",\" ws \"\\\"body_span\\\":\" ws str )? ws \"}\"\nargs-0 ::= \"{\" ws \"\\\"收件人\\\"\" ws \":\" ws value ws \"}\"\nobj ::= \"{\" ws ( member ( ws \",\" ws member )* )? ws \"}\"\nmember ::= str ws \":\" ws value\nvalue ::= str | obj | array | number | boolean | \"null\"\narray ::= \"[\" ws ( value ( ws \",\" ws value )* )? ws \"]\"\nnumber ::= \"-\"? ( \"0\" | [1-9] [0-9]* ) ( \".\" [0-9]+ )? ( [eE] [+-]? [0-9]+ )?\nboolean ::= \"true\" | \"false\"\nstr ::= \"\\\"\" char* \"\\\"\"\nchar ::= [^\"\\\\\\x00-\\x1F] | \"\\\\\" escape\nescape ::= [\"\\\\/bfnrt] | \"u\" hex hex hex hex\nhex ::= [0-9a-fA-F]\nws ::= [ \\t\\n]*"
+    }
+  ]
+}

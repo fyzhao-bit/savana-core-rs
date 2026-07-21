@@ -9,6 +9,8 @@ pub mod chars;
 pub mod dataflow_policy;
 pub mod decode_en;
 pub mod decode_zh;
+pub mod encryption;
+pub mod gbnf_generator;
 pub mod infer_en;
 pub mod infer_zh;
 pub mod ontology;

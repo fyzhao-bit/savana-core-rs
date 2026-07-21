@@ -11,10 +11,22 @@ workspace = true
 [dependencies]
 thiserror.workspace = true
 serde = { workspace = true }
-serde_json = { workspace = true }
+# preserve_order: gbnf_generator iterates JSON-Schema `properties` in
+# declaration order (Python dict insertion order) — the fixed-order argument
+# grammar depends on it, so serde_json must keep object key order, not sort.
+serde_json = { workspace = true, features = ["preserve_order"] }
 ndarray.workspace = true
 ort = { workspace = true }
 unicode_categories = "0.1"
+# encryption core (byte-exact vs Python `cryptography`/`hashlib`/`hmac`):
+# AES-256-GCM, PBKDF2-HMAC-SHA256, HMAC-SHA256. All RustCrypto, edition-2021,
+# generic-array 0.14 family (no edition2024 transitive deps).
+aes-gcm = "0.10"
+pbkdf2 = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+getrandom = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
