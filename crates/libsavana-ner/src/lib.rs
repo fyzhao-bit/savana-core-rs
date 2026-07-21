@@ -1,6 +1,9 @@
 //! libsavana-ner — Rust port of server/security/ner_gate.py entity detection.
 use serde::{Deserialize, Serialize};
 
+pub mod chars;
+pub mod wordpiece;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EntityType {
     Name,
