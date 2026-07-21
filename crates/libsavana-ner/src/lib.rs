@@ -1,6 +1,7 @@
 //! libsavana-ner — Rust port of server/security/ner_gate.py entity detection.
 use serde::{Deserialize, Serialize};
 
+pub mod assets;
 pub mod chars;
 pub mod wordpiece;
 

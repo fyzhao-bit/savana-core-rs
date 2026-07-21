@@ -129,21 +129,27 @@ impl WordPiece {
 /// where `open(path, encoding="utf-8")` applies universal-newline translation
 /// (`\r\n` and lone `\r` become `\n`) before line splitting.
 fn read_vocab(content: &str) -> HashMap<String, i64> {
-    let normalized = normalize_newlines(content);
-    let lines: Vec<&str> = if normalized.is_empty() {
-        Vec::new()
-    } else if let Some(stripped) = normalized.strip_suffix('\n') {
-        // A trailing '\n' terminates the last real line; it must not produce
-        // a spurious extra (empty-string) entry the way a naive split would.
-        stripped.split('\n').collect()
-    } else {
-        normalized.split('\n').collect()
-    };
-    lines
+    split_python_lines(content)
         .into_iter()
         .enumerate()
-        .map(|(i, l)| (l.to_string(), i as i64))
+        .map(|(i, l)| (l, i as i64))
         .collect()
+}
+
+/// Splits file content into logical lines the way Python's `for line in f`
+/// does for a UTF-8 text-mode file: universal-newline translation (`\r\n`
+/// and lone `\r` become `\n`) is applied first, then a single trailing `\n`
+/// terminates the last real line without producing a spurious extra
+/// (empty-string) entry the way a naive `split('\n')` would. Each returned
+/// element already has its line terminator stripped, matching
+/// `line.rstrip("\n")`.
+pub(crate) fn split_python_lines(content: &str) -> Vec<String> {
+    let normalized = normalize_newlines(content);
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+    let body = normalized.strip_suffix('\n').unwrap_or(&normalized);
+    body.split('\n').map(|s| s.to_string()).collect()
 }
 
 fn normalize_newlines(s: &str) -> String {
