@@ -16,6 +16,7 @@ pub mod facts;
 pub mod gbnf_generator;
 pub mod infer_en;
 pub mod infer_zh;
+pub mod l2_filter;
 pub mod masking;
 pub mod ontology;
 pub mod pdp_tool;
