@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub mod assets;
+pub mod capabilities;
 pub mod chars;
 pub mod decode_en;
 pub mod decode_zh;
