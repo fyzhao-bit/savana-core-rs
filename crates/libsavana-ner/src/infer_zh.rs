@@ -13,7 +13,6 @@
 //! ONNX Runtime parity with Python comes from `ort`'s `load-dynamic` feature
 //! pointing `ORT_DYLIB_PATH` at the SAME `libonnxruntime` Python loads.
 
-use crate::Span;
 use ndarray::{Array2, Axis, Ix2};
 use ort::value::Tensor;
 use std::collections::{HashMap, HashSet};
@@ -124,11 +123,4 @@ impl ZhModel {
             .map_err(|e| ort::Error::new(e.to_string()))?;
         Ok(em)
     }
-}
-
-/// Convenience wrapper mirroring `_OnnxZh.extract`: delegates to
-/// [`crate::decode_zh::extract`] so callers can go straight from a model to
-/// spans. Kept thin — all decode logic lives in `decode_zh`.
-pub fn extract(model: &mut ZhModel, text: &str) -> ort::Result<Vec<Span>> {
-    crate::decode_zh::extract(model, text)
 }

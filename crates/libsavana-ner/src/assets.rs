@@ -19,20 +19,26 @@ use std::path::Path;
 /// `line.find("\t")`); a line starting with a tab, or with no tab at all, is
 /// skipped.
 ///
-/// The `id` prefix is parsed with `str::parse::<i64>` and `.unwrap()`s on
-/// failure, mirroring Python's `int(line[:tab])`, which raises `ValueError`
-/// on malformed input rather than silently coercing it. Real asset files are
-/// well-formed, so this only fires on a corrupt/foreign file — the panic
-/// message includes the offending id text.
+/// The `id` prefix is parsed with `str::parse::<i64>`, mirroring Python's
+/// `int(line[:tab])`, which raises `ValueError` on malformed input rather
+/// than silently coercing it. Real asset files are well-formed, so this only
+/// fires on a corrupt/foreign file — in that case this fails closed with an
+/// `io::Error` (kind `InvalidData`) rather than panicking, so a bad asset
+/// degrades to `NerGate::load` capturing `Err` (backend → `None`, gate
+/// reports `ner_unavailable`) instead of unwinding past `.ok()`. The error
+/// message is intentionally stable and does not echo the offending text.
 pub fn read_dic_value_first<P: AsRef<Path>>(path: P) -> io::Result<HashMap<String, i64>> {
     let content = fs::read_to_string(path)?;
     let mut out = HashMap::new();
     for line in split_python_lines(&content) {
         if let Some(tab) = line.find('\t') {
             if tab > 0 {
-                let id: i64 = line[..tab].parse().unwrap_or_else(|e| {
-                    panic!("read_dic_value_first: invalid id {:?}: {e}", &line[..tab])
-                });
+                let id: i64 = line[..tab].parse().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "read_dic_value_first: invalid id",
+                    )
+                })?;
                 out.insert(line[tab + 1..].to_string(), id);
             }
         }
@@ -51,9 +57,9 @@ pub fn read_dic_id_first<P: AsRef<Path>>(path: P) -> io::Result<HashMap<i64, Str
     for line in split_python_lines(&content) {
         if let Some(tab) = line.find('\t') {
             if tab > 0 {
-                let id: i64 = line[..tab].parse().unwrap_or_else(|e| {
-                    panic!("read_dic_id_first: invalid id {:?}: {e}", &line[..tab])
-                });
+                let id: i64 = line[..tab].parse().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "read_dic_id_first: invalid id")
+                })?;
                 out.insert(id, line[tab + 1..].to_string());
             }
         }
@@ -201,6 +207,20 @@ mod tests {
     fn read_crf_rejects_wrong_byte_count() {
         let f = temp_with(&[0u8; 4]); // one f32, but ntags=2 needs 4 f32s (16 bytes)
         let err = read_crf(f.path(), 2).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn read_dic_malformed_id_is_err_not_panic() {
+        // A non-integer id prefix must fail closed with an `io::Error`
+        // (kind `InvalidData`), not panic — a corrupt asset should degrade
+        // to `NerGate::load` capturing `Err` and the gate reporting
+        // `ner_unavailable`, never unwind past `.ok()`.
+        let f = temp_with(b"nope\tOOV\n");
+        let err = read_dic_value_first(f.path()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        let err = read_dic_id_first(f.path()).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 

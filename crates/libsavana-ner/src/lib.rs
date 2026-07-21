@@ -28,12 +28,6 @@ pub struct Span {
     pub end: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Lang {
-    En,
-    Zh,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum NerError {
     #[error("ner_unavailable")]
