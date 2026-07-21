@@ -18,6 +18,20 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 ndarray.workspace = true
 ort = { workspace = true }
 unicode_categories = "0.1"
+# NFKC byte-exact vs CPython 3.12.4 (unidata_version 15.0.0). This crate's
+# Unicode data version is LOCK-STEPPED to the vector-freezing CPython:
+#   =0.1.22 -> Unicode 15.0.0   (0.1.23 -> 15.1, 0.1.24 -> 16.0, 0.1.25 -> 17.0)
+# Bumping it silently changes normalization results, so it is version-pinned
+# exactly like the vendored casefold/category tables in unicode_tables.rs.
+unicode-normalization = "=0.1.22"
+# Structured-PII / token / lookalike patterns. `regex` (RE2-style, linear, no
+# backtracking) expresses 10 of the 11 leak-gate patterns byte-exactly. The
+# ONE exception — the inline PHONE pattern with a negative lookBEHIND *and*
+# lookahead — is not expressible in a finite-automaton engine, so it is FLAGGED
+# and delegated to `fancy-regex` (a backtracking engine that supports
+# lookaround), used for that single pattern only. See masking.rs STRUCTURED.
+regex = "1"
+fancy-regex = "0.14"
 # encryption core (byte-exact vs Python `cryptography`/`hashlib`/`hmac`):
 # AES-256-GCM, PBKDF2-HMAC-SHA256, HMAC-SHA256. All RustCrypto, edition-2021,
 # generic-array 0.14 family (no edition2024 transitive deps).

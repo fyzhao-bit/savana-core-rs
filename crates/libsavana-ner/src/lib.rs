@@ -13,9 +13,12 @@ pub mod encryption;
 pub mod gbnf_generator;
 pub mod infer_en;
 pub mod infer_zh;
+pub mod masking;
 pub mod ontology;
 pub mod pdp_tool;
+pub mod scoped_vault;
 pub mod sink_policy;
+pub mod unicode_tables;
 pub mod wordpiece;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

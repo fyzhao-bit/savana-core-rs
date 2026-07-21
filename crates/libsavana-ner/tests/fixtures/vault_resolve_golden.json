@@ -1,0 +1,95 @@
+{
+ "secret_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+ "artifact_id": "00abcdef12",
+ "generation": 3,
+ "mask_version": "doc-mask-v1",
+ "digest": "evidence-digest-xyz",
+ "cases": [
+  {
+   "kind": "NAME",
+   "raw": "Jane Doe",
+   "token": "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]",
+   "counter": 1,
+   "tag": "6d3f7adb6e3d18e5",
+   "claims_json": "{\"artifact_id\":\"00abcdef12\",\"counter\":1,\"generation\":3,\"kind\":\"NAME\",\"mask_version\":\"doc-mask-v1\"}",
+   "authorized": true
+  },
+  {
+   "kind": "EMAIL",
+   "raw": "jane@example.com",
+   "token": "[[JARVIS-DOC:00abcdef12:3:EMAIL:1:197241b73c7c080e]]",
+   "counter": 1,
+   "tag": "197241b73c7c080e",
+   "claims_json": "{\"artifact_id\":\"00abcdef12\",\"counter\":1,\"generation\":3,\"kind\":\"EMAIL\",\"mask_version\":\"doc-mask-v1\"}",
+   "authorized": true
+  },
+  {
+   "kind": "PLACE",
+   "raw": "Berlin",
+   "token": "[[JARVIS-DOC:00abcdef12:3:PLACE:1:fb0a0bd22e7dc644]]",
+   "counter": 1,
+   "tag": "fb0a0bd22e7dc644",
+   "claims_json": "{\"artifact_id\":\"00abcdef12\",\"counter\":1,\"generation\":3,\"kind\":\"PLACE\",\"mask_version\":\"doc-mask-v1\"}",
+   "authorized": false
+  },
+  {
+   "kind": "ORG",
+   "raw": "Stra\u00dfe GmbH",
+   "token": "[[JARVIS-DOC:00abcdef12:3:ORG:1:0b0fd12e75c58004]]",
+   "counter": 1,
+   "tag": "0b0fd12e75c58004",
+   "claims_json": "{\"artifact_id\":\"00abcdef12\",\"counter\":1,\"generation\":3,\"kind\":\"ORG\",\"mask_version\":\"doc-mask-v1\"}",
+   "authorized": false
+  }
+ ],
+ "resolve": [
+  {
+   "desc": "authorized",
+   "token": "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]",
+   "digest": "evidence-digest-xyz",
+   "out": {
+    "raw": "Jane Doe"
+   }
+  },
+  {
+   "desc": "unauthorized_token",
+   "token": "[[JARVIS-DOC:00abcdef12:3:PLACE:1:fb0a0bd22e7dc644]]",
+   "digest": "evidence-digest-xyz",
+   "out": {
+    "code": "VAULT_TOKEN_UNAUTHORIZED"
+   }
+  },
+  {
+   "desc": "wrong_digest",
+   "token": "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]",
+   "digest": "nope",
+   "out": {
+    "code": "VAULT_TOKEN_UNAUTHORIZED"
+   }
+  },
+  {
+   "desc": "tampered_tag",
+   "token": "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e0]]",
+   "digest": "evidence-digest-xyz",
+   "out": {
+    "code": "VAULT_TOKEN_INVALID"
+   }
+  },
+  {
+   "desc": "wrong_scope",
+   "token": "[[JARVIS-DOC:00abcdef99:3:NAME:1:6d3f7adb6e3d18e5]]",
+   "digest": "evidence-digest-xyz",
+   "out": {
+    "code": "VAULT_TOKEN_INVALID"
+   }
+  },
+  {
+   "desc": "garbage",
+   "token": "[[not a token]]",
+   "digest": "evidence-digest-xyz",
+   "out": {
+    "code": "VAULT_TOKEN_INVALID"
+   }
+  }
+ ]
+}
