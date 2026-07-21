@@ -1,0 +1,17 @@
+{
+ "schema_version": "conformance-v1",
+ "changelog": "conformance/CHANGELOG.md",
+ "files": {
+  "masking_normalize.json": "masking.normalize",
+  "masking_canonical_scan_forms.json": "masking.canonical_scan_forms",
+  "masking_folded_scan_map.json": "masking.folded_scan_map",
+  "masking_leak_gate.json": "masking.masked_text_is_clean",
+  "masking_supported_script.json": "masking.require_supported_script",
+  "facts_amount_grammar.json": "facts.amount_grammar",
+  "digest_json_amount.json": "digest.json_amount",
+  "pdp_verdict_matrix.json": "pdp.unified_sink_check",
+  "canary_nfkc_count.json": "canary.nfkc_count",
+  "stable_error_codes.json": "errors.stable_codes",
+  "no_effect_receipt.json": "receipts.no_effect"
+ }
+}

@@ -1,0 +1,52 @@
+{
+ "schema_version": "conformance-v1",
+ "function_id": "canary.nfkc_count",
+ "vectors": [
+  {
+   "id": "0",
+   "input": {
+    "report": "notes about Ａｖｅｒｙ　Ｓｔｏｎｅ today",
+    "values": [
+     "Avery Stone"
+    ]
+   },
+   "expect": {
+    "value": 1
+   }
+  },
+  {
+   "id": "1",
+   "input": {
+    "report": "AVERY stone and avery STONE",
+    "values": [
+     "Avery Stone"
+    ]
+   },
+   "expect": {
+    "value": 2
+   }
+  },
+  {
+   "id": "2",
+   "input": {
+    "report": "nothing private here",
+    "values": [
+     "Avery Stone"
+    ]
+   },
+   "expect": {
+    "value": 0
+   }
+  },
+  {
+   "id": "3",
+   "input": {
+    "report": "",
+    "values": []
+   },
+   "expect": {
+    "value": 0
+   }
+  }
+ ]
+}

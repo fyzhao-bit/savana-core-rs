@@ -1,0 +1,46 @@
+{
+ "schema_version": "conformance-v1",
+ "function_id": "receipts.no_effect",
+ "vectors": [
+  {
+   "id": "0",
+   "input": "send_test_email",
+   "expect": {
+    "value": {
+     "keys": [
+      "action_id",
+      "effect_performed",
+      "simulated",
+      "status",
+      "tool"
+     ],
+     "status": "SIMULATED_SUCCESS",
+     "simulated": true,
+     "effect_performed": false,
+     "tool": "send_test_email",
+     "action_id_matches_regex": true
+    }
+   }
+  },
+  {
+   "id": "1",
+   "input": "send_test_message",
+   "expect": {
+    "value": {
+     "keys": [
+      "action_id",
+      "effect_performed",
+      "simulated",
+      "status",
+      "tool"
+     ],
+     "status": "SIMULATED_SUCCESS",
+     "simulated": true,
+     "effect_performed": false,
+     "tool": "send_test_message",
+     "action_id_matches_regex": true
+    }
+   }
+  }
+ ]
+}

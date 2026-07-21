@@ -1,0 +1,41 @@
+{
+ "schema_version": "conformance-v1",
+ "function_id": "masking.require_supported_script",
+ "vectors": [
+  {
+   "id": "0",
+   "input": "Latin plus 汉字 ok",
+   "expect": {
+    "value": "ok"
+   }
+  },
+  {
+   "id": "1",
+   "input": "Привет",
+   "expect": {
+    "raises": "UNSUPPORTED_DOCUMENT_LANGUAGE"
+   }
+  },
+  {
+   "id": "2",
+   "input": "Ελληνικά",
+   "expect": {
+    "raises": "UNSUPPORTED_DOCUMENT_LANGUAGE"
+   }
+  },
+  {
+   "id": "3",
+   "input": "مرحبا",
+   "expect": {
+    "raises": "UNSUPPORTED_DOCUMENT_LANGUAGE"
+   }
+  },
+  {
+   "id": "4",
+   "input": "digits 123 !?",
+   "expect": {
+    "value": "ok"
+   }
+  }
+ ]
+}

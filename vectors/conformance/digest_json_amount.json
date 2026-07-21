@@ -1,0 +1,85 @@
+{
+ "schema_version": "conformance-v1",
+ "function_id": "digest.json_amount",
+ "vectors": [
+  {
+   "id": "0",
+   "input": {
+    "t": "none"
+   },
+   "expect": {
+    "value": null
+   }
+  },
+  {
+   "id": "1",
+   "input": {
+    "t": "int",
+    "v": 5
+   },
+   "expect": {
+    "value": "5"
+   }
+  },
+  {
+   "id": "2",
+   "input": {
+    "t": "dec",
+    "v": "12.50"
+   },
+   "expect": {
+    "value": "12.50"
+   }
+  },
+  {
+   "id": "3",
+   "input": {
+    "t": "dec",
+    "v": "1000"
+   },
+   "expect": {
+    "value": "1000"
+   }
+  },
+  {
+   "id": "4",
+   "input": {
+    "t": "dec",
+    "v": "999999999999999999999.5"
+   },
+   "expect": {
+    "value": "999999999999999999999.5"
+   }
+  },
+  {
+   "id": "5",
+   "input": {
+    "t": "bool",
+    "v": true
+   },
+   "expect": {
+    "raises": "CANONICAL_NUMBER_INVALID"
+   }
+  },
+  {
+   "id": "6",
+   "input": {
+    "t": "dec",
+    "v": "Infinity"
+   },
+   "expect": {
+    "raises": "CANONICAL_NUMBER_INVALID"
+   }
+  },
+  {
+   "id": "7",
+   "input": {
+    "t": "dec",
+    "v": "NaN"
+   },
+   "expect": {
+    "raises": "CANONICAL_NUMBER_INVALID"
+   }
+  }
+ ]
+}

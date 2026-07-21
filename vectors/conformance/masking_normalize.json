@@ -1,0 +1,69 @@
+{
+ "schema_version": "conformance-v1",
+ "function_id": "masking.normalize",
+ "vectors": [
+  {
+   "id": "0",
+   "input": "a\u001c\u001d\u001e\u001fb",
+   "expect": {
+    "value": "ab"
+   }
+  },
+  {
+   "id": "1",
+   "input": "Straße",
+   "expect": {
+    "value": "Straße"
+   }
+  },
+  {
+   "id": "2",
+   "input": "STRASSE",
+   "expect": {
+    "value": "STRASSE"
+   }
+  },
+  {
+   "id": "3",
+   "input": "ｆｕｌｌｗｉｄｔｈ NBSP",
+   "expect": {
+    "value": "fullwidth NBSP"
+   }
+  },
+  {
+   "id": "4",
+   "input": "zero​width",
+   "expect": {
+    "value": "zerowidth"
+   }
+  },
+  {
+   "id": "5",
+   "input": "tab\tsep",
+   "expect": {
+    "value": "tab sep"
+   }
+  },
+  {
+   "id": "6",
+   "input": "line sep",
+   "expect": {
+    "value": "line\nsep"
+   }
+  },
+  {
+   "id": "7",
+   "input": "汉字passthrough",
+   "expect": {
+    "value": "汉字passthrough"
+   }
+  },
+  {
+   "id": "8",
+   "input": "  spaced   run  ",
+   "expect": {
+    "value": "  spaced   run  "
+   }
+  }
+ ]
+}

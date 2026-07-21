@@ -1,0 +1,402 @@
+{
+ "schema_version": "conformance-v1",
+ "function_id": "pdp.unified_sink_check",
+ "vectors": [
+  {
+   "id": "0",
+   "input": {
+    "tool": "retrieve_pdf_evidence",
+    "attempt": "document_read",
+    "taint": "constant",
+    "counts": {}
+   },
+   "expect": {
+    "value": [
+     "allowed",
+     "unknown",
+     "document_read"
+    ]
+   }
+  },
+  {
+   "id": "1",
+   "input": {
+    "tool": "retrieve_pdf_evidence",
+    "attempt": "document_read",
+    "taint": "user",
+    "counts": {}
+   },
+   "expect": {
+    "value": [
+     "allowed",
+     "unknown",
+     "document_read"
+    ]
+   }
+  },
+  {
+   "id": "2",
+   "input": {
+    "tool": "retrieve_pdf_evidence",
+    "attempt": "document_read",
+    "taint": "tool",
+    "counts": {}
+   },
+   "expect": {
+    "value": [
+     "allowed",
+     "unknown",
+     "document_read"
+    ]
+   }
+  },
+  {
+   "id": "3",
+   "input": {
+    "tool": "retrieve_pdf_evidence",
+    "attempt": "document_read",
+    "taint": "qllm",
+    "counts": {}
+   },
+   "expect": {
+    "value": [
+     "allowed",
+     "unknown",
+     "document_read"
+    ]
+   }
+  },
+  {
+   "id": "4",
+   "input": {
+    "tool": "draft_due_diligence_report",
+    "attempt": "document_cloud_analysis",
+    "taint": "constant",
+    "counts": {}
+   },
+   "expect": {
+    "value": [
+     "blocked",
+     "consent_required",
+     "document_cloud_analysis"
+    ]
+   }
+  },
+  {
+   "id": "5",
+   "input": {
+    "tool": "draft_due_diligence_report",
+    "attempt": "document_cloud_analysis",
+    "taint": "user",
+    "counts": {}
+   },
+   "expect": {
+    "value": [
+     "blocked",
+     "consent_required",
+     "document_cloud_analysis"
+    ]
+   }
+  },
+  {
+   "id": "6",
+   "input": {
+    "tool": "draft_due_diligence_report",
+    "attempt": "document_cloud_analysis",
+    "taint": "tool",
+    "counts": {}
+   },
+   "expect": {
+    "value": [
+     "blocked",
+     "consent_required",
+     "document_cloud_analysis"
+    ]
+   }
+  },
+  {
+   "id": "7",
+   "input": {
+    "tool": "draft_due_diligence_report",
+    "attempt": "document_cloud_analysis",
+    "taint": "qllm",
+    "counts": {}
+   },
+   "expect": {
+    "value": [
+     "blocked",
+     "consent_required",
+     "document_cloud_analysis"
+    ]
+   }
+  },
+  {
+   "id": "8",
+   "input": {
+    "tool": "send_email",
+    "attempt": "outbound_message",
+    "taint": "constant",
+    "counts": {}
+   },
+   "expect": {
+    "value": [
+     "blocked",
+     "consent_required",
+     "outbound_message"
+    ]
+   }
+  },
+  {
+   "id": "9",
+   "input": {
+    "tool": "send_email",
+    "attempt": "outbound_message",
+    "taint": "user",
+    "counts": {}
+   },
+   "expect": {
+    "value": [
+     "blocked",
+     "consent_required",
+     "outbound_message"
+    ]
+   }
+  },
+  {
+   "id": "10",
+   "input": {
+    "tool": "send_email",
+    "attempt": "outbound_message",
+    "taint": "tool",
+    "counts": {}
+   },
+   "expect": {
+    "value": [
+     "blocked",
+     "consent_required",
+     "outbound_message"
+    ]
+   }
+  },
+  {
+   "id": "11",
+   "input": {
+    "tool": "send_email",
+    "attempt": "outbound_message",
+    "taint": "qllm",
+    "counts": {}
+   },
+   "expect": {
+    "value": [
+     "blocked",
+     "consent_required",
+     "outbound_message"
+    ]
+   }
+  },
+  {
+   "id": "12",
+   "input": {
+    "tool": "retrieve_pdf_evidence",
+    "attempt": "outbound_message",
+    "taint": "constant",
+    "counts": {}
+   },
+   "expect": {
+    "value": [
+     "rejected",
+     "invalid_attempt",
+     "outbound_message"
+    ]
+   }
+  },
+  {
+   "id": "13",
+   "input": {
+    "tool": "retrieve_pdf_evidence",
+    "attempt": "outbound_message",
+    "taint": "tool",
+    "counts": {}
+   },
+   "expect": {
+    "value": [
+     "rejected",
+     "invalid_attempt",
+     "outbound_message"
+    ]
+   }
+  },
+  {
+   "id": "14",
+   "input": {
+    "tool": "draft_due_diligence_report",
+    "attempt": "outbound_message",
+    "taint": "constant",
+    "counts": {}
+   },
+   "expect": {
+    "value": [
+     "rejected",
+     "invalid_attempt",
+     "outbound_message"
+    ]
+   }
+  },
+  {
+   "id": "15",
+   "input": {
+    "tool": "draft_due_diligence_report",
+    "attempt": "outbound_message",
+    "taint": "tool",
+    "counts": {}
+   },
+   "expect": {
+    "value": [
+     "rejected",
+     "invalid_attempt",
+     "outbound_message"
+    ]
+   }
+  },
+  {
+   "id": "16",
+   "input": {
+    "tool": "send_email",
+    "attempt": "document_read",
+    "taint": "constant",
+    "counts": {}
+   },
+   "expect": {
+    "value": [
+     "rejected",
+     "invalid_attempt",
+     "document_read"
+    ]
+   }
+  },
+  {
+   "id": "17",
+   "input": {
+    "tool": "send_email",
+    "attempt": "document_read",
+    "taint": "tool",
+    "counts": {}
+   },
+   "expect": {
+    "value": [
+     "rejected",
+     "invalid_attempt",
+     "document_read"
+    ]
+   }
+  },
+  {
+   "id": "18",
+   "input": {
+    "tool": "retrieve_pdf_evidence",
+    "attempt": "document_read",
+    "taint": "constant",
+    "counts": {
+     "document_read": 1
+    }
+   },
+   "expect": {
+    "value": [
+     "rejected",
+     "limit_exceeded",
+     "document_read"
+    ]
+   }
+  },
+  {
+   "id": "19",
+   "input": {
+    "tool": "retrieve_pdf_evidence",
+    "attempt": "document_read",
+    "taint": "tool",
+    "counts": {
+     "document_read": 1
+    }
+   },
+   "expect": {
+    "value": [
+     "rejected",
+     "limit_exceeded",
+     "document_read"
+    ]
+   }
+  },
+  {
+   "id": "20",
+   "input": {
+    "tool": "draft_due_diligence_report",
+    "attempt": "document_cloud_analysis",
+    "taint": "constant",
+    "counts": {
+     "document_cloud_analysis": 1
+    }
+   },
+   "expect": {
+    "value": [
+     "rejected",
+     "cloud_blocked_type",
+     "document_cloud_analysis"
+    ]
+   }
+  },
+  {
+   "id": "21",
+   "input": {
+    "tool": "draft_due_diligence_report",
+    "attempt": "document_cloud_analysis",
+    "taint": "tool",
+    "counts": {
+     "document_cloud_analysis": 1
+    }
+   },
+   "expect": {
+    "value": [
+     "rejected",
+     "cloud_blocked_type",
+     "document_cloud_analysis"
+    ]
+   }
+  },
+  {
+   "id": "22",
+   "input": {
+    "tool": "send_email",
+    "attempt": "outbound_message",
+    "taint": "constant",
+    "counts": {
+     "outbound_message": 1
+    }
+   },
+   "expect": {
+    "value": [
+     "rejected",
+     "limit_exceeded",
+     "outbound_message"
+    ]
+   }
+  },
+  {
+   "id": "23",
+   "input": {
+    "tool": "send_email",
+    "attempt": "outbound_message",
+    "taint": "tool",
+    "counts": {
+     "outbound_message": 1
+    }
+   },
+   "expect": {
+    "value": [
+     "rejected",
+     "limit_exceeded",
+     "outbound_message"
+    ]
+   }
+  }
+ ]
+}

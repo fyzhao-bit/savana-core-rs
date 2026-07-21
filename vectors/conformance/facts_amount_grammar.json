@@ -1,0 +1,98 @@
+{
+ "schema_version": "conformance-v1",
+ "function_id": "facts.amount_grammar",
+ "vectors": [
+  {
+   "id": "0",
+   "input": "$12,345.67",
+   "expect": {
+    "value": [
+     [
+      1,
+      10,
+      "12345.67"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "1",
+   "input": "¥1000",
+   "expect": {
+    "value": [
+     [
+      1,
+      5,
+      "1000"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "2",
+   "input": "￥250",
+   "expect": {
+    "value": [
+     [
+      1,
+      4,
+      "250"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "3",
+   "input": "RMB 500",
+   "expect": {
+    "value": [
+     [
+      4,
+      7,
+      "500"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "4",
+   "input": "总计 1,234.50 元",
+   "expect": {
+    "value": [
+     [
+      3,
+      11,
+      "1234.50"
+     ]
+    ]
+   }
+  },
+  {
+   "id": "5",
+   "input": "12345",
+   "expect": {
+    "value": []
+   }
+  },
+  {
+   "id": "6",
+   "input": "123456",
+   "expect": {
+    "value": []
+   }
+  },
+  {
+   "id": "7",
+   "input": "USD 9.99",
+   "expect": {
+    "value": [
+     [
+      4,
+      8,
+      "9.99"
+     ]
+    ]
+   }
+  }
+ ]
+}

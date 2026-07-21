@@ -1,0 +1,96 @@
+{
+ "schema_version": "conformance-v1",
+ "function_id": "masking.canonical_scan_forms",
+ "vectors": [
+  {
+   "id": "0",
+   "input": "a\u001c\u001d\u001e\u001fb",
+   "expect": {
+    "value": [
+     "a b",
+     "a b"
+    ]
+   }
+  },
+  {
+   "id": "1",
+   "input": "Straße",
+   "expect": {
+    "value": [
+     "Straße",
+     "strasse"
+    ]
+   }
+  },
+  {
+   "id": "2",
+   "input": "STRASSE",
+   "expect": {
+    "value": [
+     "STRASSE",
+     "strasse"
+    ]
+   }
+  },
+  {
+   "id": "3",
+   "input": "ｆｕｌｌｗｉｄｔｈ NBSP",
+   "expect": {
+    "value": [
+     "ｆｕｌｌｗｉｄｔｈ NBSP",
+     "ｆｕｌｌｗｉｄｔｈ nbsp"
+    ]
+   }
+  },
+  {
+   "id": "4",
+   "input": "zero​width",
+   "expect": {
+    "value": [
+     "zero​width",
+     "zero​width"
+    ]
+   }
+  },
+  {
+   "id": "5",
+   "input": "tab\tsep",
+   "expect": {
+    "value": [
+     "tab sep",
+     "tab sep"
+    ]
+   }
+  },
+  {
+   "id": "6",
+   "input": "line sep",
+   "expect": {
+    "value": [
+     "line sep",
+     "line sep"
+    ]
+   }
+  },
+  {
+   "id": "7",
+   "input": "汉字passthrough",
+   "expect": {
+    "value": [
+     "汉字passthrough",
+     "汉字passthrough"
+    ]
+   }
+  },
+  {
+   "id": "8",
+   "input": "  spaced   run  ",
+   "expect": {
+    "value": [
+     "spaced run",
+     "spaced run"
+    ]
+   }
+  }
+ ]
+}

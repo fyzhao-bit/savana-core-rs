@@ -1,0 +1,41 @@
+{
+ "schema_version": "conformance-v1",
+ "function_id": "masking.masked_text_is_clean",
+ "vectors": [
+  {
+   "id": "0",
+   "input": "١٢٣-٤٥-٦٧٨٩",
+   "expect": {
+    "value": false
+   }
+  },
+  {
+   "id": "1",
+   "input": "contact jane.doe@example.com",
+   "expect": {
+    "value": false
+   }
+  },
+  {
+   "id": "2",
+   "input": "call 415-555-0199",
+   "expect": {
+    "value": false
+   }
+  },
+  {
+   "id": "3",
+   "input": "Reviewed the masked evidence.",
+   "expect": {
+    "value": true
+   }
+  },
+  {
+   "id": "4",
+   "input": "[[JARVIS-DOC:abc:NAME:1]] ok",
+   "expect": {
+    "value": false
+   }
+  }
+ ]
+}

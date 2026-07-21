@@ -1,0 +1,108 @@
+{
+ "schema_version": "conformance-v1",
+ "function_id": "masking.folded_scan_map",
+ "vectors": [
+  {
+   "id": "0",
+   "input": "Straße",
+   "expect": {
+    "value": [
+     "strasse",
+     [
+      0,
+      1,
+      2,
+      3,
+      4,
+      4,
+      5
+     ],
+     [
+      1,
+      2,
+      3,
+      4,
+      5,
+      5,
+      6
+     ]
+    ]
+   }
+  },
+  {
+   "id": "1",
+   "input": "  spaced   run  ",
+   "expect": {
+    "value": [
+     "spaced run",
+     [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      11,
+      12,
+      13
+     ],
+     [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      11,
+      12,
+      13,
+      14
+     ]
+    ]
+   }
+  },
+  {
+   "id": "2",
+   "input": "a\u001c b",
+   "expect": {
+    "value": [
+     "a b",
+     [
+      0,
+      1,
+      3
+     ],
+     [
+      1,
+      3,
+      4
+     ]
+    ]
+   }
+  },
+  {
+   "id": "3",
+   "input": "plain",
+   "expect": {
+    "value": [
+     "plain",
+     [
+      0,
+      1,
+      2,
+      3,
+      4
+     ],
+     [
+      1,
+      2,
+      3,
+      4,
+      5
+     ]
+    ]
+   }
+  }
+ ]
+}
