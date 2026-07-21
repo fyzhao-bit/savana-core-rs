@@ -1,4 +1,5 @@
 use libsavana_ner::attempt_classifier::{self, AttemptPolicyProfile};
+use libsavana_ner::body_pipeline;
 use libsavana_ner::capabilities::{self, Capability, Readers, Source};
 use libsavana_ner::dataflow_policy::{self, ArgTaint, DataflowPolicyProfile};
 use libsavana_ner::ontology::{self, Store as OntologyStoreData, Value as OntologyValue};
@@ -42,6 +43,25 @@ fn detect_strict(py: Python<'_>, text: &str, assets: &str) -> PyResult<Vec<Py<Py
             .collect(),
         Err(e) => Err(PyRuntimeError::new_err(e.to_string())),
     }
+}
+
+/// G2 data-plane leak gate — PyO3 surface over
+/// [`libsavana_ner::body_pipeline::leak_gate`] (the byte-exact port of the
+/// fail-closed residue detector in `server/security/body_pipeline.py`, §7).
+///
+/// This is the deterministic, model-free G2 privacy boundary in the
+/// summarize-send chain: `body` is the masked body text (Python passes `str`,
+/// or `None` when the masker returned nothing — `None` → `False`, matching the
+/// Python `if body is None: return False`), and `vault` is the on-host
+/// placeholder→real map as `(key, value)` pairs (Python's `dict.items()`). Only
+/// the values are inspected (code-point len ≥ 4, deduped). Returns `True` iff
+/// the body is safe to egress: no structured-PII residue AND no surviving raw
+/// vault value at a non-word / non-`<>` boundary. Any doubt (incl. a regex
+/// engine error) fails closed to `False`.
+#[pyfunction]
+#[pyo3(signature = (body, vault))]
+fn leak_gate(body: Option<&str>, vault: Vec<(String, String)>) -> bool {
+    body_pipeline::leak_gate(body, &vault)
 }
 
 /// Parse Python source-name strings into [`Source`]s, mirroring the
@@ -381,6 +401,7 @@ fn pdp_adjudicate_tool_call(
 fn savana_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(detect_strict, m)?)?;
+    m.add_function(wrap_pyfunction!(leak_gate, m)?)?;
     m.add_function(wrap_pyfunction!(capabilities_combine, m)?)?;
     m.add_function(wrap_pyfunction!(capability_is_public, m)?)?;
     m.add_function(wrap_pyfunction!(capability_is_trusted, m)?)?;
