@@ -33,6 +33,16 @@ pub struct MaskError {
 pub const CODE_MASK_BOUNDARY_FAILED: &str = "MASK_BOUNDARY_FAILED";
 pub const CODE_UNSUPPORTED_DOCUMENT_LANGUAGE: &str = "UNSUPPORTED_DOCUMENT_LANGUAGE";
 
+/// The `[[JARVIS-DOC:…]]` / `[[JARVIS-DOC-QUERY:…]]` scan grammars
+/// (`masking._TOKEN_SCAN_RE` / `_QUERY_TOKEN_SCAN_RE`, masking.py:195-202).
+/// Exposed as the single source of truth so `facts` (which strips/blanks these
+/// exact shapes before pattern-matching) cannot silently drift from what the
+/// leak gate below scans for — mirroring how `facts.py` imports
+/// `masking.DOC_TOKEN_RE`/`QUERY_TOKEN_RE`.
+pub const DOC_TOKEN_PATTERN: &str =
+    r"\[\[JARVIS-DOC:[0-9a-f]{8,64}:\d{1,9}:[A-Z][A-Z0-9_]{0,31}:\d{1,9}:[0-9a-f]{16}\]\]";
+pub const QUERY_TOKEN_PATTERN: &str = r"\[\[JARVIS-DOC-QUERY:[A-Z][A-Z0-9_]{0,31}:\d{1,9}\]\]";
+
 impl MaskError {
     fn boundary() -> Self {
         MaskError {
@@ -349,10 +359,8 @@ fn patterns() -> &'static LeakPatterns {
             // `\s*` here only ever sees U+0020 (input is already canonicalized),
             // so regex `\s` (White_Space) and Python `\s` agree in this space.
             lookalike_scan: re(r"\[\[\s*jarvis"),
-            token_scan: re(
-                r"\[\[JARVIS-DOC:[0-9a-f]{8,64}:\d{1,9}:[A-Z][A-Z0-9_]{0,31}:\d{1,9}:[0-9a-f]{16}\]\]",
-            ),
-            query_token_scan: re(r"\[\[JARVIS-DOC-QUERY:[A-Z][A-Z0-9_]{0,31}:\d{1,9}\]\]"),
+            token_scan: re(DOC_TOKEN_PATTERN),
+            query_token_scan: re(QUERY_TOKEN_PATTERN),
         }
     })
 }

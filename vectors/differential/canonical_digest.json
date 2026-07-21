@@ -1,0 +1,151 @@
+[
+ {
+  "payload": {
+   "b": 1,
+   "a": "2.5",
+   "z": null
+  },
+  "sha256": "26df021839dc0e7d4da58b435268275520c98c5db61f938805953fbb0b8e91bd"
+ },
+ {
+  "payload": {
+   "artifact": {
+    "artifact_id": "a-001",
+    "generation": 3,
+    "versions": {
+     "parser_version": "p1",
+     "ocr_version": null
+    }
+   }
+  },
+  "sha256": "062fa8567388149d93eb3744fd3f7ed4cd05ff8b6a8d511200c3229baa4717e7"
+ },
+ {
+  "payload": {
+   "facts": [
+    {
+     "fact_id": "f1",
+     "kind": "amount",
+     "value": "12.50",
+     "currency": "USD",
+     "date": null,
+     "pages": [
+      1,
+      2
+     ],
+     "chunk_ids": [
+      "c1"
+     ]
+    },
+    {
+     "fact_id": "f2",
+     "kind": "date",
+     "value": null,
+     "currency": null,
+     "date": "2026-03-01",
+     "pages": [
+      3
+     ],
+     "chunk_ids": [
+      "c2",
+      "c3"
+     ]
+    }
+   ],
+   "reconciliation": [
+    {
+     "metric": "documented_total",
+     "stated_amount": "1000",
+     "computed_amount": "1000",
+     "variance": "0",
+     "currency": "USD",
+     "pages": [
+      1,
+      2
+     ]
+    }
+   ]
+  },
+  "sha256": "ee90c9ff1130377bdf43c6a21a55928fb1d04167cb410d298959462f5f190297"
+ },
+ {
+  "payload": {
+   "unicode": "café é中文😀",
+   "ctrl": "a\tb\nc\r\"q\\z",
+   "empty": "",
+   "nested": {
+    "list": [
+     1,
+     "2",
+     null,
+     true,
+     false,
+     []
+    ]
+   }
+  },
+  "sha256": "e0a6648c70faaf7b99e40976a4bcd3acfb8c80fb0fafb61d0358eeaaf1ef383d"
+ },
+ {
+  "payload": {
+   "kéy": "v",
+   "kez": "w",
+   "key": "x"
+  },
+  "sha256": "99f4795632652ea6075bf4d17a3a7dd32f5f9c1c96e8b62e37e50cb34a610dc0"
+ },
+ {
+  "payload": {
+   "total_pages": 42,
+   "represented_pages": [
+    1,
+    2,
+    3,
+    4,
+    5
+   ],
+   "omitted_pages": [],
+   "complete": true,
+   "budget_truncated": false
+  },
+  "sha256": "95fbb5e923fdb25d9afb41c51da33523e9d1fe91a4106591fbdd2daca7885727"
+ },
+ {
+  "payload": {
+   "deep": {
+    "a": {
+     "b": {
+      "c": {
+       "d": [
+        "x",
+        {
+         "e": null
+        }
+       ]
+      }
+     }
+    }
+   },
+   "amount": "999999999999999999999.5"
+  },
+  "sha256": "ce7723efd9b93603cbfdda198051f4f57bed661844715f9158ca1839a099422b"
+ },
+ {
+  "payload": {
+   "z": 1,
+   "y": 2,
+   "x": 3,
+   "w": 4,
+   "a": 5,
+   "m": "middle"
+  },
+  "sha256": "5a1c3d0014d674be8c7f52c5adcddacafed662aaff891af2fb2989b8f6c7ac09"
+ },
+ {
+  "payload": {
+   "del": "xy",
+   "low": "\u0000\u0001\u001f\b\f"
+  },
+  "sha256": "6c4c742a4526b90d86fed0317197e533944db6413b55ae957365797224745e6d"
+ }
+]

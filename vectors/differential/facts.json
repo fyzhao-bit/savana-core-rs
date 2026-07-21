@@ -1,0 +1,4637 @@
+{
+ "spans": [
+  {
+   "input": "$12,345.67",
+   "expect": [
+    [
+     1,
+     10,
+     "12345.67"
+    ]
+   ]
+  },
+  {
+   "input": "¥1000",
+   "expect": [
+    [
+     1,
+     5,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "￥250",
+   "expect": [
+    [
+     1,
+     4,
+     "250"
+    ]
+   ]
+  },
+  {
+   "input": "RMB 500",
+   "expect": [
+    [
+     4,
+     7,
+     "500"
+    ]
+   ]
+  },
+  {
+   "input": "总计 1,234.50 元",
+   "expect": [
+    [
+     3,
+     11,
+     "1234.50"
+    ]
+   ]
+  },
+  {
+   "input": "12345",
+   "expect": []
+  },
+  {
+   "input": "123456",
+   "expect": []
+  },
+  {
+   "input": "USD 9.99",
+   "expect": [
+    [
+     4,
+     8,
+     "9.99"
+    ]
+   ]
+  },
+  {
+   "input": "NT$ 1,250,000 total",
+   "expect": [
+    [
+     4,
+     13,
+     "1250000"
+    ]
+   ]
+  },
+  {
+   "input": "The price is $100 and €50.5.",
+   "expect": [
+    [
+     14,
+     17,
+     "100"
+    ],
+    [
+     23,
+     27,
+     "50.5"
+    ]
+   ]
+  },
+  {
+   "input": "Amount: (1,000.00) USD",
+   "expect": [
+    [
+     9,
+     17,
+     "1000.00"
+    ]
+   ]
+  },
+  {
+   "input": "Refund -250 dollars",
+   "expect": [
+    [
+     8,
+     11,
+     "250"
+    ]
+   ]
+  },
+  {
+   "input": "1000 yen and 20 pounds",
+   "expect": [
+    [
+     0,
+     4,
+     "1000"
+    ],
+    [
+     13,
+     15,
+     "20"
+    ]
+   ]
+  },
+  {
+   "input": "港币 3,500",
+   "expect": [
+    [
+     3,
+     8,
+     "3500"
+    ]
+   ]
+  },
+  {
+   "input": "费用 2,000 元, 税 300元",
+   "expect": [
+    [
+     3,
+     8,
+     "2000"
+    ],
+    [
+     14,
+     17,
+     "300"
+    ]
+   ]
+  },
+  {
+   "input": "999,999,999,999,999,999,999 USD",
+   "expect": [
+    [
+     0,
+     27,
+     "999999999999999999999"
+    ]
+   ]
+  },
+  {
+   "input": "12,345,678 HKD",
+   "expect": [
+    [
+     0,
+     10,
+     "12345678"
+    ]
+   ]
+  },
+  {
+   "input": "0.5 EUR",
+   "expect": [
+    [
+     0,
+     3,
+     "0.5"
+    ]
+   ]
+  },
+  {
+   "input": "USD9.99",
+   "expect": []
+  },
+  {
+   "input": "$ 1,234",
+   "expect": [
+    [
+     2,
+     7,
+     "1234"
+    ]
+   ]
+  },
+  {
+   "input": "£5",
+   "expect": [
+    [
+     1,
+     2,
+     "5"
+    ]
+   ]
+  },
+  {
+   "input": "no money here",
+   "expect": []
+  },
+  {
+   "input": "code USD alone",
+   "expect": []
+  },
+  {
+   "input": "1,23 USD",
+   "expect": []
+  },
+  {
+   "input": "1,234,5 USD",
+   "expect": []
+  },
+  {
+   "input": "amount 50000 CNY tax 6,000 CNY",
+   "expect": [
+    [
+     7,
+     12,
+     "50000"
+    ],
+    [
+     21,
+     26,
+     "6000"
+    ]
+   ]
+  },
+  {
+   "input": "US$0.01",
+   "expect": [
+    [
+     3,
+     7,
+     "0.01"
+    ]
+   ]
+  },
+  {
+   "input": "[[JARVIS-DOC:abcabcab:1:AMOUNT:1:0123456789abcdef]] then $50",
+   "expect": [
+    [
+     58,
+     60,
+     "50"
+    ]
+   ]
+  },
+  {
+   "input": "spend 5 USD, 5 USD again",
+   "expect": [
+    [
+     6,
+     7,
+     "5"
+    ],
+    [
+     13,
+     14,
+     "5"
+    ]
+   ]
+  },
+  {
+   "input": "５００ USD",
+   "expect": [
+    [
+     0,
+     3,
+     "500"
+    ]
+   ]
+  },
+  {
+   "input": "9999元",
+   "expect": [
+    [
+     0,
+     4,
+     "9999"
+    ]
+   ]
+  },
+  {
+   "input": "10,0 元",
+   "expect": []
+  },
+  {
+   "input": "1,000元 and 2,000 元",
+   "expect": [
+    [
+     0,
+     5,
+     "1000"
+    ],
+    [
+     11,
+     16,
+     "2000"
+    ]
+   ]
+  },
+  {
+   "input": "RMB美元91,0012345",
+   "expect": []
+  },
+  {
+   "input": "港币dollar99.9999,",
+   "expect": []
+  },
+  {
+   "input": "GBP",
+   "expect": []
+  },
+  {
+   "input": "123456123  1,00grand totalUSD中文",
+   "expect": []
+  },
+  {
+   "input": "RMB0.5HKD美元total¥total",
+   "expect": []
+  },
+  {
+   "input": "人民币euros(US$-",
+   "expect": []
+  },
+  {
+   "input": "RMBgrand total1,00dollarCNY£",
+   "expect": []
+  },
+  {
+   "input": "港币新台币",
+   "expect": []
+  },
+  {
+   "input": "total",
+   "expect": []
+  },
+  {
+   "input": "５００total",
+   "expect": []
+  },
+  {
+   "input": "元-US$euros)$总计",
+   "expect": []
+  },
+  {
+   "input": "円0人民币",
+   "expect": [
+    [
+     1,
+     2,
+     "0"
+    ]
+   ]
+  },
+  {
+   "input": "\n.$CNY",
+   "expect": []
+  },
+  {
+   "input": "0EUR￥合计1234512345HK$",
+   "expect": []
+  },
+  {
+   "input": "12345,12.50",
+   "expect": []
+  },
+  {
+   "input": "HK$9totalCNYTWDyen",
+   "expect": [
+    [
+     3,
+     4,
+     "9"
+    ]
+   ]
+  },
+  {
+   "input": "GBP",
+   "expect": []
+  },
+  {
+   "input": "HKD",
+   "expect": []
+  },
+  {
+   "input": "[[JARVIS-DOC-QUERY:NAME:3]]合计NT$1000",
+   "expect": [
+    [
+     32,
+     36,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "£eurosyenRMB123NT$",
+   "expect": []
+  },
+  {
+   "input": "５００12345",
+   "expect": []
+  },
+  {
+   "input": "abc99.9999abc美元",
+   "expect": []
+  },
+  {
+   "input": "RMBHK$中文[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]1231",
+   "expect": []
+  },
+  {
+   "input": "\n\nHK$",
+   "expect": []
+  },
+  {
+   "input": "1,001,234,567总计新台币",
+   "expect": []
+  },
+  {
+   "input": " 123总计¥0.5$1000",
+   "expect": [
+    [
+     7,
+     10,
+     "0.5"
+    ],
+    [
+     11,
+     15,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "[[JARVIS-DOC-QUERY:NAME:3]]US$dollars1",
+   "expect": []
+  },
+  {
+   "input": "HKD.人民币 1,234,5671,000$",
+   "expect": []
+  },
+  {
+   "input": ")£USDNT$新台币新台币",
+   "expect": []
+  },
+  {
+   "input": "USD\teuros合计.  ",
+   "expect": []
+  },
+  {
+   "input": "TWD¥12.50￥",
+   "expect": [
+    [
+     4,
+     9,
+     "12.50"
+    ]
+   ]
+  },
+  {
+   "input": "-HKD总计(€USD[[JARVIS-DOC-QUERY:NAME:3]]",
+   "expect": []
+  },
+  {
+   "input": "12345[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]1,234,567",
+   "expect": []
+  },
+  {
+   "input": "円１,０００新台币1,00",
+   "expect": [
+    [
+     1,
+     6,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "pounds$",
+   "expect": []
+  },
+  {
+   "input": "1,000GBPCNY €",
+   "expect": []
+  },
+  {
+   "input": "TWDNT$1,2345",
+   "expect": []
+  },
+  {
+   "input": "5合计12.50",
+   "expect": []
+  },
+  {
+   "input": "totalHK$dollars.",
+   "expect": []
+  },
+  {
+   "input": "grand total123455",
+   "expect": []
+  },
+  {
+   "input": "12.50(total0-CNY",
+   "expect": []
+  },
+  {
+   "input": "12345$",
+   "expect": [
+    [
+     0,
+     5,
+     "12345"
+    ]
+   ]
+  },
+  {
+   "input": "HKDpoundsdollargrand total",
+   "expect": []
+  },
+  {
+   "input": "元1￥1,0012CNY",
+   "expect": [
+    [
+     1,
+     2,
+     "1"
+    ]
+   ]
+  },
+  {
+   "input": "５００5  -",
+   "expect": []
+  },
+  {
+   "input": " １,０００",
+   "expect": []
+  },
+  {
+   "input": "123456$\n)",
+   "expect": []
+  },
+  {
+   "input": "£港币\t",
+   "expect": []
+  },
+  {
+   "input": ".新台币RMB12abc(",
+   "expect": []
+  },
+  {
+   "input": "EURyen)",
+   "expect": []
+  },
+  {
+   "input": "12.50)",
+   "expect": []
+  },
+  {
+   "input": "0grand total12.50GBP1234565",
+   "expect": []
+  },
+  {
+   "input": "dollar1,234,567",
+   "expect": []
+  },
+  {
+   "input": "£￥",
+   "expect": []
+  },
+  {
+   "input": ".１,０００123456HKD  ",
+   "expect": []
+  },
+  {
+   "input": "美元€",
+   "expect": []
+  },
+  {
+   "input": "US$\nUSD12.50 ",
+   "expect": []
+  },
+  {
+   "input": "9元12.50yenHKD",
+   "expect": [
+    [
+     0,
+     1,
+     "9"
+    ]
+   ]
+  },
+  {
+   "input": "12.50５００€港币HKD",
+   "expect": [
+    [
+     0,
+     8,
+     "12.50500"
+    ]
+   ]
+  },
+  {
+   "input": "grand total1,00HKD9",
+   "expect": []
+  },
+  {
+   "input": "NT$dollar,",
+   "expect": []
+  },
+  {
+   "input": ",dollars1000[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]1234561,2345",
+   "expect": []
+  },
+  {
+   "input": "１,０００100012.50美元５００1,00grand total",
+   "expect": [
+    [
+     12,
+     14,
+     "50"
+    ]
+   ]
+  },
+  {
+   "input": "dollar(yen\t123456",
+   "expect": []
+  },
+  {
+   "input": "1,234,5671000£",
+   "expect": []
+  },
+  {
+   "input": "€12345１,０００",
+   "expect": []
+  },
+  {
+   "input": "\nJPY$",
+   "expect": []
+  },
+  {
+   "input": "TWDHK$人民币123USD[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]",
+   "expect": [
+    [
+     9,
+     12,
+     "123"
+    ]
+   ]
+  },
+  {
+   "input": "１,０００US$.\n元RMB",
+   "expect": [
+    [
+     0,
+     5,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "123￥港币新台币人民币912.50",
+   "expect": [
+    [
+     0,
+     3,
+     "123"
+    ],
+    [
+     12,
+     18,
+     "912.50"
+    ]
+   ]
+  },
+  {
+   "input": "99.99991,234,567grand totalpounds[[JARVIS-DOC-QUERY:NAME:3]])总计",
+   "expect": []
+  },
+  {
+   "input": "1,0012.501000[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]合计(1,000",
+   "expect": []
+  },
+  {
+   "input": " JPY),",
+   "expect": []
+  },
+  {
+   "input": "123,1000  -",
+   "expect": []
+  },
+  {
+   "input": "￥123yenNT$-.人民币",
+   "expect": [
+    [
+     1,
+     4,
+     "123"
+    ]
+   ]
+  },
+  {
+   "input": "\n12345元USDEUR)JPY",
+   "expect": [
+    [
+     1,
+     6,
+     "12345"
+    ]
+   ]
+  },
+  {
+   "input": "中文TWD",
+   "expect": []
+  },
+  {
+   "input": "(RMB合计５００円RMB新台币",
+   "expect": []
+  },
+  {
+   "input": "9.123€99.9999TWD12.50",
+   "expect": [
+    [
+     0,
+     5,
+     "9.123"
+    ]
+   ]
+  },
+  {
+   "input": ".123USDUS$",
+   "expect": []
+  },
+  {
+   "input": "euros£",
+   "expect": []
+  },
+  {
+   "input": "１,０００TWD新台币円totaldollars99.9999",
+   "expect": []
+  },
+  {
+   "input": "£EUR.0.5",
+   "expect": []
+  },
+  {
+   "input": "poundsCNYNT$５００",
+   "expect": [
+    [
+     12,
+     15,
+     "500"
+    ]
+   ]
+  },
+  {
+   "input": "dollar0.5¥.",
+   "expect": [
+    [
+     8,
+     9,
+     "5"
+    ]
+   ]
+  },
+  {
+   "input": "円 .(NT$",
+   "expect": []
+  },
+  {
+   "input": "totalUSD[[JARVIS-DOC-QUERY:NAME:3]]dollarHKDCNY",
+   "expect": []
+  },
+  {
+   "input": "[[JARVIS-DOC-QUERY:NAME:3]])",
+   "expect": []
+  },
+  {
+   "input": ")abc12.500",
+   "expect": []
+  },
+  {
+   "input": "$[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]",
+   "expect": []
+  },
+  {
+   "input": "dollar1,0001,2345123",
+   "expect": []
+  },
+  {
+   "input": "１,０００12345yenUSD美元新台币1",
+   "expect": [
+    [
+     21,
+     22,
+     "1"
+    ]
+   ]
+  },
+  {
+   "input": ".)１,０００",
+   "expect": []
+  },
+  {
+   "input": "TWDHK$0.5EURabcdollars",
+   "expect": [
+    [
+     6,
+     9,
+     "0.5"
+    ]
+   ]
+  },
+  {
+   "input": "1,23451,000",
+   "expect": []
+  },
+  {
+   "input": "99.9999)",
+   "expect": []
+  },
+  {
+   "input": "TWD1,000123,USDGBP",
+   "expect": []
+  },
+  {
+   "input": "1234512.50",
+   "expect": []
+  },
+  {
+   "input": "\t12345中文",
+   "expect": []
+  },
+  {
+   "input": "1,234,567.total５００0.5",
+   "expect": []
+  },
+  {
+   "input": "(,\t",
+   "expect": []
+  },
+  {
+   "input": "港币1,000HK$HKD",
+   "expect": [
+    [
+     2,
+     7,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "dollar新台币US$€",
+   "expect": []
+  },
+  {
+   "input": ".1,000",
+   "expect": []
+  },
+  {
+   "input": "总计)",
+   "expect": []
+  },
+  {
+   "input": "NT$€\t12grand total总计",
+   "expect": [
+    [
+     5,
+     7,
+     "12"
+    ]
+   ]
+  },
+  {
+   "input": "GBP\t",
+   "expect": []
+  },
+  {
+   "input": "€EURNT$",
+   "expect": []
+  },
+  {
+   "input": "港币1,00,¥",
+   "expect": []
+  },
+  {
+   "input": "HK$)0.5  €JPY",
+   "expect": [
+    [
+     4,
+     7,
+     "0.5"
+    ]
+   ]
+  },
+  {
+   "input": "美元总计",
+   "expect": []
+  },
+  {
+   "input": "¥１,０００",
+   "expect": [
+    [
+     1,
+     6,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "yen",
+   "expect": []
+  },
+  {
+   "input": "５００123dollarspounds",
+   "expect": []
+  },
+  {
+   "input": "99.9999合计1dollars５００",
+   "expect": []
+  },
+  {
+   "input": "12345total",
+   "expect": []
+  },
+  {
+   "input": "12abc港币NT$EUR€",
+   "expect": []
+  },
+  {
+   "input": "GBP",
+   "expect": []
+  },
+  {
+   "input": "99.99991,00dollarstotal  新台币元",
+   "expect": []
+  },
+  {
+   "input": "dollarUS$yen円",
+   "expect": []
+  },
+  {
+   "input": "JPY美元",
+   "expect": []
+  },
+  {
+   "input": "5",
+   "expect": []
+  },
+  {
+   "input": "新台币.(",
+   "expect": []
+  },
+  {
+   "input": "\n1,2345美元.新台币1,00",
+   "expect": []
+  },
+  {
+   "input": "元1,000£dollarsdollars円5",
+   "expect": [
+    [
+     1,
+     6,
+     "1000"
+    ],
+    [
+     22,
+     23,
+     "5"
+    ]
+   ]
+  },
+  {
+   "input": "£dollarsJPY",
+   "expect": []
+  },
+  {
+   "input": "元JPY港币12.50港币1000",
+   "expect": [
+    [
+     6,
+     11,
+     "12.50"
+    ],
+    [
+     13,
+     17,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "9",
+   "expect": []
+  },
+  {
+   "input": "dollars中文",
+   "expect": []
+  },
+  {
+   "input": "-$121港币",
+   "expect": [
+    [
+     2,
+     5,
+     "121"
+    ]
+   ]
+  },
+  {
+   "input": "12HKD",
+   "expect": []
+  },
+  {
+   "input": ".JPYTWD9中文",
+   "expect": []
+  },
+  {
+   "input": "12NT$",
+   "expect": [
+    [
+     0,
+     2,
+     "12"
+    ]
+   ]
+  },
+  {
+   "input": "  abc",
+   "expect": []
+  },
+  {
+   "input": "EURRMB元",
+   "expect": []
+  },
+  {
+   "input": "dollar人民币  GBP£¥[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]",
+   "expect": []
+  },
+  {
+   "input": "5",
+   "expect": []
+  },
+  {
+   "input": "NT$",
+   "expect": []
+  },
+  {
+   "input": "TWD[[JARVIS-DOC-QUERY:NAME:3]]美元JPY",
+   "expect": []
+  },
+  {
+   "input": "港币1",
+   "expect": [
+    [
+     2,
+     3,
+     "1"
+    ]
+   ]
+  },
+  {
+   "input": "元元",
+   "expect": []
+  },
+  {
+   "input": "円grand total0.5",
+   "expect": []
+  },
+  {
+   "input": "5euros中文HKDRMB合计",
+   "expect": []
+  },
+  {
+   "input": "12345123元\t1,2345１,０００美元",
+   "expect": []
+  },
+  {
+   "input": "abc",
+   "expect": []
+  },
+  {
+   "input": "合计[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]1,00",
+   "expect": []
+  },
+  {
+   "input": "USD512345  12(",
+   "expect": []
+  },
+  {
+   "input": "12345US$RMB[[JARVIS-DOC-QUERY:NAME:3]]\ntotal",
+   "expect": [
+    [
+     0,
+     5,
+     "12345"
+    ]
+   ]
+  },
+  {
+   "input": "HKDabc",
+   "expect": []
+  },
+  {
+   "input": "TWD",
+   "expect": []
+  },
+  {
+   "input": "[[JARVIS-DOC-QUERY:NAME:3]]美元dollar.",
+   "expect": []
+  },
+  {
+   "input": "12345JPY",
+   "expect": []
+  },
+  {
+   "input": "yen12.50总计元总计grand total",
+   "expect": []
+  },
+  {
+   "input": "TWD512",
+   "expect": []
+  },
+  {
+   "input": ",JPY\t\n合计1,000",
+   "expect": []
+  },
+  {
+   "input": "$123450  $,",
+   "expect": []
+  },
+  {
+   "input": "£-",
+   "expect": []
+  },
+  {
+   "input": "$１,０００yen￥[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]",
+   "expect": [
+    [
+     1,
+     6,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "EURtotalJPY  (",
+   "expect": []
+  },
+  {
+   "input": ".  (",
+   "expect": []
+  },
+  {
+   "input": "[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]1230港币",
+   "expect": [
+    [
+     51,
+     55,
+     "1230"
+    ]
+   ]
+  },
+  {
+   "input": "51,2345EUR\t1,2345)1000",
+   "expect": []
+  },
+  {
+   "input": "\t",
+   "expect": []
+  },
+  {
+   "input": "99.99999dollarsgrand total新台币¥",
+   "expect": []
+  },
+  {
+   "input": "123456¥)合计",
+   "expect": []
+  },
+  {
+   "input": "NT$euros５００EUR",
+   "expect": []
+  },
+  {
+   "input": "新台币US$[[JARVIS-DOC-QUERY:NAME:3]][[JARVIS-DOC-QUERY:NAME:3]]0",
+   "expect": []
+  },
+  {
+   "input": "美元pounds美元HKD\t-  ",
+   "expect": []
+  },
+  {
+   "input": "EUR",
+   "expect": []
+  },
+  {
+   "input": "1,000123-5",
+   "expect": []
+  },
+  {
+   "input": "[[JARVIS-DOC-QUERY:NAME:3]]５００99.99991000-grand totalHKD",
+   "expect": []
+  },
+  {
+   "input": "pounds  1,000合计10005-",
+   "expect": [
+    [
+     8,
+     13,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "-123US$",
+   "expect": [
+    [
+     1,
+     4,
+     "123"
+    ]
+   ]
+  },
+  {
+   "input": "€",
+   "expect": []
+  },
+  {
+   "input": "[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]yenRMBEUR1,2345５００",
+   "expect": []
+  },
+  {
+   "input": "     dollar1,234,567US$",
+   "expect": []
+  },
+  {
+   "input": "TWDTWD12345199.9999",
+   "expect": []
+  },
+  {
+   "input": "99.9999total1,00CNY  0.5",
+   "expect": []
+  },
+  {
+   "input": ".US$",
+   "expect": []
+  },
+  {
+   "input": "dollarabc美元12.50",
+   "expect": [
+    [
+     11,
+     16,
+     "12.50"
+    ]
+   ]
+  },
+  {
+   "input": "元5",
+   "expect": [
+    [
+     1,
+     2,
+     "5"
+    ]
+   ]
+  },
+  {
+   "input": "09￥元新台币\n,",
+   "expect": [
+    [
+     0,
+     2,
+     "9"
+    ]
+   ]
+  },
+  {
+   "input": "NT$",
+   "expect": []
+  },
+  {
+   "input": "RMBtotalCNYUS$",
+   "expect": []
+  },
+  {
+   "input": "999.9999euros合计12.50£TWD",
+   "expect": [
+    [
+     18,
+     20,
+     "50"
+    ]
+   ]
+  },
+  {
+   "input": "1 RMBUS$人民币",
+   "expect": []
+  },
+  {
+   "input": "人民币1,2345(USD12total",
+   "expect": []
+  },
+  {
+   "input": "￥123456123456",
+   "expect": []
+  },
+  {
+   "input": "中文-",
+   "expect": []
+  },
+  {
+   "input": "HK$",
+   "expect": []
+  },
+  {
+   "input": "[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]人民币",
+   "expect": []
+  },
+  {
+   "input": "¥中文CNY51,234,5670总计",
+   "expect": []
+  },
+  {
+   "input": "(",
+   "expect": []
+  },
+  {
+   "input": "12€CNYdollar",
+   "expect": [
+    [
+     0,
+     2,
+     "12"
+    ]
+   ]
+  },
+  {
+   "input": "eurosCNY１,０００12.50-",
+   "expect": []
+  },
+  {
+   "input": "新台币TWD12.500.5\t",
+   "expect": []
+  },
+  {
+   "input": "0.5.",
+   "expect": []
+  },
+  {
+   "input": "\n-円RMBeuros",
+   "expect": []
+  },
+  {
+   "input": "中文12.50",
+   "expect": []
+  },
+  {
+   "input": "total51USDCNY)",
+   "expect": []
+  },
+  {
+   "input": "\t",
+   "expect": []
+  },
+  {
+   "input": "1234560.512",
+   "expect": []
+  },
+  {
+   "input": "12.50JPY合计12.50\t$",
+   "expect": [
+    [
+     13,
+     15,
+     "50"
+    ]
+   ]
+  },
+  {
+   "input": "€",
+   "expect": []
+  },
+  {
+   "input": "GBP(\nRMB",
+   "expect": []
+  },
+  {
+   "input": "NT$(12345totaldollars.",
+   "expect": [
+    [
+     4,
+     9,
+     "12345"
+    ]
+   ]
+  },
+  {
+   "input": "[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]])",
+   "expect": []
+  },
+  {
+   "input": "HKDyenUS$１,０００[[JARVIS-DOC-QUERY:NAME:3]]€",
+   "expect": [
+    [
+     9,
+     14,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "pounds0.5CNY)",
+   "expect": []
+  },
+  {
+   "input": "12345£",
+   "expect": [
+    [
+     0,
+     5,
+     "12345"
+    ]
+   ]
+  },
+  {
+   "input": "euros",
+   "expect": []
+  },
+  {
+   "input": "港币1,234,5671,2345abc",
+   "expect": []
+  },
+  {
+   "input": "GBP9总计１,０００ euros",
+   "expect": []
+  },
+  {
+   "input": ")99.9999",
+   "expect": []
+  },
+  {
+   "input": "1,000 1,234512.50£",
+   "expect": [
+    [
+     15,
+     17,
+     "50"
+    ]
+   ]
+  },
+  {
+   "input": "中文poundspounds,\tUSD9",
+   "expect": []
+  },
+  {
+   "input": "12.50合计dollars",
+   "expect": []
+  },
+  {
+   "input": "5１,０００人民币",
+   "expect": [
+    [
+     0,
+     6,
+     "51000"
+    ]
+   ]
+  },
+  {
+   "input": "5",
+   "expect": []
+  },
+  {
+   "input": "美元01,0012.50NT$",
+   "expect": [
+    [
+     10,
+     12,
+     "50"
+    ]
+   ]
+  },
+  {
+   "input": "新台币1新台币美元pounds[[JARVIS-DOC-QUERY:NAME:3]]1,2345",
+   "expect": [
+    [
+     3,
+     4,
+     "1"
+    ]
+   ]
+  },
+  {
+   "input": "0.5￥元,HK$¥€",
+   "expect": [
+    [
+     0,
+     3,
+     "0.5"
+    ]
+   ]
+  },
+  {
+   "input": "\t0.5人民币港币012345",
+   "expect": [
+    [
+     1,
+     4,
+     "0.5"
+    ]
+   ]
+  },
+  {
+   "input": "1新台币,",
+   "expect": [
+    [
+     0,
+     1,
+     "1"
+    ]
+   ]
+  },
+  {
+   "input": "1000合计1HK$",
+   "expect": []
+  },
+  {
+   "input": "dollars美元€abcRMB",
+   "expect": []
+  },
+  {
+   "input": "abc５００中文1,2345[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]0.5.",
+   "expect": []
+  },
+  {
+   "input": "yen0euros元1HK$",
+   "expect": [
+    [
+     10,
+     11,
+     "1"
+    ]
+   ]
+  },
+  {
+   "input": "美元\tRMBTWD",
+   "expect": []
+  },
+  {
+   "input": "EUR港币HK$ HK$",
+   "expect": []
+  },
+  {
+   "input": "GBPeuros１,０００1,000港币HKD",
+   "expect": []
+  },
+  {
+   "input": "HKD  １,０００pounds",
+   "expect": [
+    [
+     5,
+     10,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "total0.5新台币",
+   "expect": [
+    [
+     7,
+     8,
+     "5"
+    ]
+   ]
+  },
+  {
+   "input": "美元",
+   "expect": []
+  },
+  {
+   "input": "¥dollar.-£",
+   "expect": []
+  },
+  {
+   "input": "RMB)1000USD",
+   "expect": []
+  },
+  {
+   "input": ".GBPabc",
+   "expect": []
+  },
+  {
+   "input": "-1[[JARVIS-DOC-QUERY:NAME:3]]",
+   "expect": []
+  },
+  {
+   "input": "$NT$",
+   "expect": []
+  },
+  {
+   "input": "dollar1000.912.50eurosEUR",
+   "expect": []
+  },
+  {
+   "input": "1,234,567dollars1,2345总计9  ￥",
+   "expect": []
+  },
+  {
+   "input": "５００grand total1,0012.50dollarsyen",
+   "expect": []
+  },
+  {
+   "input": "\ngrand total",
+   "expect": []
+  },
+  {
+   "input": "GBP",
+   "expect": []
+  },
+  {
+   "input": "GBP$USD1,00",
+   "expect": []
+  },
+  {
+   "input": "￥(JPY12.50RMB12345JPY",
+   "expect": []
+  },
+  {
+   "input": "1,234,567新台币euros总计合计",
+   "expect": [
+    [
+     0,
+     9,
+     "1234567"
+    ]
+   ]
+  },
+  {
+   "input": "\n)£港币0$",
+   "expect": [
+    [
+     5,
+     6,
+     "0"
+    ]
+   ]
+  },
+  {
+   "input": "５００港币$",
+   "expect": [
+    [
+     0,
+     3,
+     "500"
+    ]
+   ]
+  },
+  {
+   "input": "HK$123456 123元1,2345",
+   "expect": [
+    [
+     10,
+     13,
+     "123"
+    ]
+   ]
+  },
+  {
+   "input": "¥grand totalEUR美元1,2345",
+   "expect": []
+  },
+  {
+   "input": "1000",
+   "expect": []
+  },
+  {
+   "input": "\nabcEUR1,234,567",
+   "expect": []
+  },
+  {
+   "input": "\t1,000¥¥",
+   "expect": [
+    [
+     1,
+     6,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "1,2345pounds",
+   "expect": []
+  },
+  {
+   "input": "NT$",
+   "expect": []
+  },
+  {
+   "input": "1000总计5-RMB",
+   "expect": []
+  },
+  {
+   "input": "€￥1,00GBP",
+   "expect": []
+  },
+  {
+   "input": "0.5123￥円",
+   "expect": [
+    [
+     0,
+     6,
+     "0.5123"
+    ]
+   ]
+  },
+  {
+   "input": "总计港币",
+   "expect": []
+  },
+  {
+   "input": "99.9999人民币)总计CNY12yen",
+   "expect": [
+    [
+     0,
+     7,
+     "99.9999"
+    ]
+   ]
+  },
+  {
+   "input": "JPY1000JPY",
+   "expect": []
+  },
+  {
+   "input": "\n1000人民币poundsgrand total)0",
+   "expect": [
+    [
+     1,
+     5,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "GBPHK$1,234,567TWD￥",
+   "expect": [
+    [
+     6,
+     15,
+     "1234567"
+    ]
+   ]
+  },
+  {
+   "input": "eurosHK$1,000",
+   "expect": [
+    [
+     8,
+     13,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "NT$",
+   "expect": []
+  },
+  {
+   "input": ",12-12345",
+   "expect": []
+  },
+  {
+   "input": "HK$dollar0dollar  JPY1,2345",
+   "expect": []
+  },
+  {
+   "input": "[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]1[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]",
+   "expect": []
+  },
+  {
+   "input": "JPY.总计￥",
+   "expect": []
+  },
+  {
+   "input": "中文",
+   "expect": []
+  },
+  {
+   "input": "99.9999JPY１,０００,TWDdollar",
+   "expect": []
+  },
+  {
+   "input": "人民币-美元",
+   "expect": []
+  },
+  {
+   "input": "CNY,US$1,234,567人民币1000dollars",
+   "expect": [
+    [
+     7,
+     16,
+     "1234567"
+    ],
+    [
+     19,
+     23,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "-HK$1,2345",
+   "expect": []
+  },
+  {
+   "input": "合计-.grand total-",
+   "expect": []
+  },
+  {
+   "input": "-5",
+   "expect": []
+  },
+  {
+   "input": "EUR[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]])1,23451000",
+   "expect": []
+  },
+  {
+   "input": "€元,99.9999",
+   "expect": []
+  },
+  {
+   "input": ")港币RMB1000",
+   "expect": []
+  },
+  {
+   "input": "1中文euros0.5¥",
+   "expect": [
+    [
+     10,
+     11,
+     "5"
+    ]
+   ]
+  },
+  {
+   "input": "USD",
+   "expect": []
+  },
+  {
+   "input": "NT$£¥GBP",
+   "expect": []
+  },
+  {
+   "input": "abc[[JARVIS-DOC-QUERY:NAME:3]]dollar",
+   "expect": []
+  },
+  {
+   "input": "dollars美元合计RMB)",
+   "expect": []
+  },
+  {
+   "input": "1,000HK$dollars\n1,000",
+   "expect": [
+    [
+     0,
+     5,
+     "1000"
+    ],
+    [
+     16,
+     21,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "円",
+   "expect": []
+  },
+  {
+   "input": "总计",
+   "expect": []
+  },
+  {
+   "input": "951元",
+   "expect": [
+    [
+     0,
+     3,
+     "951"
+    ]
+   ]
+  },
+  {
+   "input": "[[JARVIS-DOC-QUERY:NAME:3]]dollareuros",
+   "expect": []
+  },
+  {
+   "input": "[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]",
+   "expect": []
+  },
+  {
+   "input": "123456012.50",
+   "expect": []
+  },
+  {
+   "input": "1234599.999912HKD,",
+   "expect": []
+  },
+  {
+   "input": "HK$USD",
+   "expect": []
+  },
+  {
+   "input": "EUR1,00",
+   "expect": []
+  },
+  {
+   "input": "US$dollar5.１,０００港币JPY",
+   "expect": [
+    [
+     11,
+     16,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "dollars1234561,00pounds元",
+   "expect": []
+  },
+  {
+   "input": "1,00total(\n",
+   "expect": []
+  },
+  {
+   "input": "12345总计total1000",
+   "expect": []
+  },
+  {
+   "input": "-  ",
+   "expect": []
+  },
+  {
+   "input": "\tRMB123abc",
+   "expect": []
+  },
+  {
+   "input": "1RMB1,234,567€abc[[JARVIS-DOC-QUERY:NAME:3]]总计",
+   "expect": []
+  },
+  {
+   "input": "dollar美元\t[[JARVIS-DOC-QUERY:NAME:3]]CNYeuros[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]",
+   "expect": []
+  },
+  {
+   "input": "0.5EUR01,2345)",
+   "expect": []
+  },
+  {
+   "input": "港币grand total-.pounds1,00",
+   "expect": []
+  },
+  {
+   "input": "EURUS$US$HK$) ",
+   "expect": []
+  },
+  {
+   "input": "EURCNYEUR",
+   "expect": []
+  },
+  {
+   "input": "５００9",
+   "expect": []
+  },
+  {
+   "input": "[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]HKD",
+   "expect": []
+  },
+  {
+   "input": ")￥￥dollars1,2345",
+   "expect": []
+  },
+  {
+   "input": "123[[JARVIS-DOC-QUERY:NAME:3]]51,00 ",
+   "expect": []
+  },
+  {
+   "input": "JPY1,000JPY",
+   "expect": []
+  },
+  {
+   "input": "港币12.50",
+   "expect": [
+    [
+     2,
+     7,
+     "12.50"
+    ]
+   ]
+  },
+  {
+   "input": "dollar9\t港币)12",
+   "expect": []
+  },
+  {
+   "input": "123456(HKD人民币美元",
+   "expect": []
+  },
+  {
+   "input": "99.9999EURNT$pounds",
+   "expect": []
+  },
+  {
+   "input": "12345中文1234560.5¥12.50123",
+   "expect": [
+    [
+     15,
+     16,
+     "5"
+    ]
+   ]
+  },
+  {
+   "input": "-",
+   "expect": []
+  },
+  {
+   "input": "１,０００grand total",
+   "expect": []
+  },
+  {
+   "input": "12.5012.50GBP€[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]",
+   "expect": []
+  },
+  {
+   "input": "121234561,23451,234,567-",
+   "expect": []
+  },
+  {
+   "input": "GBP()１,０００元€",
+   "expect": [
+    [
+     5,
+     10,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "$euros5[[JARVIS-DOC-QUERY:NAME:3]]12.50GBP12345",
+   "expect": []
+  },
+  {
+   "input": "￥11元\t1,234,567",
+   "expect": [
+    [
+     1,
+     3,
+     "11"
+    ],
+    [
+     5,
+     14,
+     "1234567"
+    ]
+   ]
+  },
+  {
+   "input": "HKD123)",
+   "expect": []
+  },
+  {
+   "input": "poundsdollars\t",
+   "expect": []
+  },
+  {
+   "input": "元(£JPYUS$合计.",
+   "expect": []
+  },
+  {
+   "input": ".",
+   "expect": []
+  },
+  {
+   "input": "1,234,567\tJPY合计中文",
+   "expect": []
+  },
+  {
+   "input": "１,０００",
+   "expect": []
+  },
+  {
+   "input": "  )[[JARVIS-DOC-QUERY:NAME:3]]1000人民币５００合计",
+   "expect": [
+    [
+     30,
+     34,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "12.50",
+   "expect": []
+  },
+  {
+   "input": "美元US$5)总计￥pounds",
+   "expect": [
+    [
+     5,
+     6,
+     "5"
+    ]
+   ]
+  },
+  {
+   "input": "\n\t中文yen)1",
+   "expect": []
+  },
+  {
+   "input": "\n12345总计CNYCNY",
+   "expect": []
+  },
+  {
+   "input": "NT$港币9eurosdollarsCNY",
+   "expect": [
+    [
+     5,
+     6,
+     "9"
+    ]
+   ]
+  },
+  {
+   "input": "美元.",
+   "expect": []
+  },
+  {
+   "input": "1000)",
+   "expect": []
+  },
+  {
+   "input": "RMB合计total1,000总计合计GBP",
+   "expect": []
+  },
+  {
+   "input": ")円円JPY円yen",
+   "expect": []
+  },
+  {
+   "input": "(99.9999-港币RMB",
+   "expect": []
+  },
+  {
+   "input": "円",
+   "expect": []
+  },
+  {
+   "input": "$123",
+   "expect": [
+    [
+     1,
+     4,
+     "123"
+    ]
+   ]
+  },
+  {
+   "input": "HKD",
+   "expect": []
+  },
+  {
+   "input": "GBPNT$\tUSD",
+   "expect": []
+  },
+  {
+   "input": "abc",
+   "expect": []
+  },
+  {
+   "input": "TWD  ",
+   "expect": []
+  },
+  {
+   "input": "5[[JARVIS-DOC-QUERY:NAME:3]]１,０００JPY",
+   "expect": []
+  },
+  {
+   "input": "合计USD)12.50",
+   "expect": []
+  },
+  {
+   "input": "US$0$",
+   "expect": [
+    [
+     3,
+     4,
+     "0"
+    ]
+   ]
+  },
+  {
+   "input": "$RMB",
+   "expect": []
+  },
+  {
+   "input": "HK$１,０００JPY-euros(円",
+   "expect": [
+    [
+     3,
+     8,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "\n123)HKD",
+   "expect": [
+    [
+     1,
+     4,
+     "123"
+    ]
+   ]
+  },
+  {
+   "input": "新台币€\tdollarsHKD￥",
+   "expect": []
+  },
+  {
+   "input": "€  总计EUReuros",
+   "expect": []
+  },
+  {
+   "input": "GBPeurosJPY",
+   "expect": []
+  },
+  {
+   "input": "HKD",
+   "expect": []
+  },
+  {
+   "input": "1234561,00total1,001,23455$",
+   "expect": []
+  },
+  {
+   "input": "\n1EUR£1",
+   "expect": [
+    [
+     6,
+     7,
+     "1"
+    ]
+   ]
+  },
+  {
+   "input": "dollar£.£５００",
+   "expect": [
+    [
+     9,
+     12,
+     "500"
+    ]
+   ]
+  },
+  {
+   "input": "US$12345５００新台币",
+   "expect": []
+  },
+  {
+   "input": "\t",
+   "expect": []
+  },
+  {
+   "input": "5",
+   "expect": []
+  },
+  {
+   "input": "total£pounds12345\n\t\t",
+   "expect": []
+  },
+  {
+   "input": "99.9999..1,2345pounds1,00",
+   "expect": []
+  },
+  {
+   "input": "1,0000",
+   "expect": []
+  },
+  {
+   "input": "1,000",
+   "expect": []
+  },
+  {
+   "input": "总计0港币HKD ",
+   "expect": []
+  },
+  {
+   "input": "１,０００",
+   "expect": []
+  },
+  {
+   "input": "合计1",
+   "expect": []
+  },
+  {
+   "input": "1000dollars,123456JPY",
+   "expect": []
+  },
+  {
+   "input": "5(  -(0.5",
+   "expect": []
+  },
+  {
+   "input": "1,001,00US$１,０００pounds€美元",
+   "expect": [
+    [
+     11,
+     16,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "1中文123451¥",
+   "expect": []
+  },
+  {
+   "input": ",",
+   "expect": []
+  },
+  {
+   "input": "\t",
+   "expect": []
+  },
+  {
+   "input": "CNYeuros港币",
+   "expect": []
+  },
+  {
+   "input": "totaldollarsUS$  ",
+   "expect": []
+  },
+  {
+   "input": "$人民币总计[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]TWD",
+   "expect": []
+  },
+  {
+   "input": ",[[JARVIS-DOC-QUERY:NAME:3]]abcUS$元合计美元",
+   "expect": []
+  },
+  {
+   "input": "新台币RMB(",
+   "expect": []
+  },
+  {
+   "input": "euros123456１,０００EUR",
+   "expect": []
+  },
+  {
+   "input": "NT$",
+   "expect": []
+  },
+  {
+   "input": "总计1234561234560￥",
+   "expect": []
+  },
+  {
+   "input": "  ",
+   "expect": []
+  },
+  {
+   "input": "\t\n1,234,567RMB",
+   "expect": []
+  },
+  {
+   "input": "CNY\t£,yen0",
+   "expect": []
+  },
+  {
+   "input": "USD\t-100012.501,00",
+   "expect": []
+  },
+  {
+   "input": "99.9999)123456CNY",
+   "expect": []
+  },
+  {
+   "input": "12345([[JARVIS-DOC-QUERY:NAME:3]]５００$total",
+   "expect": [
+    [
+     33,
+     36,
+     "500"
+    ]
+   ]
+  },
+  {
+   "input": ")abcdollars",
+   "expect": []
+  },
+  {
+   "input": "yen99.9999",
+   "expect": []
+  },
+  {
+   "input": "港币123456TWD$grand total",
+   "expect": []
+  },
+  {
+   "input": "919港币10grand total",
+   "expect": [
+    [
+     0,
+     3,
+     "919"
+    ]
+   ]
+  },
+  {
+   "input": "￥£",
+   "expect": []
+  },
+  {
+   "input": ")TWD   eurosGBP",
+   "expect": []
+  },
+  {
+   "input": "USD港币",
+   "expect": []
+  },
+  {
+   "input": "\t.grand totalGBP１,０００euros$",
+   "expect": []
+  },
+  {
+   "input": "总计円yen1,234,567",
+   "expect": []
+  },
+  {
+   "input": "  12.50EUR\n人民币人民币",
+   "expect": []
+  },
+  {
+   "input": "１,０００HK$1,000円",
+   "expect": [
+    [
+     0,
+     5,
+     "1000"
+    ],
+    [
+     8,
+     13,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]US$12.50５００总计1,00",
+   "expect": [
+    [
+     54,
+     62,
+     "12.50500"
+    ]
+   ]
+  },
+  {
+   "input": "円１,０００.123451total1",
+   "expect": [
+    [
+     1,
+     13,
+     "1000.123451"
+    ]
+   ]
+  },
+  {
+   "input": "CNY５００\n中文美元",
+   "expect": []
+  },
+  {
+   "input": "人民币５００",
+   "expect": [
+    [
+     3,
+     6,
+     "500"
+    ]
+   ]
+  },
+  {
+   "input": "$円1,00€新台币円123456",
+   "expect": []
+  },
+  {
+   "input": "(€5EUR1,00",
+   "expect": [
+    [
+     2,
+     3,
+     "5"
+    ]
+   ]
+  },
+  {
+   "input": "人民币.\n1,234,5671,00RMBgrand total",
+   "expect": []
+  },
+  {
+   "input": ".0.5RMB",
+   "expect": []
+  },
+  {
+   "input": "1,000中文新台币1,000US$",
+   "expect": [
+    [
+     10,
+     15,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "12345abc¥NT$12345",
+   "expect": [
+    [
+     12,
+     17,
+     "12345"
+    ]
+   ]
+  },
+  {
+   "input": ",€人民币总计19",
+   "expect": []
+  },
+  {
+   "input": "1,001pounds  ",
+   "expect": []
+  },
+  {
+   "input": "１,０００99.9999",
+   "expect": []
+  },
+  {
+   "input": "NT$[[JARVIS-DOC-QUERY:NAME:3]]0.5１,０００总计",
+   "expect": []
+  },
+  {
+   "input": "元",
+   "expect": []
+  },
+  {
+   "input": "0.51,234,567.123456(¥",
+   "expect": []
+  },
+  {
+   "input": "港币euros合计５００",
+   "expect": []
+  },
+  {
+   "input": "￥US$人民币",
+   "expect": []
+  },
+  {
+   "input": "\n",
+   "expect": []
+  },
+  {
+   "input": "GBP0abc1,000EUR",
+   "expect": []
+  },
+  {
+   "input": "USD \t",
+   "expect": []
+  },
+  {
+   "input": "新台币0５００USDTWD",
+   "expect": [
+    [
+     3,
+     7,
+     "500"
+    ]
+   ]
+  },
+  {
+   "input": "1,23451000\t12.50USD",
+   "expect": []
+  },
+  {
+   "input": "EUR",
+   "expect": []
+  },
+  {
+   "input": "abcNT$",
+   "expect": []
+  },
+  {
+   "input": "１,０００円NT$",
+   "expect": [
+    [
+     0,
+     5,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "-dollars0.512.505",
+   "expect": []
+  },
+  {
+   "input": "GBP€CNY",
+   "expect": []
+  },
+  {
+   "input": ")US$",
+   "expect": []
+  },
+  {
+   "input": "1000合计[[JARVIS-DOC-QUERY:NAME:3]]1000pounds",
+   "expect": []
+  },
+  {
+   "input": "1,000人民币¥1000￥NT$",
+   "expect": [
+    [
+     0,
+     5,
+     "1000"
+    ],
+    [
+     9,
+     13,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "1,234,5670.5\t新台币JPY１,０００",
+   "expect": [
+    [
+     11,
+     12,
+     "5"
+    ]
+   ]
+  },
+  {
+   "input": "US$CNYGBP",
+   "expect": []
+  },
+  {
+   "input": "-NT$５００1\tyen",
+   "expect": [
+    [
+     4,
+     8,
+     "5001"
+    ]
+   ]
+  },
+  {
+   "input": "123456",
+   "expect": []
+  },
+  {
+   "input": "99.9999\n",
+   "expect": []
+  },
+  {
+   "input": "9１,０００$10001(yen",
+   "expect": [
+    [
+     0,
+     6,
+     "91000"
+    ]
+   ]
+  },
+  {
+   "input": "  美元",
+   "expect": []
+  },
+  {
+   "input": "1,23451,2345eurosGBPyen(dollars",
+   "expect": []
+  },
+  {
+   "input": "GBP",
+   "expect": []
+  },
+  {
+   "input": "新台币yen总计",
+   "expect": []
+  },
+  {
+   "input": "GBPGBPeurosyen  US$",
+   "expect": []
+  },
+  {
+   "input": "total$£EUR¥1,2345",
+   "expect": []
+  },
+  {
+   "input": "美元",
+   "expect": []
+  },
+  {
+   "input": ",１,０００poundsdollar1",
+   "expect": []
+  },
+  {
+   "input": "合计12CNY[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]1￥总计",
+   "expect": [
+    [
+     58,
+     59,
+     "1"
+    ]
+   ]
+  },
+  {
+   "input": " 合计[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]1,000JPY.",
+   "expect": []
+  },
+  {
+   "input": "dollars",
+   "expect": []
+  },
+  {
+   "input": "01000１,０００1,234,567pounds１,０００euros",
+   "expect": []
+  },
+  {
+   "input": " ",
+   "expect": []
+  },
+  {
+   "input": "€中文人民币123456",
+   "expect": []
+  },
+  {
+   "input": "1000",
+   "expect": []
+  },
+  {
+   "input": "1000",
+   "expect": []
+  },
+  {
+   "input": "US$新台币.[[JARVIS-DOC-QUERY:NAME:3]]",
+   "expect": []
+  },
+  {
+   "input": "€",
+   "expect": []
+  },
+  {
+   "input": "12美元£12345123456",
+   "expect": [
+    [
+     0,
+     2,
+     "12"
+    ]
+   ]
+  },
+  {
+   "input": "美元-1,2345HK$",
+   "expect": []
+  },
+  {
+   "input": ",0.5123456总计",
+   "expect": []
+  },
+  {
+   "input": "yen５００GBP港币¥  ",
+   "expect": []
+  },
+  {
+   "input": "JPYJPY0.5",
+   "expect": []
+  },
+  {
+   "input": "€",
+   "expect": []
+  },
+  {
+   "input": "9€新台币)99.99999NT$",
+   "expect": [
+    [
+     0,
+     1,
+     "9"
+    ],
+    [
+     6,
+     14,
+     "99.99999"
+    ]
+   ]
+  },
+  {
+   "input": "EURHK$0.51人民币dollars",
+   "expect": [
+    [
+     6,
+     10,
+     "0.51"
+    ]
+   ]
+  },
+  {
+   "input": "yen  元[[JARVIS-DOC-QUERY:NAME:3]]0",
+   "expect": []
+  },
+  {
+   "input": "(123yengrand totalgrand totalRMB",
+   "expect": []
+  },
+  {
+   "input": "123456JPY1HKD",
+   "expect": []
+  },
+  {
+   "input": ",港币12,EUR中文",
+   "expect": []
+  },
+  {
+   "input": "99.9999新台币\n",
+   "expect": [
+    [
+     0,
+     7,
+     "99.9999"
+    ]
+   ]
+  },
+  {
+   "input": "新台币1,2345合计RMB",
+   "expect": []
+  },
+  {
+   "input": "RMB",
+   "expect": []
+  },
+  {
+   "input": "[[JARVIS-DOC-QUERY:NAME:3]]0.5港币",
+   "expect": [
+    [
+     27,
+     30,
+     "0.5"
+    ]
+   ]
+  },
+  {
+   "input": "EUREUR¥[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]",
+   "expect": []
+  },
+  {
+   "input": "GBP)TWDdollar123123",
+   "expect": []
+  },
+  {
+   "input": "TWD-yen",
+   "expect": []
+  },
+  {
+   "input": "TWD  -港币美元NT$GBP",
+   "expect": []
+  },
+  {
+   "input": "euros元新台币",
+   "expect": []
+  },
+  {
+   "input": "港币GBP",
+   "expect": []
+  },
+  {
+   "input": "0",
+   "expect": []
+  },
+  {
+   "input": "0123456总计total",
+   "expect": []
+  },
+  {
+   "input": "123１,０００12.50NT$[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]CNYGBP",
+   "expect": [
+    [
+     11,
+     13,
+     "50"
+    ]
+   ]
+  },
+  {
+   "input": "US$",
+   "expect": []
+  },
+  {
+   "input": "12",
+   "expect": []
+  },
+  {
+   "input": "grand total円12£美元",
+   "expect": [
+    [
+     12,
+     14,
+     "12"
+    ]
+   ]
+  },
+  {
+   "input": "US$港币美元",
+   "expect": []
+  },
+  {
+   "input": ",123456",
+   "expect": []
+  },
+  {
+   "input": "元123456CNY",
+   "expect": []
+  },
+  {
+   "input": "HKD元５００GBP123",
+   "expect": [
+    [
+     4,
+     7,
+     "500"
+    ]
+   ]
+  },
+  {
+   "input": "£.yen99.9999元",
+   "expect": [
+    [
+     8,
+     12,
+     "9999"
+    ]
+   ]
+  },
+  {
+   "input": "CNY元港币\tCNY",
+   "expect": []
+  },
+  {
+   "input": "CNY££1,2345円TWD",
+   "expect": []
+  },
+  {
+   "input": "12345HK$[[JARVIS-DOC-QUERY:NAME:3]]  ５００",
+   "expect": [
+    [
+     0,
+     5,
+     "12345"
+    ]
+   ]
+  },
+  {
+   "input": "9",
+   "expect": []
+  },
+  {
+   "input": "５００dollarsGBP港币",
+   "expect": []
+  },
+  {
+   "input": "中文EUR",
+   "expect": []
+  },
+  {
+   "input": "  中文",
+   "expect": []
+  },
+  {
+   "input": "1000",
+   "expect": []
+  },
+  {
+   "input": "NT$港币HKD总计euros",
+   "expect": []
+  },
+  {
+   "input": "total[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]¥EURUS$",
+   "expect": []
+  },
+  {
+   "input": "GBPHK$",
+   "expect": []
+  },
+  {
+   "input": "1,234,567(12345",
+   "expect": []
+  },
+  {
+   "input": "RMBJPY.USD",
+   "expect": []
+  },
+  {
+   "input": "CNY99.9999",
+   "expect": []
+  },
+  {
+   "input": "円合计\t",
+   "expect": []
+  },
+  {
+   "input": "yenHK$€５００\t",
+   "expect": [
+    [
+     7,
+     10,
+     "500"
+    ]
+   ]
+  },
+  {
+   "input": "[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]£12.50人民币,JPY",
+   "expect": [
+    [
+     52,
+     57,
+     "12.50"
+    ]
+   ]
+  },
+  {
+   "input": "12.50USDRMB12345HK$1,234,567(",
+   "expect": [
+    [
+     19,
+     28,
+     "1234567"
+    ]
+   ]
+  },
+  {
+   "input": "€,£1,000[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]",
+   "expect": [
+    [
+     3,
+     8,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "HKDHKD",
+   "expect": []
+  },
+  {
+   "input": "TWD1,2345.",
+   "expect": []
+  },
+  {
+   "input": "\tUS$\n€",
+   "expect": []
+  },
+  {
+   "input": "TWD12345",
+   "expect": []
+  },
+  {
+   "input": "eurosJPY12345\tdollar.",
+   "expect": []
+  },
+  {
+   "input": "123eurosdollars10000HKD",
+   "expect": []
+  },
+  {
+   "input": "总计123(",
+   "expect": []
+  },
+  {
+   "input": ")HKDHK$EUR",
+   "expect": []
+  },
+  {
+   "input": "pounds0[[JARVIS-DOC-QUERY:NAME:3]]GBP1,00",
+   "expect": []
+  },
+  {
+   "input": "元grand total人民币abc元[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]￥",
+   "expect": []
+  },
+  {
+   "input": "0)0.5USDJPYHK$1",
+   "expect": [
+    [
+     14,
+     15,
+     "1"
+    ]
+   ]
+  },
+  {
+   "input": "1212.501,2345\t£TWD[[JARVIS-DOC-QUERY:NAME:3]]",
+   "expect": []
+  },
+  {
+   "input": "512345",
+   "expect": []
+  },
+  {
+   "input": "abc10009\n",
+   "expect": []
+  },
+  {
+   "input": "(dollar",
+   "expect": []
+  },
+  {
+   "input": "12345",
+   "expect": []
+  },
+  {
+   "input": "US$poundsyenUSD123456HK$",
+   "expect": []
+  },
+  {
+   "input": "１,０００  ￥",
+   "expect": [
+    [
+     0,
+     5,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "--HKD1JPY£12345",
+   "expect": [
+    [
+     10,
+     15,
+     "12345"
+    ]
+   ]
+  },
+  {
+   "input": ".1,000港币US$)",
+   "expect": [
+    [
+     1,
+     6,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "totalyen\n",
+   "expect": []
+  },
+  {
+   "input": "￥0.5$euros",
+   "expect": [
+    [
+     1,
+     4,
+     "0.5"
+    ]
+   ]
+  },
+  {
+   "input": "1,000abc1,001,00",
+   "expect": []
+  },
+  {
+   "input": "人民币€poundsCNY\n",
+   "expect": []
+  },
+  {
+   "input": "1,00RMB99.9999abcUS$€",
+   "expect": []
+  },
+  {
+   "input": "1,2345RMB",
+   "expect": []
+  },
+  {
+   "input": "¥1,00円",
+   "expect": []
+  },
+  {
+   "input": "港币",
+   "expect": []
+  },
+  {
+   "input": "1,0001000\t11,2345",
+   "expect": []
+  },
+  {
+   "input": "US$(.港币  ",
+   "expect": []
+  },
+  {
+   "input": "yenEUR元",
+   "expect": []
+  },
+  {
+   "input": "9円[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]([[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]",
+   "expect": [
+    [
+     0,
+     1,
+     "9"
+    ]
+   ]
+  },
+  {
+   "input": "abc99.9999",
+   "expect": []
+  },
+  {
+   "input": "５００",
+   "expect": []
+  },
+  {
+   "input": "５００EUR.123456",
+   "expect": []
+  },
+  {
+   "input": "EUR",
+   "expect": []
+  },
+  {
+   "input": "TWD",
+   "expect": []
+  },
+  {
+   "input": "12345699.9999-5港币",
+   "expect": [
+    [
+     14,
+     15,
+     "5"
+    ]
+   ]
+  },
+  {
+   "input": "eurostotal",
+   "expect": []
+  },
+  {
+   "input": "１,０００",
+   "expect": []
+  },
+  {
+   "input": "12.501234561123港币9euros",
+   "expect": [
+    [
+     17,
+     18,
+     "9"
+    ]
+   ]
+  },
+  {
+   "input": "EUR1,0012399.9999",
+   "expect": []
+  },
+  {
+   "input": "港币HKD1,23459)",
+   "expect": []
+  },
+  {
+   "input": "  £12345",
+   "expect": [
+    [
+     3,
+     8,
+     "12345"
+    ]
+   ]
+  },
+  {
+   "input": "￥abc  US$USD元-",
+   "expect": []
+  },
+  {
+   "input": "5",
+   "expect": []
+  },
+  {
+   "input": "\t",
+   "expect": []
+  },
+  {
+   "input": "￥(90¥EUR",
+   "expect": [
+    [
+     2,
+     4,
+     "90"
+    ]
+   ]
+  },
+  {
+   "input": "JPY円91,00abc",
+   "expect": []
+  },
+  {
+   "input": "USD0.5yen",
+   "expect": []
+  },
+  {
+   "input": "grand total港币",
+   "expect": []
+  },
+  {
+   "input": "１,０００12CNY",
+   "expect": []
+  },
+  {
+   "input": "123456123456.\n美元grand total",
+   "expect": []
+  },
+  {
+   "input": "港币12\tHK$",
+   "expect": [
+    [
+     2,
+     4,
+     "12"
+    ]
+   ]
+  },
+  {
+   "input": "$¥",
+   "expect": []
+  },
+  {
+   "input": "\tdollars¥",
+   "expect": []
+  },
+  {
+   "input": "(中文５００５００HKDabc\n",
+   "expect": []
+  },
+  {
+   "input": "totaleuros123456RMBNT$JPY中文",
+   "expect": []
+  },
+  {
+   "input": "£1,00５００１,０００CNY\tdollar",
+   "expect": []
+  },
+  {
+   "input": "\n￥",
+   "expect": []
+  },
+  {
+   "input": "9€yendollar人民币 1,234,567",
+   "expect": [
+    [
+     0,
+     1,
+     "9"
+    ],
+    [
+     15,
+     24,
+     "1234567"
+    ]
+   ]
+  },
+  {
+   "input": "美元",
+   "expect": []
+  },
+  {
+   "input": "[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]91,001,234,56712345  total",
+   "expect": []
+  },
+  {
+   "input": "12345",
+   "expect": []
+  },
+  {
+   "input": "1,234,567US$¥",
+   "expect": [
+    [
+     0,
+     9,
+     "1234567"
+    ]
+   ]
+  },
+  {
+   "input": "  円£HK$9¥港币",
+   "expect": [
+    [
+     7,
+     8,
+     "9"
+    ]
+   ]
+  },
+  {
+   "input": "USD円12USD,totalNT$",
+   "expect": [
+    [
+     4,
+     6,
+     "12"
+    ]
+   ]
+  },
+  {
+   "input": "$total",
+   "expect": []
+  },
+  {
+   "input": "$12[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]美元(",
+   "expect": [
+    [
+     1,
+     3,
+     "12"
+    ]
+   ]
+  },
+  {
+   "input": "合计10001￥)新台币[[JARVIS-DOC-QUERY:NAME:3]]",
+   "expect": []
+  },
+  {
+   "input": "dollar中文JPY1,234,567123456[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]",
+   "expect": []
+  },
+  {
+   "input": "\t５００",
+   "expect": []
+  },
+  {
+   "input": "港币,12345US$1,234,567港币",
+   "expect": [
+    [
+     11,
+     20,
+     "1234567"
+    ]
+   ]
+  },
+  {
+   "input": "123totalyen中文1000１,０００",
+   "expect": []
+  },
+  {
+   "input": "１,０００¥  RMB£",
+   "expect": [
+    [
+     0,
+     5,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "￥元",
+   "expect": []
+  },
+  {
+   "input": "HK$USD",
+   "expect": []
+  },
+  {
+   "input": "12355",
+   "expect": []
+  },
+  {
+   "input": "1,000人民币grand total",
+   "expect": [
+    [
+     0,
+     5,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "0.5,NT$abc中文",
+   "expect": []
+  },
+  {
+   "input": "dollars",
+   "expect": []
+  },
+  {
+   "input": "(€¥12.50,",
+   "expect": [
+    [
+     3,
+     5,
+     "12"
+    ]
+   ]
+  },
+  {
+   "input": "£円)",
+   "expect": []
+  },
+  {
+   "input": "1,000¥- 1,000euros",
+   "expect": [
+    [
+     0,
+     5,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "-円\n1,000.dollars",
+   "expect": [
+    [
+     3,
+     8,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "美元",
+   "expect": []
+  },
+  {
+   "input": "abc1,000 pounds[[JARVIS-DOC-QUERY:NAME:3]]",
+   "expect": []
+  },
+  {
+   "input": "1,00[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]JPY1000\n",
+   "expect": []
+  },
+  {
+   "input": "\n)JPY1,000  dollar",
+   "expect": []
+  },
+  {
+   "input": "dollar",
+   "expect": []
+  },
+  {
+   "input": "1000€  US$-yen",
+   "expect": [
+    [
+     0,
+     4,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "12.501,00JPY\t[[JARVIS-DOC-QUERY:NAME:3]]￥0",
+   "expect": [
+    [
+     41,
+     42,
+     "0"
+    ]
+   ]
+  },
+  {
+   "input": "新台币1,2345euros[[JARVIS-DOC-QUERY:NAME:3]]0",
+   "expect": []
+  },
+  {
+   "input": "1000  ￥HK$",
+   "expect": [
+    [
+     0,
+     4,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "５００1000人民币TWD",
+   "expect": []
+  },
+  {
+   "input": "HKD",
+   "expect": []
+  },
+  {
+   "input": "0RMB(1000-人民币",
+   "expect": []
+  },
+  {
+   "input": "123合计EUR.５００GBP0.5",
+   "expect": []
+  },
+  {
+   "input": "1,2345123456$1,000\tJPY",
+   "expect": [
+    [
+     13,
+     18,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "dollars",
+   "expect": []
+  },
+  {
+   "input": "円円dollarsNT$１,０００¥123",
+   "expect": [
+    [
+     12,
+     17,
+     "1000"
+    ],
+    [
+     18,
+     21,
+     "123"
+    ]
+   ]
+  },
+  {
+   "input": "99.99991,2345pounds",
+   "expect": []
+  },
+  {
+   "input": "GBP1,000USD1,234,567",
+   "expect": []
+  },
+  {
+   "input": "-",
+   "expect": []
+  },
+  {
+   "input": "GBPpounds",
+   "expect": []
+  },
+  {
+   "input": "５００[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]元GBP",
+   "expect": []
+  },
+  {
+   "input": "€",
+   "expect": []
+  },
+  {
+   "input": "$,(grand total)dollar",
+   "expect": []
+  },
+  {
+   "input": "USD",
+   "expect": []
+  },
+  {
+   "input": "dollar12123总计",
+   "expect": []
+  },
+  {
+   "input": "HKD\n€,1000) ",
+   "expect": []
+  },
+  {
+   "input": "US$人民币元RMB",
+   "expect": []
+  },
+  {
+   "input": "0.5$grand total",
+   "expect": [
+    [
+     0,
+     3,
+     "0.5"
+    ]
+   ]
+  },
+  {
+   "input": "9(",
+   "expect": []
+  },
+  {
+   "input": "5CNYgrand total",
+   "expect": []
+  },
+  {
+   "input": " ",
+   "expect": []
+  },
+  {
+   "input": "合计1円  pounds",
+   "expect": []
+  },
+  {
+   "input": "RMBHKDgrand totalCNYeuros1,2345人民币",
+   "expect": []
+  },
+  {
+   "input": "01,00total0.5",
+   "expect": []
+  },
+  {
+   "input": "中文)\n1,234,56712.50",
+   "expect": []
+  },
+  {
+   "input": "总计12.50-１,０００dollarJPY",
+   "expect": []
+  },
+  {
+   "input": "[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]",
+   "expect": []
+  },
+  {
+   "input": "合计人民币RMBUS$12345",
+   "expect": [
+    [
+     11,
+     16,
+     "12345"
+    ]
+   ]
+  },
+  {
+   "input": "元",
+   "expect": []
+  },
+  {
+   "input": "123456yen\t$(美元99.9999",
+   "expect": [
+    [
+     14,
+     21,
+     "99.9999"
+    ]
+   ]
+  },
+  {
+   "input": "CNY¥(pounds",
+   "expect": []
+  },
+  {
+   "input": "USD12345601,000１,０００9total",
+   "expect": []
+  },
+  {
+   "input": "abcdollars",
+   "expect": []
+  },
+  {
+   "input": "0.5  123",
+   "expect": []
+  },
+  {
+   "input": "$US$  EUR",
+   "expect": []
+  },
+  {
+   "input": "人民币dollars円CNYHK$",
+   "expect": []
+  },
+  {
+   "input": " HK$[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]１,０００",
+   "expect": []
+  },
+  {
+   "input": "1,234,567grand total1000USD(abc99.9999",
+   "expect": []
+  },
+  {
+   "input": "12345$￥",
+   "expect": [
+    [
+     0,
+     5,
+     "12345"
+    ]
+   ]
+  },
+  {
+   "input": "円1,2345RMBHK$  总计￥",
+   "expect": []
+  },
+  {
+   "input": "¥£ １,０００",
+   "expect": [
+    [
+     3,
+     8,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "GBP  ￥grand totalUSD",
+   "expect": []
+  },
+  {
+   "input": "abc1,2345HKD0",
+   "expect": []
+  },
+  {
+   "input": "1,2345€EUR",
+   "expect": []
+  },
+  {
+   "input": "１,０００",
+   "expect": []
+  },
+  {
+   "input": "euros(yendollars",
+   "expect": []
+  },
+  {
+   "input": "  £abc新台币CNY12345",
+   "expect": []
+  },
+  {
+   "input": "1000dollarsabcUSD",
+   "expect": []
+  },
+  {
+   "input": "US$总计合计￥",
+   "expect": []
+  },
+  {
+   "input": "US$9[[JARVIS-DOC-QUERY:NAME:3]]NT$dollarEURdollars",
+   "expect": [
+    [
+     3,
+     4,
+     "9"
+    ]
+   ]
+  },
+  {
+   "input": "CNY$0.5$",
+   "expect": [
+    [
+     4,
+     7,
+     "0.5"
+    ]
+   ]
+  },
+  {
+   "input": "\n",
+   "expect": []
+  },
+  {
+   "input": "￥新台币NT$５００dollar-",
+   "expect": [
+    [
+     7,
+     10,
+     "500"
+    ]
+   ]
+  },
+  {
+   "input": "元EURdollar",
+   "expect": []
+  },
+  {
+   "input": "５００",
+   "expect": []
+  },
+  {
+   "input": "GBP\t[[JARVIS-DOC-QUERY:NAME:3]]",
+   "expect": []
+  },
+  {
+   "input": "123",
+   "expect": []
+  },
+  {
+   "input": "JPY12港币",
+   "expect": []
+  },
+  {
+   "input": "￥",
+   "expect": []
+  },
+  {
+   "input": "  1,000,",
+   "expect": []
+  },
+  {
+   "input": "1,00￥££港币円,",
+   "expect": []
+  },
+  {
+   "input": "１,０００abc",
+   "expect": []
+  },
+  {
+   "input": "\n12,CNY12€",
+   "expect": []
+  },
+  {
+   "input": "123",
+   "expect": []
+  },
+  {
+   "input": "[[JARVIS-DOC-QUERY:NAME:3]]99.99991,234,567円0.5",
+   "expect": [
+    [
+     44,
+     47,
+     "0.5"
+    ]
+   ]
+  },
+  {
+   "input": "123HKD1,00-51,00",
+   "expect": []
+  },
+  {
+   "input": "HK$9",
+   "expect": [
+    [
+     3,
+     4,
+     "9"
+    ]
+   ]
+  },
+  {
+   "input": "TWD",
+   "expect": []
+  },
+  {
+   "input": "12.50(",
+   "expect": []
+  },
+  {
+   "input": "5",
+   "expect": []
+  },
+  {
+   "input": "  (dollarRMB美元美元",
+   "expect": []
+  },
+  {
+   "input": "1,000HKD",
+   "expect": []
+  },
+  {
+   "input": "５００12345123)",
+   "expect": []
+  },
+  {
+   "input": "  9.",
+   "expect": []
+  },
+  {
+   "input": "dollar€12345HKD",
+   "expect": [
+    [
+     7,
+     12,
+     "12345"
+    ]
+   ]
+  },
+  {
+   "input": "dollar)99.99991,234,567,",
+   "expect": []
+  },
+  {
+   "input": "1000",
+   "expect": []
+  },
+  {
+   "input": "11,00pounds中文HK$euros",
+   "expect": []
+  },
+  {
+   "input": "CNY円TWD[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]1,234,567",
+   "expect": []
+  },
+  {
+   "input": "新台币USDNT$123456",
+   "expect": []
+  },
+  {
+   "input": "€1",
+   "expect": [
+    [
+     1,
+     2,
+     "1"
+    ]
+   ]
+  },
+  {
+   "input": "￥US$12345dollar円(",
+   "expect": [
+    [
+     4,
+     9,
+     "12345"
+    ]
+   ]
+  },
+  {
+   "input": "9",
+   "expect": []
+  },
+  {
+   "input": "US$12.50新台币１,０００",
+   "expect": [
+    [
+     3,
+     8,
+     "12.50"
+    ],
+    [
+     11,
+     16,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "５００.1JPY",
+   "expect": []
+  },
+  {
+   "input": "１,０００,EUR５００NT$円１,０００",
+   "expect": [
+    [
+     16,
+     21,
+     "1000"
+    ]
+   ]
+  },
+  {
+   "input": "yen",
+   "expect": []
+  },
+  {
+   "input": "\n121234561合计123456  ",
+   "expect": []
+  },
+  {
+   "input": "合计[[JARVIS-DOC-QUERY:NAME:3]],",
+   "expect": []
+  },
+  {
+   "input": "\tyen(１,０００1000total1,000",
+   "expect": []
+  },
+  {
+   "input": "1,00.[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]euros1000人民币美元",
+   "expect": []
+  },
+  {
+   "input": "元NT$５００.12.5012345",
+   "expect": [
+    [
+     4,
+     10,
+     "500.12"
+    ]
+   ]
+  },
+  {
+   "input": "(\t12.500.5HK$元12",
+   "expect": [
+    [
+     5,
+     10,
+     "500.5"
+    ],
+    [
+     14,
+     16,
+     "12"
+    ]
+   ]
+  },
+  {
+   "input": "abc５００５００[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]中文总计",
+   "expect": []
+  },
+  {
+   "input": "US$1,00NT$EUREUR",
+   "expect": []
+  },
+  {
+   "input": "新台币[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]５００合计100012.50pounds",
+   "expect": []
+  },
+  {
+   "input": "\nGBP-1,234,567[[JARVIS-DOC:abcabcab:1:AMOUNT:2:0123456789abcdef]]",
+   "expect": [
+    [
+     5,
+     14,
+     "1234567"
+    ]
+   ]
+  }
+ ],
+ "documents": [
+  {
+   "name": "simple_invoice",
+   "chunks": [
+    {
+     "chunk_id": "c1",
+     "pages": [
+      1
+     ],
+     "text": "Invoice date 2026-03-01\nItem A $100.00\nItem B $250.50\nGrand Total $350.50"
+    }
+   ],
+   "expect_facts": [
+    {
+     "fact_id": "f1",
+     "kind": "amount",
+     "value": "100",
+     "currency": "USD",
+     "date": null,
+     "pages": [
+      1
+     ],
+     "chunk_ids": [
+      "c1"
+     ]
+    },
+    {
+     "fact_id": "f2",
+     "kind": "amount",
+     "value": "250.50",
+     "currency": "USD",
+     "date": null,
+     "pages": [
+      1
+     ],
+     "chunk_ids": [
+      "c1"
+     ]
+    },
+    {
+     "fact_id": "f3",
+     "kind": "date",
+     "value": null,
+     "currency": null,
+     "date": "2026-03-01",
+     "pages": [
+      1
+     ],
+     "chunk_ids": [
+      "c1"
+     ]
+    },
+    {
+     "fact_id": "f4",
+     "kind": "stated_total",
+     "value": "350.50",
+     "currency": "USD",
+     "date": null,
+     "pages": [
+      1
+     ],
+     "chunk_ids": [
+      "c1"
+     ]
+    }
+   ],
+   "expect_reconciliation": [
+    {
+     "metric": "documented_total",
+     "stated_amount": "350.50",
+     "computed_amount": "350.50",
+     "variance": "0",
+     "currency": "USD",
+     "pages": [
+      1
+     ]
+    }
+   ]
+  },
+  {
+   "name": "multi_currency",
+   "chunks": [
+    {
+     "chunk_id": "c1",
+     "pages": [
+      1
+     ],
+     "text": "Line 1 US$100\nLine 2 €200.25\nTotal US$100"
+    },
+    {
+     "chunk_id": "c2",
+     "pages": [
+      2
+     ],
+     "text": "Also NT$ 1,500 and 500 元"
+    }
+   ],
+   "expect_facts": [
+    {
+     "fact_id": "f1",
+     "kind": "amount",
+     "value": "500",
+     "currency": "CNY",
+     "date": null,
+     "pages": [
+      2
+     ],
+     "chunk_ids": [
+      "c2"
+     ]
+    },
+    {
+     "fact_id": "f2",
+     "kind": "amount",
+     "value": "200.25",
+     "currency": "EUR",
+     "date": null,
+     "pages": [
+      1
+     ],
+     "chunk_ids": [
+      "c1"
+     ]
+    },
+    {
+     "fact_id": "f3",
+     "kind": "amount",
+     "value": "1500",
+     "currency": "TWD",
+     "date": null,
+     "pages": [
+      2
+     ],
+     "chunk_ids": [
+      "c2"
+     ]
+    },
+    {
+     "fact_id": "f4",
+     "kind": "amount",
+     "value": "100",
+     "currency": "USD",
+     "date": null,
+     "pages": [
+      1
+     ],
+     "chunk_ids": [
+      "c1"
+     ]
+    },
+    {
+     "fact_id": "f5",
+     "kind": "stated_total",
+     "value": "100",
+     "currency": "USD",
+     "date": null,
+     "pages": [
+      1
+     ],
+     "chunk_ids": [
+      "c1"
+     ]
+    }
+   ],
+   "expect_reconciliation": [
+    {
+     "metric": "documented_total",
+     "stated_amount": null,
+     "computed_amount": "500",
+     "variance": null,
+     "currency": "CNY",
+     "pages": [
+      2
+     ]
+    },
+    {
+     "metric": "documented_total",
+     "stated_amount": null,
+     "computed_amount": "200.25",
+     "variance": null,
+     "currency": "EUR",
+     "pages": [
+      1
+     ]
+    },
+    {
+     "metric": "documented_total",
+     "stated_amount": null,
+     "computed_amount": "1500",
+     "variance": null,
+     "currency": "TWD",
+     "pages": [
+      2
+     ]
+    },
+    {
+     "metric": "documented_total",
+     "stated_amount": "100",
+     "computed_amount": "100",
+     "variance": "0",
+     "currency": "USD",
+     "pages": [
+      1
+     ]
+    }
+   ]
+  },
+  {
+   "name": "conflicting_totals",
+   "chunks": [
+    {
+     "chunk_id": "c1",
+     "pages": [
+      1
+     ],
+     "text": "Total $100\nTotal $200\nitem $30"
+    }
+   ],
+   "expect_facts": [
+    {
+     "fact_id": "f1",
+     "kind": "amount",
+     "value": "30",
+     "currency": "USD",
+     "date": null,
+     "pages": [
+      1
+     ],
+     "chunk_ids": [
+      "c1"
+     ]
+    },
+    {
+     "fact_id": "f2",
+     "kind": "stated_total",
+     "value": "100",
+     "currency": "USD",
+     "date": null,
+     "pages": [
+      1
+     ],
+     "chunk_ids": [
+      "c1"
+     ]
+    },
+    {
+     "fact_id": "f3",
+     "kind": "stated_total",
+     "value": "200",
+     "currency": "USD",
+     "date": null,
+     "pages": [
+      1
+     ],
+     "chunk_ids": [
+      "c1"
+     ]
+    }
+   ],
+   "expect_reconciliation": [
+    {
+     "metric": "documented_total",
+     "stated_amount": null,
+     "computed_amount": "30",
+     "variance": null,
+     "currency": "USD",
+     "pages": [
+      1
+     ]
+    }
+   ]
+  },
+  {
+   "name": "cjk_doc",
+   "chunks": [
+    {
+     "chunk_id": "c1",
+     "pages": [
+      3
+     ],
+     "text": "发票日期 2026年3月1日\n项目一 1,234.50 元\n合计 5,000 元"
+    }
+   ],
+   "expect_facts": [
+    {
+     "fact_id": "f1",
+     "kind": "amount",
+     "value": "1234.50",
+     "currency": "CNY",
+     "date": null,
+     "pages": [
+      3
+     ],
+     "chunk_ids": [
+      "c1"
+     ]
+    },
+    {
+     "fact_id": "f2",
+     "kind": "date",
+     "value": null,
+     "currency": null,
+     "date": "2026-03-01",
+     "pages": [
+      3
+     ],
+     "chunk_ids": [
+      "c1"
+     ]
+    },
+    {
+     "fact_id": "f3",
+     "kind": "stated_total",
+     "value": "5000",
+     "currency": "CNY",
+     "date": null,
+     "pages": [
+      3
+     ],
+     "chunk_ids": [
+      "c1"
+     ]
+    }
+   ],
+   "expect_reconciliation": [
+    {
+     "metric": "documented_total",
+     "stated_amount": "5000",
+     "computed_amount": "1234.50",
+     "variance": "3765.50",
+     "currency": "CNY",
+     "pages": [
+      3
+     ]
+    }
+   ]
+  },
+  {
+   "name": "merge_across_chunks",
+   "chunks": [
+    {
+     "chunk_id": "cA",
+     "pages": [
+      1
+     ],
+     "text": "fee $99.99"
+    },
+    {
+     "chunk_id": "cB",
+     "pages": [
+      2
+     ],
+     "text": "fee $99.99"
+    },
+    {
+     "chunk_id": "cC",
+     "pages": [
+      3,
+      4
+     ],
+     "text": "date 2025-12-31 and 1 January 2026"
+    }
+   ],
+   "expect_facts": [
+    {
+     "fact_id": "f1",
+     "kind": "amount",
+     "value": "99.99",
+     "currency": "USD",
+     "date": null,
+     "pages": [
+      1,
+      2
+     ],
+     "chunk_ids": [
+      "cA",
+      "cB"
+     ]
+    },
+    {
+     "fact_id": "f2",
+     "kind": "date",
+     "value": null,
+     "currency": null,
+     "date": "2025-12-31",
+     "pages": [
+      3,
+      4
+     ],
+     "chunk_ids": [
+      "cC"
+     ]
+    },
+    {
+     "fact_id": "f3",
+     "kind": "date",
+     "value": null,
+     "currency": null,
+     "date": "2026-01-01",
+     "pages": [
+      3,
+      4
+     ],
+     "chunk_ids": [
+      "cC"
+     ]
+    }
+   ],
+   "expect_reconciliation": [
+    {
+     "metric": "documented_total",
+     "stated_amount": null,
+     "computed_amount": "99.99",
+     "variance": null,
+     "currency": "USD",
+     "pages": [
+      1,
+      2
+     ]
+    }
+   ]
+  },
+  {
+   "name": "tokens_and_invalid_date",
+   "chunks": [
+    {
+     "chunk_id": "c1",
+     "pages": [
+      1
+     ],
+     "text": "ref [[JARVIS-DOC:abcabcab:1:NAME:2:0123456789abcdef]] amount $12,345.67\nbad date 2026-02-30 good date March 5, 2026"
+    }
+   ],
+   "expect_facts": [
+    {
+     "fact_id": "f1",
+     "kind": "amount",
+     "value": "12345.67",
+     "currency": "USD",
+     "date": null,
+     "pages": [
+      1
+     ],
+     "chunk_ids": [
+      "c1"
+     ]
+    },
+    {
+     "fact_id": "f2",
+     "kind": "date",
+     "value": null,
+     "currency": null,
+     "date": "2026-03-05",
+     "pages": [
+      1
+     ],
+     "chunk_ids": [
+      "c1"
+     ]
+    }
+   ],
+   "expect_reconciliation": [
+    {
+     "metric": "documented_total",
+     "stated_amount": null,
+     "computed_amount": "12345.67",
+     "variance": null,
+     "currency": "USD",
+     "pages": [
+      1
+     ]
+    }
+   ]
+  },
+  {
+   "name": "bare_numbers_no_currency",
+   "chunks": [
+    {
+     "chunk_id": "c1",
+     "pages": [
+      1
+     ],
+     "text": "quantity 3 units, 12345 count, subtotal is missing"
+    }
+   ],
+   "expect_facts": [],
+   "expect_reconciliation": []
+  },
+  {
+   "name": "empty",
+   "chunks": [
+    {
+     "chunk_id": "c1",
+     "pages": [
+      1
+     ],
+     "text": ""
+    }
+   ],
+   "expect_facts": [],
+   "expect_reconciliation": []
+  }
+ ]
+}

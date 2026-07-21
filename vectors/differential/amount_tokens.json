@@ -1,0 +1,202 @@
+{
+ "secret": "amount-tokens-differential-secret-key",
+ "artifact_id": "a1b2c3d4",
+ "generation": 1,
+ "mask_version": "doc-mask-v1",
+ "facts": [
+  {
+   "fact_id": "f1",
+   "kind": "amount",
+   "value": "12.50",
+   "currency": "USD",
+   "date": null,
+   "pages": [
+    1
+   ],
+   "chunk_ids": [
+    "c1"
+   ]
+  },
+  {
+   "fact_id": "f2",
+   "kind": "amount",
+   "value": "12.50",
+   "currency": "USD",
+   "date": null,
+   "pages": [
+    2
+   ],
+   "chunk_ids": [
+    "c2"
+   ]
+  },
+  {
+   "fact_id": "f3",
+   "kind": "date",
+   "value": null,
+   "currency": null,
+   "date": "2026-03-01",
+   "pages": [
+    3
+   ],
+   "chunk_ids": [
+    "c3"
+   ]
+  },
+  {
+   "fact_id": "f4",
+   "kind": "stated_total",
+   "value": "1000",
+   "currency": "USD",
+   "date": null,
+   "pages": [
+    1
+   ],
+   "chunk_ids": [
+    "c1"
+   ]
+  }
+ ],
+ "reconciliation": [
+  {
+   "metric": "documented_total",
+   "stated_amount": "1000",
+   "computed_amount": "25.00",
+   "variance": "975.00",
+   "currency": "USD",
+   "pages": [
+    1,
+    2
+   ]
+  },
+  {
+   "metric": "documented_total",
+   "stated_amount": null,
+   "computed_amount": null,
+   "variance": null,
+   "currency": null,
+   "pages": []
+  }
+ ],
+ "expect_facts": [
+  {
+   "fact_id": "f1",
+   "kind": "amount",
+   "value": "[[JARVIS-DOC:a1b2c3d4:1:AMOUNT:1:dbe474d22e971a80]]",
+   "currency": "USD",
+   "date": null,
+   "pages": [
+    1
+   ],
+   "chunk_ids": [
+    "c1"
+   ]
+  },
+  {
+   "fact_id": "f2",
+   "kind": "amount",
+   "value": "[[JARVIS-DOC:a1b2c3d4:1:AMOUNT:1:dbe474d22e971a80]]",
+   "currency": "USD",
+   "date": null,
+   "pages": [
+    2
+   ],
+   "chunk_ids": [
+    "c2"
+   ]
+  },
+  {
+   "fact_id": "f3",
+   "kind": "date",
+   "value": null,
+   "currency": null,
+   "date": "2026-03-01",
+   "pages": [
+    3
+   ],
+   "chunk_ids": [
+    "c3"
+   ]
+  },
+  {
+   "fact_id": "f4",
+   "kind": "stated_total",
+   "value": "[[JARVIS-DOC:a1b2c3d4:1:AMOUNT:2:1015ee721ae21a2b]]",
+   "currency": "USD",
+   "date": null,
+   "pages": [
+    1
+   ],
+   "chunk_ids": [
+    "c1"
+   ]
+  }
+ ],
+ "expect_reconciliation": [
+  {
+   "metric": "documented_total",
+   "stated_amount": "[[JARVIS-DOC:a1b2c3d4:1:AMOUNT:2:1015ee721ae21a2b]]",
+   "computed_amount": "[[JARVIS-DOC:a1b2c3d4:1:AMOUNT:3:faab7a73a42e90d9]]",
+   "variance": "[[JARVIS-DOC:a1b2c3d4:1:AMOUNT:4:1003830158dbb14c]]",
+   "currency": "USD",
+   "pages": [
+    1,
+    2
+   ]
+  },
+  {
+   "metric": "documented_total",
+   "stated_amount": null,
+   "computed_amount": null,
+   "variance": null,
+   "currency": null,
+   "pages": []
+  }
+ ],
+ "chunks": [
+  {
+   "chunk_id": "c1",
+   "pages": [
+    1
+   ],
+   "text": "Item A $100.00 and NT$ 1,250,000 total"
+  },
+  {
+   "chunk_id": "c2",
+   "pages": [
+    2
+   ],
+   "text": "总计 1,234.50 元 plus $100.00 again"
+  },
+  {
+   "chunk_id": "c3",
+   "pages": [
+    3
+   ],
+   "text": "no amounts here"
+  }
+ ],
+ "expect_chunks": [
+  {
+   "chunk_id": "c1",
+   "pages": [
+    1
+   ],
+   "text": "Item A $[[JARVIS-DOC:a1b2c3d4:1:AMOUNT:2:1015ee721ae21a2b]] and NT$ [[JARVIS-DOC:a1b2c3d4:1:AMOUNT:1:dbe474d22e971a80]] total"
+  },
+  {
+   "chunk_id": "c2",
+   "pages": [
+    2
+   ],
+   "text": "总计 [[JARVIS-DOC:a1b2c3d4:1:AMOUNT:3:faab7a73a42e90d9]] 元 plus $[[JARVIS-DOC:a1b2c3d4:1:AMOUNT:2:1015ee721ae21a2b]] again"
+  },
+  {
+   "chunk_id": "c3",
+   "pages": [
+    3
+   ],
+   "text": "no amounts here"
+  }
+ ]
+}

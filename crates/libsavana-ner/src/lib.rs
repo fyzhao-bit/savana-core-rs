@@ -2,14 +2,17 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+pub mod amount_tokens;
 pub mod assets;
 pub mod attempt_classifier;
+pub mod canonical;
 pub mod capabilities;
 pub mod chars;
 pub mod dataflow_policy;
 pub mod decode_en;
 pub mod decode_zh;
 pub mod encryption;
+pub mod facts;
 pub mod gbnf_generator;
 pub mod infer_en;
 pub mod infer_zh;
