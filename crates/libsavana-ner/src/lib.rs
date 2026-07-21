@@ -13,6 +13,7 @@ pub mod chars;
 pub mod dataflow_policy;
 pub mod decode_en;
 pub mod decode_zh;
+pub mod doc_masker;
 pub mod encryption;
 pub mod facts;
 pub mod gbnf_generator;

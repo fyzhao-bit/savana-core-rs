@@ -1,0 +1,752 @@
+{
+ "secret_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+ "artifact_id": "00abcdef12",
+ "generation": 3,
+ "mask_version": "doc-mask-v1",
+ "cases": [
+  {
+   "name": "en_multipage_sweep",
+   "dict": [
+    [
+     "Alice Wang",
+     "NAME"
+    ],
+    [
+     "Bob",
+     "NAME"
+    ],
+    [
+     "Berlin",
+     "PLACE"
+    ]
+   ],
+   "pages": [
+    {
+     "page_number": 1,
+     "text": "Contact Alice Wang at jane@example.com. Bob lives in Berlin."
+    },
+    {
+     "page_number": 2,
+     "text": "Bob again. Call 13800138000 now."
+    }
+   ],
+   "expect": {
+    "ok": {
+     "pages": [
+      [
+       1,
+       "Contact [[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]] at [[JARVIS-DOC:00abcdef12:3:EMAIL:1:197241b73c7c080e]]. [[JARVIS-DOC:00abcdef12:3:NAME:2:09e387bd0d9dc54f]] lives in [[JARVIS-DOC:00abcdef12:3:PLACE:1:fb0a0bd22e7dc644]]."
+      ],
+      [
+       2,
+       "[[JARVIS-DOC:00abcdef12:3:NAME:2:09e387bd0d9dc54f]] again. Call [[JARVIS-DOC:00abcdef12:3:PHONE:1:eb6eef7ddc6f9f91]] now."
+      ]
+     ],
+     "chunks": [
+      [
+       "c00001-000",
+       1,
+       1,
+       "Contact [[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]] at [[JARVIS-DOC:00abcdef12:3:EMAIL:1:197241b73c7c080e]].\n[[JARVIS-DOC:00abcdef12:3:NAME:2:09e387bd0d9dc54f]] lives in [[JARVIS-DOC:00abcdef12:3:PLACE:1:fb0a0bd22e7dc644]]."
+      ],
+      [
+       "c00002-000",
+       2,
+       2,
+       "[[JARVIS-DOC:00abcdef12:3:NAME:2:09e387bd0d9dc54f]] again.\nCall [[JARVIS-DOC:00abcdef12:3:PHONE:1:eb6eef7ddc6f9f91]] now."
+      ]
+     ],
+     "vault": [
+      [
+       "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]",
+       "Alice Wang"
+      ],
+      [
+       "[[JARVIS-DOC:00abcdef12:3:EMAIL:1:197241b73c7c080e]]",
+       "jane@example.com"
+      ],
+      [
+       "[[JARVIS-DOC:00abcdef12:3:NAME:2:09e387bd0d9dc54f]]",
+       "Bob"
+      ],
+      [
+       "[[JARVIS-DOC:00abcdef12:3:PLACE:1:fb0a0bd22e7dc644]]",
+       "Berlin"
+      ],
+      [
+       "[[JARVIS-DOC:00abcdef12:3:PHONE:1:eb6eef7ddc6f9f91]]",
+       "13800138000"
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "name": "zh_page",
+   "dict": [
+    [
+     "王小明",
+     "NAME"
+    ],
+    [
+     "北京",
+     "PLACE"
+    ]
+   ],
+   "pages": [
+    {
+     "page_number": 1,
+     "text": "王小明住在北京，电话13800138000。身份证110101199003072316。"
+    }
+   ],
+   "expect": {
+    "ok": {
+     "pages": [
+      [
+       1,
+       "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]住在[[JARVIS-DOC:00abcdef12:3:PLACE:1:fb0a0bd22e7dc644]],电话[[JARVIS-DOC:00abcdef12:3:PHONE:1:eb6eef7ddc6f9f91]]。身份证[[JARVIS-DOC:00abcdef12:3:CN_ID:1:991514d8e5957931]]。"
+      ]
+     ],
+     "chunks": [
+      [
+       "c00001-000",
+       1,
+       1,
+       "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]住在[[JARVIS-DOC:00abcdef12:3:PLACE:1:fb0a0bd22e7dc644]],电话[[JARVIS-DOC:00abcdef12:3:PHONE:1:eb6eef7ddc6f9f91]]。身份证[[JARVIS-DOC:00abcdef12:3:CN_ID:1:991514d8e5957931]]。"
+      ]
+     ],
+     "vault": [
+      [
+       "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]",
+       "王小明"
+      ],
+      [
+       "[[JARVIS-DOC:00abcdef12:3:PLACE:1:fb0a0bd22e7dc644]]",
+       "北京"
+      ],
+      [
+       "[[JARVIS-DOC:00abcdef12:3:PHONE:1:eb6eef7ddc6f9f91]]",
+       "13800138000"
+      ],
+      [
+       "[[JARVIS-DOC:00abcdef12:3:CN_ID:1:991514d8e5957931]]",
+       "110101199003072316"
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "name": "mixed_en_zh",
+   "dict": [
+    [
+     "李雷",
+     "NAME"
+    ],
+    [
+     "Shanghai",
+     "PLACE"
+    ],
+    [
+     "Acme",
+     "ORG"
+    ]
+   ],
+   "pages": [
+    {
+     "page_number": 1,
+     "text": "李雷 works at Acme in Shanghai. Reach him: li@acme.cn"
+    }
+   ],
+   "expect": {
+    "ok": {
+     "pages": [
+      [
+       1,
+       "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]] works at [[JARVIS-DOC:00abcdef12:3:ORG:1:0b0fd12e75c58004]] in [[JARVIS-DOC:00abcdef12:3:PLACE:1:fb0a0bd22e7dc644]]. Reach him: [[JARVIS-DOC:00abcdef12:3:EMAIL:1:197241b73c7c080e]]"
+      ]
+     ],
+     "chunks": [
+      [
+       "c00001-000",
+       1,
+       1,
+       "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]] works at [[JARVIS-DOC:00abcdef12:3:ORG:1:0b0fd12e75c58004]] in [[JARVIS-DOC:00abcdef12:3:PLACE:1:fb0a0bd22e7dc644]].\nReach him: [[JARVIS-DOC:00abcdef12:3:EMAIL:1:197241b73c7c080e]]"
+      ]
+     ],
+     "vault": [
+      [
+       "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]",
+       "李雷"
+      ],
+      [
+       "[[JARVIS-DOC:00abcdef12:3:ORG:1:0b0fd12e75c58004]]",
+       "Acme"
+      ],
+      [
+       "[[JARVIS-DOC:00abcdef12:3:PLACE:1:fb0a0bd22e7dc644]]",
+       "Shanghai"
+      ],
+      [
+       "[[JARVIS-DOC:00abcdef12:3:EMAIL:1:197241b73c7c080e]]",
+       "li@acme.cn"
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "name": "cross_page_seam",
+   "dict": [
+    [
+     "Alice Wang",
+     "NAME"
+    ]
+   ],
+   "pages": [
+    {
+     "page_number": 1,
+     "text": "The meeting notes mention Dr. Alice"
+    },
+    {
+     "page_number": 2,
+     "text": " Wang who chaired the review board."
+    }
+   ],
+   "expect": {
+    "ok": {
+     "pages": [
+      [
+       1,
+       "The meeting notes mention Dr. [[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]"
+      ],
+      [
+       2,
+       "[[JARVIS-DOC:00abcdef12:3:NAME:2:09e387bd0d9dc54f]] who chaired the review board."
+      ]
+     ],
+     "chunks": [
+      [
+       "c00001-000",
+       1,
+       1,
+       "The meeting notes mention Dr.\n[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]"
+      ],
+      [
+       "c00002-000",
+       2,
+       2,
+       "[[JARVIS-DOC:00abcdef12:3:NAME:2:09e387bd0d9dc54f]] who chaired the review board."
+      ]
+     ],
+     "vault": [
+      [
+       "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]",
+       "Alice"
+      ],
+      [
+       "[[JARVIS-DOC:00abcdef12:3:NAME:2:09e387bd0d9dc54f]]",
+       " Wang"
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "name": "structured_variety",
+   "dict": [],
+   "pages": [
+    {
+     "page_number": 1,
+     "text": "SSN 078-05-1120, IBAN GB29NWBK60161331926819, id AB1234567, ip 192.168.0.1, card 4111 1111 1111 1111."
+    }
+   ],
+   "expect": {
+    "ok": {
+     "pages": [
+      [
+       1,
+       "SSN [[JARVIS-DOC:00abcdef12:3:SSN:1:312c797f9750563a]], IBAN [[JARVIS-DOC:00abcdef12:3:IBAN:1:42f415be316f02ae]], id [[JARVIS-DOC:00abcdef12:3:NATIONAL_ID:1:2ae4e0a7966c1d2b]], ip [[JARVIS-DOC:00abcdef12:3:IP_ADDRESS:1:bae6ffbc880c328c]], card [[JARVIS-DOC:00abcdef12:3:BANK_CARD:1:0ac7e57431cc0c06]]."
+      ]
+     ],
+     "chunks": [
+      [
+       "c00001-000",
+       1,
+       1,
+       "SSN [[JARVIS-DOC:00abcdef12:3:SSN:1:312c797f9750563a]], IBAN [[JARVIS-DOC:00abcdef12:3:IBAN:1:42f415be316f02ae]], id [[JARVIS-DOC:00abcdef12:3:NATIONAL_ID:1:2ae4e0a7966c1d2b]], ip [[JARVIS-DOC:00abcdef12:3:IP_ADDRESS:1:bae6ffbc880c328c]], card [[JARVIS-DOC:00abcdef12:3:BANK_CARD:1:0ac7e57431cc0c06]]."
+      ]
+     ],
+     "vault": [
+      [
+       "[[JARVIS-DOC:00abcdef12:3:SSN:1:312c797f9750563a]]",
+       "078-05-1120"
+      ],
+      [
+       "[[JARVIS-DOC:00abcdef12:3:IBAN:1:42f415be316f02ae]]",
+       "GB29NWBK60161331926819"
+      ],
+      [
+       "[[JARVIS-DOC:00abcdef12:3:NATIONAL_ID:1:2ae4e0a7966c1d2b]]",
+       "AB1234567"
+      ],
+      [
+       "[[JARVIS-DOC:00abcdef12:3:IP_ADDRESS:1:bae6ffbc880c328c]]",
+       "192.168.0.1"
+      ],
+      [
+       "[[JARVIS-DOC:00abcdef12:3:BANK_CARD:1:0ac7e57431cc0c06]]",
+       "4111 1111 1111 1111"
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "name": "overlap_longer_wins",
+   "dict": [
+    [
+     "Alice",
+     "MISC"
+    ],
+    [
+     "Alice Wang",
+     "NAME"
+    ]
+   ],
+   "pages": [
+    {
+     "page_number": 1,
+     "text": "Hello Alice Wang, welcome."
+    }
+   ],
+   "expect": {
+    "ok": {
+     "pages": [
+      [
+       1,
+       "Hello [[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]], welcome."
+      ]
+     ],
+     "chunks": [
+      [
+       "c00001-000",
+       1,
+       1,
+       "Hello [[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]], welcome."
+      ]
+     ],
+     "vault": [
+      [
+       "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]",
+       "Alice Wang"
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "name": "casefold_sweep_sharp_s",
+   "dict": [
+    [
+     "Straße",
+     "ORG"
+    ]
+   ],
+   "pages": [
+    {
+     "page_number": 1,
+     "text": "Employer: Straße GmbH is the firm."
+    },
+    {
+     "page_number": 2,
+     "text": "Later the report writes STRASSE in caps."
+    }
+   ],
+   "expect": {
+    "ok": {
+     "pages": [
+      [
+       1,
+       "Employer: [[JARVIS-DOC:00abcdef12:3:ORG:1:0b0fd12e75c58004]] GmbH is the firm."
+      ],
+      [
+       2,
+       "Later the report writes [[JARVIS-DOC:00abcdef12:3:ORG:2:36c389644ea70b44]] in caps."
+      ]
+     ],
+     "chunks": [
+      [
+       "c00001-000",
+       1,
+       1,
+       "Employer: [[JARVIS-DOC:00abcdef12:3:ORG:1:0b0fd12e75c58004]] GmbH is the firm."
+      ],
+      [
+       "c00002-000",
+       2,
+       2,
+       "Later the report writes [[JARVIS-DOC:00abcdef12:3:ORG:2:36c389644ea70b44]] in caps."
+      ]
+     ],
+     "vault": [
+      [
+       "[[JARVIS-DOC:00abcdef12:3:ORG:1:0b0fd12e75c58004]]",
+       "Straße"
+      ],
+      [
+       "[[JARVIS-DOC:00abcdef12:3:ORG:2:36c389644ea70b44]]",
+       "STRASSE"
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "name": "ocr_gate_pass",
+   "dict": [
+    [
+     "Alice Wang",
+     "NAME"
+    ]
+   ],
+   "pages": [
+    {
+     "page_number": 1,
+     "source": "ocr",
+     "text": "ignored raw text",
+     "obs": [
+      [
+       "Contact Alice Wang",
+       1.0
+      ],
+      [
+       "at the front desk",
+       0.5
+      ],
+      [
+       "garbled lowconf run",
+       0.2
+      ],
+      [
+       "second floor",
+       0.3
+      ],
+      [
+       "room seven",
+       1.0
+      ]
+     ]
+    }
+   ],
+   "expect": {
+    "ok": {
+     "pages": [
+      [
+       1,
+       "Contact [[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]\nat the front desk\nsecond floor\nroom seven"
+      ]
+     ],
+     "chunks": [
+      [
+       "c00001-000",
+       1,
+       1,
+       "Contact [[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]\nat the front desk\nsecond floor\nroom seven"
+      ]
+     ],
+     "vault": [
+      [
+       "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]",
+       "Alice Wang"
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "name": "repeated_entity_one_token",
+   "dict": [
+    [
+     "Bob",
+     "NAME"
+    ]
+   ],
+   "pages": [
+    {
+     "page_number": 1,
+     "text": "Bob started the project."
+    },
+    {
+     "page_number": 2,
+     "text": "Then Bob paused it."
+    },
+    {
+     "page_number": 3,
+     "text": "Finally Bob shipped it, thanks Bob."
+    }
+   ],
+   "expect": {
+    "ok": {
+     "pages": [
+      [
+       1,
+       "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]] started the project."
+      ],
+      [
+       2,
+       "Then [[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]] paused it."
+      ],
+      [
+       3,
+       "Finally [[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]] shipped it, thanks [[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]."
+      ]
+     ],
+     "chunks": [
+      [
+       "c00001-000",
+       1,
+       1,
+       "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]] started the project."
+      ],
+      [
+       "c00002-000",
+       2,
+       2,
+       "Then [[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]] paused it."
+      ],
+      [
+       "c00003-000",
+       3,
+       3,
+       "Finally [[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]] shipped it, thanks [[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]."
+      ]
+     ],
+     "vault": [
+      [
+       "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]",
+       "Bob"
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "name": "leak_gate_exercised",
+   "dict": [
+    [
+     "Jane Roe",
+     "NAME"
+    ]
+   ],
+   "pages": [
+    {
+     "page_number": 1,
+     "text": "Jane Roe email jane.roe@corp.example, phone +1 212 555 0123, again Jane Roe."
+    }
+   ],
+   "expect": {
+    "ok": {
+     "pages": [
+      [
+       1,
+       "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]] email [[JARVIS-DOC:00abcdef12:3:EMAIL:1:197241b73c7c080e]], phone [[JARVIS-DOC:00abcdef12:3:PHONE:1:eb6eef7ddc6f9f91]], again [[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]."
+      ]
+     ],
+     "chunks": [
+      [
+       "c00001-000",
+       1,
+       1,
+       "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]] email [[JARVIS-DOC:00abcdef12:3:EMAIL:1:197241b73c7c080e]], phone [[JARVIS-DOC:00abcdef12:3:PHONE:1:eb6eef7ddc6f9f91]], again [[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]."
+      ]
+     ],
+     "vault": [
+      [
+       "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]",
+       "Jane Roe"
+      ],
+      [
+       "[[JARVIS-DOC:00abcdef12:3:EMAIL:1:197241b73c7c080e]]",
+       "jane.roe@corp.example"
+      ],
+      [
+       "[[JARVIS-DOC:00abcdef12:3:PHONE:1:eb6eef7ddc6f9f91]]",
+       "+1 212 555 0123"
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "name": "err_unsupported_script",
+   "dict": [],
+   "pages": [
+    {
+     "page_number": 1,
+     "text": "Contact Привет office today."
+    }
+   ],
+   "expect": {
+    "raises": "UNSUPPORTED_DOCUMENT_LANGUAGE"
+   }
+  },
+  {
+   "name": "err_ocr_low_confidence",
+   "dict": [],
+   "pages": [
+    {
+     "page_number": 1,
+     "source": "ocr",
+     "text": "raw",
+     "obs": [
+      [
+       "good line one",
+       1.0
+      ],
+      [
+       "good line two",
+       0.5
+      ],
+      [
+       "bad line a",
+       0.1
+      ],
+      [
+       "bad line b",
+       0.2
+      ],
+      [
+       "good line three",
+       0.3
+      ]
+     ]
+    }
+   ],
+   "expect": {
+    "raises": "OCR_LOW_CONFIDENCE"
+   }
+  },
+  {
+   "name": "err_span_cap",
+   "dict": [
+    [
+     "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ",
+     "NAME"
+    ]
+   ],
+   "pages": [
+    {
+     "page_number": 1,
+     "text": "prefix QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ suffix"
+    }
+   ],
+   "expect": {
+    "raises": "MASK_BOUNDARY_FAILED"
+   }
+  },
+  {
+   "name": "err_seam_ambiguous",
+   "dict": [],
+   "pages": [
+    {
+     "page_number": 1,
+     "text": "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+     "page_number": 2,
+     "text": "1111111111 rest of the second page text."
+    }
+   ],
+   "expect": {
+    "raises": "MASK_BOUNDARY_FAILED"
+   }
+  },
+  {
+   "name": "whitespace_span_skipped",
+   "dict": [
+    [
+     "   ",
+     "NAME"
+    ],
+    [
+     "Bob",
+     "NAME"
+    ]
+   ],
+   "pages": [
+    {
+     "page_number": 1,
+     "text": "Meet Bob   here soon."
+    }
+   ],
+   "expect": {
+    "ok": {
+     "pages": [
+      [
+       1,
+       "Meet [[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]   here soon."
+      ]
+     ],
+     "chunks": [
+      [
+       "c00001-000",
+       1,
+       1,
+       "Meet [[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]   here soon."
+      ]
+     ],
+     "vault": [
+      [
+       "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]",
+       "Bob"
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "name": "lookalike_escaped",
+   "dict": [
+    [
+     "Bob",
+     "NAME"
+    ]
+   ],
+   "pages": [
+    {
+     "page_number": 1,
+     "text": "Fake [[JARVIS-DOC:deadbeef:1:NAME:1:0000000000000000]] and real Bob."
+    }
+   ],
+   "expect": {
+    "ok": {
+     "pages": [
+      [
+       1,
+       "Fake [[/JARVIS-DOC:deadbeef:1:NAME:1:[[JARVIS-DOC:00abcdef12:3:BANK_CARD:1:0ac7e57431cc0c06]]]] and real [[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]."
+      ]
+     ],
+     "chunks": [
+      [
+       "c00001-000",
+       1,
+       1,
+       "Fake [[/JARVIS-DOC:deadbeef:1:NAME:1:[[JARVIS-DOC:00abcdef12:3:BANK_CARD:1:0ac7e57431cc0c06]]]] and real [[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]."
+      ]
+     ],
+     "vault": [
+      [
+       "[[JARVIS-DOC:00abcdef12:3:BANK_CARD:1:0ac7e57431cc0c06]]",
+       "0000000000000000"
+      ],
+      [
+       "[[JARVIS-DOC:00abcdef12:3:NAME:1:6d3f7adb6e3d18e5]]",
+       "Bob"
+      ]
+     ]
+    }
+   }
+  }
+ ]
+}

@@ -231,7 +231,7 @@ pub fn folded_scan_map(text: &str) -> Result<(String, Vec<usize>, Vec<usize>), M
 /// NOT `char::is_alphabetic` (Alphabetic property, broader — Nl, combining
 /// Other_Alphabetic marks) — matching Python is what keeps the script gate
 /// byte-exact. Table vendored from CPython 15.0.0.
-fn is_py_alpha(c: char) -> bool {
+pub fn is_py_alpha(c: char) -> bool {
     let cp = c as u32;
     PY_ALPHA
         .binary_search_by(|&(lo, hi)| {
@@ -320,6 +320,7 @@ impl PatEngine {
 struct LeakPatterns {
     structured: Vec<(&'static str, PatEngine)>,
     lookalike_scan: regex::Regex,
+    lookalike_source: regex::Regex,
     token_scan: regex::Regex,
     query_token_scan: regex::Regex,
 }
@@ -341,15 +342,15 @@ fn patterns() -> &'static LeakPatterns {
                 ("SSN", PatEngine::Re(re(r"\b\d{3}-\d{2}-\d{4}\b"))),
                 ("IBAN", PatEngine::Re(re(r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b"))),
                 ("NATIONAL_ID", PatEngine::Re(re(r"\b[A-Z]{1,2}\d{6,9}\b"))),
-                // slm_gate._RE_PHONE_CN
-                ("PHONE_CN", PatEngine::Re(re(r"1[3-9]\d{9}"))),
+                // slm_gate._RE_PHONE_CN — kind "PHONE" (masking._STRUCTURED_PATTERNS).
+                ("PHONE", PatEngine::Re(re(r"1[3-9]\d{9}"))),
                 // FLAGGED: masking.py inline PHONE — negative lookbehind + lookahead.
-                ("PHONE_LOOKAROUND", PatEngine::Fancy(
+                ("PHONE", PatEngine::Fancy(
                     fancy_regex::Regex::new(r"(?<![0-9A-Za-z])(?:\+?\d[ \-]?){9,}\d(?![0-9A-Za-z])")
                         .expect("fancy phone pattern compiles"),
                 )),
-                // slm_gate._RE_PHONE_GENERIC
-                ("PHONE_GENERIC", PatEngine::Re(re(
+                // slm_gate._RE_PHONE_GENERIC — kind "PHONE".
+                ("PHONE", PatEngine::Re(re(
                     r"(?:\+\d{1,3}[- ]?)?\(?\d{2,4}\)?[- ]?\d{2,4}[- ]?\d{4,10}",
                 ))),
                 // slm_gate._RE_IP
@@ -359,6 +360,10 @@ fn patterns() -> &'static LeakPatterns {
             // `\s*` here only ever sees U+0020 (input is already canonicalized),
             // so regex `\s` (White_Space) and Python `\s` agree in this space.
             lookalike_scan: re(r"\[\[\s*jarvis"),
+            // masking._LOOKALIKE_SOURCE_RE — case-insensitive, applied to the
+            // POST-NORMALIZE page text where the only whitespace is U+0020/U+000A
+            // (both `\s` in either engine), so Python `\s` and regex `\s` agree.
+            lookalike_source: re(r"(?i)\[\[\s*(jarvis)"),
             token_scan: re(DOC_TOKEN_PATTERN),
             query_token_scan: re(QUERY_TOKEN_PATTERN),
         }
@@ -378,6 +383,147 @@ pub fn masked_text_is_clean(text: &str) -> bool {
         return false;
     }
     !p.structured.iter().any(|(_, pat)| pat.is_match(&collapsed))
+}
+
+// ── Document-masker support (consumed by `doc_masker`) ──
+//
+// The strict document masker in `server/documents/masking.py` reuses the SAME
+// canonical space, `\s` semantics, structured-PII pattern set, token grammar and
+// lookalike escaping the leak gate above is built on. Exposing them here keeps a
+// SINGLE definition of each — the pipeline port cannot silently drift from the
+// gate it must stay a superset of.
+
+/// True iff Python `re` `\s` matches `c` (str semantics; WS_SET). Re-exported so
+/// the masker's sentence splitter tokenizes on the identical whitespace set.
+#[inline]
+pub fn is_python_ws(c: char) -> bool {
+    is_ws(c)
+}
+
+/// Byte offsets of every char boundary in `text`, plus the trailing `text.len()`
+/// sentinel. A regex match byte offset (always on a char boundary) maps to its
+/// CHAR index by binary search — Python `re` over `str` yields CHAR indices, the
+/// `regex`/`fancy-regex` engines yield BYTE indices, so every structured-match
+/// span must be converted before it becomes a char-space document span.
+fn char_boundaries(text: &str) -> Vec<usize> {
+    let mut b = Vec::with_capacity(text.len() + 1);
+    for (bo, _) in text.char_indices() {
+        b.push(bo);
+    }
+    b.push(text.len());
+    b
+}
+
+#[inline]
+fn to_char_index(boundaries: &[usize], byte: usize) -> usize {
+    boundaries
+        .binary_search(&byte)
+        .expect("regex offsets fall on char boundaries")
+}
+
+/// Port of `masking._structured_spans` detection: every structured-PII match
+/// over `text`, as `(char_start, char_end, kind)`, in `_STRUCTURED_PATTERNS`
+/// iteration order (pattern by pattern, each left-to-right, non-overlapping) —
+/// the exact order `_merge_spans`'s stable sort tie-breaks on. Byte offsets are
+/// converted to char offsets. Zero-width matches are dropped (Python filters
+/// `match.end() > match.start()`).
+pub fn structured_matches(text: &str) -> Vec<(usize, usize, &'static str)> {
+    let p = patterns();
+    let boundaries = char_boundaries(text);
+    let mut out = Vec::new();
+    for (kind, engine) in &p.structured {
+        match engine {
+            PatEngine::Re(r) => {
+                for m in r.find_iter(text) {
+                    if m.end() > m.start() {
+                        out.push((
+                            to_char_index(&boundaries, m.start()),
+                            to_char_index(&boundaries, m.end()),
+                            *kind,
+                        ));
+                    }
+                }
+            }
+            PatEngine::Fancy(r) => {
+                // Non-overlapping leftmost matches, like Python `finditer`. A
+                // fancy-regex runtime error stops iteration for THIS pattern
+                // (the residual leak gate is the fail-closed authority; over-
+                // masking a detection is never a confidentiality loss).
+                for m in r.find_iter(text).flatten() {
+                    if m.end() > m.start() {
+                        out.push((
+                            to_char_index(&boundaries, m.start()),
+                            to_char_index(&boundaries, m.end()),
+                            *kind,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// True iff any structured-PII pattern matches `text` (the residual-scan check —
+/// `any(pattern.search(collapsed))`), match-only, no offsets.
+pub fn has_structured_residue(text: &str) -> bool {
+    patterns().structured.iter().any(|(_, e)| e.is_match(text))
+}
+
+/// True iff `folded` contains an unescaped `[[…jarvis` token lookalike
+/// (`_LOOKALIKE_SCAN_RE.search`).
+pub fn has_lookalike(folded: &str) -> bool {
+    patterns().lookalike_scan.is_match(folded)
+}
+
+/// Port of `masking._escape_lookalikes`: rewrite every source-authored
+/// `[[<ws>*jarvis` (case-insensitive) to `[[/jarvis`, DROPPING the interior
+/// whitespace (Python's replacement is `"[[/" + group(1)`, keeping only the
+/// matched `jarvis` in its original case). Runs on post-normalize text, so the
+/// only whitespace `\s*` can consume is U+0020/U+000A.
+pub fn escape_lookalikes(text: &str) -> String {
+    patterns()
+        .lookalike_source
+        .replace_all(text, |caps: &regex::Captures| format!("[[/{}", &caps[1]))
+        .into_owned()
+}
+
+/// Port of `masking._strip_issued_tokens`: replace every vault-ISSUED token with
+/// the object-replacement stand-in in one pass; non-issued token-shaped strings
+/// survive so the lookalike scan still flags them. Empty `issued` → unchanged.
+pub fn strip_issued_tokens(text: &str, issued: &std::collections::HashSet<String>) -> String {
+    if issued.is_empty() {
+        return text.to_string();
+    }
+    patterns()
+        .token_scan
+        .replace_all(text, |caps: &regex::Captures| {
+            let tok = &caps[0];
+            if issued.contains(tok) {
+                TOKEN_STAND_IN.to_string()
+            } else {
+                tok.to_string()
+            }
+        })
+        .into_owned()
+}
+
+/// Every well-formed `[[JARVIS-DOC:…]]` token in `text`, as
+/// `(char_start, char_end, token_string)` — for the chunk splitter's
+/// no-token-bisection guard and the per-chunk issued-token recorder.
+pub fn doc_token_spans(text: &str) -> Vec<(usize, usize, String)> {
+    let boundaries = char_boundaries(text);
+    patterns()
+        .token_scan
+        .find_iter(text)
+        .map(|m| {
+            (
+                to_char_index(&boundaries, m.start()),
+                to_char_index(&boundaries, m.end()),
+                m.as_str().to_string(),
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]

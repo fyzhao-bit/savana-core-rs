@@ -16,6 +16,7 @@
 //! `[[JARVIS-DOC:…]]` grammar. All three are golden-tested against the same
 //! CPython in `tests/vault_resolve.rs`.
 
+use crate::masking::canonical_scan_forms;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::collections::{HashMap, HashSet};
@@ -156,22 +157,40 @@ fn decode_tag(tag: &str) -> Option<[u8; 8]> {
 }
 
 /// One stored value. The token string is the key; the raw is the payload.
+/// `kind`/`chunks` mirror `_VaultEntry` — `kind` feeds the masker's active
+/// "mask once → mask everywhere" sweep (`value_entries` → first-seen kind), and
+/// `chunks` records which serialized chunks carried the token (`record_chunks`).
 struct Entry {
     raw: String,
+    kind: String,
+    chunks: HashSet<String>,
 }
 
-/// The resolution-side subset of `ScopedDocumentVault`: enough to authenticate
-/// and rehydrate a token. `put`/`authorize_evidence` build state; `resolve`
-/// is the guarded rehydration primitive.
+/// The full `ScopedDocumentVault`: the resolution side (`resolve`, byte-exact
+/// against CPython in `tests/vault_resolve.rs`) PLUS the MINT side the strict
+/// document masker drives — `put` accreting authenticated tokens and the
+/// incrementally-maintained folded-value indices (`value_entries`,
+/// `folded_length_buckets`, `issued_token_set`) the 2-phase sweep and residual
+/// leak scan consume.
 pub struct ScopedDocumentVault {
     secret: Vec<u8>,
     artifact_id: String,
     generation: u32,
     mask_version: String,
     entries: HashMap<String, Entry>,
+    /// Tokens in first-put order — Python's `dict` insertion order, which
+    /// `value_entries`/`entries_in_order` must reproduce so the sweep's
+    /// first-seen `(folded → kind)` map and the differential agree.
+    order: Vec<String>,
     by_value: HashMap<(String, String), String>,
     counters: HashMap<String, u32>,
     grants: HashMap<String, HashSet<String>>,
+    /// Canonical folded raw values, deduplicated (first-seen), grouped by folded
+    /// CHAR length — the bucketed residual-scan index maintained at `put` time
+    /// (mirrors `_folded_seen`/`_folded_buckets`). Lengths are `char` counts
+    /// (Python `len(folded)`), never byte lengths.
+    folded_seen: HashSet<String>,
+    folded_buckets: HashMap<usize, HashSet<String>>,
 }
 
 impl ScopedDocumentVault {
@@ -182,10 +201,25 @@ impl ScopedDocumentVault {
             generation,
             mask_version: mask_version.to_string(),
             entries: HashMap::new(),
+            order: Vec::new(),
             by_value: HashMap::new(),
             counters: HashMap::new(),
             grants: HashMap::new(),
+            folded_seen: HashSet::new(),
+            folded_buckets: HashMap::new(),
         }
+    }
+
+    /// Scope getters — the masker re-checks these against the artifact before
+    /// masking (fail-closed if the vault is scoped to a different generation).
+    pub fn artifact_id(&self) -> &str {
+        &self.artifact_id
+    }
+    pub fn generation(&self) -> u32 {
+        self.generation
+    }
+    pub fn mask_version(&self) -> &str {
+        &self.mask_version
     }
 
     /// `tag = HMAC-SHA256(secret, claims).hexdigest()[:16]`.
@@ -228,11 +262,69 @@ impl ScopedDocumentVault {
             token.clone(),
             Entry {
                 raw: raw.to_string(),
+                kind: kind.to_string(),
+                chunks: HashSet::new(),
             },
         );
+        self.order.push(token.clone());
         self.by_value
             .insert((kind.to_string(), raw.to_string()), token.clone());
+        // Fold once at put() time (mirrors `_folded_*` upkeep) so the masker's
+        // sweep/scan never re-canonicalizes the whole vault per call. Bucket key
+        // is the folded CHAR length.
+        let folded = canonical_scan_forms(raw).1;
+        if !self.folded_seen.contains(&folded) {
+            let len = folded.chars().count();
+            self.folded_seen.insert(folded.clone());
+            self.folded_buckets.entry(len).or_default().insert(folded);
+        }
         Ok(token)
+    }
+
+    /// Port of `value_entries`: `(kind, raw)` for every entry in first-put
+    /// (insertion) order — the masker builds its first-seen `folded → kind` map
+    /// from this, so re-vaulting a recurrence returns the SAME token.
+    pub fn value_entries(&self) -> Vec<(String, String)> {
+        self.order
+            .iter()
+            .map(|t| {
+                let e = &self.entries[t];
+                (e.kind.clone(), e.raw.clone())
+            })
+            .collect()
+    }
+
+    /// `(token, raw)` for every entry in first-put order — the shape the
+    /// differential compares against Python's `vault._entries`.
+    pub fn entries_in_order(&self) -> Vec<(String, String)> {
+        self.order
+            .iter()
+            .map(|t| (t.clone(), self.entries[t].raw.clone()))
+            .collect()
+    }
+
+    /// Port of `folded_length_buckets`: folded values grouped by folded CHAR
+    /// length for the bucketed residual scan / active sweep. Read-only view.
+    pub fn folded_length_buckets(&self) -> &HashMap<usize, HashSet<String>> {
+        &self.folded_buckets
+    }
+
+    /// Port of `issued_token_set`: the set of vault-issued token strings, used
+    /// to strip only genuine tokens (leaving lookalikes for the scan to flag).
+    pub fn issued_token_set(&self) -> HashSet<String> {
+        self.entries.keys().cloned().collect()
+    }
+
+    /// Port of `record_chunks`: record that `chunk_id` carried `token`. Verifies
+    /// the token first (fail-closed). Metadata only — never part of masked
+    /// output, but kept faithful to the Python entry shape.
+    pub fn record_chunks(&mut self, token: &str, chunk_id: &str) -> Result<(), VaultError> {
+        // Re-verify via the resolution path, then record on the entry.
+        self.verify(token)?;
+        if let Some(entry) = self.entries.get_mut(token) {
+            entry.chunks.insert(chunk_id.to_string());
+        }
+        Ok(())
     }
 
     /// Port of `authorize_evidence`: record the token subset a digest may
