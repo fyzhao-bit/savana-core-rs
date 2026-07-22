@@ -13,4 +13,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 libsavana-ner = { path = "../libsavana-ner" }
-pyo3 = { version = "0.22", features = ["extension-module"] }
+# abi3-py312: build ONE stable-ABI wheel (cp312-abi3) per platform — forward-
+# compatible with 3.13+, and (crucially) needs no per-interpreter match, so the
+# manylinux container build doesn't have to locate a specific `python3`.
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py312"] }
