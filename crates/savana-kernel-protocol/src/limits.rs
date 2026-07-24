@@ -169,4 +169,24 @@ impl EffectiveLimits {
         ner_failure_threshold,
         request_deadline_ms,
     );
+
+    pub(crate) fn check_frame_bytes(&self, length: usize) -> Result<(), ProtocolError> {
+        let length = u64::try_from(length)
+            .map_err(|_| ProtocolError::stable(StableCode::ProtocolFrameTooLarge))?;
+        if length > self.frame_bytes() {
+            return Err(ProtocolError::stable(StableCode::ProtocolFrameTooLarge));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_wire_items(&self, length: u64) -> Result<(), ProtocolError> {
+        if length > self.frame_bytes() {
+            return Err(ProtocolError::stable(StableCode::ProtocolFrameTooLarge));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_wire_bytes(&self, length: usize) -> Result<(), ProtocolError> {
+        self.check_frame_bytes(length)
+    }
 }

@@ -67,6 +67,65 @@ impl StableCode {
             Self::KernelUnavailable => "KERNEL_UNAVAILABLE",
         }
     }
+
+    pub(crate) fn from_wire(value: &str) -> Option<Self> {
+        Some(match value {
+            "PROTOCOL_MALFORMED_FRAME" => Self::ProtocolMalformedFrame,
+            "PROTOCOL_TRUNCATED_FRAME" => Self::ProtocolTruncatedFrame,
+            "PROTOCOL_FRAME_TOO_LARGE" => Self::ProtocolFrameTooLarge,
+            "PROTOCOL_ALLOCATION_REFUSED" => Self::ProtocolAllocationRefused,
+            "PROTOCOL_IO" => Self::ProtocolIo,
+            "PROTOCOL_MALFORMED_CBOR" => Self::ProtocolMalformedCbor,
+            "PROTOCOL_NON_CANONICAL_CBOR" => Self::ProtocolNonCanonicalCbor,
+            "PROTOCOL_NESTING_TOO_DEEP" => Self::ProtocolNestingTooDeep,
+            "PROTOCOL_UNKNOWN_FIELD" => Self::ProtocolUnknownField,
+            "PROTOCOL_UNKNOWN_OPERATION" => Self::ProtocolUnknownOperation,
+            "PROTOCOL_UNSUPPORTED_VERSION" => Self::ProtocolUnsupportedVersion,
+            "IDENTITY_PEER_REJECTED" => Self::IdentityPeerRejected,
+            "IDENTITY_UNKNOWN_CLIENT" => Self::IdentityUnknownClient,
+            "IDENTITY_INVALID_SIGNATURE" => Self::IdentityInvalidSignature,
+            "IDENTITY_TRANSCRIPT_MISMATCH" => Self::IdentityTranscriptMismatch,
+            "IDENTITY_REPLAY" => Self::IdentityReplay,
+            "IDENTITY_RELEASE_MISMATCH" => Self::IdentityReleaseMismatch,
+            "IDENTITY_KEY_PERMISSIONS" => Self::IdentityKeyPermissions,
+            "IDENTITY_SOCKET_PERMISSIONS" => Self::IdentitySocketPermissions,
+            "POLICY_INVALID_SIGNATURE" => Self::PolicyInvalidSignature,
+            "POLICY_EXPIRED" => Self::PolicyExpired,
+            "POLICY_NOT_YET_VALID" => Self::PolicyNotYetValid,
+            "POLICY_ROLLBACK" => Self::PolicyRollback,
+            "POLICY_EQUIVOCATION" => Self::PolicyEquivocation,
+            "POLICY_LIMIT_EXCEEDED" => Self::PolicyLimitExceeded,
+            "POLICY_RELEASE_INCOMPATIBLE" => Self::PolicyReleaseIncompatible,
+            "DEADLINE_EXCEEDED" => Self::DeadlineExceeded,
+            "KERNEL_OVERLOADED" => Self::KernelOverloaded,
+            "KERNEL_UNAVAILABLE" => Self::KernelUnavailable,
+            _ => return None,
+        })
+    }
+}
+
+impl<C> minicbor::Encode<C> for StableCode {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        encoder: &mut minicbor::Encoder<W>,
+        _context: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        encoder.str(self.as_str())?;
+        Ok(())
+    }
+}
+
+impl<'bytes, C> minicbor::Decode<'bytes, C> for StableCode {
+    fn decode(
+        decoder: &mut minicbor::Decoder<'bytes>,
+        _context: &mut C,
+    ) -> Result<Self, minicbor::decode::Error> {
+        let position = decoder.position();
+        let value = decoder.str()?;
+        Self::from_wire(value).ok_or_else(|| {
+            minicbor::decode::Error::message(Self::ProtocolMalformedCbor.as_str()).at(position)
+        })
+    }
 }
 
 impl fmt::Display for StableCode {
@@ -87,6 +146,45 @@ impl ProtocolError {
 
     pub const fn code(self) -> StableCode {
         self.code
+    }
+
+    pub(crate) fn malformed<T>(_error: T) -> Self {
+        Self::stable(StableCode::ProtocolMalformedCbor)
+    }
+
+    pub(crate) fn indefinite() -> Self {
+        Self::stable(StableCode::ProtocolMalformedCbor)
+    }
+
+    pub(crate) fn unsupported_cbor() -> Self {
+        Self::stable(StableCode::ProtocolMalformedCbor)
+    }
+
+    pub(crate) fn from_typed_decode(error: minicbor::decode::Error) -> Self {
+        if error
+            .to_string()
+            .contains(StableCode::ProtocolUnknownOperation.as_str())
+        {
+            Self::stable(StableCode::ProtocolUnknownOperation)
+        } else {
+            Self::stable(StableCode::ProtocolMalformedCbor)
+        }
+    }
+
+    pub(crate) fn io(error: std::io::Error) -> Self {
+        match error.kind() {
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                Self::stable(StableCode::DeadlineExceeded)
+            }
+            _ => Self::stable(StableCode::ProtocolIo),
+        }
+    }
+
+    pub(crate) fn from_read(error: std::io::Error) -> Self {
+        match error.kind() {
+            std::io::ErrorKind::UnexpectedEof => Self::stable(StableCode::ProtocolTruncatedFrame),
+            _ => Self::io(error),
+        }
     }
 }
 

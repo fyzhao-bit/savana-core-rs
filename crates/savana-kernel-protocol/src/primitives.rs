@@ -1,4 +1,212 @@
-use crate::StableCode;
+use crate::{ProtocolError, StableCode};
+
+macro_rules! fixed_bytes {
+    ($name:ident, $length:literal) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub struct $name([u8; $length]);
+
+        impl $name {
+            pub const fn new(bytes: [u8; $length]) -> Self {
+                Self(bytes)
+            }
+
+            pub const fn as_bytes(&self) -> &[u8; $length] {
+                &self.0
+            }
+        }
+
+        impl TryFrom<&[u8]> for $name {
+            type Error = ProtocolError;
+
+            fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+                let bytes = <[u8; $length]>::try_from(bytes)
+                    .map_err(|_| ProtocolError::stable(StableCode::ProtocolMalformedCbor))?;
+                Ok(Self::new(bytes))
+            }
+        }
+
+        impl<C> minicbor::Encode<C> for $name {
+            fn encode<W: minicbor::encode::Write>(
+                &self,
+                encoder: &mut minicbor::Encoder<W>,
+                _context: &mut C,
+            ) -> Result<(), minicbor::encode::Error<W::Error>> {
+                encoder.bytes(&self.0)?;
+                Ok(())
+            }
+        }
+
+        impl<'bytes, C> minicbor::Decode<'bytes, C> for $name {
+            fn decode(
+                decoder: &mut minicbor::Decoder<'bytes>,
+                _context: &mut C,
+            ) -> Result<Self, minicbor::decode::Error> {
+                let position = decoder.position();
+                Self::try_from(decoder.bytes()?).map_err(|_| {
+                    minicbor::decode::Error::message(StableCode::ProtocolMalformedCbor.as_str())
+                        .at(position)
+                })
+            }
+        }
+    };
+}
+
+fixed_bytes!(Digest32, 32);
+fixed_bytes!(Nonce32, 32);
+fixed_bytes!(BootId, 32);
+fixed_bytes!(Signature64, 64);
+fixed_bytes!(RequestId, 16);
+
+macro_rules! bounded_id {
+    ($name:ident) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Result<Self, ProtocolError> {
+                let value = value.into();
+                let valid_length = (1..=128).contains(&value.len());
+                let valid_characters = !value.chars().any(char::is_control);
+                if !valid_length || !valid_characters {
+                    return Err(ProtocolError::stable(StableCode::ProtocolMalformedCbor));
+                }
+                Ok(Self(value))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl TryFrom<&str> for $name {
+            type Error = ProtocolError;
+
+            fn try_from(value: &str) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = ProtocolError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
+
+        impl<C> minicbor::Encode<C> for $name {
+            fn encode<W: minicbor::encode::Write>(
+                &self,
+                encoder: &mut minicbor::Encoder<W>,
+                _context: &mut C,
+            ) -> Result<(), minicbor::encode::Error<W::Error>> {
+                encoder.str(&self.0)?;
+                Ok(())
+            }
+        }
+
+        impl<'bytes, C> minicbor::Decode<'bytes, C> for $name {
+            fn decode(
+                decoder: &mut minicbor::Decoder<'bytes>,
+                _context: &mut C,
+            ) -> Result<Self, minicbor::decode::Error> {
+                let position = decoder.position();
+                Self::try_from(decoder.str()?).map_err(|_| {
+                    minicbor::decode::Error::message(StableCode::ProtocolMalformedCbor.as_str())
+                        .at(position)
+                })
+            }
+        }
+    };
+}
+
+bounded_id!(KeyId);
+bounded_id!(ClientId);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, minicbor::Encode, minicbor::Decode)]
+#[cbor(array)]
+pub struct ProtocolVersion {
+    #[n(0)]
+    pub major: u16,
+    #[n(1)]
+    pub minor: u16,
+}
+
+impl ProtocolVersion {
+    pub const fn new(major: u16, minor: u16) -> Self {
+        Self { major, minor }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UnixMillis(u64);
+
+impl UnixMillis {
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl<C> minicbor::Encode<C> for UnixMillis {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        encoder: &mut minicbor::Encoder<W>,
+        _context: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        encoder.u64(self.0)?;
+        Ok(())
+    }
+}
+
+impl<'bytes, C> minicbor::Decode<'bytes, C> for UnixMillis {
+    fn decode(
+        decoder: &mut minicbor::Decoder<'bytes>,
+        _context: &mut C,
+    ) -> Result<Self, minicbor::decode::Error> {
+        Ok(Self::new(decoder.u64()?))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RequestedMode {
+    Required,
+    Shadow,
+}
+
+impl<C> minicbor::Encode<C> for RequestedMode {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        encoder: &mut minicbor::Encoder<W>,
+        _context: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        encoder.u8(match self {
+            Self::Required => 0,
+            Self::Shadow => 1,
+        })?;
+        Ok(())
+    }
+}
+
+impl<'bytes, C> minicbor::Decode<'bytes, C> for RequestedMode {
+    fn decode(
+        decoder: &mut minicbor::Decoder<'bytes>,
+        _context: &mut C,
+    ) -> Result<Self, minicbor::decode::Error> {
+        let position = decoder.position();
+        match decoder.u64()? {
+            0 => Ok(Self::Required),
+            1 => Ok(Self::Shadow),
+            _ => Err(minicbor::decode::Error::message(
+                StableCode::ProtocolUnknownOperation.as_str(),
+            )
+            .at(position)),
+        }
+    }
+}
 
 const RESOURCE_LIMIT_FIELD_COUNT: usize = 24;
 
