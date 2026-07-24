@@ -1,0 +1,16 @@
+[package]
+name = "savana-kernel-protocol"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+minicbor.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
