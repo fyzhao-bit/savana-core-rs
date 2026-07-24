@@ -34,6 +34,35 @@ fn compiled_request() -> ResourceLimitsV1 {
     }
 }
 
+fn lowered_request() -> ResourceLimitsV1 {
+    ResourceLimitsV1 {
+        frame_bytes: 7_000_001,
+        cbor_depth: 17,
+        pages: 1_901,
+        chars_per_page: 40_001,
+        chars_per_document: 900_001,
+        observations: 90_001,
+        vault_entries: 19_001,
+        vault_raw_bytes: 30_000_001,
+        runs_per_client: 101,
+        vaults_per_client: 401,
+        approval_ledger_entries: 60_001,
+        model_manifest_bytes: 200_001,
+        model_assets: 23,
+        model_tensor_contracts: 22,
+        model_tensor_rank: 7,
+        single_model_asset_bytes: 200_000_001,
+        total_model_asset_bytes: 500_000_001,
+        ner_workers: 3,
+        ner_queue: 119,
+        ner_text_bytes: 190_001,
+        model_probes: 15,
+        model_probe_spans: 500,
+        ner_failure_threshold: 21,
+        request_deadline_ms: 110_001,
+    }
+}
+
 #[test]
 fn v1_constants_are_frozen() {
     assert_eq!((PROTOCOL_MAJOR, PROTOCOL_MINOR), (1, 0));
@@ -119,8 +148,8 @@ fn resource_limit_decode_rejects_duplicate_and_missing_fields() {
 }
 
 #[test]
-fn compiled_limits_accept_and_preserve_every_requested_value() {
-    let requested = compiled_request();
+fn lowered_limits_preserve_every_requested_value() {
+    let requested = lowered_request();
     let effective = HardLimits::COMPILED.lower(&requested).unwrap();
 
     assert_eq!(effective.frame_bytes(), requested.frame_bytes);
