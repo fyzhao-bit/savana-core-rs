@@ -3,9 +3,9 @@ use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
 use nix::fcntl::OFlag;
-use savana_kernel_protocol::StableCode;
+use savana_kernel_protocol::{HandshakeTranscriptV1, Signature64, StableCode};
 use zeroize::Zeroizing;
 
 use crate::DaemonError;
@@ -17,6 +17,25 @@ pub struct DaemonSigningIdentity {
 impl DaemonSigningIdentity {
     pub(crate) fn public_key(&self) -> [u8; 32] {
         self.signing_key.verifying_key().to_bytes()
+    }
+
+    pub(crate) fn sign_daemon_hello(
+        &self,
+        transcript: &HandshakeTranscriptV1,
+    ) -> Result<Signature64, DaemonError> {
+        let transcript = minicbor::to_vec(transcript)
+            .map_err(|_| DaemonError::stable(StableCode::KernelUnavailable))?;
+        let mut signed = Vec::with_capacity(b"SAVANA_DAEMON_HELLO_V1\0".len() + transcript.len());
+        signed.extend_from_slice(b"SAVANA_DAEMON_HELLO_V1\0");
+        signed.extend_from_slice(&transcript);
+        Ok(Signature64::new(self.signing_key.sign(&signed).to_bytes()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_seed_for_test(seed: [u8; 32]) -> Self {
+        Self {
+            signing_key: SigningKey::from_bytes(&seed),
+        }
     }
 }
 

@@ -779,6 +779,7 @@ name = "savana-kerneld"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "getrandom 0.2.17",
  "minicbor",
  "nix",
  "savana-kernel-protocol",

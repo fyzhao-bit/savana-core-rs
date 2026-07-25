@@ -12,6 +12,8 @@ const MAXIMUM_LOCK_BYTES: usize = 256 * 1024;
 #[derive(Clone)]
 pub struct DaemonConfig {
     protocol_major: u16,
+    minimum_minor: u16,
+    maximum_minor: u16,
     daemon_identity: InstallationPublicKeyV1,
     daemon_clients: Vec<InstallationClientV1>,
     daemon_uid: u32,
@@ -28,6 +30,8 @@ pub struct DaemonConfig {
     model_manifest_digest: Digest32,
     approval_key_set_digest: Digest32,
     resource_profile_digest: Digest32,
+    release_expires_at: savana_kernel_protocol::UnixMillis,
+    policy_expires_at: savana_kernel_protocol::UnixMillis,
 }
 
 impl std::fmt::Debug for DaemonConfig {
@@ -115,6 +119,8 @@ impl DaemonConfig {
         verify_lock(&lock, release, policy, selected_policy_signature)?;
         Ok(Self {
             protocol_major: release.protocol_major(),
+            minimum_minor: release.minimum_minor(),
+            maximum_minor: release.maximum_minor(),
             daemon_identity: release.daemon_identity().clone(),
             daemon_clients: release.daemon_clients().to_vec(),
             daemon_uid: release.daemon_uid(),
@@ -131,6 +137,8 @@ impl DaemonConfig {
             model_manifest_digest: release.model_manifest_digest(),
             approval_key_set_digest: release.approval_key_set_digest(),
             resource_profile_digest: policy.resource_profile_digest(),
+            release_expires_at: release.expires_at(),
+            policy_expires_at: policy.identity().expires_at,
         })
     }
 
@@ -178,6 +186,14 @@ impl DaemonConfig {
         self.protocol_major
     }
 
+    pub(crate) const fn minimum_minor(&self) -> u16 {
+        self.minimum_minor
+    }
+
+    pub(crate) const fn maximum_minor(&self) -> u16 {
+        self.maximum_minor
+    }
+
     pub(crate) const fn release_digest(&self) -> Digest32 {
         self.release_digest
     }
@@ -200,6 +216,14 @@ impl DaemonConfig {
 
     pub(crate) const fn resource_profile_digest(&self) -> Digest32 {
         self.resource_profile_digest
+    }
+
+    pub(crate) const fn release_expires_at(&self) -> savana_kernel_protocol::UnixMillis {
+        self.release_expires_at
+    }
+
+    pub(crate) const fn policy_expires_at(&self) -> savana_kernel_protocol::UnixMillis {
+        self.policy_expires_at
     }
 }
 

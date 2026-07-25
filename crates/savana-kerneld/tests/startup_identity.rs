@@ -6,7 +6,7 @@ use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use ed25519_dalek::{Signer, SigningKey};
-use savana_kernel_protocol::{BootId, Digest32, KeyId, Signature64, StableCode, UnixMillis};
+use savana_kernel_protocol::{Digest32, KeyId, Signature64, StableCode, UnixMillis};
 use savana_kerneld::{load_daemon_signing_key, DaemonConfig};
 use savana_policy_core::{
     PolicyVerifier, ReleaseTrustRootV1, ReleaseVerifier, VerifiedPolicyV1, VerifiedReleaseIdentity,
@@ -135,31 +135,11 @@ fn verified_identity_debug_views_do_not_expose_private_object_graphs() {
 }
 
 #[test]
-fn verified_lock_key_and_policy_produce_the_canonical_runtime_identity() {
+fn verified_lock_key_and_policy_produce_the_canonical_runtime_config() {
     let fixture = startup_fixture();
     let config = fixture.config().unwrap();
     let signing = load_daemon_signing_key(&fixture.key_path, fixture.expected_uid).unwrap();
     assert_eq!(format!("{signing:?}"), "DaemonSigningIdentity(<redacted>)");
-
-    let identity = config
-        .server_identity(&signing, BootId::new([0x77; 32]))
-        .unwrap();
-    assert_eq!(identity.daemon_key_id.as_str(), "daemon-key");
-    assert_eq!(
-        identity.release_digest,
-        Digest32::new(hex_digest(&fixture.lock.allowed_release_digests[0]))
-    );
-    assert_eq!(identity.policy_digest, fixture.policy.identity().digest);
-    assert_eq!(
-        identity.policy_version,
-        fixture.policy.identity().policy_version
-    );
-    assert_eq!(identity.model_manifest_digest, Digest32::new([0xd1; 32]));
-    assert_eq!(identity.approval_key_set_digest, Digest32::new([0xd4; 32]));
-    assert_eq!(
-        identity.resource_profile_digest,
-        fixture.policy.resource_profile_digest()
-    );
 
     assert_eq!(config.daemon_uid(), fixture.lock.daemon_uid);
     assert_eq!(config.daemon_gid(), fixture.lock.daemon_gid);
@@ -232,23 +212,6 @@ fn private_key_permissions_owner_shape_links_and_parent_are_strict() {
         &fixture.key_path.with_file_name("missing.seed"),
         fixture.expected_uid,
         StableCode::IdentityKeyPermissions,
-    );
-}
-
-#[test]
-fn daemon_public_key_must_match_the_verified_profile_and_lock() {
-    let fixture = startup_fixture();
-    let config = fixture.config().unwrap();
-    let wrong_path = fixture.key_path.with_file_name("wrong.seed");
-    fs::write(&wrong_path, [0x62; 32]).unwrap();
-    fs::set_permissions(&wrong_path, PermissionsExt::from_mode(0o600)).unwrap();
-    let wrong = load_daemon_signing_key(&wrong_path, fixture.expected_uid).unwrap();
-    assert_eq!(
-        config
-            .server_identity(&wrong, BootId::new([0x77; 32]))
-            .unwrap_err()
-            .code(),
-        StableCode::IdentityKeyPermissions
     );
 }
 

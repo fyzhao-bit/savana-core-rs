@@ -19,7 +19,8 @@ ed25519-dalek.workspace = true
 zeroize.workspace = true
 nix.workspace = true
 sha2.workspace = true
+getrandom.workspace = true
+minicbor.workspace = true
 
 [dev-dependencies]
-minicbor.workspace = true
 tempfile = "=3.23.0"

@@ -280,6 +280,10 @@ impl VerifiedReleaseIdentity {
         self.manifest.maximum_minor
     }
 
+    pub const fn expires_at(&self) -> UnixMillis {
+        self.manifest.expires_at
+    }
+
     pub const fn minimum_policy_version(&self) -> u64 {
         self.manifest.minimum_policy_version
     }
