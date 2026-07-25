@@ -8,105 +8,89 @@ use crate::PolicyError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode)]
 #[cbor(array)]
-pub struct ProtocolRangeV1 {
+pub(crate) struct ProtocolRangeV1 {
     #[n(0)]
-    pub major: u16,
+    pub(crate) major: u16,
     #[n(1)]
-    pub minimum_minor: u16,
+    pub(crate) minimum_minor: u16,
     #[n(2)]
-    pub maximum_minor: u16,
+    pub(crate) maximum_minor: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode)]
 #[cbor(array)]
-pub struct DataflowPolicyV1 {
+pub(crate) struct DataflowPolicyV1 {
     #[n(0)]
-    pub no_side_effect_tools: Vec<ToolName>,
+    pub(crate) no_side_effect_tools: Vec<ToolName>,
     #[n(1)]
-    pub consent_overridable_tools: Vec<ToolName>,
+    pub(crate) consent_overridable_tools: Vec<ToolName>,
     #[n(2)]
-    pub high_risk_tools: Vec<ToolName>,
+    pub(crate) high_risk_tools: Vec<ToolName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode)]
 #[cbor(array)]
-pub struct ToolAttemptV1 {
+pub(crate) struct ToolAttemptV1 {
     #[n(0)]
-    pub tool: ToolName,
+    pub(crate) tool: ToolName,
     #[n(1)]
-    pub attempt: AttemptKindV1,
+    pub(crate) attempt: AttemptKindV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode)]
 #[cbor(array)]
-pub struct AttemptLimitV1 {
+pub(crate) struct AttemptLimitV1 {
     #[n(0)]
-    pub attempt: AttemptKindV1,
+    pub(crate) attempt: AttemptKindV1,
     #[n(1)]
-    pub maximum_per_run: u32,
+    pub(crate) maximum_per_run: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode)]
 #[cbor(array)]
-pub struct AttemptPolicyV1 {
+pub(crate) struct AttemptPolicyV1 {
     #[n(0)]
-    pub valid_pairs: Vec<ToolAttemptV1>,
+    pub(crate) valid_pairs: Vec<ToolAttemptV1>,
     #[n(1)]
-    pub limits: Vec<AttemptLimitV1>,
+    pub(crate) limits: Vec<AttemptLimitV1>,
     #[n(2)]
-    pub cloud_blocked: Vec<AttemptKindV1>,
+    pub(crate) cloud_blocked: Vec<AttemptKindV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode)]
 #[cbor(array)]
-pub struct OntologyPolicyV1 {
+pub(crate) struct OntologyPolicyV1 {
     #[n(0)]
-    pub snapshot_authority_key_ids: Vec<KeyId>,
+    pub(crate) snapshot_authority_key_ids: Vec<KeyId>,
     #[n(1)]
-    pub max_snapshot_entries: u32,
+    pub(crate) max_snapshot_entries: u32,
     #[n(2)]
-    pub max_constraints_per_tool: u16,
+    pub(crate) max_constraints_per_tool: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode)]
 #[cbor(array)]
-pub struct ToolValidatorRequirementV1 {
+pub(crate) struct ToolValidatorRequirementV1 {
     #[n(0)]
-    pub tool: ToolName,
+    pub(crate) tool: ToolName,
     #[n(1)]
-    pub validator_ids: Vec<ValidatorId>,
+    pub(crate) validator_ids: Vec<ValidatorId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode)]
 #[cbor(array)]
-pub struct SinkPolicyV1 {
+pub(crate) struct SinkPolicyV1 {
     #[n(0)]
-    pub validator_requirements: Vec<ToolValidatorRequirementV1>,
+    pub(crate) validator_requirements: Vec<ToolValidatorRequirementV1>,
     #[n(1)]
-    pub deny_on_missing_attestation: bool,
+    pub(crate) deny_on_missing_attestation: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BoundedDigestSet(Vec<Digest32>);
+pub(crate) struct BoundedDigestSet(Vec<Digest32>);
 
 impl BoundedDigestSet {
-    pub fn new(values: Vec<Digest32>) -> Result<Self, PolicyError> {
-        if values.is_empty() {
-            return Err(PolicyError::stable(StableCode::ProtocolMalformedCbor));
-        }
-        if values.len() > HardLimits::COMPILED.policy_release_targets() as usize {
-            return Err(PolicyError::stable(StableCode::PolicyLimitExceeded));
-        }
-        if !values
-            .windows(2)
-            .all(|pair| matches!(pair, [left, right] if left.as_bytes() < right.as_bytes()))
-        {
-            return Err(PolicyError::stable(StableCode::ProtocolMalformedCbor));
-        }
-        Ok(Self(values))
-    }
-
-    pub fn as_slice(&self) -> &[Digest32] {
+    pub(crate) fn as_slice(&self) -> &[Digest32] {
         &self.0
     }
 
@@ -131,32 +115,32 @@ impl<C> Encode<C> for BoundedDigestSet {
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode)]
 #[cbor(array)]
-pub struct ReleasePolicyV1 {
+pub(crate) struct ReleasePolicyV1 {
     #[n(0)]
-    pub challenge_ttl_seconds: u32,
+    pub(crate) challenge_ttl_seconds: u32,
     #[n(1)]
-    pub receipt_ttl_seconds: u32,
+    pub(crate) receipt_ttl_seconds: u32,
     #[n(2)]
-    pub require_authenticated_user_assertion: bool,
+    pub(crate) require_authenticated_user_assertion: bool,
     #[n(3)]
-    pub consume_vault_on_success: bool,
+    pub(crate) consume_vault_on_success: bool,
     #[n(4)]
-    pub compatible_release_target_ids: BoundedDigestSet,
+    pub(crate) compatible_release_target_ids: BoundedDigestSet,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode)]
 #[cbor(array)]
-pub struct AllowedToolV1 {
+pub(crate) struct AllowedToolV1 {
     #[n(0)]
-    pub name: ToolName,
+    pub(crate) name: ToolName,
     #[n(1)]
-    pub descriptor_digest: Digest32,
+    pub(crate) descriptor_digest: Digest32,
     #[n(2)]
-    pub attempt: AttemptKindV1,
+    pub(crate) attempt: AttemptKindV1,
     #[n(3)]
-    pub constraint_ids: Vec<ConstraintId>,
+    pub(crate) constraint_ids: Vec<ConstraintId>,
     #[n(4)]
-    pub validator_ids: Vec<ValidatorId>,
+    pub(crate) validator_ids: Vec<ValidatorId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,14 +182,14 @@ impl<C> Encode<C> for AuthorityRoleV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthorityKeyV1 {
-    pub key_id: KeyId,
-    pub role: AuthorityRoleV1,
-    pub public_key: [u8; 32],
-    pub epoch: u64,
-    pub not_before: UnixMillis,
-    pub not_after: UnixMillis,
-    pub revoked: bool,
+pub(crate) struct AuthorityKeyV1 {
+    pub(crate) key_id: KeyId,
+    pub(crate) role: AuthorityRoleV1,
+    pub(crate) public_key: [u8; 32],
+    pub(crate) epoch: u64,
+    pub(crate) not_before: UnixMillis,
+    pub(crate) not_after: UnixMillis,
+    pub(crate) revoked: bool,
 }
 
 impl<C> Encode<C> for AuthorityKeyV1 {
@@ -228,50 +212,50 @@ impl<C> Encode<C> for AuthorityKeyV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode)]
 #[cbor(array)]
-pub struct StableErrorMappingV1 {
+pub(crate) struct StableErrorMappingV1 {
     #[n(0)]
-    pub policy_reason_tag: u16,
+    pub(crate) policy_reason_tag: u16,
     #[n(1)]
-    pub stable_code: StableCode,
+    pub(crate) stable_code: StableCode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode)]
 #[cbor(array)]
-pub struct PolicyBundleV1 {
+pub(crate) struct PolicyBundleV1 {
     #[n(0)]
-    pub schema_version: u16,
+    pub(crate) schema_version: u16,
     #[n(1)]
-    pub protocol: ProtocolRangeV1,
+    pub(crate) protocol: ProtocolRangeV1,
     #[n(2)]
-    pub policy_version: u64,
+    pub(crate) policy_version: u64,
     #[n(3)]
-    pub key_epoch: u64,
+    pub(crate) key_epoch: u64,
     #[n(4)]
-    pub issued_at: UnixMillis,
+    pub(crate) issued_at: UnixMillis,
     #[n(5)]
-    pub expires_at: UnixMillis,
+    pub(crate) expires_at: UnixMillis,
     #[n(6)]
-    pub signing_key_id: KeyId,
+    pub(crate) signing_key_id: KeyId,
     #[n(7)]
-    pub dataflow: DataflowPolicyV1,
+    pub(crate) dataflow: DataflowPolicyV1,
     #[n(8)]
-    pub attempts: AttemptPolicyV1,
+    pub(crate) attempts: AttemptPolicyV1,
     #[n(9)]
-    pub ontology: OntologyPolicyV1,
+    pub(crate) ontology: OntologyPolicyV1,
     #[n(10)]
-    pub sink: SinkPolicyV1,
+    pub(crate) sink: SinkPolicyV1,
     #[n(11)]
-    pub release: ReleasePolicyV1,
+    pub(crate) release: ReleasePolicyV1,
     #[n(12)]
-    pub tools: Vec<AllowedToolV1>,
+    pub(crate) tools: Vec<AllowedToolV1>,
     #[n(13)]
-    pub authorities: Vec<AuthorityKeyV1>,
+    pub(crate) authorities: Vec<AuthorityKeyV1>,
     #[n(14)]
-    pub resources: ResourceLimitsV1,
+    pub(crate) resources: ResourceLimitsV1,
     #[n(15)]
-    pub accepted_model_manifest_digests: Vec<Digest32>,
+    pub(crate) accepted_model_manifest_digests: Vec<Digest32>,
     #[n(16)]
-    pub error_map: Vec<StableErrorMappingV1>,
+    pub(crate) error_map: Vec<StableErrorMappingV1>,
 }
 
 pub(crate) fn decode_canonical_policy(bytes: &[u8]) -> Result<PolicyBundleV1, PolicyError> {

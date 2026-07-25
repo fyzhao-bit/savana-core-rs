@@ -7,6 +7,7 @@ use savana_kernel_protocol::{Digest32, Signature64, StableCode, UnixMillis};
 use sha2::{Digest, Sha256};
 
 use crate::atomic_file;
+use crate::lock_file::LedgerLock;
 use crate::{PolicyError, PolicyVerifier, VerifiedPolicyV1};
 
 const LEDGER_SCHEMA_VERSION: u16 = 1;
@@ -64,6 +65,7 @@ pub struct PolicyStore {
     ledger_path: PathBuf,
     ledger: RollbackLedgerV1,
     poisoned: bool,
+    _lock: LedgerLock,
 }
 
 impl std::fmt::Debug for PolicyStore {
@@ -76,12 +78,26 @@ impl std::fmt::Debug for PolicyStore {
 
 impl PolicyStore {
     pub fn open(ledger_path: &Path, verifier: PolicyVerifier) -> Result<Self, PolicyError> {
+        Self::open_with_parent_sync(ledger_path, verifier, atomic_file::sync_directory)
+    }
+
+    fn open_with_parent_sync<F>(
+        ledger_path: &Path,
+        verifier: PolicyVerifier,
+        sync_parent: F,
+    ) -> Result<Self, PolicyError>
+    where
+        F: FnOnce(&Path) -> Result<(), PolicyError>,
+    {
+        let lock = LedgerLock::acquire(ledger_path)?;
         let ledger = match fs::symlink_metadata(ledger_path) {
             Ok(metadata) => {
                 if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
                     return Err(PolicyError::stable(StableCode::ProtocolIo));
                 }
-                read_existing_ledger(ledger_path, &metadata)?
+                let ledger = read_existing_ledger(ledger_path, &metadata)?;
+                sync_parent(atomic_file::normalized_parent(ledger_path)?)?;
+                ledger
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => RollbackLedgerV1::GENESIS,
             Err(error) => return Err(PolicyError::io(error)),
@@ -91,6 +107,7 @@ impl PolicyStore {
             ledger_path: ledger_path.to_owned(),
             ledger,
             poisoned: false,
+            _lock: lock,
         })
     }
 
@@ -123,17 +140,18 @@ impl PolicyStore {
         Ok(verified)
     }
 
-    pub fn ledger_identity(&self) -> PolicyLedgerIdentity {
+    pub fn ledger_identity(&self) -> Result<PolicyLedgerIdentity, PolicyError> {
+        self.ensure_usable()?;
         let canonical = self.ledger.canonical_bytes();
         let mut hasher = Sha256::new();
         hasher.update(LEDGER_DOMAIN);
         hasher.update(&canonical);
-        PolicyLedgerIdentity {
+        Ok(PolicyLedgerIdentity {
             highest_policy_version: self.ledger.highest_policy_version,
             highest_key_epoch: self.ledger.highest_key_epoch,
             highest_policy_digest: self.ledger.highest_policy_digest,
             canonical_ledger_digest: Digest32::new(hasher.finalize().into()),
-        }
+        })
     }
 
     fn ensure_usable(&self) -> Result<(), PolicyError> {
@@ -278,7 +296,6 @@ mod tests {
     use savana_kernel_protocol::KeyId;
 
     use super::*;
-    use crate::atomic_file::ReplaceError;
     use crate::PolicyTrustRootV1;
 
     #[test]
@@ -291,24 +308,23 @@ mod tests {
     }
 
     #[test]
-    fn post_rename_failure_poison_keeps_old_in_memory_high_water() {
+    fn post_rename_failure_poison_requires_reopen_reconciliation() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger_path = dir.path().join("policy.ledger");
         let signing_key = SigningKey::from_bytes(&[0x42; 32]);
-        let verifier = PolicyVerifier::new(
-            vec![PolicyTrustRootV1 {
-                key_id: KeyId::try_from("policy-root").unwrap(),
-                public_key: signing_key.verifying_key().to_bytes(),
-                epoch: 3,
-                revoked: false,
-            }],
-            Digest32::new([0xa0; 32]),
-        )
-        .unwrap();
-        let mut store = PolicyStore {
-            verifier,
-            ledger_path: PathBuf::from("policy.ledger"),
-            ledger: RollbackLedgerV1::GENESIS,
-            poisoned: false,
+        let verifier = || {
+            PolicyVerifier::new(
+                vec![PolicyTrustRootV1 {
+                    key_id: KeyId::try_from("policy-root").unwrap(),
+                    public_key: signing_key.verifying_key().to_bytes(),
+                    epoch: 3,
+                    revoked: false,
+                }],
+                Digest32::new([0xa0; 32]),
+            )
+            .unwrap()
         };
+        let mut store = PolicyStore::open(&ledger_path, verifier()).unwrap();
         let next = RollbackLedgerV1 {
             schema_version: 1,
             highest_policy_version: 7,
@@ -317,10 +333,10 @@ mod tests {
         };
 
         let error = store
-            .persist_candidate_with(next, |_path, _bytes| {
-                Err(ReplaceError::after_rename(PolicyError::stable(
-                    StableCode::ProtocolIo,
-                )))
+            .persist_candidate_with(next, |path, bytes| {
+                atomic_file::replace_with_parent_sync(path, bytes, |_parent| {
+                    Err(PolicyError::stable(StableCode::ProtocolIo))
+                })
             })
             .unwrap_err();
 
@@ -328,11 +344,31 @@ mod tests {
         assert_eq!(store.ledger, RollbackLedgerV1::GENESIS);
         assert!(store.poisoned);
         assert_eq!(
+            store.ledger_identity().unwrap_err().code(),
+            StableCode::ProtocolIo
+        );
+        assert_eq!(
             store
-                .verify_and_accept(&[], &Signature64::new([0; 64]), UnixMillis::new(0),)
+                .verify_and_accept(&[], &Signature64::new([0; 64]), UnixMillis::new(0))
                 .unwrap_err()
                 .code(),
             StableCode::ProtocolIo
+        );
+        drop(store);
+
+        assert_eq!(
+            PolicyStore::open_with_parent_sync(&ledger_path, verifier(), |_parent| {
+                Err(PolicyError::stable(StableCode::ProtocolIo))
+            })
+            .unwrap_err()
+            .code(),
+            StableCode::ProtocolIo
+        );
+
+        let reopened = PolicyStore::open(&ledger_path, verifier()).unwrap();
+        assert_eq!(
+            reopened.ledger_identity().unwrap().highest_policy_version,
+            7
         );
     }
 }

@@ -31,17 +31,60 @@ pub struct VerifiedPolicyV1 {
     effective_limits: EffectiveLimits,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedAuthorityV1<'policy> {
+    authority: &'policy AuthorityKeyV1,
+}
+
+impl VerifiedAuthorityV1<'_> {
+    pub const fn key_id(&self) -> &KeyId {
+        &self.authority.key_id
+    }
+
+    pub const fn role(&self) -> AuthorityRoleV1 {
+        self.authority.role
+    }
+
+    pub const fn public_key(&self) -> &[u8; 32] {
+        &self.authority.public_key
+    }
+
+    pub const fn epoch(&self) -> u64 {
+        self.authority.epoch
+    }
+
+    pub const fn not_before(&self) -> UnixMillis {
+        self.authority.not_before
+    }
+
+    pub const fn not_after(&self) -> UnixMillis {
+        self.authority.not_after
+    }
+}
+
 impl VerifiedPolicyV1 {
     pub const fn identity(&self) -> PolicyIdentity {
         self.identity
     }
 
-    pub const fn bundle(&self) -> &PolicyBundleV1 {
-        &self.bundle
-    }
-
     pub const fn effective_limits(&self) -> &EffectiveLimits {
         &self.effective_limits
+    }
+
+    pub fn authority(
+        &self,
+        key_id: &KeyId,
+        role: AuthorityRoleV1,
+    ) -> Option<VerifiedAuthorityV1<'_>> {
+        self.bundle
+            .authorities
+            .iter()
+            .find(|authority| {
+                authority.key_id == *key_id
+                    && authority.role == role
+                    && authority_valid_for_policy(authority, &self.bundle)
+            })
+            .map(|authority| VerifiedAuthorityV1 { authority })
     }
 }
 

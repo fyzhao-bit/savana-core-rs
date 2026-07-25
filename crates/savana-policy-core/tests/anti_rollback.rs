@@ -18,10 +18,90 @@ fn accept(store: &mut PolicyStore, policy: &support::TestPolicy) {
 }
 
 #[test]
+fn exclusive_lifetime_lock_prevents_stale_store_rollback() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("policy.ledger");
+    let mut first = open_store(&path);
+
+    assert_eq!(
+        PolicyStore::open(&path, support::verifier())
+            .unwrap_err()
+            .code(),
+        StableCode::ProtocolIo
+    );
+
+    accept(&mut first, &support::valid_policy(8, 3));
+    drop(first);
+
+    let mut restarted = open_store(&path);
+    assert_eq!(
+        restarted.ledger_identity().unwrap().highest_policy_version,
+        8
+    );
+    let older = support::valid_policy(7, 3);
+    let (bundle, signature) = support::signed(&older);
+    assert_eq!(
+        restarted
+            .verify_and_accept(&bundle, &signature, support::unix_now())
+            .unwrap_err()
+            .code(),
+        StableCode::PolicyRollback
+    );
+}
+
+#[test]
+fn persistent_lock_file_is_regular_private_and_no_follow() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let ledger_path = dir.path().join("policy.ledger");
+    let lock_path = dir.path().join(".policy.ledger.lock");
+
+    let store = open_store(&ledger_path);
+    let metadata = fs::symlink_metadata(&lock_path).unwrap();
+    assert!(metadata.file_type().is_file());
+    assert!(!metadata.file_type().is_symlink());
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    drop(store);
+    assert!(lock_path.exists());
+
+    fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        PolicyStore::open(&ledger_path, support::verifier())
+            .unwrap_err()
+            .code(),
+        StableCode::ProtocolIo
+    );
+
+    let symlink_dir = tempfile::tempdir().unwrap();
+    let symlink_ledger = symlink_dir.path().join("policy.ledger");
+    let symlink_lock = symlink_dir.path().join(".policy.ledger.lock");
+    let target = symlink_dir.path().join("target");
+    fs::write(&target, b"not a lock").unwrap();
+    symlink(&target, &symlink_lock).unwrap();
+    assert_eq!(
+        PolicyStore::open(&symlink_ledger, support::verifier())
+            .unwrap_err()
+            .code(),
+        StableCode::ProtocolIo
+    );
+
+    let directory_dir = tempfile::tempdir().unwrap();
+    let directory_ledger = directory_dir.path().join("policy.ledger");
+    fs::create_dir(directory_dir.path().join(".policy.ledger.lock")).unwrap();
+    assert_eq!(
+        PolicyStore::open(&directory_ledger, support::verifier())
+            .unwrap_err()
+            .code(),
+        StableCode::ProtocolIo
+    );
+}
+
+#[test]
 fn genesis_identity_is_canonical_and_public() {
     let dir = tempfile::tempdir().unwrap();
     let store = open_store(&dir.path().join("policy.ledger"));
-    let identity = store.ledger_identity();
+    let identity = store.ledger_identity().unwrap();
     assert_eq!(identity.highest_policy_version, 0);
     assert_eq!(identity.highest_key_epoch, 0);
     assert_eq!(identity.highest_policy_digest, Digest32::new([0; 32]));
@@ -42,11 +122,11 @@ fn durable_ledger_rejects_rollback_and_equivocation_after_restart() {
     let path = dir.path().join("policy.ledger");
     let mut store = open_store(&path);
     accept(&mut store, &support::valid_policy(7, 3));
-    let accepted_identity = store.ledger_identity();
+    let accepted_identity = store.ledger_identity().unwrap();
     drop(store);
 
     let mut restarted = open_store(&path);
-    assert_eq!(restarted.ledger_identity(), accepted_identity);
+    assert_eq!(restarted.ledger_identity().unwrap(), accepted_identity);
 
     let older = support::valid_policy(6, 3);
     let (bundle, signature) = support::signed(&older);
@@ -68,6 +148,7 @@ fn durable_ledger_rejects_rollback_and_equivocation_after_restart() {
             .code(),
         StableCode::PolicyEquivocation
     );
+    drop(restarted);
 
     let changed_epoch = support::valid_policy(7, 4);
     let (bundle, signature) = support::signed(&changed_epoch);
@@ -89,6 +170,7 @@ fn durable_ledger_rejects_rollback_and_equivocation_after_restart() {
             .code(),
         StableCode::PolicyEquivocation
     );
+    drop(changed_epoch_store);
 
     let lower_epoch = support::valid_policy(8, 2);
     let (bundle, signature) = support::signed(&lower_epoch);
@@ -119,15 +201,22 @@ fn equal_identity_is_idempotent_and_higher_identity_is_durable() {
     let policy = support::valid_policy(7, 3);
     let mut store = open_store(&path);
     accept(&mut store, &policy);
-    let first = store.ledger_identity();
+    let first = store.ledger_identity().unwrap();
     accept(&mut store, &policy);
-    assert_eq!(store.ledger_identity(), first);
+    assert_eq!(store.ledger_identity().unwrap(), first);
 
     let mut next = support::valid_policy(8, 3);
     next.tools[0].descriptor_digest = [0x31; 32];
     accept(&mut store, &next);
-    assert_eq!(store.ledger_identity().highest_policy_version, 8);
-    assert_eq!(open_store(&path).ledger_identity(), store.ledger_identity());
+    assert_eq!(store.ledger_identity().unwrap().highest_policy_version, 8);
+    drop(store);
+    assert_eq!(
+        open_store(&path)
+            .ledger_identity()
+            .unwrap()
+            .highest_policy_version,
+        8
+    );
 
     let higher_epoch = support::valid_policy(9, 4);
     let (bundle, signature) = support::signed(&higher_epoch);
@@ -145,9 +234,19 @@ fn equal_identity_is_idempotent_and_higher_identity_is_durable() {
     higher_epoch_store
         .verify_and_accept(&bundle, &signature, support::unix_now())
         .unwrap();
-    assert_eq!(higher_epoch_store.ledger_identity().highest_key_epoch, 4);
     assert_eq!(
-        open_store(&path).ledger_identity().highest_policy_version,
+        higher_epoch_store
+            .ledger_identity()
+            .unwrap()
+            .highest_key_epoch,
+        4
+    );
+    drop(higher_epoch_store);
+    assert_eq!(
+        open_store(&path)
+            .ledger_identity()
+            .unwrap()
+            .highest_policy_version,
         9
     );
 }
@@ -241,7 +340,7 @@ fn leftover_temporary_files_are_ignored_and_preserved() {
     fs::write(&leftover, b"untrusted partial state").unwrap();
 
     let mut store = open_store(&path);
-    assert_eq!(store.ledger_identity().highest_policy_version, 0);
+    assert_eq!(store.ledger_identity().unwrap().highest_policy_version, 0);
     assert!(leftover.exists());
     accept(&mut store, &support::valid_policy(7, 3));
     assert!(leftover.exists());
@@ -254,7 +353,7 @@ fn failed_persistence_does_not_advance_in_memory_high_water() {
     fs::create_dir(&state_dir).unwrap();
     let path = state_dir.join("policy.ledger");
     let mut store = open_store(&path);
-    let before = store.ledger_identity();
+    let before = store.ledger_identity().unwrap();
     let moved_state = dir.path().join("moved-state");
     fs::rename(&state_dir, &moved_state).unwrap();
 
@@ -267,13 +366,13 @@ fn failed_persistence_does_not_advance_in_memory_high_water() {
             .code(),
         StableCode::ProtocolIo
     );
-    assert_eq!(store.ledger_identity(), before);
+    assert_eq!(store.ledger_identity().unwrap(), before);
 
     fs::rename(moved_state, &state_dir).unwrap();
     store
         .verify_and_accept(&bundle, &signature, support::unix_now())
         .unwrap();
-    assert_eq!(store.ledger_identity().highest_policy_version, 7);
+    assert_eq!(store.ledger_identity().unwrap().highest_policy_version, 7);
 }
 
 #[test]

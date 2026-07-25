@@ -39,6 +39,17 @@ impl ReplaceError {
 }
 
 pub(crate) fn replace(path: &Path, bytes: &[u8]) -> Result<(), ReplaceError> {
+    replace_with_parent_sync(path, bytes, sync_directory)
+}
+
+pub(crate) fn replace_with_parent_sync<F>(
+    path: &Path,
+    bytes: &[u8],
+    sync_parent: F,
+) -> Result<(), ReplaceError>
+where
+    F: FnOnce(&Path) -> Result<(), PolicyError>,
+{
     let parent = normalized_parent(path).map_err(ReplaceError::before_rename)?;
     let file_name = path
         .file_name()
@@ -58,10 +69,7 @@ pub(crate) fn replace(path: &Path, bytes: &[u8]) -> Result<(), ReplaceError> {
         let _cleanup_result = fs::remove_file(&temporary_path);
         return Err(ReplaceError::before_rename(error));
     }
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(PolicyError::io)
-        .map_err(ReplaceError::after_rename)
+    sync_parent(parent).map_err(ReplaceError::after_rename)
 }
 
 fn create_temporary(
@@ -96,7 +104,7 @@ fn create_temporary(
     Err(PolicyError::io("temporary name collisions"))
 }
 
-fn normalized_parent(path: &Path) -> Result<&Path, PolicyError> {
+pub(crate) fn normalized_parent(path: &Path) -> Result<&Path, PolicyError> {
     let parent = path
         .parent()
         .ok_or_else(|| PolicyError::io("missing parent"))?;
@@ -105,6 +113,12 @@ fn normalized_parent(path: &Path) -> Result<&Path, PolicyError> {
     } else {
         Ok(parent)
     }
+}
+
+pub(crate) fn sync_directory(path: &Path) -> Result<(), PolicyError> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(PolicyError::io)
 }
 
 fn hex(bytes: &[u8]) -> String {

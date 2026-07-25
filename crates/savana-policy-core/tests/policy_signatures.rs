@@ -1,7 +1,7 @@
 mod support;
 
 use savana_kernel_protocol::{Digest32, KeyId, StableCode};
-use savana_policy_core::{PolicyTrustRootV1, PolicyVerifier};
+use savana_policy_core::{AuthorityRoleV1, PolicyTrustRootV1, PolicyVerifier};
 
 #[test]
 fn valid_policy_signature_is_accepted() {
@@ -12,6 +12,57 @@ fn valid_policy_signature_is_accepted() {
         .unwrap();
     assert_eq!(verified.identity().policy_version, 7);
     assert_eq!(verified.identity().key_epoch, 3);
+    assert_eq!(
+        verified.effective_limits().frame_bytes(),
+        savana_kernel_protocol::HardLimits::COMPILED.frame_bytes()
+    );
+    let validator_id = KeyId::try_from("role-04").unwrap();
+    let validator = verified
+        .authority(&validator_id, AuthorityRoleV1::Validator)
+        .unwrap();
+    assert_eq!(validator.key_id(), &validator_id);
+    assert_eq!(validator.role(), AuthorityRoleV1::Validator);
+    assert_eq!(validator.public_key(), &[5; 32]);
+    assert_eq!(validator.epoch(), 1);
+    assert!(verified
+        .authority(&validator_id, AuthorityRoleV1::Ontology)
+        .is_none());
+}
+
+#[test]
+fn authority_view_excludes_revoked_and_partial_window_keys() {
+    let mut policy = support::valid_policy(7, 3);
+    policy.authorities.push(support::Authority {
+        key_id: "role-04-window".to_owned(),
+        role: 4,
+        public_key: [0x52; 32],
+        epoch: 2,
+        not_before: 1_001,
+        not_after: 4_100,
+        revoked: false,
+    });
+    policy.authorities.push(support::Authority {
+        key_id: "role-04-revoked".to_owned(),
+        role: 4,
+        public_key: [0x51; 32],
+        epoch: 2,
+        not_before: 900,
+        not_after: 4_100,
+        revoked: true,
+    });
+    let (bundle, signature) = support::signed(&policy);
+    let verified = support::verifier()
+        .verify(&bundle, &signature, support::unix_now())
+        .unwrap();
+
+    for key_id in ["role-04-revoked", "role-04-window"] {
+        assert!(verified
+            .authority(
+                &KeyId::try_from(key_id).unwrap(),
+                AuthorityRoleV1::Validator
+            )
+            .is_none());
+    }
 }
 
 #[test]
