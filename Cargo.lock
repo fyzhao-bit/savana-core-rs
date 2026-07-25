@@ -775,6 +775,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "savana-kerneld"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "minicbor",
+ "nix",
+ "savana-kernel-protocol",
+ "savana-policy-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
 name = "savana-policy-core"
 version = "0.1.0"
 dependencies = [

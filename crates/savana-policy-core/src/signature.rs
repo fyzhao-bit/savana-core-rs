@@ -1,5 +1,6 @@
 use ed25519_dalek::{Signature, VerifyingKey};
 use savana_kernel_protocol::{Digest32, KeyId, Signature64, StableCode, UnixMillis};
+use sha2::{Digest, Sha256};
 
 use crate::bundle::decode_canonical_policy;
 use crate::validate::{validate_policy, VerifiedPolicyV1};
@@ -97,7 +98,15 @@ impl PolicyVerifier {
         verifying_key
             .verify_strict(&signed, &detached_signature)
             .map_err(|_| invalid_signature())?;
-        validate_policy(bundle, canonical_bundle, self.active_release_target_id, now)
+        let signature_digest = Digest32::new(Sha256::digest(signature.as_bytes()).into());
+        validate_policy(
+            bundle,
+            canonical_bundle,
+            signature_digest,
+            root.public_key,
+            self.active_release_target_id,
+            now,
+        )
     }
 }
 

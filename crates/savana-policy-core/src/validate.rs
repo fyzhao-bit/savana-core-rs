@@ -24,11 +24,21 @@ pub struct PolicyIdentity {
     pub expires_at: UnixMillis,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct VerifiedPolicyV1 {
     bundle: PolicyBundleV1,
     identity: PolicyIdentity,
     effective_limits: EffectiveLimits,
+    signature_digest: Digest32,
+    signing_public_key: [u8; 32],
+    active_release_target_id: Digest32,
+    resource_profile_digest: Digest32,
+}
+
+impl std::fmt::Debug for VerifiedPolicyV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VerifiedPolicyV1(<verified>)")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +81,26 @@ impl VerifiedPolicyV1 {
         &self.effective_limits
     }
 
+    pub const fn signing_key_id(&self) -> &KeyId {
+        &self.bundle.signing_key_id
+    }
+
+    pub(crate) const fn signature_digest(&self) -> Digest32 {
+        self.signature_digest
+    }
+
+    pub(crate) const fn signing_public_key(&self) -> &[u8; 32] {
+        &self.signing_public_key
+    }
+
+    pub(crate) const fn active_release_target_id(&self) -> Digest32 {
+        self.active_release_target_id
+    }
+
+    pub const fn resource_profile_digest(&self) -> Digest32 {
+        self.resource_profile_digest
+    }
+
     pub fn authority(
         &self,
         key_id: &KeyId,
@@ -91,6 +121,8 @@ impl VerifiedPolicyV1 {
 pub(crate) fn validate_policy(
     bundle: PolicyBundleV1,
     canonical_bytes: &[u8],
+    signature_digest: Digest32,
+    signing_public_key: [u8; 32],
     active_release_target_id: Digest32,
     now: UnixMillis,
 ) -> Result<VerifiedPolicyV1, PolicyError> {
@@ -102,6 +134,9 @@ pub(crate) fn validate_policy(
     validate_tools_and_attempts(&bundle)?;
     validate_ontology_and_validators(&bundle)?;
     validate_release_and_mappings(&bundle, active_release_target_id)?;
+    let canonical_resources = minicbor::to_vec(bundle.resources).map_err(PolicyError::io)?;
+    let resource_profile_digest =
+        domain_digest(b"SAVANA_RESOURCE_PROFILE_V1\0", &canonical_resources);
 
     let identity = PolicyIdentity {
         digest: Digest32::new(Sha256::digest(canonical_bytes).into()),
@@ -113,6 +148,10 @@ pub(crate) fn validate_policy(
         bundle,
         identity,
         effective_limits,
+        signature_digest,
+        signing_public_key,
+        active_release_target_id,
+        resource_profile_digest,
     })
 }
 
@@ -427,4 +466,11 @@ fn sorted_digests(values: &[Digest32]) -> bool {
 
 fn malformed() -> PolicyError {
     PolicyError::stable(StableCode::ProtocolMalformedCbor)
+}
+
+fn domain_digest(domain: &[u8], bytes: &[u8]) -> Digest32 {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update(bytes);
+    Digest32::new(hasher.finalize().into())
 }

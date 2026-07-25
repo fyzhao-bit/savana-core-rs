@@ -5,6 +5,7 @@ members = [
   "crates/savana-core-py",
   "crates/savana-kernel-protocol",
   "crates/savana-policy-core",
+  "crates/savana-kerneld",
 ]
 
 [workspace.package]
