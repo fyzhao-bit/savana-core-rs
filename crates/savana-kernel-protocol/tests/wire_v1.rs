@@ -1,5 +1,6 @@
 use savana_kernel_protocol::{
-    HardLimits, ResourceLimitsV1, StableCode, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+    AttemptKindV1, ConstraintId, HardLimits, ResourceLimitsV1, StableCode, ToolName, ValidatorId,
+    PROTOCOL_MAJOR, PROTOCOL_MINOR,
 };
 
 type OneOverCase = (&'static str, fn(&mut ResourceLimitsV1));
@@ -91,6 +92,58 @@ fn v1_constants_are_frozen() {
     assert_eq!(limits.model_probe_spans(), 512);
     assert_eq!(limits.ner_failure_threshold(), 32);
     assert_eq!(limits.request_deadline_ms(), 120_000);
+    assert_eq!(limits.policy_tools(), 256);
+    assert_eq!(limits.policy_authorities(), 64);
+    assert_eq!(limits.policy_error_mappings(), 256);
+    assert_eq!(limits.policy_model_digests(), 32);
+    assert_eq!(limits.policy_tool_name_set(), 256);
+    assert_eq!(limits.policy_valid_pairs(), 1_536);
+    assert_eq!(limits.policy_attempt_limits(), 6);
+    assert_eq!(limits.policy_snapshot_authorities(), 16);
+    assert_eq!(limits.policy_validator_requirements(), 256);
+    assert_eq!(limits.policy_validators_per_tool(), 32);
+    assert_eq!(limits.policy_constraints_per_tool(), 64);
+    assert_eq!(limits.policy_release_targets(), 16);
+}
+
+#[test]
+fn policy_identifier_and_attempt_primitives_are_closed() {
+    assert_eq!(
+        ToolName::try_from("tool-name").unwrap().as_str(),
+        "tool-name"
+    );
+    assert_eq!(
+        ValidatorId::try_from("validator-id").unwrap().as_str(),
+        "validator-id"
+    );
+    assert_eq!(
+        ConstraintId::try_from("constraint-id").unwrap().as_str(),
+        "constraint-id"
+    );
+    for invalid in ["", "contains\0nul", &"x".repeat(129)] {
+        assert_eq!(
+            ToolName::try_from(invalid).unwrap_err().code(),
+            StableCode::ProtocolMalformedCbor
+        );
+    }
+
+    let attempts = [
+        AttemptKindV1::Read,
+        AttemptKindV1::Create,
+        AttemptKindV1::Update,
+        AttemptKindV1::Delete,
+        AttemptKindV1::Send,
+        AttemptKindV1::Execute,
+    ];
+    for (expected_tag, attempt) in (0_u8..).zip(attempts) {
+        let encoded = minicbor::to_vec(attempt).unwrap();
+        assert_eq!(encoded, [expected_tag]);
+        assert_eq!(
+            minicbor::decode::<AttemptKindV1>(&encoded).unwrap(),
+            attempt
+        );
+    }
+    assert!(minicbor::decode::<AttemptKindV1>(&[6]).is_err());
 }
 
 #[test]

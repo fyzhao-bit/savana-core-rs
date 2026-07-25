@@ -26,6 +26,18 @@ pub struct HardLimits {
     model_probe_spans: u64,
     ner_failure_threshold: u64,
     request_deadline_ms: u64,
+    policy_tools: u64,
+    policy_authorities: u64,
+    policy_error_mappings: u64,
+    policy_model_digests: u64,
+    policy_tool_name_set: u64,
+    policy_valid_pairs: u64,
+    policy_attempt_limits: u64,
+    policy_snapshot_authorities: u64,
+    policy_validator_requirements: u64,
+    policy_validators_per_tool: u64,
+    policy_constraints_per_tool: u64,
+    policy_release_targets: u64,
 }
 
 macro_rules! limit_getters {
@@ -71,6 +83,18 @@ impl HardLimits {
         model_probe_spans: 512,
         ner_failure_threshold: 32,
         request_deadline_ms: 120_000,
+        policy_tools: 256,
+        policy_authorities: 64,
+        policy_error_mappings: 256,
+        policy_model_digests: 32,
+        policy_tool_name_set: 256,
+        policy_valid_pairs: 1_536,
+        policy_attempt_limits: 6,
+        policy_snapshot_authorities: 16,
+        policy_validator_requirements: 256,
+        policy_validators_per_tool: 32,
+        policy_constraints_per_tool: 64,
+        policy_release_targets: 16,
     };
 
     limit_getters!(direct;
@@ -98,6 +122,18 @@ impl HardLimits {
         model_probe_spans,
         ner_failure_threshold,
         request_deadline_ms,
+        policy_tools,
+        policy_authorities,
+        policy_error_mappings,
+        policy_model_digests,
+        policy_tool_name_set,
+        policy_valid_pairs,
+        policy_attempt_limits,
+        policy_snapshot_authorities,
+        policy_validator_requirements,
+        policy_validators_per_tool,
+        policy_constraints_per_tool,
+        policy_release_targets,
     );
 
     pub fn lower(&self, requested: &ResourceLimitsV1) -> Result<EffectiveLimits, ProtocolError> {

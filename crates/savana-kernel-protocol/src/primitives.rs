@@ -65,9 +65,7 @@ macro_rules! bounded_id {
         impl $name {
             pub fn new(value: impl Into<String>) -> Result<Self, ProtocolError> {
                 let value = value.into();
-                let valid_length = (1..=128).contains(&value.len());
-                let valid_characters = !value.chars().any(char::is_control);
-                if !valid_length || !valid_characters {
+                if !valid_bounded_text(&value) {
                     return Err(ProtocolError::stable(StableCode::ProtocolMalformedCbor));
                 }
                 Ok(Self(value))
@@ -111,17 +109,83 @@ macro_rules! bounded_id {
                 _context: &mut C,
             ) -> Result<Self, minicbor::decode::Error> {
                 let position = decoder.position();
-                Self::try_from(decoder.str()?).map_err(|_| {
-                    minicbor::decode::Error::message(StableCode::ProtocolMalformedCbor.as_str())
-                        .at(position)
-                })
+                let value = decoder.str()?;
+                if !valid_bounded_text(value) {
+                    return Err(minicbor::decode::Error::message(
+                        StableCode::ProtocolMalformedCbor.as_str(),
+                    )
+                    .at(position));
+                }
+                Ok(Self(value.to_owned()))
             }
         }
     };
 }
 
+fn valid_bounded_text(value: &str) -> bool {
+    (1..=128).contains(&value.len()) && !value.chars().any(char::is_control)
+}
+
 bounded_id!(KeyId);
 bounded_id!(ClientId);
+bounded_id!(ToolName);
+bounded_id!(ValidatorId);
+bounded_id!(ConstraintId);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttemptKindV1 {
+    Read,
+    Create,
+    Update,
+    Delete,
+    Send,
+    Execute,
+}
+
+impl AttemptKindV1 {
+    pub const fn tag(self) -> u8 {
+        match self {
+            Self::Read => 0,
+            Self::Create => 1,
+            Self::Update => 2,
+            Self::Delete => 3,
+            Self::Send => 4,
+            Self::Execute => 5,
+        }
+    }
+}
+
+impl<C> minicbor::Encode<C> for AttemptKindV1 {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        encoder: &mut minicbor::Encoder<W>,
+        _context: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        encoder.u8(self.tag())?;
+        Ok(())
+    }
+}
+
+impl<'bytes, C> minicbor::Decode<'bytes, C> for AttemptKindV1 {
+    fn decode(
+        decoder: &mut minicbor::Decoder<'bytes>,
+        _context: &mut C,
+    ) -> Result<Self, minicbor::decode::Error> {
+        let position = decoder.position();
+        match decoder.u8()? {
+            0 => Ok(Self::Read),
+            1 => Ok(Self::Create),
+            2 => Ok(Self::Update),
+            3 => Ok(Self::Delete),
+            4 => Ok(Self::Send),
+            5 => Ok(Self::Execute),
+            _ => Err(
+                minicbor::decode::Error::message(StableCode::ProtocolMalformedCbor.as_str())
+                    .at(position),
+            ),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, minicbor::Encode, minicbor::Decode)]
 #[cbor(array)]

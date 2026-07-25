@@ -1,0 +1,125 @@
+use std::ffi::OsString;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+
+use crate::PolicyError;
+
+const TEMP_ATTEMPTS: usize = 16;
+
+#[derive(Debug)]
+pub(crate) struct ReplaceError {
+    error: PolicyError,
+    renamed: bool,
+}
+
+impl ReplaceError {
+    fn before_rename(error: PolicyError) -> Self {
+        Self {
+            error,
+            renamed: false,
+        }
+    }
+
+    pub(crate) fn after_rename(error: PolicyError) -> Self {
+        Self {
+            error,
+            renamed: true,
+        }
+    }
+
+    pub(crate) const fn renamed(&self) -> bool {
+        self.renamed
+    }
+
+    pub(crate) const fn into_policy_error(self) -> PolicyError {
+        self.error
+    }
+}
+
+pub(crate) fn replace(path: &Path, bytes: &[u8]) -> Result<(), ReplaceError> {
+    let parent = normalized_parent(path).map_err(ReplaceError::before_rename)?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| ReplaceError::before_rename(PolicyError::io("missing name")))?;
+    let (temporary_path, mut temporary) =
+        create_temporary(parent, file_name).map_err(ReplaceError::before_rename)?;
+
+    if let Err(error) = temporary.write_all(bytes).map_err(PolicyError::io) {
+        let _cleanup_result = fs::remove_file(&temporary_path);
+        return Err(ReplaceError::before_rename(error));
+    }
+    if let Err(error) = temporary.sync_all().map_err(PolicyError::io) {
+        let _cleanup_result = fs::remove_file(&temporary_path);
+        return Err(ReplaceError::before_rename(error));
+    }
+    if let Err(error) = fs::rename(&temporary_path, path).map_err(PolicyError::io) {
+        let _cleanup_result = fs::remove_file(&temporary_path);
+        return Err(ReplaceError::before_rename(error));
+    }
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(PolicyError::io)
+        .map_err(ReplaceError::after_rename)
+}
+
+fn create_temporary(
+    parent: &Path,
+    file_name: &std::ffi::OsStr,
+) -> Result<(PathBuf, File), PolicyError> {
+    for _ in 0..TEMP_ATTEMPTS {
+        let mut random = [0_u8; 16];
+        getrandom::getrandom(&mut random).map_err(PolicyError::io)?;
+        let mut temporary_name = OsString::from(".");
+        temporary_name.push(file_name);
+        temporary_name.push(".tmp-");
+        temporary_name.push(hex(&random));
+        let temporary_path = parent.join(temporary_name);
+        let opened = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary_path);
+        match opened {
+            Ok(file) => {
+                if let Err(error) = file.set_permissions(fs::Permissions::from_mode(0o600)) {
+                    let _cleanup_result = fs::remove_file(&temporary_path);
+                    return Err(PolicyError::io(error));
+                }
+                return Ok((temporary_path, file));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(PolicyError::io(error)),
+        }
+    }
+    Err(PolicyError::io("temporary name collisions"))
+}
+
+fn normalized_parent(path: &Path) -> Result<&Path, PolicyError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| PolicyError::io("missing parent"))?;
+    if parent.as_os_str().is_empty() {
+        Ok(Path::new("."))
+    } else {
+        Ok(parent)
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(hex_digit(byte >> 4));
+        encoded.push(hex_digit(byte & 0x0f));
+    }
+    encoded
+}
+
+fn hex_digit(nibble: u8) -> char {
+    match nibble {
+        0..=9 => char::from(b'0' + nibble),
+        10..=15 => char::from(b'a' + (nibble - 10)),
+        _ => '?',
+    }
+}
