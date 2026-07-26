@@ -90,7 +90,6 @@ struct TestLock {
 }
 
 struct StartupFixture {
-    _process_guard: MutexGuard<'static, ()>,
     _stage: TempDir,
     _key_dir: TempDir,
     release: VerifiedReleaseIdentity,
@@ -99,6 +98,7 @@ struct StartupFixture {
     lock: TestLock,
     key_path: PathBuf,
     expected_uid: u32,
+    _process_guard: MutexGuard<'static, ()>,
 }
 
 struct TestUmaskGuard {
@@ -856,7 +856,6 @@ fn startup_fixture() -> StartupFixture {
     };
 
     StartupFixture {
-        _process_guard: process_guard,
         _stage: stage,
         _key_dir: key_dir,
         release,
@@ -865,6 +864,7 @@ fn startup_fixture() -> StartupFixture {
         lock,
         key_path,
         expected_uid: daemon_uid,
+        _process_guard: process_guard,
     }
 }
 
