@@ -418,16 +418,19 @@ fn commitment_encoding_is_a_closed_two_item_tagged_union() {
     let begin = IngressRequestCommitmentV1::BeginRun {
         input: KernelValue::Null,
     };
+    let begin_bytes = minicbor::to_vec(&begin).unwrap();
+    assert_eq!(begin_bytes, vec![0x82, 0x00, 0x81, 0x82, 0x00, 0xf6]);
     assert_eq!(
-        minicbor::to_vec(&begin).unwrap(),
-        vec![0x82, 0x00, 0x81, 0x82, 0x00, 0xf6]
+        minicbor::decode::<IngressRequestCommitmentV1>(&begin_bytes).unwrap(),
+        begin
     );
     let ingest = IngressRequestCommitmentV1::IngestUserInput {
         run: support::run_handle_with_byte(0x70),
         input: KernelValue::Null,
     };
+    let ingest_bytes = minicbor::to_vec(&ingest).unwrap();
     assert_eq!(
-        minicbor::to_vec(&ingest).unwrap(),
+        ingest_bytes,
         support::decode_hex(concat!(
             "8201825820",
             "7070707070707070",
@@ -437,10 +440,104 @@ fn commitment_encoding_is_a_closed_two_item_tagged_union() {
             "8200f6"
         ))
     );
+    assert_eq!(
+        minicbor::decode::<IngressRequestCommitmentV1>(&ingest_bytes).unwrap(),
+        ingest
+    );
 
     let mut unknown = minicbor::to_vec(&begin).unwrap();
     unknown[1] = 2;
     let error = minicbor::decode::<IngressRequestCommitmentV1>(&unknown).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains(StableCode::ProtocolMalformedCbor.as_str()));
+}
+
+#[test]
+fn commitment_decode_rejects_noncanonical_children_and_shapes() {
+    let mut non_shortest_run_handle = vec![0x82, 0x01, 0x82, 0x59, 0x00, 0x20];
+    non_shortest_run_handle.extend_from_slice(&[0x70; 32]);
+    non_shortest_run_handle.extend_from_slice(&[0x82, 0x00, 0xf6]);
+
+    let cases = [
+        (
+            "outer array length",
+            vec![0x98, 0x02, 0x00, 0x81, 0x82, 0x00, 0xf6],
+        ),
+        (
+            "commitment tag",
+            vec![0x82, 0x18, 0x00, 0x81, 0x82, 0x00, 0xf6],
+        ),
+        (
+            "payload array length",
+            vec![0x82, 0x00, 0x98, 0x01, 0x82, 0x00, 0xf6],
+        ),
+        (
+            "KernelValue array length",
+            vec![0x82, 0x00, 0x81, 0x98, 0x02, 0x00, 0xf6],
+        ),
+        (
+            "KernelValue tag",
+            vec![0x82, 0x00, 0x81, 0x82, 0x18, 0x00, 0xf6],
+        ),
+        (
+            "KernelValue integer payload",
+            vec![0x82, 0x00, 0x81, 0x82, 0x02, 0x18, 0x00],
+        ),
+        (
+            "KernelValue text length",
+            vec![0x82, 0x00, 0x81, 0x82, 0x03, 0x78, 0x01, b'a'],
+        ),
+        (
+            "KernelValue byte-string length",
+            vec![0x82, 0x00, 0x81, 0x82, 0x04, 0x58, 0x01, 0xaa],
+        ),
+        (
+            "KernelValue list length",
+            vec![0x82, 0x00, 0x81, 0x82, 0x05, 0x98, 0x01, 0x82, 0x00, 0xf6],
+        ),
+        (
+            "KernelValue object key length",
+            vec![
+                0x82, 0x00, 0x81, 0x82, 0x06, 0x81, 0x82, 0x78, 0x01, b'a', 0x82, 0x00, 0xf6,
+            ],
+        ),
+        ("RunHandle byte-string length", non_shortest_run_handle),
+    ];
+
+    let mut accepted = Vec::new();
+    for (name, bytes) in cases {
+        match minicbor::decode::<IngressRequestCommitmentV1>(&bytes) {
+            Ok(_) => accepted.push(name),
+            Err(error) => assert!(
+                error
+                    .to_string()
+                    .contains(StableCode::ProtocolMalformedCbor.as_str()),
+                "{name} returned {error}"
+            ),
+        }
+    }
+    assert!(accepted.is_empty(), "accepted encodings: {accepted:?}");
+
+    let commitment = IngressRequestCommitmentV1::BeginRun {
+        input: KernelValue::Null,
+    };
+    let mut wrapped = vec![0xf6];
+    wrapped.extend_from_slice(&minicbor::to_vec(&commitment).unwrap());
+    wrapped.push(0xf5);
+    let mut decoder = minicbor::Decoder::new(&wrapped);
+    decoder.null().unwrap();
+    assert_eq!(
+        decoder.decode::<IngressRequestCommitmentV1>().unwrap(),
+        commitment
+    );
+    assert!(decoder.bool().unwrap());
+
+    let mut wrapped_noncanonical = vec![0xf6];
+    wrapped_noncanonical.extend_from_slice(&[0x98, 0x02, 0x00, 0x81, 0x82, 0x00, 0xf6]);
+    let mut decoder = minicbor::Decoder::new(&wrapped_noncanonical);
+    decoder.null().unwrap();
+    let error = decoder.decode::<IngressRequestCommitmentV1>().unwrap_err();
     assert!(error
         .to_string()
         .contains(StableCode::ProtocolMalformedCbor.as_str()));

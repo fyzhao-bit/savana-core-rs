@@ -117,7 +117,7 @@ impl<'bytes, C> minicbor::Decode<'bytes, C> for IngressRequestCommitmentV1 {
     ) -> Result<Self, minicbor::decode::Error> {
         let position = decoder.position();
         expect_array(decoder, 2)?;
-        match decoder.u8()? {
+        let value = match decoder.u8()? {
             0 => {
                 expect_array(decoder, 1)?;
                 Ok(Self::BeginRun {
@@ -132,7 +132,13 @@ impl<'bytes, C> minicbor::Decode<'bytes, C> for IngressRequestCommitmentV1 {
                 })
             }
             _ => Err(decode_error(position)),
+        }?;
+        let end = decoder.position();
+        let canonical = minicbor::to_vec(&value).map_err(|_| decode_error(position))?;
+        if decoder.input().get(position..end) != Some(canonical.as_slice()) {
+            return Err(decode_error(position));
         }
+        Ok(value)
     }
 }
 
