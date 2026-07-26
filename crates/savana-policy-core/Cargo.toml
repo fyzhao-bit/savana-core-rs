@@ -25,4 +25,5 @@ nix.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
+savana-policy-core-test-support = { package = "savana-policy-core", path = ".", features = ["test-support"] }
 tempfile = "=3.23.0"

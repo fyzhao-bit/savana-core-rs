@@ -35,6 +35,7 @@ fn anchored_acceptance_persists_and_equal_identity_is_idempotent() {
             .unwrap();
     let policy = support::valid_policy(7, 3);
     accept(&mut store, &policy);
+    let accepted_identity = store.ledger_identity().unwrap();
     let first = fs::symlink_metadata(&ledger).unwrap();
     let inode = (first.dev(), first.ino());
     assert_eq!(first.uid(), metadata.uid());
@@ -45,14 +46,10 @@ fn anchored_acceptance_persists_and_equal_identity_is_idempotent() {
     let unchanged = fs::symlink_metadata(&ledger).unwrap();
     assert_eq!((unchanged.dev(), unchanged.ino()), inode);
     drop(store);
-    assert_eq!(
-        PolicyStore::open_anchored(&ledger, metadata.uid(), metadata.gid(), support::verifier(),)
-            .unwrap()
-            .ledger_identity()
-            .unwrap()
-            .highest_policy_version,
-        7
-    );
+    let restarted =
+        PolicyStore::open_anchored(&ledger, metadata.uid(), metadata.gid(), support::verifier())
+            .unwrap();
+    assert_eq!(restarted.ledger_identity().unwrap(), accepted_identity);
 }
 
 fn verifier_for_epoch(epoch: u64) -> PolicyVerifier {

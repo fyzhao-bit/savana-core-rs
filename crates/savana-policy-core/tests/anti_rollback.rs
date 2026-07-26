@@ -23,6 +23,7 @@ fn persistent_lock_file_is_regular_private_and_no_follow() {
     assert!(metadata.file_type().is_file());
     assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
     drop(store);
+    assert!(lock_path.exists());
 
     fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o644)).unwrap();
     assert_eq!(
@@ -43,6 +44,16 @@ fn persistent_lock_file_is_regular_private_and_no_follow() {
         )
         .unwrap_err()
         .code(),
+        StableCode::ProtocolIo
+    );
+
+    let directory_dir = tempfile::tempdir().unwrap();
+    let directory_ledger = directory_dir.path().join("policy.ledger");
+    fs::create_dir(directory_dir.path().join(".policy.ledger.lock")).unwrap();
+    assert_eq!(
+        PolicyStore::open(&directory_ledger, support::verifier())
+            .unwrap_err()
+            .code(),
         StableCode::ProtocolIo
     );
 }

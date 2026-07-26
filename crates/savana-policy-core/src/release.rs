@@ -408,7 +408,7 @@ impl ReleaseStage {
         Self::open_at(stage_path, current_executable, owner_uid, owner_gid)
     }
 
-    #[cfg(any(debug_assertions, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn open_mapped_for_test_support(
         stage_path: &Path,
