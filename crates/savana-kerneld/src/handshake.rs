@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
 use std::sync::Mutex;
 
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -10,6 +12,7 @@ use savana_policy_core::InstallationClientRoleV1;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+use crate::peer::PeerIdentity;
 use crate::state::ReplayState;
 #[cfg(test)]
 use crate::state::ReplayStatus;
@@ -18,37 +21,6 @@ use crate::{DaemonConfig, DaemonSigningIdentity};
 const PENDING_WINDOW_MS: u64 = 5_000;
 const MAXIMUM_CLIENTS: usize = 16;
 const CLIENT_FINISH_DOMAIN: &[u8] = b"SAVANA_CLIENT_FINISH_V1\0";
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PeerIdentity {
-    uid: u32,
-    gid: u32,
-}
-
-impl PeerIdentity {
-    pub(crate) const fn from_kernel_credentials(uid: u32, gid: u32) -> Self {
-        Self { uid, gid }
-    }
-
-    pub(crate) const fn uid(self) -> u32 {
-        self.uid
-    }
-
-    pub(crate) const fn gid(self) -> u32 {
-        self.gid
-    }
-
-    #[cfg(test)]
-    const fn new_for_test(uid: u32, gid: u32) -> Self {
-        Self::from_kernel_credentials(uid, gid)
-    }
-}
-
-impl std::fmt::Debug for PeerIdentity {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("PeerIdentity(<kernel-credentials>)")
-    }
-}
 
 #[derive(Clone)]
 struct ConfiguredClient {
@@ -159,6 +131,32 @@ impl EntropySource for SystemEntropy {
     }
 }
 
+#[cfg(test)]
+struct TransportTestEntropy {
+    next: AtomicU8,
+}
+
+#[cfg(test)]
+impl TransportTestEntropy {
+    const fn new() -> Self {
+        Self {
+            next: AtomicU8::new(0x31),
+        }
+    }
+}
+
+#[cfg(test)]
+impl EntropySource for TransportTestEntropy {
+    fn fill_32(&self, output: &mut [u8; 32]) -> Result<(), ()> {
+        let value = self.next.fetch_add(1, AtomicOrdering::AcqRel);
+        if value == 0 {
+            return Err(());
+        }
+        output.fill(value);
+        Ok(())
+    }
+}
+
 pub(crate) struct HandshakeService {
     runtime: RuntimeIdentity,
     signing_identity: DaemonSigningIdentity,
@@ -256,6 +254,22 @@ impl HandshakeService {
         Ok(service)
     }
 
+    pub(crate) fn refresh_before_bind(&self, now: UnixMillis) -> Result<(), StableCode> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| StableCode::KernelUnavailable)?;
+        state.observe(now)?;
+        self.runtime.validate_time(now)
+    }
+
+    pub(crate) fn started_identity(&self) -> Result<ServerIdentityV1, StableCode> {
+        self.runtime.server_identity(
+            self.boot_id,
+            ProtocolVersion::new(PROTOCOL_MAJOR, PROTOCOL_MINOR),
+        )
+    }
+
     fn new_inner(
         runtime: RuntimeIdentity,
         signing_identity: DaemonSigningIdentity,
@@ -276,6 +290,79 @@ impl HandshakeService {
             entropy,
             state,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_transport_test(
+        client_public_key: [u8; 32],
+        peer: PeerIdentity,
+        startup_now: UnixMillis,
+        expires_at: UnixMillis,
+    ) -> Result<Self, StableCode> {
+        Self::new_for_transport_test_with_expiries(
+            client_public_key,
+            peer,
+            startup_now,
+            expires_at,
+            expires_at,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_transport_test_with_expiries(
+        client_public_key: [u8; 32],
+        peer: PeerIdentity,
+        startup_now: UnixMillis,
+        release_expires_at: UnixMillis,
+        policy_expires_at: UnixMillis,
+    ) -> Result<Self, StableCode> {
+        let daemon_key = ed25519_dalek::SigningKey::from_bytes(&[0x61; 32]);
+        let runtime = RuntimeIdentity {
+            protocol_major: PROTOCOL_MAJOR,
+            minimum_minor: PROTOCOL_MINOR,
+            maximum_minor: PROTOCOL_MINOR,
+            daemon_key_id: KeyId::try_from("transport-daemon-key")
+                .map_err(|_| StableCode::KernelUnavailable)?,
+            daemon_public_key: daemon_key.verifying_key().to_bytes(),
+            clients: vec![ConfiguredClient {
+                client_id: ClientId::try_from("transport-client")
+                    .map_err(|_| StableCode::KernelUnavailable)?,
+                key_id: KeyId::try_from("transport-client-key")
+                    .map_err(|_| StableCode::KernelUnavailable)?,
+                public_key: client_public_key,
+                role: InstallationClientRoleV1::JarvisKernelClient,
+                peer_uid: peer.uid(),
+                peer_gid: peer.gid(),
+            }]
+            .into_boxed_slice(),
+            release_digest: Digest32::new([0x81; 32]),
+            policy_digest: Digest32::new([0x82; 32]),
+            policy_version: 7,
+            model_manifest_digest: Digest32::new([0x83; 32]),
+            approval_key_set_digest: Digest32::new([0x84; 32]),
+            resource_profile_digest: Digest32::new([0x85; 32]),
+            release_expires_at,
+            policy_expires_at,
+        };
+        Self::new_inner(
+            runtime,
+            DaemonSigningIdentity::from_seed_for_test([0x61; 32]),
+            startup_now,
+            Box::new(TransportTestEntropy::new()),
+        )
+    }
+
+    pub(crate) fn preauthorize_peer(&self, peer: &PeerIdentity) -> Result<(), StableCode> {
+        if self
+            .runtime
+            .clients
+            .iter()
+            .any(|client| client.peer_uid == peer.uid() && client.peer_gid == peer.gid())
+        {
+            Ok(())
+        } else {
+            Err(StableCode::IdentityPeerRejected)
+        }
     }
 
     #[cfg(test)]
@@ -396,6 +483,42 @@ impl HandshakeService {
         Ok(context)
     }
 
+    pub(crate) fn validate_context_identity(
+        &self,
+        context: &ConnectionContext,
+        now: UnixMillis,
+    ) -> Result<ServerIdentityV1, StableCode> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| StableCode::KernelUnavailable)?;
+        state.observe(now)?;
+        self.runtime.validate_time(now)?;
+
+        let expected_expiry = UnixMillis::new(
+            self.runtime
+                .release_expires_at
+                .get()
+                .min(self.runtime.policy_expires_at.get()),
+        );
+        let configured_client = self.runtime.clients.iter().any(|client| {
+            client.client_id == context.client_id
+                && client.peer_uid == context.peer.uid()
+                && client.peer_gid == context.peer.gid()
+        });
+        match context.mode {
+            RequestedMode::Required | RequestedMode::Shadow => {}
+        }
+        if context.boot_id != self.boot_id
+            || context.protocol != ProtocolVersion::new(PROTOCOL_MAJOR, PROTOCOL_MINOR)
+            || context.expires_at != expected_expiry
+            || !configured_client
+        {
+            return Err(StableCode::IdentityTranscriptMismatch);
+        }
+        self.runtime.server_identity(self.boot_id, context.protocol)
+    }
+
     fn validate_pending_identity(
         &self,
         pending: &PendingHandshake,
@@ -448,7 +571,7 @@ impl HandshakeService {
             .runtime
             .clients
             .iter()
-            .any(|client| client.peer_uid == peer.uid && client.peer_gid == peer.gid)
+            .any(|client| client.peer_uid == peer.uid() && client.peer_gid == peer.gid())
         {
             return Err(StableCode::IdentityPeerRejected);
         }
@@ -470,6 +593,7 @@ impl HandshakeService {
 
     #[cfg(test)]
     fn poison_state_for_test(&self) {
+        let _panic_guard = crate::panic_report::PROCESS_PANIC_TEST_LOCK.lock().unwrap();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _state_guard = self.state.lock().unwrap();
             panic!("poison handshake state for test");
@@ -520,7 +644,7 @@ fn resolve_client(runtime: &RuntimeIdentity, hello: &ClientHelloV1) -> Result<us
 }
 
 fn verify_peer(client: &ConfiguredClient, peer: &PeerIdentity) -> Result<(), StableCode> {
-    if client.peer_uid != peer.uid || client.peer_gid != peer.gid {
+    if client.peer_uid != peer.uid() || client.peer_gid != peer.gid() {
         return Err(StableCode::IdentityPeerRejected);
     }
     Ok(())
@@ -989,6 +1113,83 @@ mod tests {
                 .finish(&fixture.peer, pending, finish, fixture.now)
                 .unwrap();
             assert_eq!(context.mode(), mode);
+        }
+    }
+
+    #[test]
+    fn peer_preauthorization_matches_any_verified_client_before_hello() {
+        let fixture = HandshakeFixture::with_clients(2);
+
+        fixture
+            .service
+            .preauthorize_peer(&fixture.peers[0])
+            .unwrap();
+        fixture
+            .service
+            .preauthorize_peer(&fixture.peers[1])
+            .unwrap();
+        assert_eq!(
+            fixture
+                .service
+                .preauthorize_peer(&PeerIdentity::new_for_test(
+                    fixture.peers[0].uid().wrapping_add(100),
+                    fixture.peers[0].gid(),
+                ))
+                .unwrap_err(),
+            StableCode::IdentityPeerRejected
+        );
+    }
+
+    #[test]
+    fn authenticated_context_revalidation_returns_exact_signed_identity() {
+        let fixture = HandshakeFixture::new();
+        let (pending, signed) = fixture
+            .service
+            .start(&fixture.peer, fixture.client_hello.clone(), fixture.now)
+            .unwrap();
+        let finish = fixture.sign_finish(&signed.transcript);
+        let context = fixture
+            .service
+            .finish(&fixture.peer, pending, finish, fixture.now)
+            .unwrap();
+
+        assert_eq!(
+            fixture
+                .service
+                .validate_context_identity(&context, UnixMillis::new(fixture.now.get() + 1))
+                .unwrap(),
+            signed.transcript.server
+        );
+    }
+
+    #[test]
+    fn context_projection_rejects_tampered_runtime_bindings() {
+        let cases: [fn(&mut ConnectionContext); 3] = [
+            |context| context.boot_id = BootId::new([0x91; 32]),
+            |context| context.protocol = ProtocolVersion::new(1, 1),
+            |context| context.expires_at = UnixMillis::new(context.expires_at.get() - 1),
+        ];
+
+        for mutate in cases {
+            let fixture = HandshakeFixture::new();
+            let (pending, signed) = fixture
+                .service
+                .start(&fixture.peer, fixture.client_hello.clone(), fixture.now)
+                .unwrap();
+            let finish = fixture.sign_finish(&signed.transcript);
+            let mut context = fixture
+                .service
+                .finish(&fixture.peer, pending, finish, fixture.now)
+                .unwrap();
+            mutate(&mut context);
+
+            assert_eq!(
+                fixture
+                    .service
+                    .validate_context_identity(&context, UnixMillis::new(fixture.now.get() + 1),)
+                    .unwrap_err(),
+                StableCode::IdentityTranscriptMismatch
+            );
         }
     }
 
@@ -1673,6 +1874,33 @@ mod tests {
     }
 
     #[test]
+    fn pre_bind_freshness_advances_the_clock_floor_and_rechecks_expiry() {
+        let fixture = HandshakeFixture::new();
+        fixture
+            .service
+            .refresh_before_bind(UnixMillis::new(2_500))
+            .unwrap();
+        assert_eq!(
+            fixture
+                .service
+                .refresh_before_bind(UnixMillis::new(2_499))
+                .unwrap_err(),
+            StableCode::KernelUnavailable
+        );
+
+        let mut runtime = test_runtime(1);
+        runtime.release_expires_at = UnixMillis::new(2_500);
+        let expired = HandshakeFixture::with_runtime(runtime).unwrap();
+        assert_eq!(
+            expired
+                .service
+                .refresh_before_bind(UnixMillis::new(2_500))
+                .unwrap_err(),
+            StableCode::IdentityReleaseMismatch
+        );
+    }
+
+    #[test]
     fn failed_finish_also_advances_the_process_clock_floor() {
         let fixture = HandshakeFixture::new();
         let (first_pending, first_hello) = fixture
@@ -2152,7 +2380,7 @@ mod tests {
                 public_key: key.verifying_key().to_bytes(),
                 role: InstallationClientRoleV1::JarvisKernelClient,
                 peer_uid: 5_001 + u32::try_from(index).unwrap(),
-                peer_gid: 6_001 + u32::try_from(index).unwrap(),
+                peer_gid: 6_001,
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();

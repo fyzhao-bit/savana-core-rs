@@ -5,9 +5,10 @@ use std::fs;
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use crate::key_file::DaemonKeyCapability;
+use crate::{DaemonConfig, DaemonError, DaemonSigningIdentity};
 use ed25519_dalek::{Signer, SigningKey};
 use savana_kernel_protocol::{Digest32, KeyId, Signature64, StableCode, UnixMillis};
-use savana_kerneld::{load_daemon_signing_key, DaemonConfig};
 use savana_policy_core::{
     PolicyVerifier, ReleaseTrustRootV1, ReleaseVerifier, VerifiedPolicyV1, VerifiedReleaseIdentity,
 };
@@ -141,12 +142,11 @@ fn verified_lock_key_and_policy_produce_the_canonical_runtime_config() {
     let signing = load_daemon_signing_key(&fixture.key_path, fixture.expected_uid).unwrap();
     assert_eq!(format!("{signing:?}"), "DaemonSigningIdentity(<redacted>)");
 
-    assert_eq!(config.daemon_uid(), fixture.lock.daemon_uid);
-    assert_eq!(config.daemon_gid(), fixture.lock.daemon_gid);
-    assert_eq!(config.jarvis_uid(), fixture.lock.jarvis_uid);
+    assert_eq!(
+        config.daemon_clients()[0].peer_uid(),
+        fixture.lock.jarvis_uid
+    );
     assert_eq!(config.socket_path(), fixture.lock.socket_path);
-    assert_eq!(config.socket_parent_mode(), 0o750);
-    assert_eq!(config.socket_mode(), 0o660);
     assert_eq!(config.daemon_clients().len(), 1);
 }
 
@@ -587,6 +587,24 @@ fn assert_key_error(path: &Path, expected_uid: u32, expected: StableCode) {
     );
 }
 
+fn load_daemon_signing_key(
+    path: &Path,
+    expected_uid: u32,
+) -> Result<DaemonSigningIdentity, DaemonError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| DaemonError::stable(StableCode::IdentityKeyPermissions))?;
+    let parent_gid = fs::metadata(parent)
+        .map_err(|_| DaemonError::stable(StableCode::IdentityKeyPermissions))?
+        .gid();
+    let capability =
+        DaemonKeyCapability::open(path, expected_uid, parent_gid, expected_uid, parent_gid)?;
+    let expected_public_key = SigningKey::from_bytes(&[0x61; 32])
+        .verifying_key()
+        .to_bytes();
+    capability.load(&expected_public_key)
+}
+
 fn assert_lock_bytes_error(fixture: &StartupFixture, bytes: &[u8]) {
     assert_eq!(
         DaemonConfig::from_verified(
@@ -604,12 +622,14 @@ fn assert_lock_bytes_error(fixture: &StartupFixture, bytes: &[u8]) {
 fn startup_fixture() -> StartupFixture {
     let stage = tempfile::tempdir().unwrap();
     let key_dir = tempfile::tempdir().unwrap();
+    fs::set_permissions(key_dir.path(), PermissionsExt::from_mode(0o750)).unwrap();
     let owner = fs::metadata(key_dir.path()).unwrap();
     let daemon_uid = owner.uid();
     let daemon_gid = owner.gid();
     assert_ne!(daemon_uid, 0, "Task 4 tests require an unprivileged runner");
     assert_ne!(daemon_gid, 0, "Task 4 tests require an unprivileged runner");
     let jarvis_uid = daemon_uid.checked_add(1).unwrap();
+    let socket_client_gid = daemon_gid.checked_add(1).unwrap();
 
     let daemon_key = SigningKey::from_bytes(&[0x61; 32]);
     let client_key = SigningKey::from_bytes(&[0x62; 32]);
@@ -630,6 +650,7 @@ fn startup_fixture() -> StartupFixture {
     let profile_bytes = encode_profile(
         daemon_uid,
         daemon_gid,
+        socket_client_gid,
         jarvis_uid,
         &daemon_key.verifying_key().to_bytes(),
         &client_key.verifying_key().to_bytes(),
@@ -746,7 +767,7 @@ fn startup_fixture() -> StartupFixture {
             public_key: hex(client_key.verifying_key().to_bytes()),
             role: "jarvis_kernel_client".to_owned(),
             peer_uid: jarvis_uid,
-            peer_gid: daemon_gid,
+            peer_gid: socket_client_gid,
         }],
         policy_trust_roots: vec![LockPolicyRoot {
             key_id: "policy-root".to_owned(),
@@ -790,6 +811,7 @@ fn startup_fixture() -> StartupFixture {
 fn encode_profile(
     daemon_uid: u32,
     daemon_gid: u32,
+    socket_client_gid: u32,
     jarvis_uid: u32,
     daemon_key: &[u8; 32],
     client_key: &[u8; 32],
@@ -825,7 +847,7 @@ fn encode_profile(
         .unwrap()
         .u32(jarvis_uid)
         .unwrap()
-        .u32(daemon_gid)
+        .u32(socket_client_gid)
         .unwrap();
     let roots = encode_policy_roots("policy-root", policy_key, 3, false);
     encoder.writer_mut().extend_from_slice(&roots);

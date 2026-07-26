@@ -4,13 +4,24 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-use savana_kernel_protocol::{Digest32, HardLimits, KeyId, Signature64, StableCode, UnixMillis};
-use savana_policy_core::{ReleaseTrustRootV1, ReleaseVerifier};
+use savana_kernel_protocol::{
+    ApprovalChallengeV1, ApprovalPurposeV1, ApprovalSubjectV1, ArtifactId, BootId, BoundedText,
+    Digest32, HardLimits, KernelValue, KeyId, MaskedDisplayBundleV1, Nonce32, PrincipalId,
+    ProtocolVersion, RunId, ServerIdentityV1, Signature64, SignedApprovalEnvelopeV1, StableCode,
+    TaskId, ToolExecutionIdentity, ToolName, UnixMillis, UnsignedApprovalEnvelopeV1,
+};
+use savana_policy_core::{PolicyVerifier, ReleaseTrustRootV1, ReleaseVerifier};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+#[path = "support/mod.rs"]
+mod policy_support;
+
 const RELEASE_DOMAIN: &[u8] = b"SAVANA_RELEASE_V1\0";
 const RELEASE_TARGET_DOMAIN: &[u8] = b"SAVANA_RELEASE_TARGET_V1\0";
+const APPROVAL_ENVELOPE_DOMAIN: &[u8] = b"SAVANA_APPROVAL_ENVELOPE_V1\0";
+const APPROVAL_RECEIPT_DOMAIN: &[u8] = b"SAVANA_APPROVAL_RECEIPT_V1\0";
+const APPROVAL_DISPLAY_DOMAIN: &[u8] = b"SAVANA_APPROVAL_DISPLAY_V1\0";
 const NOW: u64 = 2_000;
 
 type ManifestMutation = Box<dyn Fn(&mut TestManifest)>;
@@ -151,6 +162,19 @@ impl ReleaseFixture {
 }
 
 #[test]
+fn committed_release_vector_and_signature_match_the_v1_fixture() {
+    let fixture = release_fixture(default_profile(), |_| {}, |_| {});
+    assert_eq!(
+        fixture.manifest_bytes.as_slice(),
+        include_bytes!("../../../vectors/kerneld/release-manifest-v1.cbor")
+    );
+    assert_eq!(
+        fixture.signature_bytes.as_bytes(),
+        include_bytes!("../../../vectors/kerneld/release-manifest-v1.sig")
+    );
+}
+
+#[test]
 fn installed_binary_must_match_signed_and_pinned_manifest() {
     let fixture = release_fixture(default_profile(), |_| {}, |_| {});
     let verified = fixture.verify().unwrap();
@@ -172,6 +196,301 @@ fn installed_binary_must_match_signed_and_pinned_manifest() {
     assert_eq!(
         fixture.verify().unwrap_err(),
         StableCode::IdentityReleaseMismatch
+    );
+}
+
+fn signed_approval_envelope(
+    release: &savana_policy_core::VerifiedReleaseIdentity,
+    policy: &savana_policy_core::VerifiedPolicyV1,
+    domain: &[u8],
+) -> Vec<u8> {
+    let display = MaskedDisplayBundleV1 {
+        purpose_label: BoundedText::try_from("final release").unwrap(),
+        tool_label: BoundedText::try_from("download").unwrap(),
+        masked_destination: KernelValue::Null,
+        masked_output: KernelValue::Text(BoundedText::try_from("masked").unwrap()),
+    };
+    let display_digest = {
+        let canonical = minicbor::to_vec(&display).unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(APPROVAL_DISPLAY_DOMAIN);
+        hasher.update(canonical);
+        Digest32::new(hasher.finalize().into())
+    };
+    let unsigned = UnsignedApprovalEnvelopeV1 {
+        daemon_identity: ServerIdentityV1 {
+            daemon_key_id: KeyId::try_from("daemon-key").unwrap(),
+            boot_id: BootId::new([0x91; 32]),
+            protocol: ProtocolVersion::new(1, 0),
+            release_digest: release.release_digest(),
+            policy_digest: policy.identity().digest,
+            policy_version: policy.identity().policy_version,
+            model_manifest_digest: release.model_manifest_digest(),
+            approval_key_set_digest: release.approval_key_set_digest(),
+            resource_profile_digest: policy.resource_profile_digest(),
+        },
+        challenge: ApprovalChallengeV1 {
+            challenge_id: Nonce32::new([0x93; 32]),
+            purpose: ApprovalPurposeV1::FinalRelease,
+            subject: ApprovalSubjectV1::VaultRelease {
+                vault_session_id: Nonce32::new([0x94; 32]),
+                evidence_digest: Digest32::new([0x95; 32]),
+                masked_output_digest: Digest32::new([0x96; 32]),
+                token_set_digest: Digest32::new([0x97; 32]),
+                artifact_id: ArtifactId::try_from("artifact-1").unwrap(),
+                artifact_generation: 1,
+            },
+            boot_id: BootId::new([0x91; 32]),
+            run_id: RunId::new([0x98; 32]),
+            principal: PrincipalId::try_from("principal-1").unwrap(),
+            conversation_id: "conversation-1".try_into().unwrap(),
+            task_id: TaskId::try_from("task-1").unwrap(),
+            tool: ToolExecutionIdentity {
+                name: ToolName::try_from("final-release").unwrap(),
+                descriptor_digest: Digest32::new([0x99; 32]),
+                registry_version: 1,
+            },
+            destination_digest: Digest32::new([0x9a; 32]),
+            policy_version: policy.identity().policy_version,
+            issued_at: UnixMillis::new(1_000),
+            expires_at: UnixMillis::new(3_000),
+            nonce: Nonce32::new([0x9b; 32]),
+        },
+        display,
+        display_digest,
+    };
+    let payload = minicbor::to_vec(&unsigned).unwrap();
+    let signature = detached_signature(domain, &payload, &SigningKey::from_bytes(&[0x61; 32]));
+    minicbor::to_vec(SignedApprovalEnvelopeV1 {
+        unsigned,
+        daemon_key_id: KeyId::try_from("daemon-key").unwrap(),
+        signature,
+    })
+    .unwrap()
+}
+
+#[test]
+fn approval_envelope_uses_the_release_pinned_daemon_identity_and_domain() {
+    let mut policy_value = policy_support::valid_policy(7, 3);
+    let (template_bytes, template_signature) = policy_support::signed(&policy_value);
+    let template_policy = policy_support::verifier()
+        .verify(
+            &template_bytes,
+            &template_signature,
+            policy_support::unix_now(),
+        )
+        .unwrap();
+    let resource_profile_digest = template_policy.resource_profile_digest();
+    let fixture = release_fixture(
+        default_profile(),
+        |_| {},
+        |manifest| {
+            manifest.resource_profile_digest = *resource_profile_digest.as_bytes();
+            manifest.release_target_id = compute_release_target(
+                manifest.protocol_major,
+                manifest.minimum_minor,
+                manifest.maximum_minor,
+                &manifest.supported_policy_schemas,
+                manifest.policy_trust_roots_digest,
+                manifest.resource_profile_digest,
+                manifest.installation_profile_digest,
+            );
+        },
+    );
+    let release = fixture.verify().unwrap();
+    policy_value.release.compatible_release_target_ids =
+        vec![*release.release_target_id().as_bytes()];
+    let (policy_bytes, policy_signature) = policy_support::signed(&policy_value);
+    let policy = PolicyVerifier::new(
+        vec![policy_support::trust_root(
+            "policy-root",
+            &policy_support::signing_key(),
+            3,
+            false,
+        )],
+        release.release_target_id(),
+    )
+    .unwrap()
+    .verify(&policy_bytes, &policy_signature, policy_support::unix_now())
+    .unwrap();
+    let encoded = signed_approval_envelope(&release, &policy, APPROVAL_ENVELOPE_DOMAIN);
+    let verified = release
+        .verify_approval_envelope(&policy, &encoded, UnixMillis::new(NOW))
+        .unwrap();
+    assert_eq!(verified.daemon_key_id().as_str(), "daemon-key");
+    assert_ne!(verified.display_digest(), Digest32::new([0; 32]));
+
+    for now in [999, 3_000] {
+        assert_eq!(
+            release
+                .verify_approval_envelope(&policy, &encoded, UnixMillis::new(now))
+                .unwrap_err()
+                .code(),
+            StableCode::AttestationExpired
+        );
+    }
+    let mut trailing = encoded.clone();
+    trailing.push(0);
+    assert_eq!(
+        release
+            .verify_approval_envelope(&policy, &trailing, UnixMillis::new(NOW))
+            .unwrap_err()
+            .code(),
+        StableCode::ProtocolMalformedCbor
+    );
+
+    assert_eq!(
+        release
+            .verify_approval_envelope(
+                &policy,
+                &signed_approval_envelope(&release, &policy, APPROVAL_RECEIPT_DOMAIN),
+                UnixMillis::new(NOW),
+            )
+            .unwrap_err()
+            .code(),
+        StableCode::ApprovalInvalidSignature
+    );
+
+    let mut wrong_display: SignedApprovalEnvelopeV1 = minicbor::decode(&encoded).unwrap();
+    wrong_display.unsigned.display_digest = Digest32::new([0xff; 32]);
+    let payload = minicbor::to_vec(&wrong_display.unsigned).unwrap();
+    wrong_display.signature = detached_signature(
+        APPROVAL_ENVELOPE_DOMAIN,
+        &payload,
+        &SigningKey::from_bytes(&[0x61; 32]),
+    );
+    assert_eq!(
+        release
+            .verify_approval_envelope(
+                &policy,
+                &minicbor::to_vec(wrong_display).unwrap(),
+                UnixMillis::new(NOW),
+            )
+            .unwrap_err()
+            .code(),
+        StableCode::ApprovalBindingMismatch
+    );
+
+    let mut zero_challenge_nonce: SignedApprovalEnvelopeV1 = minicbor::decode(&encoded).unwrap();
+    zero_challenge_nonce.unsigned.challenge.nonce = Nonce32::new([0; 32]);
+    let payload = minicbor::to_vec(&zero_challenge_nonce.unsigned).unwrap();
+    zero_challenge_nonce.signature = detached_signature(
+        APPROVAL_ENVELOPE_DOMAIN,
+        &payload,
+        &SigningKey::from_bytes(&[0x61; 32]),
+    );
+    assert_eq!(
+        release
+            .verify_approval_envelope(
+                &policy,
+                &minicbor::to_vec(zero_challenge_nonce).unwrap(),
+                UnixMillis::new(NOW),
+            )
+            .unwrap_err()
+            .code(),
+        StableCode::ApprovalBindingMismatch
+    );
+
+    let mut next_policy_value = policy_support::valid_policy(8, 3);
+    next_policy_value.release.compatible_release_target_ids =
+        vec![*release.release_target_id().as_bytes()];
+    let (next_policy_bytes, next_policy_signature) = policy_support::signed(&next_policy_value);
+    let next_policy = PolicyVerifier::new(
+        vec![policy_support::trust_root(
+            "policy-root",
+            &policy_support::signing_key(),
+            3,
+            false,
+        )],
+        release.release_target_id(),
+    )
+    .unwrap()
+    .verify(
+        &next_policy_bytes,
+        &next_policy_signature,
+        policy_support::unix_now(),
+    )
+    .unwrap();
+    assert_eq!(
+        release
+            .verify_approval_envelope(&next_policy, &encoded, UnixMillis::new(NOW))
+            .unwrap_err()
+            .code(),
+        StableCode::ApprovalBindingMismatch
+    );
+
+    let mut relabeled: SignedApprovalEnvelopeV1 = minicbor::decode(&encoded).unwrap();
+    relabeled.daemon_key_id = KeyId::try_from("other-daemon").unwrap();
+    assert_eq!(
+        release
+            .verify_approval_envelope(
+                &policy,
+                &minicbor::to_vec(relabeled).unwrap(),
+                UnixMillis::new(NOW),
+            )
+            .unwrap_err()
+            .code(),
+        StableCode::ApprovalInvalidSignature
+    );
+}
+
+#[test]
+fn approval_envelope_obeys_the_current_policy_effective_frame_limit() {
+    let mut policy_value = policy_support::valid_policy(7, 3);
+    policy_value.resources.frame_bytes = 1;
+    let (template_bytes, template_signature) = policy_support::signed(&policy_value);
+    let template_policy = policy_support::verifier()
+        .verify(
+            &template_bytes,
+            &template_signature,
+            policy_support::unix_now(),
+        )
+        .unwrap();
+    let resource_profile_digest = template_policy.resource_profile_digest();
+    let fixture = release_fixture(
+        default_profile(),
+        |_| {},
+        |manifest| {
+            manifest.resource_profile_digest = *resource_profile_digest.as_bytes();
+            manifest.release_target_id = compute_release_target(
+                manifest.protocol_major,
+                manifest.minimum_minor,
+                manifest.maximum_minor,
+                &manifest.supported_policy_schemas,
+                manifest.policy_trust_roots_digest,
+                manifest.resource_profile_digest,
+                manifest.installation_profile_digest,
+            );
+        },
+    );
+    let release = fixture.verify().unwrap();
+    policy_value.release.compatible_release_target_ids =
+        vec![*release.release_target_id().as_bytes()];
+    let (policy_bytes, policy_signature) = policy_support::signed(&policy_value);
+    let policy = PolicyVerifier::new(
+        vec![policy_support::trust_root(
+            "policy-root",
+            &policy_support::signing_key(),
+            3,
+            false,
+        )],
+        release.release_target_id(),
+    )
+    .unwrap()
+    .verify(&policy_bytes, &policy_signature, policy_support::unix_now())
+    .unwrap();
+    let encoded = signed_approval_envelope(&release, &policy, APPROVAL_ENVELOPE_DOMAIN);
+    assert!(
+        u64::try_from(encoded.len()).unwrap() > policy.effective_limits().frame_bytes(),
+        "the correctly signed envelope must exercise the lowered policy limit"
+    );
+
+    assert_eq!(
+        release
+            .verify_approval_envelope(&policy, &encoded, UnixMillis::new(NOW))
+            .unwrap_err()
+            .code(),
+        StableCode::PolicyLimitExceeded
     );
 }
 
@@ -353,6 +672,39 @@ fn manifest_schema_protocol_scalars_and_target_are_refused_exactly() {
 }
 
 #[test]
+fn source_commit_accepts_64_lowercase_hex_and_rejects_other_lengths_or_non_hex() {
+    let accepted = release_fixture(
+        default_profile(),
+        |_| {},
+        |manifest| {
+            manifest.source_commit = "a".repeat(64);
+        },
+    );
+    assert!(accepted.verify().is_ok());
+
+    for source_commit in [
+        "a".repeat(39),
+        "a".repeat(41),
+        "a".repeat(63),
+        "a".repeat(65),
+        "A".repeat(40),
+        "g".repeat(40),
+    ] {
+        let rejected = release_fixture(
+            default_profile(),
+            |_| {},
+            move |manifest| {
+                manifest.source_commit = source_commit;
+            },
+        );
+        assert_eq!(
+            rejected.verify().unwrap_err(),
+            StableCode::ProtocolMalformedCbor
+        );
+    }
+}
+
+#[test]
 fn manifest_and_profile_noncanonical_encodings_are_distinguished() {
     let mut fixture = release_fixture(default_profile(), |_| {}, |_| {});
     let mut noncanonical_manifest = fixture.manifest_bytes.clone();
@@ -406,6 +758,7 @@ fn profile_client_root_platform_path_and_mode_contract_is_closed() {
         (
             "too many clients",
             Box::new(|profile| {
+                let socket_client_gid = profile.daemon_clients[0].peer_gid;
                 profile.daemon_clients = (0..17)
                     .map(|index| TestClient {
                         client_id: format!("client-{index:02}"),
@@ -413,7 +766,7 @@ fn profile_client_root_platform_path_and_mode_contract_is_closed() {
                         public_key: vec![index as u8 + 1; 32],
                         role: 0,
                         peer_uid: profile.jarvis_uid,
-                        peer_gid: profile.daemon_gid,
+                        peer_gid: socket_client_gid,
                     })
                     .collect()
             }),
@@ -560,6 +913,35 @@ fn profile_client_root_platform_path_and_mode_contract_is_closed() {
         };
         assert_eq!(fixture.verify().unwrap_err(), expected, "{label}");
     }
+}
+
+#[test]
+fn profile_clients_share_one_non_daemon_socket_group() {
+    let mut mixed_groups = default_profile();
+    let mut second = mixed_groups.daemon_clients[0].clone();
+    second.client_id = "jarvis-client-02".to_owned();
+    second.key_id = "jarvis-key-02".to_owned();
+    second.public_key = SigningKey::from_bytes(&[0x63; 32])
+        .verifying_key()
+        .to_bytes()
+        .to_vec();
+    second.peer_gid = mixed_groups.daemon_clients[0].peer_gid + 1;
+    mixed_groups.daemon_clients.push(second);
+    assert_eq!(
+        release_fixture(mixed_groups, |_| {}, |_| {})
+            .verify()
+            .unwrap_err(),
+        StableCode::ProtocolMalformedCbor
+    );
+
+    let mut daemon_group = default_profile();
+    daemon_group.daemon_clients[0].peer_gid = daemon_group.daemon_gid;
+    assert_eq!(
+        release_fixture(daemon_group, |_| {}, |_| {})
+            .verify()
+            .unwrap_err(),
+        StableCode::ProtocolMalformedCbor
+    );
 }
 
 #[test]
@@ -908,7 +1290,7 @@ fn default_profile() -> TestProfile {
             public_key: client_key.verifying_key().to_bytes().to_vec(),
             role: 0,
             peer_uid: 1_001,
-            peer_gid: 1_002,
+            peer_gid: 1_003,
         }],
         policy_trust_roots: vec![TestPolicyRoot {
             key_id: "policy-root".to_owned(),

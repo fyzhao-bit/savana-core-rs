@@ -59,7 +59,21 @@ fn active_release_target(policy: &VerifiedPolicyV1) {
     let _ = policy.active_release_target_id();
 }
 ```
+
+A verified approval envelope exposes only verified projections, not its backing
+signed artifact:
+
+```compile_fail
+use savana_policy_core::VerifiedApprovalEnvelopeV1;
+
+fn signed_artifact(envelope: &VerifiedApprovalEnvelopeV1) {
+    let _ = &envelope.artifact;
+}
+```
 "#]
+
+#[cfg(all(feature = "test-support", not(debug_assertions)))]
+compile_error!("test-support cannot be enabled in a release build");
 
 mod atomic_file;
 mod bundle;
@@ -72,10 +86,16 @@ mod validate;
 
 pub use bundle::AuthorityRoleV1;
 pub use error::PolicyError;
-pub use ledger::{PolicyLedgerIdentity, PolicyStore};
+pub use ledger::{PolicyLedgerIdentity, PolicyStateCapability, PolicyStore};
 pub use release::{
     InstallationClientRoleV1, InstallationClientV1, InstallationPlatformV1,
-    InstallationPublicKeyV1, ReleaseTrustRootV1, ReleaseVerifier, VerifiedReleaseIdentity,
+    InstallationPublicKeyV1, ReleaseStage, ReleaseTrustRootV1, ReleaseVerifier,
+    VerifiedReleaseIdentity,
 };
 pub use signature::{PolicyTrustRootV1, PolicyVerifier};
-pub use validate::{PolicyIdentity, VerifiedAuthorityV1, VerifiedPolicyV1};
+pub use validate::{
+    PolicyIdentity, VerifiedApprovalEnvelopeV1, VerifiedApprovalReceiptV1, VerifiedAuthorityV1,
+    VerifiedIngressV1, VerifiedOntologyEventV1, VerifiedOntologySnapshotV1,
+    VerifiedPlannerAttestationV1, VerifiedPolicyV1, VerifiedRegistrySnapshotV1,
+    VerifiedValidatorAttestationV1,
+};

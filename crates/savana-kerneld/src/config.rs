@@ -1,4 +1,4 @@
-use savana_kernel_protocol::{Digest32, Signature64, StableCode};
+use savana_kernel_protocol::{Digest32, EffectiveLimits, Signature64, StableCode};
 use savana_policy_core::{
     InstallationClientV1, InstallationPublicKeyV1, VerifiedPolicyV1, VerifiedReleaseIdentity,
 };
@@ -10,20 +10,15 @@ use crate::DaemonError;
 const MAXIMUM_LOCK_BYTES: usize = 256 * 1024;
 
 #[derive(Clone)]
-pub struct DaemonConfig {
+pub(crate) struct DaemonConfig {
     protocol_major: u16,
     minimum_minor: u16,
     maximum_minor: u16,
     daemon_identity: InstallationPublicKeyV1,
     daemon_clients: Vec<InstallationClientV1>,
-    daemon_uid: u32,
-    daemon_gid: u32,
-    jarvis_uid: u32,
     socket_path: String,
     selected_policy_path: String,
     selected_policy_signature_path: String,
-    socket_parent_mode: u16,
-    socket_mode: u16,
     release_digest: Digest32,
     policy_digest: Digest32,
     policy_version: u64,
@@ -32,6 +27,8 @@ pub struct DaemonConfig {
     resource_profile_digest: Digest32,
     release_expires_at: savana_kernel_protocol::UnixMillis,
     policy_expires_at: savana_kernel_protocol::UnixMillis,
+    #[allow(dead_code)]
+    effective_limits: EffectiveLimits,
 }
 
 impl std::fmt::Debug for DaemonConfig {
@@ -117,20 +114,28 @@ impl DaemonConfig {
             .map_err(|_| release_mismatch())?;
         let lock = parse_canonical_lock(lock_bytes)?;
         verify_lock(&lock, release, policy, selected_policy_signature)?;
+        let socket_client_gid = release
+            .daemon_clients()
+            .first()
+            .map(InstallationClientV1::peer_gid)
+            .ok_or_else(release_mismatch)?;
+        if socket_client_gid == release.daemon_gid()
+            || release
+                .daemon_clients()
+                .iter()
+                .any(|client| client.peer_gid() != socket_client_gid)
+        {
+            return Err(release_mismatch());
+        }
         Ok(Self {
             protocol_major: release.protocol_major(),
             minimum_minor: release.minimum_minor(),
             maximum_minor: release.maximum_minor(),
             daemon_identity: release.daemon_identity().clone(),
             daemon_clients: release.daemon_clients().to_vec(),
-            daemon_uid: release.daemon_uid(),
-            daemon_gid: release.daemon_gid(),
-            jarvis_uid: release.jarvis_uid(),
             socket_path: release.socket_path().to_owned(),
             selected_policy_path: release.selected_policy_path().to_owned(),
             selected_policy_signature_path: release.selected_policy_signature_path().to_owned(),
-            socket_parent_mode: release.socket_parent_mode(),
-            socket_mode: release.socket_mode(),
             release_digest: release.release_digest(),
             policy_digest: policy.identity().digest,
             policy_version: policy.identity().policy_version,
@@ -139,19 +144,8 @@ impl DaemonConfig {
             resource_profile_digest: policy.resource_profile_digest(),
             release_expires_at: release.expires_at(),
             policy_expires_at: policy.identity().expires_at,
+            effective_limits: *policy.effective_limits(),
         })
-    }
-
-    pub const fn daemon_uid(&self) -> u32 {
-        self.daemon_uid
-    }
-
-    pub const fn daemon_gid(&self) -> u32 {
-        self.daemon_gid
-    }
-
-    pub const fn jarvis_uid(&self) -> u32 {
-        self.jarvis_uid
     }
 
     pub fn socket_path(&self) -> &str {
@@ -164,14 +158,6 @@ impl DaemonConfig {
 
     pub fn selected_policy_signature_path(&self) -> &str {
         &self.selected_policy_signature_path
-    }
-
-    pub const fn socket_parent_mode(&self) -> u16 {
-        self.socket_parent_mode
-    }
-
-    pub const fn socket_mode(&self) -> u16 {
-        self.socket_mode
     }
 
     pub fn daemon_identity(&self) -> &InstallationPublicKeyV1 {
@@ -224,6 +210,11 @@ impl DaemonConfig {
 
     pub(crate) const fn policy_expires_at(&self) -> savana_kernel_protocol::UnixMillis {
         self.policy_expires_at
+    }
+
+    #[allow(dead_code)]
+    pub(crate) const fn effective_limits(&self) -> &EffectiveLimits {
+        &self.effective_limits
     }
 }
 

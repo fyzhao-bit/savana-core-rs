@@ -14,3 +14,8 @@ thiserror.workspace = true
 minicbor.workspace = true
 sha2.workspace = true
 zeroize.workspace = true
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
+getrandom.workspace = true
+rustix.workspace = true

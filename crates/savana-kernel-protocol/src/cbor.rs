@@ -157,10 +157,21 @@ fn client_hello_shape(decoder: &mut minicbor::Decoder<'_>) -> Result<(), Protoco
 fn operation_shape(decoder: &mut minicbor::Decoder<'_>) -> Result<(), ProtocolError> {
     expect_array(decoder, 2)?;
     let tag = decoder.u64().map_err(ProtocolError::malformed)?;
-    if tag != 0 {
-        return Err(ProtocolError::stable(StableCode::ProtocolUnknownOperation));
+    let fields = match tag {
+        0 => 0,
+        10 => 3,
+        11 => 2,
+        12..=15 => 3,
+        16..=17 => 2,
+        18 => 1,
+        19 => 2,
+        _ => return Err(ProtocolError::stable(StableCode::ProtocolUnknownOperation)),
+    };
+    expect_array(decoder, fields)?;
+    for _ in 0..fields {
+        skip(decoder)?;
     }
-    expect_array(decoder, 0)
+    Ok(())
 }
 
 fn request_shape(decoder: &mut minicbor::Decoder<'_>) -> Result<(), ProtocolError> {
@@ -214,6 +225,21 @@ fn response_payload_shape(decoder: &mut minicbor::Decoder<'_>) -> Result<(), Pro
             expect_array(decoder, 3)?;
             skip(decoder)?;
             server_identity_shape(decoder)?;
+            skip(decoder)
+        }
+        10 => {
+            expect_array(decoder, 3)?;
+            skip(decoder)?;
+            skip(decoder)?;
+            skip(decoder)
+        }
+        11..=15 | 17 | 19 => skip(decoder),
+        16 => skip(decoder),
+        18 => {
+            expect_array(decoder, 4)?;
+            skip(decoder)?;
+            skip(decoder)?;
+            skip(decoder)?;
             skip(decoder)
         }
         _ => Err(ProtocolError::stable(StableCode::ProtocolUnknownOperation)),

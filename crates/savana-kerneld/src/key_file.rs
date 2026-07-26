@@ -1,16 +1,13 @@
-use std::fs::{File, OpenOptions};
-use std::io::Read;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 use ed25519_dalek::{Signer, SigningKey};
-use nix::fcntl::OFlag;
 use savana_kernel_protocol::{HandshakeTranscriptV1, Signature64, StableCode};
 use zeroize::Zeroizing;
 
+use crate::fs_cap::{DirectoryCapability, FileCapability, FileExpectation, LengthRule};
 use crate::DaemonError;
 
-pub struct DaemonSigningIdentity {
+pub(crate) struct DaemonSigningIdentity {
     signing_key: SigningKey,
 }
 
@@ -45,64 +42,100 @@ impl std::fmt::Debug for DaemonSigningIdentity {
     }
 }
 
-pub fn load_daemon_signing_key(
-    path: &Path,
-    expected_uid: u32,
-) -> Result<DaemonSigningIdentity, DaemonError> {
-    validate_path_components(path)?;
-    let mut file = open_no_follow(path).map_err(|_| key_permissions())?;
-    let metadata = file.metadata().map_err(|_| key_permissions())?;
-    if !metadata.is_file()
-        || metadata.nlink() != 1
-        || metadata.uid() != expected_uid
-        || metadata.mode() & 0o7777 != 0o600
-    {
-        return Err(key_permissions());
-    }
-
-    let mut seed = Zeroizing::new([0_u8; 32]);
-    file.read_exact(seed.as_mut())
-        .map_err(|_| key_permissions())?;
-    let mut trailing = [0_u8; 1];
-    if file.read(&mut trailing).map_err(|_| key_permissions())? != 0 {
-        return Err(key_permissions());
-    }
-    Ok(DaemonSigningIdentity {
-        signing_key: SigningKey::from_bytes(&seed),
-    })
+pub(crate) struct DaemonKeyCapability {
+    parent: DirectoryCapability,
+    seed: FileCapability,
 }
 
-fn validate_path_components(path: &Path) -> Result<(), DaemonError> {
-    if !path.is_absolute() {
-        return Err(key_permissions());
+impl std::fmt::Debug for DaemonKeyCapability {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DaemonKeyCapability(<verified>)")
     }
-    let mut current = PathBuf::from("/");
-    let components: Vec<_> = path.components().collect();
-    for (index, component) in components.iter().enumerate() {
-        match component {
-            Component::RootDir => continue,
-            Component::Normal(value) => current.push(value),
-            _ => return Err(key_permissions()),
-        }
-        let metadata = std::fs::symlink_metadata(&current).map_err(|_| key_permissions())?;
-        if metadata.file_type().is_symlink() {
-            return Err(key_permissions());
-        }
-        let is_final = index + 1 == components.len();
-        if (is_final && !metadata.is_file()) || (!is_final && !metadata.is_dir()) {
-            return Err(key_permissions());
-        }
-    }
-    Ok(())
 }
 
-fn open_no_follow(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new()
-        .read(true)
-        .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC).bits())
-        .open(path)
+impl DaemonKeyCapability {
+    pub(crate) fn open(
+        path: &Path,
+        parent_uid: u32,
+        parent_gid: u32,
+        key_uid: u32,
+        key_gid: u32,
+    ) -> Result<Self, DaemonError> {
+        let parent_path = path.parent().ok_or_else(key_permissions)?;
+        let leaf = path.file_name().ok_or_else(key_permissions)?;
+        let parent = DirectoryCapability::open_final(
+            parent_path,
+            parent_uid,
+            parent_gid,
+            0o750,
+            StableCode::IdentityKeyPermissions,
+        )?;
+        let seed = parent.open_file(
+            leaf,
+            FileExpectation {
+                owner_uid: key_uid,
+                owner_gid: key_gid,
+                permissions: 0o600,
+                length: LengthRule::Exact(32),
+            },
+        )?;
+        Ok(Self { parent, seed })
+    }
+
+    pub(crate) fn load(
+        &self,
+        expected_public_key: &[u8; 32],
+    ) -> Result<DaemonSigningIdentity, DaemonError> {
+        let mut seed = Zeroizing::new([0_u8; 32]);
+        self.seed.read_exact_into(seed.as_mut())?;
+        let signing_key = SigningKey::from_bytes(&seed);
+        if signing_key.verifying_key().to_bytes() != *expected_public_key {
+            return Err(key_permissions());
+        }
+        self.recheck()?;
+        Ok(DaemonSigningIdentity { signing_key })
+    }
+
+    pub(crate) fn recheck(&self) -> Result<(), DaemonError> {
+        self.seed.recheck()?;
+        self.parent.recheck()
+    }
 }
 
 fn key_permissions() -> DaemonError {
     DaemonError::stable(StableCode::IdentityKeyPermissions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::fs;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    #[test]
+    fn daemon_key_is_loaded_from_held_parent_and_exact_leaf_capabilities() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("private");
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o750)).unwrap();
+        let seed = [0x61; 32];
+        let path = parent.join("daemon-identity-v1.seed");
+        fs::write(&path, seed).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        let expected_public = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+
+        let capability = DaemonKeyCapability::open(
+            &path,
+            metadata.uid(),
+            metadata.gid(),
+            metadata.uid(),
+            metadata.gid(),
+        )
+        .unwrap();
+        let identity = capability.load(&expected_public).unwrap();
+        assert_eq!(identity.public_key(), expected_public);
+        capability.recheck().unwrap();
+    }
 }

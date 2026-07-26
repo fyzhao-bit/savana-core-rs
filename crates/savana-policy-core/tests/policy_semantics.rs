@@ -1,5 +1,6 @@
 mod support;
 
+use ed25519_dalek::VerifyingKey;
 use savana_kernel_protocol::{HardLimits, StableCode, UnixMillis};
 
 type Mutation = Box<dyn Fn(&mut support::TestPolicy)>;
@@ -203,6 +204,43 @@ fn authority_integrity_and_all_eight_roles_are_required() {
     for (label, mutate) in mutations {
         let mut policy = base.clone();
         mutate(&mut policy);
+        assert_rejected(
+            &policy,
+            support::NOW,
+            StableCode::ProtocolMalformedCbor,
+            label,
+        );
+    }
+}
+
+#[test]
+fn active_authority_public_keys_cannot_be_reused_across_key_ids() {
+    let mut policy = support::valid_policy(7, 3);
+    policy.authorities[1].public_key = policy.authorities[0].public_key;
+    assert_rejected(
+        &policy,
+        support::NOW,
+        StableCode::ProtocolMalformedCbor,
+        "duplicate active authority public key",
+    );
+}
+
+#[test]
+fn verified_policy_rejects_invalid_and_weak_producer_authority_keys() {
+    let invalid = (1..=u8::MAX)
+        .map(|byte| [byte; 32])
+        .find(|candidate| VerifyingKey::from_bytes(candidate).is_err())
+        .expect("repeated-byte test space contains an invalid compressed point");
+    for (label, public_key) in [
+        ("invalid compressed point", invalid),
+        ("weak identity point", {
+            let mut identity = [0; 32];
+            identity[0] = 1;
+            identity
+        }),
+    ] {
+        let mut policy = support::valid_policy(7, 3);
+        policy.authorities[0].public_key = public_key;
         assert_rejected(
             &policy,
             support::NOW,

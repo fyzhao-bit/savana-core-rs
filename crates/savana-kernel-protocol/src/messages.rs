@@ -1,6 +1,6 @@
 use crate::{
-    BootId, ClientId, Digest32, KeyId, Nonce32, ProtocolVersion, RequestId, RequestedMode,
-    Signature64, StableCode, UnixMillis,
+    BootId, ClientId, Digest32, KeyId, Nonce32, OperationV1, ProtocolVersion, RequestId,
+    RequestedMode, Signature64, StableCode, UnixMillis,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, minicbor::Encode, minicbor::Decode)]
@@ -40,12 +40,7 @@ pub struct RequestEnvelopeV1 {
     pub operation: OperationV1,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OperationV1 {
-    Health,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, minicbor::Encode, minicbor::Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, minicbor::Encode)]
 #[cbor(array)]
 pub struct ServerIdentityV1 {
     #[n(0)]
@@ -66,6 +61,32 @@ pub struct ServerIdentityV1 {
     pub approval_key_set_digest: Digest32,
     #[n(8)]
     pub resource_profile_digest: Digest32,
+}
+
+impl<'bytes, C> minicbor::Decode<'bytes, C> for ServerIdentityV1 {
+    fn decode(
+        decoder: &mut minicbor::Decoder<'bytes>,
+        context: &mut C,
+    ) -> Result<Self, minicbor::decode::Error> {
+        let position = decoder.position();
+        if decoder.array()? != Some(9) {
+            return Err(minicbor::decode::Error::message(
+                StableCode::ProtocolMalformedCbor.as_str(),
+            )
+            .at(position));
+        }
+        Ok(Self {
+            daemon_key_id: KeyId::decode(decoder, context)?,
+            boot_id: BootId::decode(decoder, context)?,
+            protocol: ProtocolVersion::decode(decoder, context)?,
+            release_digest: Digest32::decode(decoder, context)?,
+            policy_digest: Digest32::decode(decoder, context)?,
+            policy_version: decoder.u64()?,
+            model_manifest_digest: Digest32::decode(decoder, context)?,
+            approval_key_set_digest: Digest32::decode(decoder, context)?,
+            resource_profile_digest: Digest32::decode(decoder, context)?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, minicbor::Encode, minicbor::Decode)]
@@ -117,8 +138,20 @@ pub enum ResponseBodyV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+// V1 freezes direct typed payloads rather than allocation-bearing Box fields.
+#[allow(clippy::large_enum_variant)]
 pub enum ResponsePayloadV1 {
     Health(HealthSnapshotV1),
+    BeginRun(crate::BeginRunResponse),
+    IngestUserInput(crate::ValueHandle),
+    PreparePlannerCall(crate::PlannerTicketHandle),
+    CommitPlannerValue(crate::ValueHandle),
+    DeriveValue(crate::ValueHandle),
+    ProposeToolCall(crate::PendingToolCallHandle),
+    EvaluateToolCall(crate::EvaluateToolCallResponseV1),
+    AuthorizeToolCall(crate::ExecutionTicketHandle),
+    MaterializeExecution(crate::ExecutionEnvelope),
+    CommitToolResult(crate::ValueHandle),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,6 +162,8 @@ pub struct HealthSnapshotV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+// V1 freezes direct typed envelopes rather than allocation-bearing Box fields.
+#[allow(clippy::large_enum_variant)]
 pub enum ClientMessageV1 {
     Hello(ClientHelloV1),
     Finish(ClientFinishV1),
@@ -136,6 +171,8 @@ pub enum ClientMessageV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+// V1 freezes direct typed envelopes rather than allocation-bearing Box fields.
+#[allow(clippy::large_enum_variant)]
 pub enum ServerMessageV1 {
     Hello(SignedServerHelloV1),
     Accepted(HandshakeAcceptedV1),
@@ -173,40 +210,6 @@ fn unknown_operation(position: usize) -> minicbor::decode::Error {
     minicbor::decode::Error::message(StableCode::ProtocolUnknownOperation.as_str()).at(position)
 }
 
-impl<C> minicbor::Encode<C> for OperationV1 {
-    fn encode<W: minicbor::encode::Write>(
-        &self,
-        encoder: &mut minicbor::Encoder<W>,
-        _context: &mut C,
-    ) -> Result<(), minicbor::encode::Error<W::Error>> {
-        match self {
-            Self::Health => {
-                encoder.array(2)?.u8(0)?.array(0)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-impl<'bytes, C> minicbor::Decode<'bytes, C> for OperationV1 {
-    fn decode(
-        decoder: &mut minicbor::Decoder<'bytes>,
-        _context: &mut C,
-    ) -> Result<Self, minicbor::decode::Error> {
-        let (position, tag) = decode_tag(decoder)?;
-        match tag {
-            0 => match decoder.array()? {
-                Some(0) => Ok(Self::Health),
-                _ => Err(minicbor::decode::Error::message(
-                    StableCode::ProtocolMalformedCbor.as_str(),
-                )
-                .at(position)),
-            },
-            _ => Err(unknown_operation(position)),
-        }
-    }
-}
-
 impl<C> minicbor::Encode<C> for ResponseBodyV1 {
     fn encode<W: minicbor::encode::Write>(
         &self,
@@ -242,6 +245,16 @@ impl<C> minicbor::Encode<C> for ResponsePayloadV1 {
     ) -> Result<(), minicbor::encode::Error<W::Error>> {
         match self {
             Self::Health(value) => encode_tagged(encoder, context, 0, value),
+            Self::BeginRun(value) => encode_tagged(encoder, context, 10, value),
+            Self::IngestUserInput(value) => encode_tagged(encoder, context, 11, value),
+            Self::PreparePlannerCall(value) => encode_tagged(encoder, context, 12, value),
+            Self::CommitPlannerValue(value) => encode_tagged(encoder, context, 13, value),
+            Self::DeriveValue(value) => encode_tagged(encoder, context, 14, value),
+            Self::ProposeToolCall(value) => encode_tagged(encoder, context, 15, value),
+            Self::EvaluateToolCall(value) => encode_tagged(encoder, context, 16, value),
+            Self::AuthorizeToolCall(value) => encode_tagged(encoder, context, 17, value),
+            Self::MaterializeExecution(value) => encode_tagged(encoder, context, 18, value),
+            Self::CommitToolResult(value) => encode_tagged(encoder, context, 19, value),
         }
     }
 }
@@ -254,6 +267,36 @@ impl<'bytes, C> minicbor::Decode<'bytes, C> for ResponsePayloadV1 {
         let (position, tag) = decode_tag(decoder)?;
         match tag {
             0 => Ok(Self::Health(HealthSnapshotV1::decode(decoder, context)?)),
+            10 => Ok(Self::BeginRun(crate::BeginRunResponse::decode(
+                decoder, context,
+            )?)),
+            11 => Ok(Self::IngestUserInput(crate::ValueHandle::decode(
+                decoder, context,
+            )?)),
+            12 => Ok(Self::PreparePlannerCall(
+                crate::PlannerTicketHandle::decode(decoder, context)?,
+            )),
+            13 => Ok(Self::CommitPlannerValue(crate::ValueHandle::decode(
+                decoder, context,
+            )?)),
+            14 => Ok(Self::DeriveValue(crate::ValueHandle::decode(
+                decoder, context,
+            )?)),
+            15 => Ok(Self::ProposeToolCall(crate::PendingToolCallHandle::decode(
+                decoder, context,
+            )?)),
+            16 => Ok(Self::EvaluateToolCall(
+                crate::EvaluateToolCallResponseV1::decode(decoder, context)?,
+            )),
+            17 => Ok(Self::AuthorizeToolCall(
+                crate::ExecutionTicketHandle::decode(decoder, context)?,
+            )),
+            18 => Ok(Self::MaterializeExecution(
+                crate::ExecutionEnvelope::decode(decoder, context)?,
+            )),
+            19 => Ok(Self::CommitToolResult(crate::ValueHandle::decode(
+                decoder, context,
+            )?)),
             _ => Err(unknown_operation(position)),
         }
     }
@@ -370,14 +413,20 @@ impl<'bytes, C> minicbor::Decode<'bytes, C> for ServerMessageV1 {
 pub(crate) fn validate_client_message(value: &ClientMessageV1) -> Result<(), crate::ProtocolError> {
     match value {
         ClientMessageV1::Hello(hello) => validate_client_hello(hello),
-        ClientMessageV1::Finish(_) | ClientMessageV1::Request(_) => Ok(()),
+        ClientMessageV1::Request(request) => request.operation.validate(),
+        ClientMessageV1::Finish(_) => Ok(()),
     }
 }
 
 pub(crate) fn validate_server_message(value: &ServerMessageV1) -> Result<(), crate::ProtocolError> {
     match value {
         ServerMessageV1::Hello(hello) => validate_client_hello(&hello.transcript.client),
-        ServerMessageV1::Accepted(_) | ServerMessageV1::Response(_) => Ok(()),
+        ServerMessageV1::Response(response) => match &response.body {
+            ResponseBodyV1::Ok(ResponsePayloadV1::BeginRun(value)) => value.validate(),
+            ResponseBodyV1::Ok(ResponsePayloadV1::EvaluateToolCall(value)) => value.validate(),
+            ResponseBodyV1::Ok(_) | ResponseBodyV1::Err(_) => Ok(()),
+        },
+        ServerMessageV1::Accepted(_) => Ok(()),
     }
 }
 

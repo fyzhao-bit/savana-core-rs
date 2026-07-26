@@ -5,6 +5,10 @@ use std::path::{Path, PathBuf};
 
 use nix::fcntl::{Flock, FlockArg};
 use nix::libc::{O_CLOEXEC, O_NOFOLLOW, O_NONBLOCK};
+use rustix::fs::{
+    fchmod, openat, statat, AtFlags as RustixAtFlags, FileType, Mode as RustixMode, OFlags,
+};
+use rustix::io::Errno;
 use savana_kernel_protocol::StableCode;
 
 use crate::atomic_file;
@@ -13,6 +17,15 @@ use crate::PolicyError;
 #[derive(Debug)]
 pub(crate) struct LedgerLock {
     _file: Flock<File>,
+    anchored: Option<AnchoredLock>,
+}
+
+#[derive(Debug)]
+struct AnchoredLock {
+    parent: File,
+    leaf: OsString,
+    owner_uid: u32,
+    owner_gid: u32,
 }
 
 impl LedgerLock {
@@ -34,8 +47,116 @@ impl LedgerLock {
             atomic_file::sync_directory(atomic_file::normalized_parent(&lock_path)?)?;
         }
 
-        Ok(Self { _file: locked })
+        Ok(Self {
+            _file: locked,
+            anchored: None,
+        })
     }
+
+    pub(crate) fn acquire_at(
+        parent: &File,
+        leaf: &std::ffi::OsStr,
+        owner_uid: u32,
+        owner_gid: u32,
+    ) -> Result<Self, PolicyError> {
+        let create_flags = OFlags::RDWR
+            | OFlags::CREATE
+            | OFlags::EXCL
+            | OFlags::NOFOLLOW
+            | OFlags::NONBLOCK
+            | OFlags::CLOEXEC;
+        let (file, created) = match openat(
+            parent,
+            leaf,
+            create_flags,
+            RustixMode::from_bits_truncate(0o600),
+        ) {
+            Ok(descriptor) => (File::from(descriptor), true),
+            Err(Errno::EXIST) => {
+                let descriptor = openat(
+                    parent,
+                    leaf,
+                    OFlags::RDWR | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                    RustixMode::empty(),
+                )
+                .map_err(PolicyError::io)?;
+                (File::from(descriptor), false)
+            }
+            Err(error) => return Err(PolicyError::io(error)),
+        };
+        if created {
+            fchmod(&file, RustixMode::from_bits_truncate(0o600)).map_err(PolicyError::io)?;
+        }
+        validate_opened_at(parent, leaf, &file, owner_uid, owner_gid)?;
+        let locked = Flock::lock(file, FlockArg::LockExclusiveNonblock)
+            .map_err(|(_file, error)| PolicyError::io(error))?;
+        validate_opened_at(parent, leaf, &locked, owner_uid, owner_gid)?;
+        if created {
+            locked.sync_all().map_err(PolicyError::io)?;
+            parent.sync_all().map_err(PolicyError::io)?;
+        }
+        let anchored = AnchoredLock {
+            parent: parent.try_clone().map_err(PolicyError::io)?,
+            leaf: leaf.to_os_string(),
+            owner_uid,
+            owner_gid,
+        };
+        Ok(Self {
+            _file: locked,
+            anchored: Some(anchored),
+        })
+    }
+
+    pub(crate) fn recheck(&self) -> Result<(), PolicyError> {
+        if let Some(anchor) = &self.anchored {
+            validate_opened_at(
+                &anchor.parent,
+                &anchor.leaf,
+                &self._file,
+                anchor.owner_uid,
+                anchor.owner_gid,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_opened_at(
+    parent: &File,
+    leaf: &std::ffi::OsStr,
+    file: &File,
+    owner_uid: u32,
+    owner_gid: u32,
+) -> Result<(), PolicyError> {
+    let opened = file.metadata().map_err(PolicyError::io)?;
+    if !opened.is_file()
+        || opened.uid() != owner_uid
+        || opened.gid() != owner_gid
+        || opened.mode() & 0o7777 != 0o600
+        || opened.nlink() != 1
+    {
+        return Err(PolicyError::stable(StableCode::ProtocolIo));
+    }
+    let linked = statat(parent, leaf, RustixAtFlags::SYMLINK_NOFOLLOW).map_err(PolicyError::io)?;
+    if FileType::from_raw_mode(linked.st_mode) != FileType::RegularFile
+        || i128::from(linked.st_dev) != i128::from(opened.dev())
+        || checked_u64(linked.st_ino)? != opened.ino()
+        || checked_u32(linked.st_uid)? != owner_uid
+        || checked_u32(linked.st_gid)? != owner_gid
+        || checked_u32(linked.st_mode)? & 0o7777 != 0o600
+        || checked_u64(linked.st_nlink)? != 1
+    {
+        return Err(PolicyError::stable(StableCode::ProtocolIo));
+    }
+    Ok(())
+}
+
+fn checked_u64<T: TryInto<u64>>(value: T) -> Result<u64, PolicyError> {
+    value.try_into().map_err(PolicyError::io)
+}
+
+fn checked_u32<T: TryInto<u32>>(value: T) -> Result<u32, PolicyError> {
+    value.try_into().map_err(PolicyError::io)
 }
 
 fn lock_path(ledger_path: &Path) -> Result<PathBuf, PolicyError> {

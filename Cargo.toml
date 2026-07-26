@@ -26,7 +26,9 @@ ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["std
 sha2 = "=0.10.9"
 getrandom = "=0.2.17"
 zeroize = { version = "=1.8.1", features = ["derive"] }
-nix = { version = "=0.29.0", default-features = false, features = ["socket", "user", "fs"] }
+nix = { version = "=0.29.0", default-features = false, features = ["socket", "user", "fs", "signal"] }
+rustix = { version = "=1.1.4", default-features = false, features = ["alloc", "event", "fs", "process", "stdio", "std"] }
+signal-hook = "=0.3.18"
 tracing = "=0.1.41"
 tracing-subscriber = { version = "=0.3.19", features = ["fmt", "json"] }
 ndarray = "0.16"

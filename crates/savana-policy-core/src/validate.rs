@@ -1,14 +1,23 @@
 use std::cmp::Ordering;
 
+use ed25519_dalek::VerifyingKey;
 use savana_kernel_protocol::{
-    AttemptKindV1, ConstraintId, Digest32, EffectiveLimits, HardLimits, KeyId, StableCode,
+    approval_display_digest, ApprovalChallengeV1, ApprovalReceiptV1, AttemptKindV1, BoundedText,
+    ConstraintId, ConversationId, Digest32, EffectiveLimits, HardLimits, KeyId,
+    MaskedDisplayBundleV1, Nonce32, OntologyEventV1, OntologySnapshotV1, PendingToolCallHandle,
+    PlannerId, PrincipalId, RegistrySnapshotV1, RunId, SignedApprovalEnvelopeV1,
+    SignedIngressEnvelopeV1, SignedOntologyEventV1, SignedOntologySnapshotV1,
+    SignedPlannerAttestationV1, SignedRegistrySnapshotV1, SignedValidatorAttestationV1, StableCode,
     ToolName, UnixMillis, ValidatorId, PROTOCOL_MAJOR, PROTOCOL_MINOR,
 };
 use sha2::{Digest, Sha256};
 
 use crate::bundle::{
-    AllowedToolV1, AuthorityKeyV1, AuthorityRoleV1, PolicyBundleV1, ToolAttemptV1,
+    encode_planner_signing_payload, encode_validator_signing_payload, AllowedToolV1,
+    AuthorityKeyV1, AuthorityRoleV1, PolicyBundleV1, ToolAttemptV1,
 };
+use crate::release::VerifiedReleaseIdentity;
+use crate::signature::{verify_signature, SignatureDomain};
 use crate::PolicyError;
 
 const MAXIMUM_PER_RUN: u32 = 65_536;
@@ -72,6 +81,284 @@ impl VerifiedAuthorityV1<'_> {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct VerifiedIngressV1 {
+    artifact: SignedIngressEnvelopeV1,
+}
+
+impl std::fmt::Debug for VerifiedIngressV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VerifiedIngressV1(<verified>)")
+    }
+}
+
+impl VerifiedIngressV1 {
+    pub const fn principal(&self) -> &PrincipalId {
+        &self.artifact.unsigned.principal
+    }
+
+    pub const fn conversation_id(&self) -> &ConversationId {
+        &self.artifact.unsigned.conversation_id
+    }
+
+    pub const fn request_digest(&self) -> Digest32 {
+        self.artifact.unsigned.request_digest
+    }
+
+    pub const fn issued_at(&self) -> UnixMillis {
+        self.artifact.unsigned.issued_at
+    }
+
+    pub const fn expires_at(&self) -> UnixMillis {
+        self.artifact.unsigned.expires_at
+    }
+
+    pub const fn nonce(&self) -> Nonce32 {
+        self.artifact.unsigned.nonce
+    }
+
+    pub const fn authority_session_id(&self) -> Nonce32 {
+        self.artifact.unsigned.authority_session_id
+    }
+
+    pub const fn authentication_context_digest(&self) -> Digest32 {
+        self.artifact.unsigned.authentication_context_digest
+    }
+
+    pub const fn key_id(&self) -> &KeyId {
+        &self.artifact.key_id
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct VerifiedPlannerAttestationV1 {
+    artifact: SignedPlannerAttestationV1,
+}
+
+impl std::fmt::Debug for VerifiedPlannerAttestationV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VerifiedPlannerAttestationV1(<verified>)")
+    }
+}
+
+impl VerifiedPlannerAttestationV1 {
+    pub const fn run_id(&self) -> RunId {
+        self.artifact.run_id
+    }
+
+    pub const fn planner_id(&self) -> &PlannerId {
+        &self.artifact.planner_id
+    }
+
+    pub const fn planner_version(&self) -> &BoundedText {
+        &self.artifact.planner_version
+    }
+
+    pub const fn prompt_digest(&self) -> Digest32 {
+        self.artifact.prompt_digest
+    }
+
+    pub const fn output_digest(&self) -> Digest32 {
+        self.artifact.output_digest
+    }
+
+    pub const fn issued_at(&self) -> UnixMillis {
+        self.artifact.issued_at
+    }
+
+    pub const fn expires_at(&self) -> UnixMillis {
+        self.artifact.expires_at
+    }
+
+    pub const fn nonce(&self) -> Nonce32 {
+        self.artifact.nonce
+    }
+
+    pub const fn key_id(&self) -> &KeyId {
+        &self.artifact.key_id
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct VerifiedRegistrySnapshotV1 {
+    artifact: SignedRegistrySnapshotV1,
+}
+
+impl std::fmt::Debug for VerifiedRegistrySnapshotV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VerifiedRegistrySnapshotV1(<verified>)")
+    }
+}
+
+impl VerifiedRegistrySnapshotV1 {
+    pub const fn snapshot(&self) -> &RegistrySnapshotV1 {
+        &self.artifact.unsigned
+    }
+
+    pub const fn key_id(&self) -> &KeyId {
+        &self.artifact.key_id
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct VerifiedOntologySnapshotV1 {
+    artifact: SignedOntologySnapshotV1,
+}
+
+impl std::fmt::Debug for VerifiedOntologySnapshotV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VerifiedOntologySnapshotV1(<verified>)")
+    }
+}
+
+impl VerifiedOntologySnapshotV1 {
+    pub const fn snapshot(&self) -> &OntologySnapshotV1 {
+        &self.artifact.unsigned
+    }
+
+    pub const fn key_id(&self) -> &KeyId {
+        &self.artifact.key_id
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct VerifiedOntologyEventV1 {
+    artifact: SignedOntologyEventV1,
+}
+
+impl std::fmt::Debug for VerifiedOntologyEventV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VerifiedOntologyEventV1(<verified>)")
+    }
+}
+
+impl VerifiedOntologyEventV1 {
+    pub const fn event(&self) -> &OntologyEventV1 {
+        &self.artifact.unsigned
+    }
+
+    pub const fn key_id(&self) -> &KeyId {
+        &self.artifact.key_id
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct VerifiedValidatorAttestationV1 {
+    artifact: SignedValidatorAttestationV1,
+}
+
+impl std::fmt::Debug for VerifiedValidatorAttestationV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VerifiedValidatorAttestationV1(<verified>)")
+    }
+}
+
+impl VerifiedValidatorAttestationV1 {
+    pub const fn validator_id(&self) -> &ValidatorId {
+        &self.artifact.validator_id
+    }
+
+    pub const fn validator_version(&self) -> &BoundedText {
+        &self.artifact.validator_version
+    }
+
+    pub const fn run_id(&self) -> RunId {
+        self.artifact.run_id
+    }
+
+    pub const fn pending(&self) -> PendingToolCallHandle {
+        self.artifact.pending
+    }
+
+    pub const fn argument_digest(&self) -> Digest32 {
+        self.artifact.argument_digest
+    }
+
+    pub const fn verdict(&self) -> savana_kernel_protocol::ValidatorVerdictV1 {
+        self.artifact.verdict
+    }
+
+    pub const fn public_reason(&self) -> StableCode {
+        self.artifact.public_reason
+    }
+
+    pub const fn issued_at(&self) -> UnixMillis {
+        self.artifact.issued_at
+    }
+
+    pub const fn expires_at(&self) -> UnixMillis {
+        self.artifact.expires_at
+    }
+
+    pub const fn nonce(&self) -> Nonce32 {
+        self.artifact.nonce
+    }
+
+    pub const fn key_id(&self) -> &KeyId {
+        &self.artifact.key_id
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+/// A canonical receipt with verified policy-selected signature, role, and
+/// validity window. It is not an authorization decision: callers must still
+/// compare the stored challenge and reserve the one-time approval ledger.
+pub struct VerifiedApprovalReceiptV1 {
+    artifact: ApprovalReceiptV1,
+}
+
+impl std::fmt::Debug for VerifiedApprovalReceiptV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VerifiedApprovalReceiptV1(<verified>)")
+    }
+}
+
+impl VerifiedApprovalReceiptV1 {
+    pub const fn receipt(&self) -> &ApprovalReceiptV1 {
+        &self.artifact
+    }
+
+    pub const fn challenge(&self) -> &ApprovalChallengeV1 {
+        &self.artifact.unsigned.challenge
+    }
+
+    pub const fn key_id(&self) -> &KeyId {
+        &self.artifact.unsigned.approval_key_id
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+/// A canonical envelope authenticated by the installation-pinned daemon and
+/// bound to a verified policy. A live-session boot binding is still the
+/// responsibility of the Authority/daemon integration.
+pub struct VerifiedApprovalEnvelopeV1 {
+    artifact: SignedApprovalEnvelopeV1,
+}
+
+impl std::fmt::Debug for VerifiedApprovalEnvelopeV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VerifiedApprovalEnvelopeV1(<verified>)")
+    }
+}
+
+impl VerifiedApprovalEnvelopeV1 {
+    pub const fn challenge(&self) -> &ApprovalChallengeV1 {
+        &self.artifact.unsigned.challenge
+    }
+
+    pub const fn display(&self) -> &MaskedDisplayBundleV1 {
+        &self.artifact.unsigned.display
+    }
+
+    pub const fn display_digest(&self) -> Digest32 {
+        self.artifact.unsigned.display_digest
+    }
+
+    pub const fn daemon_key_id(&self) -> &KeyId {
+        &self.artifact.daemon_key_id
+    }
+}
+
 impl VerifiedPolicyV1 {
     pub const fn identity(&self) -> PolicyIdentity {
         self.identity
@@ -116,6 +403,446 @@ impl VerifiedPolicyV1 {
             })
             .map(|authority| VerifiedAuthorityV1 { authority })
     }
+
+    pub fn verify_ingress(
+        &self,
+        canonical_artifact: &[u8],
+        now: UnixMillis,
+    ) -> Result<VerifiedIngressV1, PolicyError> {
+        let artifact: SignedIngressEnvelopeV1 =
+            decode_canonical_artifact(canonical_artifact, self.effective_limits.frame_bytes())?;
+        let authority = self.producer_authority(
+            &artifact.key_id,
+            AuthorityRoleV1::Ingress,
+            StableCode::AttestationInvalidSignature,
+        )?;
+        let payload = encode_canonical(&artifact.unsigned)?;
+        verify_signature(
+            SignatureDomain::IngressV1,
+            &payload,
+            &artifact.signature,
+            &authority.public_key,
+            StableCode::AttestationInvalidSignature,
+        )?;
+        if is_zero_nonce(artifact.unsigned.nonce)
+            || is_zero_nonce(artifact.unsigned.authority_session_id)
+        {
+            return Err(PolicyError::stable(StableCode::AttestationBindingMismatch));
+        }
+        self.validate_artifact_window(
+            artifact.unsigned.issued_at,
+            artifact.unsigned.expires_at,
+            now,
+            authority,
+            StableCode::AttestationBindingMismatch,
+        )?;
+        Ok(VerifiedIngressV1 { artifact })
+    }
+
+    pub fn verify_planner_attestation(
+        &self,
+        canonical_artifact: &[u8],
+        now: UnixMillis,
+    ) -> Result<VerifiedPlannerAttestationV1, PolicyError> {
+        let artifact: SignedPlannerAttestationV1 =
+            decode_canonical_artifact(canonical_artifact, self.effective_limits.frame_bytes())?;
+        let authority = self.producer_authority(
+            &artifact.key_id,
+            AuthorityRoleV1::Planner,
+            StableCode::AttestationInvalidSignature,
+        )?;
+        let payload = encode_planner_signing_payload(&artifact)?;
+        verify_signature(
+            SignatureDomain::PlannerV1,
+            &payload,
+            &artifact.signature,
+            &authority.public_key,
+            StableCode::AttestationInvalidSignature,
+        )?;
+        if artifact.planner_id.as_str() != artifact.key_id.as_str() {
+            return Err(PolicyError::stable(StableCode::AttestationBindingMismatch));
+        }
+        if is_zero_nonce(artifact.nonce) {
+            return Err(PolicyError::stable(StableCode::AttestationBindingMismatch));
+        }
+        self.validate_artifact_window(
+            artifact.issued_at,
+            artifact.expires_at,
+            now,
+            authority,
+            StableCode::AttestationBindingMismatch,
+        )?;
+        Ok(VerifiedPlannerAttestationV1 { artifact })
+    }
+
+    pub fn verify_registry_snapshot(
+        &self,
+        canonical_artifact: &[u8],
+        now: UnixMillis,
+    ) -> Result<VerifiedRegistrySnapshotV1, PolicyError> {
+        let artifact: SignedRegistrySnapshotV1 =
+            decode_canonical_artifact(canonical_artifact, self.effective_limits.frame_bytes())?;
+        let authority = self.producer_authority(
+            &artifact.key_id,
+            AuthorityRoleV1::Registry,
+            StableCode::RegistryInvalidSignature,
+        )?;
+        let payload = encode_canonical(&artifact.unsigned)?;
+        verify_signature(
+            SignatureDomain::RegistryV1,
+            &payload,
+            &artifact.signature,
+            &authority.public_key,
+            StableCode::RegistryInvalidSignature,
+        )?;
+        self.validate_artifact_window(
+            artifact.unsigned.issued_at,
+            artifact.unsigned.expires_at,
+            now,
+            authority,
+            StableCode::AttestationBindingMismatch,
+        )?;
+        Ok(VerifiedRegistrySnapshotV1 { artifact })
+    }
+
+    pub fn verify_ontology_snapshot(
+        &self,
+        canonical_artifact: &[u8],
+        now: UnixMillis,
+    ) -> Result<VerifiedOntologySnapshotV1, PolicyError> {
+        let artifact: SignedOntologySnapshotV1 =
+            decode_canonical_artifact(canonical_artifact, self.effective_limits.frame_bytes())?;
+        let authority = self.producer_authority(
+            &artifact.key_id,
+            AuthorityRoleV1::Ontology,
+            StableCode::OntologyInvalidSignature,
+        )?;
+        if !self
+            .bundle
+            .ontology
+            .snapshot_authority_key_ids
+            .contains(&artifact.key_id)
+        {
+            return Err(PolicyError::stable(StableCode::OntologyInvalidSignature));
+        }
+        let payload = encode_canonical(&artifact.unsigned)?;
+        verify_signature(
+            SignatureDomain::OntologySnapshotV1,
+            &payload,
+            &artifact.signature,
+            &authority.public_key,
+            StableCode::OntologyInvalidSignature,
+        )?;
+        if u32::try_from(artifact.unsigned.entries.len()).map_or(true, |entries| {
+            entries > self.bundle.ontology.max_snapshot_entries
+        }) {
+            return Err(PolicyError::stable(StableCode::PolicyLimitExceeded));
+        }
+        self.validate_artifact_window(
+            artifact.unsigned.issued_at,
+            artifact.unsigned.expires_at,
+            now,
+            authority,
+            StableCode::AttestationBindingMismatch,
+        )?;
+        Ok(VerifiedOntologySnapshotV1 { artifact })
+    }
+
+    pub fn verify_ontology_event(
+        &self,
+        canonical_artifact: &[u8],
+        now: UnixMillis,
+    ) -> Result<VerifiedOntologyEventV1, PolicyError> {
+        let artifact: SignedOntologyEventV1 =
+            decode_canonical_artifact(canonical_artifact, self.effective_limits.frame_bytes())?;
+        let authority = self.producer_authority(
+            &artifact.key_id,
+            AuthorityRoleV1::Ontology,
+            StableCode::OntologyInvalidSignature,
+        )?;
+        if !self
+            .bundle
+            .ontology
+            .snapshot_authority_key_ids
+            .contains(&artifact.key_id)
+        {
+            return Err(PolicyError::stable(StableCode::OntologyInvalidSignature));
+        }
+        let payload = encode_canonical(&artifact.unsigned)?;
+        verify_signature(
+            SignatureDomain::OntologyEventV1,
+            &payload,
+            &artifact.signature,
+            &authority.public_key,
+            StableCode::OntologyInvalidSignature,
+        )?;
+        self.validate_artifact_window(
+            artifact.unsigned.issued_at,
+            artifact.unsigned.expires_at,
+            now,
+            authority,
+            StableCode::AttestationBindingMismatch,
+        )?;
+        Ok(VerifiedOntologyEventV1 { artifact })
+    }
+
+    pub fn verify_validator_attestation(
+        &self,
+        canonical_artifact: &[u8],
+        now: UnixMillis,
+    ) -> Result<VerifiedValidatorAttestationV1, PolicyError> {
+        let artifact: SignedValidatorAttestationV1 =
+            decode_canonical_artifact(canonical_artifact, self.effective_limits.frame_bytes())?;
+        let authority = self.producer_authority(
+            &artifact.key_id,
+            AuthorityRoleV1::Validator,
+            StableCode::AttestationInvalidSignature,
+        )?;
+        let payload = encode_validator_signing_payload(&artifact)?;
+        verify_signature(
+            SignatureDomain::ValidatorV1,
+            &payload,
+            &artifact.signature,
+            &authority.public_key,
+            StableCode::AttestationInvalidSignature,
+        )?;
+        if artifact.validator_id.as_str() != artifact.key_id.as_str() {
+            return Err(PolicyError::stable(StableCode::AttestationBindingMismatch));
+        }
+        if is_zero_nonce(artifact.nonce) {
+            return Err(PolicyError::stable(StableCode::AttestationBindingMismatch));
+        }
+        self.validate_artifact_window(
+            artifact.issued_at,
+            artifact.expires_at,
+            now,
+            authority,
+            StableCode::AttestationBindingMismatch,
+        )?;
+        Ok(VerifiedValidatorAttestationV1 { artifact })
+    }
+
+    pub fn verify_approval_receipt(
+        &self,
+        canonical_artifact: &[u8],
+        now: UnixMillis,
+    ) -> Result<VerifiedApprovalReceiptV1, PolicyError> {
+        let artifact: ApprovalReceiptV1 =
+            decode_canonical_artifact(canonical_artifact, self.effective_limits.frame_bytes())?;
+        let authority = self.producer_authority(
+            &artifact.unsigned.approval_key_id,
+            AuthorityRoleV1::Approval,
+            StableCode::ApprovalInvalidSignature,
+        )?;
+        let payload = encode_canonical(&artifact.unsigned)?;
+        verify_signature(
+            SignatureDomain::ApprovalReceiptV1,
+            &payload,
+            &artifact.signature,
+            &authority.public_key,
+            StableCode::ApprovalInvalidSignature,
+        )?;
+        if artifact.unsigned.challenge.policy_version != self.bundle.policy_version {
+            return Err(PolicyError::stable(StableCode::ApprovalBindingMismatch));
+        }
+        if is_zero_nonce(artifact.unsigned.challenge.challenge_id)
+            || is_zero_nonce(artifact.unsigned.challenge.nonce)
+            || is_zero_nonce(artifact.unsigned.receipt_nonce)
+        {
+            return Err(PolicyError::stable(StableCode::ApprovalBindingMismatch));
+        }
+        self.validate_artifact_window(
+            artifact.unsigned.challenge.issued_at,
+            artifact.unsigned.challenge.expires_at,
+            now,
+            authority,
+            StableCode::ApprovalBindingMismatch,
+        )?;
+        self.validate_artifact_window(
+            artifact.unsigned.issued_at,
+            artifact.unsigned.expires_at,
+            now,
+            authority,
+            StableCode::ApprovalBindingMismatch,
+        )?;
+        if artifact.unsigned.issued_at.get() < artifact.unsigned.challenge.issued_at.get()
+            || artifact.unsigned.expires_at.get() > artifact.unsigned.challenge.expires_at.get()
+            || window_millis(
+                artifact.unsigned.challenge.issued_at,
+                artifact.unsigned.challenge.expires_at,
+            ) > u64::from(self.bundle.release.challenge_ttl_seconds) * 1_000
+            || window_millis(artifact.unsigned.issued_at, artifact.unsigned.expires_at)
+                > u64::from(self.bundle.release.receipt_ttl_seconds) * 1_000
+        {
+            return Err(PolicyError::stable(StableCode::ApprovalBindingMismatch));
+        }
+        Ok(VerifiedApprovalReceiptV1 { artifact })
+    }
+
+    fn producer_authority(
+        &self,
+        key_id: &KeyId,
+        role: AuthorityRoleV1,
+        invalid_code: StableCode,
+    ) -> Result<ProducerAuthority, PolicyError> {
+        let authority = self
+            .authority(key_id, role)
+            .ok_or_else(|| PolicyError::stable(invalid_code))?;
+        Ok(ProducerAuthority {
+            public_key: *authority.public_key(),
+            not_before: authority.not_before(),
+            not_after: authority.not_after(),
+        })
+    }
+
+    fn validate_artifact_window(
+        &self,
+        issued_at: UnixMillis,
+        expires_at: UnixMillis,
+        now: UnixMillis,
+        authority: ProducerAuthority,
+        binding_code: StableCode,
+    ) -> Result<(), PolicyError> {
+        if issued_at.get() >= expires_at.get() {
+            return Err(malformed());
+        }
+        if issued_at.get() < self.bundle.issued_at.get()
+            || expires_at.get() > self.bundle.expires_at.get()
+            || issued_at.get() < authority.not_before.get()
+            || expires_at.get() > authority.not_after.get()
+        {
+            return Err(PolicyError::stable(binding_code));
+        }
+        if now.get() < issued_at.get()
+            || now.get() >= expires_at.get()
+            || now.get() < self.bundle.issued_at.get()
+            || now.get() >= self.bundle.expires_at.get()
+            || now.get() < authority.not_before.get()
+            || now.get() >= authority.not_after.get()
+        {
+            return Err(PolicyError::stable(StableCode::AttestationExpired));
+        }
+        Ok(())
+    }
+}
+
+impl VerifiedReleaseIdentity {
+    pub fn verify_approval_envelope(
+        &self,
+        policy: &VerifiedPolicyV1,
+        canonical_artifact: &[u8],
+        now: UnixMillis,
+    ) -> Result<VerifiedApprovalEnvelopeV1, PolicyError> {
+        let artifact: SignedApprovalEnvelopeV1 =
+            decode_canonical_artifact(canonical_artifact, policy.effective_limits().frame_bytes())?;
+        let pinned = self.daemon_identity();
+        if artifact.daemon_key_id != *pinned.key_id()
+            || artifact.unsigned.daemon_identity.daemon_key_id != *pinned.key_id()
+        {
+            return Err(PolicyError::stable(StableCode::ApprovalInvalidSignature));
+        }
+        let payload = encode_canonical(&artifact.unsigned)?;
+        verify_signature(
+            SignatureDomain::ApprovalEnvelopeV1,
+            &payload,
+            &artifact.signature,
+            pinned.public_key(),
+            StableCode::ApprovalInvalidSignature,
+        )?;
+
+        let identity = &artifact.unsigned.daemon_identity;
+        let challenge = &artifact.unsigned.challenge;
+        if identity.release_digest != self.release_digest()
+            || identity.model_manifest_digest != self.model_manifest_digest()
+            || identity.approval_key_set_digest != self.approval_key_set_digest()
+            || identity.resource_profile_digest != self.resource_profile_digest()
+            || identity.resource_profile_digest != policy.resource_profile_digest()
+            || identity.policy_digest != policy.identity.digest
+            || identity.policy_version != policy.identity.policy_version
+            || policy.active_release_target_id() != self.release_target_id()
+            || identity.protocol.major != self.protocol_major()
+            || identity.protocol.minor < self.minimum_minor()
+            || identity.protocol.minor > self.maximum_minor()
+            || identity.policy_version < self.minimum_policy_version()
+            || challenge.boot_id != identity.boot_id
+            || challenge.policy_version != identity.policy_version
+        {
+            return Err(PolicyError::stable(StableCode::ApprovalBindingMismatch));
+        }
+        if is_zero_nonce(challenge.challenge_id) || is_zero_nonce(challenge.nonce) {
+            return Err(PolicyError::stable(StableCode::ApprovalBindingMismatch));
+        }
+        if artifact.unsigned.display_digest != approval_display_digest(&artifact.unsigned.display)?
+        {
+            return Err(PolicyError::stable(StableCode::ApprovalBindingMismatch));
+        }
+        if challenge.issued_at.get() >= challenge.expires_at.get() {
+            return Err(malformed());
+        }
+        if challenge.issued_at.get() < self.issued_at().get()
+            || challenge.expires_at.get() > self.expires_at().get()
+            || challenge.issued_at.get() < policy.bundle.issued_at.get()
+            || challenge.expires_at.get() > policy.bundle.expires_at.get()
+            || window_millis(challenge.issued_at, challenge.expires_at)
+                > u64::from(policy.bundle.release.challenge_ttl_seconds) * 1_000
+        {
+            return Err(PolicyError::stable(StableCode::ApprovalBindingMismatch));
+        }
+        if now.get() < challenge.issued_at.get()
+            || now.get() >= challenge.expires_at.get()
+            || now.get() < self.issued_at().get()
+            || now.get() >= self.expires_at().get()
+            || now.get() < policy.bundle.issued_at.get()
+            || now.get() >= policy.bundle.expires_at.get()
+        {
+            return Err(PolicyError::stable(StableCode::AttestationExpired));
+        }
+        Ok(VerifiedApprovalEnvelopeV1 { artifact })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ProducerAuthority {
+    public_key: [u8; 32],
+    not_before: UnixMillis,
+    not_after: UnixMillis,
+}
+
+fn decode_canonical_artifact<'bytes, T>(
+    bytes: &'bytes [u8],
+    maximum_bytes: u64,
+) -> Result<T, PolicyError>
+where
+    T: minicbor::Decode<'bytes, ()> + minicbor::Encode<()>,
+{
+    if u64::try_from(bytes.len()).map_or(true, |length| length > maximum_bytes) {
+        return Err(PolicyError::stable(StableCode::PolicyLimitExceeded));
+    }
+    let mut decoder = minicbor::Decoder::new(bytes);
+    let value = T::decode(&mut decoder, &mut ()).map_err(|_| malformed())?;
+    if decoder.position() != bytes.len() {
+        return Err(malformed());
+    }
+    let canonical = encode_canonical(&value)?;
+    if canonical != bytes {
+        return Err(malformed());
+    }
+    Ok(value)
+}
+
+fn encode_canonical<T>(value: &T) -> Result<Vec<u8>, PolicyError>
+where
+    T: minicbor::Encode<()>,
+{
+    minicbor::to_vec(value).map_err(|_| malformed())
+}
+
+fn window_millis(issued_at: UnixMillis, expires_at: UnixMillis) -> u64 {
+    expires_at.get().saturating_sub(issued_at.get())
+}
+
+fn is_zero_nonce(value: Nonce32) -> bool {
+    value.as_bytes() == &[0; 32]
 }
 
 pub(crate) fn validate_policy(
@@ -277,14 +1004,21 @@ fn validate_ordering(bundle: &PolicyBundleV1) -> Result<(), PolicyError> {
 
 fn validate_authorities(bundle: &PolicyBundleV1) -> Result<(), PolicyError> {
     let mut role_present = [false; 8];
-    for authority in &bundle.authorities {
+    for (index, authority) in bundle.authorities.iter().enumerate() {
         if authority.epoch == 0
             || authority.public_key == [0; 32]
+            || !usable_verifying_key(&authority.public_key)
             || authority.not_before.get() >= authority.not_after.get()
         {
             return Err(malformed());
         }
         if authority_valid_for_policy(authority, bundle) {
+            if bundle.authorities[..index].iter().any(|prior| {
+                authority_valid_for_policy(prior, bundle)
+                    && prior.public_key == authority.public_key
+            }) {
+                return Err(malformed());
+            }
             let present = role_present
                 .get_mut(usize::from(authority.role.tag()))
                 .ok_or_else(malformed)?;
@@ -295,6 +1029,10 @@ fn validate_authorities(bundle: &PolicyBundleV1) -> Result<(), PolicyError> {
         return Err(malformed());
     }
     Ok(())
+}
+
+fn usable_verifying_key(public_key: &[u8; 32]) -> bool {
+    VerifyingKey::from_bytes(public_key).is_ok_and(|key| !key.is_weak())
 }
 
 fn validate_tools_and_attempts(bundle: &PolicyBundleV1) -> Result<(), PolicyError> {

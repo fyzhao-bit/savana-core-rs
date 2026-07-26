@@ -1,7 +1,11 @@
+use ed25519_dalek::{Signature, SigningKey};
 use savana_kernel_protocol::{
-    AttemptKindV1, ConstraintId, HardLimits, ResourceLimitsV1, StableCode, ToolName, ValidatorId,
-    PROTOCOL_MAJOR, PROTOCOL_MINOR,
+    encode_client_message, encode_server_message, AttemptKindV1, ClientMessageV1, ConstraintId,
+    HardLimits, ResourceLimitsV1, StableCode, ToolName, ValidatorId, PROTOCOL_MAJOR,
+    PROTOCOL_MINOR,
 };
+
+mod support;
 
 type OneOverCase = (&'static str, fn(&mut ResourceLimitsV1));
 
@@ -33,6 +37,32 @@ fn compiled_request() -> ResourceLimitsV1 {
         ner_failure_threshold: limits.ner_failure_threshold(),
         request_deadline_ms: limits.request_deadline_ms(),
     }
+}
+
+#[test]
+fn committed_handshake_vectors_match_the_v1_encoders() {
+    let expected_client = include_bytes!("../../../vectors/kerneld/client-hello-v1.cbor");
+    let client = encode_client_message(&ClientMessageV1::Hello(support::client_hello())).unwrap();
+    assert_eq!(client.as_slice(), expected_client);
+
+    let expected_server = include_bytes!("../../../vectors/kerneld/server-hello-v1.cbor");
+    let server_message = support::server_message();
+    let server = encode_server_message(&server_message).unwrap();
+    assert_eq!(server.as_slice(), expected_server);
+
+    let savana_kernel_protocol::ServerMessageV1::Hello(signed_hello) = server_message else {
+        panic!("fixed server vector is a hello");
+    };
+    let transcript = minicbor::to_vec(&signed_hello.transcript).unwrap();
+    let mut signature_input = b"SAVANA_DAEMON_HELLO_V1\0".to_vec();
+    signature_input.extend_from_slice(&transcript);
+    SigningKey::from_bytes(&[0x61; 32])
+        .verifying_key()
+        .verify_strict(
+            &signature_input,
+            &Signature::from_bytes(signed_hello.signature.as_bytes()),
+        )
+        .unwrap();
 }
 
 fn lowered_request() -> ResourceLimitsV1 {

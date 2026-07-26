@@ -1,5 +1,12 @@
 use crate::{ProtocolError, StableCode};
 
+pub(crate) fn canonical_text_cmp(left: &str, right: &str) -> std::cmp::Ordering {
+    left.as_bytes()
+        .len()
+        .cmp(&right.as_bytes().len())
+        .then_with(|| left.as_bytes().cmp(right.as_bytes()))
+}
+
 macro_rules! fixed_bytes {
     ($name:ident, $length:literal) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -63,12 +70,12 @@ macro_rules! bounded_id {
         pub struct $name(String);
 
         impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, ProtocolError> {
-                let value = value.into();
-                if !valid_bounded_text(&value) {
+            pub fn new(value: impl AsRef<str>) -> Result<Self, ProtocolError> {
+                let value = value.as_ref();
+                if !valid_bounded_text(value) {
                     return Err(ProtocolError::stable(StableCode::ProtocolMalformedCbor));
                 }
-                Ok(Self(value))
+                Ok(Self(value.to_owned()))
             }
 
             pub fn as_str(&self) -> &str {
@@ -88,7 +95,10 @@ macro_rules! bounded_id {
             type Error = ProtocolError;
 
             fn try_from(value: String) -> Result<Self, Self::Error> {
-                Self::new(value)
+                if !valid_bounded_text(&value) {
+                    return Err(ProtocolError::stable(StableCode::ProtocolMalformedCbor));
+                }
+                Ok(Self(value))
             }
         }
 
@@ -187,7 +197,7 @@ impl<'bytes, C> minicbor::Decode<'bytes, C> for AttemptKindV1 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, minicbor::Encode, minicbor::Decode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, minicbor::Encode)]
 #[cbor(array)]
 pub struct ProtocolVersion {
     #[n(0)]
@@ -199,6 +209,22 @@ pub struct ProtocolVersion {
 impl ProtocolVersion {
     pub const fn new(major: u16, minor: u16) -> Self {
         Self { major, minor }
+    }
+}
+
+impl<'bytes, C> minicbor::Decode<'bytes, C> for ProtocolVersion {
+    fn decode(
+        decoder: &mut minicbor::Decoder<'bytes>,
+        _context: &mut C,
+    ) -> Result<Self, minicbor::decode::Error> {
+        let position = decoder.position();
+        if decoder.array()? != Some(2) {
+            return Err(minicbor::decode::Error::message(
+                StableCode::ProtocolMalformedCbor.as_str(),
+            )
+            .at(position));
+        }
+        Ok(Self::new(decoder.u16()?, decoder.u16()?))
     }
 }
 

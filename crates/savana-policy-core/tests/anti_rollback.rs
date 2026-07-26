@@ -1,6 +1,7 @@
 mod support;
 
 use std::fs;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use savana_kernel_protocol::{Digest32, StableCode};
 use savana_policy_core::{PolicyStore, PolicyVerifier};
@@ -15,6 +16,48 @@ fn accept(store: &mut PolicyStore, policy: &support::TestPolicy) {
     store
         .verify_and_accept(&bundle, &signature, support::unix_now())
         .unwrap();
+}
+
+#[test]
+fn anchored_store_persists_and_reopens_without_rewriting_equal_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    fs::create_dir(&state).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+    let state_metadata = fs::metadata(&state).unwrap();
+    let ledger = state.join("policy-ledger-v1.cbor");
+    let mut first = PolicyStore::open_anchored(
+        &ledger,
+        state_metadata.uid(),
+        state_metadata.gid(),
+        support::verifier(),
+    )
+    .unwrap();
+    let policy = support::valid_policy(7, 3);
+    accept(&mut first, &policy);
+    let persisted = fs::symlink_metadata(&ledger).unwrap();
+    assert!(persisted.is_file());
+    assert_eq!(persisted.uid(), state_metadata.uid());
+    assert_eq!(persisted.gid(), state_metadata.gid());
+    assert_eq!(persisted.mode() & 0o7777, 0o600);
+    assert_eq!(persisted.nlink(), 1);
+    let persisted_inode = (persisted.dev(), persisted.ino());
+    drop(first);
+
+    let mut restarted = PolicyStore::open_anchored(
+        &ledger,
+        state_metadata.uid(),
+        state_metadata.gid(),
+        support::verifier(),
+    )
+    .unwrap();
+    assert_eq!(
+        restarted.ledger_identity().unwrap().highest_policy_version,
+        7
+    );
+    accept(&mut restarted, &policy);
+    let unchanged = fs::symlink_metadata(&ledger).unwrap();
+    assert_eq!((unchanged.dev(), unchanged.ino()), persisted_inode);
 }
 
 #[test]

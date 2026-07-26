@@ -156,7 +156,9 @@ pub fn valid_policy(policy_version: u64, key_epoch: u64) -> TestPolicy {
         .map(|role| Authority {
             key_id: format!("role-0{role}"),
             role,
-            public_key: [role + 1; 32],
+            public_key: SigningKey::from_bytes(&[0x70 + role; 32])
+                .verifying_key()
+                .to_bytes(),
             epoch: 1,
             not_before: 900,
             not_after: 4_100,

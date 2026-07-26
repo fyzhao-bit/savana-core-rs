@@ -1,11 +1,14 @@
 use std::cmp::Ordering;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use nix::fcntl::OFlag;
+use rustix::fs::{open as rustix_open, openat, statat, AtFlags, Dir, FileType, Mode, OFlags, Stat};
 use savana_kernel_protocol::{
     ClientId, Digest32, HardLimits, KeyId, Signature64, StableCode, UnixMillis, PROTOCOL_MAJOR,
     PROTOCOL_MINOR,
@@ -22,6 +25,21 @@ const MAXIMUM_SCHEMA_VERSIONS: u64 = 16;
 const MAXIMUM_CLIENTS: u64 = 16;
 const MAXIMUM_POLICY_ROOTS: u64 = 16;
 const MAXIMUM_RELATIVE_PATH_BYTES: usize = 256;
+const MAXIMUM_RELEASE_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
+const MAXIMUM_INSTALLATION_PROFILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAXIMUM_DEFAULT_POLICY_BYTES: u64 = 8 * 1024 * 1024;
+const MAXIMUM_SIGNED_MODEL_MANIFEST_BYTES: u64 = 256 * 1024;
+const MAXIMUM_MODEL_ASSET_BYTES: u64 = 256 * 1024 * 1024;
+const MAXIMUM_MODEL_ASSETS_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+const MAXIMUM_DAEMON_EXECUTABLE_BYTES: u64 = 128 * 1024 * 1024;
+const MAXIMUM_RUNTIME_BYTES: u64 = 256 * 1024 * 1024;
+const MAXIMUM_OTHER_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
+const MAXIMUM_COMPLETE_STAGE_BYTES: u64 = 1024 * 1024 * 1024;
+
+#[cfg(target_os = "linux")]
+const COMPILED_RELEASE_STAGE_PATH: &str = "/opt/savana/kernel/release";
+#[cfg(target_os = "macos")]
+const COMPILED_RELEASE_STAGE_PATH: &str = "/Library/Application Support/Savana/Kernel/release";
 
 const LINUX_SOCKET_PATH: &str = "/run/savana/kernel/kerneld.sock";
 const LINUX_POLICY_PATH: &str = "/etc/savana/kernel/selected-policy-v1.cbor";
@@ -56,6 +74,429 @@ pub struct ReleaseTrustRootV1 {
 pub struct ReleaseVerifier {
     roots: Vec<ReleaseTrustRootV1>,
     allowed_release_digests: Vec<Digest32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NodeIdentity {
+    dev: i128,
+    ino: u64,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    nlink: u64,
+    length: u64,
+}
+
+impl NodeIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            dev: i128::from(metadata.dev()),
+            ino: metadata.ino(),
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+            mode: metadata.mode(),
+            nlink: metadata.nlink(),
+            length: metadata.len(),
+        }
+    }
+
+    fn from_stat(stat: &Stat) -> Result<Self, PolicyError> {
+        Ok(Self {
+            dev: i128::from(stat.st_dev),
+            ino: checked_u64(stat.st_ino)?,
+            uid: checked_u32(stat.st_uid)?,
+            gid: checked_u32(stat.st_gid)?,
+            mode: checked_u32(stat.st_mode)?,
+            nlink: checked_u64(stat.st_nlink)?,
+            length: checked_u64(stat.st_size)?,
+        })
+    }
+
+    const fn same_inode(self, other: Self) -> bool {
+        self.dev == other.dev && self.ino == other.ino
+    }
+
+    const fn permissions(self) -> u32 {
+        self.mode & 0o7777
+    }
+}
+
+fn checked_u64<T: TryInto<u64>>(value: T) -> Result<u64, PolicyError> {
+    value.try_into().map_err(|_| release_mismatch())
+}
+
+fn checked_u32<T: TryInto<u32>>(value: T) -> Result<u32, PolicyError> {
+    value.try_into().map_err(|_| release_mismatch())
+}
+
+struct HeldFile {
+    file: File,
+    parent: File,
+    leaf: OsString,
+    identity: NodeIdentity,
+}
+
+impl HeldFile {
+    fn recheck(&self) -> Result<(), PolicyError> {
+        let descriptor_identity =
+            NodeIdentity::from_metadata(&self.file.metadata().map_err(|_| release_mismatch())?);
+        let pathname_identity = stat_identity(&self.parent, &self.leaf)?;
+        if descriptor_identity != self.identity || pathname_identity != self.identity {
+            return Err(release_mismatch());
+        }
+        Ok(())
+    }
+
+    fn read_bounded(&self, maximum: u64) -> Result<Vec<u8>, PolicyError> {
+        self.recheck()?;
+        if self.identity.length > maximum {
+            return Err(release_mismatch());
+        }
+        let capacity = usize::try_from(self.identity.length).map_err(|_| release_mismatch())?;
+        let mut bytes = vec![0_u8; capacity];
+        let mut offset = 0_usize;
+        while offset < bytes.len() {
+            let file_offset = u64::try_from(offset).map_err(|_| release_mismatch())?;
+            let read = self
+                .file
+                .read_at(&mut bytes[offset..], file_offset)
+                .map_err(|_| release_mismatch())?;
+            if read == 0 {
+                return Err(release_mismatch());
+            }
+            offset = offset.checked_add(read).ok_or_else(release_mismatch)?;
+        }
+        self.recheck()?;
+        Ok(bytes)
+    }
+
+    fn hash_exact(&self, expected_length: u64) -> Result<Digest32, PolicyError> {
+        self.recheck()?;
+        if self.identity.length != expected_length {
+            return Err(release_mismatch());
+        }
+        let mut hasher = Sha256::new();
+        let mut offset = 0_u64;
+        let mut buffer = [0_u8; 16 * 1024];
+        while offset < expected_length {
+            let remaining = expected_length
+                .checked_sub(offset)
+                .ok_or_else(release_mismatch)?;
+            let wanted = usize::try_from(remaining.min(buffer.len() as u64))
+                .map_err(|_| release_mismatch())?;
+            let read = self
+                .file
+                .read_at(&mut buffer[..wanted], offset)
+                .map_err(|_| release_mismatch())?;
+            if read == 0 {
+                return Err(release_mismatch());
+            }
+            hasher.update(&buffer[..read]);
+            offset = offset
+                .checked_add(u64::try_from(read).map_err(|_| release_mismatch())?)
+                .ok_or_else(release_mismatch)?;
+        }
+        self.recheck()?;
+        Ok(Digest32::new(hasher.finalize().into()))
+    }
+}
+
+pub struct ReleaseStage {
+    stage: File,
+    stage_path: PathBuf,
+    stage_identity: NodeIdentity,
+    owner_uid: u32,
+    owner_gid: u32,
+    manifest: HeldFile,
+    signature: HeldFile,
+    executable: HeldFile,
+}
+
+impl std::fmt::Debug for ReleaseStage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ReleaseStage(<descriptor-anchored>)")
+    }
+}
+
+impl ReleaseStage {
+    pub fn open_compiled(current_executable: &Path) -> Result<Self, PolicyError> {
+        Self::open_at(
+            Path::new(COMPILED_RELEASE_STAGE_PATH),
+            current_executable,
+            0,
+            0,
+        )
+    }
+
+    #[cfg(test)]
+    fn open_for_test(
+        stage_path: &Path,
+        current_executable: &Path,
+        owner_uid: u32,
+        owner_gid: u32,
+    ) -> Result<Self, PolicyError> {
+        Self::open_at(stage_path, current_executable, owner_uid, owner_gid)
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn open_mapped_for_test_support(
+        stage_path: &Path,
+        current_executable: &Path,
+        owner_uid: u32,
+        owner_gid: u32,
+    ) -> Result<Self, PolicyError> {
+        Self::open_at(stage_path, current_executable, owner_uid, owner_gid)
+    }
+
+    fn open_at(
+        stage_path: &Path,
+        current_executable: &Path,
+        owner_uid: u32,
+        owner_gid: u32,
+    ) -> Result<Self, PolicyError> {
+        let expected_executable = stage_path.join("bin/savana-kerneld");
+        if current_executable.as_os_str().as_bytes() != expected_executable.as_os_str().as_bytes() {
+            return Err(release_mismatch());
+        }
+
+        let stage = open_absolute_directory_chain(stage_path)?;
+        let stage_metadata = stage.metadata().map_err(|_| release_mismatch())?;
+        let stage_identity = NodeIdentity::from_metadata(&stage_metadata);
+        validate_directory(&stage_metadata, stage_identity, owner_uid, owner_gid)?;
+
+        let release = open_verified_directory(&stage, OsStr::new("release"), owner_uid, owner_gid)?;
+        let manifest = open_verified_file(
+            &release,
+            OsStr::new("release-manifest-v1.cbor"),
+            owner_uid,
+            owner_gid,
+            0o444,
+            FileLength::Maximum(MAXIMUM_RELEASE_MANIFEST_BYTES),
+        )?;
+        let signature = open_verified_file(
+            &release,
+            OsStr::new("release-manifest-v1.sig"),
+            owner_uid,
+            owner_gid,
+            0o444,
+            FileLength::Exact(64),
+        )?;
+        let bin = open_verified_directory(&stage, OsStr::new("bin"), owner_uid, owner_gid)?;
+        let executable = open_verified_file(
+            &bin,
+            OsStr::new("savana-kerneld"),
+            owner_uid,
+            owner_gid,
+            0o555,
+            FileLength::Maximum(MAXIMUM_DAEMON_EXECUTABLE_BYTES),
+        )?;
+
+        Ok(Self {
+            stage,
+            stage_path: stage_path.to_path_buf(),
+            stage_identity,
+            owner_uid,
+            owner_gid,
+            manifest,
+            signature,
+            executable,
+        })
+    }
+
+    fn open_payload(&self, payload: &ReleaseFileV1) -> Result<HeldFile, PolicyError> {
+        if !valid_relative_path(&payload.relative_path)
+            || !allowed_payload_path(&payload.relative_path)
+        {
+            return Err(release_mismatch());
+        }
+        let mut parent = self.stage.try_clone().map_err(|_| release_mismatch())?;
+        let mut components = Path::new(&payload.relative_path).components().peekable();
+        while let Some(component) = components.next() {
+            let Component::Normal(component) = component else {
+                return Err(release_mismatch());
+            };
+            if components.peek().is_none() {
+                let permissions = if payload.relative_path == "bin/savana-kerneld" {
+                    0o555
+                } else {
+                    0o444
+                };
+                return open_verified_file(
+                    &parent,
+                    component,
+                    self.owner_uid,
+                    self.owner_gid,
+                    permissions,
+                    FileLength::Exact(payload.byte_length),
+                );
+            }
+            parent = open_verified_directory(&parent, component, self.owner_uid, self.owner_gid)?;
+        }
+        Err(release_mismatch())
+    }
+
+    fn recheck_payload_path(
+        &self,
+        payload: &ReleaseFileV1,
+        identity: NodeIdentity,
+    ) -> Result<(), PolicyError> {
+        let reopened = self.open_payload(payload)?;
+        if reopened.identity != identity {
+            return Err(release_mismatch());
+        }
+        Ok(())
+    }
+
+    fn recheck_stage_path(&self) -> Result<(), PolicyError> {
+        let reopened = open_absolute_directory_chain(&self.stage_path)?;
+        let identity =
+            NodeIdentity::from_metadata(&reopened.metadata().map_err(|_| release_mismatch())?);
+        let held =
+            NodeIdentity::from_metadata(&self.stage.metadata().map_err(|_| release_mismatch())?);
+        if identity != self.stage_identity || held != self.stage_identity {
+            return Err(release_mismatch());
+        }
+        Ok(())
+    }
+}
+
+enum FileLength {
+    Exact(u64),
+    Maximum(u64),
+}
+
+fn open_absolute_directory_chain(path: &Path) -> Result<File, PolicyError> {
+    if !path.is_absolute() {
+        return Err(release_mismatch());
+    }
+    let root = rustix_open(
+        "/",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| release_mismatch())?;
+    let mut current = File::from(root);
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(component) => {
+                let next = openat(
+                    &current,
+                    component,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|_| release_mismatch())?;
+                current = File::from(next);
+            }
+            _ => return Err(release_mismatch()),
+        }
+    }
+    Ok(current)
+}
+
+fn open_verified_directory(
+    parent: &File,
+    leaf: &OsStr,
+    owner_uid: u32,
+    owner_gid: u32,
+) -> Result<File, PolicyError> {
+    ensure_normal_leaf(leaf)?;
+    let before = stat_identity(parent, leaf)?;
+    let descriptor = openat(
+        parent,
+        leaf,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| release_mismatch())?;
+    let directory = File::from(descriptor);
+    let metadata = directory.metadata().map_err(|_| release_mismatch())?;
+    let identity = NodeIdentity::from_metadata(&metadata);
+    if !before.same_inode(identity) {
+        return Err(release_mismatch());
+    }
+    validate_directory(&metadata, identity, owner_uid, owner_gid)?;
+    let after = stat_identity(parent, leaf)?;
+    if !identity.same_inode(after) {
+        return Err(release_mismatch());
+    }
+    Ok(directory)
+}
+
+fn open_verified_file(
+    parent: &File,
+    leaf: &OsStr,
+    owner_uid: u32,
+    owner_gid: u32,
+    permissions: u32,
+    length: FileLength,
+) -> Result<HeldFile, PolicyError> {
+    ensure_normal_leaf(leaf)?;
+    let before = stat_identity(parent, leaf)?;
+    let descriptor = openat(
+        parent,
+        leaf,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| release_mismatch())?;
+    let file = File::from(descriptor);
+    let metadata = file.metadata().map_err(|_| release_mismatch())?;
+    let identity = NodeIdentity::from_metadata(&metadata);
+    if !before.same_inode(identity)
+        || !metadata.is_file()
+        || identity.uid != owner_uid
+        || identity.gid != owner_gid
+        || identity.permissions() != permissions
+        || identity.nlink != 1
+        || match length {
+            FileLength::Exact(expected) => identity.length != expected,
+            FileLength::Maximum(maximum) => identity.length > maximum,
+        }
+    {
+        return Err(release_mismatch());
+    }
+    let after = stat_identity(parent, leaf)?;
+    if !identity.same_inode(after) {
+        return Err(release_mismatch());
+    }
+    Ok(HeldFile {
+        file,
+        parent: parent.try_clone().map_err(|_| release_mismatch())?,
+        leaf: leaf.to_os_string(),
+        identity,
+    })
+}
+
+fn validate_directory(
+    metadata: &fs::Metadata,
+    identity: NodeIdentity,
+    owner_uid: u32,
+    owner_gid: u32,
+) -> Result<(), PolicyError> {
+    if !metadata.is_dir()
+        || identity.uid != owner_uid
+        || identity.gid != owner_gid
+        || identity.permissions() != 0o755
+    {
+        return Err(release_mismatch());
+    }
+    Ok(())
+}
+
+fn stat_identity(parent: &File, leaf: &OsStr) -> Result<NodeIdentity, PolicyError> {
+    let stat = statat(parent, leaf, AtFlags::SYMLINK_NOFOLLOW).map_err(|_| release_mismatch())?;
+    NodeIdentity::from_stat(&stat)
+}
+
+fn ensure_normal_leaf(leaf: &OsStr) -> Result<(), PolicyError> {
+    let mut components = Path::new(leaf).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return Err(release_mismatch());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -284,6 +725,10 @@ impl VerifiedReleaseIdentity {
         self.manifest.expires_at
     }
 
+    pub(crate) const fn issued_at(&self) -> UnixMillis {
+        self.manifest.issued_at
+    }
+
     pub const fn minimum_policy_version(&self) -> u64 {
         self.manifest.minimum_policy_version
     }
@@ -500,6 +945,353 @@ impl ReleaseVerifier {
             release_signature_digest: hash_bytes(&signature_array),
         })
     }
+
+    pub fn verify_stage(
+        &self,
+        stage: &ReleaseStage,
+        now: UnixMillis,
+    ) -> Result<VerifiedReleaseIdentity, PolicyError> {
+        let manifest_bytes = stage
+            .manifest
+            .read_bounded(MAXIMUM_RELEASE_MANIFEST_BYTES)?;
+        let manifest = decode_manifest(&manifest_bytes)?;
+        let release_digest = hash_bytes(&manifest_bytes);
+        if self
+            .allowed_release_digests
+            .binary_search_by(|candidate| candidate.as_bytes().cmp(release_digest.as_bytes()))
+            .is_err()
+        {
+            return Err(release_mismatch());
+        }
+
+        let root = self
+            .roots
+            .iter()
+            .find(|root| root.key_id == manifest.signing_key_id)
+            .filter(|root| {
+                !root.revoked
+                    && root.not_before.get() <= now.get()
+                    && now.get() < root.not_after.get()
+            })
+            .ok_or_else(invalid_signature)?;
+        let signature_bytes = stage.signature.read_bounded(64)?;
+        let signature_array: [u8; 64] = signature_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| invalid_signature())?;
+        verify_release_signature(root, &manifest_bytes, &signature_array)?;
+        validate_manifest(&manifest, now)?;
+        let declared_stage_length = validate_stage_payload_limits(stage, &manifest)?;
+
+        let profile_payload = payload(
+            &manifest,
+            "installation/kernel-installation-profile-v1.cbor",
+        )
+        .ok_or_else(release_mismatch)?;
+        let held_profile = stage.open_payload(profile_payload)?;
+        let profile_bytes = held_profile.read_bounded(MAXIMUM_INSTALLATION_PROFILE_BYTES)?;
+        stage.recheck_payload_path(profile_payload, held_profile.identity)?;
+        if hash_bytes(&profile_bytes) != manifest.installation_profile_digest {
+            return Err(release_mismatch());
+        }
+        let profile = decode_profile(&profile_bytes)?;
+        validate_profile(&profile)?;
+        if !is_compiled_platform(profile.platform) {
+            return Err(release_mismatch());
+        }
+
+        let canonical_roots = encode_policy_roots(&profile.policy_trust_roots)?;
+        if hash_bytes(&canonical_roots) != manifest.policy_trust_roots_digest {
+            return Err(release_mismatch());
+        }
+        if compute_release_target(&manifest)? != manifest.release_target_id {
+            return Err(release_mismatch());
+        }
+        validate_payload_layout(&manifest, &profile)?;
+
+        enumerate_verified_stage(stage, &manifest, declared_stage_length)?;
+
+        stage.manifest.recheck()?;
+        stage.signature.recheck()?;
+        stage.executable.recheck()?;
+        stage.recheck_stage_path()?;
+
+        Ok(VerifiedReleaseIdentity {
+            manifest,
+            profile,
+            release_digest,
+            release_signature_digest: hash_bytes(&signature_array),
+        })
+    }
+}
+
+fn validate_stage_payload_limits(
+    stage: &ReleaseStage,
+    manifest: &ReleaseManifestV1,
+) -> Result<u64, PolicyError> {
+    let mut complete_length = stage
+        .manifest
+        .identity
+        .length
+        .checked_add(stage.signature.identity.length)
+        .ok_or_else(release_mismatch)?;
+    let mut model_assets_length = 0_u64;
+    for payload in &manifest.payloads {
+        if payload.byte_length == 0 {
+            return Err(release_mismatch());
+        }
+        let maximum = payload_maximum(&payload.relative_path);
+        if payload.byte_length > maximum {
+            return Err(release_mismatch());
+        }
+        if payload.relative_path == "policy/default-policy-v1.sig" && payload.byte_length != 64 {
+            return Err(release_mismatch());
+        }
+        if payload.relative_path.starts_with("model/assets/") {
+            model_assets_length = model_assets_length
+                .checked_add(payload.byte_length)
+                .ok_or_else(release_mismatch)?;
+            if model_assets_length > MAXIMUM_MODEL_ASSETS_TOTAL_BYTES {
+                return Err(release_mismatch());
+            }
+        }
+        complete_length = complete_length
+            .checked_add(payload.byte_length)
+            .ok_or_else(release_mismatch)?;
+        if complete_length > MAXIMUM_COMPLETE_STAGE_BYTES {
+            return Err(release_mismatch());
+        }
+    }
+    Ok(complete_length)
+}
+
+fn payload_maximum(relative_path: &str) -> u64 {
+    match relative_path {
+        "bin/savana-kerneld" => MAXIMUM_DAEMON_EXECUTABLE_BYTES,
+        "installation/kernel-installation-profile-v1.cbor" => MAXIMUM_INSTALLATION_PROFILE_BYTES,
+        "policy/default-policy-v1.cbor" => MAXIMUM_DEFAULT_POLICY_BYTES,
+        "policy/default-policy-v1.sig" => 64,
+        "model/signed-model-manifest-v1.cbor" => MAXIMUM_SIGNED_MODEL_MANIFEST_BYTES,
+        path if path.starts_with("model/assets/") => MAXIMUM_MODEL_ASSET_BYTES,
+        path if path.starts_with("runtime/") => MAXIMUM_RUNTIME_BYTES,
+        _ => MAXIMUM_OTHER_PAYLOAD_BYTES,
+    }
+}
+
+#[cfg(target_os = "linux")]
+const fn is_compiled_platform(platform: InstallationPlatformV1) -> bool {
+    matches!(platform, InstallationPlatformV1::Linux)
+}
+
+#[cfg(target_os = "macos")]
+const fn is_compiled_platform(platform: InstallationPlatformV1) -> bool {
+    matches!(platform, InstallationPlatformV1::MacOs)
+}
+
+fn enumerate_verified_stage(
+    stage: &ReleaseStage,
+    manifest: &ReleaseManifestV1,
+    declared_stage_length: u64,
+) -> Result<(), PolicyError> {
+    let mut allowed_directories = vec!["release".to_owned()];
+    for payload in &manifest.payloads {
+        let mut parent = Path::new(&payload.relative_path).parent();
+        while let Some(directory) = parent {
+            let value = directory.to_str().ok_or_else(release_mismatch)?;
+            if value.is_empty() {
+                break;
+            }
+            if !allowed_directories.iter().any(|allowed| allowed == value) {
+                allowed_directories.push(value.to_owned());
+            }
+            parent = directory.parent();
+        }
+    }
+
+    let maximum_files = manifest
+        .payloads
+        .len()
+        .checked_add(2)
+        .ok_or_else(release_mismatch)?;
+    let mut discovered_files = Vec::with_capacity(maximum_files);
+    let mut actual_stage_length = 0_u64;
+    walk_held_stage(
+        stage,
+        manifest,
+        &stage.stage,
+        "",
+        &allowed_directories,
+        maximum_files,
+        &mut discovered_files,
+        &mut actual_stage_length,
+    )?;
+
+    if discovered_files.len() != maximum_files
+        || actual_stage_length != declared_stage_length
+        || !manifest.payloads.iter().all(|payload| {
+            discovered_files
+                .iter()
+                .any(|discovered| discovered == &payload.relative_path)
+        })
+        || !discovered_files
+            .iter()
+            .any(|path| path == "release/release-manifest-v1.cbor")
+        || !discovered_files
+            .iter()
+            .any(|path| path == "release/release-manifest-v1.sig")
+    {
+        return Err(release_mismatch());
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_held_stage(
+    stage: &ReleaseStage,
+    manifest: &ReleaseManifestV1,
+    directory: &File,
+    prefix: &str,
+    allowed_directories: &[String],
+    maximum_files: usize,
+    discovered_files: &mut Vec<String>,
+    actual_stage_length: &mut u64,
+) -> Result<(), PolicyError> {
+    let entries = Dir::read_from(directory).map_err(|_| release_mismatch())?;
+    for entry in entries {
+        let entry = entry.map_err(|_| release_mismatch())?;
+        let name_bytes = entry.file_name().to_bytes();
+        if matches!(name_bytes, b"." | b"..") {
+            continue;
+        }
+        let name = std::str::from_utf8(name_bytes).map_err(|_| release_mismatch())?;
+        if name.is_empty() || name.contains('/') {
+            return Err(release_mismatch());
+        }
+        let relative_path = if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            let mut value = String::with_capacity(prefix.len() + 1 + name.len());
+            value.push_str(prefix);
+            value.push('/');
+            value.push_str(name);
+            value
+        };
+        if relative_path.len() > MAXIMUM_RELATIVE_PATH_BYTES {
+            return Err(release_mismatch());
+        }
+
+        let leaf = OsStr::from_bytes(name_bytes);
+        let stat =
+            statat(directory, leaf, AtFlags::SYMLINK_NOFOLLOW).map_err(|_| release_mismatch())?;
+        match FileType::from_raw_mode(stat.st_mode) {
+            FileType::Directory => {
+                if !allowed_directories
+                    .iter()
+                    .any(|allowed| allowed == &relative_path)
+                {
+                    return Err(release_mismatch());
+                }
+                let child =
+                    open_verified_directory(directory, leaf, stage.owner_uid, stage.owner_gid)?;
+                let child_identity =
+                    NodeIdentity::from_metadata(&child.metadata().map_err(|_| release_mismatch())?);
+                walk_held_stage(
+                    stage,
+                    manifest,
+                    &child,
+                    &relative_path,
+                    allowed_directories,
+                    maximum_files,
+                    discovered_files,
+                    actual_stage_length,
+                )?;
+                let descriptor_identity =
+                    NodeIdentity::from_metadata(&child.metadata().map_err(|_| release_mismatch())?);
+                let pathname_identity = stat_identity(directory, leaf)?;
+                if descriptor_identity != child_identity || pathname_identity != child_identity {
+                    return Err(release_mismatch());
+                }
+            }
+            FileType::RegularFile => {
+                if discovered_files.len() >= maximum_files {
+                    return Err(release_mismatch());
+                }
+                let length =
+                    verify_enumerated_stage_file(stage, manifest, directory, leaf, &relative_path)?;
+                *actual_stage_length = actual_stage_length
+                    .checked_add(length)
+                    .ok_or_else(release_mismatch)?;
+                if *actual_stage_length > MAXIMUM_COMPLETE_STAGE_BYTES {
+                    return Err(release_mismatch());
+                }
+                discovered_files.push(relative_path);
+            }
+            _ => return Err(release_mismatch()),
+        }
+    }
+    Ok(())
+}
+
+fn verify_enumerated_stage_file(
+    stage: &ReleaseStage,
+    manifest: &ReleaseManifestV1,
+    directory: &File,
+    leaf: &OsStr,
+    relative_path: &str,
+) -> Result<u64, PolicyError> {
+    if relative_path == "release/release-manifest-v1.cbor" {
+        let held = open_verified_file(
+            directory,
+            leaf,
+            stage.owner_uid,
+            stage.owner_gid,
+            0o444,
+            FileLength::Exact(stage.manifest.identity.length),
+        )?;
+        if held.identity != stage.manifest.identity {
+            return Err(release_mismatch());
+        }
+        held.recheck()?;
+        return Ok(held.identity.length);
+    }
+    if relative_path == "release/release-manifest-v1.sig" {
+        let held = open_verified_file(
+            directory,
+            leaf,
+            stage.owner_uid,
+            stage.owner_gid,
+            0o444,
+            FileLength::Exact(64),
+        )?;
+        if held.identity != stage.signature.identity {
+            return Err(release_mismatch());
+        }
+        held.recheck()?;
+        return Ok(held.identity.length);
+    }
+
+    let expected = payload(manifest, relative_path).ok_or_else(release_mismatch)?;
+    let permissions = if relative_path == "bin/savana-kerneld" {
+        0o555
+    } else {
+        0o444
+    };
+    let held = open_verified_file(
+        directory,
+        leaf,
+        stage.owner_uid,
+        stage.owner_gid,
+        permissions,
+        FileLength::Exact(expected.byte_length),
+    )?;
+    if relative_path == "bin/savana-kerneld" && held.identity != stage.executable.identity {
+        return Err(release_mismatch());
+    }
+    if held.hash_exact(expected.byte_length)? != expected.sha256 {
+        return Err(release_mismatch());
+    }
+    stage.recheck_payload_path(expected, held.identity)?;
+    Ok(held.identity.length)
 }
 
 fn validate_release_roots(roots: &[ReleaseTrustRootV1]) -> Result<(), PolicyError> {
@@ -616,6 +1408,19 @@ fn validate_profile(profile: &KernelInstallationProfileV1) -> Result<(), PolicyE
                     == Ordering::Less
         )
     }) {
+        return Err(malformed());
+    }
+    let socket_client_gid = profile
+        .daemon_clients
+        .first()
+        .map(|client| client.peer_gid)
+        .ok_or_else(malformed)?;
+    if socket_client_gid == profile.daemon_gid
+        || profile
+            .daemon_clients
+            .iter()
+            .any(|client| client.peer_gid != socket_client_gid)
+    {
         return Err(malformed());
     }
     for (index, client) in profile.daemon_clients.iter().enumerate() {
@@ -1549,3 +2354,6 @@ fn invalid_signature() -> PolicyError {
 fn release_mismatch() -> PolicyError {
     PolicyError::stable(StableCode::IdentityReleaseMismatch)
 }
+
+#[cfg(test)]
+mod release_stage_tests;

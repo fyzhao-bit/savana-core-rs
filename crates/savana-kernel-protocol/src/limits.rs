@@ -1,5 +1,18 @@
 use crate::{ProtocolError, ResourceLimitsV1, StableCode};
 
+// A KernelValue can appear under the Task 1 maximum-overhead path:
+// ServerMessage -> ResponseEnvelope -> ResponseBody -> ResponsePayload ->
+// EvaluateToolCallResponse::NeedsApproval -> SignedApprovalEnvelope ->
+// UnsignedApprovalEnvelope -> MaskedDisplay. That consumes nine CBOR array
+// depths before the KernelValue. Each nested Object consumes three more
+// depths (its tagged value, entries array, and [name, value] pair). A semantic
+// depth of eight therefore places the deepest leaf payload at CBOR depth 31;
+// depth nine would place the leaf tag beyond the immutable global limit 32.
+pub(crate) const KERNEL_VALUE_MAX_DEPTH: usize = 8;
+pub(crate) const KERNEL_VALUE_MAX_NODES: usize = 65_536;
+pub(crate) const KERNEL_VALUE_MAX_TEXT_BYTES: usize = 64 * 1024;
+pub(crate) const KERNEL_VALUE_MAX_TOTAL_BYTES: usize = 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HardLimits {
     frame_bytes: u64,

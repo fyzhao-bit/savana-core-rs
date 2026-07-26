@@ -1,9 +1,11 @@
+use ed25519_dalek::{Signer, SigningKey};
 use savana_kernel_protocol::{
     BootId, ClientHelloV1, ClientId, Digest32, EffectiveLimits, HandshakeTranscriptV1, HardLimits,
     KeyId, Nonce32, ProtocolVersion, RequestedMode, ResourceLimitsV1, ServerIdentityV1,
     ServerMessageV1, Signature64, SignedServerHelloV1,
 };
 
+#[allow(dead_code)]
 pub(crate) fn compiled_effective_limits() -> EffectiveLimits {
     let limits = HardLimits::COMPILED;
     let requested = ResourceLimitsV1 {
@@ -65,13 +67,18 @@ pub(crate) fn server_identity() -> ServerIdentityV1 {
 
 #[allow(dead_code)]
 pub(crate) fn server_message() -> ServerMessageV1 {
+    let transcript = HandshakeTranscriptV1 {
+        client: client_hello(),
+        server_nonce: Nonce32::new([0x44; 32]),
+        server: server_identity(),
+    };
+    let canonical = minicbor::to_vec(&transcript).expect("fixed transcript encodes");
+    let mut signature_input = b"SAVANA_DAEMON_HELLO_V1\0".to_vec();
+    signature_input.extend_from_slice(&canonical);
+    let signature = SigningKey::from_bytes(&[0x61; 32]).sign(&signature_input);
     ServerMessageV1::Hello(SignedServerHelloV1 {
-        transcript: HandshakeTranscriptV1 {
-            client: client_hello(),
-            server_nonce: Nonce32::new([0x44; 32]),
-            server: server_identity(),
-        },
-        signature: Signature64::new([0x55; 64]),
+        transcript,
+        signature: Signature64::new(signature.to_bytes()),
     })
 }
 

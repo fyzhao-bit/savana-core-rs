@@ -12,3 +12,23 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test -p libsavana-ner
+  kerneld:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.82.0
+        with: { components: clippy, rustfmt }
+      - run: cargo fmt --all -- --check
+      - run: >-
+          cargo clippy -p savana-kernel-protocol -p savana-policy-core
+          -p savana-kerneld --all-targets --locked -- -D warnings
+      - run: >-
+          cargo test -p savana-kernel-protocol -p savana-policy-core
+          -p savana-kerneld --all-targets --locked
+      - run: >-
+          cargo test -p savana-kerneld --features test-support
+          --test production_state_machine --locked

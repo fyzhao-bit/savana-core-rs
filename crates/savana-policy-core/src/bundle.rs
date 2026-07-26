@@ -1,7 +1,8 @@
 use minicbor::{Decode, Encode};
 use savana_kernel_protocol::{
-    AttemptKindV1, ConstraintId, Digest32, HardLimits, KeyId, ResourceLimitsV1, StableCode,
-    ToolName, UnixMillis, ValidatorId,
+    AttemptKindV1, ConstraintId, Digest32, HardLimits, KeyId, ResourceLimitsV1,
+    SignedPlannerAttestationV1, SignedValidatorAttestationV1, StableCode, ToolName, UnixMillis,
+    ValidatorId,
 };
 
 use crate::PolicyError;
@@ -307,6 +308,46 @@ pub(crate) fn decode_canonical_policy(bytes: &[u8]) -> Result<PolicyBundleV1, Po
         return Err(malformed());
     }
     Ok(bundle)
+}
+
+pub(crate) fn encode_planner_signing_payload(
+    value: &SignedPlannerAttestationV1,
+) -> Result<Vec<u8>, PolicyError> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder
+        .array(9)
+        .and_then(|encoder| encoder.encode(value.run_id))
+        .and_then(|encoder| encoder.encode(&value.planner_id))
+        .and_then(|encoder| encoder.encode(&value.planner_version))
+        .and_then(|encoder| encoder.encode(value.prompt_digest))
+        .and_then(|encoder| encoder.encode(value.output_digest))
+        .and_then(|encoder| encoder.encode(value.issued_at))
+        .and_then(|encoder| encoder.encode(value.expires_at))
+        .and_then(|encoder| encoder.encode(value.nonce))
+        .and_then(|encoder| encoder.encode(&value.key_id))
+        .map_err(|_| malformed())?;
+    Ok(encoder.into_writer())
+}
+
+pub(crate) fn encode_validator_signing_payload(
+    value: &SignedValidatorAttestationV1,
+) -> Result<Vec<u8>, PolicyError> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder
+        .array(11)
+        .and_then(|encoder| encoder.encode(&value.validator_id))
+        .and_then(|encoder| encoder.encode(&value.validator_version))
+        .and_then(|encoder| encoder.encode(value.run_id))
+        .and_then(|encoder| encoder.encode(value.pending))
+        .and_then(|encoder| encoder.encode(value.argument_digest))
+        .and_then(|encoder| encoder.encode(value.verdict))
+        .and_then(|encoder| encoder.encode(value.public_reason))
+        .and_then(|encoder| encoder.encode(value.issued_at))
+        .and_then(|encoder| encoder.encode(value.expires_at))
+        .and_then(|encoder| encoder.encode(value.nonce))
+        .and_then(|encoder| encoder.encode(&value.key_id))
+        .map_err(|_| malformed())?;
+    Ok(encoder.into_writer())
 }
 
 fn decode_protocol(decoder: &mut minicbor::Decoder<'_>) -> Result<ProtocolRangeV1, PolicyError> {
