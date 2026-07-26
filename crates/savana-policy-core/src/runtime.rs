@@ -67,6 +67,8 @@ impl AuthenticatedContextIssuer {
             return Err(binding_mismatch());
         }
 
+        #[cfg(test)]
+        engine.run_bind_pre_state_lock_hook();
         let mut state = engine.state.write().map_err(|_| unavailable())?;
         let monotonic = engine
             .clock
@@ -155,14 +157,14 @@ mod tests {
         .unwrap();
         let inner = issuer.engine.upgrade().unwrap();
         let state = inner.state.write().unwrap();
-        let (started_tx, started_rx) = mpsc::sync_channel(1);
-        let waiting = std::thread::spawn(move || {
-            started_tx.send(()).unwrap();
-            bind(&issuer, identity, boot_id, 4_000)
-        });
-        started_rx
+        let (pre_lock_tx, pre_lock_rx) = mpsc::sync_channel(1);
+        inner.install_bind_pre_state_lock_hook(Box::new(move || {
+            pre_lock_tx.send(()).unwrap();
+        }));
+        let waiting = std::thread::spawn(move || bind(&issuer, identity, boot_id, 4_000));
+        pre_lock_rx
             .recv_timeout(Duration::from_secs(2))
-            .expect("waiting bind never started");
+            .expect("waiting bind never reached the pre-state-lock hook");
         clock.set(4_000, 2_100);
         drop(state);
         assert_eq!(
@@ -185,14 +187,14 @@ mod tests {
         .unwrap();
         let inner = issuer.engine.upgrade().unwrap();
         let state = inner.state.write().unwrap();
-        let (started_tx, started_rx) = mpsc::sync_channel(1);
-        let waiting = std::thread::spawn(move || {
-            started_tx.send(()).unwrap();
-            bind(&issuer, identity, boot_id, 2_200)
-        });
-        started_rx
+        let (pre_lock_tx, pre_lock_rx) = mpsc::sync_channel(1);
+        inner.install_bind_pre_state_lock_hook(Box::new(move || {
+            pre_lock_tx.send(()).unwrap();
+        }));
+        let waiting = std::thread::spawn(move || bind(&issuer, identity, boot_id, 2_200));
+        pre_lock_rx
             .recv_timeout(Duration::from_secs(2))
-            .expect("waiting bind never started");
+            .expect("waiting bind never reached the pre-state-lock hook");
         clock.set(2_201, 301);
         drop(state);
         assert_eq!(

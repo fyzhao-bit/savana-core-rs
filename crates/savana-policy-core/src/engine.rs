@@ -21,6 +21,8 @@ pub(crate) struct EngineInner {
     pub(crate) random: Arc<dyn RandomSource + Send + Sync>,
     pub(crate) boot_id: BootId,
     pub(crate) instance_tag: [u8; 32],
+    #[cfg(test)]
+    bind_pre_state_lock_hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 #[allow(dead_code)]
@@ -81,7 +83,24 @@ impl EngineInner {
             random,
             boot_id,
             instance_tag,
+            #[cfg(test)]
+            bind_pre_state_lock_hook: std::sync::Mutex::new(None),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_bind_pre_state_lock_hook(&self, hook: Box<dyn FnOnce() + Send>) {
+        let mut installed = self.bind_pre_state_lock_hook.lock().unwrap();
+        assert!(installed.is_none(), "bind pre-state-lock hook already set");
+        *installed = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_bind_pre_state_lock_hook(&self) {
+        let hook = self.bind_pre_state_lock_hook.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -301,11 +320,13 @@ mod tests {
         calls: AtomicU64,
         first_entered: mpsc::SyncSender<()>,
         release_first: std::sync::Mutex<mpsc::Receiver<()>>,
-        later_entered: mpsc::SyncSender<()>,
+        later_monotonic_entered: mpsc::SyncSender<()>,
+        wall_entered: mpsc::SyncSender<()>,
     }
 
     impl Clock for BlockingFirstBindClock {
         fn wall_now(&self) -> Result<UnixMillis, StableCode> {
+            self.wall_entered.send(()).unwrap();
             Ok(UnixMillis::new(2_000))
         }
 
@@ -323,7 +344,7 @@ mod tests {
                     Ok(100)
                 }
                 _ => {
-                    self.later_entered.send(()).unwrap();
+                    self.later_monotonic_entered.send(()).unwrap();
                     Ok(101)
                 }
             }
@@ -334,12 +355,14 @@ mod tests {
     fn concurrent_monotonic_observations_are_serialized_not_false_regressions() {
         let (first_entered_tx, first_entered_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
-        let (later_entered_tx, later_entered_rx) = mpsc::sync_channel(1);
+        let (later_monotonic_entered_tx, later_monotonic_entered_rx) = mpsc::sync_channel(1);
+        let (wall_entered_tx, wall_entered_rx) = mpsc::sync_channel(2);
         let clock = Arc::new(BlockingFirstBindClock {
             calls: AtomicU64::new(0),
             first_entered: first_entered_tx,
             release_first: std::sync::Mutex::new(release_rx),
-            later_entered: later_entered_tx,
+            later_monotonic_entered: later_monotonic_entered_tx,
+            wall_entered: wall_entered_tx,
         });
         let (current, identity) = test_support::current_policy_and_identity();
         let boot_id = BootId::new([0x41; 32]);
@@ -359,20 +382,24 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("first clock read never blocked");
 
-        let (second_started_tx, second_started_rx) = mpsc::sync_channel(1);
+        let (second_pre_lock_tx, second_pre_lock_rx) = mpsc::sync_channel(1);
+        engine
+            .inner
+            .install_bind_pre_state_lock_hook(Box::new(move || {
+                second_pre_lock_tx.send(()).unwrap();
+            }));
         let second_issuer = Arc::clone(&issuer);
-        let second = std::thread::spawn(move || {
-            second_started_tx.send(()).unwrap();
-            bind(&second_issuer, identity, boot_id, 3_000)
-        });
-        second_started_rx
+        let second = std::thread::spawn(move || bind(&second_issuer, identity, boot_id, 3_000));
+        second_pre_lock_rx
             .recv_timeout(Duration::from_secs(2))
-            .expect("second bind never started");
+            .expect("second bind never reached the pre-state-lock hook");
         assert!(
-            later_entered_rx
-                .recv_timeout(Duration::from_millis(100))
-                .is_err(),
+            later_monotonic_entered_rx.try_recv().is_err(),
             "second monotonic read entered before the first released engine state"
+        );
+        assert!(
+            wall_entered_rx.try_recv().is_err(),
+            "wall clock entered before the first released engine state"
         );
         release_tx.send(()).unwrap();
         assert!(first.join().unwrap().is_ok());
