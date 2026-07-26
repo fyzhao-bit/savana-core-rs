@@ -5,17 +5,141 @@ use savana_kernel_protocol::{
     Digest32, HardLimits, KeyId, ResourceLimitsV1, Signature64, StableCode, UnixMillis,
 };
 use savana_policy_core::{
-    PolicyTrustRootV1, PolicyVerifier, ReleaseStage, ReleaseTrustRootV1, ReleaseVerifier,
-    VerifiedReleaseIdentity,
+    Clock, CurrentPolicyCapability, PolicyStore, PolicyTrustRootV1, PolicyVerifier, RandomSource,
+    ReleaseStage, ReleaseTrustRootV1, ReleaseVerifier, VerifiedReleaseIdentity,
 };
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 pub const POLICY_DOMAIN: &[u8] = b"SAVANA_POLICY_V1\0";
 pub const RELEASE_DOMAIN: &[u8] = b"SAVANA_RELEASE_V1\0";
 pub const NOW: u64 = 2_000;
+
+#[derive(Debug, Clone, Copy)]
+pub enum RandomBehavior {
+    Full,
+    Filled(u8),
+    Error,
+    Short(usize),
+    Zeros(usize),
+}
+
+pub struct TestClock {
+    wall: AtomicU64,
+    monotonic: AtomicU64,
+    fail_wall: AtomicBool,
+}
+
+impl TestClock {
+    pub fn now(&self) -> u64 {
+        self.wall.load(Ordering::SeqCst)
+    }
+
+    pub fn fail_wall(&self) {
+        self.fail_wall.store(true, Ordering::SeqCst);
+    }
+
+    pub fn restore_wall_and_regress_monotonic(&self) {
+        self.fail_wall.store(false, Ordering::SeqCst);
+        self.monotonic.store(99, Ordering::SeqCst);
+    }
+}
+
+impl Clock for TestClock {
+    fn wall_now(&self) -> Result<UnixMillis, StableCode> {
+        if self.fail_wall.load(Ordering::SeqCst) {
+            return Err(StableCode::ProtocolIo);
+        }
+        Ok(UnixMillis::new(self.wall.load(Ordering::SeqCst)))
+    }
+
+    fn monotonic_now_millis(&self) -> Result<u64, StableCode> {
+        Ok(self.monotonic.load(Ordering::SeqCst))
+    }
+}
+
+struct TestRandom {
+    behavior: RandomBehavior,
+}
+
+impl RandomSource for TestRandom {
+    fn fill(&self, output: &mut [u8]) -> Result<usize, StableCode> {
+        match self.behavior {
+            RandomBehavior::Full => {
+                output.fill(0x5a);
+                Ok(output.len())
+            }
+            RandomBehavior::Filled(byte) => {
+                output.fill(byte);
+                Ok(output.len())
+            }
+            RandomBehavior::Error => Err(StableCode::ProtocolIo),
+            RandomBehavior::Short(written) => {
+                let filled = written.min(output.len());
+                output[..filled].fill(0x5a);
+                Ok(written)
+            }
+            RandomBehavior::Zeros(written) => Ok(written),
+        }
+    }
+}
+
+pub fn clock() -> Arc<TestClock> {
+    Arc::new(TestClock {
+        wall: AtomicU64::new(NOW),
+        monotonic: AtomicU64::new(100),
+        fail_wall: AtomicBool::new(false),
+    })
+}
+
+pub fn random(behavior: RandomBehavior) -> Arc<dyn RandomSource + Send + Sync> {
+    Arc::new(TestRandom { behavior })
+}
+
+pub fn healthy_dependencies() -> (
+    Arc<dyn Clock + Send + Sync>,
+    Arc<dyn RandomSource + Send + Sync>,
+) {
+    (clock(), random(RandomBehavior::Full))
+}
+
+pub fn fresh_current_policy() -> CurrentPolicyCapability {
+    current_policy_and_identity().0
+}
+
+pub fn current_policy_and_identity() -> (CurrentPolicyCapability, savana_policy_core::PolicyIdentity)
+{
+    let fixture = current_policy_fixture();
+    let release = fixture.release();
+    let identity = release
+        .policy_verifier()
+        .expect("fixture release verifier")
+        .verify(
+            fixture.policy_bytes(),
+            fixture.policy_signature(),
+            fixture.now(),
+        )
+        .expect("verify fixture policy")
+        .identity();
+    let store = PolicyStore::open(
+        fixture.ledger_path(),
+        release.policy_verifier().expect("fixture release verifier"),
+    )
+    .expect("open fixture policy store");
+    let current = store
+        .verify_and_accept_initial(
+            release,
+            fixture.policy_bytes(),
+            fixture.policy_signature(),
+            fixture.now(),
+        )
+        .expect("mint fixture current policy");
+    (current, identity)
+}
 
 #[derive(Clone)]
 pub struct ProtocolRange {

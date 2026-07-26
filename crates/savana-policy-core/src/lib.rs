@@ -145,6 +145,70 @@ fn old_raw_acceptance(store: &mut PolicyStore) {
     );
 }
 ```
+
+Authenticated contexts cannot be forged or cloned from raw fields:
+
+```compile_fail
+use savana_policy_core::AuthenticatedCallContext;
+
+fn forge() {
+    let _ = AuthenticatedCallContext::new();
+}
+```
+
+Context issuers are instance-bound and non-cloneable:
+
+```compile_fail
+use savana_policy_core::AuthenticatedContextIssuer;
+
+fn clone_issuer(issuer: AuthenticatedContextIssuer) {
+    let _ = issuer.clone();
+}
+```
+
+The engine can only consume a current-policy capability, never a raw verified
+policy:
+
+```compile_fail
+use std::sync::Arc;
+use savana_kernel_protocol::{BootId, StableCode, UnixMillis};
+use savana_policy_core::{Clock, PolicyEngine, RandomSource, VerifiedPolicyV1};
+
+struct Dependencies;
+
+impl Clock for Dependencies {
+    fn wall_now(&self) -> Result<UnixMillis, StableCode> {
+        Ok(UnixMillis::new(1))
+    }
+
+    fn monotonic_now_millis(&self) -> Result<u64, StableCode> {
+        Ok(1)
+    }
+}
+
+impl RandomSource for Dependencies {
+    fn fill(&self, output: &mut [u8]) -> Result<usize, StableCode> {
+        output.fill(1);
+        Ok(output.len())
+    }
+}
+
+fn raw_engine(policy: VerifiedPolicyV1) {
+    let clock: Arc<dyn Clock + Send + Sync> = Arc::new(Dependencies);
+    let random: Arc<dyn RandomSource + Send + Sync> = Arc::new(Dependencies);
+    let _ = PolicyEngine::new(policy, BootId::new([1; 32]), clock, random);
+}
+```
+
+Raw policy replacement is not part of the engine API:
+
+```compile_fail
+use savana_policy_core::{PolicyEngine, VerifiedPolicyV1};
+
+fn raw_replacement(engine: &PolicyEngine, policy: VerifiedPolicyV1) {
+    engine.replace_policy(policy);
+}
+```
 "#]
 
 #[cfg(test)]
@@ -160,16 +224,19 @@ compile_error!("test-support cannot be enabled in a release build");
 mod atomic_file;
 mod bundle;
 mod current_policy;
+mod engine;
 mod error;
 mod ledger;
 mod lock_file;
 mod provenance;
 mod release;
+mod runtime;
 mod signature;
 mod validate;
 
 pub use bundle::AuthorityRoleV1;
 pub use current_policy::CurrentPolicyCapability;
+pub use engine::PolicyEngine;
 pub use error::PolicyError;
 pub use ledger::{PolicyLedgerIdentity, PolicyStateCapability, PolicyStore};
 pub use release::{
@@ -177,6 +244,7 @@ pub use release::{
     InstallationPublicKeyV1, ReleaseStage, ReleaseTrustRootV1, ReleaseVerifier,
     VerifiedReleaseIdentity,
 };
+pub use runtime::{AuthenticatedCallContext, AuthenticatedContextIssuer, Clock, RandomSource};
 pub use signature::{PolicyTrustRootV1, PolicyVerifier};
 pub use validate::{
     PolicyIdentity, VerifiedApprovalEnvelopeV1, VerifiedApprovalReceiptV1, VerifiedAuthorityV1,
