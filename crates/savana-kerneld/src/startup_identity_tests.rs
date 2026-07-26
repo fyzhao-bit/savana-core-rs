@@ -4,10 +4,17 @@ mod policy_support;
 use std::fs;
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    mpsc::{self, RecvTimeoutError},
+    MutexGuard,
+};
+use std::thread;
+use std::time::Duration;
 
 use crate::key_file::DaemonKeyCapability;
 use crate::{DaemonConfig, DaemonError, DaemonSigningIdentity};
 use ed25519_dalek::{Signer, SigningKey};
+use nix::sys::stat::{umask, Mode};
 use savana_kernel_protocol::{Digest32, KeyId, Signature64, StableCode, UnixMillis};
 use savana_policy_core::{
     PolicyVerifier, ReleaseTrustRootV1, ReleaseVerifier, VerifiedPolicyV1, VerifiedReleaseIdentity,
@@ -83,6 +90,7 @@ struct TestLock {
 }
 
 struct StartupFixture {
+    _process_guard: MutexGuard<'static, ()>,
     _stage: TempDir,
     _key_dir: TempDir,
     release: VerifiedReleaseIdentity,
@@ -91,6 +99,24 @@ struct StartupFixture {
     lock: TestLock,
     key_path: PathBuf,
     expected_uid: u32,
+}
+
+struct TestUmaskGuard {
+    previous: Mode,
+}
+
+impl TestUmaskGuard {
+    fn install(mask: Mode) -> Self {
+        Self {
+            previous: umask(mask),
+        }
+    }
+}
+
+impl Drop for TestUmaskGuard {
+    fn drop(&mut self) {
+        umask(self.previous);
+    }
 }
 
 impl StartupFixture {
@@ -117,6 +143,38 @@ impl StartupFixture {
         )
         .map_err(|error| error.code())
     }
+}
+
+#[test]
+fn startup_fixture_waits_for_process_global_mutation_lock() {
+    let process_guard = crate::socket::PROCESS_TEST_LOCK.lock().unwrap();
+    let umask_guard = TestUmaskGuard::install(Mode::from_bits_truncate(0o117));
+    let (fixture_ready_tx, fixture_ready_rx) = mpsc::sync_channel(1);
+    let (finish_tx, finish_rx) = mpsc::sync_channel(0);
+
+    let worker = thread::spawn(move || {
+        let fixture = startup_fixture();
+        fixture_ready_tx.send(()).unwrap();
+        finish_rx.recv().unwrap();
+        drop(fixture);
+    });
+
+    match fixture_ready_rx.recv_timeout(Duration::from_millis(100)) {
+        Err(RecvTimeoutError::Timeout) => {}
+        Err(RecvTimeoutError::Disconnected) => {
+            panic!("startup fixture exited while the process-global lock was held")
+        }
+        Ok(()) => panic!("startup fixture ran while the process-global lock was held"),
+    }
+
+    drop(umask_guard);
+    drop(process_guard);
+
+    fixture_ready_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("startup fixture should run after the process-global lock is released");
+    finish_tx.send(()).unwrap();
+    worker.join().unwrap();
 }
 
 #[test]
@@ -620,6 +678,7 @@ fn assert_lock_bytes_error(fixture: &StartupFixture, bytes: &[u8]) {
 }
 
 fn startup_fixture() -> StartupFixture {
+    let process_guard = crate::socket::PROCESS_TEST_LOCK.lock().unwrap();
     let stage = tempfile::tempdir().unwrap();
     let key_dir = tempfile::tempdir().unwrap();
     fs::set_permissions(key_dir.path(), PermissionsExt::from_mode(0o750)).unwrap();
@@ -797,6 +856,7 @@ fn startup_fixture() -> StartupFixture {
     };
 
     StartupFixture {
+        _process_guard: process_guard,
         _stage: stage,
         _key_dir: key_dir,
         release,
