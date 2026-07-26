@@ -39,6 +39,7 @@ pub struct HardLimits {
     model_probe_spans: u64,
     ner_failure_threshold: u64,
     request_deadline_ms: u64,
+    ingress_replay_entries_per_client: u64,
     policy_tools: u64,
     policy_authorities: u64,
     policy_error_mappings: u64,
@@ -96,6 +97,7 @@ impl HardLimits {
         model_probe_spans: 512,
         ner_failure_threshold: 32,
         request_deadline_ms: 120_000,
+        ingress_replay_entries_per_client: 4_096,
         policy_tools: 256,
         policy_authorities: 64,
         policy_error_mappings: 256,
@@ -149,6 +151,10 @@ impl HardLimits {
         policy_release_targets,
     );
 
+    pub const fn ingress_replay_entries_per_client(&self) -> u64 {
+        self.ingress_replay_entries_per_client
+    }
+
     pub fn lower(&self, requested: &ResourceLimitsV1) -> Result<EffectiveLimits, ProtocolError> {
         if requested.frame_bytes > self.frame_bytes
             || requested.cbor_depth > self.cbor_depth
@@ -174,6 +180,7 @@ impl HardLimits {
             || requested.model_probe_spans > self.model_probe_spans
             || requested.ner_failure_threshold > self.ner_failure_threshold
             || requested.request_deadline_ms > self.request_deadline_ms
+            || requested.ingress_replay_entries_per_client > self.ingress_replay_entries_per_client
         {
             return Err(ProtocolError::stable(StableCode::PolicyLimitExceeded));
         }
@@ -218,6 +225,10 @@ impl EffectiveLimits {
         ner_failure_threshold,
         request_deadline_ms,
     );
+
+    pub const fn ingress_replay_entries_per_client(&self) -> u64 {
+        self.limits.ingress_replay_entries_per_client
+    }
 
     pub(crate) fn check_frame_bytes(&self, length: usize) -> Result<(), ProtocolError> {
         let length = u64::try_from(length)

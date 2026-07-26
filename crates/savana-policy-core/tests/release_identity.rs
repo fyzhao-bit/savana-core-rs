@@ -16,6 +16,8 @@ use tempfile::TempDir;
 
 #[path = "support/mod.rs"]
 mod policy_support;
+#[path = "../vector_support.rs"]
+mod vector_support;
 
 const RELEASE_DOMAIN: &[u8] = b"SAVANA_RELEASE_V1\0";
 const RELEASE_TARGET_DOMAIN: &[u8] = b"SAVANA_RELEASE_TARGET_V1\0";
@@ -172,6 +174,93 @@ fn committed_release_vector_and_signature_match_the_v1_fixture() {
         fixture.signature_bytes.as_bytes(),
         include_bytes!("../../../vectors/kerneld/release-manifest-v1.sig")
     );
+
+    let vector = vector_support::release_bound_vector_fixture();
+    assert_eq!(
+        <[u8; 32]>::from(Sha256::digest(&vector.roots_bytes)),
+        vector.roots_digest
+    );
+    assert_eq!(
+        <[u8; 32]>::from(Sha256::digest(&vector.profile_bytes)),
+        vector.installation_profile_digest
+    );
+    assert_eq!(
+        vector.release_target_id,
+        fixture.manifest_value.release_target_id
+    );
+    let canonical_resources = minicbor::to_vec(vector.policy.resources).unwrap();
+    let mut resource_hash = Sha256::new();
+    resource_hash.update(b"SAVANA_RESOURCE_PROFILE_V1\0");
+    resource_hash.update(canonical_resources);
+    assert_eq!(
+        <[u8; 32]>::from(resource_hash.finalize()),
+        fixture.manifest_value.resource_profile_digest
+    );
+
+    let mut target_tuple = minicbor::Encoder::new(Vec::new());
+    target_tuple
+        .array(7)
+        .unwrap()
+        .u16(fixture.manifest_value.protocol_major)
+        .unwrap()
+        .u16(fixture.manifest_value.minimum_minor)
+        .unwrap()
+        .u16(fixture.manifest_value.maximum_minor)
+        .unwrap()
+        .array(u64::try_from(fixture.manifest_value.supported_policy_schemas.len()).unwrap())
+        .unwrap();
+    for schema in &fixture.manifest_value.supported_policy_schemas {
+        target_tuple.u16(*schema).unwrap();
+    }
+    target_tuple
+        .bytes(&fixture.manifest_value.policy_trust_roots_digest)
+        .unwrap()
+        .bytes(&fixture.manifest_value.resource_profile_digest)
+        .unwrap()
+        .bytes(&fixture.manifest_value.installation_profile_digest)
+        .unwrap();
+    let mut target_hash = Sha256::new();
+    target_hash.update(RELEASE_TARGET_DOMAIN);
+    target_hash.update(target_tuple.into_writer());
+    assert_eq!(
+        <[u8; 32]>::from(target_hash.finalize()),
+        fixture.manifest_value.release_target_id
+    );
+}
+
+#[test]
+fn committed_release_and_policy_vectors_form_one_release_bound_pair() {
+    let fixture = release_fixture(default_profile(), |_| {}, |_| {});
+    assert_eq!(
+        fixture.manifest_bytes.as_slice(),
+        include_bytes!("../../../vectors/kerneld/release-manifest-v1.cbor")
+    );
+    assert_eq!(
+        fixture.signature_bytes.as_bytes(),
+        include_bytes!("../../../vectors/kerneld/release-manifest-v1.sig")
+    );
+    let verified_release = fixture.verify().unwrap();
+
+    let vector = vector_support::release_bound_vector_fixture();
+    let policy_bytes = include_bytes!("../../../vectors/kerneld/policy-bundle-v1.cbor");
+    let policy_signature = Signature64::new(*include_bytes!(
+        "../../../vectors/kerneld/policy-bundle-v1.sig"
+    ));
+    let verified_policy = verified_release
+        .policy_verifier()
+        .unwrap()
+        .verify(policy_bytes, &policy_signature, policy_support::unix_now())
+        .unwrap();
+
+    assert_eq!(
+        verified_policy.resource_profile_digest(),
+        verified_release.resource_profile_digest()
+    );
+    assert!(vector
+        .policy
+        .release
+        .compatible_release_target_ids
+        .contains(verified_release.release_target_id().as_bytes()));
 }
 
 #[test]
@@ -1393,7 +1482,8 @@ where
     };
     let roots_digest = sha256(&encode_policy_roots(&profile.policy_trust_roots));
     let profile_digest = sha256(&profile_bytes);
-    let resource_profile_digest = [0x31; 32];
+    let vector = vector_support::release_bound_vector_fixture();
+    let resource_profile_digest = vector.resource_profile_digest;
     let supported_policy_schemas = vec![1];
     let release_target_id = compute_release_target(
         1,

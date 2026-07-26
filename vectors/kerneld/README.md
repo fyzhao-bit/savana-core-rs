@@ -7,11 +7,11 @@ clients:
 | --- | ---: | --- |
 | `client-hello-v1.cbor` | 76 | `0e441513e7ffe707c34576841bfe265dec625f2a45ad0cb2bed3f7ffd8125059` |
 | `server-hello-v1.cbor` | 406 | `d8218d95a92a67d688c2b78bee1321332f6d8b5e9be114537adfd20d2d0c9ec4` |
-| `policy-flow-v1.cbor` | 2,902 | `bee4bb8e632370f31f95c8cc5588b9e58bb2e990f8ea6c708a23759cc74b1624` |
-| `policy-bundle-v1.cbor` | 894 | `672a20ca6d401636fafcedba6eee644a1f8fe35842232d93418a220b526b2212` |
-| `policy-bundle-v1.sig` | 64 | `88176d7fa2da696bacb98e4be3b00c8cc95d76caa84010fc5982c1a49f29f2ac` |
-| `release-manifest-v1.cbor` | 1,132 | `01f365315b5a2e0fcf48b12e06db1501e93289fd3ea3e48e77111cfba326d779` |
-| `release-manifest-v1.sig` | 64 | `5bd240bdba97d7310831e2e585f345e28ce8490d7b8d0fa9785e8c47befe6ae9` |
+| `policy-flow-v1.cbor` | 3,121 | `96077e5b1808a488dd62408858be20b807cae3f1979f53d576dba5a7fb878ac6` |
+| `policy-bundle-v1.cbor` | 899 | `6a63e3bded3897bc74fa36825ba6cf019bf79806af8c61902b90ad5b2d9e0cbd` |
+| `policy-bundle-v1.sig` | 64 | `99a565b4d266a071bb4691e5e4c555504fded6a2881c5c457ce410334ec7fc67` |
+| `release-manifest-v1.cbor` | 1,132 | `6116e7cda7a6d568e815c92b22202e3bee84c30c7ca1222a27ed125f4c92db4f` |
+| `release-manifest-v1.sig` | 64 | `55d19f2f854f3312cc33a040c787eff0fd7096d51d2957573543f0b9d633b94f` |
 
 ## Test-only identities
 
@@ -45,9 +45,9 @@ Run from the repository root with Rust 1.82:
 ```bash
 vector_stage="$(mktemp -d)"
 mkdir "$vector_stage/wire" "$vector_stage/signed" "$vector_stage/candidate"
-cargo +1.82.0 run -p savana-kernel-protocol \
+rustup run 1.82.0 cargo run --locked -p savana-kernel-protocol \
   --example generate_wire_vectors -- --output "$vector_stage/wire"
-cargo +1.82.0 run -p savana-policy-core \
+rustup run 1.82.0 cargo run --locked -p savana-policy-core \
   --example generate_signed_vectors -- --output "$vector_stage/signed"
 
 install -m 0644 vectors/kerneld/README.md \

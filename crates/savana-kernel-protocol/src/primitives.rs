@@ -298,7 +298,7 @@ impl<'bytes, C> minicbor::Decode<'bytes, C> for RequestedMode {
     }
 }
 
-const RESOURCE_LIMIT_FIELD_COUNT: usize = 24;
+const RESOURCE_LIMIT_FIELD_COUNT: usize = 25;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, minicbor::Encode)]
 #[cbor(map)]
@@ -351,6 +351,8 @@ pub struct ResourceLimitsV1 {
     pub ner_failure_threshold: u64,
     #[n(23)]
     pub request_deadline_ms: u64,
+    #[n(24)]
+    pub ingress_replay_entries_per_client: u64,
 }
 
 impl<'b, C> minicbor::Decode<'b, C> for ResourceLimitsV1 {
@@ -411,6 +413,7 @@ impl<'b, C> minicbor::Decode<'b, C> for ResourceLimitsV1 {
             model_probe_spans: required(&fields, 21)?,
             ner_failure_threshold: required(&fields, 22)?,
             request_deadline_ms: required(&fields, 23)?,
+            ingress_replay_entries_per_client: required(&fields, 24)?,
         })
     }
 }

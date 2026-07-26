@@ -283,6 +283,7 @@ pub fn compiled_resources() -> ResourceLimitsV1 {
         model_probe_spans: limits.model_probe_spans(),
         ner_failure_threshold: limits.ner_failure_threshold(),
         request_deadline_ms: limits.request_deadline_ms(),
+        ingress_replay_entries_per_client: limits.ingress_replay_entries_per_client(),
     }
 }
 

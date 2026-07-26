@@ -160,7 +160,7 @@ fn operation_shape(decoder: &mut minicbor::Decoder<'_>) -> Result<(), ProtocolEr
     let fields = match tag {
         0 => 0,
         10 => 3,
-        11 => 2,
+        11 => 3,
         12..=15 => 3,
         16..=17 => 2,
         18 => 1,

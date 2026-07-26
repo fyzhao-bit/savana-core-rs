@@ -1,13 +1,14 @@
 use savana_kernel_protocol::{
-    approval_display_digest, decode_client_message, decode_server_message, encode_client_message,
-    encode_server_message, ActiveToolView, ApprovalAuthMethod, ApprovalChallengeV1,
-    ApprovalDecision, ApprovalPurposeV1, ApprovalReceiptV1, ApprovalSubjectV1, ArgumentName,
-    ArtifactId, AttemptKindV1, AuthorizeToolCallRequest, BeginRunRequest, BeginRunResponse, BootId,
-    BoundedArgumentNames, BoundedBytes, BoundedList, BoundedObject, BoundedText, ClientId,
-    ClientMessageV1, CommitPlannerValueRequest, CommitToolResultRequest, ConstraintId,
-    ConversationId, DecisionTrace, DeriveOperation, DeriveValueRequest, Digest32,
-    EvaluateToolCallRequest, EvaluateToolCallResponseV1, ExecutionEnvelope, ExecutionTicketHandle,
-    IngestUserInputRequest, IngressEnvelopeV1, KernelValue, KeyId, MaskedDisplayBundleV1,
+    approval_display_digest, connection_binding_digest, decode_client_message,
+    decode_server_message, encode_client_message, encode_server_message, ingress_request_digest,
+    ActiveToolView, ApprovalAuthMethod, ApprovalChallengeV1, ApprovalDecision, ApprovalPurposeV1,
+    ApprovalReceiptV1, ApprovalSubjectV1, ArgumentName, ArtifactId, AttemptKindV1,
+    AuthorizeToolCallRequest, BeginRunRequest, BeginRunResponse, BootId, BoundedArgumentNames,
+    BoundedBytes, BoundedList, BoundedObject, BoundedText, ClientId, ClientMessageV1,
+    CommitPlannerValueRequest, CommitToolResultRequest, ConstraintId, ConversationId,
+    DecisionTrace, DeriveOperation, DeriveValueRequest, Digest32, EvaluateToolCallRequest,
+    EvaluateToolCallResponseV1, ExecutionEnvelope, ExecutionTicketHandle, IngestUserInputRequest,
+    IngressEnvelopeV1, IngressRequestCommitmentV1, KernelValue, KeyId, MaskedDisplayBundleV1,
     MaterializeExecutionRequest, NamedArgumentHandle, Nonce32, OntologyEffectV1, OntologyEntryV1,
     OntologyEventV1, OntologySnapshotV1, OperationV1, PendingToolCallHandle, PlannerCommitProofV1,
     PlannerId, PlannerTicketHandle, PreparePlannerCallRequest, PrincipalId, ProposeToolCallRequest,
@@ -26,26 +27,13 @@ mod policy_flow_fixture;
 mod support;
 
 fn signed_ingress() -> SignedIngressEnvelopeV1 {
-    SignedIngressEnvelopeV1 {
-        unsigned: IngressEnvelopeV1 {
-            principal: PrincipalId::try_from("fixture-principal").unwrap(),
-            conversation_id: "fixture-conversation".try_into().unwrap(),
-            request_digest: Digest32::new([0x21; 32]),
-            issued_at: UnixMillis::new(1_000),
-            expires_at: UnixMillis::new(2_000),
-            nonce: Nonce32::new([0x22; 32]),
-            authority_session_id: Nonce32::new([0x23; 32]),
-            authentication_context_digest: Digest32::new([0x24; 32]),
-        },
-        key_id: KeyId::try_from("fixture-ingress-key").unwrap(),
-        signature: Signature64::new([0x25; 64]),
-    }
+    support::signed_ingress()
 }
 
 fn begin_run_request() -> BeginRunRequest {
     BeginRunRequest {
         ingress: signed_ingress(),
-        role: RoleId::try_from("operator").unwrap(),
+        input: KernelValue::Null,
         registry: SignedRegistrySnapshotV1 {
             unsigned: RegistrySnapshotV1 {
                 version: 7,
@@ -58,6 +46,404 @@ fn begin_run_request() -> BeginRunRequest {
             signature: Signature64::new([0x26; 64]),
         },
     }
+}
+
+#[test]
+fn ingress_begin_and_ingest_have_only_the_new_exact_shapes() {
+    let ingress = support::signed_ingress();
+    let ingress_bytes = minicbor::to_vec(&ingress.unsigned).unwrap();
+    assert_eq!(ingress_bytes[0], 0x8c);
+
+    let begin = BeginRunRequest {
+        ingress: ingress.clone(),
+        input: KernelValue::Null,
+        registry: support::signed_registry(),
+    };
+    let begin_bytes = minicbor::to_vec(&begin).unwrap();
+    assert_eq!(begin_bytes[0], 0x83);
+    assert_eq!(
+        minicbor::decode::<BeginRunRequest>(&begin_bytes).unwrap(),
+        begin
+    );
+
+    let ingest = IngestUserInputRequest {
+        run: support::run_handle_with_byte(0x70),
+        envelope: ingress,
+        input: KernelValue::Bool(true),
+    };
+    let ingest_bytes = minicbor::to_vec(&ingest).unwrap();
+    assert_eq!(ingest_bytes[0], 0x83);
+    assert_eq!(
+        minicbor::decode::<IngestUserInputRequest>(&ingest_bytes).unwrap(),
+        ingest
+    );
+}
+
+#[test]
+fn legacy_ingress_lengths_and_bare_begin_role_are_rejected() {
+    let old_eight_item_ingress = support::legacy_eight_item_ingress_bytes();
+    assert!(minicbor::decode::<IngressEnvelopeV1>(&old_eight_item_ingress).is_err());
+
+    let extra_ingress_slot = support::thirteen_item_ingress_bytes();
+    assert!(minicbor::decode::<IngressEnvelopeV1>(&extra_ingress_slot).is_err());
+
+    let legacy_begin = support::legacy_begin_with_role_text_bytes();
+    assert!(minicbor::decode::<BeginRunRequest>(&legacy_begin).is_err());
+
+    let old_ingest = support::legacy_two_item_ingest_bytes();
+    assert!(minicbor::decode::<IngestUserInputRequest>(&old_ingest).is_err());
+}
+
+fn signed_ingress_with_raw_unsigned(
+    unsigned: &[u8],
+    wrapper_len: u64,
+    include_signature: bool,
+    include_extra: bool,
+) -> Vec<u8> {
+    let fixture = support::signed_ingress();
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder.array(wrapper_len).unwrap();
+    let mut encoded = encoder.into_writer();
+    encoded.extend_from_slice(unsigned);
+    let mut encoder = minicbor::Encoder::new(encoded);
+    encoder.encode(fixture.key_id).unwrap();
+    if include_signature {
+        encoder.encode(fixture.signature).unwrap();
+    }
+    if include_extra {
+        encoder.null().unwrap();
+    }
+    encoder.into_writer()
+}
+
+fn begin_payload_with_raw_ingress(
+    ingress: &[u8],
+    payload_len: u64,
+    legacy_role: bool,
+    include_registry: bool,
+    include_extra: bool,
+) -> Vec<u8> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder.array(payload_len).unwrap();
+    let mut encoded = encoder.into_writer();
+    encoded.extend_from_slice(ingress);
+    let mut encoder = minicbor::Encoder::new(encoded);
+    if legacy_role {
+        encoder
+            .encode(RoleId::try_from("operator").unwrap())
+            .unwrap();
+    } else {
+        encoder.encode(KernelValue::Null).unwrap();
+    }
+    if include_registry {
+        encoder.encode(support::signed_registry()).unwrap();
+    }
+    if include_extra {
+        encoder.null().unwrap();
+    }
+    encoder.into_writer()
+}
+
+fn ingest_payload(payload_len: u64, include_input: bool, include_extra: bool) -> Vec<u8> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder
+        .array(payload_len)
+        .unwrap()
+        .encode(support::run_handle_with_byte(0x70))
+        .unwrap()
+        .encode(support::signed_ingress())
+        .unwrap();
+    if include_input {
+        encoder.encode(KernelValue::Null).unwrap();
+    }
+    if include_extra {
+        encoder.null().unwrap();
+    }
+    encoder.into_writer()
+}
+
+fn request_with_raw_operation_payload(tag: u8, payload: &[u8]) -> Vec<u8> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder
+        .array(2)
+        .unwrap()
+        .u8(2)
+        .unwrap()
+        .array(4)
+        .unwrap()
+        .encode(ProtocolVersion::new(1, 0))
+        .unwrap()
+        .encode(RequestId::new([0x11; 16]))
+        .unwrap()
+        .encode(UnixMillis::new(1_500))
+        .unwrap()
+        .array(2)
+        .unwrap()
+        .u8(tag)
+        .unwrap();
+    let mut encoded = encoder.into_writer();
+    encoded.extend_from_slice(payload);
+    encoded
+}
+
+#[test]
+fn malformed_policy_operation_shapes_map_to_the_stable_wire_error() {
+    let valid_unsigned = minicbor::to_vec(&support::signed_ingress().unsigned).unwrap();
+    let valid_signed = minicbor::to_vec(support::signed_ingress()).unwrap();
+
+    let ingress_len_8 = signed_ingress_with_raw_unsigned(
+        &support::legacy_eight_item_ingress_bytes(),
+        3,
+        true,
+        false,
+    );
+    let ingress_len_13 =
+        signed_ingress_with_raw_unsigned(&support::thirteen_item_ingress_bytes(), 3, true, false);
+    let signed_len_2 = signed_ingress_with_raw_unsigned(&valid_unsigned, 2, false, false);
+    let signed_len_4 = signed_ingress_with_raw_unsigned(&valid_unsigned, 4, true, true);
+
+    let cases = vec![
+        (
+            10,
+            begin_payload_with_raw_ingress(&ingress_len_8, 3, false, true, false),
+        ),
+        (
+            10,
+            begin_payload_with_raw_ingress(&ingress_len_13, 3, false, true, false),
+        ),
+        (
+            10,
+            begin_payload_with_raw_ingress(&signed_len_2, 3, false, true, false),
+        ),
+        (
+            10,
+            begin_payload_with_raw_ingress(&signed_len_4, 3, false, true, false),
+        ),
+        (
+            10,
+            begin_payload_with_raw_ingress(&valid_signed, 2, false, false, false),
+        ),
+        (
+            10,
+            begin_payload_with_raw_ingress(&valid_signed, 4, false, true, true),
+        ),
+        (10, support::legacy_begin_with_role_text_bytes()),
+        (11, ingest_payload(2, false, false)),
+        (11, ingest_payload(4, true, true)),
+    ];
+
+    for (tag, payload) in cases {
+        let message = request_with_raw_operation_payload(tag, &payload);
+        assert_eq!(
+            decode_client_message(&message, &support::compiled_effective_limits())
+                .unwrap_err()
+                .code(),
+            StableCode::ProtocolMalformedCbor
+        );
+    }
+}
+
+#[test]
+fn connection_binding_is_the_domain_hash_of_the_exact_transcript() {
+    let transcript = support::handshake_transcript();
+    let canonical = minicbor::to_vec(&transcript).unwrap();
+    let mut reference = Sha256::new();
+    reference.update(b"SAVANA_CONNECTION_BINDING_V1\0");
+    reference.update(&canonical);
+    assert_eq!(
+        connection_binding_digest(&transcript).unwrap(),
+        Digest32::new(reference.finalize().into())
+    );
+    assert_eq!(
+        connection_binding_digest(&transcript).unwrap(),
+        support::digest32_from_hex(
+            "3d543784844ecf92135e64a4d50ba64f1e7988dbb32ea0c1b9e8b785ff95dc8f"
+        )
+    );
+
+    let mut changed = transcript.clone();
+    changed.server.boot_id = BootId::new([0x91; 32]);
+    assert_ne!(
+        connection_binding_digest(&transcript).unwrap(),
+        connection_binding_digest(&changed).unwrap()
+    );
+}
+
+#[test]
+fn request_commitment_binds_variant_input_and_run() {
+    let mutations = vec![
+        (KernelValue::Null, KernelValue::Bool(false)),
+        (KernelValue::Bool(false), KernelValue::Bool(true)),
+        (KernelValue::Integer(7), KernelValue::Integer(8)),
+        (
+            KernelValue::Text(BoundedText::new("a").unwrap()),
+            KernelValue::Text(BoundedText::new("b").unwrap()),
+        ),
+        (
+            KernelValue::Bytes(BoundedBytes::new(vec![1]).unwrap()),
+            KernelValue::Bytes(BoundedBytes::new(vec![2]).unwrap()),
+        ),
+        (
+            KernelValue::List(BoundedList::new(vec![KernelValue::Bool(false)]).unwrap()),
+            KernelValue::List(BoundedList::new(vec![KernelValue::Bool(true)]).unwrap()),
+        ),
+        (
+            KernelValue::Object(
+                BoundedObject::new(vec![(
+                    ArgumentName::try_from("nested").unwrap(),
+                    KernelValue::Null,
+                )])
+                .unwrap(),
+            ),
+            KernelValue::Object(
+                BoundedObject::new(vec![(
+                    ArgumentName::try_from("nested").unwrap(),
+                    KernelValue::Bool(false),
+                )])
+                .unwrap(),
+            ),
+        ),
+        (
+            KernelValue::Object(
+                BoundedObject::new(vec![(
+                    ArgumentName::try_from("left").unwrap(),
+                    KernelValue::Null,
+                )])
+                .unwrap(),
+            ),
+            KernelValue::Object(
+                BoundedObject::new(vec![(
+                    ArgumentName::try_from("right").unwrap(),
+                    KernelValue::Null,
+                )])
+                .unwrap(),
+            ),
+        ),
+    ];
+    let fixed_run = support::run_handle_with_byte(0x41);
+    for (before, after) in mutations {
+        assert_ne!(
+            minicbor::to_vec(&before).unwrap(),
+            minicbor::to_vec(&after).unwrap()
+        );
+        assert_ne!(
+            ingress_request_digest(&IngressRequestCommitmentV1::BeginRun {
+                input: before.clone(),
+            })
+            .unwrap(),
+            ingress_request_digest(&IngressRequestCommitmentV1::BeginRun {
+                input: after.clone(),
+            })
+            .unwrap()
+        );
+        assert_ne!(
+            ingress_request_digest(&IngressRequestCommitmentV1::IngestUserInput {
+                run: fixed_run,
+                input: before,
+            })
+            .unwrap(),
+            ingress_request_digest(&IngressRequestCommitmentV1::IngestUserInput {
+                run: fixed_run,
+                input: after,
+            })
+            .unwrap()
+        );
+    }
+
+    let begin_null = IngressRequestCommitmentV1::BeginRun {
+        input: KernelValue::Null,
+    };
+    let ingest_a = IngressRequestCommitmentV1::IngestUserInput {
+        run: fixed_run,
+        input: KernelValue::Bool(true),
+    };
+    let ingest_b = IngressRequestCommitmentV1::IngestUserInput {
+        run: support::run_handle_with_byte(0x42),
+        input: KernelValue::Bool(true),
+    };
+    assert_ne!(
+        ingress_request_digest(&IngressRequestCommitmentV1::BeginRun {
+            input: KernelValue::Bool(true),
+        })
+        .unwrap(),
+        ingress_request_digest(&ingest_a).unwrap()
+    );
+    assert_ne!(
+        ingress_request_digest(&ingest_a).unwrap(),
+        ingress_request_digest(&ingest_b).unwrap()
+    );
+    assert_eq!(
+        ingress_request_digest(&begin_null).unwrap(),
+        support::digest32_from_hex(
+            "99dbaa60637f157d913d024ca99693f92ca8dba64490e8f6cbd0eeec20f99665"
+        )
+    );
+
+    let ingest_fixed = IngressRequestCommitmentV1::IngestUserInput {
+        run: support::run_handle_with_byte(0x70),
+        input: KernelValue::Null,
+    };
+    assert_eq!(
+        ingress_request_digest(&ingest_fixed).unwrap(),
+        support::digest32_from_hex(
+            "5368417421be910eec040a38eebdb30744f67005890da2ce3cf17ecca7048da5"
+        )
+    );
+
+    let baseline = ingress_request_digest(&IngressRequestCommitmentV1::IngestUserInput {
+        run: fixed_run,
+        input: KernelValue::Null,
+    })
+    .unwrap();
+    for index in 0..32 {
+        let mut encoded = Vec::with_capacity(34);
+        encoded.extend_from_slice(&[0x58, 0x20]);
+        encoded.extend_from_slice(&[0x41; 32]);
+        encoded[index + 2] = 0x42;
+        let mutated_run = minicbor::decode(&encoded).unwrap();
+        assert_ne!(
+            baseline,
+            ingress_request_digest(&IngressRequestCommitmentV1::IngestUserInput {
+                run: mutated_run,
+                input: KernelValue::Null,
+            })
+            .unwrap(),
+            "run-handle byte {index} must be committed"
+        );
+    }
+}
+
+#[test]
+fn commitment_encoding_is_a_closed_two_item_tagged_union() {
+    let begin = IngressRequestCommitmentV1::BeginRun {
+        input: KernelValue::Null,
+    };
+    assert_eq!(
+        minicbor::to_vec(&begin).unwrap(),
+        vec![0x82, 0x00, 0x81, 0x82, 0x00, 0xf6]
+    );
+    let ingest = IngressRequestCommitmentV1::IngestUserInput {
+        run: support::run_handle_with_byte(0x70),
+        input: KernelValue::Null,
+    };
+    assert_eq!(
+        minicbor::to_vec(&ingest).unwrap(),
+        support::decode_hex(concat!(
+            "8201825820",
+            "7070707070707070",
+            "7070707070707070",
+            "7070707070707070",
+            "7070707070707070",
+            "8200f6"
+        ))
+    );
+
+    let mut unknown = minicbor::to_vec(&begin).unwrap();
+    unknown[1] = 2;
+    let error = minicbor::decode::<IngressRequestCommitmentV1>(&unknown).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains(StableCode::ProtocolMalformedCbor.as_str()));
 }
 
 fn request(operation: OperationV1) -> ClientMessageV1 {
@@ -393,6 +779,7 @@ fn policy_operations() -> Vec<OperationV1> {
         OperationV1::IngestUserInput(IngestUserInputRequest {
             run: opaque(0x70),
             envelope: signed_ingress(),
+            input: KernelValue::Null,
         }),
         OperationV1::PreparePlannerCall(PreparePlannerCallRequest {
             run: opaque(0x70),
@@ -1187,7 +1574,8 @@ fn all_task_one_stable_codes_keep_their_exact_wire_strings() {
 
 #[test]
 fn committed_policy_flow_vector_matches_generator_and_covers_required_cases() {
-    let messages = policy_flow_fixture::encoded_messages();
+    let transcript = support::handshake_transcript();
+    let messages = policy_flow_fixture::encoded_messages(&transcript);
     let mut encoder = minicbor::Encoder::new(Vec::new());
     encoder.array(messages.len() as u64).unwrap();
     for message in &messages {

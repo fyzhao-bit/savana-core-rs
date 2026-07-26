@@ -54,8 +54,13 @@ fn generate(arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Err
     let output = prepare_output(&output_path, overwrite)?;
 
     let client = encode_client_message(&ClientMessageV1::Hello(client_hello()))?;
-    let server = encode_server_message(&server_message()?)?;
-    let policy_flow = encode_policy_flow()?;
+    let server_message = server_message()?;
+    let ServerMessageV1::Hello(hello) = &server_message else {
+        unreachable!("fixed server message is a hello");
+    };
+    let transcript = hello.transcript.clone();
+    let server = encode_server_message(&server_message)?;
+    let policy_flow = encode_policy_flow(&transcript)?;
     write_vector(&output, TARGETS[0], &client, overwrite)?;
     write_vector(&output, TARGETS[1], &server, overwrite)?;
     write_vector(&output, TARGETS[2], &policy_flow, overwrite)?;
@@ -63,8 +68,8 @@ fn generate(arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Err
     Ok(())
 }
 
-fn encode_policy_flow() -> Result<Vec<u8>, Box<dyn Error>> {
-    let messages = policy_flow_fixture::encoded_messages();
+fn encode_policy_flow(transcript: &HandshakeTranscriptV1) -> Result<Vec<u8>, Box<dyn Error>> {
+    let messages = policy_flow_fixture::encoded_messages(transcript);
     let mut encoder = minicbor::Encoder::new(Vec::new());
     encoder.array(u64::try_from(messages.len())?)?;
     for message in messages {

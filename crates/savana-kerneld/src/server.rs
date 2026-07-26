@@ -2350,6 +2350,7 @@ mod tests {
             model_probe_spans: hard.model_probe_spans(),
             ner_failure_threshold: hard.ner_failure_threshold(),
             request_deadline_ms,
+            ingress_replay_entries_per_client: hard.ingress_replay_entries_per_client(),
         })
         .unwrap()
     }

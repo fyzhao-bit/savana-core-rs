@@ -1,4 +1,9 @@
-mod support;
+#[path = "support/mod.rs"]
+mod policy_support;
+#[path = "../vector_support.rs"]
+mod vector_support;
+
+use policy_support as support;
 
 use ed25519_dalek::SigningKey;
 use savana_kernel_protocol::{
@@ -12,10 +17,12 @@ use savana_kernel_protocol::{
     ValidatorVerdictV1,
 };
 use savana_policy_core::{AuthorityRoleV1, PolicyTrustRootV1, PolicyVerifier, VerifiedPolicyV1};
+use sha2::{Digest as _, Sha256};
 
 #[test]
 fn committed_policy_vector_and_signature_match_the_v1_fixture() {
-    let (bundle, signature) = support::signed(&support::valid_policy(7, 3));
+    let fixture = vector_support::release_bound_vector_fixture();
+    let (bundle, signature) = support::signed(&fixture.policy);
     assert_eq!(
         bundle.as_slice(),
         include_bytes!("../../../vectors/kerneld/policy-bundle-v1.cbor")
@@ -23,6 +30,60 @@ fn committed_policy_vector_and_signature_match_the_v1_fixture() {
     assert_eq!(
         signature.as_bytes(),
         include_bytes!("../../../vectors/kerneld/policy-bundle-v1.sig")
+    );
+}
+
+#[test]
+fn release_bound_vector_fixture_uses_independent_domain_hashes() {
+    let fixture = vector_support::release_bound_vector_fixture();
+
+    let canonical_resources = minicbor::to_vec(fixture.policy.resources).unwrap();
+    let mut resource_hash = Sha256::new();
+    resource_hash.update(b"SAVANA_RESOURCE_PROFILE_V1\0");
+    resource_hash.update(canonical_resources);
+    assert_eq!(
+        <[u8; 32]>::from(resource_hash.finalize()),
+        fixture.resource_profile_digest
+    );
+
+    let mut target_tuple = minicbor::Encoder::new(Vec::new());
+    target_tuple
+        .array(7)
+        .unwrap()
+        .u16(1)
+        .unwrap()
+        .u16(0)
+        .unwrap()
+        .u16(0)
+        .unwrap()
+        .array(1)
+        .unwrap()
+        .u16(1)
+        .unwrap()
+        .bytes(&fixture.roots_digest)
+        .unwrap()
+        .bytes(&fixture.resource_profile_digest)
+        .unwrap()
+        .bytes(&fixture.installation_profile_digest)
+        .unwrap();
+    let mut target_hash = Sha256::new();
+    target_hash.update(b"SAVANA_RELEASE_TARGET_V1\0");
+    target_hash.update(target_tuple.into_writer());
+    assert_eq!(
+        <[u8; 32]>::from(target_hash.finalize()),
+        fixture.release_target_id
+    );
+    assert_eq!(
+        fixture.policy.release.compatible_release_target_ids,
+        vec![fixture.release_target_id]
+    );
+    assert_eq!(
+        <[u8; 32]>::from(Sha256::digest(&fixture.roots_bytes)),
+        fixture.roots_digest
+    );
+    assert_eq!(
+        <[u8; 32]>::from(Sha256::digest(&fixture.profile_bytes)),
+        fixture.installation_profile_digest
     );
 }
 
@@ -352,6 +413,10 @@ fn encoded_ingress(domain: &[u8]) -> Vec<u8> {
         nonce: Nonce32::new([0x22; 32]),
         authority_session_id: Nonce32::new([0x23; 32]),
         authentication_context_digest: Digest32::new([0x24; 32]),
+        role: savana_kernel_protocol::RoleId::try_from("operator").unwrap(),
+        policy_digest: Digest32::new([0x25; 32]),
+        boot_id: BootId::new([0x26; 32]),
+        connection_binding_digest: Digest32::new([0x27; 32]),
     };
     let payload = minicbor::to_vec(&unsigned).unwrap();
     minicbor::to_vec(SignedIngressEnvelopeV1 {

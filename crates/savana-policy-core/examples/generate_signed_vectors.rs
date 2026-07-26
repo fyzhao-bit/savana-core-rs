@@ -1,5 +1,7 @@
 #[path = "../tests/support/mod.rs"]
 mod policy_support;
+#[path = "../vector_support.rs"]
+mod vector_support;
 
 use std::cmp::Ordering;
 use std::error::Error;
@@ -16,7 +18,6 @@ mod vector_output;
 use vector_output::OutputDirectory;
 
 const RELEASE_DOMAIN: &[u8] = b"SAVANA_RELEASE_V1\0";
-const RELEASE_TARGET_DOMAIN: &[u8] = b"SAVANA_RELEASE_TARGET_V1\0";
 const TARGETS: [&str; 4] = [
     "policy-bundle-v1.cbor",
     "policy-bundle-v1.sig",
@@ -54,8 +55,10 @@ fn generate(arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Err
     let (output_path, overwrite) = parse_arguments(arguments)?;
     let output = prepare_output(&output_path, overwrite)?;
 
-    let (policy, policy_signature) = policy_support::signed(&policy_support::valid_policy(7, 3));
-    let (release, release_signature) = release_vector();
+    let fixture = vector_support::release_bound_vector_fixture();
+    assert_eq!(sha256(&fixture.roots_bytes), fixture.roots_digest);
+    let (policy, policy_signature) = policy_support::signed(&fixture.policy);
+    let (release, release_signature) = release_vector(&fixture);
     for (name, bytes) in [
         (TARGETS[0], policy.as_slice()),
         (TARGETS[1], policy_signature.as_bytes().as_slice()),
@@ -125,21 +128,7 @@ where
     output.write_vector_with_hook(name, bytes, overwrite, before_rename)
 }
 
-fn release_vector() -> (Vec<u8>, Signature64) {
-    let daemon_key = SigningKey::from_bytes(&[0x61; 32]);
-    let client_key = SigningKey::from_bytes(&[0x62; 32]);
-    let policy_key = SigningKey::from_bytes(&[0x42; 32]);
-    let profile = encode_profile(
-        &daemon_key.verifying_key().to_bytes(),
-        &client_key.verifying_key().to_bytes(),
-        &policy_key.verifying_key().to_bytes(),
-    );
-    let roots = encode_policy_roots(&policy_key.verifying_key().to_bytes());
-    let roots_digest = sha256(&roots);
-    let profile_digest = sha256(&profile);
-    let resource_digest = [0x31; 32];
-    let target = compute_release_target(roots_digest, resource_digest, profile_digest);
-
+fn release_vector(fixture: &vector_support::ReleaseBoundVectorFixture) -> (Vec<u8>, Signature64) {
     let mut payloads = vec![
         ("bin/savana-kerneld", b"kernel-binary".to_vec()),
         ("policy/default-policy-v1.cbor", b"default-policy".to_vec()),
@@ -157,7 +146,10 @@ fn release_vector() -> (Vec<u8>, Signature64) {
             "model/signed-model-manifest-v1.cbor",
             b"model-manifest".to_vec(),
         ),
-        ("installation/kernel-installation-profile-v1.cbor", profile),
+        (
+            "installation/kernel-installation-profile-v1.cbor",
+            fixture.profile_bytes.clone(),
+        ),
         ("runtime/libonnxruntime.so", b"onnx-runtime".to_vec()),
         ("model/assets/model.bin", b"model-asset".to_vec()),
     ];
@@ -180,7 +172,7 @@ fn release_vector() -> (Vec<u8>, Signature64) {
         .unwrap()
         .u64(1)
         .unwrap()
-        .bytes(&target)
+        .bytes(&fixture.release_target_id)
         .unwrap()
         .str(&"a".repeat(40))
         .unwrap()
@@ -206,7 +198,7 @@ fn release_vector() -> (Vec<u8>, Signature64) {
         .unwrap()
         .u16(1)
         .unwrap()
-        .bytes(&roots_digest)
+        .bytes(&fixture.roots_digest)
         .unwrap()
         .u64(1)
         .unwrap()
@@ -218,9 +210,9 @@ fn release_vector() -> (Vec<u8>, Signature64) {
         .unwrap()
         .bytes(&[0xd4; 32])
         .unwrap()
-        .bytes(&resource_digest)
+        .bytes(&fixture.resource_profile_digest)
         .unwrap()
-        .bytes(&profile_digest)
+        .bytes(&fixture.installation_profile_digest)
         .unwrap()
         .array(payloads.len() as u64)
         .unwrap();
@@ -240,111 +232,6 @@ fn release_vector() -> (Vec<u8>, Signature64) {
     let release_key = SigningKey::from_bytes(&[0x51; 32]);
     let signature = detached_signature(RELEASE_DOMAIN, &manifest, &release_key);
     (manifest, signature)
-}
-
-fn encode_profile(daemon_key: &[u8; 32], client_key: &[u8; 32], policy_key: &[u8; 32]) -> Vec<u8> {
-    let mut encoder = minicbor::Encoder::new(Vec::new());
-    encoder
-        .array(14)
-        .unwrap()
-        .u16(1)
-        .unwrap()
-        .bytes(&[0x71; 32])
-        .unwrap()
-        .u8(0)
-        .unwrap()
-        .array(2)
-        .unwrap()
-        .str("daemon-key")
-        .unwrap()
-        .bytes(daemon_key)
-        .unwrap()
-        .array(1)
-        .unwrap()
-        .array(6)
-        .unwrap()
-        .str("jarvis-client")
-        .unwrap()
-        .str("jarvis-key")
-        .unwrap()
-        .bytes(client_key)
-        .unwrap()
-        .u8(0)
-        .unwrap()
-        .u32(1_001)
-        .unwrap()
-        .u32(1_003)
-        .unwrap();
-    encoder
-        .writer_mut()
-        .extend_from_slice(&encode_policy_roots(policy_key));
-    encoder
-        .u32(1_002)
-        .unwrap()
-        .u32(1_002)
-        .unwrap()
-        .u32(1_001)
-        .unwrap()
-        .str("/run/savana/kernel/kerneld.sock")
-        .unwrap()
-        .str("/etc/savana/kernel/selected-policy-v1.cbor")
-        .unwrap()
-        .str("/etc/savana/kernel/selected-policy-v1.sig")
-        .unwrap()
-        .u16(0o750)
-        .unwrap()
-        .u16(0o660)
-        .unwrap();
-    encoder.into_writer()
-}
-
-fn encode_policy_roots(policy_key: &[u8; 32]) -> Vec<u8> {
-    let mut encoder = minicbor::Encoder::new(Vec::new());
-    encoder
-        .array(1)
-        .unwrap()
-        .array(4)
-        .unwrap()
-        .str("policy-root")
-        .unwrap()
-        .bytes(policy_key)
-        .unwrap()
-        .u64(3)
-        .unwrap()
-        .bool(false)
-        .unwrap();
-    encoder.into_writer()
-}
-
-fn compute_release_target(
-    roots_digest: [u8; 32],
-    resource_digest: [u8; 32],
-    profile_digest: [u8; 32],
-) -> [u8; 32] {
-    let mut encoder = minicbor::Encoder::new(Vec::new());
-    encoder
-        .array(7)
-        .unwrap()
-        .u16(1)
-        .unwrap()
-        .u16(0)
-        .unwrap()
-        .u16(0)
-        .unwrap()
-        .array(1)
-        .unwrap()
-        .u16(1)
-        .unwrap()
-        .bytes(&roots_digest)
-        .unwrap()
-        .bytes(&resource_digest)
-        .unwrap()
-        .bytes(&profile_digest)
-        .unwrap();
-    let mut hash = Sha256::new();
-    hash.update(RELEASE_TARGET_DOMAIN);
-    hash.update(encoder.into_writer());
-    hash.finalize().into()
 }
 
 fn detached_signature(domain: &[u8], bytes: &[u8], key: &SigningKey) -> Signature64 {

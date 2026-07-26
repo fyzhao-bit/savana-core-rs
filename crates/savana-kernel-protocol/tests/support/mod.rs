@@ -1,14 +1,163 @@
+#![allow(dead_code)]
+
 use ed25519_dalek::{Signer, SigningKey};
 use savana_kernel_protocol::{
-    BootId, ClientHelloV1, ClientId, Digest32, EffectiveLimits, HandshakeTranscriptV1, HardLimits,
-    KeyId, Nonce32, ProtocolVersion, RequestedMode, ResourceLimitsV1, ServerIdentityV1,
-    ServerMessageV1, Signature64, SignedServerHelloV1,
+    BootId, ClientHelloV1, ClientId, ConversationId, Digest32, EffectiveLimits,
+    HandshakeTranscriptV1, HardLimits, IngressEnvelopeV1, KeyId, Nonce32, PrincipalId,
+    ProtocolVersion, RegistrySnapshotV1, RequestedMode, ResourceLimitsV1, RoleId, RunHandle,
+    ServerIdentityV1, ServerMessageV1, Signature64, SignedIngressEnvelopeV1,
+    SignedRegistrySnapshotV1, SignedServerHelloV1, UnixMillis,
 };
 
+pub(crate) fn decode_hex(input: &str) -> Vec<u8> {
+    assert_eq!(input.len() % 2, 0);
+    input
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).unwrap();
+            u8::from_str_radix(pair, 16).unwrap()
+        })
+        .collect()
+}
+
+pub(crate) fn digest32_from_hex(input: &str) -> Digest32 {
+    Digest32::new(decode_hex(input).try_into().unwrap())
+}
+
+pub(crate) fn run_handle_with_byte(byte: u8) -> RunHandle {
+    let mut encoded = Vec::with_capacity(34);
+    encoded.extend_from_slice(&[0x58, 0x20]);
+    encoded.extend_from_slice(&[byte; 32]);
+    minicbor::decode(&encoded).unwrap()
+}
+
+pub(crate) fn signed_ingress() -> SignedIngressEnvelopeV1 {
+    SignedIngressEnvelopeV1 {
+        unsigned: IngressEnvelopeV1 {
+            principal: PrincipalId::try_from("principal-1").unwrap(),
+            conversation_id: ConversationId::try_from("conversation-1").unwrap(),
+            request_digest: Digest32::new([0x21; 32]),
+            issued_at: UnixMillis::new(1_000),
+            expires_at: UnixMillis::new(3_000),
+            nonce: Nonce32::new([0x22; 32]),
+            authority_session_id: Nonce32::new([0x23; 32]),
+            authentication_context_digest: Digest32::new([0x24; 32]),
+            role: RoleId::try_from("operator").unwrap(),
+            policy_digest: Digest32::new([0x25; 32]),
+            boot_id: BootId::new([0x26; 32]),
+            connection_binding_digest: Digest32::new([0x27; 32]),
+        },
+        key_id: KeyId::try_from("ingress-key").unwrap(),
+        signature: Signature64::new([0x28; 64]),
+    }
+}
+
+pub(crate) fn signed_registry() -> SignedRegistrySnapshotV1 {
+    SignedRegistrySnapshotV1 {
+        unsigned: RegistrySnapshotV1 {
+            version: 1,
+            previous_digest: None,
+            tools: Vec::new(),
+            issued_at: UnixMillis::new(1_000),
+            expires_at: UnixMillis::new(3_000),
+        },
+        key_id: KeyId::try_from("registry-key").unwrap(),
+        signature: Signature64::new([0x29; 64]),
+    }
+}
+
+pub(crate) fn legacy_eight_item_ingress_bytes() -> Vec<u8> {
+    let ingress = signed_ingress().unsigned;
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder
+        .array(8)
+        .unwrap()
+        .encode(ingress.principal)
+        .unwrap()
+        .encode(ingress.conversation_id)
+        .unwrap()
+        .encode(ingress.request_digest)
+        .unwrap()
+        .encode(ingress.issued_at)
+        .unwrap()
+        .encode(ingress.expires_at)
+        .unwrap()
+        .encode(ingress.nonce)
+        .unwrap()
+        .encode(ingress.authority_session_id)
+        .unwrap()
+        .encode(ingress.authentication_context_digest)
+        .unwrap();
+    encoder.into_writer()
+}
+
+pub(crate) fn thirteen_item_ingress_bytes() -> Vec<u8> {
+    let ingress = signed_ingress().unsigned;
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder
+        .array(13)
+        .unwrap()
+        .encode(ingress.principal)
+        .unwrap()
+        .encode(ingress.conversation_id)
+        .unwrap()
+        .encode(ingress.request_digest)
+        .unwrap()
+        .encode(ingress.issued_at)
+        .unwrap()
+        .encode(ingress.expires_at)
+        .unwrap()
+        .encode(ingress.nonce)
+        .unwrap()
+        .encode(ingress.authority_session_id)
+        .unwrap()
+        .encode(ingress.authentication_context_digest)
+        .unwrap()
+        .encode(ingress.role)
+        .unwrap()
+        .encode(ingress.policy_digest)
+        .unwrap()
+        .encode(ingress.boot_id)
+        .unwrap()
+        .encode(ingress.connection_binding_digest)
+        .unwrap()
+        .null()
+        .unwrap();
+    encoder.into_writer()
+}
+
+pub(crate) fn legacy_begin_with_role_text_bytes() -> Vec<u8> {
+    let ingress = signed_ingress();
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder
+        .array(3)
+        .unwrap()
+        .encode(ingress)
+        .unwrap()
+        .encode(RoleId::try_from("operator").unwrap())
+        .unwrap()
+        .encode(signed_registry())
+        .unwrap();
+    encoder.into_writer()
+}
+
+pub(crate) fn legacy_two_item_ingest_bytes() -> Vec<u8> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder
+        .array(2)
+        .unwrap()
+        .encode(run_handle_with_byte(0x70))
+        .unwrap()
+        .encode(signed_ingress())
+        .unwrap();
+    encoder.into_writer()
+}
+
 #[allow(dead_code)]
-pub(crate) fn compiled_effective_limits() -> EffectiveLimits {
+pub(crate) fn compiled_request() -> ResourceLimitsV1 {
     let limits = HardLimits::COMPILED;
-    let requested = ResourceLimitsV1 {
+    ResourceLimitsV1 {
         frame_bytes: limits.frame_bytes(),
         cbor_depth: limits.cbor_depth(),
         pages: limits.pages(),
@@ -33,10 +182,58 @@ pub(crate) fn compiled_effective_limits() -> EffectiveLimits {
         model_probe_spans: limits.model_probe_spans(),
         ner_failure_threshold: limits.ner_failure_threshold(),
         request_deadline_ms: limits.request_deadline_ms(),
-    };
+        ingress_replay_entries_per_client: limits.ingress_replay_entries_per_client(),
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn compiled_effective_limits() -> EffectiveLimits {
     HardLimits::COMPILED
-        .lower(&requested)
+        .lower(&compiled_request())
         .expect("compiled limits lower to themselves")
+}
+
+pub(crate) fn resource_limit_map_keys(encoded: &[u8]) -> Vec<u64> {
+    let mut decoder = minicbor::Decoder::new(encoded);
+    let entries = decoder
+        .map()
+        .unwrap()
+        .expect("resource limits use a definite map");
+    let mut keys = Vec::with_capacity(entries.try_into().unwrap());
+    for _ in 0..entries {
+        keys.push(decoder.u64().unwrap());
+        decoder.u64().unwrap();
+    }
+    assert_eq!(decoder.position(), encoded.len());
+    keys
+}
+
+pub(crate) fn resource_limits_without_key_24(encoded: &[u8]) -> Vec<u8> {
+    let mut decoder = minicbor::Decoder::new(encoded);
+    let entries = decoder
+        .map()
+        .unwrap()
+        .expect("resource limits use a definite map");
+    let mut pairs = Vec::with_capacity(entries.try_into().unwrap());
+    let mut found_key_24 = false;
+    for _ in 0..entries {
+        let key = decoder.u64().unwrap();
+        let value = decoder.u64().unwrap();
+        found_key_24 |= key == 24;
+        if key != 24 {
+            pairs.push((key, value));
+        }
+    }
+    assert_eq!(decoder.position(), encoded.len());
+    assert!(found_key_24);
+    assert_eq!(pairs.len() as u64, entries - 1);
+
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder.map(entries - 1).unwrap();
+    for (key, value) in pairs {
+        encoder.u64(key).unwrap().u64(value).unwrap();
+    }
+    encoder.into_writer()
 }
 
 #[allow(dead_code)]
@@ -80,6 +277,18 @@ pub(crate) fn server_message() -> ServerMessageV1 {
         transcript,
         signature: Signature64::new(signature.to_bytes()),
     })
+}
+
+pub(crate) fn handshake_transcript() -> HandshakeTranscriptV1 {
+    let message = server_message();
+    assert_eq!(
+        minicbor::to_vec(&message).unwrap().as_slice(),
+        include_bytes!("../../../../vectors/kerneld/server-hello-v1.cbor")
+    );
+    match message {
+        ServerMessageV1::Hello(hello) => hello.transcript,
+        _ => unreachable!("server_message fixture is the committed hello"),
+    }
 }
 
 #[allow(dead_code)]

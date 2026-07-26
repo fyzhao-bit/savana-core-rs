@@ -2,7 +2,7 @@ use crate::{
     primitives::canonical_text_cmp, registry::validate_active_tools, ActiveToolView,
     ApprovalReceiptV1, ArgumentName, DecisionTrace, DeriveOperation, Digest32,
     ExecutionTicketHandle, KernelValue, PendingToolCallHandle, PlannerCommitProofV1, PlannerId,
-    ProtocolError, RoleId, RunHandle, SignedApprovalEnvelopeV1, SignedIngressEnvelopeV1,
+    ProtocolError, RunHandle, SignedApprovalEnvelopeV1, SignedIngressEnvelopeV1,
     SignedRegistrySnapshotV1, SignedValidatorAttestationV1, StableCode, ToolExecutionIdentity,
     ToolHandle, ValueHandle,
 };
@@ -18,7 +18,7 @@ pub struct BeginRunRequest {
     #[n(0)]
     pub ingress: SignedIngressEnvelopeV1,
     #[n(1)]
-    pub role: RoleId,
+    pub input: KernelValue,
     #[n(2)]
     pub registry: SignedRegistrySnapshotV1,
 }
@@ -31,7 +31,7 @@ impl<'bytes, C> minicbor::Decode<'bytes, C> for BeginRunRequest {
         expect_array(decoder, 3)?;
         Ok(Self {
             ingress: SignedIngressEnvelopeV1::decode(decoder, context)?,
-            role: RoleId::decode(decoder, context)?,
+            input: KernelValue::decode(decoder, context)?,
             registry: SignedRegistrySnapshotV1::decode(decoder, context)?,
         })
     }
@@ -115,6 +115,8 @@ pub struct IngestUserInputRequest {
     pub run: RunHandle,
     #[n(1)]
     pub envelope: SignedIngressEnvelopeV1,
+    #[n(2)]
+    pub input: KernelValue,
 }
 
 impl<'bytes, C> minicbor::Decode<'bytes, C> for IngestUserInputRequest {
@@ -122,10 +124,11 @@ impl<'bytes, C> minicbor::Decode<'bytes, C> for IngestUserInputRequest {
         decoder: &mut minicbor::Decoder<'bytes>,
         context: &mut C,
     ) -> Result<Self, minicbor::decode::Error> {
-        expect_array(decoder, 2)?;
+        expect_array(decoder, 3)?;
         Ok(Self {
             run: RunHandle::decode(decoder, context)?,
             envelope: SignedIngressEnvelopeV1::decode(decoder, context)?,
+            input: KernelValue::decode(decoder, context)?,
         })
     }
 }

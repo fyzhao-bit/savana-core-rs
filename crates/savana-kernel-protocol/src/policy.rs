@@ -1,7 +1,9 @@
 use crate::{
-    BoundedText, ConversationId, Digest32, KeyId, Nonce32, PlannerId, PlannerTicketHandle,
-    PrincipalId, ProtocolError, RunId, Signature64, StableCode, ToolHandle, ToolName, UnixMillis,
+    BootId, BoundedText, ConversationId, Digest32, KernelValue, KeyId, Nonce32, PlannerId,
+    PlannerTicketHandle, PrincipalId, ProtocolError, RoleId, RunHandle, RunId, Signature64,
+    StableCode, ToolHandle, ToolName, UnixMillis,
 };
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq, minicbor::Encode)]
 #[cbor(array)]
@@ -22,6 +24,14 @@ pub struct IngressEnvelopeV1 {
     pub authority_session_id: Nonce32,
     #[n(7)]
     pub authentication_context_digest: Digest32,
+    #[n(8)]
+    pub role: RoleId,
+    #[n(9)]
+    pub policy_digest: Digest32,
+    #[n(10)]
+    pub boot_id: BootId,
+    #[n(11)]
+    pub connection_binding_digest: Digest32,
 }
 
 impl<'bytes, C> minicbor::Decode<'bytes, C> for IngressEnvelopeV1 {
@@ -29,7 +39,7 @@ impl<'bytes, C> minicbor::Decode<'bytes, C> for IngressEnvelopeV1 {
         decoder: &mut minicbor::Decoder<'bytes>,
         context: &mut C,
     ) -> Result<Self, minicbor::decode::Error> {
-        expect_array(decoder, 8)?;
+        expect_array(decoder, 12)?;
         Ok(Self {
             principal: PrincipalId::decode(decoder, context)?,
             conversation_id: ConversationId::decode(decoder, context)?,
@@ -39,6 +49,10 @@ impl<'bytes, C> minicbor::Decode<'bytes, C> for IngressEnvelopeV1 {
             nonce: Nonce32::decode(decoder, context)?,
             authority_session_id: Nonce32::decode(decoder, context)?,
             authentication_context_digest: Digest32::decode(decoder, context)?,
+            role: RoleId::decode(decoder, context)?,
+            policy_digest: Digest32::decode(decoder, context)?,
+            boot_id: BootId::decode(decoder, context)?,
+            connection_binding_digest: Digest32::decode(decoder, context)?,
         })
     }
 }
@@ -66,6 +80,70 @@ impl<'bytes, C> minicbor::Decode<'bytes, C> for SignedIngressEnvelopeV1 {
             signature: Signature64::decode(decoder, context)?,
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IngressRequestCommitmentV1 {
+    BeginRun { input: KernelValue },
+    IngestUserInput { run: RunHandle, input: KernelValue },
+}
+
+impl<C> minicbor::Encode<C> for IngressRequestCommitmentV1 {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        encoder: &mut minicbor::Encoder<W>,
+        context: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        encoder.array(2)?;
+        match self {
+            Self::BeginRun { input } => {
+                encoder.u8(0)?.array(1)?;
+                input.encode(encoder, context)?;
+            }
+            Self::IngestUserInput { run, input } => {
+                encoder.u8(1)?.array(2)?;
+                run.encode(encoder, context)?;
+                input.encode(encoder, context)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'bytes, C> minicbor::Decode<'bytes, C> for IngressRequestCommitmentV1 {
+    fn decode(
+        decoder: &mut minicbor::Decoder<'bytes>,
+        context: &mut C,
+    ) -> Result<Self, minicbor::decode::Error> {
+        let position = decoder.position();
+        expect_array(decoder, 2)?;
+        match decoder.u8()? {
+            0 => {
+                expect_array(decoder, 1)?;
+                Ok(Self::BeginRun {
+                    input: KernelValue::decode(decoder, context)?,
+                })
+            }
+            1 => {
+                expect_array(decoder, 2)?;
+                Ok(Self::IngestUserInput {
+                    run: RunHandle::decode(decoder, context)?,
+                    input: KernelValue::decode(decoder, context)?,
+                })
+            }
+            _ => Err(decode_error(position)),
+        }
+    }
+}
+
+pub fn ingress_request_digest(
+    commitment: &IngressRequestCommitmentV1,
+) -> Result<Digest32, ProtocolError> {
+    let canonical = minicbor::to_vec(commitment).map_err(ProtocolError::malformed)?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"SAVANA_INGRESS_REQUEST_V1\0");
+    hasher.update(canonical);
+    Ok(Digest32::new(hasher.finalize().into()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, minicbor::Encode)]

@@ -32,9 +32,9 @@ pub use handles::{
 };
 pub use limits::{EffectiveLimits, HardLimits};
 pub use messages::{
-    ClientFinishV1, ClientHelloV1, ClientMessageV1, HandshakeAcceptedV1, HandshakeTranscriptV1,
-    HealthSnapshotV1, RequestEnvelopeV1, ResponseBodyV1, ResponseEnvelopeV1, ResponsePayloadV1,
-    ServerIdentityV1, ServerMessageV1, SignedServerHelloV1,
+    connection_binding_digest, ClientFinishV1, ClientHelloV1, ClientMessageV1, HandshakeAcceptedV1,
+    HandshakeTranscriptV1, HealthSnapshotV1, RequestEnvelopeV1, ResponseBodyV1, ResponseEnvelopeV1,
+    ResponsePayloadV1, ServerIdentityV1, ServerMessageV1, SignedServerHelloV1,
 };
 pub use ontology::{
     OntologyEffectV1, OntologyEntryV1, OntologyEventV1, OntologySnapshotV1, SignedOntologyEventV1,
@@ -48,8 +48,9 @@ pub use operations::{
     ProposeToolCallRequest,
 };
 pub use policy::{
-    ActiveToolView, DecisionTrace, IngressEnvelopeV1, PlannerCommitProofV1,
-    SignedIngressEnvelopeV1, SignedPlannerAttestationV1, ToolExecutionIdentity,
+    ingress_request_digest, ActiveToolView, DecisionTrace, IngressEnvelopeV1,
+    IngressRequestCommitmentV1, PlannerCommitProofV1, SignedIngressEnvelopeV1,
+    SignedPlannerAttestationV1, ToolExecutionIdentity,
 };
 pub use primitives::{
     AttemptKindV1, BootId, ClientId, ConstraintId, Digest32, KeyId, Nonce32, ProtocolVersion,

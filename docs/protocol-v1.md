@@ -60,7 +60,7 @@ All CBOR exchanged or signed by this slice uses these restrictions:
   encoder.
 
 Wire messages use arrays and scalars only. `ResourceLimitsV1` is the one V1
-numeric-key map. Its canonical keys are emitted in ascending order `0..23`.
+numeric-key map. Its canonical keys are emitted in ascending order `0..24`.
 
 Text identifiers (`KeyId`, `ClientId`, `ToolName`, `ValidatorId`, and
 `ConstraintId`) contain 1 through 128 UTF-8 bytes and no Unicode control
@@ -166,8 +166,8 @@ these fields:
 
 | Tag | Length | Fields in position order |
 | ---: | ---: | --- |
-| 10 | 3 | `ingress`, `role`, `registry` |
-| 11 | 2 | `run`, `envelope` |
+| 10 | 3 | `ingress`, `input`, `registry` |
+| 11 | 3 | `run`, `envelope`, `input` |
 | 12 | 3 | `run`, `planner`, `prompt_values` |
 | 13 | 3 | `run`, `proof`, `value` |
 | 14 | 3 | `run`, `operation`, `inputs` |
@@ -241,7 +241,7 @@ semantics are a later integration step.
 
 | Type | Length | Fields in position order |
 | --- | ---: | --- |
-| `IngressEnvelopeV1` | 8 | `principal`, `conversation_id`, `request_digest`, `issued_at`, `expires_at`, `nonce`, `authority_session_id`, `authentication_context_digest` |
+| `IngressEnvelopeV1` | 12 | `principal`, `conversation_id`, `request_digest`, `issued_at`, `expires_at`, `nonce`, `authority_session_id`, `authentication_context_digest`, `role`, `policy_digest`, `boot_id`, `connection_binding_digest` |
 | `SignedIngressEnvelopeV1` | 3 | `unsigned`, `key_id`, `signature` |
 | `SignedPlannerAttestationV1` | 10 | `run_id`, `planner_id`, `planner_version`, `prompt_digest`, `output_digest`, `issued_at`, `expires_at`, `nonce`, `key_id`, `signature` |
 | `ToolExecutionIdentity` | 3 | `name`, `descriptor_digest`, `registry_version` |
@@ -261,6 +261,33 @@ semantics are a later integration step.
 | `SignedApprovalEnvelopeV1` | 3 | `unsigned`, `daemon_key_id`, `signature` |
 | `UnsignedApprovalReceiptV1` | 9 | `envelope_digest`, `challenge`, `decision`, `approval_principal`, `auth_method`, `approval_key_id`, `issued_at`, `expires_at`, `receipt_nonce` |
 | `ApprovalReceiptV1` | 2 | `unsigned`, `signature` |
+
+`request_digest` is the exact operation commitment:
+
+```text
+SHA-256("SAVANA_INGRESS_REQUEST_V1\0" ||
+        canonical_cbor(IngressRequestCommitmentV1))
+```
+
+`IngressRequestCommitmentV1` is a closed tagged union whose canonical CBOR is
+the exact outer array `[tag, payload]`:
+
+| Tag | Variant | Exact payload |
+| ---: | --- | --- |
+| 0 | `BeginRun` | `[KernelValue]` |
+| 1 | `IngestUserInput` | `[RunHandle, KernelValue]` |
+
+Both the outer array and each payload require their exact stated length.
+Unknown tags, missing or extra items, indefinite arrays, and non-canonical
+children are rejected.
+
+```text
+BeginRun Null CBOR: 8200818200f6
+BeginRun Null digest: 99dbaa60637f157d913d024ca99693f92ca8dba64490e8f6cbd0eeec20f99665
+Ingest run=0x70*32, Null CBOR:
+820182582070707070707070707070707070707070707070707070707070707070707070708200f6
+Ingest digest: 5368417421be910eec040a38eebdb30744f67005890da2ce3cf17ecca7048da5
+```
 
 These enums are `[tag, payload]`:
 
@@ -387,6 +414,18 @@ Array length 2:
 | ---: | --- | --- |
 | 0 | `transcript` | `HandshakeTranscriptV1` |
 | 1 | `signature` | raw Ed25519 `Signature64` |
+
+The connection binding committed by signed ingress is:
+
+```text
+SHA-256("SAVANA_CONNECTION_BINDING_V1\0" ||
+        canonical_cbor(HandshakeTranscriptV1))
+```
+
+Before signing ingress, the Authority must obtain the complete daemon-signed
+hello, verify its signature against the release-pinned daemon key and fixed
+installation identity, and only then copy the selected policy digest and boot
+ID and derive this connection binding from the verified transcript.
 
 ### `HandshakeAcceptedV1`
 
@@ -516,7 +555,7 @@ SHA256(canonical_cbor(HandshakeTranscriptV1))
 It is not a hash of the tagged server message, is not a hash of the framed
 bytes, is not domain-prefixed, and is not double-hashed.
 
-Three additional domain-separated hashes are identities, not signatures:
+Five additional domain-separated hashes are identities, not signatures:
 
 - `release_target_id = SHA256(b"SAVANA_RELEASE_TARGET_V1\0" ||
   canonical_release_target_array)`.
@@ -525,6 +564,12 @@ Three additional domain-separated hashes are identities, not signatures:
   canonical_ResourceLimitsV1)`.
 - `canonical_ledger_digest =
   SHA256(b"SAVANA_POLICY_LEDGER_V1\0" || canonical_ledger)`.
+- `connection_binding_digest =
+  SHA256(b"SAVANA_CONNECTION_BINDING_V1\0" ||
+  canonical_cbor(HandshakeTranscriptV1))`.
+- `request_digest =
+  SHA256(b"SAVANA_INGRESS_REQUEST_V1\0" ||
+  canonical_cbor(IngressRequestCommitmentV1))`.
 
 `SAVANA_POLICY_LEDGER_V1\0` is a digest domain, not a signature domain.
 
@@ -610,7 +655,7 @@ Nested policy arrays:
 | 6 | `ModelManifest` |
 | 7 | `Release` |
 
-`ResourceLimitsV1` is a map with exactly 24 unsigned entries:
+`ResourceLimitsV1` is a map with exactly 25 unsigned entries:
 
 | Key | Field | Compiled maximum |
 | ---: | --- | ---: |
@@ -638,6 +683,7 @@ Nested policy arrays:
 | 21 | `model_probe_spans` | 512 |
 | 22 | `ner_failure_threshold` | 32 |
 | 23 | `request_deadline_ms` | 120,000 |
+| 24 | `ingress_replay_entries_per_client` | 4,096 |
 
 Every requested value must be less than or equal to its compiled maximum.
 

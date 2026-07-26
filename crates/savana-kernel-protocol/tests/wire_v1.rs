@@ -1,43 +1,16 @@
+use std::collections::BTreeMap;
+
 use ed25519_dalek::{Signature, SigningKey};
 use savana_kernel_protocol::{
     encode_client_message, encode_server_message, AttemptKindV1, ClientMessageV1, ConstraintId,
     HardLimits, ResourceLimitsV1, StableCode, ToolName, ValidatorId, PROTOCOL_MAJOR,
     PROTOCOL_MINOR,
 };
+use sha2::{Digest, Sha256};
 
 mod support;
 
 type OneOverCase = (&'static str, fn(&mut ResourceLimitsV1));
-
-fn compiled_request() -> ResourceLimitsV1 {
-    let limits = HardLimits::COMPILED;
-    ResourceLimitsV1 {
-        frame_bytes: limits.frame_bytes(),
-        cbor_depth: limits.cbor_depth(),
-        pages: limits.pages(),
-        chars_per_page: limits.chars_per_page(),
-        chars_per_document: limits.chars_per_document(),
-        observations: limits.observations(),
-        vault_entries: limits.vault_entries(),
-        vault_raw_bytes: limits.vault_raw_bytes(),
-        runs_per_client: limits.runs_per_client(),
-        vaults_per_client: limits.vaults_per_client(),
-        approval_ledger_entries: limits.approval_ledger_entries(),
-        model_manifest_bytes: limits.model_manifest_bytes(),
-        model_assets: limits.model_assets(),
-        model_tensor_contracts: limits.model_tensor_contracts(),
-        model_tensor_rank: limits.model_tensor_rank(),
-        single_model_asset_bytes: limits.single_model_asset_bytes(),
-        total_model_asset_bytes: limits.total_model_asset_bytes(),
-        ner_workers: limits.ner_workers(),
-        ner_queue: limits.ner_queue(),
-        ner_text_bytes: limits.ner_text_bytes(),
-        model_probes: limits.model_probes(),
-        model_probe_spans: limits.model_probe_spans(),
-        ner_failure_threshold: limits.ner_failure_threshold(),
-        request_deadline_ms: limits.request_deadline_ms(),
-    }
-}
 
 #[test]
 fn committed_handshake_vectors_match_the_v1_encoders() {
@@ -63,6 +36,71 @@ fn committed_handshake_vectors_match_the_v1_encoders() {
             &Signature::from_bytes(signed_hello.signature.as_bytes()),
         )
         .unwrap();
+}
+
+#[test]
+fn vector_readme_metadata_matches_committed_files() {
+    const NAMES: [&str; 7] = [
+        "client-hello-v1.cbor",
+        "server-hello-v1.cbor",
+        "policy-flow-v1.cbor",
+        "policy-bundle-v1.cbor",
+        "policy-bundle-v1.sig",
+        "release-manifest-v1.cbor",
+        "release-manifest-v1.sig",
+    ];
+    let readme = include_str!("../../../vectors/kerneld/README.md");
+    let mut documented = BTreeMap::new();
+    for line in readme.lines() {
+        let columns = line.split('|').map(str::trim).collect::<Vec<_>>();
+        if columns.len() != 5 || !columns[1].starts_with('`') || !columns[1].ends_with('`') {
+            continue;
+        }
+        let name = columns[1].trim_matches('`');
+        assert!(NAMES.contains(&name), "unknown vector row {name}");
+        let bytes = columns[2].replace(',', "").parse::<usize>().unwrap();
+        let hash = columns[3].trim_matches('`').to_owned();
+        assert_eq!(hash.len(), 64, "invalid SHA-256 width for {name}");
+        assert!(
+            documented.insert(name.to_owned(), (bytes, hash)).is_none(),
+            "duplicate vector row {name}"
+        );
+    }
+    assert_eq!(documented.len(), NAMES.len());
+
+    for name in NAMES {
+        let bytes: &[u8] = match name {
+            "client-hello-v1.cbor" => {
+                include_bytes!("../../../vectors/kerneld/client-hello-v1.cbor")
+            }
+            "server-hello-v1.cbor" => {
+                include_bytes!("../../../vectors/kerneld/server-hello-v1.cbor")
+            }
+            "policy-flow-v1.cbor" => {
+                include_bytes!("../../../vectors/kerneld/policy-flow-v1.cbor")
+            }
+            "policy-bundle-v1.cbor" => {
+                include_bytes!("../../../vectors/kerneld/policy-bundle-v1.cbor")
+            }
+            "policy-bundle-v1.sig" => {
+                include_bytes!("../../../vectors/kerneld/policy-bundle-v1.sig")
+            }
+            "release-manifest-v1.cbor" => {
+                include_bytes!("../../../vectors/kerneld/release-manifest-v1.cbor")
+            }
+            "release-manifest-v1.sig" => {
+                include_bytes!("../../../vectors/kerneld/release-manifest-v1.sig")
+            }
+            _ => unreachable!(),
+        };
+        let (documented_bytes, documented_hash) = &documented[name];
+        assert_eq!(*documented_bytes, bytes.len(), "byte length for {name}");
+        assert_eq!(
+            *documented_hash,
+            format!("{:x}", Sha256::digest(bytes)),
+            "SHA-256 for {name}"
+        );
+    }
 }
 
 fn lowered_request() -> ResourceLimitsV1 {
@@ -91,7 +129,48 @@ fn lowered_request() -> ResourceLimitsV1 {
         model_probe_spans: 500,
         ner_failure_threshold: 21,
         request_deadline_ms: 110_001,
+        ingress_replay_entries_per_client: 4_001,
     }
+}
+
+#[test]
+fn ingress_replay_limit_is_required_at_canonical_map_key_24() {
+    let requested = support::compiled_request();
+    let encoded = minicbor::to_vec(requested).unwrap();
+    let decoded = minicbor::decode::<ResourceLimitsV1>(&encoded).unwrap();
+    assert_eq!(decoded.ingress_replay_entries_per_client, 4_096);
+    assert_eq!(
+        support::resource_limit_map_keys(&encoded),
+        (0_u64..=24).collect::<Vec<_>>()
+    );
+    let error =
+        minicbor::decode::<ResourceLimitsV1>(&support::resource_limits_without_key_24(&encoded))
+            .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains(StableCode::ProtocolMalformedCbor.as_str()));
+}
+
+#[test]
+fn ingress_replay_limit_lowers_but_never_exceeds_4096() {
+    assert_eq!(
+        HardLimits::COMPILED.ingress_replay_entries_per_client(),
+        4_096
+    );
+    let mut requested = support::compiled_request();
+    requested.ingress_replay_entries_per_client = 17;
+    assert_eq!(
+        HardLimits::COMPILED
+            .lower(&requested)
+            .unwrap()
+            .ingress_replay_entries_per_client(),
+        17
+    );
+    requested.ingress_replay_entries_per_client = 4_097;
+    assert_eq!(
+        HardLimits::COMPILED.lower(&requested).unwrap_err().code(),
+        StableCode::PolicyLimitExceeded
+    );
 }
 
 #[test]
@@ -122,6 +201,7 @@ fn v1_constants_are_frozen() {
     assert_eq!(limits.model_probe_spans(), 512);
     assert_eq!(limits.ner_failure_threshold(), 32);
     assert_eq!(limits.request_deadline_ms(), 120_000);
+    assert_eq!(limits.ingress_replay_entries_per_client(), 4_096);
     assert_eq!(limits.policy_tools(), 256);
     assert_eq!(limits.policy_authorities(), 64);
     assert_eq!(limits.policy_error_mappings(), 256);
@@ -192,8 +272,8 @@ fn stable_codes_are_wire_strings() {
 #[test]
 fn resource_limit_decode_rejects_unknown_cbor_fields_with_stable_code() {
     let mut encoder = minicbor::Encoder::new(Vec::new());
-    encoder.map(25).unwrap();
-    for field in 0_u8..=24 {
+    encoder.map(26).unwrap();
+    for field in 0_u8..=25 {
         encoder.u8(field).unwrap().u8(1).unwrap();
     }
 
@@ -207,8 +287,8 @@ fn resource_limit_decode_rejects_unknown_cbor_fields_with_stable_code() {
 #[test]
 fn resource_limit_decode_rejects_duplicate_and_missing_fields() {
     let mut duplicate = minicbor::Encoder::new(Vec::new());
-    duplicate.map(24).unwrap();
-    for field in 0_u8..=22 {
+    duplicate.map(25).unwrap();
+    for field in 0_u8..=23 {
         duplicate.u8(field).unwrap().u8(1).unwrap();
     }
     duplicate.u8(0).unwrap().u8(1).unwrap();
@@ -219,8 +299,8 @@ fn resource_limit_decode_rejects_duplicate_and_missing_fields() {
         .contains(StableCode::ProtocolMalformedCbor.as_str()));
 
     let mut missing = minicbor::Encoder::new(Vec::new());
-    missing.map(23).unwrap();
-    for field in 0_u8..=22 {
+    missing.map(24).unwrap();
+    for field in 0_u8..=23 {
         missing.u8(field).unwrap().u8(1).unwrap();
     }
     let missing_error = minicbor::decode::<ResourceLimitsV1>(&missing.into_writer())
@@ -280,11 +360,15 @@ fn lowered_limits_preserve_every_requested_value() {
         effective.request_deadline_ms(),
         requested.request_deadline_ms
     );
+    assert_eq!(
+        effective.ingress_replay_entries_per_client(),
+        requested.ingress_replay_entries_per_client
+    );
 }
 
 #[test]
 fn every_one_over_compiled_limit_is_rejected() {
-    let cases: [OneOverCase; 24] = [
+    let cases: [OneOverCase; 25] = [
         ("frame_bytes", |requested| requested.frame_bytes += 1),
         ("cbor_depth", |requested| requested.cbor_depth += 1),
         ("pages", |requested| requested.pages += 1),
@@ -335,10 +419,13 @@ fn every_one_over_compiled_limit_is_rejected() {
         ("request_deadline_ms", |requested| {
             requested.request_deadline_ms += 1
         }),
+        ("ingress_replay_entries_per_client", |requested| {
+            requested.ingress_replay_entries_per_client += 1
+        }),
     ];
 
     for (field, raise_one) in cases {
-        let mut requested = compiled_request();
+        let mut requested = support::compiled_request();
         raise_one(&mut requested);
         let error = HardLimits::COMPILED.lower(&requested).unwrap_err();
         assert_eq!(

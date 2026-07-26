@@ -1,7 +1,8 @@
 use crate::{
-    BootId, ClientId, Digest32, KeyId, Nonce32, OperationV1, ProtocolVersion, RequestId,
-    RequestedMode, Signature64, StableCode, UnixMillis,
+    BootId, ClientId, Digest32, KeyId, Nonce32, OperationV1, ProtocolError, ProtocolVersion,
+    RequestId, RequestedMode, Signature64, StableCode, UnixMillis,
 };
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq, minicbor::Encode, minicbor::Decode)]
 #[cbor(array)]
@@ -98,6 +99,16 @@ pub struct HandshakeTranscriptV1 {
     pub server_nonce: Nonce32,
     #[n(2)]
     pub server: ServerIdentityV1,
+}
+
+pub fn connection_binding_digest(
+    transcript: &HandshakeTranscriptV1,
+) -> Result<Digest32, ProtocolError> {
+    let canonical = minicbor::to_vec(transcript).map_err(ProtocolError::malformed)?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"SAVANA_CONNECTION_BINDING_V1\0");
+    hasher.update(canonical);
+    Ok(Digest32::new(hasher.finalize().into()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, minicbor::Encode, minicbor::Decode)]

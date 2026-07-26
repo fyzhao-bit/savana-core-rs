@@ -1,16 +1,18 @@
 use savana_kernel_protocol::{
-    approval_display_digest, encode_client_message, encode_server_message, ApprovalAuthMethod,
-    ApprovalChallengeV1, ApprovalDecision, ApprovalPurposeV1, ApprovalReceiptV1, ApprovalSubjectV1,
-    BeginRunRequest, BootId, BoundedText, ClientMessageV1, CommitPlannerValueRequest,
-    CommitToolResultRequest, ConversationId, DecisionTrace, DeriveOperation, DeriveValueRequest,
-    Digest32, EvaluateToolCallRequest, EvaluateToolCallResponseV1, IngestUserInputRequest,
-    IngressEnvelopeV1, KernelValue, KeyId, MaskedDisplayBundleV1, MaterializeExecutionRequest,
-    Nonce32, OperationV1, PlannerCommitProofV1, PlannerId, PreparePlannerCallRequest, PrincipalId,
-    ProposeToolCallRequest, ProtocolVersion, RegistrySnapshotV1, RequestEnvelopeV1, RequestId,
-    ResponseBodyV1, ResponseEnvelopeV1, ResponsePayloadV1, RoleId, RunId, ServerIdentityV1,
-    ServerMessageV1, Signature64, SignedApprovalEnvelopeV1, SignedIngressEnvelopeV1,
-    SignedRegistrySnapshotV1, StableCode, TaskId, ToolExecutionIdentity, ToolName, UnixMillis,
-    UnsignedApprovalEnvelopeV1, UnsignedApprovalReceiptV1, ValueHandle,
+    approval_display_digest, connection_binding_digest, encode_client_message,
+    encode_server_message, ingress_request_digest, ApprovalAuthMethod, ApprovalChallengeV1,
+    ApprovalDecision, ApprovalPurposeV1, ApprovalReceiptV1, ApprovalSubjectV1, BeginRunRequest,
+    BootId, BoundedText, ClientMessageV1, CommitPlannerValueRequest, CommitToolResultRequest,
+    ConversationId, DecisionTrace, DeriveOperation, DeriveValueRequest, Digest32,
+    EvaluateToolCallRequest, EvaluateToolCallResponseV1, HandshakeTranscriptV1,
+    IngestUserInputRequest, IngressEnvelopeV1, IngressRequestCommitmentV1, KernelValue, KeyId,
+    MaskedDisplayBundleV1, MaterializeExecutionRequest, Nonce32, OperationV1, PlannerCommitProofV1,
+    PlannerId, PreparePlannerCallRequest, PrincipalId, ProposeToolCallRequest, ProtocolVersion,
+    RegistrySnapshotV1, RequestEnvelopeV1, RequestId, ResponseBodyV1, ResponseEnvelopeV1,
+    ResponsePayloadV1, RoleId, RunId, ServerIdentityV1, ServerMessageV1, Signature64,
+    SignedApprovalEnvelopeV1, SignedIngressEnvelopeV1, SignedRegistrySnapshotV1, StableCode,
+    TaskId, ToolExecutionIdentity, ToolName, UnixMillis, UnsignedApprovalEnvelopeV1,
+    UnsignedApprovalReceiptV1, ValueHandle,
 };
 
 #[derive(Clone, Copy)]
@@ -44,13 +46,23 @@ pub(crate) fn fixture_handles() -> FixtureHandles {
     }
 }
 
-pub(crate) fn encoded_messages() -> Vec<Vec<u8>> {
+pub(crate) fn encoded_messages(transcript: &HandshakeTranscriptV1) -> Vec<Vec<u8>> {
     let handles = fixture_handles();
+    let begin_input = KernelValue::Null;
+    let ingest_input = KernelValue::Null;
     let operations = vec![
-        OperationV1::BeginRun(begin_run()),
+        OperationV1::BeginRun(begin_run(transcript, begin_input)),
         OperationV1::IngestUserInput(IngestUserInputRequest {
             run: handles.run,
-            envelope: ingress(),
+            envelope: ingress(
+                transcript,
+                &IngressRequestCommitmentV1::IngestUserInput {
+                    run: handles.run,
+                    input: ingest_input.clone(),
+                },
+                0x2a,
+            ),
+            input: ingest_input,
         }),
         OperationV1::PreparePlannerCall(PreparePlannerCallRequest {
             run: handles.run,
@@ -127,28 +139,43 @@ pub(crate) fn encoded_messages() -> Vec<Vec<u8>> {
     messages
 }
 
-fn ingress() -> SignedIngressEnvelopeV1 {
+fn ingress(
+    transcript: &HandshakeTranscriptV1,
+    commitment: &IngressRequestCommitmentV1,
+    nonce_byte: u8,
+) -> SignedIngressEnvelopeV1 {
     SignedIngressEnvelopeV1 {
         unsigned: IngressEnvelopeV1 {
             principal: PrincipalId::try_from("fixture-principal").expect("fixed principal"),
             conversation_id: ConversationId::try_from("fixture-conversation")
                 .expect("fixed conversation"),
-            request_digest: Digest32::new([0x21; 32]),
+            request_digest: ingress_request_digest(commitment).expect("fixed request commitment"),
             issued_at: UnixMillis::new(1_000),
             expires_at: UnixMillis::new(2_000),
-            nonce: Nonce32::new([0x22; 32]),
+            nonce: Nonce32::new([nonce_byte; 32]),
             authority_session_id: Nonce32::new([0x23; 32]),
             authentication_context_digest: Digest32::new([0x24; 32]),
+            role: RoleId::try_from("operator").expect("fixed role"),
+            policy_digest: transcript.server.policy_digest,
+            boot_id: transcript.server.boot_id,
+            connection_binding_digest: connection_binding_digest(transcript)
+                .expect("fixed connection binding"),
         },
         key_id: KeyId::try_from("fixture-ingress-key").expect("fixed ingress key"),
         signature: Signature64::new([0x25; 64]),
     }
 }
 
-fn begin_run() -> BeginRunRequest {
+fn begin_run(transcript: &HandshakeTranscriptV1, input: KernelValue) -> BeginRunRequest {
     BeginRunRequest {
-        ingress: ingress(),
-        role: RoleId::try_from("operator").expect("fixed role"),
+        ingress: ingress(
+            transcript,
+            &IngressRequestCommitmentV1::BeginRun {
+                input: input.clone(),
+            },
+            0x22,
+        ),
+        input,
         registry: SignedRegistrySnapshotV1 {
             unsigned: RegistrySnapshotV1 {
                 version: 7,
