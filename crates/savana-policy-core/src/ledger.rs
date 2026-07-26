@@ -11,7 +11,13 @@ use sha2::{Digest, Sha256};
 
 use crate::atomic_file;
 use crate::lock_file::LedgerLock;
-use crate::{PolicyError, PolicyVerifier, VerifiedPolicyV1};
+use crate::{
+    CurrentPolicyCapability, PolicyError, PolicyVerifier, VerifiedPolicyV1, VerifiedReleaseIdentity,
+};
+
+#[cfg(test)]
+#[path = "ledger/acceptance_tests.rs"]
+mod acceptance_tests;
 
 const LEDGER_SCHEMA_VERSION: u16 = 1;
 const MAXIMUM_LEDGER_BYTES: u64 = 128;
@@ -61,6 +67,50 @@ pub struct PolicyLedgerIdentity {
     pub highest_key_epoch: u64,
     pub highest_policy_digest: Digest32,
     pub canonical_ledger_digest: Digest32,
+}
+
+impl PolicyLedgerIdentity {
+    fn from_preencoded(
+        ledger: RollbackLedgerV1,
+        canonical: &[u8],
+        identity: crate::PolicyIdentity,
+    ) -> Result<Self, PolicyError> {
+        if ledger.highest_policy_version != identity.policy_version
+            || ledger.highest_key_epoch != identity.key_epoch
+            || ledger.highest_policy_digest != identity.digest
+            || ledger.canonical_bytes() != canonical
+        {
+            return Err(PolicyError::stable(StableCode::ProtocolIo));
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(LEDGER_DOMAIN);
+        hasher.update(canonical);
+        Ok(Self {
+            highest_policy_version: ledger.highest_policy_version,
+            highest_key_epoch: ledger.highest_key_epoch,
+            highest_policy_digest: ledger.highest_policy_digest,
+            canonical_ledger_digest: Digest32::new(hasher.finalize().into()),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct InitialAcceptanceCommitGuard {
+    armed: bool,
+}
+
+impl InitialAcceptanceCommitGuard {
+    fn complete(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for InitialAcceptanceCommitGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            std::process::abort();
+        }
+    }
 }
 
 pub struct PolicyStore {
@@ -181,7 +231,8 @@ impl PolicyStore {
         })
     }
 
-    pub fn verify_and_accept(
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn verify_and_accept(
         &mut self,
         canonical_bundle: &[u8],
         signature: &Signature64,
@@ -189,6 +240,57 @@ impl PolicyStore {
     ) -> Result<VerifiedPolicyV1, PolicyError> {
         self.ensure_usable()?;
         let verified = self.verifier.verify(canonical_bundle, signature, now)?;
+        let next = self.validate_ledger_transition(&verified)?;
+        if next == self.ledger {
+            return Ok(verified);
+        }
+        let canonical = next.canonical_bytes();
+        let durable = self.persist_prevalidated(next, &canonical)?;
+        durable.complete();
+        Ok(verified)
+    }
+
+    pub fn verify_and_accept_initial(
+        mut self,
+        release: VerifiedReleaseIdentity,
+        policy_bytes: &[u8],
+        signature: &Signature64,
+        now: UnixMillis,
+    ) -> Result<CurrentPolicyCapability, PolicyError> {
+        self.ensure_usable()?;
+        if !self.verifier.is_bound_to(&release)
+            || now.get() < release.issued_at().get()
+            || now.get() >= release.expires_at().get()
+        {
+            return Err(PolicyError::stable(StableCode::IdentityReleaseMismatch));
+        }
+        let policy = self.verifier.verify(policy_bytes, signature, now)?;
+        release.verify_selected_policy_binding(&policy, signature)?;
+        release.recheck_retained_stage()?;
+        let identity = policy.identity();
+        let next = self.validate_ledger_transition(&policy)?;
+        let canonical_ledger = next.canonical_bytes();
+        let ledger_identity =
+            PolicyLedgerIdentity::from_preencoded(next, &canonical_ledger, identity)?;
+        let resource_profile_digest = policy.resource_profile_digest();
+        let durable = self.persist_prevalidated(next, &canonical_ledger)?;
+        #[cfg(test)]
+        acceptance_test_post_persistence_hook();
+        let current = CurrentPolicyCapability {
+            store: self,
+            policy,
+            ledger_identity,
+            release,
+            resource_profile_digest,
+        };
+        durable.complete();
+        Ok(current)
+    }
+
+    fn validate_ledger_transition(
+        &self,
+        verified: &VerifiedPolicyV1,
+    ) -> Result<RollbackLedgerV1, PolicyError> {
         let identity = verified.identity();
         if identity.policy_version < self.ledger.highest_policy_version {
             return Err(PolicyError::stable(StableCode::PolicyRollback));
@@ -197,7 +299,7 @@ impl PolicyStore {
             if identity.key_epoch == self.ledger.highest_key_epoch
                 && identity.digest == self.ledger.highest_policy_digest
             {
-                return Ok(verified);
+                return Ok(self.ledger);
             }
             return Err(PolicyError::stable(StableCode::PolicyEquivocation));
         }
@@ -205,9 +307,7 @@ impl PolicyStore {
             return Err(PolicyError::stable(StableCode::PolicyRollback));
         }
 
-        let next = RollbackLedgerV1::from_verified(&verified);
-        self.persist_candidate(next)?;
-        Ok(verified)
+        Ok(RollbackLedgerV1::from_verified(verified))
     }
 
     pub fn ledger_identity(&self) -> Result<PolicyLedgerIdentity, PolicyError> {
@@ -242,16 +342,20 @@ impl PolicyStore {
         }
     }
 
-    fn persist_candidate(&mut self, next: RollbackLedgerV1) -> Result<(), PolicyError> {
-        let canonical = next.canonical_bytes();
+    fn persist_prevalidated(
+        &mut self,
+        next: RollbackLedgerV1,
+        canonical: &[u8],
+    ) -> Result<InitialAcceptanceCommitGuard, PolicyError> {
         let result = match &self.anchored {
-            Some(state) => state.replace(&canonical),
-            None => atomic_file::replace(&self.ledger_path, &canonical),
+            Some(state) => state.replace(canonical),
+            None => atomic_file::replace(&self.ledger_path, canonical),
         };
         match result {
             Ok(()) => {
+                let guard = InitialAcceptanceCommitGuard { armed: true };
                 self.ledger = next;
-                Ok(())
+                Ok(guard)
             }
             Err(error) => {
                 if error.renamed() {
@@ -283,6 +387,13 @@ impl PolicyStore {
                 Err(error.into_policy_error())
             }
         }
+    }
+}
+
+#[cfg(test)]
+fn acceptance_test_post_persistence_hook() {
+    if std::env::var_os("SAVANA_TEST_INITIAL_ACCEPTANCE_PANIC").is_some() {
+        panic!("injected post-persistence panic");
     }
 }
 
@@ -709,8 +820,12 @@ mod tests {
             highest_policy_digest: Digest32::new([1; 32]),
         };
 
+        let canonical = next.canonical_bytes();
         assert_eq!(
-            store.persist_candidate(next).unwrap_err().code(),
+            store
+                .persist_prevalidated(next, &canonical)
+                .unwrap_err()
+                .code(),
             StableCode::ProtocolIo
         );
         assert!(!held_state.join("policy-ledger-v1.cbor").exists());

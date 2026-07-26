@@ -16,10 +16,20 @@ pub struct PolicyTrustRootV1 {
     pub revoked: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PolicyVerifierOrigin {
+    Offline,
+    ReleaseBound {
+        release_digest: Digest32,
+        installation_profile_digest: Digest32,
+    },
+}
+
+#[derive(Clone)]
 pub struct PolicyVerifier {
     roots: Vec<PolicyTrustRootV1>,
     active_release_target_id: Digest32,
+    origin: PolicyVerifierOrigin,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -63,6 +73,32 @@ impl PolicyVerifier {
         roots: Vec<PolicyTrustRootV1>,
         active_release_target_id: Digest32,
     ) -> Result<Self, PolicyError> {
+        Self::validate_roots(&roots)?;
+        Ok(Self {
+            roots,
+            active_release_target_id,
+            origin: PolicyVerifierOrigin::Offline,
+        })
+    }
+
+    pub(crate) fn for_release(
+        roots: Vec<PolicyTrustRootV1>,
+        active_release_target_id: Digest32,
+        release_digest: Digest32,
+        installation_profile_digest: Digest32,
+    ) -> Result<Self, PolicyError> {
+        Self::validate_roots(&roots)?;
+        Ok(Self {
+            roots,
+            active_release_target_id,
+            origin: PolicyVerifierOrigin::ReleaseBound {
+                release_digest,
+                installation_profile_digest,
+            },
+        })
+    }
+
+    fn validate_roots(roots: &[PolicyTrustRootV1]) -> Result<(), PolicyError> {
         if roots.is_empty() {
             return Err(PolicyError::stable(StableCode::ProtocolMalformedCbor));
         }
@@ -85,10 +121,15 @@ impl PolicyVerifier {
         {
             return Err(PolicyError::stable(StableCode::PolicyInvalidSignature));
         }
-        Ok(Self {
-            roots,
-            active_release_target_id,
-        })
+        Ok(())
+    }
+
+    pub(crate) fn is_bound_to(&self, release: &crate::VerifiedReleaseIdentity) -> bool {
+        self.origin
+            == (PolicyVerifierOrigin::ReleaseBound {
+                release_digest: release.release_digest(),
+                installation_profile_digest: release.installation_profile_digest(),
+            })
     }
 
     pub fn verify(
@@ -120,6 +161,12 @@ impl PolicyVerifier {
             self.active_release_target_id,
             now,
         )
+    }
+}
+
+impl std::fmt::Debug for PolicyVerifier {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PolicyVerifier(<verified>)")
     }
 }
 

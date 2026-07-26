@@ -16,6 +16,7 @@ use crate::bundle::{
     encode_planner_signing_payload, encode_validator_signing_payload, AllowedToolV1,
     AuthorityKeyV1, AuthorityRoleV1, PolicyBundleV1, ToolAttemptV1,
 };
+use crate::provenance::PolicyBound;
 use crate::release::VerifiedReleaseIdentity;
 use crate::signature::{verify_signature, SignatureDomain};
 use crate::PolicyError;
@@ -81,9 +82,10 @@ impl VerifiedAuthorityV1<'_> {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct VerifiedIngressV1 {
     artifact: SignedIngressEnvelopeV1,
+    policy_identity: PolicyIdentity,
 }
 
 impl std::fmt::Debug for VerifiedIngressV1 {
@@ -93,6 +95,14 @@ impl std::fmt::Debug for VerifiedIngressV1 {
 }
 
 impl VerifiedIngressV1 {
+    pub const fn role(&self) -> &savana_kernel_protocol::RoleId {
+        &self.artifact.unsigned.role
+    }
+
+    pub const fn policy_digest(&self) -> Digest32 {
+        self.artifact.unsigned.policy_digest
+    }
+
     pub const fn principal(&self) -> &PrincipalId {
         &self.artifact.unsigned.principal
     }
@@ -130,9 +140,10 @@ impl VerifiedIngressV1 {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct VerifiedPlannerAttestationV1 {
     artifact: SignedPlannerAttestationV1,
+    policy_identity: PolicyIdentity,
 }
 
 impl std::fmt::Debug for VerifiedPlannerAttestationV1 {
@@ -179,9 +190,10 @@ impl VerifiedPlannerAttestationV1 {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct VerifiedRegistrySnapshotV1 {
     artifact: SignedRegistrySnapshotV1,
+    policy_identity: PolicyIdentity,
 }
 
 impl std::fmt::Debug for VerifiedRegistrySnapshotV1 {
@@ -200,9 +212,10 @@ impl VerifiedRegistrySnapshotV1 {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct VerifiedOntologySnapshotV1 {
     artifact: SignedOntologySnapshotV1,
+    policy_identity: PolicyIdentity,
 }
 
 impl std::fmt::Debug for VerifiedOntologySnapshotV1 {
@@ -221,9 +234,10 @@ impl VerifiedOntologySnapshotV1 {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct VerifiedOntologyEventV1 {
     artifact: SignedOntologyEventV1,
+    policy_identity: PolicyIdentity,
 }
 
 impl std::fmt::Debug for VerifiedOntologyEventV1 {
@@ -242,9 +256,10 @@ impl VerifiedOntologyEventV1 {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct VerifiedValidatorAttestationV1 {
     artifact: SignedValidatorAttestationV1,
+    policy_identity: PolicyIdentity,
 }
 
 impl std::fmt::Debug for VerifiedValidatorAttestationV1 {
@@ -299,12 +314,13 @@ impl VerifiedValidatorAttestationV1 {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 /// A canonical receipt with verified policy-selected signature, role, and
 /// validity window. It is not an authorization decision: callers must still
 /// compare the stored challenge and reserve the one-time approval ledger.
 pub struct VerifiedApprovalReceiptV1 {
     artifact: ApprovalReceiptV1,
+    policy_identity: PolicyIdentity,
 }
 
 impl std::fmt::Debug for VerifiedApprovalReceiptV1 {
@@ -327,12 +343,13 @@ impl VerifiedApprovalReceiptV1 {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 /// A canonical envelope authenticated by the installation-pinned daemon and
 /// bound to a verified policy. A live-session boot binding is still the
 /// responsibility of the Authority/daemon integration.
 pub struct VerifiedApprovalEnvelopeV1 {
     artifact: SignedApprovalEnvelopeV1,
+    policy_identity: PolicyIdentity,
 }
 
 impl std::fmt::Debug for VerifiedApprovalEnvelopeV1 {
@@ -358,6 +375,54 @@ impl VerifiedApprovalEnvelopeV1 {
         &self.artifact.daemon_key_id
     }
 }
+
+macro_rules! impl_policy_bound {
+    ($($wrapper:ty),+ $(,)?) => {
+        $(
+            impl PolicyBound for $wrapper {
+                fn verified_policy_identity(&self) -> PolicyIdentity {
+                    self.policy_identity
+                }
+            }
+        )+
+    };
+}
+
+macro_rules! impl_artifact_equality {
+    ($($wrapper:ty),+ $(,)?) => {
+        $(
+            impl PartialEq for $wrapper {
+                fn eq(&self, other: &Self) -> bool {
+                    self.artifact == other.artifact
+                }
+            }
+
+            impl Eq for $wrapper {}
+        )+
+    };
+}
+
+impl_policy_bound!(
+    VerifiedIngressV1,
+    VerifiedPlannerAttestationV1,
+    VerifiedRegistrySnapshotV1,
+    VerifiedOntologySnapshotV1,
+    VerifiedOntologyEventV1,
+    VerifiedValidatorAttestationV1,
+    VerifiedApprovalReceiptV1,
+    VerifiedApprovalEnvelopeV1,
+);
+
+impl_artifact_equality!(
+    VerifiedIngressV1,
+    VerifiedPlannerAttestationV1,
+    VerifiedRegistrySnapshotV1,
+    VerifiedOntologySnapshotV1,
+    VerifiedOntologyEventV1,
+    VerifiedValidatorAttestationV1,
+    VerifiedApprovalReceiptV1,
+    VerifiedApprovalEnvelopeV1,
+);
 
 impl VerifiedPolicyV1 {
     pub const fn identity(&self) -> PolicyIdentity {
@@ -424,19 +489,22 @@ impl VerifiedPolicyV1 {
             &authority.public_key,
             StableCode::AttestationInvalidSignature,
         )?;
-        if is_zero_nonce(artifact.unsigned.nonce)
-            || is_zero_nonce(artifact.unsigned.authority_session_id)
-        {
-            return Err(PolicyError::stable(StableCode::AttestationBindingMismatch));
-        }
         self.validate_artifact_window(
             artifact.unsigned.issued_at,
             artifact.unsigned.expires_at,
             now,
             authority,
-            StableCode::AttestationBindingMismatch,
+            StableCode::AttestationExpired,
         )?;
-        Ok(VerifiedIngressV1 { artifact })
+        if is_zero_nonce(artifact.unsigned.nonce)
+            || is_zero_nonce(artifact.unsigned.authority_session_id)
+        {
+            return Err(PolicyError::stable(StableCode::AttestationBindingMismatch));
+        }
+        Ok(VerifiedIngressV1 {
+            artifact,
+            policy_identity: self.identity(),
+        })
     }
 
     pub fn verify_planner_attestation(
@@ -472,7 +540,10 @@ impl VerifiedPolicyV1 {
             authority,
             StableCode::AttestationBindingMismatch,
         )?;
-        Ok(VerifiedPlannerAttestationV1 { artifact })
+        Ok(VerifiedPlannerAttestationV1 {
+            artifact,
+            policy_identity: self.identity(),
+        })
     }
 
     pub fn verify_registry_snapshot(
@@ -500,9 +571,12 @@ impl VerifiedPolicyV1 {
             artifact.unsigned.expires_at,
             now,
             authority,
-            StableCode::AttestationBindingMismatch,
+            StableCode::AttestationExpired,
         )?;
-        Ok(VerifiedRegistrySnapshotV1 { artifact })
+        Ok(VerifiedRegistrySnapshotV1 {
+            artifact,
+            policy_identity: self.identity(),
+        })
     }
 
     pub fn verify_ontology_snapshot(
@@ -545,7 +619,10 @@ impl VerifiedPolicyV1 {
             authority,
             StableCode::AttestationBindingMismatch,
         )?;
-        Ok(VerifiedOntologySnapshotV1 { artifact })
+        Ok(VerifiedOntologySnapshotV1 {
+            artifact,
+            policy_identity: self.identity(),
+        })
     }
 
     pub fn verify_ontology_event(
@@ -583,7 +660,10 @@ impl VerifiedPolicyV1 {
             authority,
             StableCode::AttestationBindingMismatch,
         )?;
-        Ok(VerifiedOntologyEventV1 { artifact })
+        Ok(VerifiedOntologyEventV1 {
+            artifact,
+            policy_identity: self.identity(),
+        })
     }
 
     pub fn verify_validator_attestation(
@@ -619,7 +699,10 @@ impl VerifiedPolicyV1 {
             authority,
             StableCode::AttestationBindingMismatch,
         )?;
-        Ok(VerifiedValidatorAttestationV1 { artifact })
+        Ok(VerifiedValidatorAttestationV1 {
+            artifact,
+            policy_identity: self.identity(),
+        })
     }
 
     pub fn verify_approval_receipt(
@@ -676,7 +759,10 @@ impl VerifiedPolicyV1 {
         {
             return Err(PolicyError::stable(StableCode::ApprovalBindingMismatch));
         }
-        Ok(VerifiedApprovalReceiptV1 { artifact })
+        Ok(VerifiedApprovalReceiptV1 {
+            artifact,
+            policy_identity: self.identity(),
+        })
     }
 
     fn producer_authority(
@@ -797,7 +883,10 @@ impl VerifiedReleaseIdentity {
         {
             return Err(PolicyError::stable(StableCode::AttestationExpired));
         }
-        Ok(VerifiedApprovalEnvelopeV1 { artifact })
+        Ok(VerifiedApprovalEnvelopeV1 {
+            artifact,
+            policy_identity: policy.identity(),
+        })
     }
 }
 
@@ -1211,4 +1300,64 @@ fn domain_digest(domain: &[u8], bytes: &[u8]) -> Digest32 {
     hasher.update(domain);
     hasher.update(bytes);
     Digest32::new(hasher.finalize().into())
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::PolicyIdentity;
+    use crate::provenance::PolicyBound;
+    use ed25519_dalek::SigningKey;
+    use savana_kernel_protocol::{KeyId, RegistrySnapshotV1, SignedRegistrySnapshotV1, UnixMillis};
+
+    use crate::test_support as support;
+
+    #[test]
+    fn complete_producer_provenance_includes_policy_expiry() {
+        let mut policy_value = support::valid_policy(7, 3);
+        policy_value.expires_at = 3_000;
+        let (policy_bytes, policy_signature) = support::signed(&policy_value);
+        let policy = support::verifier()
+            .verify(&policy_bytes, &policy_signature, support::unix_now())
+            .unwrap();
+        let first = policy.identity();
+        let mut second_policy_value = support::valid_policy(7, 3);
+        second_policy_value.expires_at = 3_001;
+        let (second_bytes, second_signature) = support::signed(&second_policy_value);
+        let second_policy = support::verifier()
+            .verify(&second_bytes, &second_signature, support::unix_now())
+            .unwrap();
+        let second = PolicyIdentity {
+            digest: first.digest,
+            policy_version: first.policy_version,
+            key_epoch: first.key_epoch,
+            expires_at: second_policy.identity().expires_at,
+        };
+        let unsigned = RegistrySnapshotV1 {
+            version: 1,
+            previous_digest: None,
+            tools: Vec::new(),
+            issued_at: UnixMillis::new(1_000),
+            expires_at: UnixMillis::new(2_500),
+        };
+        let payload = minicbor::to_vec(&unsigned).unwrap();
+        let artifact = minicbor::to_vec(SignedRegistrySnapshotV1 {
+            unsigned,
+            key_id: KeyId::try_from("role-02").unwrap(),
+            signature: support::detached_signature(
+                b"SAVANA_REGISTRY_V1\0",
+                &payload,
+                &SigningKey::from_bytes(&[0x72; 32]),
+            ),
+        })
+        .unwrap();
+        let producer = policy
+            .verify_registry_snapshot(&artifact, support::unix_now())
+            .unwrap();
+        let other_producer = second_policy
+            .verify_registry_snapshot(&artifact, support::unix_now())
+            .unwrap();
+        assert_eq!(producer, other_producer);
+        assert!(producer.is_current_for(first));
+        assert!(!producer.is_current_for(second));
+    }
 }

@@ -414,7 +414,7 @@ fn encoded_ingress(domain: &[u8]) -> Vec<u8> {
         authority_session_id: Nonce32::new([0x23; 32]),
         authentication_context_digest: Digest32::new([0x24; 32]),
         role: savana_kernel_protocol::RoleId::try_from("operator").unwrap(),
-        policy_digest: Digest32::new([0x25; 32]),
+        policy_digest: producer_policy().identity().digest,
         boot_id: BootId::new([0x26; 32]),
         connection_binding_digest: Digest32::new([0x27; 32]),
     };
@@ -655,6 +655,40 @@ fn ingress_signature_binds_principal_request_and_nonce() {
             .code(),
         StableCode::AttestationInvalidSignature
     );
+}
+
+#[test]
+fn ingress_signature_binds_role_policy_boot_and_connection() {
+    let policy = producer_policy();
+    for mutation in 0..4 {
+        let mut value: SignedIngressEnvelopeV1 =
+            minicbor::decode(&encoded_ingress(INGRESS_DOMAIN)).unwrap();
+        match mutation {
+            0 => value.unsigned.role = "observer".try_into().unwrap(),
+            1 => value.unsigned.policy_digest = Digest32::new([0x91; 32]),
+            2 => value.unsigned.boot_id = BootId::new([0x92; 32]),
+            3 => value.unsigned.connection_binding_digest = Digest32::new([0x93; 32]),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            policy
+                .verify_ingress(&minicbor::to_vec(value).unwrap(), support::unix_now())
+                .unwrap_err()
+                .code(),
+            StableCode::AttestationInvalidSignature
+        );
+    }
+}
+
+#[test]
+fn verified_ingress_projects_only_role_and_policy_digest() {
+    let policy = producer_policy();
+    let verified = policy
+        .verify_ingress(&encoded_ingress(INGRESS_DOMAIN), support::unix_now())
+        .unwrap();
+    assert_eq!(verified.role().as_str(), "operator");
+    assert_eq!(verified.policy_digest(), policy.identity().digest);
+    assert_eq!(format!("{verified:?}"), "VerifiedIngressV1(<verified>)");
 }
 
 #[test]

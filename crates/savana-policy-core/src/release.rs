@@ -5,6 +5,7 @@ use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use nix::fcntl::OFlag;
@@ -137,6 +138,15 @@ struct HeldFile {
 }
 
 impl HeldFile {
+    fn try_clone(&self) -> Result<Self, PolicyError> {
+        Ok(Self {
+            file: self.file.try_clone().map_err(|_| release_mismatch())?,
+            parent: self.parent.try_clone().map_err(|_| release_mismatch())?,
+            leaf: self.leaf.clone(),
+            identity: self.identity,
+        })
+    }
+
     fn recheck(&self) -> Result<(), PolicyError> {
         let descriptor_identity =
             NodeIdentity::from_metadata(&self.file.metadata().map_err(|_| release_mismatch())?);
@@ -201,6 +211,166 @@ impl HeldFile {
     }
 }
 
+struct ReleaseStageRetention {
+    stage: File,
+    stage_path: PathBuf,
+    stage_identity: NodeIdentity,
+    manifest: HeldFile,
+    signature: HeldFile,
+    executable: HeldFile,
+    payloads: Vec<HeldFile>,
+}
+
+impl ReleaseStageRetention {
+    fn capture(stage: &ReleaseStage, manifest: &ReleaseManifestV1) -> Result<Self, PolicyError> {
+        let mut payloads = Vec::new();
+        payloads
+            .try_reserve_exact(manifest.payloads.len())
+            .map_err(|_| release_mismatch())?;
+        for payload in &manifest.payloads {
+            let held = stage.open_payload(payload)?;
+            if held.hash_exact(payload.byte_length)? != payload.sha256 {
+                return Err(release_mismatch());
+            }
+            stage.recheck_payload_path(payload, held.identity)?;
+            payloads.push(held);
+        }
+        let retention = Self {
+            stage: stage.stage.try_clone().map_err(|_| release_mismatch())?,
+            stage_path: stage.stage_path.clone(),
+            stage_identity: stage.stage_identity,
+            manifest: stage.manifest.try_clone()?,
+            signature: stage.signature.try_clone()?,
+            executable: stage.executable.try_clone()?,
+            payloads,
+        };
+        retention.recheck(manifest)?;
+        Ok(retention)
+    }
+
+    fn capture_installed(
+        stage_path: &Path,
+        manifest: &ReleaseManifestV1,
+        release_digest: Digest32,
+        release_signature_digest: Digest32,
+    ) -> Result<Self, PolicyError> {
+        let stage_path = fs::canonicalize(stage_path).map_err(|_| release_mismatch())?;
+        let stage = open_absolute_directory_chain(&stage_path)?;
+        let stage_identity =
+            NodeIdentity::from_metadata(&stage.metadata().map_err(|_| release_mismatch())?);
+        let manifest_file = open_retained_file(&stage, "release/release-manifest-v1.cbor")?;
+        let signature = open_retained_file(&stage, "release/release-manifest-v1.sig")?;
+        let executable = open_retained_file(&stage, "bin/savana-kerneld")?;
+        if manifest_file.hash_exact(manifest_file.identity.length)? != release_digest
+            || signature.hash_exact(64)? != release_signature_digest
+        {
+            return Err(release_mismatch());
+        }
+        let mut payloads = Vec::new();
+        payloads
+            .try_reserve_exact(manifest.payloads.len())
+            .map_err(|_| release_mismatch())?;
+        for payload in &manifest.payloads {
+            let held = open_retained_file(&stage, &payload.relative_path)?;
+            if held.hash_exact(payload.byte_length)? != payload.sha256 {
+                return Err(release_mismatch());
+            }
+            payloads.push(held);
+        }
+        let retention = Self {
+            stage,
+            stage_path,
+            stage_identity,
+            manifest: manifest_file,
+            signature,
+            executable,
+            payloads,
+        };
+        retention.recheck(manifest)?;
+        Ok(retention)
+    }
+
+    fn recheck(&self, manifest: &ReleaseManifestV1) -> Result<(), PolicyError> {
+        let reopened = open_absolute_directory_chain(&self.stage_path)?;
+        let pathname_identity =
+            NodeIdentity::from_metadata(&reopened.metadata().map_err(|_| release_mismatch())?);
+        let descriptor_identity =
+            NodeIdentity::from_metadata(&self.stage.metadata().map_err(|_| release_mismatch())?);
+        if pathname_identity != self.stage_identity || descriptor_identity != self.stage_identity {
+            return Err(release_mismatch());
+        }
+        self.recheck_path("release/release-manifest-v1.cbor", &self.manifest)?;
+        self.recheck_path("release/release-manifest-v1.sig", &self.signature)?;
+        self.recheck_path("bin/savana-kerneld", &self.executable)?;
+        if self.payloads.len() != manifest.payloads.len() {
+            return Err(release_mismatch());
+        }
+        for (payload, held) in manifest.payloads.iter().zip(&self.payloads) {
+            self.recheck_path(&payload.relative_path, held)?;
+        }
+        Ok(())
+    }
+
+    fn recheck_path(&self, relative_path: &str, held: &HeldFile) -> Result<(), PolicyError> {
+        held.recheck()?;
+        let reopened = open_retained_file(&self.stage, relative_path)?;
+        if reopened.identity != held.identity {
+            return Err(release_mismatch());
+        }
+        Ok(())
+    }
+}
+
+fn open_retained_file(stage: &File, relative_path: &str) -> Result<HeldFile, PolicyError> {
+    if !valid_relative_path(relative_path) {
+        return Err(release_mismatch());
+    }
+    let mut parent = stage.try_clone().map_err(|_| release_mismatch())?;
+    let mut components = Path::new(relative_path).components().peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(leaf) = component else {
+            return Err(release_mismatch());
+        };
+        if components.peek().is_some() {
+            let descriptor = openat(
+                &parent,
+                leaf,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| release_mismatch())?;
+            parent = File::from(descriptor);
+            continue;
+        }
+        let before = stat_identity(&parent, leaf)?;
+        let descriptor = openat(
+            &parent,
+            leaf,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| release_mismatch())?;
+        let file = File::from(descriptor);
+        let metadata = file.metadata().map_err(|_| release_mismatch())?;
+        let identity = NodeIdentity::from_metadata(&metadata);
+        let after = stat_identity(&parent, leaf)?;
+        if !metadata.is_file()
+            || identity.nlink != 1
+            || !before.same_inode(identity)
+            || !identity.same_inode(after)
+        {
+            return Err(release_mismatch());
+        }
+        return Ok(HeldFile {
+            file,
+            parent,
+            leaf: leaf.to_os_string(),
+            identity,
+        });
+    }
+    Err(release_mismatch())
+}
+
 pub struct ReleaseStage {
     stage: File,
     stage_path: PathBuf,
@@ -238,7 +408,7 @@ impl ReleaseStage {
         Self::open_at(stage_path, current_executable, owner_uid, owner_gid)
     }
 
-    #[cfg(feature = "test-support")]
+    #[cfg(any(debug_assertions, feature = "test-support"))]
     #[doc(hidden)]
     pub fn open_mapped_for_test_support(
         stage_path: &Path,
@@ -676,6 +846,7 @@ pub struct VerifiedReleaseIdentity {
     profile: KernelInstallationProfileV1,
     release_digest: Digest32,
     release_signature_digest: Digest32,
+    retention: Arc<ReleaseStageRetention>,
 }
 
 impl std::fmt::Debug for VerifiedReleaseIdentity {
@@ -810,10 +981,16 @@ impl VerifiedReleaseIdentity {
     }
 
     pub fn policy_verifier(&self) -> Result<PolicyVerifier, PolicyError> {
-        PolicyVerifier::new(
+        PolicyVerifier::for_release(
             self.profile.policy_trust_roots.clone(),
             self.manifest.release_target_id,
+            self.release_digest,
+            self.manifest.installation_profile_digest,
         )
+    }
+
+    pub(crate) fn recheck_retained_stage(&self) -> Result<(), PolicyError> {
+        self.retention.recheck(&self.manifest)
     }
 
     pub fn verify_selected_policy_binding(
@@ -938,11 +1115,18 @@ impl ReleaseVerifier {
         verify_stage_tree(&stage_root, &manifest, &manifest_bytes, &signature_array)?;
         verify_installed_binary(installed_binary, &manifest)?;
 
+        let retention = Arc::new(ReleaseStageRetention::capture_installed(
+            &stage_root,
+            &manifest,
+            release_digest,
+            hash_bytes(&signature_array),
+        )?);
         Ok(VerifiedReleaseIdentity {
             manifest,
             profile,
             release_digest,
             release_signature_digest: hash_bytes(&signature_array),
+            retention,
         })
     }
 
@@ -1016,11 +1200,13 @@ impl ReleaseVerifier {
         stage.executable.recheck()?;
         stage.recheck_stage_path()?;
 
+        let retention = Arc::new(ReleaseStageRetention::capture(stage, &manifest)?);
         Ok(VerifiedReleaseIdentity {
             manifest,
             profile,
             release_digest,
             release_signature_digest: hash_bytes(&signature_array),
+            retention,
         })
     }
 }

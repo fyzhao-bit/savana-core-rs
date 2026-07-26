@@ -70,21 +70,106 @@ fn signed_artifact(envelope: &VerifiedApprovalEnvelopeV1) {
     let _ = &envelope.artifact;
 }
 ```
+
+The current-policy capability can only be minted by consuming verified release,
+policy, and durable-ledger state:
+
+```compile_fail
+use savana_policy_core::{CurrentPolicyCapability, VerifiedPolicyV1};
+
+fn forge(policy: VerifiedPolicyV1) {
+    let _ = CurrentPolicyCapability::new(policy);
+}
+```
+
+```compile_fail
+use savana_policy_core::CurrentPolicyCapability;
+
+fn clone_current(current: CurrentPolicyCapability) {
+    let _ = current.clone();
+}
+```
+
+```compile_fail
+use savana_policy_core::CurrentPolicyCapability;
+
+fn default_current() {
+    let _ = CurrentPolicyCapability::default();
+}
+```
+
+```compile_fail
+use savana_policy_core::{CurrentPolicyCapability, VerifiedPolicyV1};
+
+fn convert(policy: VerifiedPolicyV1) {
+    let _: CurrentPolicyCapability = policy.into();
+}
+```
+
+```compile_fail
+use savana_policy_core::CurrentPolicyCapability;
+
+fn raw_fields(current: CurrentPolicyCapability) {
+    let CurrentPolicyCapability { store, .. } = current;
+    drop(store);
+}
+```
+
+```compile_fail
+use savana_policy_core::CurrentPolicyCapability;
+
+fn backing_policy(current: &CurrentPolicyCapability) {
+    let _ = current.backing_policy();
+}
+```
+
+```compile_fail
+use savana_policy_core::{CurrentPolicyCapability, VerifiedPolicyV1};
+
+fn unchecked(policy: VerifiedPolicyV1) {
+    let _ = CurrentPolicyCapability::unchecked(policy);
+}
+```
+
+The pre-capability raw acceptance transition is crate-private:
+
+```compile_fail
+use savana_kernel_protocol::{Signature64, UnixMillis};
+use savana_policy_core::PolicyStore;
+
+fn old_raw_acceptance(store: &mut PolicyStore) {
+    let _ = store.verify_and_accept(
+        &[],
+        &Signature64::new([0; 64]),
+        UnixMillis::new(0),
+    );
+}
+```
 "#]
+
+#[cfg(test)]
+extern crate self as savana_policy_core;
+
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod test_support;
 
 #[cfg(all(feature = "test-support", not(debug_assertions)))]
 compile_error!("test-support cannot be enabled in a release build");
 
 mod atomic_file;
 mod bundle;
+mod current_policy;
 mod error;
 mod ledger;
 mod lock_file;
+mod provenance;
 mod release;
 mod signature;
 mod validate;
 
 pub use bundle::AuthorityRoleV1;
+pub use current_policy::CurrentPolicyCapability;
 pub use error::PolicyError;
 pub use ledger::{PolicyLedgerIdentity, PolicyStateCapability, PolicyStore};
 pub use release::{

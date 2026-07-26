@@ -4,7 +4,14 @@ use ed25519_dalek::{Signer, SigningKey};
 use savana_kernel_protocol::{
     Digest32, HardLimits, KeyId, ResourceLimitsV1, Signature64, StableCode, UnixMillis,
 };
-use savana_policy_core::{PolicyTrustRootV1, PolicyVerifier};
+use savana_policy_core::{
+    PolicyTrustRootV1, PolicyVerifier, ReleaseStage, ReleaseTrustRootV1, ReleaseVerifier,
+    VerifiedReleaseIdentity,
+};
+use sha2::{Digest, Sha256};
+use std::fs;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 
 pub const POLICY_DOMAIN: &[u8] = b"SAVANA_POLICY_V1\0";
 pub const RELEASE_DOMAIN: &[u8] = b"SAVANA_RELEASE_V1\0";
@@ -145,6 +152,449 @@ pub fn verifier() -> PolicyVerifier {
         active_target(),
     )
     .expect("valid fixture verifier")
+}
+
+pub fn offline_verifier() -> PolicyVerifier {
+    PolicyVerifier::new(
+        vec![trust_root("policy-root", &signing_key(), 3, false)],
+        current_release_target(),
+    )
+    .expect("valid offline fixture verifier")
+}
+
+pub fn read_optional_ledger(path: &Path) -> Option<Vec<u8>> {
+    match fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => panic!("read ledger fixture: {error}"),
+    }
+}
+
+pub struct CurrentPolicyFixture {
+    _root: Option<tempfile::TempDir>,
+    ledger: PathBuf,
+    release: VerifiedReleaseIdentity,
+    other_release: VerifiedReleaseIdentity,
+    wrong_resource_release: VerifiedReleaseIdentity,
+    expired_release: VerifiedReleaseIdentity,
+    policy_bytes: Vec<u8>,
+    policy_signature: Signature64,
+}
+
+impl CurrentPolicyFixture {
+    pub fn ledger_path(&self) -> &Path {
+        &self.ledger
+    }
+
+    pub fn release(&self) -> VerifiedReleaseIdentity {
+        self.release.clone()
+    }
+
+    pub fn other_release(&self) -> VerifiedReleaseIdentity {
+        self.other_release.clone()
+    }
+
+    pub fn release_with_wrong_resource_digest(&self) -> VerifiedReleaseIdentity {
+        self.wrong_resource_release.clone()
+    }
+
+    pub fn expired_release(&self) -> VerifiedReleaseIdentity {
+        self.expired_release.clone()
+    }
+
+    pub fn policy_bytes(&self) -> &[u8] {
+        &self.policy_bytes
+    }
+
+    pub const fn policy_signature(&self) -> &Signature64 {
+        &self.policy_signature
+    }
+
+    pub const fn now(&self) -> UnixMillis {
+        UnixMillis::new(NOW)
+    }
+}
+
+pub fn current_policy_fixture() -> CurrentPolicyFixture {
+    let root = tempfile::tempdir().unwrap();
+    let mut fixture = current_policy_fixture_at(root.path());
+    fixture._root = Some(root);
+    fixture
+}
+
+pub fn current_policy_fixture_at(root: &Path) -> CurrentPolicyFixture {
+    fs::create_dir_all(root).unwrap();
+    let root = fs::canonicalize(root).unwrap();
+    let resource_digest = fixture_resource_digest();
+    let target = current_release_target();
+    let mut policy = valid_policy(7, 3);
+    policy.release.compatible_release_target_ids = vec![*target.as_bytes()];
+    let (policy_bytes, policy_signature) = signed(&policy);
+    let release = build_verified_release(&root, "release-a", b'a', resource_digest, 4_000, NOW);
+    let other_release =
+        build_verified_release(&root, "release-b", b'b', resource_digest, 4_000, NOW);
+    let wrong_resource_release = build_verified_release(
+        &root,
+        "release-wrong-resource",
+        b'c',
+        [0xf3; 32],
+        4_000,
+        NOW,
+    );
+    let expired_release = build_verified_release(
+        &root,
+        "release-expired",
+        b'd',
+        resource_digest,
+        1_900,
+        1_500,
+    );
+    CurrentPolicyFixture {
+        ledger: root.join("policy.ledger"),
+        _root: None,
+        release,
+        other_release,
+        wrong_resource_release,
+        expired_release,
+        policy_bytes,
+        policy_signature,
+    }
+}
+
+fn fixture_resource_digest() -> [u8; 32] {
+    let canonical = minicbor::to_vec(compiled_resources()).unwrap();
+    let mut hasher = Sha256::new();
+    hasher.update(b"SAVANA_RESOURCE_PROFILE_V1\0");
+    hasher.update(canonical);
+    hasher.finalize().into()
+}
+
+fn current_release_target() -> Digest32 {
+    let profile = fixture_profile();
+    let profile_digest: [u8; 32] = Sha256::digest(&profile).into();
+    let roots = fixture_policy_roots();
+    let roots_digest: [u8; 32] = Sha256::digest(&roots).into();
+    Digest32::new(compute_fixture_release_target(
+        roots_digest,
+        fixture_resource_digest(),
+        profile_digest,
+    ))
+}
+
+fn fixture_policy_roots() -> Vec<u8> {
+    let key = signing_key();
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder
+        .array(1)
+        .unwrap()
+        .array(4)
+        .unwrap()
+        .str("policy-root")
+        .unwrap()
+        .bytes(&key.verifying_key().to_bytes())
+        .unwrap()
+        .u64(3)
+        .unwrap()
+        .bool(false)
+        .unwrap();
+    encoder.into_writer()
+}
+
+fn fixture_profile() -> Vec<u8> {
+    let daemon = SigningKey::from_bytes(&[0x61; 32]);
+    let client = SigningKey::from_bytes(&[0x62; 32]);
+    let platform = if cfg!(target_os = "macos") { 1 } else { 0 };
+    let (socket, policy, signature) = if cfg!(target_os = "macos") {
+        (
+            "/var/run/savana/kernel/kerneld.sock",
+            "/Library/Application Support/Savana/Kernel/selected-policy-v1.cbor",
+            "/Library/Application Support/Savana/Kernel/selected-policy-v1.sig",
+        )
+    } else {
+        (
+            "/run/savana/kernel/kerneld.sock",
+            "/etc/savana/kernel/selected-policy-v1.cbor",
+            "/etc/savana/kernel/selected-policy-v1.sig",
+        )
+    };
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder
+        .array(14)
+        .unwrap()
+        .u16(1)
+        .unwrap()
+        .bytes(&[0x71; 32])
+        .unwrap()
+        .u8(platform)
+        .unwrap()
+        .array(2)
+        .unwrap()
+        .str("daemon-key")
+        .unwrap()
+        .bytes(&daemon.verifying_key().to_bytes())
+        .unwrap()
+        .array(1)
+        .unwrap()
+        .array(6)
+        .unwrap()
+        .str("jarvis-client")
+        .unwrap()
+        .str("jarvis-key")
+        .unwrap()
+        .bytes(&client.verifying_key().to_bytes())
+        .unwrap()
+        .u8(0)
+        .unwrap()
+        .u32(1_001)
+        .unwrap()
+        .u32(1_003)
+        .unwrap();
+    let roots = fixture_policy_roots();
+    let mut decoder = minicbor::Decoder::new(&roots);
+    let root_count = decoder.array().unwrap().unwrap();
+    assert_eq!(root_count, 1);
+    encoder
+        .array(1)
+        .unwrap()
+        .array(4)
+        .unwrap()
+        .str("policy-root")
+        .unwrap()
+        .bytes(&signing_key().verifying_key().to_bytes())
+        .unwrap()
+        .u64(3)
+        .unwrap()
+        .bool(false)
+        .unwrap()
+        .u32(1_002)
+        .unwrap()
+        .u32(1_002)
+        .unwrap()
+        .u32(1_001)
+        .unwrap()
+        .str(socket)
+        .unwrap()
+        .str(policy)
+        .unwrap()
+        .str(signature)
+        .unwrap()
+        .u16(0o750)
+        .unwrap()
+        .u16(0o660)
+        .unwrap();
+    encoder.into_writer()
+}
+
+fn compute_fixture_release_target(
+    roots_digest: [u8; 32],
+    resource_digest: [u8; 32],
+    profile_digest: [u8; 32],
+) -> [u8; 32] {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder
+        .array(7)
+        .unwrap()
+        .u16(1)
+        .unwrap()
+        .u16(0)
+        .unwrap()
+        .u16(0)
+        .unwrap()
+        .array(1)
+        .unwrap()
+        .u16(1)
+        .unwrap()
+        .bytes(&roots_digest)
+        .unwrap()
+        .bytes(&resource_digest)
+        .unwrap()
+        .bytes(&profile_digest)
+        .unwrap();
+    let mut hasher = Sha256::new();
+    hasher.update(b"SAVANA_RELEASE_TARGET_V1\0");
+    hasher.update(encoder.into_writer());
+    hasher.finalize().into()
+}
+
+fn build_verified_release(
+    root: &Path,
+    name: &str,
+    source_marker: u8,
+    resource_digest: [u8; 32],
+    expires_at: u64,
+    verification_now: u64,
+) -> VerifiedReleaseIdentity {
+    let stage = root.join(name);
+    let profile = fixture_profile();
+    let profile_digest: [u8; 32] = Sha256::digest(&profile).into();
+    let roots_digest: [u8; 32] = Sha256::digest(fixture_policy_roots()).into();
+    let release_target =
+        compute_fixture_release_target(roots_digest, resource_digest, profile_digest);
+    let runtime_path = if cfg!(target_os = "macos") {
+        "runtime/libonnxruntime.dylib"
+    } else {
+        "runtime/libonnxruntime.so"
+    };
+    let mut files = vec![
+        ("bin/savana-kerneld", b"kernel-binary".to_vec()),
+        ("policy/default-policy-v1.cbor", b"default-policy".to_vec()),
+        ("policy/default-policy-v1.sig", vec![0x81; 64]),
+        (
+            "approval/producer-registry-v1.cbor",
+            b"producer-registry".to_vec(),
+        ),
+        ("approval/ontology-v1.cbor", b"ontology".to_vec()),
+        (
+            "approval/approval-key-set-v1.cbor",
+            b"approval-keys".to_vec(),
+        ),
+        (
+            "model/signed-model-manifest-v1.cbor",
+            b"model-manifest".to_vec(),
+        ),
+        ("installation/kernel-installation-profile-v1.cbor", profile),
+        (runtime_path, b"onnx-runtime".to_vec()),
+        ("model/assets/model.bin", b"model-asset".to_vec()),
+    ];
+    files.sort_by(|left, right| {
+        left.0
+            .len()
+            .cmp(&right.0.len())
+            .then_with(|| left.0.as_bytes().cmp(right.0.as_bytes()))
+    });
+    for (relative, bytes) in &files {
+        let path = stage.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
+        fs::set_permissions(
+            &path,
+            fs::Permissions::from_mode(if *relative == "bin/savana-kerneld" {
+                0o555
+            } else {
+                0o444
+            }),
+        )
+        .unwrap();
+    }
+    set_directory_modes(&stage);
+
+    let binary_digest: [u8; 32] = Sha256::digest(b"kernel-binary").into();
+    let mut manifest = minicbor::Encoder::new(Vec::new());
+    manifest
+        .array(25)
+        .unwrap()
+        .u16(1)
+        .unwrap()
+        .str("1.0.0")
+        .unwrap()
+        .u64(1)
+        .unwrap()
+        .bytes(&release_target)
+        .unwrap()
+        .str(&String::from_utf8(vec![source_marker; 40]).unwrap())
+        .unwrap()
+        .str("release-root")
+        .unwrap()
+        .bytes(&binary_digest)
+        .unwrap()
+        .bytes(&[0xc1; 32])
+        .unwrap()
+        .bytes(&[0xc2; 32])
+        .unwrap()
+        .u16(1)
+        .unwrap()
+        .u16(0)
+        .unwrap()
+        .u16(0)
+        .unwrap()
+        .array(1)
+        .unwrap()
+        .u16(1)
+        .unwrap()
+        .array(1)
+        .unwrap()
+        .u16(1)
+        .unwrap()
+        .bytes(&roots_digest)
+        .unwrap()
+        .u64(1)
+        .unwrap()
+        .bytes(&[0xd1; 32])
+        .unwrap()
+        .bytes(&[0xd2; 32])
+        .unwrap()
+        .bytes(&[0xd3; 32])
+        .unwrap()
+        .bytes(&[0xd4; 32])
+        .unwrap()
+        .bytes(&resource_digest)
+        .unwrap()
+        .bytes(&profile_digest)
+        .unwrap()
+        .array(files.len() as u64)
+        .unwrap();
+    for (relative, bytes) in &files {
+        let digest: [u8; 32] = Sha256::digest(bytes).into();
+        manifest
+            .array(3)
+            .unwrap()
+            .str(relative)
+            .unwrap()
+            .u64(bytes.len() as u64)
+            .unwrap()
+            .bytes(&digest)
+            .unwrap();
+    }
+    manifest.u64(1_000).unwrap().u64(expires_at).unwrap();
+    let manifest_bytes = manifest.into_writer();
+    let release_key = SigningKey::from_bytes(&[0x51; 32]);
+    let release_signature = detached_signature(RELEASE_DOMAIN, &manifest_bytes, &release_key);
+    let release_dir = stage.join("release");
+    fs::create_dir_all(&release_dir).unwrap();
+    let manifest_path = release_dir.join("release-manifest-v1.cbor");
+    let signature_path = release_dir.join("release-manifest-v1.sig");
+    fs::write(&manifest_path, &manifest_bytes).unwrap();
+    fs::write(&signature_path, release_signature.as_bytes()).unwrap();
+    for path in [&manifest_path, &signature_path] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o444)).unwrap();
+    }
+    set_directory_modes(&stage);
+    let digest = Digest32::new(Sha256::digest(&manifest_bytes).into());
+    let verifier = ReleaseVerifier::new(
+        vec![ReleaseTrustRootV1 {
+            key_id: KeyId::try_from("release-root").unwrap(),
+            public_key: release_key.verifying_key().to_bytes(),
+            not_before: UnixMillis::new(500),
+            not_after: UnixMillis::new(5_000),
+            revoked: false,
+        }],
+        vec![digest],
+    )
+    .unwrap();
+    let metadata = fs::metadata(&stage).unwrap();
+    let mapped = ReleaseStage::open_mapped_for_test_support(
+        &stage,
+        &stage.join("bin/savana-kerneld"),
+        metadata.uid(),
+        metadata.gid(),
+    )
+    .unwrap();
+    verifier
+        .verify_stage(&mapped, UnixMillis::new(verification_now))
+        .unwrap()
+}
+
+fn set_directory_modes(root: &Path) {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+        for entry in fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            }
+        }
+    }
 }
 
 pub fn verifier_with_roots(roots: Vec<PolicyTrustRootV1>) -> PolicyVerifier {
