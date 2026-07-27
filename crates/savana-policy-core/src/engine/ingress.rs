@@ -377,7 +377,7 @@ fn resolve_run<'state>(
     current: PolicyIdentity,
     wall: UnixMillis,
 ) -> Result<&'state RunRecord, PolicyError> {
-    require_handle_kind(state, token, HandleKind::Run, wall)?;
+    require_client_handle_kind(state, token, HandleKind::Run, wall, &context.client_id)?;
     let run = state.runs.get(token).ok_or_else(unavailable)?;
     if run.client_id != context.client_id || run.peer_uid != context.peer_uid {
         return Err(PolicyError::stable(StableCode::HandleWrongClient));
@@ -398,6 +398,49 @@ fn resolve_run<'state>(
         return Err(PolicyError::stable(StableCode::AttestationBindingMismatch));
     }
     Ok(run)
+}
+
+fn require_client_handle_kind(
+    state: &EngineState,
+    token: &HandleToken,
+    expected: HandleKind,
+    wall: UnixMillis,
+    client_id: &savana_kernel_protocol::ClientId,
+) -> Result<(), PolicyError> {
+    let kind = state.handle_kinds.get(token);
+    let owner = live_handle_owner(state, token)?;
+    let (kind, (record_kind, record_client)) = match (kind, owner) {
+        (None, None) => return require_handle_kind(state, token, expected, wall),
+        (Some(kind), Some(owner)) => (kind, owner),
+        _ => return Err(unavailable()),
+    };
+    if *kind != record_kind {
+        return Err(unavailable());
+    }
+    if record_client != client_id {
+        return Err(PolicyError::stable(StableCode::HandleWrongClient));
+    }
+    if *kind != expected {
+        return Err(PolicyError::stable(StableCode::HandleWrongType));
+    }
+    Ok(())
+}
+
+fn live_handle_owner<'state>(
+    state: &'state EngineState,
+    token: &HandleToken,
+) -> Result<Option<(HandleKind, &'state savana_kernel_protocol::ClientId)>, PolicyError> {
+    match (
+        state.runs.get(token),
+        state.values.get(token),
+        state.tools.get(token),
+    ) {
+        (None, None, None) => Ok(None),
+        (Some(record), None, None) => Ok(Some((HandleKind::Run, &record.client_id))),
+        (None, Some(record), None) => Ok(Some((HandleKind::Value, &record.client_id))),
+        (None, None, Some(record)) => Ok(Some((HandleKind::Tool, &record.client_id))),
+        _ => Err(unavailable()),
+    }
 }
 
 fn require_handle_kind(
@@ -1484,6 +1527,205 @@ mod tests {
     }
 
     #[test]
+    fn bad_ingress_signature_precedes_a_known_wrong_type_handle() {
+        let fixture = crate::test_support::IngressFixture::new();
+        let response = fixture
+            .engine
+            .begin_run(
+                &fixture.context,
+                fixture.begin_request("operator", KernelValue::Null),
+            )
+            .unwrap();
+        let known_wrong_type: RunHandle =
+            minicbor::decode(&minicbor::to_vec(response.initial_value).unwrap()).unwrap();
+        let mut request = fixture.ingest_request(known_wrong_type, KernelValue::Null);
+        request.envelope.signature = Signature64::new([0; 64]);
+
+        assert_ingest_failure_preserves_security_snapshot(
+            &fixture,
+            &fixture.context,
+            request,
+            StableCode::AttestationInvalidSignature,
+        );
+    }
+
+    #[test]
+    fn expired_ingress_precedes_an_unknown_handle() {
+        let fixture = crate::test_support::IngressFixture::new();
+        let mut request = fixture.ingest_request(run_handle([0xaa; 32]), KernelValue::Null);
+        request.envelope.unsigned.expires_at = UnixMillis::new(2_000);
+        crate::test_support::resign_ingress(&mut request.envelope);
+
+        assert_ingest_failure_preserves_security_snapshot(
+            &fixture,
+            &fixture.context,
+            request,
+            StableCode::AttestationExpired,
+        );
+    }
+
+    #[test]
+    fn wrong_ingress_binding_precedes_a_stale_handle() {
+        let fixture = crate::test_support::IngressFixture::new();
+        let stale = run_handle([0xbb; 32]);
+        fixture
+            .engine
+            .inner
+            .state
+            .write()
+            .unwrap()
+            .stale_handles
+            .push(StaleHandleRecord {
+                token: HandleToken([0xbb; 32]),
+                kind: HandleKind::Tool,
+                expires_at: UnixMillis::new(3_000),
+            });
+        let request =
+            fixture.ingest_request_for(stale, KernelValue::Null, Digest32::new([0x93; 32]));
+
+        assert_ingest_failure_preserves_security_snapshot(
+            &fixture,
+            &fixture.context,
+            request,
+            StableCode::AttestationBindingMismatch,
+        );
+    }
+
+    #[test]
+    fn cross_client_live_wrong_type_handle_precedes_type_disclosure() {
+        let fixture = crate::test_support::IngressFixture::new();
+        let response = fixture
+            .engine
+            .begin_run(
+                &fixture.context,
+                fixture.begin_request("operator", KernelValue::Null),
+            )
+            .unwrap();
+        let cross_client_value: RunHandle =
+            minicbor::decode(&minicbor::to_vec(response.initial_value).unwrap()).unwrap();
+        let (other_context, other_binding) = fixture.bind("other-client", 0x3a, 0x4a);
+        let request =
+            fixture.ingest_request_for(cross_client_value, KernelValue::Null, other_binding);
+
+        assert_ingest_failure_preserves_security_snapshot(
+            &fixture,
+            &other_context,
+            request,
+            StableCode::HandleWrongClient,
+        );
+    }
+
+    #[test]
+    fn stale_handle_kind_never_discloses_a_type_mismatch() {
+        let fixture = crate::test_support::IngressFixture::new();
+        let stale = run_handle([0xbc; 32]);
+        fixture
+            .engine
+            .inner
+            .state
+            .write()
+            .unwrap()
+            .stale_handles
+            .push(StaleHandleRecord {
+                token: HandleToken([0xbc; 32]),
+                kind: HandleKind::Value,
+                expires_at: UnixMillis::new(3_000),
+            });
+        let request = fixture.ingest_request(stale, KernelValue::Null);
+
+        assert_ingest_failure_preserves_security_snapshot(
+            &fixture,
+            &fixture.context,
+            request,
+            StableCode::HandleStalePolicy,
+        );
+    }
+
+    #[test]
+    fn inconsistent_live_handle_indexes_fail_closed() {
+        let fixture = crate::test_support::IngressFixture::new();
+        let run = fixture
+            .engine
+            .begin_run(
+                &fixture.context,
+                fixture.begin_request("operator", KernelValue::Null),
+            )
+            .unwrap()
+            .run;
+        let token = handle_token(&run).unwrap();
+        fixture
+            .engine
+            .inner
+            .state
+            .write()
+            .unwrap()
+            .handle_kinds
+            .remove(&token);
+        let request = fixture.ingest_request(run, KernelValue::Null);
+
+        assert_ingest_failure_preserves_security_snapshot(
+            &fixture,
+            &fixture.context,
+            request,
+            StableCode::KernelUnavailable,
+        );
+
+        let fixture = crate::test_support::IngressFixture::new();
+        let run = fixture
+            .engine
+            .begin_run(
+                &fixture.context,
+                fixture.begin_request("operator", KernelValue::Null),
+            )
+            .unwrap()
+            .run;
+        let token = handle_token(&run).unwrap();
+        fixture
+            .engine
+            .inner
+            .state
+            .write()
+            .unwrap()
+            .runs
+            .remove(&token);
+        let request = fixture.ingest_request(run, KernelValue::Null);
+
+        assert_ingest_failure_preserves_security_snapshot(
+            &fixture,
+            &fixture.context,
+            request,
+            StableCode::KernelUnavailable,
+        );
+
+        let fixture = crate::test_support::IngressFixture::new();
+        let run = fixture
+            .engine
+            .begin_run(
+                &fixture.context,
+                fixture.begin_request("operator", KernelValue::Null),
+            )
+            .unwrap()
+            .run;
+        let token = handle_token(&run).unwrap();
+        fixture
+            .engine
+            .inner
+            .state
+            .write()
+            .unwrap()
+            .handle_kinds
+            .insert(token, HandleKind::Value);
+        let request = fixture.ingest_request(run, KernelValue::Null);
+
+        assert_ingest_failure_preserves_security_snapshot(
+            &fixture,
+            &fixture.context,
+            request,
+            StableCode::KernelUnavailable,
+        );
+    }
+
+    #[test]
     fn ingest_resolves_live_wrong_type_unknown_and_stale_handles_in_order() {
         let fixture = crate::test_support::IngressFixture::new();
         let response = fixture
@@ -1657,6 +1899,27 @@ mod tests {
             state.handle_kinds.len(),
             usize::from(state.registry.is_some()),
         )
+    }
+
+    fn assert_ingest_failure_preserves_security_snapshot(
+        fixture: &crate::test_support::IngressFixture,
+        context: &AuthenticatedCallContext,
+        request: IngestUserInputRequest,
+        expected: StableCode,
+    ) {
+        let before = security_snapshot(&fixture.engine.inner.state.read().unwrap());
+        assert_eq!(
+            fixture
+                .engine
+                .ingest_user_input(context, request)
+                .unwrap_err()
+                .code(),
+            expected
+        );
+        assert_eq!(
+            security_snapshot(&fixture.engine.inner.state.read().unwrap()),
+            before
+        );
     }
 
     fn security_snapshot(state: &EngineState) -> SecuritySnapshot {
