@@ -1,4 +1,4 @@
-use savana_kernel_protocol::{Digest32, EffectiveLimits, Signature64, StableCode};
+use savana_kernel_protocol::{Digest32, Signature64, StableCode};
 use savana_policy_core::{
     InstallationClientV1, InstallationPublicKeyV1, VerifiedPolicyV1, VerifiedReleaseIdentity,
 };
@@ -20,16 +20,9 @@ pub(crate) struct DaemonConfig {
     selected_policy_path: String,
     selected_policy_signature_path: String,
     release_digest: Digest32,
-    policy_digest: Digest32,
-    policy_version: u64,
-    policy_key_epoch: u64,
     model_manifest_digest: Digest32,
     approval_key_set_digest: Digest32,
-    resource_profile_digest: Digest32,
     release_expires_at: savana_kernel_protocol::UnixMillis,
-    policy_expires_at: savana_kernel_protocol::UnixMillis,
-    #[allow(dead_code)]
-    effective_limits: EffectiveLimits,
 }
 
 impl std::fmt::Debug for DaemonConfig {
@@ -138,15 +131,9 @@ impl DaemonConfig {
             selected_policy_path: release.selected_policy_path().to_owned(),
             selected_policy_signature_path: release.selected_policy_signature_path().to_owned(),
             release_digest: release.release_digest(),
-            policy_digest: policy.identity().digest,
-            policy_version: policy.identity().policy_version,
-            policy_key_epoch: policy.identity().key_epoch,
             model_manifest_digest: release.model_manifest_digest(),
             approval_key_set_digest: release.approval_key_set_digest(),
-            resource_profile_digest: policy.resource_profile_digest(),
             release_expires_at: release.expires_at(),
-            policy_expires_at: policy.identity().expires_at,
-            effective_limits: *policy.effective_limits(),
         })
     }
 
@@ -186,18 +173,6 @@ impl DaemonConfig {
         self.release_digest
     }
 
-    pub(crate) const fn policy_digest(&self) -> Digest32 {
-        self.policy_digest
-    }
-
-    pub(crate) const fn policy_version(&self) -> u64 {
-        self.policy_version
-    }
-
-    pub(crate) const fn policy_key_epoch(&self) -> u64 {
-        self.policy_key_epoch
-    }
-
     pub(crate) const fn model_manifest_digest(&self) -> Digest32 {
         self.model_manifest_digest
     }
@@ -206,21 +181,8 @@ impl DaemonConfig {
         self.approval_key_set_digest
     }
 
-    pub(crate) const fn resource_profile_digest(&self) -> Digest32 {
-        self.resource_profile_digest
-    }
-
     pub(crate) const fn release_expires_at(&self) -> savana_kernel_protocol::UnixMillis {
         self.release_expires_at
-    }
-
-    pub(crate) const fn policy_expires_at(&self) -> savana_kernel_protocol::UnixMillis {
-        self.policy_expires_at
-    }
-
-    #[allow(dead_code)]
-    pub(crate) const fn effective_limits(&self) -> &EffectiveLimits {
-        &self.effective_limits
     }
 }
 

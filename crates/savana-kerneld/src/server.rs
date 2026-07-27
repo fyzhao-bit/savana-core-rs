@@ -13,19 +13,19 @@ use std::time::{Duration, Instant};
 use nix::fcntl::{fcntl, FcntlArg, FdFlag};
 use savana_kernel_protocol::{
     decode_client_message, encode_server_message, read_frame, write_frame, ClientMessageV1,
-    EffectiveLimits, HealthSnapshotV1, OperationV1, RequestEnvelopeV1, RequestedMode,
-    ResponseBodyV1, ResponseEnvelopeV1, ResponsePayloadV1, ServerIdentityV1, ServerMessageV1,
-    StableCode, UnixMillis,
+    EffectiveLimits, HealthSnapshotV1, OperationV1, RequestEnvelopeV1, ResponseBodyV1,
+    ResponseEnvelopeV1, ResponsePayloadV1, ServerIdentityV1, ServerMessageV1, StableCode,
+    UnixMillis,
 };
 use savana_policy_core::Clock;
 
 use crate::audit::{AuditEvent, AuditSink, OperationTag, RequestCode};
 use crate::handshake::{ConnectionContext, HandshakeService};
 use crate::peer::peer_identity;
+use crate::policy_runtime::{DispatchLease, PolicyRuntime};
 use crate::socket::{bind_preflight, BoundListener, SocketPreflight};
 #[cfg(test)]
 use crate::socket::{bind_socket, SocketConfig};
-use crate::DaemonConfig;
 
 #[cfg(test)]
 struct SpawnFailureOrderObserver {
@@ -233,7 +233,7 @@ fn poll_lifecycle(lifecycle: &mut dyn ServerLifecycle, shutdown: &Shutdown) {
 pub(crate) struct KernelServer {
     bound: BoundListener,
     service: Arc<HandshakeService>,
-    effective_limits: EffectiveLimits,
+    runtime: Arc<PolicyRuntime>,
     limits: ServerLimits,
     clock: Arc<dyn Clock + Send + Sync>,
     shutdown: Shutdown,
@@ -242,17 +242,17 @@ pub(crate) struct KernelServer {
 
 impl KernelServer {
     pub(crate) fn new_preflight(
-        config: &DaemonConfig,
         service: HandshakeService,
         socket: SocketPreflight,
         audit: Arc<AuditSink>,
         clock: Arc<dyn Clock + Send + Sync>,
+        runtime: Arc<PolicyRuntime>,
     ) -> Result<Self, StableCode> {
         let bound = bind_preflight(socket)?;
         Ok(Self {
             bound,
             service: Arc::new(service),
-            effective_limits: *config.effective_limits(),
+            runtime,
             limits: ServerLimits::production(),
             clock,
             shutdown: Shutdown::new(),
@@ -270,11 +270,17 @@ impl KernelServer {
     ) -> Result<(Self, Shutdown), StableCode> {
         let bound = bind_socket(&socket_config)?;
         let shutdown = Shutdown::new();
+        let service = Arc::new(service);
+        let runtime = Arc::clone(service.runtime());
+        let old_snapshot = runtime.snapshot()?;
+        runtime.force_replace_snapshot_for_test(
+            old_snapshot.with_limit_for_test(effective_limits, old_snapshot.generation()),
+        )?;
         Ok((
             Self {
                 bound,
-                service: Arc::new(service),
-                effective_limits,
+                service,
+                runtime,
                 limits,
                 clock,
                 shutdown: shutdown.clone(),
@@ -310,7 +316,7 @@ impl KernelServer {
                 spawn_worker(
                     Arc::clone(&receiver),
                     Arc::clone(&self.service),
-                    self.effective_limits,
+                    Arc::clone(&self.runtime),
                     self.limits.clone(),
                     Arc::clone(&self.clock),
                     self.shutdown.clone(),
@@ -321,7 +327,7 @@ impl KernelServer {
             let worker = spawn_worker(
                 Arc::clone(&receiver),
                 Arc::clone(&self.service),
-                self.effective_limits,
+                Arc::clone(&self.runtime),
                 self.limits.clone(),
                 Arc::clone(&self.clock),
                 self.shutdown.clone(),
@@ -400,13 +406,24 @@ impl KernelServer {
                 }
             };
             match listener.accept() {
-                Ok((stream, _address)) => match admit(&sender, stream) {
-                    Ok(()) | Err(StableCode::KernelOverloaded) => {}
-                    Err(_) => {
-                        self.shutdown.fail();
-                        break;
+                Ok((stream, _address)) => {
+                    let admission = match self.runtime.admission_lease() {
+                        Ok(admission) => admission,
+                        Err(_) => {
+                            self.shutdown.fail();
+                            break;
+                        }
+                    };
+                    let admitted = admit(&sender, stream);
+                    drop(admission);
+                    match admitted {
+                        Ok(()) | Err(StableCode::KernelOverloaded) => {}
+                        Err(_) => {
+                            self.shutdown.fail();
+                            break;
+                        }
                     }
-                },
+                }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     thread::park_timeout(self.limits.accept_poll_interval);
                 }
@@ -443,7 +460,7 @@ impl KernelServer {
 fn spawn_worker(
     receiver: Arc<Mutex<Receiver<UnixStream>>>,
     service: Arc<HandshakeService>,
-    effective_limits: EffectiveLimits,
+    runtime: Arc<PolicyRuntime>,
     limits: ServerLimits,
     clock: Arc<dyn Clock + Send + Sync>,
     shutdown: Shutdown,
@@ -455,7 +472,7 @@ fn spawn_worker(
             worker_loop(
                 &receiver,
                 &service,
-                &effective_limits,
+                runtime.as_ref(),
                 limits,
                 clock.as_ref(),
                 &shutdown,
@@ -468,7 +485,7 @@ fn spawn_worker(
 fn worker_loop(
     receiver: &Mutex<Receiver<UnixStream>>,
     service: &HandshakeService,
-    effective_limits: &EffectiveLimits,
+    runtime: &PolicyRuntime,
     limits: ServerLimits,
     clock: &dyn Clock,
     shutdown: &Shutdown,
@@ -499,19 +516,19 @@ fn worker_loop(
             drop(stream);
             return;
         }
-        let mut stream = stream;
+        let stream = stream;
         if configure_stream(&stream, limits.frame_io_deadline).is_err() {
             continue;
         }
         match handle_connection(
-            &mut stream,
+            stream,
             service,
-            effective_limits,
             ConnectionRuntime {
                 frame_io_deadline: limits.frame_io_deadline,
                 clock,
                 shutdown,
                 audit,
+                runtime,
                 #[cfg(test)]
                 peer_lookup_failures: limits.peer_lookup_failures.as_deref(),
             },
@@ -533,14 +550,38 @@ struct ConnectionRuntime<'runtime> {
     clock: &'runtime dyn Clock,
     shutdown: &'runtime Shutdown,
     audit: Option<&'runtime AuditSink>,
+    runtime: &'runtime PolicyRuntime,
     #[cfg(test)]
     peer_lookup_failures: Option<&'runtime AtomicUsize>,
 }
 
+struct LeasedConnection<'runtime> {
+    stream: Option<UnixStream>,
+    dispatch: DispatchLease<'runtime>,
+    #[cfg(test)]
+    stream_closed_probe: Option<LeasedConnectionDropProbe>,
+}
+
+#[cfg(test)]
+struct LeasedConnectionDropProbe {
+    stream_closed: SyncSender<()>,
+    resume_drop: Receiver<()>,
+}
+
+impl Drop for LeasedConnection<'_> {
+    fn drop(&mut self) {
+        drop(self.stream.take());
+        #[cfg(test)]
+        if let Some(probe) = self.stream_closed_probe.take() {
+            probe.stream_closed.send(()).unwrap();
+            probe.resume_drop.recv().unwrap();
+        }
+    }
+}
+
 fn handle_connection(
-    stream: &mut UnixStream,
+    stream: UnixStream,
     service: &HandshakeService,
-    effective_limits: &EffectiveLimits,
     runtime: ConnectionRuntime<'_>,
 ) -> Result<(), ConnectionFailure> {
     let ConnectionRuntime {
@@ -548,9 +589,25 @@ fn handle_connection(
         clock,
         shutdown,
         audit,
+        runtime: policy_runtime,
         #[cfg(test)]
         peer_lookup_failures,
     } = runtime;
+    let dispatch = policy_runtime
+        .dispatch_lease()
+        .map_err(|code| handshake_rejection(audit, code))?;
+    let snapshot = Arc::clone(dispatch.snapshot());
+    let effective_limits = snapshot.effective_limits();
+    let mut leased = LeasedConnection {
+        stream: Some(stream),
+        dispatch,
+        #[cfg(test)]
+        stream_closed_probe: None,
+    };
+    let stream = leased
+        .stream
+        .as_mut()
+        .ok_or(ConnectionFailure::Fatal(StableCode::KernelUnavailable))?;
     #[cfg(test)]
     if let Some(failures) = peer_lookup_failures {
         if failures
@@ -567,7 +624,7 @@ fn handle_connection(
         .preauthorize_peer(&peer)
         .map_err(|code| handshake_service_failure(audit, code))?;
 
-    let hello = match read_client_message(stream, effective_limits, frame_io_deadline, shutdown)
+    let hello = match read_client_message(stream, &effective_limits, frame_io_deadline, shutdown)
         .map_err(|failure| audit_handshake_failure(audit, failure))?
     {
         ClientMessageV1::Hello(hello) => hello,
@@ -587,13 +644,13 @@ fn handle_connection(
     write_server_message(
         stream,
         &ServerMessageV1::Hello(signed_hello),
-        effective_limits,
+        &effective_limits,
         frame_io_deadline,
         shutdown,
     )
     .map_err(|failure| audit_handshake_failure(audit, failure))?;
 
-    let finish = match read_client_message(stream, effective_limits, frame_io_deadline, shutdown)
+    let finish = match read_client_message(stream, &effective_limits, frame_io_deadline, shutdown)
         .map_err(|failure| audit_handshake_failure(audit, failure))?
     {
         ClientMessageV1::Finish(finish) => finish,
@@ -613,13 +670,13 @@ fn handle_connection(
     write_server_message(
         stream,
         &ServerMessageV1::Accepted(context.accepted()),
-        effective_limits,
+        &effective_limits,
         frame_io_deadline,
         shutdown,
     )
     .map_err(|failure| audit_handshake_failure(audit, failure))?;
 
-    let request = match read_client_message(stream, effective_limits, frame_io_deadline, shutdown)?
+    let request = match read_client_message(stream, &effective_limits, frame_io_deadline, shutdown)?
     {
         ClientMessageV1::Request(request) => request,
         ClientMessageV1::Hello(_) | ClientMessageV1::Finish(_) => {
@@ -654,7 +711,7 @@ fn handle_connection(
             return Err(ConnectionFailure::Fatal(code));
         }
     };
-    let identity = match service.validate_context_identity(&context, now) {
+    let identity = match service.validate_context_identity_in_snapshot(&context, now, &snapshot) {
         Ok(identity) => identity,
         Err(code) => {
             record_request_completion(
@@ -666,7 +723,14 @@ fn handle_connection(
             return Err(classify_service_failure(code));
         }
     };
-    let response = response_for_request(&context, identity, request, now, effective_limits);
+    let response = response_for_request(
+        policy_runtime,
+        &context,
+        identity,
+        request,
+        now,
+        &effective_limits,
+    );
     let response_code = match &response.body {
         ResponseBodyV1::Ok(_) => RequestCode::Ok,
         ResponseBodyV1::Err(code) => RequestCode::Error(*code),
@@ -674,7 +738,7 @@ fn handle_connection(
     let write_result = write_server_message(
         stream,
         &ServerMessageV1::Response(response),
-        effective_limits,
+        &effective_limits,
         frame_io_deadline,
         shutdown,
     );
@@ -729,6 +793,7 @@ fn record_request_completion(
 }
 
 fn response_for_request(
+    runtime: &PolicyRuntime,
     context: &ConnectionContext,
     identity: ServerIdentityV1,
     request: RequestEnvelopeV1,
@@ -752,28 +817,20 @@ fn response_for_request(
 
     let body = match error {
         Some(code) => ResponseBodyV1::Err(code),
-        None => match (context.mode(), request.operation) {
-            (RequestedMode::Required, OperationV1::Health)
-            | (RequestedMode::Shadow, OperationV1::Health) => {
+        None => match request.operation {
+            OperationV1::Health => {
                 ResponseBodyV1::Ok(ResponsePayloadV1::Health(HealthSnapshotV1 {
-                    ready: false,
+                    ready: true,
                     identity,
                     last_error: None,
                 }))
             }
-            (
-                RequestedMode::Required | RequestedMode::Shadow,
-                OperationV1::BeginRun(_)
-                | OperationV1::IngestUserInput(_)
-                | OperationV1::PreparePlannerCall(_)
-                | OperationV1::CommitPlannerValue(_)
-                | OperationV1::DeriveValue(_)
-                | OperationV1::ProposeToolCall(_)
-                | OperationV1::EvaluateToolCall(_)
-                | OperationV1::AuthorizeToolCall(_)
-                | OperationV1::MaterializeExecution(_)
-                | OperationV1::CommitToolResult(_),
-            ) => ResponseBodyV1::Err(StableCode::KernelUnavailable),
+            operation => match bind_authenticated(runtime, context, request.deadline_unix_ms) {
+                Ok(authenticated) => {
+                    crate::ops::policy::dispatch(runtime.engine(), &authenticated, operation)
+                }
+                Err(code) => ResponseBodyV1::Err(code),
+            },
         },
     };
     ResponseEnvelopeV1 {
@@ -781,6 +838,29 @@ fn response_for_request(
         request_id: request.request_id,
         body,
     }
+}
+
+fn bind_authenticated(
+    runtime: &PolicyRuntime,
+    context: &ConnectionContext,
+    request_deadline: UnixMillis,
+) -> Result<savana_policy_core::AuthenticatedCallContext, StableCode> {
+    #[cfg(test)]
+    if runtime.is_synthetic_for_handshake_test() {
+        return Err(StableCode::KernelUnavailable);
+    }
+    runtime
+        .issuer()
+        .bind(
+            context.client_id().clone(),
+            context.connection_id(),
+            context.connection_binding_digest(),
+            context.policy_identity(),
+            context.boot_id(),
+            context.peer().uid(),
+            request_deadline,
+        )
+        .map_err(|error| error.code())
 }
 
 fn read_client_message(
@@ -1068,6 +1148,52 @@ mod tests {
     }
 
     #[test]
+    fn leased_connection_closes_its_stream_before_releasing_the_dispatch_lease() {
+        let client_key = SigningKey::from_bytes(&[0x62; 32]);
+        let service = HandshakeService::new_for_transport_test(
+            client_key.verifying_key().to_bytes(),
+            PeerIdentity::new_for_test(geteuid().as_raw(), getegid().as_raw()),
+            UnixMillis::new(1_000),
+            UnixMillis::new(5_000),
+        )
+        .unwrap();
+        let runtime = Arc::clone(service.runtime());
+        let dispatch = runtime.dispatch_lease().unwrap();
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let (stream_closed_tx, stream_closed_rx) = sync_channel(0);
+        let (resume_tx, resume_rx) = sync_channel(0);
+        let leased = LeasedConnection {
+            stream: Some(server),
+            dispatch,
+            stream_closed_probe: Some(LeasedConnectionDropProbe {
+                stream_closed: stream_closed_tx,
+                resume_drop: resume_rx,
+            }),
+        };
+        let (close_tx, close_rx) = sync_channel(0);
+
+        thread::scope(|scope| {
+            scope.spawn(|| drop(leased));
+            let runtime = Arc::clone(&runtime);
+            scope.spawn(move || {
+                let guard = runtime.close_and_drain().unwrap();
+                close_tx.send(()).unwrap();
+                drop(guard);
+            });
+            stream_closed_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap();
+            assert_eq!(client.read(&mut [0_u8; 1]).unwrap(), 0);
+            assert!(close_rx.recv_timeout(Duration::from_millis(50)).is_err());
+            resume_tx.send(()).unwrap();
+            close_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        });
+    }
+
+    #[test]
     fn partial_worker_spawn_failure_joins_started_workers_before_socket_cleanup() {
         let _process_guard = PROCESS_TEST_LOCK.lock().unwrap();
         let root = tempfile::tempdir().unwrap();
@@ -1330,30 +1456,26 @@ mod tests {
             UnixMillis::new(20_000),
         )
         .unwrap();
-        let effective = effective_limits(1024, 2_000);
-        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let (mut client, server) = UnixStream::pair().unwrap();
         let attacker_bytes = [0xde, 0xad, 0xbe, 0xef];
         client.write_all(&attacker_bytes).unwrap();
 
         assert_eq!(
             handle_connection(
-                &mut server,
+                server,
                 &service,
-                &effective,
                 ConnectionRuntime {
                     frame_io_deadline: Duration::from_millis(100),
                     clock: &TestClock::new(2_000),
                     shutdown: &Shutdown::new(),
                     audit: None,
+                    runtime: service.runtime().as_ref(),
                     peer_lookup_failures: None,
                 },
             )
             .unwrap_err(),
             ConnectionFailure::Local(StableCode::IdentityPeerRejected)
         );
-        let mut unread = [0_u8; 4];
-        server.read_exact(&mut unread).unwrap();
-        assert_eq!(unread, attacker_bytes);
     }
 
     #[test]
@@ -1369,8 +1491,7 @@ mod tests {
             UnixMillis::new(20_000),
         )
         .unwrap();
-        let effective = effective_limits(1024, 2_000);
-        let (_client, mut server) = UnixStream::pair().unwrap();
+        let (_client, server) = UnixStream::pair().unwrap();
         let (audit_writer, mut audit_reader) = UnixStream::pair().unwrap();
         let audit_writer: OwnedFd = audit_writer.into();
         let audit =
@@ -1378,14 +1499,14 @@ mod tests {
 
         assert_eq!(
             handle_connection(
-                &mut server,
+                server,
                 &service,
-                &effective,
                 ConnectionRuntime {
                     frame_io_deadline: Duration::from_millis(100),
                     clock: &TestClock::new(2_000),
                     shutdown: &Shutdown::new(),
                     audit: Some(&audit),
+                    runtime: service.runtime().as_ref(),
                     peer_lookup_failures: None,
                 },
             )
@@ -1414,8 +1535,7 @@ mod tests {
             UnixMillis::new(20_000),
         )
         .unwrap();
-        let effective = effective_limits(1024, 2_000);
-        let (_client, mut server) = UnixStream::pair().unwrap();
+        let (_client, server) = UnixStream::pair().unwrap();
         let (audit_writer, audit_reader) = UnixStream::pair().unwrap();
         drop(audit_reader);
         let audit_writer: OwnedFd = audit_writer.into();
@@ -1424,14 +1544,14 @@ mod tests {
 
         assert_eq!(
             handle_connection(
-                &mut server,
+                server,
                 &service,
-                &effective,
                 ConnectionRuntime {
                     frame_io_deadline: Duration::from_millis(100),
                     clock: &TestClock::new(2_000),
                     shutdown: &Shutdown::new(),
                     audit: Some(&audit),
+                    runtime: service.runtime().as_ref(),
                     peer_lookup_failures: None,
                 },
             ),
@@ -1451,28 +1571,25 @@ mod tests {
         )
         .unwrap();
 
-        let (mut attacker, mut direct_server) = UnixStream::pair().unwrap();
+        let (mut attacker, direct_server) = UnixStream::pair().unwrap();
         attacker.write_all(&[0xaa, 0xbb, 0xcc, 0xdd]).unwrap();
         let injected = AtomicUsize::new(1);
         assert_eq!(
             handle_connection(
-                &mut direct_server,
+                direct_server,
                 &service,
-                &effective,
                 ConnectionRuntime {
                     frame_io_deadline: Duration::from_millis(100),
                     clock: &TestClock::new(2_000),
                     shutdown: &Shutdown::new(),
                     audit: None,
+                    runtime: service.runtime().as_ref(),
                     peer_lookup_failures: Some(&injected),
                 },
             )
             .unwrap_err(),
             ConnectionFailure::Local(StableCode::KernelUnavailable)
         );
-        let mut unread = [0_u8; 4];
-        direct_server.read_exact(&mut unread).unwrap();
-        assert_eq!(unread, [0xaa, 0xbb, 0xcc, 0xdd]);
 
         let (sender, receiver) = sync_channel(2);
         let (mut failed_client, failed_server) = UnixStream::pair().unwrap();
@@ -1497,7 +1614,7 @@ mod tests {
             worker_loop(
                 &Mutex::new(receiver),
                 &service,
-                &effective,
+                service.runtime().as_ref(),
                 limits,
                 &TestClock::new(2_000),
                 &worker_shutdown,
@@ -1819,7 +1936,7 @@ mod tests {
             UnixMillis::new(20_000),
         )
         .unwrap();
-        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let (mut client, server) = UnixStream::pair().unwrap();
         client
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
@@ -1834,14 +1951,14 @@ mod tests {
         let worker_audit = Arc::clone(&audit);
         let handle = thread::spawn(move || {
             handle_connection(
-                &mut server,
+                server,
                 &service,
-                &effective,
                 ConnectionRuntime {
                     frame_io_deadline: Duration::from_millis(500),
                     clock: &TestClock::new(2_000),
                     shutdown: &Shutdown::new(),
                     audit: Some(worker_audit.as_ref()),
+                    runtime: service.runtime().as_ref(),
                     peer_lookup_failures: None,
                 },
             )
@@ -2057,7 +2174,7 @@ mod tests {
             assert_eq!(response.request_id, request_id);
             match response.body {
                 ResponseBodyV1::Ok(ResponsePayloadV1::Health(snapshot)) => {
-                    assert!(!snapshot.ready);
+                    assert!(snapshot.ready);
                     assert_eq!(snapshot.identity, signed.transcript.server);
                     assert_eq!(snapshot.last_error, None);
                 }
@@ -2174,7 +2291,8 @@ mod tests {
             policy_expires_at,
         )
         .unwrap();
-        let (client, mut server) = UnixStream::pair().unwrap();
+        service.force_effective_limits_for_transport_test(effective);
+        let (client, server) = UnixStream::pair().unwrap();
         client
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
@@ -2183,14 +2301,14 @@ mod tests {
             .unwrap();
         let handle = thread::spawn(move || {
             handle_connection(
-                &mut server,
+                server,
                 &service,
-                &effective,
                 ConnectionRuntime {
                     frame_io_deadline: Duration::from_millis(500),
                     clock: &TestClock::new(2_000),
                     shutdown: &Shutdown::new(),
                     audit: None,
+                    runtime: service.runtime().as_ref(),
                     peer_lookup_failures: None,
                 },
             )

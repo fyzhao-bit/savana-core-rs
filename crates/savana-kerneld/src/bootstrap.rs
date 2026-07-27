@@ -14,9 +14,8 @@ use std::sync::Mutex;
 use nix::unistd::{getegid, geteuid};
 use savana_kernel_protocol::{Digest32, KeyId, StableCode, UnixMillis};
 use savana_policy_core::{
-    AuthenticatedContextIssuer, Clock, PolicyEngine, PolicyStateCapability, PolicyStore,
-    PolicyVerifier, RandomSource, ReleaseStage, ReleaseTrustRootV1, ReleaseVerifier,
-    VerifiedReleaseIdentity,
+    Clock, PolicyEngine, PolicyStateCapability, PolicyStore, PolicyVerifier, RandomSource,
+    ReleaseStage, ReleaseTrustRootV1, ReleaseVerifier, VerifiedReleaseIdentity,
 };
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +23,7 @@ use crate::audit::{AuditEvent, AuditSink};
 use crate::fs_cap::{DirectoryCapability, FileCapability, FileExpectation, LengthRule};
 use crate::handshake::HandshakeService;
 use crate::key_file::DaemonKeyCapability;
+use crate::policy_runtime::{CandidateRuntimeData, DaemonPolicyRuntimeSnapshot, PolicyRuntime};
 use crate::runtime_deps::{checked_clock, draw_boot_id, SystemClock, SystemRandom};
 use crate::selected_policy::{SelectedPolicySource, SelectedPolicyUpdateGuard};
 use crate::server::{KernelServer, ServerLifecycle};
@@ -708,8 +708,7 @@ pub(crate) struct PreparedRuntime {
     service: HandshakeService,
     socket: SocketPreflight,
     clock: Arc<dyn Clock + Send + Sync>,
-    engine: PolicyEngine,
-    issuer: AuthenticatedContextIssuer,
+    runtime: Arc<PolicyRuntime>,
     selected_guard: Option<SelectedPolicyUpdateGuard>,
 }
 
@@ -786,6 +785,9 @@ impl PreparedRuntime {
             &stateless_policy,
             &candidate.signature,
         )?;
+        let candidate_runtime =
+            CandidateRuntimeData::from_config_and_candidate(&config, &stateless_policy)
+                .map_err(DaemonError::stable)?;
         bootstrap_trace!(BootstrapEvent::FixedLockVerified);
         context.verify_signed_fixed_paths(&config)?;
         if startup_now.get() >= release.expires_at().get() {
@@ -816,9 +818,20 @@ impl PreparedRuntime {
             PolicyEngine::new(current, boot_id, Arc::clone(&clock), Arc::clone(&random))
                 .map_err(|error| DaemonError::stable(error.code()))?;
         bootstrap_trace!(BootstrapEvent::EngineConstructed);
+        let policy_identity = engine.current_policy_identity();
+        let effective_limits = engine.effective_limits();
+        let snapshot = Arc::new(
+            DaemonPolicyRuntimeSnapshot::initial(
+                candidate_runtime,
+                policy_identity,
+                effective_limits,
+            )
+            .map_err(DaemonError::stable)?,
+        );
+        let runtime = Arc::new(PolicyRuntime::new(snapshot, engine, Arc::new(issuer)));
         clock.monotonic_now_millis().map_err(|_| unavailable())?;
         let service = HandshakeService::new(
-            &config,
+            Arc::clone(&runtime),
             signing_identity,
             startup_now,
             boot_id,
@@ -843,8 +856,7 @@ impl PreparedRuntime {
             service,
             socket,
             clock,
-            engine,
-            issuer,
+            runtime,
             selected_guard: Some(selected_guard),
         })
     }
@@ -930,9 +942,9 @@ impl PreparedRuntime {
             .started_identity()
             .map_err(DaemonError::stable)?;
         Ok((
-            self.engine.boot_id_for_test(),
+            self.runtime.engine().boot_id_for_test(),
             handshake.boot_id,
-            self.engine.current_policy_identity(),
+            self.runtime.engine().current_policy_identity(),
             self.service.policy_identity_for_test(),
         ))
     }
@@ -950,13 +962,12 @@ impl PreparedRuntime {
             context,
             daemon_key,
             state_common,
-            config,
             service,
             socket,
             clock,
-            engine,
-            issuer,
+            runtime,
             selected_guard,
+            ..
         } = self;
         let retained = RuntimeRetention {
             context,
@@ -964,17 +975,21 @@ impl PreparedRuntime {
             state_common,
         };
         retained.recheck()?;
-        let server =
-            KernelServer::new_preflight(&config, service, socket, Arc::clone(&audit), clock)
-                .map_err(DaemonError::stable)?;
+        let server = KernelServer::new_preflight(
+            service,
+            socket,
+            Arc::clone(&audit),
+            clock,
+            Arc::clone(&runtime),
+        )
+        .map_err(DaemonError::stable)?;
         Ok(BoundRuntime {
             server,
             retained,
             audit,
             identity,
             selected_guard,
-            engine,
-            issuer,
+            runtime,
         })
     }
 }
@@ -985,8 +1000,7 @@ pub(crate) struct BoundRuntime {
     audit: Arc<AuditSink>,
     identity: savana_kernel_protocol::ServerIdentityV1,
     selected_guard: Option<SelectedPolicyUpdateGuard>,
-    engine: PolicyEngine,
-    issuer: AuthenticatedContextIssuer,
+    runtime: Arc<PolicyRuntime>,
 }
 
 impl std::fmt::Debug for BoundRuntime {
@@ -1003,8 +1017,7 @@ impl BoundRuntime {
             audit,
             identity,
             selected_guard,
-            engine,
-            issuer,
+            runtime,
         } = self;
         if audit
             .emit(AuditEvent::Started {
@@ -1023,8 +1036,7 @@ impl BoundRuntime {
         };
         let server_result = server.run_with_lifecycle(&mut lifecycle);
         drop(lifecycle);
-        let _ = &engine;
-        let _ = &issuer;
+        let _ = &runtime;
         let retained_result = retained.recheck();
         if let Err(code) = server_result {
             return Err(DaemonError::stable(code));

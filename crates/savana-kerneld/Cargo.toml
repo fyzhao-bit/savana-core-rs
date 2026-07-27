@@ -36,3 +36,8 @@ savana-policy-core = { path = "../savana-policy-core", features = ["test-support
 name = "production_state_machine"
 path = "tests/production_state_machine.rs"
 required-features = ["test-support"]
+
+[[test]]
+name = "policy_protocol"
+path = "tests/policy_protocol.rs"
+required-features = ["test-support"]

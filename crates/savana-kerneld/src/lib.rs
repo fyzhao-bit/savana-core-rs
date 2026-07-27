@@ -192,11 +192,13 @@ mod error;
 mod fs_cap;
 #[allow(dead_code)]
 mod handshake;
-mod identity;
 mod key_file;
+mod ops;
 mod panic_report;
 #[allow(dead_code)]
 mod peer;
+#[allow(dead_code)]
+mod policy_runtime;
 mod runtime_deps;
 mod selected_policy;
 #[allow(dead_code)]

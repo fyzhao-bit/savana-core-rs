@@ -798,6 +798,7 @@ pub fn current_policy_fixture() -> CurrentPolicyFixture {
 
 pub fn current_policy_fixture_at(root: &Path) -> CurrentPolicyFixture {
     fs::create_dir_all(root).unwrap();
+    fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
     let root = fs::canonicalize(root).unwrap();
     let resource_digest = fixture_resource_digest();
     let target = current_release_target();
@@ -1033,6 +1034,8 @@ fn build_verified_release_with_profile(
     profile: Vec<u8>,
 ) -> VerifiedReleaseIdentity {
     let stage = root.join(name);
+    fs::create_dir_all(&stage).unwrap();
+    set_directory_modes(&stage);
     let profile_digest: [u8; 32] = Sha256::digest(&profile).into();
     let roots_digest: [u8; 32] = Sha256::digest(fixture_policy_roots()).into();
     let release_target =
@@ -1071,7 +1074,7 @@ fn build_verified_release_with_profile(
     });
     for (relative, bytes) in &files {
         let path = stage.join(relative);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        create_stage_parent(&stage, path.parent().unwrap());
         fs::write(&path, bytes).unwrap();
         fs::set_permissions(
             &path,
@@ -1157,7 +1160,7 @@ fn build_verified_release_with_profile(
     let release_key = SigningKey::from_bytes(&[0x51; 32]);
     let release_signature = detached_signature(RELEASE_DOMAIN, &manifest_bytes, &release_key);
     let release_dir = stage.join("release");
-    fs::create_dir_all(&release_dir).unwrap();
+    create_stage_parent(&stage, &release_dir);
     let manifest_path = release_dir.join("release-manifest-v1.cbor");
     let signature_path = release_dir.join("release-manifest-v1.sig");
     fs::write(&manifest_path, &manifest_bytes).unwrap();
@@ -1201,6 +1204,18 @@ fn set_directory_modes(root: &Path) {
                 pending.push(path);
             }
         }
+    }
+}
+
+fn create_stage_parent(stage: &Path, parent: &Path) {
+    let relative = parent.strip_prefix(stage).unwrap();
+    let mut current = stage.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        if !current.exists() {
+            fs::create_dir(&current).unwrap();
+        }
+        fs::set_permissions(&current, fs::Permissions::from_mode(0o755)).unwrap();
     }
 }
 

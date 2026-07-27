@@ -8,11 +8,14 @@ use savana_kernel_protocol::{
     HandshakeTranscriptV1, KeyId, Nonce32, ProtocolVersion, RequestedMode, ServerIdentityV1,
     SignedServerHelloV1, StableCode, UnixMillis, PROTOCOL_MAJOR, PROTOCOL_MINOR,
 };
-use savana_policy_core::{InstallationClientRoleV1, RandomSource};
+use savana_policy_core::{
+    InstallationClientRoleV1, PolicyIdentity, RandomSource, VerifiedPolicyV1,
+};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::peer::PeerIdentity;
+use crate::policy_runtime::{DaemonPolicyRuntimeSnapshot, PolicyRuntime};
 use crate::runtime_deps::draw_nonzero_32;
 use crate::state::ReplayState;
 #[cfg(test)]
@@ -34,7 +37,7 @@ struct ConfiguredClient {
 }
 
 #[derive(Clone)]
-struct RuntimeIdentity {
+pub(crate) struct RuntimeIdentity {
     protocol_major: u16,
     minimum_minor: u16,
     maximum_minor: u16,
@@ -53,7 +56,11 @@ struct RuntimeIdentity {
 }
 
 impl RuntimeIdentity {
-    fn from_config(config: &DaemonConfig) -> Self {
+    pub(crate) fn from_config_and_candidate(
+        config: &DaemonConfig,
+        candidate: &VerifiedPolicyV1,
+    ) -> Self {
+        let policy_identity = candidate.identity();
         let clients = config
             .daemon_clients()
             .iter()
@@ -75,14 +82,66 @@ impl RuntimeIdentity {
             daemon_public_key: *config.daemon_identity().public_key(),
             clients,
             release_digest: config.release_digest(),
-            policy_digest: config.policy_digest(),
-            policy_version: config.policy_version(),
-            policy_key_epoch: config.policy_key_epoch(),
+            policy_digest: policy_identity.digest,
+            policy_version: policy_identity.policy_version,
+            policy_key_epoch: policy_identity.key_epoch,
             model_manifest_digest: config.model_manifest_digest(),
             approval_key_set_digest: config.approval_key_set_digest(),
-            resource_profile_digest: config.resource_profile_digest(),
+            resource_profile_digest: candidate.resource_profile_digest(),
             release_expires_at: config.release_expires_at(),
-            policy_expires_at: config.policy_expires_at(),
+            policy_expires_at: policy_identity.expires_at,
+        }
+    }
+
+    pub(crate) const fn policy_digest(&self) -> Digest32 {
+        self.policy_digest
+    }
+
+    pub(crate) const fn policy_version(&self) -> u64 {
+        self.policy_version
+    }
+
+    pub(crate) const fn policy_key_epoch(&self) -> u64 {
+        self.policy_key_epoch
+    }
+
+    pub(crate) const fn policy_expires_at(&self) -> UnixMillis {
+        self.policy_expires_at
+    }
+
+    pub(crate) const fn resource_profile_digest(&self) -> Digest32 {
+        self.resource_profile_digest
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_policy_runtime_test(
+        policy_identity: PolicyIdentity,
+        resource_profile_digest: Digest32,
+    ) -> Self {
+        Self {
+            protocol_major: PROTOCOL_MAJOR,
+            minimum_minor: PROTOCOL_MINOR,
+            maximum_minor: PROTOCOL_MINOR,
+            daemon_key_id: KeyId::try_from("runtime-daemon").expect("test key id"),
+            daemon_public_key: [0x61; 32],
+            clients: vec![ConfiguredClient {
+                client_id: ClientId::try_from("runtime-client").expect("test client id"),
+                key_id: KeyId::try_from("runtime-client-key").expect("test client key id"),
+                public_key: [0x62; 32],
+                role: InstallationClientRoleV1::JarvisKernelClient,
+                peer_uid: 5_001,
+                peer_gid: 6_001,
+            }]
+            .into_boxed_slice(),
+            release_digest: Digest32::new([0x31; 32]),
+            policy_digest: policy_identity.digest,
+            policy_version: policy_identity.policy_version,
+            policy_key_epoch: policy_identity.key_epoch,
+            model_manifest_digest: Digest32::new([0x32; 32]),
+            approval_key_set_digest: Digest32::new([0x33; 32]),
+            resource_profile_digest,
+            release_expires_at: UnixMillis::new(20_000),
+            policy_expires_at: policy_identity.expires_at,
         }
     }
 
@@ -152,7 +211,7 @@ impl RandomSource for TransportTestEntropy {
 }
 
 pub(crate) struct HandshakeService {
-    runtime: RuntimeIdentity,
+    runtime: Arc<PolicyRuntime>,
     signing_identity: DaemonSigningIdentity,
     boot_id: BootId,
     random: Arc<dyn RandomSource + Send + Sync>,
@@ -172,6 +231,9 @@ pub(crate) struct PendingHandshake {
     peer: PeerIdentity,
     transcript: HandshakeTranscriptV1,
     transcript_digest: Digest32,
+    connection_binding_digest: Digest32,
+    policy_identity: PolicyIdentity,
+    generation: u64,
     expires_at: UnixMillis,
 }
 
@@ -183,11 +245,15 @@ impl std::fmt::Debug for PendingHandshake {
 
 pub(crate) struct ConnectionContext {
     capability: Zeroizing<[u8; 32]>,
+    connection_id: Nonce32,
     client_id: ClientId,
     peer: PeerIdentity,
     boot_id: BootId,
     protocol: ProtocolVersion,
     mode: RequestedMode,
+    policy_identity: PolicyIdentity,
+    connection_binding_digest: Digest32,
+    generation: u64,
     expires_at: UnixMillis,
 }
 
@@ -204,6 +270,22 @@ impl ConnectionContext {
 
     pub(crate) const fn peer(&self) -> &PeerIdentity {
         &self.peer
+    }
+
+    pub(crate) const fn connection_id(&self) -> Nonce32 {
+        self.connection_id
+    }
+
+    pub(crate) const fn connection_binding_digest(&self) -> Digest32 {
+        self.connection_binding_digest
+    }
+
+    pub(crate) const fn policy_identity(&self) -> PolicyIdentity {
+        self.policy_identity
+    }
+
+    pub(crate) const fn boot_id(&self) -> BootId {
+        self.boot_id
     }
 
     pub(crate) const fn protocol(&self) -> ProtocolVersion {
@@ -228,27 +310,13 @@ impl ConnectionContext {
 
 impl HandshakeService {
     pub(crate) fn new(
-        config: &DaemonConfig,
+        runtime: Arc<PolicyRuntime>,
         signing_identity: DaemonSigningIdentity,
         startup_now: UnixMillis,
         boot_id: BootId,
         random: Arc<dyn RandomSource + Send + Sync>,
     ) -> Result<Self, StableCode> {
-        let service = Self::new_inner(
-            RuntimeIdentity::from_config(config),
-            signing_identity,
-            startup_now,
-            boot_id,
-            random,
-        )?;
-        config
-            .server_identity(
-                &service.signing_identity,
-                service.boot_id,
-                ProtocolVersion::new(PROTOCOL_MAJOR, PROTOCOL_MINOR),
-            )
-            .map_err(|error| error.code())?;
-        Ok(service)
+        Self::new_inner(runtime, signing_identity, startup_now, boot_id, random)
     }
 
     pub(crate) fn refresh_before_bind(&self, now: UnixMillis) -> Result<(), StableCode> {
@@ -257,30 +325,35 @@ impl HandshakeService {
             .lock()
             .map_err(|_| StableCode::KernelUnavailable)?;
         state.observe(now)?;
-        self.runtime.validate_time(now)
+        self.runtime
+            .snapshot()?
+            .runtime_identity()
+            .validate_time(now)
     }
 
     pub(crate) fn started_identity(&self) -> Result<ServerIdentityV1, StableCode> {
-        self.runtime.server_identity(
+        self.runtime.snapshot()?.runtime_identity().server_identity(
             self.boot_id,
             ProtocolVersion::new(PROTOCOL_MAJOR, PROTOCOL_MINOR),
         )
     }
 
     fn new_inner(
-        runtime: RuntimeIdentity,
+        runtime: Arc<PolicyRuntime>,
         signing_identity: DaemonSigningIdentity,
         startup_now: UnixMillis,
         boot_id: BootId,
         random: Arc<dyn RandomSource + Send + Sync>,
     ) -> Result<Self, StableCode> {
-        if !(1..=MAXIMUM_CLIENTS).contains(&runtime.clients.len())
-            || signing_identity.public_key() != runtime.daemon_public_key
+        let snapshot = runtime.snapshot()?;
+        let identity = snapshot.runtime_identity();
+        if !(1..=MAXIMUM_CLIENTS).contains(&identity.clients.len())
+            || signing_identity.public_key() != identity.daemon_public_key
             || boot_id.as_bytes() == &[0; 32]
         {
             return Err(StableCode::IdentityKeyPermissions);
         }
-        let state = Mutex::new(ReplayState::new(runtime.clients.len(), startup_now));
+        let state = Mutex::new(ReplayState::new(identity.clients.len(), startup_now));
         Ok(Self {
             runtime,
             signing_identity,
@@ -344,7 +417,7 @@ impl HandshakeService {
             policy_expires_at,
         };
         Self::new_inner(
-            runtime,
+            Arc::new(PolicyRuntime::new_for_handshake_test(runtime)),
             DaemonSigningIdentity::from_seed_for_test([0x61; 32]),
             startup_now,
             BootId::new([0x31; 32]),
@@ -355,6 +428,8 @@ impl HandshakeService {
     pub(crate) fn preauthorize_peer(&self, peer: &PeerIdentity) -> Result<(), StableCode> {
         if self
             .runtime
+            .snapshot()?
+            .runtime_identity()
             .clients
             .iter()
             .any(|client| client.peer_uid == peer.uid() && client.peer_gid == peer.gid())
@@ -365,6 +440,10 @@ impl HandshakeService {
         }
     }
 
+    pub(crate) const fn runtime(&self) -> &Arc<PolicyRuntime> {
+        &self.runtime
+    }
+
     #[cfg(test)]
     fn new_with_random_for_test(
         runtime: RuntimeIdentity,
@@ -373,7 +452,13 @@ impl HandshakeService {
         boot_id: BootId,
         random: Arc<dyn RandomSource + Send + Sync>,
     ) -> Result<Self, StableCode> {
-        Self::new_inner(runtime, signing_identity, startup_now, boot_id, random)
+        Self::new_inner(
+            Arc::new(PolicyRuntime::new_for_handshake_test(runtime)),
+            signing_identity,
+            startup_now,
+            boot_id,
+            random,
+        )
     }
 
     pub(crate) fn start(
@@ -382,6 +467,8 @@ impl HandshakeService {
         hello: ClientHelloV1,
         now: UnixMillis,
     ) -> Result<(PendingHandshake, SignedServerHelloV1), StableCode> {
+        let snapshot = self.runtime.snapshot()?;
+        let runtime = snapshot.runtime_identity();
         let mut state = self
             .state
             .lock()
@@ -392,11 +479,11 @@ impl HandshakeService {
                 .checked_add(PENDING_WINDOW_MS)
                 .ok_or(StableCode::KernelUnavailable)?,
         );
-        self.runtime.validate_time(now)?;
+        runtime.validate_time(now)?;
         validate_hello(&hello)?;
-        let protocol = negotiate_version(&self.runtime, &hello.supported_versions)?;
-        let client_index = resolve_client(&self.runtime, &hello)?;
-        let client = &self.runtime.clients[client_index];
+        let protocol = negotiate_version(runtime, &hello.supported_versions)?;
+        let client_index = resolve_client(runtime, &hello)?;
+        let client = &runtime.clients[client_index];
         verify_peer(client, peer)?;
         let slot_index = state.reserve_slot(client_index, hello.client_nonce, now)?;
 
@@ -404,9 +491,12 @@ impl HandshakeService {
         let transcript = HandshakeTranscriptV1 {
             client: hello,
             server_nonce,
-            server: self.runtime.server_identity(self.boot_id, protocol)?,
+            server: runtime.server_identity(self.boot_id, protocol)?,
         };
         let digest = transcript_digest(&transcript)?;
+        let connection_binding_digest =
+            savana_kernel_protocol::connection_binding_digest(&transcript)
+                .map_err(|_| StableCode::KernelUnavailable)?;
         let signature = self
             .signing_identity
             .sign_daemon_hello(&transcript)
@@ -422,6 +512,9 @@ impl HandshakeService {
             peer: *peer,
             transcript: transcript.clone(),
             transcript_digest: digest,
+            connection_binding_digest,
+            policy_identity: snapshot.policy_identity(),
+            generation: snapshot.generation(),
             expires_at,
         };
         state.commit_pending(
@@ -441,19 +534,26 @@ impl HandshakeService {
         finish: ClientFinishV1,
         now: UnixMillis,
     ) -> Result<ConnectionContext, StableCode> {
+        let snapshot = self.runtime.snapshot()?;
+        let runtime = snapshot.runtime_identity();
         let mut state = self
             .state
             .lock()
             .map_err(|_| StableCode::KernelUnavailable)?;
         state.observe(now)?;
-        self.runtime.validate_time(now)?;
+        runtime.validate_time(now)?;
         if *peer != pending.peer {
             return Err(StableCode::IdentityPeerRejected);
         }
         if now.get() >= pending.expires_at.get() {
             return Err(StableCode::DeadlineExceeded);
         }
-        let client = self.validate_pending_identity(&pending)?;
+        if pending.policy_identity != snapshot.policy_identity()
+            || pending.generation != snapshot.generation()
+        {
+            return Err(StableCode::IdentityTranscriptMismatch);
+        }
+        let client = self.validate_pending_identity(runtime, &pending)?;
         state.validate_pending(
             pending.partition_index,
             pending.slot_index,
@@ -464,20 +564,24 @@ impl HandshakeService {
         if finish.transcript_digest != pending.transcript_digest {
             return Err(StableCode::IdentityTranscriptMismatch);
         }
-        verify_client_finish(client, &finish)?;
+        verify_client_finish(&client, &finish)?;
         let capability = nonzero_capability(self.random.as_ref())?;
         let context = ConnectionContext {
+            connection_id: Nonce32::new(*capability),
             capability,
             client_id: client.client_id.clone(),
             peer: pending.peer,
             boot_id: self.boot_id,
             protocol: pending.transcript.server.protocol,
             mode: pending.transcript.client.requested_mode,
+            policy_identity: pending.policy_identity,
+            connection_binding_digest: pending.connection_binding_digest,
+            generation: pending.generation,
             expires_at: UnixMillis::new(
-                self.runtime
+                runtime
                     .release_expires_at
                     .get()
-                    .min(self.runtime.policy_expires_at.get()),
+                    .min(runtime.policy_expires_at.get()),
             ),
         };
         state.mark_finished(pending.partition_index, pending.slot_index)?;
@@ -489,20 +593,31 @@ impl HandshakeService {
         context: &ConnectionContext,
         now: UnixMillis,
     ) -> Result<ServerIdentityV1, StableCode> {
+        let snapshot = self.runtime.snapshot()?;
+        self.validate_context_identity_in_snapshot(context, now, snapshot.as_ref())
+    }
+
+    pub(crate) fn validate_context_identity_in_snapshot(
+        &self,
+        context: &ConnectionContext,
+        now: UnixMillis,
+        snapshot: &DaemonPolicyRuntimeSnapshot,
+    ) -> Result<ServerIdentityV1, StableCode> {
+        let runtime = snapshot.runtime_identity();
         let mut state = self
             .state
             .lock()
             .map_err(|_| StableCode::KernelUnavailable)?;
         state.observe(now)?;
-        self.runtime.validate_time(now)?;
+        runtime.validate_time(now)?;
 
         let expected_expiry = UnixMillis::new(
-            self.runtime
+            runtime
                 .release_expires_at
                 .get()
-                .min(self.runtime.policy_expires_at.get()),
+                .min(runtime.policy_expires_at.get()),
         );
-        let configured_client = self.runtime.clients.iter().any(|client| {
+        let configured_client = runtime.clients.iter().any(|client| {
             client.client_id == context.client_id
                 && client.peer_uid == context.peer.uid()
                 && client.peer_gid == context.peer.gid()
@@ -513,33 +628,34 @@ impl HandshakeService {
         if context.boot_id != self.boot_id
             || context.protocol != ProtocolVersion::new(PROTOCOL_MAJOR, PROTOCOL_MINOR)
             || context.expires_at != expected_expiry
+            || context.policy_identity != snapshot.policy_identity()
+            || context.generation != snapshot.generation()
             || !configured_client
         {
             return Err(StableCode::IdentityTranscriptMismatch);
         }
-        self.runtime.server_identity(self.boot_id, context.protocol)
+        runtime.server_identity(self.boot_id, context.protocol)
     }
 
     fn validate_pending_identity(
         &self,
+        runtime: &RuntimeIdentity,
         pending: &PendingHandshake,
-    ) -> Result<&ConfiguredClient, StableCode> {
+    ) -> Result<ConfiguredClient, StableCode> {
         if pending.partition_index != pending.client_index {
             return Err(StableCode::IdentityTranscriptMismatch);
         }
-        let client = self
-            .runtime
+        let client = runtime
             .clients
             .get(pending.client_index)
             .ok_or(StableCode::IdentityTranscriptMismatch)?;
         let negotiated_protocol =
-            negotiate_version(&self.runtime, &pending.transcript.client.supported_versions)
+            negotiate_version(runtime, &pending.transcript.client.supported_versions)
                 .map_err(|_| StableCode::IdentityTranscriptMismatch)?;
         if pending.transcript.server.protocol != negotiated_protocol {
             return Err(StableCode::IdentityTranscriptMismatch);
         }
-        let expected_server = self
-            .runtime
+        let expected_server = runtime
             .server_identity(self.boot_id, negotiated_protocol)
             .map_err(|_| StableCode::IdentityTranscriptMismatch)?;
         if pending.transcript.client.client_id != client.client_id
@@ -549,10 +665,13 @@ impl HandshakeService {
             || pending.transcript.server != expected_server
             || validate_hello(&pending.transcript.client).is_err()
             || transcript_digest(&pending.transcript)? != pending.transcript_digest
+            || savana_kernel_protocol::connection_binding_digest(&pending.transcript)
+                .map_err(|_| StableCode::IdentityTranscriptMismatch)?
+                != pending.connection_binding_digest
         {
             return Err(StableCode::IdentityTranscriptMismatch);
         }
-        Ok(client)
+        Ok(client.clone())
     }
 
     #[cfg(test)]
@@ -567,9 +686,10 @@ impl HandshakeService {
             .lock()
             .map_err(|_| StableCode::KernelUnavailable)?;
         state.observe(now)?;
-        self.runtime.validate_time(now)?;
-        if !self
-            .runtime
+        let snapshot = self.runtime.snapshot()?;
+        let runtime = snapshot.runtime_identity();
+        runtime.validate_time(now)?;
+        if !runtime
             .clients
             .iter()
             .any(|client| client.peer_uid == peer.uid() && client.peer_gid == peer.gid())
@@ -594,12 +714,23 @@ impl HandshakeService {
 
     #[cfg(feature = "test-support")]
     pub(crate) fn policy_identity_for_test(&self) -> savana_policy_core::PolicyIdentity {
-        savana_policy_core::PolicyIdentity {
-            digest: self.runtime.policy_digest,
-            policy_version: self.runtime.policy_version,
-            key_epoch: self.runtime.policy_key_epoch,
-            expires_at: self.runtime.policy_expires_at,
-        }
+        self.runtime
+            .snapshot()
+            .expect("test identity snapshot")
+            .policy_identity()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_effective_limits_for_transport_test(
+        &self,
+        effective_limits: savana_kernel_protocol::EffectiveLimits,
+    ) {
+        let current = self.runtime.snapshot().expect("transport test snapshot");
+        self.runtime
+            .force_replace_snapshot_for_test(
+                current.with_limit_for_test(effective_limits, current.generation()),
+            )
+            .expect("transport test limits");
     }
 
     #[cfg(test)]
@@ -703,6 +834,7 @@ mod tests {
         BootId, ClientFinishV1, ClientHelloV1, ClientId, Digest32, KeyId, Nonce32, ProtocolVersion,
         RequestedMode, Signature64, StableCode, UnixMillis,
     };
+    use zeroize::Zeroizing;
 
     use super::*;
     use crate::key_file::DaemonSigningIdentity;
@@ -2348,6 +2480,100 @@ mod tests {
                 signature: Signature64::new(self.client_keys[client].sign(&input).to_bytes()),
             }
         }
+
+        fn start(&self) -> (PendingHandshake, SignedServerHelloV1) {
+            self.service
+                .start(&self.peer, self.client_hello.clone(), self.now)
+                .expect("fixture handshake start")
+        }
+
+        fn finish(
+            &self,
+            pending: PendingHandshake,
+            signed: &SignedServerHelloV1,
+        ) -> Result<ConnectionContext, StableCode> {
+            self.service.finish(
+                &self.peer,
+                pending,
+                self.sign_finish(&signed.transcript),
+                self.now,
+            )
+        }
+
+        fn finish_direct_copy_for_test(
+            &self,
+            pending: &PendingHandshake,
+            _signed: &SignedServerHelloV1,
+        ) -> ConnectionContext {
+            let capability = Zeroizing::new([0x66; 32]);
+            ConnectionContext {
+                connection_id: Nonce32::new(*capability),
+                capability,
+                client_id: pending.transcript.client.client_id.clone(),
+                peer: pending.peer,
+                boot_id: self.service.boot_id_for_test(),
+                protocol: pending.transcript.server.protocol,
+                mode: pending.transcript.client.requested_mode,
+                policy_identity: pending.policy_identity,
+                connection_binding_digest: pending.connection_binding_digest,
+                generation: pending.generation,
+                expires_at: UnixMillis::new(
+                    self.runtime
+                        .release_expires_at
+                        .get()
+                        .min(self.runtime.policy_expires_at.get()),
+                ),
+            }
+        }
+
+        fn publish_generation_for_test(&self, generation: u64) {
+            let runtime = self.service.runtime();
+            let old = runtime.snapshot().expect("fixture snapshot");
+            runtime
+                .force_replace_snapshot_for_test(
+                    old.with_limit_for_test(old.effective_limits(), generation),
+                )
+                .expect("fixture snapshot replacement");
+        }
+
+        fn policy_identity(&self) -> PolicyIdentity {
+            PolicyIdentity {
+                digest: self.runtime.policy_digest,
+                policy_version: self.runtime.policy_version,
+                key_epoch: self.runtime.policy_key_epoch,
+                expires_at: self.runtime.policy_expires_at,
+            }
+        }
+
+        fn digest_from_hex(&self, encoded: &str) -> Digest32 {
+            let mut bytes = [0_u8; 32];
+            assert_eq!(encoded.len(), bytes.len() * 2);
+            for (index, byte) in bytes.iter_mut().enumerate() {
+                let offset = index * 2;
+                *byte = u8::from_str_radix(&encoded[offset..offset + 2], 16).unwrap();
+            }
+            Digest32::new(bytes)
+        }
+
+        fn replay_tombstone_for(&self, signed: &SignedServerHelloV1) -> ReplayTombstone {
+            let digest = transcript_digest(&signed.transcript).expect("fixture digest");
+            ReplayTombstone(
+                self.service
+                    .state
+                    .lock()
+                    .expect("fixture replay state")
+                    .status_for_digest(digest)
+                    .is_some(),
+            )
+        }
+    }
+
+    struct ReplayTombstone(bool);
+
+    impl ReplayTombstone {
+        const fn is_retained(&self) -> bool {
+            self.0
+        }
     }
 
     fn build_service(
@@ -2414,6 +2640,52 @@ mod tests {
             release_expires_at: UnixMillis::new(20_000),
             policy_expires_at: UnixMillis::new(15_000),
         }
+    }
+
+    #[test]
+    fn pending_and_live_contexts_bind_generation_policy_and_connection_digest() {
+        let fixture = HandshakeFixture::new();
+        let (pending, signed) = fixture.start();
+        assert_eq!(pending.generation, 1);
+        assert_eq!(pending.policy_identity, fixture.policy_identity());
+        assert_eq!(
+            pending.connection_binding_digest,
+            savana_kernel_protocol::connection_binding_digest(&signed.transcript).unwrap()
+        );
+        assert_eq!(
+            pending.connection_binding_digest,
+            fixture.digest_from_hex(
+                "3d543784844ecf92135e64a4d50ba64f1e7988dbb32ea0c1b9e8b785ff95dc8f"
+            )
+        );
+
+        let context = fixture.finish(pending, &signed).unwrap();
+        assert_eq!(context.generation, 1);
+        assert_eq!(context.policy_identity, fixture.policy_identity());
+        assert_eq!(
+            context.connection_binding_digest,
+            savana_kernel_protocol::connection_binding_digest(&signed.transcript).unwrap()
+        );
+    }
+
+    #[test]
+    fn stale_pending_and_live_generations_fail_transcript_identity_and_close() {
+        let fixture = HandshakeFixture::new();
+        let (pending, signed) = fixture.start();
+        let context = fixture.finish_direct_copy_for_test(&pending, &signed);
+        fixture.publish_generation_for_test(2);
+        assert_eq!(
+            fixture.finish(pending, &signed).unwrap_err(),
+            StableCode::IdentityTranscriptMismatch
+        );
+        assert_eq!(
+            fixture
+                .service
+                .validate_context_identity(&context, fixture.now)
+                .unwrap_err(),
+            StableCode::IdentityTranscriptMismatch
+        );
+        assert!(fixture.replay_tombstone_for(&signed).is_retained());
     }
 
     fn client_keys(count: usize) -> Vec<SigningKey> {
