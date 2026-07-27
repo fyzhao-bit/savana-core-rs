@@ -1726,6 +1726,46 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_concrete_handle_records_fail_closed() {
+        for duplicate_kind in [HandleKind::Value, HandleKind::Tool] {
+            let fixture = crate::test_support::IngressFixture::new();
+            let response = fixture
+                .engine
+                .begin_run(
+                    &fixture.context,
+                    fixture.begin_request("operator", KernelValue::Null),
+                )
+                .unwrap();
+            let run = response.run;
+            let run_token = handle_token(&run).unwrap();
+            {
+                let mut state = fixture.engine.inner.state.write().unwrap();
+                match duplicate_kind {
+                    HandleKind::Value => {
+                        let value_token = handle_token(&response.initial_value).unwrap();
+                        let duplicate = state.values.get(&value_token).unwrap().clone();
+                        state.values.insert(run_token, duplicate);
+                    }
+                    HandleKind::Tool => {
+                        let tool_token = handle_token(&response.active_tools[0].handle).unwrap();
+                        let duplicate = state.tools.get(&tool_token).unwrap().clone();
+                        state.tools.insert(run_token, duplicate);
+                    }
+                    HandleKind::Run => unreachable!(),
+                }
+            }
+            let request = fixture.ingest_request(run, KernelValue::Null);
+
+            assert_ingest_failure_preserves_security_snapshot(
+                &fixture,
+                &fixture.context,
+                request,
+                StableCode::KernelUnavailable,
+            );
+        }
+    }
+
+    #[test]
     fn ingest_resolves_live_wrong_type_unknown_and_stale_handles_in_order() {
         let fixture = crate::test_support::IngressFixture::new();
         let response = fixture
