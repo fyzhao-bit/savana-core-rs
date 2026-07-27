@@ -766,8 +766,20 @@ fn handle_connection(
             return Err(ConnectionFailure::Fatal(code));
         }
     };
-    let identity = match service.validate_context_identity_in_snapshot(&context, now, &snapshot) {
-        Ok(identity) => identity,
+    let response = match service.validate_context_identity_in_snapshot(&context, now, &snapshot) {
+        Ok(identity) => response_for_request(
+            policy_runtime,
+            &context,
+            identity,
+            request,
+            now,
+            &effective_limits,
+        ),
+        Err(code @ StableCode::PolicyExpired) => ResponseEnvelopeV1 {
+            version: context.protocol(),
+            request_id: request.request_id,
+            body: ResponseBodyV1::Err(code),
+        },
         Err(code) => {
             record_request_completion(
                 audit,
@@ -780,14 +792,6 @@ fn handle_connection(
             return Err(classify_service_failure(code));
         }
     };
-    let response = response_for_request(
-        policy_runtime,
-        &context,
-        identity,
-        request,
-        now,
-        &effective_limits,
-    );
     let response_code = match &response.body {
         ResponseBodyV1::Ok(_) => RequestCode::Ok,
         ResponseBodyV1::Err(code) => RequestCode::Error(*code),
@@ -2291,7 +2295,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_expiry_after_handshake_closes_without_response() {
+    fn policy_expiry_after_handshake_returns_stable_error_then_closes() {
         let effective = effective_limits(1024 * 1024, 2_000);
         let (mut client, key, handle) = spawn_session_with_expiries(
             0x96,
@@ -2309,11 +2313,17 @@ mod tests {
             )),
             &effective,
         );
-        assert_silent_close(&mut client);
+        let response = match read_server(&mut client, &effective) {
+            ServerMessageV1::Response(response) => response,
+            other => panic!("expected policy-expired response, got {other:?}"),
+        };
+        assert_eq!(response.request_id, RequestId::new([0x42; 16]));
         assert_eq!(
-            handle.join().unwrap(),
-            Err(ConnectionFailure::Local(StableCode::PolicyExpired))
+            response.body,
+            ResponseBodyV1::Err(StableCode::PolicyExpired)
         );
+        assert_silent_close(&mut client);
+        assert_eq!(handle.join().unwrap(), Ok(()));
     }
 
     #[test]

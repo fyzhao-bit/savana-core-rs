@@ -9,7 +9,7 @@ use support::{
 
 use std::fs;
 use std::io::Read;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::sync::{
@@ -58,7 +58,6 @@ impl Corruption {
 #[test]
 fn complete_mapped_installation_authenticates_health_and_retains_durable_state() {
     let installation = Installation::build();
-    let host_socket_available = host_supports_unix_listener();
     let mut child = Command::new(&installation.executable)
         .arg("--config")
         .arg(&installation.config)
@@ -96,7 +95,7 @@ fn complete_mapped_installation_authenticates_health_and_retains_durable_state()
     }
 
     let output = child.wait_with_output().unwrap();
-    assert_process_result(&output, authenticated_health, host_socket_available);
+    assert_process_result(&output, authenticated_health);
     assert!(output.stdout.is_empty());
     assert!(!String::from_utf8_lossy(&output.stderr).contains(&installation.canary));
     assert!(!installation.socket.exists());
@@ -145,12 +144,6 @@ fn corrupt_bootstrap_release_policy_and_key_never_leave_a_socket() {
             assert!(!installation.ledger.exists(), "{corruption:?}");
         }
     }
-}
-
-#[test]
-fn socket_permission_fallback_requires_an_independent_host_denial() {
-    assert!(socket_permission_fallback_allowed(false));
-    assert!(!socket_permission_fallback_allowed(true));
 }
 
 #[test]
@@ -291,23 +284,6 @@ fn durable_policy_rejection_precedes_daemon_seed_read_in_real_startup() {
     );
     assert_eq!(fs::read(&installation.ledger).unwrap(), newer_ledger);
     assert!(!installation.socket.exists());
-}
-
-fn host_supports_unix_listener() -> bool {
-    let temporary = tempfile::tempdir().unwrap();
-    let socket = temporary.path().join("capability.sock");
-    match UnixListener::bind(&socket) {
-        Ok(listener) => {
-            drop(listener);
-            true
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => false,
-        Err(error) => panic!("independent Unix-listener probe failed unexpectedly: {error}"),
-    }
-}
-
-const fn socket_permission_fallback_allowed(host_socket_available: bool) -> bool {
-    !host_socket_available
 }
 
 fn assert_authenticated_health(installation: &Installation) -> BootId {
@@ -456,31 +432,22 @@ fn system_now_ms() -> u64 {
     .unwrap()
 }
 
-fn assert_process_result(output: &Output, authenticated_health: bool, host_socket_available: bool) {
+fn assert_process_result(output: &Output, authenticated_health: bool) {
     let stderr = String::from_utf8(output.stderr.clone()).unwrap();
-    if authenticated_health {
-        assert!(output.status.success(), "{stderr}");
-        let lines: Vec<_> = stderr.lines().collect();
-        assert_eq!(lines.len(), 3, "{stderr}");
-        assert!(lines[0].starts_with(r#"{"event":"Started","#), "{stderr}");
-        assert!(
-            lines[1].starts_with(
-                r#"{"event":"RequestCompleted","operation_tag":"health","code":"OK","#
-            ),
-            "{stderr}"
-        );
-        assert_eq!(lines[2], r#"{"event":"Stopped","reason":"sigterm"}"#);
-    } else {
-        assert!(
-            socket_permission_fallback_allowed(host_socket_available),
-            "daemon failed at socket bind on a host whose independent UDS probe succeeded: {stderr}"
-        );
-        assert_eq!(output.status.code(), Some(1), "{stderr}");
-        assert_eq!(
-            stderr,
-            "{\"event\":\"BootstrapFailed\",\"code\":\"IDENTITY_SOCKET_PERMISSIONS\"}\n"
-        );
-    }
+    assert!(
+        authenticated_health,
+        "mapped daemon failed before authenticated Health: {stderr}"
+    );
+    assert!(output.status.success(), "{stderr}");
+    let lines: Vec<_> = stderr.lines().collect();
+    assert_eq!(lines.len(), 3, "{stderr}");
+    assert!(lines[0].starts_with(r#"{"event":"Started","#), "{stderr}");
+    assert!(
+        lines[1]
+            .starts_with(r#"{"event":"RequestCompleted","operation_tag":"health","code":"OK","#),
+        "{stderr}"
+    );
+    assert_eq!(lines[2], r#"{"event":"Stopped","reason":"sigterm"}"#);
 }
 
 impl Installation {

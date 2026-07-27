@@ -8,9 +8,10 @@ This document freezes the byte-level contract implemented by
 `savana-kerneld`.
 
 The closed V1 schema includes authenticated `Health` and policy-transition
-tags `10..19`. Until the policy engine integration lands, `savana-kerneld`
-recognizes those policy tags but fails them closed with `KERNEL_UNAVAILABLE`;
-schema availability is not authority to execute a transition.
+tags `10..19`. `savana-kerneld` currently dispatches `Health`, `BeginRun`
+(tag 10), and `IngestUserInput` (tag 11). It recognizes tags `12..19` but
+fails them closed with `KERNEL_UNAVAILABLE`; schema availability is not
+authority to execute a transition.
 
 Registry V1 signatures cover the existing domain-separated canonical message
 directly:
@@ -207,9 +208,11 @@ the caller's input-to-name mapping order and is not sorted.
 `RunHandle`, `ValueHandle`, `ToolHandle`, `PlannerTicketHandle`,
 `PendingToolCallHandle`, and `ExecutionTicketHandle` are exactly 32-byte CBOR
 byte strings. Their Rust debug form is redacted and their fields and byte
-constructors are private. Decode accepts no other width. A sealed issuance API
-is intentionally deferred to the policy-engine integration; ordinary callers
-do not receive a constructor.
+constructors are private. Decode accepts no other width. The policy engine
+issues them from authenticated, current-policy state; ordinary callers do not
+receive a constructor. JARVIS must treat every handle as an opaque byte string:
+it may return a handle in the operation slot that requires it, but cannot
+inspect, forge, reinterpret, or transfer its authority.
 
 `RoleId` is 1 through 64 UTF-8 bytes. `PrincipalId`, `ConversationId`,
 `TaskId`, `ArtifactId`, and `PlannerId` are 1 through 128 UTF-8 bytes.
@@ -249,8 +252,9 @@ fields.
 ### Producer and approval arrays used by policy operations
 
 The schema declarations below are front-loaded because tags `10..19` cannot
-be closed or decoded without them. Signature verification and policy-core
-semantics are a later integration step.
+be closed or decoded without them. The daemon currently applies the signed
+ingress and registry semantics for tags 10 and 11; the remaining producer
+artifacts are decoded but their operations stay fail-closed.
 
 | Type | Length | Fields in position order |
 | --- | ---: | --- |
@@ -359,6 +363,14 @@ rejects reuse of one active Ed25519 public key under multiple authority key
 IDs. All active authority keys must decode as non-weak Ed25519 keys.
 `planner_id` and `validator_id` must equal their signed key IDs.
 
+Ingress verification selects the artifact key only from the exact active
+`AuthorityRoleV1::Ingress` set in the current verified policy. The component
+called Approval Authority therefore signs ingress with an `Ingress` key; an
+`Approval` receipt key is not a fallback and cannot authorize ingress. The
+Authority, not JARVIS, maps authenticated principal and entitlement state to
+the exact `RoleId`. The kernel treats role bytes literally and provides no
+hierarchy, wildcard, alias, case folding, default, or fallback role.
+
 Producer intervals are half-open: `policy.issued_at <= artifact.issued_at <=
 now < artifact.expires_at <= policy.expires_at`, with the same containment in
 the selected authority interval. Pure time failure is
@@ -417,7 +429,10 @@ Array length 3:
 | 2 | `server` | `ServerIdentityV1` |
 
 The server nonce and boot ID are independently generated nonzero 32-byte random
-values.
+values. Before accepting a socket on every daemon process start, production
+generates the boot ID from the operating-system CSPRNG. Entropy failure or an
+all-zero result is fatal. The boot ID is never persisted, restored, reused, or
+derived deterministically; deterministic entropy exists only in test support.
 
 ### `SignedServerHelloV1`
 
@@ -439,6 +454,22 @@ Before signing ingress, the Authority must obtain the complete daemon-signed
 hello, verify its signature against the release-pinned daemon key and fixed
 installation identity, and only then copy the selected policy digest and boot
 ID and derive this connection binding from the verified transcript.
+
+The producer sequence for every ingress operation is:
+
+```text
+connect -> receive and verify SignedServerHelloV1
+        -> derive the connection binding
+        -> finish mutual authentication and verify HandshakeAcceptedV1
+        -> build the exact request commitment
+        -> obtain Authority-signed ingress for that binding and commitment
+        -> send one request -> read one response -> close
+```
+
+JARVIS transports signed bytes and opaque handles; it never receives a Rust
+capability or selects a role. It cannot substitute the role, policy, boot ID,
+connection binding, request commitment, or Authority session with an unsigned
+claim.
 
 ### `HandshakeAcceptedV1`
 
@@ -498,8 +529,9 @@ envelope is wire-visible; the internal unsigned policy binding is not.
 | 1 | `identity` | `ServerIdentityV1` |
 | 2 | `last_error` | `null` or `StableCode` string |
 
-This pre-release slice reports `ready = false`; downstream policy, vault, and
-NER plans define the transition to a ready product kernel.
+After successful release, identity, current-policy, ledger, and socket
+initialization, this slice reports `ready = true`. A startup failure exposes no
+ready socket.
 
 ### Top-level message tags
 
@@ -526,6 +558,22 @@ ClientHello -> SignedServerHello -> ClientFinish -> HandshakeAccepted
              -> one Request -> one Response -> close
 ```
 
+After `HandshakeAcceptedV1` and successful canonical decoding of `Request`, a
+current-policy expiry is returned in that request's `ResponseEnvelopeV1` as
+`POLICY_EXPIRED`, then the connection closes. Release expiry, a stale
+generation transcript, and failures before a canonical request is available
+invalidate the connection and close without a response.
+
+The connection binding authorizes only the ingress in that one request; a
+connection is not a long-lived run or handle ownership boundary. Every later
+operation uses a fresh mutually authenticated connection. A policy handle may
+continue on a fresh connection only for the same authenticated installation
+client, boot, policy generation, and run provenance. Moving signed ingress to
+another connection fails with `ATTESTATION_BINDING_MISMATCH`; using an old
+policy-generation handle after rollover fails with `HANDLE_STALE_POLICY`.
+A pending or accepted handshake transcript from the old published generation
+fails with `IDENTITY_TRANSCRIPT_MISMATCH`.
+
 ## Negotiation and authentication
 
 The client hello lists 1 through 16 unique versions. This implementation
@@ -546,6 +594,14 @@ per configured client.
 The authenticated context binds the peer credentials, client identity, boot
 ID, negotiated version, requested mode, and the earlier of the verified release
 and policy expiries.
+
+Within one boot and current policy generation, the ingress replay key is the
+exact `(ingress_authority_key_id, ingress_nonce)` pair. It is global across
+connections and clients, while capacity is charged to the authenticated client
+that successfully consumes it. Signature, binding, registry, capacity, or
+state failure does not consume the nonce or create partial state. Successful
+`BeginRun` and `IngestUserInput` each consume one replay entry until the
+ingress expires; ending a run does not remove that tombstone.
 
 ## Signature and digest construction
 
@@ -699,6 +755,18 @@ Nested policy arrays:
 | 24 | `ingress_replay_entries_per_client` | 4,096 |
 
 Every requested value must be less than or equal to its compiled maximum.
+The verified installation permits at most 16 daemon clients, so checked engine
+initialization caps current-policy ingress replay state at 65,536 entries.
+Reaching the per-client or global replay bound returns `KERNEL_OVERLOADED`;
+the daemon never evicts a still-valid entry to admit a request.
+
+Live handles and unexpired stale-handle tombstones are likewise bounded. At
+most 65,536 live handles may exist, at most 65,536 stale identifiers may be
+retained across old policy generations, and their combined active count may
+not exceed 65,536. Rollover first preflights the would-be stale set and refuses
+with `KERNEL_OVERLOADED` before a ledger write if it cannot retain every
+required identifier. After a successful rollover, old handles resolve as
+`HANDLE_STALE_POLICY` rather than becoming unknown or being rebound.
 
 ### Policy acceptance, ordering, and collection bounds
 
@@ -1078,6 +1146,47 @@ Every lock field is re-derived from and compared with the verified release,
 installation profile, selected policy, and selected-policy signature. The lock
 does not create authority independently.
 
+## Selected-policy update coordination
+
+The selected-policy directory contains one fixed sibling
+`.selected-policy-v1.update.lock`. Production opens it with
+`O_NOFOLLOW | O_CLOEXEC` and requires a regular file owned by UID 0 and the
+verified daemon GID, mode `0640`, link count 1, and length 0. The directory
+entry must name the same opened inode before and after locking. The lock file
+is created during installation and must not be renamed, unlinked, or replaced
+while the daemon is online; repairing it is an offline operation.
+
+The daemon takes a nonblocking shared whole-file BSD `flock` through
+`nix::fcntl::Flock` before reading `kernel-lock.json`, the selected policy, or
+its signature. An active updater therefore makes acceptance fail closed with
+`KERNEL_UNAVAILABLE`. Initial boot verifies the installed release, opens the
+policy store and its exclusive lifetime ledger lock, then holds the selected
+policy update guard while it verifies and release-binds the three candidate
+artifacts, rechecks every held capability, durably advances the anti-rollback
+ledger, creates the policy engine, and starts IPC dispatch.
+
+Every cooperating privileged installer or updater must take the same update
+file with an exclusive whole-file BSD `flock` and keep it locked for this exact
+publication sequence:
+
+1. create and fully write temporary kernel-lock, selected-policy, and
+   selected-policy-signature files;
+2. sync all three temporary files;
+3. atomically replace `kernel-lock.json`;
+4. atomically replace the selected-policy file;
+5. atomically replace the selected-policy-signature file;
+6. sync both affected parent directories; and
+7. release the exclusive update lock.
+
+The updater never opens, acquires, repairs, or writes the policy ledger. The
+daemon alone performs anti-rollback acceptance and ledger persistence. A
+cooperating update consequently cannot interleave artifact replacement between
+verification and that persistence.
+
+V1 exposes no IPC policy-rollover operation. Refresh coordination and
+publication are private Rust integration inside `savana-kerneld`; debug
+test-lifecycle controls are neither production APIs nor protocol messages.
+
 ## Compiled production paths
 
 Common:
@@ -1095,6 +1204,7 @@ Linux:
 | Daemon executable | `/opt/savana/kernel/release/bin/savana-kerneld` |
 | Daemon seed | `/var/lib/savana/kernel/private/daemon-identity-v1.seed` |
 | Policy ledger | `/var/lib/savana/kernel/state/policy-ledger-v1.cbor` |
+| Selected-policy update lock | `/etc/savana/kernel/.selected-policy-v1.update.lock` |
 | Selected policy | `/etc/savana/kernel/selected-policy-v1.cbor` |
 | Selected policy signature | `/etc/savana/kernel/selected-policy-v1.sig` |
 | Socket | `/run/savana/kernel/kerneld.sock` |
@@ -1107,15 +1217,16 @@ macOS:
 | Daemon executable | `/Library/Application Support/Savana/Kernel/release/bin/savana-kerneld` |
 | Daemon seed | `/Library/Application Support/Savana/Kernel/private/daemon-identity-v1.seed` |
 | Policy ledger | `/Library/Application Support/Savana/Kernel/state/policy-ledger-v1.cbor` |
+| Selected-policy update lock | `/Library/Application Support/Savana/Kernel/.selected-policy-v1.update.lock` |
 | Selected policy | `/Library/Application Support/Savana/Kernel/selected-policy-v1.cbor` |
 | Selected policy signature | `/Library/Application Support/Savana/Kernel/selected-policy-v1.sig` |
 | Socket | `/var/run/savana/kernel/kerneld.sock` |
 
 The executable, manifest, signature, signed payloads, bootstrap, lock, selected
-policy, selected-policy signature, daemon seed, ledger directory, socket
-parent, and socket are verified through descriptor-anchored capabilities and
-strict owner/mode/link rules. Path substitution does not create a supported
-interface.
+policy, selected-policy signature, selected-policy update lock, daemon seed,
+ledger directory, socket parent, and socket are verified through
+descriptor-anchored capabilities and strict owner/mode/link rules. Path
+substitution does not create a supported interface.
 
 ## Stable error codes
 

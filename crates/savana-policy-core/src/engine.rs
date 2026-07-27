@@ -188,6 +188,30 @@ impl PolicyEngine {
     pub fn boot_id_for_test(&self) -> BootId {
         self.inner.boot_id
     }
+
+    /// Returns aggregate counts and the current registry identity digest only
+    /// for the debug-only mapped daemon attack harness. It exposes no handles,
+    /// caller identities, backing artifacts, or mutation capability, and
+    /// `test-support` is compile-time forbidden in release builds.
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    #[doc(hidden)]
+    pub fn security_state_for_test_support(
+        &self,
+    ) -> Result<([u64; 4], Digest32, u32), PolicyError> {
+        let state = self.inner.state.read().map_err(|_| unavailable())?;
+        let counts = [
+            u64::try_from(state.runs.len()).map_err(|_| unavailable())?,
+            u64::try_from(state.values.len()).map_err(|_| unavailable())?,
+            u64::try_from(state.tools.len()).map_err(|_| unavailable())?,
+            u64::try_from(state.ingress_replay.len()).map_err(|_| unavailable())?,
+        ];
+        let registry_digest = state
+            .registry
+            .as_ref()
+            .map_or(Digest32::new([0; 32]), |registry| registry.identity.digest);
+        let stale = u32::try_from(state.stale_handles.len()).map_err(|_| unavailable())?;
+        Ok((counts, registry_digest, stale))
+    }
 }
 
 fn checked_engine_limits(

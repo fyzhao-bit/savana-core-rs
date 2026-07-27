@@ -50,6 +50,7 @@ const QUERY_POLICY: u8 = 0x0d;
 const OBSERVE_REPLAY_TOMBSTONE: u8 = 0x0e;
 const CAPTURE_OLD_ARTIFACTS: u8 = 0x0f;
 const POST_RENAME_FAULT: u8 = 0x10;
+const QUERY_SECURITY_STATE: u8 = 0x11;
 const SHUTDOWN: u8 = 0xff;
 
 const STATUS_OK: u8 = 0;
@@ -574,6 +575,31 @@ impl ControlInner {
             Err(StableCode::KernelUnavailable)
         }
     }
+
+    fn response_security_state(&self) -> Result<(), StableCode> {
+        let (counts, registry_digest, stale_handles) = self
+            .runtime
+            .engine()
+            .security_state_for_test_support()
+            .map_err(|error| error.code())?;
+        let mut bytes = [0_u8; RESPONSE_BYTES];
+        bytes[0] = QUERY_SECURITY_STATE;
+        bytes[1] = STATUS_OK;
+        bytes[4..12].copy_from_slice(&counts[0].to_be_bytes());
+        bytes[12..20].copy_from_slice(&counts[1].to_be_bytes());
+        bytes[20..28].copy_from_slice(&counts[2].to_be_bytes());
+        bytes[28..36].copy_from_slice(&counts[3].to_be_bytes());
+        bytes[36..68].copy_from_slice(registry_digest.as_bytes());
+        bytes[68..72].copy_from_slice(&stale_handles.to_be_bytes());
+        let mut output = self
+            .output
+            .lock()
+            .map_err(|_| StableCode::KernelUnavailable)?;
+        output
+            .write_all(&bytes)
+            .and_then(|_| output.flush())
+            .map_err(|_| StableCode::KernelUnavailable)
+    }
 }
 
 pub(crate) struct TestLifecycleControl {
@@ -820,6 +846,10 @@ impl TestLifecycleControl {
             QUERY_POLICY => {
                 self.inner
                     .response_for_code(QUERY_POLICY, self.inner.query_policy())?;
+                Ok(false)
+            }
+            QUERY_SECURITY_STATE => {
+                self.inner.response_security_state()?;
                 Ok(false)
             }
             CAPTURE_OLD_ARTIFACTS => {

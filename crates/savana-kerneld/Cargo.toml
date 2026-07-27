@@ -52,3 +52,8 @@ required-features = ["test-support"]
 name = "policy_fail_stop"
 path = "tests/policy_fail_stop.rs"
 required-features = ["test-support"]
+
+[[test]]
+name = "policy_attack_matrix"
+path = "tests/policy_attack_matrix.rs"
+required-features = ["test-support"]

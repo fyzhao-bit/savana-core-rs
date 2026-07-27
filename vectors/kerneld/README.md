@@ -45,10 +45,12 @@ Run from the repository root with Rust 1.82:
 ```bash
 vector_stage="$(mktemp -d)"
 mkdir "$vector_stage/wire" "$vector_stage/signed" "$vector_stage/candidate"
-rustup run 1.82.0 cargo run --locked -p savana-kernel-protocol \
-  --example generate_wire_vectors -- --output "$vector_stage/wire"
-rustup run 1.82.0 cargo run --locked -p savana-policy-core \
-  --example generate_signed_vectors -- --output "$vector_stage/signed"
+rustup run 1.82.0 cargo run -p savana-kernel-protocol \
+  --example generate_wire_vectors --locked --offline \
+  -- --output "$vector_stage/wire"
+rustup run 1.82.0 cargo run -p savana-policy-core \
+  --example generate_signed_vectors --locked --offline \
+  -- --output "$vector_stage/signed"
 
 install -m 0644 vectors/kerneld/README.md \
   "$vector_stage/candidate/README.md"

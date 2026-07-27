@@ -5,19 +5,31 @@ pub mod policy_support;
 
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use nix::fcntl::{Flock, FlockArg};
 use nix::libc::{O_CLOEXEC, O_NOFOLLOW};
+use nix::sys::signal::{kill, Signal};
+use nix::unistd::Pid;
 use nix::unistd::{chown, getegid, geteuid};
-use savana_kernel_protocol::{Digest32, Signature64, UnixMillis};
+use savana_kernel_protocol::{
+    connection_binding_digest, decode_server_message, encode_client_message,
+    ingress_request_digest, read_frame, write_frame, AttemptKindV1, BeginRunRequest, BoundedText,
+    ClientFinishV1, ClientHelloV1, ClientMessageV1, ConstraintId, Digest32, EffectiveLimits,
+    HardLimits, IngestUserInputRequest, IngressEnvelopeV1, IngressRequestCommitmentV1, KernelValue,
+    KeyId, Nonce32, OperationV1, PrincipalId, ProtocolVersion, RegistrySnapshotV1,
+    RequestEnvelopeV1, RequestId, RequestedMode, ResponseBodyV1, ResponsePayloadV1, RoleId,
+    RunHandle, ServerMessageV1, Signature64, SignedIngressEnvelopeV1, SignedRegistrySnapshotV1,
+    StableCode, ToolDescriptorV1, ToolExecutionIdentity, ToolName, UnixMillis,
+};
 use savana_policy_core::PolicyIdentity;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -26,6 +38,10 @@ use tempfile::TempDir;
 const RELEASE_DOMAIN: &[u8] = b"SAVANA_RELEASE_V1\0";
 const TARGET_DOMAIN: &[u8] = b"SAVANA_RELEASE_TARGET_V1\0";
 const RESOURCE_DOMAIN: &[u8] = b"SAVANA_RESOURCE_PROFILE_V1\0";
+const DAEMON_HELLO_DOMAIN: &[u8] = b"SAVANA_DAEMON_HELLO_V1\0";
+const CLIENT_FINISH_DOMAIN: &[u8] = b"SAVANA_CLIENT_FINISH_V1\0";
+const INGRESS_DOMAIN: &[u8] = b"SAVANA_INGRESS_V1\0";
+const REGISTRY_DOMAIN: &[u8] = b"SAVANA_REGISTRY_V1\0";
 pub const POLICY_VERSION: u64 = 7;
 pub const POLICY_EPOCH: u64 = 3;
 pub const NEXT_POLICY_VERSION: u64 = POLICY_VERSION + 1;
@@ -72,6 +88,7 @@ pub enum ControlOpcode {
     ObserveReplayTombstone = 0x0e,
     CaptureOldArtifacts = 0x0f,
     PostRenameFault = 0x10,
+    QuerySecurityState = 0x11,
     Shutdown = 0xff,
 }
 
@@ -95,6 +112,7 @@ impl ControlOpcode {
             0x0e => Self::ObserveReplayTombstone,
             0x0f => Self::CaptureOldArtifacts,
             0x10 => Self::PostRenameFault,
+            0x11 => Self::QuerySecurityState,
             0xff => Self::Shutdown,
             _ => return None,
         })
@@ -140,6 +158,24 @@ pub struct ControlResponse {
     pub expires_at: u64,
     pub digest: Digest32,
     pub frame_limit: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecurityStateSnapshot {
+    pub runs: u64,
+    pub values: u64,
+    pub tools: u64,
+    pub replay_entries: u64,
+    pub registry_digest: Digest32,
+    pub stale_handles: u32,
+}
+
+impl SecurityStateSnapshot {
+    pub const fn live_handles(self) -> u64 {
+        self.runs
+            .saturating_add(self.values)
+            .saturating_add(self.tools)
+    }
 }
 
 impl ControlResponse {
@@ -299,6 +335,10 @@ pub struct Installation {
     pub policy_digest: Digest32,
     pub resource_profile_digest: Digest32,
     pub canary: String,
+    policy_issued_at: u64,
+    policy_expires_at: u64,
+    matching_tool_count: usize,
+    effective_limits: EffectiveLimits,
     initial_identity: PolicyIdentity,
     next_identity: PolicyIdentity,
     next_candidate: CandidateFiles,
@@ -307,6 +347,20 @@ pub struct Installation {
 
 impl Installation {
     pub fn build() -> Self {
+        Self::build_with_options(1, 3_600_000)
+    }
+
+    pub fn build_with_matching_tools(matching_tool_count: usize) -> Self {
+        Self::build_with_options(matching_tool_count, 3_600_000)
+    }
+
+    pub fn build_with_lifetime_ms(lifetime_ms: u64) -> Self {
+        Self::build_with_options(1, lifetime_ms)
+    }
+
+    fn build_with_options(matching_tool_count: usize, lifetime_ms: u64) -> Self {
+        assert!((1..=256).contains(&matching_tool_count));
+        assert!(lifetime_ms >= 1_000);
         let canary = "mapped-secret-canary";
         let temporary = tempfile::Builder::new()
             .prefix(canary)
@@ -324,7 +378,8 @@ impl Installation {
         )
         .unwrap();
         let issued_at = now.saturating_sub(60_000);
-        let expires_at = now.checked_add(3_600_000).unwrap();
+        let policy_expires_at = now.checked_add(lifetime_ms).unwrap();
+        let release_expires_at = now.checked_add(lifetime_ms.max(3_600_000)).unwrap();
 
         let jarvis_uid = geteuid().as_raw();
         let socket_client_gid = getegid().as_raw();
@@ -333,10 +388,16 @@ impl Installation {
         let daemon_key = SigningKey::from_bytes(&[0x61; 32]);
         let client_key = SigningKey::from_bytes(&[0x62; 32]);
         let client_b_key = SigningKey::from_bytes(&[0x63; 32]);
+        let client_c_key = SigningKey::from_bytes(&[0x64; 32]);
+        let client_c_public = client_c_key.verifying_key().to_bytes();
+        let include_client_c = matching_tool_count > 1;
         let policy_key = policy_support::signing_key();
         let release_key = SigningKey::from_bytes(&[0x51; 32]);
 
         let resources = policy_support::compiled_resources();
+        let effective_limits = HardLimits::COMPILED
+            .lower(&resources)
+            .expect("fixture resource limits");
         let resource_bytes = minicbor::to_vec(resources).unwrap();
         let resource_digest = domain_digest(RESOURCE_DOMAIN, &resource_bytes);
         let roots_bytes = encode_policy_roots(
@@ -354,19 +415,26 @@ impl Installation {
             &daemon_key.verifying_key().to_bytes(),
             &client_key.verifying_key().to_bytes(),
             &client_b_key.verifying_key().to_bytes(),
+            include_client_c.then_some(&client_c_public),
             &policy_key.verifying_key().to_bytes(),
         );
         let profile_digest = sha256(&profile_bytes);
         let release_target = compute_target(roots_digest, resource_digest, profile_digest);
 
-        let policy = installation_policy(POLICY_VERSION, issued_at, expires_at, release_target);
+        let policy = installation_policy(
+            POLICY_VERSION,
+            issued_at,
+            policy_expires_at,
+            release_target,
+            matching_tool_count,
+        );
         let (policy_bytes, policy_signature) = policy_support::signed(&policy);
         let initial_policy_digest = sha256(&policy_bytes);
         let initial_identity = PolicyIdentity {
             digest: Digest32::new(initial_policy_digest),
             policy_version: POLICY_VERSION,
             key_epoch: POLICY_EPOCH,
-            expires_at: UnixMillis::new(expires_at),
+            expires_at: UnixMillis::new(policy_expires_at),
         };
 
         let stage = mapped(&root, release_stage_path());
@@ -433,7 +501,7 @@ impl Installation {
             resource_digest,
             profile_digest,
             issued_at,
-            expires_at,
+            release_expires_at,
         );
         let release_signature = detached_signature(RELEASE_DOMAIN, &manifest_bytes, &release_key);
         let release_manifest = stage.join("release/release-manifest-v1.cbor");
@@ -489,24 +557,37 @@ impl Installation {
                 key_id: "daemon-key".to_owned(),
                 public_key: hex(daemon_key.verifying_key().to_bytes()),
             },
-            daemon_clients: vec![
-                LockClient {
-                    client_id: "jarvis-client".to_owned(),
-                    key_id: "jarvis-key".to_owned(),
-                    public_key: hex(client_key.verifying_key().to_bytes()),
-                    role: "jarvis_kernel_client".to_owned(),
-                    peer_uid: jarvis_uid,
-                    peer_gid: socket_client_gid,
-                },
-                LockClient {
-                    client_id: "jarvis-client-b".to_owned(),
-                    key_id: "jarvis-key-b".to_owned(),
-                    public_key: hex(client_b_key.verifying_key().to_bytes()),
-                    role: "jarvis_kernel_client".to_owned(),
-                    peer_uid: jarvis_uid,
-                    peer_gid: socket_client_gid,
-                },
-            ],
+            daemon_clients: {
+                let mut clients = vec![
+                    LockClient {
+                        client_id: "jarvis-client".to_owned(),
+                        key_id: "jarvis-key".to_owned(),
+                        public_key: hex(client_key.verifying_key().to_bytes()),
+                        role: "jarvis_kernel_client".to_owned(),
+                        peer_uid: jarvis_uid,
+                        peer_gid: socket_client_gid,
+                    },
+                    LockClient {
+                        client_id: "jarvis-client-b".to_owned(),
+                        key_id: "jarvis-key-b".to_owned(),
+                        public_key: hex(client_b_key.verifying_key().to_bytes()),
+                        role: "jarvis_kernel_client".to_owned(),
+                        peer_uid: jarvis_uid,
+                        peer_gid: socket_client_gid,
+                    },
+                ];
+                if include_client_c {
+                    clients.push(LockClient {
+                        client_id: "jarvis-client-c".to_owned(),
+                        key_id: "jarvis-key-c".to_owned(),
+                        public_key: hex(client_c_key.verifying_key().to_bytes()),
+                        role: "jarvis_kernel_client".to_owned(),
+                        peer_uid: jarvis_uid,
+                        peer_gid: socket_client_gid,
+                    });
+                }
+                clients
+            },
             policy_trust_roots: vec![LockPolicyRoot {
                 key_id: "policy-root".to_owned(),
                 public_key: hex(policy_key.verifying_key().to_bytes()),
@@ -536,15 +617,20 @@ impl Installation {
         let kernel_lock_bytes = serde_json::to_vec(&lock).unwrap();
         write_file(&kernel_lock, &kernel_lock_bytes, 0o444);
 
-        let next_policy =
-            installation_policy(NEXT_POLICY_VERSION, issued_at, expires_at, release_target);
+        let next_policy = installation_policy(
+            NEXT_POLICY_VERSION,
+            issued_at,
+            policy_expires_at,
+            release_target,
+            matching_tool_count,
+        );
         let (next_policy_bytes, next_signature) = policy_support::signed(&next_policy);
         let next_policy_digest = sha256(&next_policy_bytes);
         let next_identity = PolicyIdentity {
             digest: Digest32::new(next_policy_digest),
             policy_version: NEXT_POLICY_VERSION,
             key_epoch: POLICY_EPOCH,
-            expires_at: UnixMillis::new(expires_at),
+            expires_at: UnixMillis::new(policy_expires_at),
         };
         let mut next_lock = lock.clone();
         next_lock.selected_policy_digest = hex(next_policy_digest);
@@ -565,7 +651,7 @@ impl Installation {
                 key_id: "release-root".to_owned(),
                 public_key: hex(release_key.verifying_key().to_bytes()),
                 not_before_unix_ms: issued_at,
-                not_after_unix_ms: expires_at,
+                not_after_unix_ms: release_expires_at,
                 revoked: false,
             }],
             allowed_release_digest: hex(release_digest),
@@ -596,6 +682,10 @@ impl Installation {
             policy_digest: Digest32::new(initial_policy_digest),
             resource_profile_digest: Digest32::new(resource_digest),
             canary: canary.to_owned(),
+            policy_issued_at: issued_at,
+            policy_expires_at,
+            matching_tool_count,
+            effective_limits,
             initial_identity,
             next_identity,
             next_candidate,
@@ -615,6 +705,79 @@ impl Installation {
 
     pub const fn next_candidate(&self) -> &CandidateFiles {
         &self.next_candidate
+    }
+
+    pub const fn effective_limits(&self) -> EffectiveLimits {
+        self.effective_limits
+    }
+
+    pub const fn policy_expires_at(&self) -> u64 {
+        self.policy_expires_at
+    }
+
+    pub fn wait_until_policy_expired(&self) {
+        while system_now_ms() < self.policy_expires_at {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    pub fn wait_until_policy_remaining(&self, remaining_ms: u64) {
+        assert!(remaining_ms > 0);
+        loop {
+            let now = system_now_ms();
+            assert!(now < self.policy_expires_at, "fixture policy expired early");
+            let remaining = self.policy_expires_at - now;
+            if remaining <= remaining_ms {
+                return;
+            }
+            thread::sleep(Duration::from_millis((remaining - remaining_ms).min(50)));
+        }
+    }
+
+    pub fn signed_registry(&self) -> SignedRegistrySnapshotV1 {
+        self.signed_registry_with_tools(self.matching_tool_count)
+    }
+
+    pub fn signed_empty_registry(&self) -> SignedRegistrySnapshotV1 {
+        self.signed_registry_with_tools(0)
+    }
+
+    fn signed_registry_with_tools(&self, tool_count: usize) -> SignedRegistrySnapshotV1 {
+        assert!(tool_count <= self.matching_tool_count);
+        let tools = matching_tool_names(self.matching_tool_count)
+            .into_iter()
+            .take(tool_count)
+            .enumerate()
+            .map(|(index, name)| ToolDescriptorV1 {
+                identity: ToolExecutionIdentity {
+                    name: ToolName::new(name).expect("fixture tool name"),
+                    descriptor_digest: matching_tool_digest(index),
+                    registry_version: 1,
+                },
+                provider_id: BoundedText::new("attack-matrix-provider").expect("fixture provider"),
+                roles: vec![RoleId::new("operator").expect("fixture role")],
+                input_schema_digest: Digest32::new([0x31; 32]),
+                output_schema_digest: Digest32::new([0x32; 32]),
+                attempt: AttemptKindV1::Read,
+                constraint_ids: vec![
+                    ConstraintId::new("constraint-00").expect("fixture constraint")
+                ],
+                validator_ids: Vec::new(),
+                projection_digest: Digest32::new([0x33; 32]),
+            })
+            .collect();
+        let unsigned = RegistrySnapshotV1 {
+            version: 1,
+            previous_digest: None,
+            tools,
+            issued_at: UnixMillis::new(self.policy_issued_at),
+            expires_at: UnixMillis::new(self.policy_expires_at),
+        };
+        SignedRegistrySnapshotV1 {
+            signature: sign_canonical(REGISTRY_DOMAIN, &unsigned, &[0x72; 32]),
+            unsigned,
+            key_id: KeyId::new("role-02").expect("registry key ID"),
+        }
     }
 
     pub fn ledger_bytes(&self) -> Option<Vec<u8>> {
@@ -843,8 +1006,25 @@ impl Installation {
             stdout_reader: Some(stdout_reader),
             stderr_reader: Some(stderr_reader),
         };
-        let ready =
-            daemon.receive_with_timeout(ControlOpcode::StartupReady, Duration::from_secs(10));
+        let ready = daemon
+            .receive_for(ControlOpcode::StartupReady, Duration::from_secs(10))
+            .unwrap_or_else(|| {
+                if daemon
+                    .child
+                    .as_mut()
+                    .expect("lifecycle child")
+                    .try_wait()
+                    .expect("poll lifecycle child")
+                    .is_some()
+                {
+                    let (status, stderr) = daemon.wait_inner();
+                    panic!(
+                        "mapped lifecycle daemon exited before ready ({status}): {}",
+                        String::from_utf8_lossy(&stderr)
+                    );
+                }
+                panic!("no lifecycle response for StartupReady within 10s");
+            });
         assert_eq!(ready.status, ControlStatus::Ready);
         daemon
     }
@@ -949,6 +1129,19 @@ impl LifecycleDaemon {
         assert_eq!(response.status, expected, "{opcode:?}: {response:?}");
     }
 
+    pub fn security_state_snapshot(&mut self) -> SecurityStateSnapshot {
+        let response = self.command(ControlOpcode::QuerySecurityState);
+        assert_eq!(response.status, ControlStatus::Ok, "{response:?}");
+        SecurityStateSnapshot {
+            runs: response.generation,
+            values: response.policy_version,
+            tools: response.key_epoch,
+            replay_entries: response.expires_at,
+            registry_digest: response.digest,
+            stale_handles: response.frame_limit,
+        }
+    }
+
     pub fn receive(&mut self, opcode: ControlOpcode) -> ControlResponse {
         self.receive_with_timeout(opcode, Duration::from_secs(10))
     }
@@ -989,7 +1182,11 @@ impl LifecycleDaemon {
             .unwrap_or_else(|| panic!("no lifecycle response for {opcode:?} within {timeout:?}"))
     }
 
-    pub fn shutdown(mut self) {
+    pub fn shutdown(self) {
+        let _ = self.shutdown_and_collect_audit();
+    }
+
+    pub fn shutdown_and_collect_audit(mut self) -> String {
         self.command_expect(ControlOpcode::Shutdown, ControlStatus::Ok);
         let (status, stderr) = self.wait_inner();
         assert!(
@@ -997,6 +1194,7 @@ impl LifecycleDaemon {
             "mapped lifecycle daemon shutdown failed: {}",
             String::from_utf8_lossy(&stderr)
         );
+        String::from_utf8(stderr).expect("audit is utf-8")
     }
 
     pub fn wait(mut self) -> ExitStatus {
@@ -1031,18 +1229,412 @@ impl Drop for LifecycleDaemon {
     }
 }
 
+pub struct RunningDaemon {
+    child: Option<Child>,
+}
+
+impl RunningDaemon {
+    pub fn start(installation: &Installation) -> Self {
+        let mut child = Command::new(&installation.executable)
+            .arg("--config")
+            .arg(&installation.config)
+            .env_remove(LIFECYCLE_CONTROL_ENV)
+            .env_remove(POLICY_CORE_LIVE_PERSISTENCE_FAULT_ENV)
+            .env_remove(TEST_PROCESS_ENTROPY_ENV)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start mapped daemon");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().expect("poll mapped daemon") {
+                let output = child.wait_with_output().expect("mapped daemon output");
+                panic!(
+                    "mapped daemon exited before bind ({status}): {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            if installation.socket.exists() {
+                return Self { child: Some(child) };
+            }
+            assert!(Instant::now() < deadline, "mapped daemon did not bind");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    pub fn stop(&mut self) {
+        let _ = self.stop_and_collect_audit();
+    }
+
+    pub fn stop_and_collect_audit(&mut self) -> String {
+        let Some(child) = self.child.take() else {
+            return String::new();
+        };
+        kill(
+            Pid::from_raw(i32::try_from(child.id()).expect("child pid")),
+            Signal::SIGTERM,
+        )
+        .expect("stop mapped daemon");
+        let output = child.wait_with_output().expect("wait mapped daemon");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stderr).expect("audit is utf-8")
+    }
+}
+
+impl Drop for RunningDaemon {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireClient {
+    A,
+    B,
+    C,
+}
+
+impl WireClient {
+    const fn seed(self) -> u8 {
+        match self {
+            Self::A => 0x62,
+            Self::B => 0x63,
+            Self::C => 0x64,
+        }
+    }
+
+    fn id(self) -> savana_kernel_protocol::ClientId {
+        match self {
+            Self::A => "jarvis-client".try_into().expect("client ID"),
+            Self::B => "jarvis-client-b".try_into().expect("client ID"),
+            Self::C => "jarvis-client-c".try_into().expect("client ID"),
+        }
+    }
+
+    fn key_id(self) -> KeyId {
+        match self {
+            Self::A => "jarvis-key".try_into().expect("client key ID"),
+            Self::B => "jarvis-key-b".try_into().expect("client key ID"),
+            Self::C => "jarvis-key-c".try_into().expect("client key ID"),
+        }
+    }
+}
+
+pub struct AuthenticatedConnection {
+    stream: UnixStream,
+    transcript: savana_kernel_protocol::HandshakeTranscriptV1,
+    effective_limits: EffectiveLimits,
+    policy_expires_at: u64,
+}
+
+impl AuthenticatedConnection {
+    pub fn connect(installation: &Installation, client: WireClient, nonce: u64) -> Self {
+        let effective_limits = installation.effective_limits();
+        let mut stream = connect_when_listening(&installation.socket);
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("read timeout");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(10)))
+            .expect("write timeout");
+        let hello = ClientHelloV1 {
+            client_nonce: nonce32(nonce),
+            supported_versions: vec![ProtocolVersion::new(1, 0)],
+            client_id: client.id(),
+            client_key_id: client.key_id(),
+            requested_mode: RequestedMode::Required,
+        };
+        write_client_message(
+            &mut stream,
+            &ClientMessageV1::Hello(hello.clone()),
+            &effective_limits,
+        );
+        let signed = match read_server_message(&mut stream, &effective_limits) {
+            ServerMessageV1::Hello(signed) => signed,
+            other => panic!("expected signed hello, got {other:?}"),
+        };
+        assert_eq!(signed.transcript.client, hello);
+        assert_eq!(
+            signed.transcript.server.release_digest,
+            installation.release_digest
+        );
+        assert_eq!(
+            signed.transcript.server.resource_profile_digest,
+            installation.resource_profile_digest
+        );
+        let transcript_bytes =
+            minicbor::to_vec(&signed.transcript).expect("canonical handshake transcript");
+        let mut daemon_input =
+            Vec::with_capacity(DAEMON_HELLO_DOMAIN.len() + transcript_bytes.len());
+        daemon_input.extend_from_slice(DAEMON_HELLO_DOMAIN);
+        daemon_input.extend_from_slice(&transcript_bytes);
+        SigningKey::from_bytes(&[0x61; 32])
+            .verifying_key()
+            .verify(
+                &daemon_input,
+                &Signature::from_bytes(signed.signature.as_bytes()),
+            )
+            .expect("verify daemon-signed hello");
+
+        let transcript_digest = Digest32::new(Sha256::digest(&transcript_bytes).into());
+        let mut finish_input = Vec::with_capacity(CLIENT_FINISH_DOMAIN.len() + 32);
+        finish_input.extend_from_slice(CLIENT_FINISH_DOMAIN);
+        finish_input.extend_from_slice(transcript_digest.as_bytes());
+        let client_key = SigningKey::from_bytes(&[client.seed(); 32]);
+        write_client_message(
+            &mut stream,
+            &ClientMessageV1::Finish(ClientFinishV1 {
+                transcript_digest,
+                signature: Signature64::new(client_key.sign(&finish_input).to_bytes()),
+            }),
+            &effective_limits,
+        );
+        match read_server_message(&mut stream, &effective_limits) {
+            ServerMessageV1::Accepted(accepted) => {
+                assert_eq!(accepted.boot_id, signed.transcript.server.boot_id);
+                assert_eq!(accepted.protocol, signed.transcript.server.protocol);
+            }
+            other => panic!("expected handshake acceptance, got {other:?}"),
+        }
+        Self {
+            stream,
+            transcript: signed.transcript,
+            effective_limits,
+            policy_expires_at: installation.policy_expires_at,
+        }
+    }
+
+    pub fn begin_request(
+        &self,
+        registry: SignedRegistrySnapshotV1,
+        input: KernelValue,
+        nonce: u64,
+    ) -> RequestEnvelopeV1 {
+        let commitment = IngressRequestCommitmentV1::BeginRun {
+            input: input.clone(),
+        };
+        RequestEnvelopeV1 {
+            version: ProtocolVersion::new(1, 0),
+            request_id: request_id(nonce),
+            deadline_unix_ms: self.request_deadline(),
+            operation: OperationV1::BeginRun(BeginRunRequest {
+                ingress: self.signed_ingress(
+                    ingress_request_digest(&commitment).expect("begin commitment"),
+                    nonce,
+                ),
+                input,
+                registry,
+            }),
+        }
+    }
+
+    pub fn ingest_request(
+        &self,
+        run: RunHandle,
+        input: KernelValue,
+        nonce: u64,
+    ) -> RequestEnvelopeV1 {
+        let commitment = IngressRequestCommitmentV1::IngestUserInput {
+            run,
+            input: input.clone(),
+        };
+        RequestEnvelopeV1 {
+            version: ProtocolVersion::new(1, 0),
+            request_id: request_id(nonce),
+            deadline_unix_ms: self.request_deadline(),
+            operation: OperationV1::IngestUserInput(IngestUserInputRequest {
+                run,
+                envelope: self.signed_ingress(
+                    ingress_request_digest(&commitment).expect("ingest commitment"),
+                    nonce,
+                ),
+                input,
+            }),
+        }
+    }
+
+    pub fn submit(mut self, request: RequestEnvelopeV1) -> Result<ResponsePayloadV1, StableCode> {
+        write_client_message(
+            &mut self.stream,
+            &ClientMessageV1::Request(request),
+            &self.effective_limits,
+        );
+        let response = match read_server_message(&mut self.stream, &self.effective_limits) {
+            ServerMessageV1::Response(response) => response,
+            other => panic!("expected exactly one response, got {other:?}"),
+        };
+        assert_stream_eof(&mut self.stream);
+        match response.body {
+            ResponseBodyV1::Ok(payload) => Ok(payload),
+            ResponseBodyV1::Err(code) => Err(code),
+        }
+    }
+
+    pub fn send_payload_expect_silent_close(mut self, payload: &[u8]) {
+        write_frame(&mut self.stream, payload, &self.effective_limits)
+            .expect("write hostile request frame");
+        self.stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("shutdown hostile request writer");
+        assert_stream_eof(&mut self.stream);
+    }
+
+    fn signed_ingress(&self, request_digest: Digest32, nonce: u64) -> SignedIngressEnvelopeV1 {
+        let now = system_now_ms();
+        let unsigned = IngressEnvelopeV1 {
+            principal: PrincipalId::new("principal-1").expect("principal"),
+            conversation_id: "conversation-1".try_into().expect("conversation"),
+            request_digest,
+            issued_at: UnixMillis::new(now.saturating_sub(1)),
+            expires_at: UnixMillis::new(
+                now.checked_add(600_000)
+                    .expect("ingress expiry")
+                    .min(self.policy_expires_at),
+            ),
+            nonce: nonce32(nonce),
+            authority_session_id: Nonce32::new([0x44; 32]),
+            authentication_context_digest: Digest32::new([0x55; 32]),
+            role: RoleId::new("operator").expect("role"),
+            policy_digest: self.transcript.server.policy_digest,
+            boot_id: self.transcript.server.boot_id,
+            connection_binding_digest: connection_binding_digest(&self.transcript)
+                .expect("connection binding"),
+        };
+        SignedIngressEnvelopeV1 {
+            signature: sign_canonical(INGRESS_DOMAIN, &unsigned, &[0x70; 32]),
+            unsigned,
+            key_id: KeyId::new("role-00").expect("ingress key ID"),
+        }
+    }
+
+    fn request_deadline(&self) -> UnixMillis {
+        let now = system_now_ms();
+        UnixMillis::new(
+            now.checked_add(20_000)
+                .expect("request deadline")
+                .min(self.policy_expires_at.saturating_sub(1)),
+        )
+    }
+}
+
+pub fn resign_ingress(ingress: &mut SignedIngressEnvelopeV1) {
+    ingress.signature = sign_canonical(INGRESS_DOMAIN, &ingress.unsigned, &[0x70; 32]);
+}
+
+pub fn resign_registry(registry: &mut SignedRegistrySnapshotV1) {
+    registry.signature = sign_canonical(REGISTRY_DOMAIN, &registry.unsigned, &[0x72; 32]);
+}
+
+fn sign_canonical<T: minicbor::Encode<()>>(
+    domain: &[u8],
+    value: &T,
+    key: &[u8; 32],
+) -> Signature64 {
+    let encoded = minicbor::to_vec(value).expect("canonical fixture payload");
+    let mut message = Vec::with_capacity(domain.len() + encoded.len());
+    message.extend_from_slice(domain);
+    message.extend_from_slice(&encoded);
+    Signature64::new(SigningKey::from_bytes(key).sign(&message).to_bytes())
+}
+
+fn nonce32(value: u64) -> Nonce32 {
+    let mut bytes = [0xa5; 32];
+    bytes[..8].copy_from_slice(&value.to_be_bytes());
+    Nonce32::new(bytes)
+}
+
+fn request_id(value: u64) -> RequestId {
+    let mut bytes = [0x5a; 16];
+    bytes[..8].copy_from_slice(&value.to_be_bytes());
+    RequestId::new(bytes)
+}
+
+fn write_client_message(
+    stream: &mut UnixStream,
+    message: &ClientMessageV1,
+    limits: &EffectiveLimits,
+) {
+    let payload = encode_client_message(message).expect("encode client message");
+    write_frame(stream, &payload, limits).expect("write client frame");
+}
+
+fn read_server_message(stream: &mut UnixStream, limits: &EffectiveLimits) -> ServerMessageV1 {
+    let payload = read_frame(stream, limits).expect("read server frame");
+    decode_server_message(&payload, limits).expect("decode server message")
+}
+
+fn assert_stream_eof(stream: &mut UnixStream) {
+    let mut byte = [0_u8; 1];
+    match stream.read(&mut byte) {
+        Ok(0) => {}
+        Ok(count) => panic!("expected EOF after one response, got {count} bytes"),
+        Err(error) => panic!("expected EOF after one response, got {error}"),
+    }
+}
+
+fn connect_when_listening(path: &Path) -> UnixStream {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match UnixStream::connect(path) {
+            Ok(stream) => return stream,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::ConnectionRefused | ErrorKind::NotFound
+                ) && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("connect mapped daemon: {error}"),
+        }
+    }
+}
+
+fn system_now_ms() -> u64 {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_millis(),
+    )
+    .expect("millisecond clock")
+}
+
 fn installation_policy(
     version: u64,
     issued_at: u64,
     expires_at: u64,
     release_target: [u8; 32],
+    matching_tool_count: usize,
 ) -> policy_support::TestPolicy {
     let mut policy = policy_support::valid_policy(version, POLICY_EPOCH);
-    policy.dataflow.no_side_effect_tools[0] = "operator-tool".to_owned();
-    policy.attempts.valid_pairs[0].tool = "operator-tool".to_owned();
-    policy.tools[0].name = "operator-tool".to_owned();
-    policy.attempts.valid_pairs.swap(0, 1);
-    policy.tools.swap(0, 1);
+    let names = matching_tool_names(matching_tool_count);
+    policy.dataflow.no_side_effect_tools = names.clone();
+    policy.dataflow.consent_overridable_tools.clear();
+    policy.dataflow.high_risk_tools.clear();
+    policy.attempts.valid_pairs = names
+        .iter()
+        .map(|name| policy_support::ToolAttempt {
+            tool: name.clone(),
+            attempt: 0,
+        })
+        .collect();
+    policy.tools = names
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| policy_support::Tool {
+            name,
+            descriptor_digest: *matching_tool_digest(index).as_bytes(),
+            attempt: 0,
+            constraint_ids: vec!["constraint-00".to_owned()],
+            validator_ids: Vec::new(),
+        })
+        .collect();
+    policy.sink.validator_requirements.clear();
     policy.issued_at = issued_at;
     policy.expires_at = expires_at;
     policy.release.compatible_release_target_ids = vec![release_target];
@@ -1051,6 +1643,26 @@ fn installation_policy(
         authority.not_after = expires_at;
     }
     policy
+}
+
+fn matching_tool_names(count: usize) -> Vec<String> {
+    if count == 1 {
+        vec!["operator-tool".to_owned()]
+    } else {
+        (0..count)
+            .map(|index| format!("operator-tool-{index:03}"))
+            .collect()
+    }
+}
+
+fn matching_tool_digest(index: usize) -> Digest32 {
+    let mut bytes = [0x21; 32];
+    bytes[..8].copy_from_slice(
+        &u64::try_from(index)
+            .expect("fixture tool index")
+            .to_be_bytes(),
+    );
+    Digest32::new(bytes)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1062,6 +1674,7 @@ fn encode_profile(
     daemon_key: &[u8; 32],
     client_key: &[u8; 32],
     client_b_key: &[u8; 32],
+    client_c_key: Option<&[u8; 32]>,
     policy_key: &[u8; 32],
 ) -> Vec<u8> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
@@ -1080,7 +1693,7 @@ fn encode_profile(
         .unwrap()
         .bytes(daemon_key)
         .unwrap()
-        .array(2)
+        .array(if client_c_key.is_some() { 3 } else { 2 })
         .unwrap()
         .array(6)
         .unwrap()
@@ -1111,6 +1724,23 @@ fn encode_profile(
         .unwrap()
         .u32(socket_client_gid)
         .unwrap();
+    if let Some(client_c_key) = client_c_key {
+        encoder
+            .array(6)
+            .unwrap()
+            .str("jarvis-client-c")
+            .unwrap()
+            .str("jarvis-key-c")
+            .unwrap()
+            .bytes(client_c_key)
+            .unwrap()
+            .u8(0)
+            .unwrap()
+            .u32(jarvis_uid)
+            .unwrap()
+            .u32(socket_client_gid)
+            .unwrap();
+    }
     encoder.writer_mut().extend_from_slice(&encode_policy_roots(
         "policy-root",
         policy_key,
