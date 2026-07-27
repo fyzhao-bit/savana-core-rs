@@ -195,6 +195,49 @@ pub fn current_policy_and_identity_from(
     (current, identity)
 }
 
+pub fn current_policy_and_identity_with_clients(
+    client_count: usize,
+) -> (CurrentPolicyCapability, PolicyIdentity) {
+    let root = tempfile::tempdir().unwrap();
+    let root_path = fs::canonicalize(root.path()).unwrap();
+    let profile = fixture_profile_with_client_count(client_count);
+    let profile_digest: [u8; 32] = Sha256::digest(&profile).into();
+    let roots_digest: [u8; 32] = Sha256::digest(fixture_policy_roots()).into();
+    let resource_digest = fixture_resource_digest();
+    let target = Digest32::new(compute_fixture_release_target(
+        roots_digest,
+        resource_digest,
+        profile_digest,
+    ));
+    let mut policy = valid_policy(7, 3);
+    policy.release.compatible_release_target_ids = vec![*target.as_bytes()];
+    let (policy_bytes, policy_signature) = signed(&policy);
+    let release = build_verified_release_with_profile(
+        &root_path,
+        "release-client-count",
+        b'f',
+        resource_digest,
+        4_000,
+        NOW,
+        profile,
+    );
+    let verifier = release.policy_verifier().unwrap();
+    let identity = verifier
+        .verify(&policy_bytes, &policy_signature, UnixMillis::new(NOW))
+        .unwrap()
+        .identity();
+    let store = PolicyStore::open(&root_path.join("policy.ledger"), verifier).unwrap();
+    let current = store
+        .verify_and_accept_initial(
+            release,
+            &policy_bytes,
+            &policy_signature,
+            UnixMillis::new(NOW),
+        )
+        .unwrap();
+    (current, identity)
+}
+
 #[derive(Clone)]
 pub struct ProtocolRange {
     pub major: u16,
@@ -479,8 +522,12 @@ fn fixture_policy_roots() -> Vec<u8> {
 }
 
 fn fixture_profile() -> Vec<u8> {
+    fixture_profile_with_client_count(1)
+}
+
+fn fixture_profile_with_client_count(client_count: usize) -> Vec<u8> {
+    assert!((1..=16).contains(&client_count));
     let daemon = SigningKey::from_bytes(&[0x61; 32]);
-    let client = SigningKey::from_bytes(&[0x62; 32]);
     let platform = if cfg!(target_os = "macos") { 1 } else { 0 };
     let (socket, policy, signature) = if cfg!(target_os = "macos") {
         (
@@ -511,22 +558,32 @@ fn fixture_profile() -> Vec<u8> {
         .unwrap()
         .bytes(&daemon.verifying_key().to_bytes())
         .unwrap()
-        .array(1)
-        .unwrap()
-        .array(6)
-        .unwrap()
-        .str("jarvis-client")
-        .unwrap()
-        .str("jarvis-key")
-        .unwrap()
-        .bytes(&client.verifying_key().to_bytes())
-        .unwrap()
-        .u8(0)
-        .unwrap()
-        .u32(1_001)
-        .unwrap()
-        .u32(1_003)
+        .array(client_count as u64)
         .unwrap();
+    for index in 0..client_count {
+        let (client_id, key_id) = if client_count == 1 {
+            ("jarvis-client".to_owned(), "jarvis-key".to_owned())
+        } else {
+            (format!("client-{index:02}"), format!("key-{index:02}"))
+        };
+        let client_seed = 0x62_u8.checked_add(index as u8).unwrap();
+        let client = SigningKey::from_bytes(&[client_seed; 32]);
+        encoder
+            .array(6)
+            .unwrap()
+            .str(&client_id)
+            .unwrap()
+            .str(&key_id)
+            .unwrap()
+            .bytes(&client.verifying_key().to_bytes())
+            .unwrap()
+            .u8(0)
+            .unwrap()
+            .u32(1_001)
+            .unwrap()
+            .u32(1_003)
+            .unwrap();
+    }
     let roots = fixture_policy_roots();
     let mut decoder = minicbor::Decoder::new(&roots);
     let root_count = decoder.array().unwrap().unwrap();
@@ -602,8 +659,27 @@ fn build_verified_release(
     expires_at: u64,
     verification_now: u64,
 ) -> VerifiedReleaseIdentity {
+    build_verified_release_with_profile(
+        root,
+        name,
+        source_marker,
+        resource_digest,
+        expires_at,
+        verification_now,
+        fixture_profile(),
+    )
+}
+
+fn build_verified_release_with_profile(
+    root: &Path,
+    name: &str,
+    source_marker: u8,
+    resource_digest: [u8; 32],
+    expires_at: u64,
+    verification_now: u64,
+    profile: Vec<u8>,
+) -> VerifiedReleaseIdentity {
     let stage = root.join(name);
-    let profile = fixture_profile();
     let profile_digest: [u8; 32] = Sha256::digest(&profile).into();
     let roots_digest: [u8; 32] = Sha256::digest(fixture_policy_roots()).into();
     let release_target =
@@ -959,12 +1035,23 @@ impl IngressFixture {
         Self::from_current(current_policy_and_identity_from(policy))
     }
 
+    pub fn with_random(random: Arc<dyn RandomSource + Send + Sync>) -> Self {
+        Self::from_current_and_random(current_policy_and_identity(), random)
+    }
+
     fn from_current((current, identity): (CurrentPolicyCapability, PolicyIdentity)) -> Self {
-        let clock = clock();
-        let boot_id = BootId::new([0x41; 32]);
         let random: Arc<dyn RandomSource + Send + Sync> = Arc::new(SequenceRandom {
             next: AtomicU64::new(1),
         });
+        Self::from_current_and_random((current, identity), random)
+    }
+
+    fn from_current_and_random(
+        (current, identity): (CurrentPolicyCapability, PolicyIdentity),
+        random: Arc<dyn RandomSource + Send + Sync>,
+    ) -> Self {
+        let clock = clock();
+        let boot_id = BootId::new([0x41; 32]);
         let (engine, issuer) = PolicyEngine::new(
             current,
             boot_id,
@@ -1057,6 +1144,16 @@ impl IngressFixture {
         connection_byte: u8,
         binding_byte: u8,
     ) -> (AuthenticatedCallContext, Digest32) {
+        self.bind_with_peer(client_id, connection_byte, binding_byte, 1_001)
+    }
+
+    pub fn bind_with_peer(
+        &self,
+        client_id: &str,
+        connection_byte: u8,
+        binding_byte: u8,
+        peer_uid: u32,
+    ) -> (AuthenticatedCallContext, Digest32) {
         let binding = Digest32::new([binding_byte; 32]);
         (
             self.issuer
@@ -1066,7 +1163,7 @@ impl IngressFixture {
                     binding,
                     self.identity,
                     self.boot_id,
-                    1_001,
+                    peer_uid,
                     UnixMillis::new(3_000),
                 )
                 .unwrap(),

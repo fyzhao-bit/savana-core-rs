@@ -73,16 +73,16 @@ pub(crate) fn begin_run_locked(
         }
     }
 
-    sweep_expired_security_state(state, wall)?;
     let replay_key = replay_key(&verified);
-    require_fresh_replay(state, &replay_key)?;
-    require_replay_capacity(state, context)?;
+    let next_replay_per_client =
+        prepare_replay_commit(state, &replay_key, &context.client_id, wall)?;
     require_run_capacity(state, context)?;
     require_handle_capacity(
         state,
         2_usize
             .checked_add(active_identities.len())
             .ok_or_else(unavailable)?,
+        wall,
     )?;
 
     let expires_at = UnixMillis::new(
@@ -118,7 +118,6 @@ pub(crate) fn begin_run_locked(
         client_id: context.client_id.clone(),
         expires_at: verified.expires_at(),
     };
-    let replay_client = context.client_id.clone();
     let mut prepared_tools = Vec::new();
     prepared_tools
         .try_reserve_exact(active_identities.len())
@@ -145,10 +144,6 @@ pub(crate) fn begin_run_locked(
         .ingress_replay
         .try_reserve(1)
         .map_err(|_| unavailable())?;
-    state
-        .replay_per_client
-        .try_reserve(1)
-        .map_err(|_| unavailable())?;
 
     let handle_count = 2_usize
         .checked_add(prepared_tools.len())
@@ -169,12 +164,14 @@ pub(crate) fn begin_run_locked(
         inner.random.as_ref(),
         &state.handle_kinds,
         &state.stale_handles,
+        wall,
         &mut transaction_tokens,
     )?;
     let (initial_value, value_token): (ValueHandle, _) = issue_handle(
         inner.random.as_ref(),
         &state.handle_kinds,
         &state.stale_handles,
+        wall,
         &mut transaction_tokens,
     )?;
     for (view_identity, record_identity, tool_client) in prepared_tools {
@@ -182,6 +179,7 @@ pub(crate) fn begin_run_locked(
             inner.random.as_ref(),
             &state.handle_kinds,
             &state.stale_handles,
+            wall,
             &mut transaction_tokens,
         )?;
         active_tools.push(ActiveToolView {
@@ -199,6 +197,7 @@ pub(crate) fn begin_run_locked(
         provenance_digest: request_digest,
         expires_at,
     };
+    commit_expired_security_state(state, wall, next_replay_per_client);
     state.registry = Some(registry_state);
     state
         .handle_kinds
@@ -208,7 +207,7 @@ pub(crate) fn begin_run_locked(
         .handle_kinds
         .insert(value_token.clone(), HandleKind::Value);
     state.values.insert(value_token, value_record);
-    for ((token, identity, client_id), view) in issued_tools.into_iter().zip(&active_tools) {
+    for (token, identity, client_id) in issued_tools {
         state.handle_kinds.insert(token.clone(), HandleKind::Tool);
         state.tools.insert(
             token,
@@ -220,10 +219,8 @@ pub(crate) fn begin_run_locked(
                 expires_at,
             },
         );
-        debug_assert_eq!(view.identity.registry_version, registry_identity.version);
     }
     state.ingress_replay.insert(replay_key, replay_entry);
-    *state.replay_per_client.entry(replay_client).or_insert(0) += 1;
 
     Ok(BeginRunResponse {
         run,
@@ -267,13 +264,11 @@ pub(crate) fn ingest_user_input_locked(
     let run_expiry = run.expires_at;
     let run_handle = request.run;
 
-    sweep_expired_security_state(state, wall)?;
     let replay_key = replay_key(&verified);
-    require_fresh_replay(state, &replay_key)?;
-    require_replay_capacity(state, context)?;
-    require_handle_capacity(state, 1)?;
+    let next_replay_per_client =
+        prepare_replay_commit(state, &replay_key, &context.client_id, wall)?;
+    require_handle_capacity(state, 1, wall)?;
     let value_client = context.client_id.clone();
-    let replay_client = context.client_id.clone();
     let replay_entry_client = context.client_id.clone();
     state.values.try_reserve(1).map_err(|_| unavailable())?;
     state
@@ -282,10 +277,6 @@ pub(crate) fn ingest_user_input_locked(
         .map_err(|_| unavailable())?;
     state
         .ingress_replay
-        .try_reserve(1)
-        .map_err(|_| unavailable())?;
-    state
-        .replay_per_client
         .try_reserve(1)
         .map_err(|_| unavailable())?;
 
@@ -297,6 +288,7 @@ pub(crate) fn ingest_user_input_locked(
         inner.random.as_ref(),
         &state.handle_kinds,
         &state.stale_handles,
+        wall,
         &mut transaction_tokens,
     )?;
     let expires_at = UnixMillis::new(
@@ -318,12 +310,12 @@ pub(crate) fn ingest_user_input_locked(
         expires_at: verified.expires_at(),
     };
 
+    commit_expired_security_state(state, wall, next_replay_per_client);
     state
         .handle_kinds
         .insert(value_token.clone(), HandleKind::Value);
     state.values.insert(value_token, value_record);
     state.ingress_replay.insert(replay_key, replay_entry);
-    *state.replay_per_client.entry(replay_client).or_insert(0) += 1;
     Ok(value)
 }
 
@@ -385,18 +377,7 @@ fn resolve_run<'state>(
     current: PolicyIdentity,
     wall: UnixMillis,
 ) -> Result<&'state RunRecord, PolicyError> {
-    match state.handle_kinds.get(token) {
-        Some(HandleKind::Run) => {}
-        Some(_) => return Err(PolicyError::stable(StableCode::HandleWrongType)),
-        None if state
-            .stale_handles
-            .iter()
-            .any(|record| record.token == *token) =>
-        {
-            return Err(PolicyError::stable(StableCode::HandleStalePolicy));
-        }
-        None => return Err(PolicyError::stable(StableCode::HandleUnknown)),
-    }
+    require_handle_kind(state, token, HandleKind::Run, wall)?;
     let run = state.runs.get(token).ok_or_else(unavailable)?;
     if run.client_id != context.client_id || run.peer_uid != context.peer_uid {
         return Err(PolicyError::stable(StableCode::HandleWrongClient));
@@ -419,6 +400,26 @@ fn resolve_run<'state>(
     Ok(run)
 }
 
+fn require_handle_kind(
+    state: &EngineState,
+    token: &HandleToken,
+    expected: HandleKind,
+    wall: UnixMillis,
+) -> Result<(), PolicyError> {
+    match state.handle_kinds.get(token) {
+        Some(kind) if *kind == expected => Ok(()),
+        Some(_) => Err(PolicyError::stable(StableCode::HandleWrongType)),
+        None if state
+            .stale_handles
+            .iter()
+            .any(|record| record.expires_at.get() > wall.get() && record.token == *token) =>
+        {
+            Err(PolicyError::stable(StableCode::HandleStalePolicy))
+        }
+        None => Err(PolicyError::stable(StableCode::HandleUnknown)),
+    }
+}
+
 fn replay_key(verified: &VerifiedIngressV1) -> IngressReplayKey {
     IngressReplayKey {
         authority_key_id: verified.key_id().clone(),
@@ -426,33 +427,69 @@ fn replay_key(verified: &VerifiedIngressV1) -> IngressReplayKey {
     }
 }
 
-fn require_fresh_replay(state: &EngineState, key: &IngressReplayKey) -> Result<(), PolicyError> {
-    if state.ingress_replay.contains_key(key) {
+fn prepare_replay_commit(
+    state: &EngineState,
+    key: &IngressReplayKey,
+    client_id: &savana_kernel_protocol::ClientId,
+    wall: UnixMillis,
+) -> Result<HashMap<savana_kernel_protocol::ClientId, u64>, PolicyError> {
+    for (client, expected) in &state.replay_per_client {
+        let actual = state
+            .ingress_replay
+            .values()
+            .filter(|entry| entry.client_id == *client)
+            .count();
+        if u64::try_from(actual).map_err(|_| unavailable())? != *expected {
+            return Err(unavailable());
+        }
+    }
+    if state
+        .ingress_replay
+        .values()
+        .any(|entry| !state.replay_per_client.contains_key(&entry.client_id))
+    {
+        return Err(unavailable());
+    }
+    if state
+        .ingress_replay
+        .get(key)
+        .is_some_and(|entry| entry.expires_at.get() > wall.get())
+    {
         return Err(PolicyError::stable(StableCode::AttestationBindingMismatch));
     }
-    Ok(())
-}
 
-fn require_replay_capacity(
-    state: &EngineState,
-    context: &AuthenticatedCallContext,
-) -> Result<(), PolicyError> {
+    let mut next = HashMap::new();
+    next.try_reserve(
+        state
+            .replay_per_client
+            .len()
+            .checked_add(1)
+            .ok_or_else(unavailable)?,
+    )
+    .map_err(|_| unavailable())?;
+    let mut active = 0_usize;
+    for entry in state
+        .ingress_replay
+        .values()
+        .filter(|entry| entry.expires_at.get() > wall.get())
+    {
+        active = active.checked_add(1).ok_or_else(unavailable)?;
+        let count = next.entry(entry.client_id.clone()).or_insert(0_u64);
+        *count = count.checked_add(1).ok_or_else(unavailable)?;
+    }
     let per_client_limit = state
         .current
         .policy
         .effective_limits()
         .ingress_replay_entries_per_client();
-    if state.ingress_replay.len() >= state.global_replay_limit
-        || state
-            .replay_per_client
-            .get(&context.client_id)
-            .copied()
-            .unwrap_or(0)
-            >= per_client_limit
+    if active >= state.global_replay_limit
+        || next.get(client_id).copied().unwrap_or(0) >= per_client_limit
     {
         return Err(PolicyError::stable(StableCode::KernelOverloaded));
     }
-    Ok(())
+    let count = next.entry(client_id.clone()).or_insert(0);
+    *count = count.checked_add(1).ok_or_else(unavailable)?;
+    Ok(next)
 }
 
 fn require_run_capacity(
@@ -473,60 +510,40 @@ fn require_run_capacity(
     Ok(())
 }
 
-fn require_handle_capacity(state: &EngineState, additional: usize) -> Result<(), PolicyError> {
+fn require_handle_capacity(
+    state: &EngineState,
+    additional: usize,
+    wall: UnixMillis,
+) -> Result<(), PolicyError> {
     let next = state
         .handle_kinds
         .len()
         .checked_add(additional)
         .ok_or_else(unavailable)?;
-    let total = next
-        .checked_add(state.stale_handles.len())
-        .ok_or_else(unavailable)?;
-    if next > MAX_LIVE_HANDLES
-        || state.stale_handles.len() > MAX_STALE_HANDLES
-        || total > MAX_STALE_HANDLES
-    {
+    let active_stale = state
+        .stale_handles
+        .iter()
+        .filter(|record| record.expires_at.get() > wall.get())
+        .count();
+    let total = next.checked_add(active_stale).ok_or_else(unavailable)?;
+    if next > MAX_LIVE_HANDLES || active_stale > MAX_STALE_HANDLES || total > MAX_STALE_HANDLES {
         return Err(PolicyError::stable(StableCode::KernelOverloaded));
     }
     Ok(())
 }
 
-fn sweep_expired_security_state(
+fn commit_expired_security_state(
     state: &mut EngineState,
     wall: UnixMillis,
-) -> Result<(), PolicyError> {
-    for (client, expected) in &state.replay_per_client {
-        let actual = state
-            .ingress_replay
-            .values()
-            .filter(|entry| entry.client_id == *client)
-            .count();
-        if u64::try_from(actual).map_err(|_| unavailable())? != *expected {
-            return Err(unavailable());
-        }
-    }
-    if state
-        .ingress_replay
-        .values()
-        .any(|entry| !state.replay_per_client.contains_key(&entry.client_id))
-    {
-        return Err(unavailable());
-    }
+    next_replay_per_client: HashMap<savana_kernel_protocol::ClientId, u64>,
+) {
     state
         .ingress_replay
         .retain(|_, entry| entry.expires_at.get() > wall.get());
-    state.replay_per_client.clear();
-    for entry in state.ingress_replay.values() {
-        let count = state
-            .replay_per_client
-            .entry(entry.client_id.clone())
-            .or_insert(0);
-        *count = count.checked_add(1).ok_or_else(unavailable)?;
-    }
+    state.replay_per_client = next_replay_per_client;
     state
         .stale_handles
         .retain(|record| record.expires_at.get() > wall.get());
-    Ok(())
 }
 
 fn handle_token<T: minicbor::Encode<()>>(handle: &T) -> Result<HandleToken, PolicyError> {
@@ -542,6 +559,7 @@ fn issue_handle<T>(
     random: &dyn RandomSource,
     occupied: &HashMap<HandleToken, HandleKind>,
     stale: &[StaleHandleRecord],
+    wall: UnixMillis,
     transaction_tokens: &mut Vec<HandleToken>,
 ) -> Result<(T, HandleToken), PolicyError>
 where
@@ -554,7 +572,9 @@ where
     }
     let key = HandleToken(token);
     if occupied.contains_key(&key)
-        || stale.iter().any(|record| record.token == key)
+        || stale
+            .iter()
+            .any(|record| record.expires_at.get() > wall.get() && record.token == key)
         || transaction_tokens.contains(&key)
     {
         return Err(unavailable());
@@ -571,11 +591,56 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Clock, PolicyEngine};
     use ed25519_dalek::{Signer, SigningKey};
     use savana_kernel_protocol::{KernelValue, Nonce32, RegistrySnapshotV1, Signature64};
     use sha2::{Digest, Sha256};
-    use std::sync::{mpsc, Arc};
+    use std::collections::VecDeque;
+    use std::sync::{mpsc, Arc, Barrier, Mutex};
     use std::time::Duration;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct SecuritySnapshot {
+        replay: Vec<(IngressReplayKey, IngressReplayEntry)>,
+        replay_per_client: Vec<(savana_kernel_protocol::ClientId, u64)>,
+        stale: Vec<StaleHandleRecord>,
+        registry: Option<RegistryState>,
+        handle_kinds: Vec<(HandleToken, HandleKind)>,
+        runs: Vec<(HandleToken, RunRecord)>,
+        values: Vec<(HandleToken, ValueRecord)>,
+        tools: Vec<(HandleToken, ToolRecord)>,
+    }
+
+    enum RandomStep {
+        Fill([u8; 32]),
+        Error,
+    }
+
+    struct ScriptedRandom(Mutex<VecDeque<RandomStep>>);
+
+    impl ScriptedRandom {
+        fn new(steps: impl IntoIterator<Item = RandomStep>) -> Self {
+            Self(Mutex::new(steps.into_iter().collect()))
+        }
+    }
+
+    impl RandomSource for ScriptedRandom {
+        fn fill(&self, output: &mut [u8]) -> Result<usize, StableCode> {
+            match self
+                .0
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("random script exhausted")
+            {
+                RandomStep::Fill(bytes) => {
+                    output.copy_from_slice(&bytes);
+                    Ok(output.len())
+                }
+                RandomStep::Error => Err(StableCode::ProtocolIo),
+            }
+        }
+    }
 
     #[test]
     fn empty_registry_identity_matches_the_normative_vector() {
@@ -630,6 +695,128 @@ mod tests {
     }
 
     #[test]
+    fn role_intersection_requires_policy_name_digest_and_exact_role_bytes() {
+        for mutation in 0..3 {
+            let fixture = crate::test_support::IngressFixture::new();
+            let mut request = fixture.begin_request("operator", KernelValue::Null);
+            match mutation {
+                0 => {
+                    request.registry.unsigned.tools[0].identity.name =
+                        savana_kernel_protocol::ToolName::new("evil").unwrap();
+                    request.registry.unsigned.tools[0]
+                        .identity
+                        .descriptor_digest = Digest32::new([0xe1; 32]);
+                }
+                1 => {
+                    request.registry.unsigned.tools[0]
+                        .identity
+                        .descriptor_digest = Digest32::new([0xe2; 32]);
+                }
+                2 => {
+                    request.registry.unsigned.tools[0].roles =
+                        vec![savana_kernel_protocol::RoleId::new("Operator").unwrap()];
+                }
+                _ => unreachable!(),
+            }
+            crate::test_support::resign_registry(&mut request.registry);
+            assert!(
+                fixture
+                    .engine
+                    .begin_run(&fixture.context, request)
+                    .unwrap()
+                    .active_tools
+                    .is_empty(),
+                "mutation {mutation} must not activate a tool"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_chain_accepts_only_initial_equal_and_exact_higher_transitions() {
+        let fixture = crate::test_support::IngressFixture::new();
+        let mut forbidden_initial = fixture.begin_request("operator", KernelValue::Null);
+        forbidden_initial.registry.unsigned.previous_digest = Some(Digest32::new([0xf1; 32]));
+        crate::test_support::resign_registry(&mut forbidden_initial.registry);
+        assert_eq!(
+            fixture
+                .engine
+                .begin_run(&fixture.context, forbidden_initial)
+                .unwrap_err()
+                .code(),
+            StableCode::RegistryEquivocation
+        );
+        assert!(fixture
+            .engine
+            .inner
+            .state
+            .read()
+            .unwrap()
+            .registry
+            .is_none());
+
+        let initial = crate::test_support::signed_registry();
+        let initial_digest = registry_identity_digest(&initial.unsigned).unwrap();
+        let mut first = fixture.begin_request("operator", KernelValue::Null);
+        first.registry = initial.clone();
+        fixture.engine.begin_run(&fixture.context, first).unwrap();
+
+        let mut equal = fixture.begin_request("operator", KernelValue::Null);
+        equal.registry = initial.clone();
+        fixture.engine.begin_run(&fixture.context, equal).unwrap();
+
+        let mut changed = fixture.begin_request("operator", KernelValue::Null);
+        changed.registry.unsigned.expires_at = UnixMillis::new(2_999);
+        crate::test_support::resign_registry(&mut changed.registry);
+        let before_changed = security_snapshot(&fixture.engine.inner.state.read().unwrap());
+        assert_eq!(
+            fixture
+                .engine
+                .begin_run(&fixture.context, changed)
+                .unwrap_err()
+                .code(),
+            StableCode::RegistryEquivocation
+        );
+        assert_eq!(
+            security_snapshot(&fixture.engine.inner.state.read().unwrap()),
+            before_changed
+        );
+
+        let mut higher = fixture.begin_request("operator", KernelValue::Null);
+        higher.registry.unsigned.version = 2;
+        higher.registry.unsigned.previous_digest = Some(initial_digest);
+        higher.registry.unsigned.tools[0].identity.registry_version = 2;
+        crate::test_support::resign_registry(&mut higher.registry);
+        fixture.engine.begin_run(&fixture.context, higher).unwrap();
+
+        let mut wrong_previous = fixture.begin_request("operator", KernelValue::Null);
+        wrong_previous.registry.unsigned.version = 3;
+        wrong_previous.registry.unsigned.previous_digest = Some(Digest32::new([0xf2; 32]));
+        wrong_previous.registry.unsigned.tools[0]
+            .identity
+            .registry_version = 3;
+        crate::test_support::resign_registry(&mut wrong_previous.registry);
+        assert_eq!(
+            fixture
+                .engine
+                .begin_run(&fixture.context, wrong_previous)
+                .unwrap_err()
+                .code(),
+            StableCode::RegistryEquivocation
+        );
+
+        let mut lower = fixture.begin_request("operator", KernelValue::Null);
+        lower.registry = initial;
+        assert_eq!(
+            fixture
+                .engine
+                .begin_run(&fixture.context, lower)
+                .unwrap_err()
+                .code(),
+            StableCode::RegistryEquivocation
+        );
+    }
+
+    #[test]
     fn handle_issuance_rejects_live_stale_and_same_transaction_collisions() {
         struct Fixed([u8; 32]);
         impl RandomSource for Fixed {
@@ -643,9 +830,15 @@ mod tests {
         occupied.insert(token.clone(), HandleKind::Run);
         let mut transaction = Vec::with_capacity(1);
         assert_eq!(
-            issue_handle::<RunHandle>(&Fixed([7; 32]), &occupied, &[], &mut transaction)
-                .unwrap_err()
-                .code(),
+            issue_handle::<RunHandle>(
+                &Fixed([7; 32]),
+                &occupied,
+                &[],
+                UnixMillis::new(2_000),
+                &mut transaction,
+            )
+            .unwrap_err()
+            .code(),
             StableCode::KernelUnavailable
         );
         occupied.clear();
@@ -655,17 +848,152 @@ mod tests {
             expires_at: UnixMillis::new(3_000),
         }];
         assert_eq!(
-            issue_handle::<RunHandle>(&Fixed([7; 32]), &occupied, &stale, &mut transaction)
-                .unwrap_err()
-                .code(),
+            issue_handle::<RunHandle>(
+                &Fixed([7; 32]),
+                &occupied,
+                &stale,
+                UnixMillis::new(2_000),
+                &mut transaction,
+            )
+            .unwrap_err()
+            .code(),
             StableCode::KernelUnavailable
         );
         transaction.push(token);
         assert_eq!(
-            issue_handle::<RunHandle>(&Fixed([7; 32]), &occupied, &[], &mut transaction)
+            issue_handle::<RunHandle>(
+                &Fixed([7; 32]),
+                &occupied,
+                &[],
+                UnixMillis::new(2_000),
+                &mut transaction,
+            )
+            .unwrap_err()
+            .code(),
+            StableCode::KernelUnavailable
+        );
+    }
+
+    #[test]
+    fn collision_failure_preserves_the_exact_security_state_including_expired_entries() {
+        let fixture = crate::test_support::IngressFixture::new();
+        {
+            let mut state = fixture.engine.inner.state.write().unwrap();
+            state
+                .handle_kinds
+                .insert(HandleToken(u64_token(2)), HandleKind::Run);
+            state.stale_handles.push(StaleHandleRecord {
+                token: HandleToken([0x91; 32]),
+                kind: HandleKind::Value,
+                expires_at: UnixMillis::new(1_999),
+            });
+            let client = savana_kernel_protocol::ClientId::new("jarvis-client").unwrap();
+            state.ingress_replay.insert(
+                IngressReplayKey {
+                    authority_key_id: savana_kernel_protocol::KeyId::new("role-00").unwrap(),
+                    nonce: Nonce32::new([0x92; 32]),
+                },
+                IngressReplayEntry {
+                    client_id: client.clone(),
+                    expires_at: UnixMillis::new(1_999),
+                },
+            );
+            state.replay_per_client.insert(client, 1);
+        }
+        let before = security_snapshot(&fixture.engine.inner.state.read().unwrap());
+        assert_eq!(
+            fixture
+                .engine
+                .begin_run(
+                    &fixture.context,
+                    fixture.begin_request("operator", KernelValue::Null),
+                )
                 .unwrap_err()
                 .code(),
             StableCode::KernelUnavailable
+        );
+        assert_eq!(
+            security_snapshot(&fixture.engine.inner.state.read().unwrap()),
+            before
+        );
+    }
+
+    #[test]
+    fn entropy_transaction_and_stale_collisions_preserve_exact_state_and_stale_resolution() {
+        let cases = [
+            vec![RandomStep::Fill([1; 32]), RandomStep::Error],
+            vec![
+                RandomStep::Fill([1; 32]),
+                RandomStep::Fill([2; 32]),
+                RandomStep::Fill([2; 32]),
+            ],
+        ];
+        for script in cases {
+            let fixture = crate::test_support::IngressFixture::with_random(Arc::new(
+                ScriptedRandom::new(script),
+            ));
+            let before = security_snapshot(&fixture.engine.inner.state.read().unwrap());
+            assert_eq!(
+                fixture
+                    .engine
+                    .begin_run(
+                        &fixture.context,
+                        fixture.begin_request("operator", KernelValue::Null),
+                    )
+                    .unwrap_err()
+                    .code(),
+                StableCode::KernelUnavailable
+            );
+            assert_eq!(
+                security_snapshot(&fixture.engine.inner.state.read().unwrap()),
+                before
+            );
+        }
+
+        let fixture =
+            crate::test_support::IngressFixture::with_random(Arc::new(ScriptedRandom::new([
+                RandomStep::Fill([1; 32]),
+                RandomStep::Fill([9; 32]),
+            ])));
+        let stale_token = HandleToken([9; 32]);
+        {
+            fixture
+                .engine
+                .inner
+                .state
+                .write()
+                .unwrap()
+                .stale_handles
+                .push(StaleHandleRecord {
+                    token: stale_token.clone(),
+                    kind: HandleKind::Run,
+                    expires_at: UnixMillis::new(3_000),
+                });
+        }
+        let before = security_snapshot(&fixture.engine.inner.state.read().unwrap());
+        assert_eq!(
+            fixture
+                .engine
+                .begin_run(
+                    &fixture.context,
+                    fixture.begin_request("operator", KernelValue::Null),
+                )
+                .unwrap_err()
+                .code(),
+            StableCode::KernelUnavailable
+        );
+        let state = fixture.engine.inner.state.read().unwrap();
+        assert_eq!(security_snapshot(&state), before);
+        assert_eq!(
+            require_handle_kind(
+                &state,
+                &stale_token,
+                HandleKind::Run,
+                UnixMillis::new(2_000),
+            )
+            .unwrap_err()
+            .code(),
+            StableCode::HandleStalePolicy
         );
     }
 
@@ -717,6 +1045,63 @@ mod tests {
         let state = fixture.engine.inner.state.read().unwrap();
         assert_eq!(state.ingress_replay.len(), 2);
         assert_eq!(state.runs.len(), 1);
+    }
+
+    #[test]
+    fn cross_client_global_replay_charges_only_the_atomic_winner() {
+        let fixture = Arc::new(crate::test_support::IngressFixture::new());
+        let (other_context, other_binding) = fixture.bind("other-client", 0x35, 0x46);
+        let input = KernelValue::Null;
+        let digest = ingress_request_digest(&IngressRequestCommitmentV1::BeginRun {
+            input: input.clone(),
+        })
+        .unwrap();
+        let nonce = Nonce32::new([0xa5; 32]);
+        let attempts = [
+            (
+                savana_kernel_protocol::ClientId::new("jarvis-client").unwrap(),
+                fixture.ingress("operator", digest, nonce, fixture.connection_binding),
+                None,
+            ),
+            (
+                savana_kernel_protocol::ClientId::new("other-client").unwrap(),
+                fixture.ingress("operator", digest, nonce, other_binding),
+                Some(Arc::new(other_context)),
+            ),
+        ];
+        let barrier = Arc::new(Barrier::new(3));
+        let joins = attempts.map(|(client, ingress, other)| {
+            let fixture = Arc::clone(&fixture);
+            let barrier = Arc::clone(&barrier);
+            let input = input.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let request = BeginRunRequest {
+                    ingress,
+                    input,
+                    registry: crate::test_support::signed_registry(),
+                };
+                let result = match other {
+                    Some(context) => fixture.engine.begin_run(context.as_ref(), request),
+                    None => fixture.engine.begin_run(&fixture.context, request),
+                };
+                (client, result)
+            })
+        });
+        barrier.wait();
+        let outcomes = joins.map(|join| join.join().unwrap());
+        let winner = outcomes
+            .iter()
+            .find_map(|(client, outcome)| outcome.is_ok().then_some(client))
+            .unwrap();
+        let loser = outcomes
+            .iter()
+            .find_map(|(client, outcome)| outcome.is_err().then_some(client))
+            .unwrap();
+        let state = fixture.engine.inner.state.read().unwrap();
+        assert_eq!(state.replay_per_client.get(winner), Some(&1));
+        assert_eq!(state.replay_per_client.get(loser).copied().unwrap_or(0), 0);
+        assert_eq!(state.ingress_replay.len(), 1);
     }
 
     #[test]
@@ -1050,7 +1435,7 @@ mod tests {
             )
             .unwrap()
             .run;
-        for mutation in 0..4 {
+        for mutation in 0..6 {
             let mut request = fixture.ingest_request(run, KernelValue::Bool(true));
             match mutation {
                 0 => {
@@ -1063,6 +1448,14 @@ mod tests {
                         Digest32::new([0x92; 32])
                 }
                 3 => request.run = other,
+                4 => {
+                    request.envelope.unsigned.principal =
+                        savana_kernel_protocol::PrincipalId::new("other-principal").unwrap()
+                }
+                5 => {
+                    request.envelope.unsigned.conversation_id =
+                        savana_kernel_protocol::ConversationId::new("other-conversation").unwrap()
+                }
                 _ => unreachable!(),
             }
             crate::test_support::resign_ingress(&mut request.envelope);
@@ -1075,6 +1468,82 @@ mod tests {
                 StableCode::AttestationBindingMismatch
             );
         }
+
+        let (wrong_peer, binding) = fixture.bind_with_peer("jarvis-client", 0x39, 0x49, 2_002);
+        assert_eq!(
+            fixture
+                .engine
+                .ingest_user_input(
+                    &wrong_peer,
+                    fixture.ingest_request_for(run, KernelValue::Bool(true), binding),
+                )
+                .unwrap_err()
+                .code(),
+            StableCode::HandleWrongClient
+        );
+    }
+
+    #[test]
+    fn ingest_resolves_live_wrong_type_unknown_and_stale_handles_in_order() {
+        let fixture = crate::test_support::IngressFixture::new();
+        let response = fixture
+            .engine
+            .begin_run(
+                &fixture.context,
+                fixture.begin_request("operator", KernelValue::Null),
+            )
+            .unwrap();
+        let wrong_type: RunHandle =
+            minicbor::decode(&minicbor::to_vec(response.initial_value).unwrap()).unwrap();
+        assert_eq!(
+            fixture
+                .engine
+                .ingest_user_input(
+                    &fixture.context,
+                    fixture.ingest_request(wrong_type, KernelValue::Null),
+                )
+                .unwrap_err()
+                .code(),
+            StableCode::HandleWrongType
+        );
+
+        let unknown = run_handle([0xaa; 32]);
+        assert_eq!(
+            fixture
+                .engine
+                .ingest_user_input(
+                    &fixture.context,
+                    fixture.ingest_request(unknown, KernelValue::Null),
+                )
+                .unwrap_err()
+                .code(),
+            StableCode::HandleUnknown
+        );
+
+        let stale = run_handle([0xbb; 32]);
+        fixture
+            .engine
+            .inner
+            .state
+            .write()
+            .unwrap()
+            .stale_handles
+            .push(StaleHandleRecord {
+                token: HandleToken([0xbb; 32]),
+                kind: HandleKind::Run,
+                expires_at: UnixMillis::new(3_000),
+            });
+        assert_eq!(
+            fixture
+                .engine
+                .ingest_user_input(
+                    &fixture.context,
+                    fixture.ingest_request(stale, KernelValue::Null),
+                )
+                .unwrap_err()
+                .code(),
+            StableCode::HandleStalePolicy
+        );
     }
 
     #[test]
@@ -1093,7 +1562,7 @@ mod tests {
         );
         {
             let mut state = fixture.engine.inner.state.write().unwrap();
-            for value in 10_000_u64..14_096 {
+            for value in 10_000_u64..14_095 {
                 let mut nonce = [0_u8; 32];
                 nonce[..8].copy_from_slice(&value.to_be_bytes());
                 state.ingress_replay.insert(
@@ -1109,9 +1578,17 @@ mod tests {
             }
             state.replay_per_client.insert(
                 savana_kernel_protocol::ClientId::new("jarvis-client").unwrap(),
-                4_096,
+                4_095,
             );
         }
+        assert!(fixture
+            .engine
+            .begin_run(
+                &fixture.context,
+                fixture.begin_request("operator", KernelValue::Null),
+            )
+            .is_ok());
+        let before_overflow = security_snapshot(&fixture.engine.inner.state.read().unwrap());
         assert_eq!(
             fixture
                 .engine
@@ -1125,8 +1602,7 @@ mod tests {
         );
         let state = fixture.engine.inner.state.read().unwrap();
         assert_eq!(state.ingress_replay.len(), 4_096);
-        assert!(state.runs.is_empty());
-        assert!(state.handle_kinds.is_empty());
+        assert_eq!(security_snapshot(&state), before_overflow);
     }
 
     #[test]
@@ -1155,6 +1631,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn verified_release_with_sixteen_canonical_clients_sets_the_global_replay_ceiling() {
+        let (current, _) = crate::test_support::current_policy_and_identity_with_clients(16);
+        let clock = crate::test_support::clock();
+        let (engine, _) = PolicyEngine::new(
+            current,
+            BootId::new([0x41; 32]),
+            Arc::clone(&clock) as Arc<dyn Clock + Send + Sync>,
+            crate::test_support::random(crate::test_support::RandomBehavior::Filled(0xa4)),
+        )
+        .unwrap();
+
+        let state = engine.inner.state.read().unwrap();
+        assert_eq!(state.global_replay_limit, 65_536);
+        assert_eq!(state.global_run_limit, 2_048);
+    }
+
     fn security_counts(state: &EngineState) -> (usize, usize, usize, usize, usize, usize) {
         (
             state.runs.len(),
@@ -1164,6 +1657,77 @@ mod tests {
             state.handle_kinds.len(),
             usize::from(state.registry.is_some()),
         )
+    }
+
+    fn security_snapshot(state: &EngineState) -> SecuritySnapshot {
+        let mut replay = state
+            .ingress_replay
+            .iter()
+            .map(|(key, entry)| (key.clone(), entry.clone()))
+            .collect::<Vec<_>>();
+        replay.sort_by(|left, right| {
+            left.0
+                .authority_key_id
+                .as_str()
+                .cmp(right.0.authority_key_id.as_str())
+                .then_with(|| left.0.nonce.as_bytes().cmp(right.0.nonce.as_bytes()))
+        });
+        let mut replay_per_client = state
+            .replay_per_client
+            .iter()
+            .map(|(client, count)| (client.clone(), *count))
+            .collect::<Vec<_>>();
+        replay_per_client.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
+        let mut stale = state.stale_handles.clone();
+        stale.sort_by(|left, right| left.token.0.cmp(&right.token.0));
+        let mut handle_kinds = state
+            .handle_kinds
+            .iter()
+            .map(|(token, kind)| (token.clone(), *kind))
+            .collect::<Vec<_>>();
+        handle_kinds.sort_by(|left, right| left.0 .0.cmp(&right.0 .0));
+        let mut runs = state
+            .runs
+            .iter()
+            .map(|(token, record)| (token.clone(), record.clone()))
+            .collect::<Vec<_>>();
+        runs.sort_by(|left, right| left.0 .0.cmp(&right.0 .0));
+        let mut values = state
+            .values
+            .iter()
+            .map(|(token, record)| (token.clone(), record.clone()))
+            .collect::<Vec<_>>();
+        values.sort_by(|left, right| left.0 .0.cmp(&right.0 .0));
+        let mut tools = state
+            .tools
+            .iter()
+            .map(|(token, record)| (token.clone(), record.clone()))
+            .collect::<Vec<_>>();
+        tools.sort_by(|left, right| left.0 .0.cmp(&right.0 .0));
+        SecuritySnapshot {
+            replay,
+            replay_per_client,
+            stale,
+            registry: state.registry.clone(),
+            handle_kinds,
+            runs,
+            values,
+            tools,
+        }
+    }
+
+    fn u64_token(value: u64) -> [u8; 32] {
+        let mut token = [0_u8; 32];
+        token[..8].copy_from_slice(&value.to_be_bytes());
+        token
+    }
+
+    fn run_handle(token: [u8; 32]) -> RunHandle {
+        let mut encoded = [0_u8; 34];
+        encoded[0] = 0x58;
+        encoded[1] = 0x20;
+        encoded[2..].copy_from_slice(&token);
+        minicbor::decode(&encoded).unwrap()
     }
 
     fn hex(bytes: &[u8]) -> String {

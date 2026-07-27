@@ -57,6 +57,7 @@ pub(crate) struct IngressReplayKey {
 }
 
 #[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IngressReplayEntry {
     pub(crate) client_id: ClientId,
     pub(crate) expires_at: UnixMillis,
@@ -69,6 +70,7 @@ pub(crate) struct RegistryIdentity {
 }
 
 #[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RegistryState {
     pub(crate) identity: RegistryIdentity,
     pub(crate) policy_identity: PolicyIdentity,
@@ -76,6 +78,7 @@ pub(crate) struct RegistryState {
 }
 
 #[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RunRecord {
     pub(crate) boot_id: BootId,
     pub(crate) client_id: ClientId,
@@ -94,6 +97,7 @@ pub(crate) struct RunRecord {
 }
 
 #[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ValueRecord {
     pub(crate) run: RunHandle,
     pub(crate) client_id: ClientId,
@@ -104,6 +108,7 @@ pub(crate) struct ValueRecord {
 }
 
 #[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ToolRecord {
     pub(crate) run: RunHandle,
     pub(crate) client_id: ClientId,
@@ -123,6 +128,7 @@ pub(crate) enum HandleKind {
 }
 
 #[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StaleHandleRecord {
     pub(crate) token: HandleToken,
     pub(crate) kind: HandleKind,
