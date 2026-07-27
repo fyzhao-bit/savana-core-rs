@@ -10,29 +10,35 @@ use crate::PolicyError;
 
 const TEMP_ATTEMPTS: usize = 16;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PersistencePhase {
+    BeforeRename,
+    AfterRename,
+}
+
 #[derive(Debug)]
 pub(crate) struct ReplaceError {
     error: PolicyError,
-    renamed: bool,
+    phase: PersistencePhase,
 }
 
 impl ReplaceError {
-    fn before_rename(error: PolicyError) -> Self {
+    pub(crate) fn before_rename(error: PolicyError) -> Self {
         Self {
             error,
-            renamed: false,
+            phase: PersistencePhase::BeforeRename,
         }
     }
 
     pub(crate) fn after_rename(error: PolicyError) -> Self {
         Self {
             error,
-            renamed: true,
+            phase: PersistencePhase::AfterRename,
         }
     }
 
-    pub(crate) const fn renamed(&self) -> bool {
-        self.renamed
+    pub(crate) const fn phase(&self) -> PersistencePhase {
+        self.phase
     }
 
     pub(crate) const fn into_policy_error(self) -> PolicyError {

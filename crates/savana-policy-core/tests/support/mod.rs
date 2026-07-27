@@ -3,15 +3,17 @@
 use ed25519_dalek::{Signer, SigningKey};
 use savana_kernel_protocol::{
     ingress_request_digest, AttemptKindV1, BeginRunRequest, BootId, BoundedText, ClientId,
-    ConversationId, Digest32, HardLimits, IngestUserInputRequest, IngressEnvelopeV1,
-    IngressRequestCommitmentV1, KernelValue, KeyId, Nonce32, PrincipalId, RegistrySnapshotV1,
-    ResourceLimitsV1, RoleId, Signature64, SignedIngressEnvelopeV1, SignedRegistrySnapshotV1,
-    StableCode, ToolDescriptorV1, ToolExecutionIdentity, ToolName, UnixMillis,
+    ConversationId, Digest32, EffectiveLimits, HardLimits, IngestUserInputRequest,
+    IngressEnvelopeV1, IngressRequestCommitmentV1, KernelValue, KeyId, Nonce32, PrincipalId,
+    RegistrySnapshotV1, ResourceLimitsV1, RoleId, Signature64, SignedIngressEnvelopeV1,
+    SignedRegistrySnapshotV1, StableCode, ToolDescriptorV1, ToolExecutionIdentity, ToolName,
+    UnixMillis,
 };
 use savana_policy_core::{
-    AuthenticatedCallContext, AuthenticatedContextIssuer, Clock, CurrentPolicyCapability,
-    PolicyEngine, PolicyIdentity, PolicyStore, PolicyTrustRootV1, PolicyVerifier, RandomSource,
-    ReleaseStage, ReleaseTrustRootV1, ReleaseVerifier, VerifiedReleaseIdentity,
+    AuthenticatedCallContext, AuthenticatedContextIssuer, Clock, CommittedPolicyRollover,
+    CurrentPolicyCapability, PolicyEngine, PolicyIdentity, PolicyRolloverFailure, PolicyStore,
+    PolicyTrustRootV1, PolicyVerifier, RandomSource, ReleaseStage, ReleaseTrustRootV1,
+    ReleaseVerifier, VerifiedReleaseIdentity,
 };
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -236,6 +238,357 @@ pub fn current_policy_and_identity_with_clients(
         )
         .unwrap();
     (current, identity)
+}
+
+pub struct RolloverFixture {
+    _root: tempfile::TempDir,
+    pub engine: PolicyEngine,
+    pub issuer: AuthenticatedContextIssuer,
+    pub current_context: AuthenticatedCallContext,
+    pub clock: Arc<TestClock>,
+    current_identity: PolicyIdentity,
+    next_identity: PolicyIdentity,
+    third_identity: PolicyIdentity,
+    next_limits: EffectiveLimits,
+    next_policy_bytes: Vec<u8>,
+    next_policy_signature: Signature64,
+    third_policy_bytes: Vec<u8>,
+    third_policy_signature: Signature64,
+    ledger_path: PathBuf,
+    boot_id: BootId,
+    connection_binding: Digest32,
+    next_nonce: AtomicU64,
+    sequence_random: Arc<SequenceRandom>,
+}
+
+impl RolloverFixture {
+    pub fn new() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = current_policy_fixture_at(root.path());
+        let release = fixture.release();
+        let verifier = release.policy_verifier().unwrap();
+        let current_identity = verifier
+            .verify(
+                fixture.policy_bytes(),
+                fixture.policy_signature(),
+                fixture.now(),
+            )
+            .unwrap()
+            .identity();
+        let store = PolicyStore::open(fixture.ledger_path(), verifier).unwrap();
+        let current = store
+            .verify_and_accept_initial(
+                release.clone(),
+                fixture.policy_bytes(),
+                fixture.policy_signature(),
+                fixture.now(),
+            )
+            .unwrap();
+
+        let mut next_policy = valid_policy(8, 3);
+        next_policy.release.compatible_release_target_ids =
+            vec![*current_release_target().as_bytes()];
+        let (next_policy_bytes, next_policy_signature) = signed(&next_policy);
+        let next_verified = release
+            .policy_verifier()
+            .unwrap()
+            .verify(&next_policy_bytes, &next_policy_signature, fixture.now())
+            .unwrap();
+        let next_identity = next_verified.identity();
+        let next_limits = *next_verified.effective_limits();
+
+        let mut third_policy = valid_policy(9, 3);
+        third_policy.release.compatible_release_target_ids =
+            vec![*current_release_target().as_bytes()];
+        let (third_policy_bytes, third_policy_signature) = signed(&third_policy);
+        let third_identity = release
+            .policy_verifier()
+            .unwrap()
+            .verify(&third_policy_bytes, &third_policy_signature, fixture.now())
+            .unwrap()
+            .identity();
+
+        let clock = clock();
+        let boot_id = BootId::new([0x41; 32]);
+        let sequence_random = Arc::new(SequenceRandom {
+            next: AtomicU64::new(1),
+        });
+        let (engine, issuer) = PolicyEngine::new(
+            current,
+            boot_id,
+            Arc::clone(&clock) as Arc<dyn Clock + Send + Sync>,
+            Arc::clone(&sequence_random) as Arc<dyn RandomSource + Send + Sync>,
+        )
+        .unwrap();
+        let connection_binding = Digest32::new([0x44; 32]);
+        let current_context = issuer
+            .bind(
+                ClientId::new("jarvis-client").unwrap(),
+                Nonce32::new([0x33; 32]),
+                connection_binding,
+                current_identity,
+                boot_id,
+                1_001,
+                UnixMillis::new(3_000),
+            )
+            .unwrap();
+
+        Self {
+            ledger_path: fixture.ledger_path().to_owned(),
+            _root: root,
+            engine,
+            issuer,
+            current_context,
+            clock,
+            current_identity,
+            next_identity,
+            third_identity,
+            next_limits,
+            next_policy_bytes,
+            next_policy_signature,
+            third_policy_bytes,
+            third_policy_signature,
+            boot_id,
+            connection_binding,
+            next_nonce: AtomicU64::new(0xa0),
+            sequence_random,
+        }
+    }
+
+    pub const fn current_identity(&self) -> PolicyIdentity {
+        self.current_identity
+    }
+
+    pub const fn next_identity(&self) -> PolicyIdentity {
+        self.next_identity
+    }
+
+    pub const fn third_identity(&self) -> PolicyIdentity {
+        self.third_identity
+    }
+
+    pub fn next_policy_bytes(&self) -> &[u8] {
+        &self.next_policy_bytes
+    }
+
+    pub const fn next_limits(&self) -> EffectiveLimits {
+        self.next_limits
+    }
+
+    pub fn replay_first_handle_draw(&self) {
+        self.sequence_random.next.store(2, Ordering::SeqCst);
+    }
+
+    pub const fn next_policy_signature(&self) -> &Signature64 {
+        &self.next_policy_signature
+    }
+
+    pub fn same_version_different_identity(&self) -> PolicyIdentity {
+        PolicyIdentity {
+            digest: Digest32::new([0xdd; 32]),
+            ..self.current_identity
+        }
+    }
+
+    pub fn lower_identity(&self) -> PolicyIdentity {
+        PolicyIdentity {
+            policy_version: self.current_identity.policy_version - 1,
+            ..self.current_identity
+        }
+    }
+
+    pub fn ledger_bytes(&self) -> Vec<u8> {
+        fs::read(&self.ledger_path).unwrap()
+    }
+
+    pub fn commit_next(&self) -> Result<CommittedPolicyRollover<'_>, PolicyRolloverFailure> {
+        self.engine
+            .prepare_rollover(self.next_identity)
+            .map_err(PolicyRolloverFailure::Rejected)?
+            .verify_accept_and_commit(
+                &self.next_policy_bytes,
+                &self.next_policy_signature,
+                UnixMillis::new(NOW),
+                self.next_identity,
+            )
+    }
+
+    pub fn commit_third(&self) -> Result<CommittedPolicyRollover<'_>, PolicyRolloverFailure> {
+        self.engine
+            .prepare_rollover(self.third_identity)
+            .map_err(PolicyRolloverFailure::Rejected)?
+            .verify_accept_and_commit(
+                &self.third_policy_bytes,
+                &self.third_policy_signature,
+                UnixMillis::new(NOW),
+                self.third_identity,
+            )
+    }
+
+    pub fn begin_current(&self) -> savana_kernel_protocol::BeginRunResponse {
+        self.engine
+            .begin_run(
+                &self.current_context,
+                self.begin_request(self.current_identity, KernelValue::Null),
+            )
+            .unwrap()
+    }
+
+    pub fn begin_request(&self, identity: PolicyIdentity, input: KernelValue) -> BeginRunRequest {
+        let commitment = IngressRequestCommitmentV1::BeginRun {
+            input: input.clone(),
+        };
+        BeginRunRequest {
+            ingress: self.ingress(
+                identity,
+                ingress_request_digest(&commitment).unwrap(),
+                self.next_nonce(),
+                self.connection_binding,
+            ),
+            input,
+            registry: signed_registry(),
+        }
+    }
+
+    pub fn next_context(&self) -> AuthenticatedCallContext {
+        self.issuer
+            .bind(
+                ClientId::new("jarvis-client").unwrap(),
+                Nonce32::new([0x34; 32]),
+                self.connection_binding,
+                self.next_identity,
+                self.boot_id,
+                1_001,
+                UnixMillis::new(3_900),
+            )
+            .unwrap()
+    }
+
+    pub fn third_context(&self) -> AuthenticatedCallContext {
+        self.issuer
+            .bind(
+                ClientId::new("jarvis-client").unwrap(),
+                Nonce32::new([0x35; 32]),
+                self.connection_binding,
+                self.third_identity,
+                self.boot_id,
+                1_001,
+                UnixMillis::new(3_900),
+            )
+            .unwrap()
+    }
+
+    pub fn ingest_next(
+        &self,
+        context: &AuthenticatedCallContext,
+        run: savana_kernel_protocol::RunHandle,
+    ) -> Result<savana_kernel_protocol::ValueHandle, savana_policy_core::PolicyError> {
+        self.ingest_next_with_expiry(context, run, 3_000)
+    }
+
+    pub fn ingest_next_with_expiry(
+        &self,
+        context: &AuthenticatedCallContext,
+        run: savana_kernel_protocol::RunHandle,
+        expires_at: u64,
+    ) -> Result<savana_kernel_protocol::ValueHandle, savana_policy_core::PolicyError> {
+        let input = KernelValue::Null;
+        let commitment = IngressRequestCommitmentV1::IngestUserInput {
+            run,
+            input: input.clone(),
+        };
+        self.engine.ingest_user_input(
+            context,
+            IngestUserInputRequest {
+                run,
+                envelope: self.ingress_with_expiry(
+                    self.next_identity,
+                    ingress_request_digest(&commitment).unwrap(),
+                    self.next_nonce(),
+                    self.connection_binding,
+                    expires_at,
+                ),
+                input,
+            },
+        )
+    }
+
+    pub fn ingest_third_with_expiry(
+        &self,
+        context: &AuthenticatedCallContext,
+        run: savana_kernel_protocol::RunHandle,
+        expires_at: u64,
+    ) -> Result<savana_kernel_protocol::ValueHandle, savana_policy_core::PolicyError> {
+        let input = KernelValue::Null;
+        let commitment = IngressRequestCommitmentV1::IngestUserInput {
+            run,
+            input: input.clone(),
+        };
+        self.engine.ingest_user_input(
+            context,
+            IngestUserInputRequest {
+                run,
+                envelope: self.ingress_with_expiry(
+                    self.third_identity,
+                    ingress_request_digest(&commitment).unwrap(),
+                    self.next_nonce(),
+                    self.connection_binding,
+                    expires_at,
+                ),
+                input,
+            },
+        )
+    }
+
+    fn ingress(
+        &self,
+        identity: PolicyIdentity,
+        request_digest: Digest32,
+        nonce: Nonce32,
+        connection_binding: Digest32,
+    ) -> SignedIngressEnvelopeV1 {
+        self.ingress_with_expiry(identity, request_digest, nonce, connection_binding, 3_000)
+    }
+
+    fn ingress_with_expiry(
+        &self,
+        identity: PolicyIdentity,
+        request_digest: Digest32,
+        nonce: Nonce32,
+        connection_binding: Digest32,
+        expires_at: u64,
+    ) -> SignedIngressEnvelopeV1 {
+        let unsigned = IngressEnvelopeV1 {
+            principal: PrincipalId::new("principal-1").unwrap(),
+            conversation_id: ConversationId::new("conversation-1").unwrap(),
+            request_digest,
+            issued_at: UnixMillis::new(1_900),
+            expires_at: UnixMillis::new(expires_at),
+            nonce,
+            authority_session_id: Nonce32::new([0x66; 32]),
+            authentication_context_digest: Digest32::new([0x55; 32]),
+            role: RoleId::new("operator").unwrap(),
+            policy_digest: identity.digest,
+            boot_id: self.boot_id,
+            connection_binding_digest: connection_binding,
+        };
+        SignedIngressEnvelopeV1 {
+            signature: sign_value(
+                INGRESS_DOMAIN,
+                &unsigned,
+                &SigningKey::from_bytes(&[0x70; 32]),
+            ),
+            unsigned,
+            key_id: KeyId::new("role-00").unwrap(),
+        }
+    }
+
+    fn next_nonce(&self) -> Nonce32 {
+        let value = self.next_nonce.fetch_add(1, Ordering::SeqCst);
+        let mut bytes = [0_u8; 32];
+        bytes[..8].copy_from_slice(&value.to_be_bytes());
+        Nonce32::new(bytes)
+    }
 }
 
 #[derive(Clone)]

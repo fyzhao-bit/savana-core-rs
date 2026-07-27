@@ -6,7 +6,9 @@ use std::process::Command;
 use ed25519_dalek::SigningKey;
 use savana_kernel_protocol::{KeyId, StableCode};
 
+use super::LedgerAcceptanceFailure;
 use super::PolicyStore;
+use crate::atomic_file::PersistencePhase;
 use crate::{PolicyTrustRootV1, PolicyVerifier};
 
 use crate::test_support as support;
@@ -208,6 +210,54 @@ fn failed_persistence_does_not_advance_in_memory_high_water() {
         .verify_and_accept(&bundle, &signature, support::unix_now())
         .unwrap();
     assert_eq!(store.ledger_identity().unwrap().highest_policy_version, 7);
+}
+
+#[test]
+fn live_acceptance_preserves_rejected_and_commit_uncertain_phases() {
+    for (phase, uncertain) in [
+        (PersistencePhase::BeforeRename, false),
+        (PersistencePhase::AfterRename, true),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let ledger = root.path().join("policy.ledger");
+        let mut store = open_store(&ledger);
+        let policy = support::valid_policy(7, 3);
+        let (bytes, signature) = support::signed(&policy);
+        let verified = store
+            .verify_live_candidate(&bytes, &signature, support::unix_now())
+            .unwrap();
+        store.inject_live_persistence_fault(phase);
+        match store.accept_verified_live(verified) {
+            Err(LedgerAcceptanceFailure::Rejected(_)) if !uncertain => {}
+            Err(LedgerAcceptanceFailure::CommitUncertain(_)) if uncertain => {}
+            _ => panic!("live acceptance phase was not preserved"),
+        }
+    }
+}
+
+#[test]
+fn higher_version_lower_epoch_is_a_live_rejection_not_commit_uncertain() {
+    let root = tempfile::tempdir().unwrap();
+    let ledger = root.path().join("policy.ledger");
+    let mut initial = open_store(&ledger);
+    accept(&mut initial, &support::valid_policy(7, 3));
+    drop(initial);
+
+    let mut lower_epoch = PolicyStore::open(&ledger, verifier_for_epoch(2)).unwrap();
+    let candidate = support::valid_policy(8, 2);
+    let (bytes, signature) = support::signed(&candidate);
+    let verified = lower_epoch
+        .verify_live_candidate(&bytes, &signature, support::unix_now())
+        .unwrap();
+    match lower_epoch.accept_verified_live(verified) {
+        Err(LedgerAcceptanceFailure::Rejected(error)) => {
+            assert_eq!(error.code(), StableCode::PolicyRollback);
+        }
+        Err(LedgerAcceptanceFailure::CommitUncertain(_)) => {
+            panic!("ledger comparison happens before persistence")
+        }
+        Ok(_) => panic!("lower key epoch must not advance"),
+    }
 }
 
 #[test]

@@ -9,7 +9,7 @@ use rustix::io::Errno;
 use savana_kernel_protocol::{Digest32, Signature64, StableCode, UnixMillis};
 use sha2::{Digest, Sha256};
 
-use crate::atomic_file;
+use crate::atomic_file::{self, PersistencePhase};
 use crate::lock_file::LedgerLock;
 use crate::{
     CurrentPolicyCapability, PolicyError, PolicyVerifier, VerifiedPolicyV1, VerifiedReleaseIdentity,
@@ -51,13 +51,26 @@ impl RollbackLedgerV1 {
 
     fn canonical_bytes(self) -> Vec<u8> {
         let mut encoded = Vec::with_capacity(64);
+        self.encode_into(&mut encoded);
+        encoded
+    }
+
+    fn try_canonical_bytes(self) -> Result<Vec<u8>, PolicyError> {
+        let mut encoded = Vec::new();
+        encoded
+            .try_reserve_exact(64)
+            .map_err(|_| PolicyError::stable(StableCode::KernelUnavailable))?;
+        self.encode_into(&mut encoded);
+        Ok(encoded)
+    }
+
+    fn encode_into(self, encoded: &mut Vec<u8>) {
         encoded.push(0x84);
-        push_unsigned(&mut encoded, u64::from(self.schema_version));
-        push_unsigned(&mut encoded, self.highest_policy_version);
-        push_unsigned(&mut encoded, self.highest_key_epoch);
+        push_unsigned(encoded, u64::from(self.schema_version));
+        push_unsigned(encoded, self.highest_policy_version);
+        push_unsigned(encoded, self.highest_key_epoch);
         encoded.extend_from_slice(&[0x58, 0x20]);
         encoded.extend_from_slice(self.highest_policy_digest.as_bytes());
-        encoded
     }
 }
 
@@ -78,7 +91,7 @@ impl PolicyLedgerIdentity {
         if ledger.highest_policy_version != identity.policy_version
             || ledger.highest_key_epoch != identity.key_epoch
             || ledger.highest_policy_digest != identity.digest
-            || ledger.canonical_bytes() != canonical
+            || ledger.try_canonical_bytes()? != canonical
         {
             return Err(PolicyError::stable(StableCode::ProtocolIo));
         }
@@ -97,6 +110,36 @@ impl PolicyLedgerIdentity {
 #[derive(Debug)]
 struct InitialAcceptanceCommitGuard {
     armed: bool,
+}
+
+pub(crate) enum LedgerAcceptanceFailure {
+    Rejected(PolicyError),
+    CommitUncertain(PolicyError),
+}
+
+pub(crate) struct DurableAcceptanceGuard {
+    armed: bool,
+}
+
+impl DurableAcceptanceGuard {
+    pub(crate) fn complete(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for DurableAcceptanceGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            std::process::abort();
+        }
+    }
+}
+
+pub(crate) struct LivePolicyAcceptance {
+    pub(crate) policy: VerifiedPolicyV1,
+    pub(crate) ledger_identity: PolicyLedgerIdentity,
+    pub(crate) resource_profile_digest: Digest32,
+    pub(crate) durable: DurableAcceptanceGuard,
 }
 
 impl InitialAcceptanceCommitGuard {
@@ -120,6 +163,8 @@ pub struct PolicyStore {
     ledger: RollbackLedgerV1,
     poisoned: bool,
     _lock: LedgerLock,
+    #[cfg(test)]
+    live_persistence_fault: Option<PersistencePhase>,
 }
 
 pub struct PolicyStateCapability {
@@ -188,6 +233,8 @@ impl PolicyStore {
             ledger,
             poisoned: false,
             _lock: lock,
+            #[cfg(test)]
+            live_persistence_fault: None,
         })
     }
 
@@ -228,6 +275,8 @@ impl PolicyStore {
             ledger,
             poisoned: false,
             _lock: lock,
+            #[cfg(test)]
+            live_persistence_fault: None,
         })
     }
 
@@ -269,7 +318,7 @@ impl PolicyStore {
         release.recheck_retained_stage()?;
         let identity = policy.identity();
         let next = self.validate_ledger_transition(&policy)?;
-        let canonical_ledger = next.canonical_bytes();
+        let canonical_ledger = next.try_canonical_bytes()?;
         let ledger_identity =
             PolicyLedgerIdentity::from_preencoded(next, &canonical_ledger, identity)?;
         let resource_profile_digest = policy.resource_profile_digest();
@@ -285,6 +334,52 @@ impl PolicyStore {
         };
         durable.complete();
         Ok(current)
+    }
+
+    pub(crate) fn verify_live_candidate(
+        &self,
+        policy_bytes: &[u8],
+        signature: &Signature64,
+        now: UnixMillis,
+    ) -> Result<VerifiedPolicyV1, PolicyError> {
+        self.ensure_usable()?;
+        self.verifier.verify(policy_bytes, signature, now)
+    }
+
+    pub(crate) fn accept_verified_live(
+        &mut self,
+        policy: VerifiedPolicyV1,
+    ) -> Result<LivePolicyAcceptance, LedgerAcceptanceFailure> {
+        self.ensure_usable()
+            .map_err(LedgerAcceptanceFailure::Rejected)?;
+        let identity = policy.identity();
+        let next = self
+            .validate_ledger_transition(&policy)
+            .map_err(LedgerAcceptanceFailure::Rejected)?;
+        let canonical_ledger = next
+            .try_canonical_bytes()
+            .map_err(LedgerAcceptanceFailure::Rejected)?;
+        let ledger_identity =
+            PolicyLedgerIdentity::from_preencoded(next, &canonical_ledger, identity)
+                .map_err(LedgerAcceptanceFailure::Rejected)?;
+        let resource_profile_digest = policy.resource_profile_digest();
+        let durable = self.persist_live_prevalidated(next, &canonical_ledger)?;
+        Ok(LivePolicyAcceptance {
+            policy,
+            ledger_identity,
+            resource_profile_digest,
+            durable,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_live_persistence_fault(&mut self, phase: PersistencePhase) {
+        self.live_persistence_fault = Some(phase);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn raise_ledger_epoch_for_rollover_test(&mut self) {
+        self.ledger.highest_key_epoch = self.ledger.highest_key_epoch.checked_add(1).unwrap();
     }
 
     fn validate_ledger_transition(
@@ -358,10 +453,55 @@ impl PolicyStore {
                 Ok(guard)
             }
             Err(error) => {
-                if error.renamed() {
+                if error.phase() == PersistencePhase::AfterRename {
                     self.poisoned = true;
                 }
                 Err(error.into_policy_error())
+            }
+        }
+    }
+
+    fn persist_live_prevalidated(
+        &mut self,
+        next: RollbackLedgerV1,
+        canonical: &[u8],
+    ) -> Result<DurableAcceptanceGuard, LedgerAcceptanceFailure> {
+        #[cfg(test)]
+        let injected = self.live_persistence_fault.take().map(|phase| match phase {
+            PersistencePhase::BeforeRename => atomic_file::ReplaceError::before_rename(
+                PolicyError::stable(StableCode::ProtocolIo),
+            ),
+            PersistencePhase::AfterRename => {
+                atomic_file::ReplaceError::after_rename(PolicyError::stable(StableCode::ProtocolIo))
+            }
+        });
+        #[cfg(not(test))]
+        let injected: Option<atomic_file::ReplaceError> = None;
+
+        let result = if let Some(error) = injected {
+            Err(error)
+        } else {
+            match &self.anchored {
+                Some(state) => state.replace(canonical),
+                None => atomic_file::replace(&self.ledger_path, canonical),
+            }
+        };
+        match result {
+            Ok(()) => {
+                let guard = DurableAcceptanceGuard { armed: true };
+                self.ledger = next;
+                Ok(guard)
+            }
+            Err(error) => {
+                let phase = error.phase();
+                let error = error.into_policy_error();
+                match phase {
+                    PersistencePhase::BeforeRename => Err(LedgerAcceptanceFailure::Rejected(error)),
+                    PersistencePhase::AfterRename => {
+                        self.poisoned = true;
+                        Err(LedgerAcceptanceFailure::CommitUncertain(error))
+                    }
+                }
             }
         }
     }
@@ -381,7 +521,7 @@ impl PolicyStore {
                 Ok(())
             }
             Err(error) => {
-                if error.renamed() {
+                if error.phase() == PersistencePhase::AfterRename {
                     self.poisoned = true;
                 }
                 Err(error.into_policy_error())

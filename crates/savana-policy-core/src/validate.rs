@@ -437,6 +437,14 @@ impl VerifiedPolicyV1 {
         &self.effective_limits
     }
 
+    #[cfg(test)]
+    pub(crate) fn overwrite_effective_limits_for_rollover_test(
+        &mut self,
+        effective_limits: EffectiveLimits,
+    ) {
+        self.effective_limits = effective_limits;
+    }
+
     pub const fn signing_key_id(&self) -> &KeyId {
         &self.bundle.signing_key_id
     }

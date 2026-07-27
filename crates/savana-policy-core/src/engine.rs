@@ -13,6 +13,9 @@ use crate::{CurrentPolicyCapability, PolicyError, PolicyIdentity};
 
 mod ingress;
 mod rollover;
+pub use rollover::{
+    CommittedPolicyRollover, PolicyRolloverDisposition, PolicyRolloverFailure, PolicyRolloverGuard,
+};
 
 #[allow(dead_code)]
 pub struct PolicyEngine {
@@ -30,6 +33,10 @@ pub(crate) struct EngineInner {
     bind_pre_state_lock_hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     dispatch_pre_state_lock_hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    rollover_pre_state_lock_hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    pub(crate) rollover_probe: rollover::RolloverProbe,
 }
 
 #[allow(dead_code)]
@@ -256,6 +263,10 @@ impl EngineInner {
             bind_pre_state_lock_hook: std::sync::Mutex::new(None),
             #[cfg(test)]
             dispatch_pre_state_lock_hook: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            rollover_pre_state_lock_hook: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            rollover_probe: rollover::RolloverProbe::default(),
         })
     }
 
@@ -287,6 +298,24 @@ impl EngineInner {
     #[cfg(test)]
     pub(crate) fn run_dispatch_pre_state_lock_hook(&self) {
         let hook = self.dispatch_pre_state_lock_hook.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_rollover_pre_state_lock_hook(&self, hook: Box<dyn FnOnce() + Send>) {
+        let mut installed = self.rollover_pre_state_lock_hook.lock().unwrap();
+        assert!(
+            installed.is_none(),
+            "rollover pre-state-lock hook already set"
+        );
+        *installed = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_rollover_pre_state_lock_hook(&self) {
+        let hook = self.rollover_pre_state_lock_hook.lock().unwrap().take();
         if let Some(hook) = hook {
             hook();
         }

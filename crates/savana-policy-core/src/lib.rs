@@ -252,7 +252,10 @@ mod validate;
 
 pub use bundle::AuthorityRoleV1;
 pub use current_policy::CurrentPolicyCapability;
-pub use engine::PolicyEngine;
+pub use engine::{
+    CommittedPolicyRollover, PolicyEngine, PolicyRolloverDisposition, PolicyRolloverFailure,
+    PolicyRolloverGuard,
+};
 pub use error::PolicyError;
 pub use ledger::{PolicyLedgerIdentity, PolicyStateCapability, PolicyStore};
 pub use release::{
