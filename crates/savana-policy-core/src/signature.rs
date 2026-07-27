@@ -177,15 +177,24 @@ pub(crate) fn verify_signature(
     public_key: &[u8; 32],
     invalid_code: StableCode,
 ) -> Result<(), PolicyError> {
-    let verifying_key =
-        VerifyingKey::from_bytes(public_key).map_err(|_| PolicyError::stable(invalid_code))?;
-    let detached_signature = Signature::from_bytes(signature.as_bytes());
     let domain = domain.bytes();
     let mut signed = Vec::with_capacity(domain.len() + canonical_payload.len());
     signed.extend_from_slice(domain);
     signed.extend_from_slice(canonical_payload);
+    verify_signature_message(&signed, signature, public_key, invalid_code)
+}
+
+pub(crate) fn verify_signature_message(
+    signed: &[u8],
+    signature: &Signature64,
+    public_key: &[u8; 32],
+    invalid_code: StableCode,
+) -> Result<(), PolicyError> {
+    let verifying_key =
+        VerifyingKey::from_bytes(public_key).map_err(|_| PolicyError::stable(invalid_code))?;
+    let detached_signature = Signature::from_bytes(signature.as_bytes());
     verifying_key
-        .verify_strict(&signed, &detached_signature)
+        .verify_strict(signed, &detached_signature)
         .map_err(|_| PolicyError::stable(invalid_code))
 }
 

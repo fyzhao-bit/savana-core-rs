@@ -12,6 +12,19 @@ tags `10..19`. Until the policy engine integration lands, `savana-kerneld`
 recognizes those policy tags but fails them closed with `KERNEL_UNAVAILABLE`;
 schema availability is not authority to execute a transition.
 
+Registry V1 signatures cover the existing domain-separated canonical message
+directly:
+
+```text
+"SAVANA_REGISTRY_V1\0" || canonical_cbor(RegistrySnapshotV1)
+```
+
+The private registry version-chain identity is SHA-256 of those exact signing
+bytes; it is not a wire field and Ed25519 does not sign that 32-byte digest.
+For the empty version-1 snapshot `[1, null, [], 1000, 3000]`, canonical CBOR is
+`8501f6801903e8190bb8` and the registry identity is
+`f7cd24b33cd5cbfa8c04d913f55175c6dd3d54fa6873a3c3d541dddc233acc38`.
+
 ## Compatibility rules
 
 - A signed V1 array is positional. A field cannot be added without a schema or

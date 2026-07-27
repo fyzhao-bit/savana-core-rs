@@ -1,10 +1,15 @@
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use savana_kernel_protocol::{BootId, StableCode};
+use savana_kernel_protocol::{
+    BeginRunRequest, BeginRunResponse, BootId, ClientId, ConversationId, Digest32,
+    IngestUserInputRequest, KernelValue, KeyId, Nonce32, PrincipalId, RoleId, RunHandle,
+    StableCode, ToolExecutionIdentity, UnixMillis, ValueHandle,
+};
 
 use crate::current_policy::AcceptedCurrentPolicy;
 use crate::runtime::{AuthenticatedCallContext, AuthenticatedContextIssuer, Clock, RandomSource};
-use crate::{CurrentPolicyCapability, PolicyError};
+use crate::{CurrentPolicyCapability, PolicyError, PolicyIdentity};
 
 mod ingress;
 mod rollover;
@@ -23,6 +28,8 @@ pub(crate) struct EngineInner {
     pub(crate) instance_tag: [u8; 32],
     #[cfg(test)]
     bind_pre_state_lock_hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    dispatch_pre_state_lock_hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 #[allow(dead_code)]
@@ -31,6 +38,95 @@ pub(crate) struct EngineState {
     pub(crate) generation: u64,
     pub(crate) last_monotonic_ms: u64,
     pub(crate) poisoned: bool,
+    pub(crate) runs: HashMap<HandleToken, RunRecord>,
+    pub(crate) values: HashMap<HandleToken, ValueRecord>,
+    pub(crate) tools: HashMap<HandleToken, ToolRecord>,
+    pub(crate) handle_kinds: HashMap<HandleToken, HandleKind>,
+    pub(crate) stale_handles: Vec<StaleHandleRecord>,
+    pub(crate) ingress_replay: HashMap<IngressReplayKey, IngressReplayEntry>,
+    pub(crate) replay_per_client: HashMap<ClientId, u64>,
+    pub(crate) registry: Option<RegistryState>,
+    pub(crate) global_replay_limit: usize,
+    pub(crate) global_run_limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct IngressReplayKey {
+    pub(crate) authority_key_id: KeyId,
+    pub(crate) nonce: Nonce32,
+}
+
+#[allow(dead_code)]
+pub(crate) struct IngressReplayEntry {
+    pub(crate) client_id: ClientId,
+    pub(crate) expires_at: UnixMillis,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RegistryIdentity {
+    pub(crate) digest: Digest32,
+    pub(crate) version: u64,
+}
+
+#[allow(dead_code)]
+pub(crate) struct RegistryState {
+    pub(crate) identity: RegistryIdentity,
+    pub(crate) policy_identity: PolicyIdentity,
+    pub(crate) expires_at: UnixMillis,
+}
+
+#[allow(dead_code)]
+pub(crate) struct RunRecord {
+    pub(crate) boot_id: BootId,
+    pub(crate) client_id: ClientId,
+    pub(crate) peer_uid: u32,
+    pub(crate) policy_identity: PolicyIdentity,
+    pub(crate) generation: u64,
+    pub(crate) principal: PrincipalId,
+    pub(crate) conversation_id: ConversationId,
+    pub(crate) role: RoleId,
+    pub(crate) authority_session_id: Nonce32,
+    pub(crate) authentication_context_digest: Digest32,
+    pub(crate) ingress_key_id: KeyId,
+    pub(crate) ingress_nonce: Nonce32,
+    pub(crate) registry_identity: RegistryIdentity,
+    pub(crate) expires_at: UnixMillis,
+}
+
+#[allow(dead_code)]
+pub(crate) struct ValueRecord {
+    pub(crate) run: RunHandle,
+    pub(crate) client_id: ClientId,
+    pub(crate) policy_identity: PolicyIdentity,
+    pub(crate) value: KernelValue,
+    pub(crate) provenance_digest: Digest32,
+    pub(crate) expires_at: UnixMillis,
+}
+
+#[allow(dead_code)]
+pub(crate) struct ToolRecord {
+    pub(crate) run: RunHandle,
+    pub(crate) client_id: ClientId,
+    pub(crate) policy_identity: PolicyIdentity,
+    pub(crate) identity: ToolExecutionIdentity,
+    pub(crate) expires_at: UnixMillis,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct HandleToken(pub(crate) [u8; 32]);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HandleKind {
+    Run,
+    Value,
+    Tool,
+}
+
+#[allow(dead_code)]
+pub(crate) struct StaleHandleRecord {
+    pub(crate) token: HandleToken,
+    pub(crate) kind: HandleKind,
+    pub(crate) expires_at: UnixMillis,
 }
 
 impl PolicyEngine {
@@ -47,6 +143,16 @@ impl PolicyEngine {
         }
         let initial_monotonic = clock.monotonic_now_millis().map_err(|_| unavailable())?;
         let accepted = current.into_accepted();
+        let client_count = accepted.release.daemon_clients().len();
+        let replay_per_client = accepted
+            .policy
+            .effective_limits()
+            .ingress_replay_entries_per_client();
+        let (global_replay_limit, global_run_limit) = checked_engine_limits(
+            client_count,
+            replay_per_client,
+            accepted.policy.effective_limits().runs_per_client(),
+        )?;
         let inner = Arc::new(EngineInner::new(
             accepted,
             boot_id,
@@ -54,6 +160,7 @@ impl PolicyEngine {
             random,
             instance_tag,
             initial_monotonic,
+            (global_replay_limit, global_run_limit),
         )?);
         let issuer = AuthenticatedContextIssuer {
             engine: Arc::downgrade(&inner),
@@ -61,6 +168,27 @@ impl PolicyEngine {
         };
         Ok((Self { inner }, issuer))
     }
+}
+
+fn checked_engine_limits(
+    client_count: usize,
+    replay_per_client: u64,
+    runs_per_client: u64,
+) -> Result<(usize, usize), PolicyError> {
+    let clients = u64::try_from(client_count).map_err(|_| unavailable())?;
+    let global_replay = replay_per_client
+        .checked_mul(clients)
+        .ok_or_else(unavailable)?;
+    let global_runs = runs_per_client
+        .checked_mul(clients)
+        .ok_or_else(unavailable)?;
+    if client_count == 0 || client_count > 16 || global_replay > 65_536 {
+        return Err(unavailable());
+    }
+    Ok((
+        usize::try_from(global_replay).map_err(|_| unavailable())?,
+        usize::try_from(global_runs).map_err(|_| unavailable())?,
+    ))
 }
 
 impl EngineInner {
@@ -71,13 +199,48 @@ impl EngineInner {
         random: Arc<dyn RandomSource + Send + Sync>,
         instance_tag: [u8; 32],
         initial_monotonic: u64,
+        limits: (usize, usize),
     ) -> Result<Self, PolicyError> {
+        let (global_replay_limit, global_run_limit) = limits;
+        let mut runs = HashMap::new();
+        runs.try_reserve(global_run_limit)
+            .map_err(|_| unavailable())?;
+        let mut values = HashMap::new();
+        values
+            .try_reserve(global_run_limit)
+            .map_err(|_| unavailable())?;
+        let mut tools = HashMap::new();
+        tools
+            .try_reserve(global_run_limit)
+            .map_err(|_| unavailable())?;
+        let mut handle_kinds = HashMap::new();
+        handle_kinds
+            .try_reserve(global_run_limit.checked_mul(3).ok_or_else(unavailable)?)
+            .map_err(|_| unavailable())?;
+        let mut ingress_replay = HashMap::new();
+        ingress_replay
+            .try_reserve(global_replay_limit)
+            .map_err(|_| unavailable())?;
+        let mut replay_per_client = HashMap::new();
+        replay_per_client
+            .try_reserve(current.release.daemon_clients().len())
+            .map_err(|_| unavailable())?;
         Ok(Self {
             state: RwLock::new(EngineState {
                 current,
                 generation: 0,
                 last_monotonic_ms: initial_monotonic,
                 poisoned: false,
+                runs,
+                values,
+                tools,
+                handle_kinds,
+                stale_handles: Vec::new(),
+                ingress_replay,
+                replay_per_client,
+                registry: None,
+                global_replay_limit,
+                global_run_limit,
             }),
             clock,
             random,
@@ -85,6 +248,8 @@ impl EngineInner {
             instance_tag,
             #[cfg(test)]
             bind_pre_state_lock_hook: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            dispatch_pre_state_lock_hook: std::sync::Mutex::new(None),
         })
     }
 
@@ -103,20 +268,48 @@ impl EngineInner {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn install_dispatch_pre_state_lock_hook(&self, hook: Box<dyn FnOnce() + Send>) {
+        let mut installed = self.dispatch_pre_state_lock_hook.lock().unwrap();
+        assert!(
+            installed.is_none(),
+            "dispatch pre-state-lock hook already set"
+        );
+        *installed = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_dispatch_pre_state_lock_hook(&self) {
+        let hook = self.dispatch_pre_state_lock_hook.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn validate_context(
         &self,
         context: &AuthenticatedCallContext,
     ) -> Result<(), PolicyError> {
         let mut state = self.state.write().map_err(|_| unavailable())?;
-        if state.poisoned {
-            return Err(unavailable());
-        }
         let monotonic = self
             .clock
             .monotonic_now_millis()
             .map_err(|_| unavailable())?;
         let wall = self.clock.wall_now().map_err(|_| unavailable())?;
+        self.validate_context_locked(&mut state, context, wall, monotonic)
+    }
+
+    pub(crate) fn validate_context_locked(
+        &self,
+        state: &mut EngineState,
+        context: &AuthenticatedCallContext,
+        wall: UnixMillis,
+        monotonic: u64,
+    ) -> Result<(), PolicyError> {
+        if state.poisoned {
+            return Err(unavailable());
+        }
         state.observe_monotonic(monotonic)?;
         let current = state.current.policy.identity();
         if wall.get() >= current.expires_at.get() {
@@ -132,6 +325,46 @@ impl EngineInner {
             return Err(deadline_exceeded());
         }
         Ok(())
+    }
+}
+
+impl PolicyEngine {
+    pub fn begin_run(
+        &self,
+        context: &AuthenticatedCallContext,
+        request: BeginRunRequest,
+    ) -> Result<BeginRunResponse, PolicyError> {
+        #[cfg(test)]
+        self.inner.run_dispatch_pre_state_lock_hook();
+        let mut state = self.inner.state.write().map_err(|_| unavailable())?;
+        let monotonic = self
+            .inner
+            .clock
+            .monotonic_now_millis()
+            .map_err(|_| unavailable())?;
+        let wall = self.inner.clock.wall_now().map_err(|_| unavailable())?;
+        self.inner
+            .validate_context_locked(&mut state, context, wall, monotonic)?;
+        ingress::begin_run_locked(&self.inner, &mut state, context, request, wall)
+    }
+
+    pub fn ingest_user_input(
+        &self,
+        context: &AuthenticatedCallContext,
+        request: IngestUserInputRequest,
+    ) -> Result<ValueHandle, PolicyError> {
+        #[cfg(test)]
+        self.inner.run_dispatch_pre_state_lock_hook();
+        let mut state = self.inner.state.write().map_err(|_| unavailable())?;
+        let monotonic = self
+            .inner
+            .clock
+            .monotonic_now_millis()
+            .map_err(|_| unavailable())?;
+        let wall = self.inner.clock.wall_now().map_err(|_| unavailable())?;
+        self.inner
+            .validate_context_locked(&mut state, context, wall, monotonic)?;
+        ingress::ingest_user_input_locked(&self.inner, &mut state, context, request, wall)
     }
 }
 

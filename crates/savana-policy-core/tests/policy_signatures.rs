@@ -636,15 +636,14 @@ fn encoded_approval_receipt(domain: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn ingress_signature_binds_principal_request_and_nonce() {
+fn ingress_signature_verification_exposes_only_authorization_projections() {
     let policy = producer_policy();
     let encoded = encoded_ingress(INGRESS_DOMAIN);
     let verified = policy
         .verify_ingress(&encoded, support::unix_now())
         .unwrap();
-    assert_eq!(verified.principal().as_str(), "principal-1");
-    assert_eq!(verified.request_digest(), Digest32::new([0x21; 32]));
-    assert_eq!(verified.nonce(), Nonce32::new([0x22; 32]));
+    assert_eq!(verified.role().as_str(), "operator");
+    assert_eq!(verified.policy_digest(), policy.identity().digest);
 
     let mut mutated: SignedIngressEnvelopeV1 = minicbor::decode(&encoded).unwrap();
     mutated.unsigned.request_digest = Digest32::new([0xff; 32]);

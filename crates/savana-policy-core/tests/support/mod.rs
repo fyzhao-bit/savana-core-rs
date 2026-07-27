@@ -2,10 +2,15 @@
 
 use ed25519_dalek::{Signer, SigningKey};
 use savana_kernel_protocol::{
-    Digest32, HardLimits, KeyId, ResourceLimitsV1, Signature64, StableCode, UnixMillis,
+    ingress_request_digest, AttemptKindV1, BeginRunRequest, BootId, BoundedText, ClientId,
+    ConversationId, Digest32, HardLimits, IngestUserInputRequest, IngressEnvelopeV1,
+    IngressRequestCommitmentV1, KernelValue, KeyId, Nonce32, PrincipalId, RegistrySnapshotV1,
+    ResourceLimitsV1, RoleId, Signature64, SignedIngressEnvelopeV1, SignedRegistrySnapshotV1,
+    StableCode, ToolDescriptorV1, ToolExecutionIdentity, ToolName, UnixMillis,
 };
 use savana_policy_core::{
-    Clock, CurrentPolicyCapability, PolicyStore, PolicyTrustRootV1, PolicyVerifier, RandomSource,
+    AuthenticatedCallContext, AuthenticatedContextIssuer, Clock, CurrentPolicyCapability,
+    PolicyEngine, PolicyIdentity, PolicyStore, PolicyTrustRootV1, PolicyVerifier, RandomSource,
     ReleaseStage, ReleaseTrustRootV1, ReleaseVerifier, VerifiedReleaseIdentity,
 };
 use sha2::{Digest, Sha256};
@@ -46,6 +51,11 @@ impl TestClock {
     pub fn restore_wall_and_regress_monotonic(&self) {
         self.fail_wall.store(false, Ordering::SeqCst);
         self.monotonic.store(99, Ordering::SeqCst);
+    }
+
+    pub fn set(&self, wall: u64, monotonic: u64) {
+        self.wall.store(wall, Ordering::SeqCst);
+        self.monotonic.store(monotonic, Ordering::SeqCst);
     }
 }
 
@@ -138,6 +148,50 @@ pub fn current_policy_and_identity() -> (CurrentPolicyCapability, savana_policy_
             fixture.now(),
         )
         .expect("mint fixture current policy");
+    (current, identity)
+}
+
+pub fn current_policy_and_identity_from(
+    mut policy: TestPolicy,
+) -> (CurrentPolicyCapability, PolicyIdentity) {
+    let root = tempfile::tempdir().unwrap();
+    let root_path = fs::canonicalize(root.path()).unwrap();
+    let canonical_resources = minicbor::to_vec(policy.resources).unwrap();
+    let mut resource_hasher = Sha256::new();
+    resource_hasher.update(b"SAVANA_RESOURCE_PROFILE_V1\0");
+    resource_hasher.update(canonical_resources);
+    let resource_digest: [u8; 32] = resource_hasher.finalize().into();
+    let profile_digest: [u8; 32] = Sha256::digest(fixture_profile()).into();
+    let roots_digest: [u8; 32] = Sha256::digest(fixture_policy_roots()).into();
+    let target = Digest32::new(compute_fixture_release_target(
+        roots_digest,
+        resource_digest,
+        profile_digest,
+    ));
+    policy.release.compatible_release_target_ids = vec![*target.as_bytes()];
+    let (policy_bytes, policy_signature) = signed(&policy);
+    let release = build_verified_release(
+        &root_path,
+        "release-custom",
+        b'e',
+        resource_digest,
+        4_000,
+        NOW,
+    );
+    let verifier = release.policy_verifier().unwrap();
+    let identity = verifier
+        .verify(&policy_bytes, &policy_signature, UnixMillis::new(NOW))
+        .unwrap()
+        .identity();
+    let store = PolicyStore::open(&root_path.join("policy.ledger"), verifier).unwrap();
+    let current = store
+        .verify_and_accept_initial(
+            release,
+            &policy_bytes,
+            &policy_signature,
+            UnixMillis::new(NOW),
+        )
+        .unwrap();
     (current, identity)
 }
 
@@ -859,6 +913,262 @@ pub fn compiled_resources() -> ResourceLimitsV1 {
         request_deadline_ms: limits.request_deadline_ms(),
         ingress_replay_entries_per_client: limits.ingress_replay_entries_per_client(),
     }
+}
+
+const INGRESS_DOMAIN: &[u8] = b"SAVANA_INGRESS_V1\0";
+const REGISTRY_DOMAIN: &[u8] = b"SAVANA_REGISTRY_V1\0";
+
+struct SequenceRandom {
+    next: AtomicU64,
+}
+
+impl RandomSource for SequenceRandom {
+    fn fill(&self, output: &mut [u8]) -> Result<usize, StableCode> {
+        let value = self.next.fetch_add(1, Ordering::SeqCst);
+        let mut block = [0_u8; 32];
+        block[..8].copy_from_slice(&value.to_be_bytes());
+        output.copy_from_slice(&block);
+        Ok(output.len())
+    }
+}
+
+pub struct IngressFixture {
+    pub engine: PolicyEngine,
+    pub issuer: AuthenticatedContextIssuer,
+    pub context: AuthenticatedCallContext,
+    pub identity: PolicyIdentity,
+    pub boot_id: BootId,
+    pub connection_binding: Digest32,
+    pub clock: Arc<TestClock>,
+    next_nonce: AtomicU64,
+}
+
+impl IngressFixture {
+    pub fn new() -> Self {
+        Self::from_current(current_policy_and_identity())
+    }
+
+    pub fn with_limits(runs_per_client: u64, replay_per_client: u64) -> Self {
+        let mut policy = valid_policy(7, 3);
+        policy.resources.runs_per_client = runs_per_client;
+        policy.resources.ingress_replay_entries_per_client = replay_per_client;
+        Self::with_policy(policy)
+    }
+
+    pub fn with_policy(policy: TestPolicy) -> Self {
+        Self::from_current(current_policy_and_identity_from(policy))
+    }
+
+    fn from_current((current, identity): (CurrentPolicyCapability, PolicyIdentity)) -> Self {
+        let clock = clock();
+        let boot_id = BootId::new([0x41; 32]);
+        let random: Arc<dyn RandomSource + Send + Sync> = Arc::new(SequenceRandom {
+            next: AtomicU64::new(1),
+        });
+        let (engine, issuer) = PolicyEngine::new(
+            current,
+            boot_id,
+            Arc::clone(&clock) as Arc<dyn Clock + Send + Sync>,
+            random,
+        )
+        .unwrap();
+        let connection_binding = Digest32::new([0x44; 32]);
+        let context = issuer
+            .bind(
+                ClientId::new("jarvis-client").unwrap(),
+                Nonce32::new([0x33; 32]),
+                connection_binding,
+                identity,
+                boot_id,
+                1_001,
+                UnixMillis::new(3_000),
+            )
+            .unwrap();
+        Self {
+            engine,
+            issuer,
+            context,
+            identity,
+            boot_id,
+            connection_binding,
+            clock,
+            next_nonce: AtomicU64::new(0x80),
+        }
+    }
+
+    pub fn begin_request(&self, role: &str, input: KernelValue) -> BeginRunRequest {
+        self.begin_request_for(role, input, self.connection_binding)
+    }
+
+    pub fn begin_request_for(
+        &self,
+        role: &str,
+        input: KernelValue,
+        connection_binding: Digest32,
+    ) -> BeginRunRequest {
+        let commitment = IngressRequestCommitmentV1::BeginRun {
+            input: input.clone(),
+        };
+        BeginRunRequest {
+            ingress: self.ingress(
+                role,
+                ingress_request_digest(&commitment).unwrap(),
+                self.next_nonce(),
+                connection_binding,
+            ),
+            input,
+            registry: signed_registry(),
+        }
+    }
+
+    pub fn ingest_request(
+        &self,
+        run: savana_kernel_protocol::RunHandle,
+        input: KernelValue,
+    ) -> IngestUserInputRequest {
+        self.ingest_request_for(run, input, self.connection_binding)
+    }
+
+    pub fn ingest_request_for(
+        &self,
+        run: savana_kernel_protocol::RunHandle,
+        input: KernelValue,
+        connection_binding: Digest32,
+    ) -> IngestUserInputRequest {
+        let commitment = IngressRequestCommitmentV1::IngestUserInput {
+            run,
+            input: input.clone(),
+        };
+        IngestUserInputRequest {
+            run,
+            envelope: self.ingress(
+                "operator",
+                ingress_request_digest(&commitment).unwrap(),
+                self.next_nonce(),
+                connection_binding,
+            ),
+            input,
+        }
+    }
+
+    pub fn bind(
+        &self,
+        client_id: &str,
+        connection_byte: u8,
+        binding_byte: u8,
+    ) -> (AuthenticatedCallContext, Digest32) {
+        let binding = Digest32::new([binding_byte; 32]);
+        (
+            self.issuer
+                .bind(
+                    ClientId::new(client_id).unwrap(),
+                    Nonce32::new([connection_byte; 32]),
+                    binding,
+                    self.identity,
+                    self.boot_id,
+                    1_001,
+                    UnixMillis::new(3_000),
+                )
+                .unwrap(),
+            binding,
+        )
+    }
+
+    pub fn ingress(
+        &self,
+        role: &str,
+        request_digest: Digest32,
+        nonce: Nonce32,
+        connection_binding: Digest32,
+    ) -> SignedIngressEnvelopeV1 {
+        let unsigned = IngressEnvelopeV1 {
+            principal: PrincipalId::new("principal-1").unwrap(),
+            conversation_id: ConversationId::new("conversation-1").unwrap(),
+            request_digest,
+            issued_at: UnixMillis::new(1_900),
+            expires_at: UnixMillis::new(3_000),
+            nonce,
+            authority_session_id: Nonce32::new([0x66; 32]),
+            authentication_context_digest: Digest32::new([0x55; 32]),
+            role: RoleId::new(role).unwrap(),
+            policy_digest: self.identity.digest,
+            boot_id: self.boot_id,
+            connection_binding_digest: connection_binding,
+        };
+        SignedIngressEnvelopeV1 {
+            signature: sign_value(
+                INGRESS_DOMAIN,
+                &unsigned,
+                &SigningKey::from_bytes(&[0x70; 32]),
+            ),
+            unsigned,
+            key_id: KeyId::new("role-00").unwrap(),
+        }
+    }
+
+    pub fn next_nonce(&self) -> Nonce32 {
+        let value = self.next_nonce.fetch_add(1, Ordering::SeqCst);
+        let mut bytes = [0_u8; 32];
+        bytes[..8].copy_from_slice(&value.to_be_bytes());
+        Nonce32::new(bytes)
+    }
+}
+
+pub fn signed_registry() -> SignedRegistrySnapshotV1 {
+    let unsigned = RegistrySnapshotV1 {
+        version: 1,
+        previous_digest: None,
+        tools: vec![ToolDescriptorV1 {
+            identity: ToolExecutionIdentity {
+                name: ToolName::new("tool-00").unwrap(),
+                descriptor_digest: Digest32::new([0x21; 32]),
+                registry_version: 1,
+            },
+            provider_id: BoundedText::try_from("provider-1").unwrap(),
+            roles: vec![RoleId::new("operator").unwrap()],
+            input_schema_digest: Digest32::new([0x31; 32]),
+            output_schema_digest: Digest32::new([0x32; 32]),
+            attempt: AttemptKindV1::Read,
+            constraint_ids: Vec::new(),
+            validator_ids: Vec::new(),
+            projection_digest: Digest32::new([0x33; 32]),
+        }],
+        issued_at: UnixMillis::new(1_900),
+        expires_at: UnixMillis::new(3_000),
+    };
+    SignedRegistrySnapshotV1 {
+        signature: sign_value(
+            REGISTRY_DOMAIN,
+            &unsigned,
+            &SigningKey::from_bytes(&[0x72; 32]),
+        ),
+        unsigned,
+        key_id: KeyId::new("role-02").unwrap(),
+    }
+}
+
+pub fn resign_ingress(value: &mut SignedIngressEnvelopeV1) {
+    value.signature = sign_value(
+        INGRESS_DOMAIN,
+        &value.unsigned,
+        &SigningKey::from_bytes(&[0x70; 32]),
+    );
+}
+
+pub fn resign_registry(value: &mut SignedRegistrySnapshotV1) {
+    value.signature = sign_value(
+        REGISTRY_DOMAIN,
+        &value.unsigned,
+        &SigningKey::from_bytes(&[0x72; 32]),
+    );
+}
+
+fn sign_value<T: minicbor::Encode<()>>(domain: &[u8], value: &T, key: &SigningKey) -> Signature64 {
+    let payload = minicbor::to_vec(value).unwrap();
+    let mut message = Vec::with_capacity(domain.len() + payload.len());
+    message.extend_from_slice(domain);
+    message.extend_from_slice(&payload);
+    Signature64::new(key.sign(&message).to_bytes())
 }
 
 pub fn encode_policy(policy: &TestPolicy) -> Vec<u8> {

@@ -71,6 +71,22 @@ fn signed_artifact(envelope: &VerifiedApprovalEnvelopeV1) {
 }
 ```
 
+Verified ingress exposes only its authorization role and policy digest. Raw
+identity, replay, request, boot, and connection-binding projections remain
+engine-internal:
+
+```compile_fail
+use savana_policy_core::VerifiedIngressV1;
+
+fn raw_ingress(ingress: &VerifiedIngressV1) {
+    let _ = ingress.principal();
+    let _ = ingress.request_digest();
+    let _ = ingress.nonce();
+    let _ = ingress.boot_id();
+    let _ = ingress.connection_binding_digest();
+}
+```
+
 The current-policy capability can only be minted by consuming verified release,
 policy, and durable-ledger state:
 

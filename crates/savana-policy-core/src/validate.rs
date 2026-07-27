@@ -18,7 +18,7 @@ use crate::bundle::{
 };
 use crate::provenance::PolicyBound;
 use crate::release::VerifiedReleaseIdentity;
-use crate::signature::{verify_signature, SignatureDomain};
+use crate::signature::{verify_signature, verify_signature_message, SignatureDomain};
 use crate::PolicyError;
 
 const MAXIMUM_PER_RUN: u32 = 65_536;
@@ -103,40 +103,44 @@ impl VerifiedIngressV1 {
         self.artifact.unsigned.policy_digest
     }
 
-    pub const fn principal(&self) -> &PrincipalId {
+    pub(crate) const fn principal(&self) -> &PrincipalId {
         &self.artifact.unsigned.principal
     }
 
-    pub const fn conversation_id(&self) -> &ConversationId {
+    pub(crate) const fn conversation_id(&self) -> &ConversationId {
         &self.artifact.unsigned.conversation_id
     }
 
-    pub const fn request_digest(&self) -> Digest32 {
+    pub(crate) const fn request_digest(&self) -> Digest32 {
         self.artifact.unsigned.request_digest
     }
 
-    pub const fn issued_at(&self) -> UnixMillis {
-        self.artifact.unsigned.issued_at
-    }
-
-    pub const fn expires_at(&self) -> UnixMillis {
+    pub(crate) const fn expires_at(&self) -> UnixMillis {
         self.artifact.unsigned.expires_at
     }
 
-    pub const fn nonce(&self) -> Nonce32 {
+    pub(crate) const fn nonce(&self) -> Nonce32 {
         self.artifact.unsigned.nonce
     }
 
-    pub const fn authority_session_id(&self) -> Nonce32 {
+    pub(crate) const fn authority_session_id(&self) -> Nonce32 {
         self.artifact.unsigned.authority_session_id
     }
 
-    pub const fn authentication_context_digest(&self) -> Digest32 {
+    pub(crate) const fn authentication_context_digest(&self) -> Digest32 {
         self.artifact.unsigned.authentication_context_digest
     }
 
-    pub const fn key_id(&self) -> &KeyId {
+    pub(crate) const fn key_id(&self) -> &KeyId {
         &self.artifact.key_id
+    }
+
+    pub(crate) const fn boot_id(&self) -> savana_kernel_protocol::BootId {
+        self.artifact.unsigned.boot_id
+    }
+
+    pub(crate) const fn connection_binding_digest(&self) -> Digest32 {
+        self.artifact.unsigned.connection_binding_digest
     }
 }
 
@@ -469,6 +473,16 @@ impl VerifiedPolicyV1 {
             .map(|authority| VerifiedAuthorityV1 { authority })
     }
 
+    pub(crate) fn allows_registry_tool(
+        &self,
+        tool: &savana_kernel_protocol::ToolDescriptorV1,
+    ) -> bool {
+        self.bundle.tools.iter().any(|allowed| {
+            allowed.name == tool.identity.name
+                && allowed.descriptor_digest == tool.identity.descriptor_digest
+        })
+    }
+
     pub fn verify_ingress(
         &self,
         canonical_artifact: &[u8],
@@ -558,9 +572,8 @@ impl VerifiedPolicyV1 {
             AuthorityRoleV1::Registry,
             StableCode::RegistryInvalidSignature,
         )?;
-        let payload = encode_canonical(&artifact.unsigned)?;
-        verify_signature(
-            SignatureDomain::RegistryV1,
+        let payload = registry_signing_bytes(&artifact.unsigned)?;
+        verify_signature_message(
             &payload,
             &artifact.signature,
             &authority.public_key,
@@ -810,6 +823,33 @@ impl VerifiedPolicyV1 {
         }
         Ok(())
     }
+}
+
+pub(crate) fn registry_signing_bytes(
+    snapshot: &RegistrySnapshotV1,
+) -> Result<Vec<u8>, PolicyError> {
+    let canonical = encode_canonical(snapshot)?;
+    let domain = SignatureDomain::RegistryV1.bytes();
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(
+            domain
+                .len()
+                .checked_add(canonical.len())
+                .ok_or_else(|| PolicyError::stable(StableCode::KernelUnavailable))?,
+        )
+        .map_err(|_| PolicyError::stable(StableCode::KernelUnavailable))?;
+    bytes.extend_from_slice(domain);
+    bytes.extend_from_slice(&canonical);
+    Ok(bytes)
+}
+
+pub(crate) fn registry_identity_digest(
+    snapshot: &RegistrySnapshotV1,
+) -> Result<Digest32, PolicyError> {
+    Ok(Digest32::new(
+        Sha256::digest(registry_signing_bytes(snapshot)?).into(),
+    ))
 }
 
 impl VerifiedReleaseIdentity {
