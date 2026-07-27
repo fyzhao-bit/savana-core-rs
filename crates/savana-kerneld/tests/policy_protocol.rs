@@ -4,8 +4,8 @@ mod support;
 
 use support::{policy_support, Installation};
 
-use std::io::{self, Read};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::io::{ErrorKind, Read};
+use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -30,9 +30,6 @@ const INGRESS_DOMAIN: &[u8] = b"SAVANA_INGRESS_V1\0";
 
 #[test]
 fn begin_and_ingest_dispatch_through_authenticated_context() {
-    if !host_supports_unix_listener() {
-        return;
-    }
     let installation = Installation::build();
     let mut daemon = RunningDaemon::start(&installation);
     let limits = HardLimits::COMPILED
@@ -57,9 +54,6 @@ fn begin_and_ingest_dispatch_through_authenticated_context() {
 
 #[test]
 fn policy_handles_follow_authenticated_client_not_original_connection() {
-    if !host_supports_unix_listener() {
-        return;
-    }
     let installation = Installation::build();
     let mut daemon = RunningDaemon::start(&installation);
     let limits = HardLimits::COMPILED
@@ -96,9 +90,6 @@ fn policy_handles_follow_authenticated_client_not_original_connection() {
 
 #[test]
 fn every_policy_connection_still_has_exactly_one_request_and_response() {
-    if !host_supports_unix_listener() {
-        return;
-    }
     let installation = Installation::build();
     let mut daemon = RunningDaemon::start(&installation);
     let limits = HardLimits::COMPILED
@@ -438,27 +429,13 @@ fn system_now_ms() -> u64 {
     .expect("millisecond clock")
 }
 
-fn host_supports_unix_listener() -> bool {
-    let temporary = tempfile::tempdir().expect("probe tempdir");
-    let socket = temporary.path().join("capability.sock");
-    match UnixListener::bind(&socket) {
-        Ok(listener) => {
-            drop(listener);
-            true
-        }
-        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => false,
-        Err(error) => panic!("independent Unix-listener probe failed unexpectedly: {error}"),
-    }
-}
-
 fn connect_when_listening(path: &std::path::Path) -> UnixStream {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         match UnixStream::connect(path) {
             Ok(stream) => return stream,
             Err(error)
-                if error.kind() == io::ErrorKind::ConnectionRefused
-                    && Instant::now() < deadline =>
+                if error.kind() == ErrorKind::ConnectionRefused && Instant::now() < deadline =>
             {
                 thread::sleep(Duration::from_millis(10));
             }

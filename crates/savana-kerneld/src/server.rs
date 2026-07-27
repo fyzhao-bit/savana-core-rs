@@ -92,6 +92,8 @@ struct ServerLimits {
     peer_lookup_failures: Option<Arc<AtomicUsize>>,
     #[cfg(test)]
     spawn_failure_order_observer: Option<Arc<SpawnFailureOrderObserver>>,
+    #[cfg(test)]
+    worker_connection_observer: Option<WorkerConnectionObserver>,
 }
 
 impl ServerLimits {
@@ -110,6 +112,8 @@ impl ServerLimits {
             peer_lookup_failures: None,
             #[cfg(test)]
             spawn_failure_order_observer: None,
+            #[cfg(test)]
+            worker_connection_observer: None,
         }
     }
 
@@ -129,6 +133,7 @@ impl ServerLimits {
             inject_shutdown_after_loop_entry: false,
             peer_lookup_failures: None,
             spawn_failure_order_observer: None,
+            worker_connection_observer: None,
         }
     }
 
@@ -156,6 +161,12 @@ impl ServerLimits {
     #[cfg(test)]
     fn with_peer_lookup_failures(mut self, count: usize) -> Self {
         self.peer_lookup_failures = Some(Arc::new(AtomicUsize::new(count)));
+        self
+    }
+
+    #[cfg(test)]
+    fn with_worker_connection_observer(mut self, observer: WorkerConnectionObserver) -> Self {
+        self.worker_connection_observer = Some(observer);
         self
     }
 }
@@ -246,12 +257,13 @@ impl KernelServer {
         socket: SocketPreflight,
         audit: Arc<AuditSink>,
         clock: Arc<dyn Clock + Send + Sync>,
-        runtime: Arc<PolicyRuntime>,
     ) -> Result<Self, StableCode> {
         let bound = bind_preflight(socket)?;
+        let service = Arc::new(service);
+        let runtime = Arc::clone(service.runtime());
         Ok(Self {
             bound,
-            service: Arc::new(service),
+            service,
             runtime,
             limits: ServerLimits::production(),
             clock,
@@ -520,7 +532,7 @@ fn worker_loop(
         if configure_stream(&stream, limits.frame_io_deadline).is_err() {
             continue;
         }
-        match handle_connection(
+        let outcome = handle_connection(
             stream,
             service,
             ConnectionRuntime {
@@ -532,7 +544,15 @@ fn worker_loop(
                 #[cfg(test)]
                 peer_lookup_failures: limits.peer_lookup_failures.as_deref(),
             },
-        ) {
+        );
+        #[cfg(test)]
+        if let Some(observer) = limits.worker_connection_observer.as_ref() {
+            let _ = observer.outcomes.send(WorkerConnectionOutcome {
+                worker: thread::current().id(),
+                result: outcome,
+            });
+        }
+        match outcome {
             Ok(()) | Err(ConnectionFailure::Local(_)) => {}
             Err(ConnectionFailure::Fatal(_)) => shutdown.fail(),
         }
@@ -543,6 +563,19 @@ fn worker_loop(
 enum ConnectionFailure {
     Local(StableCode),
     Fatal(StableCode),
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct WorkerConnectionObserver {
+    outcomes: std::sync::mpsc::Sender<WorkerConnectionOutcome>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct WorkerConnectionOutcome {
+    worker: thread::ThreadId,
+    result: Result<(), ConnectionFailure>,
 }
 
 struct ConnectionRuntime<'runtime> {
@@ -1037,7 +1070,7 @@ mod tests {
     use std::os::unix::fs::{chown, PermissionsExt};
     use std::os::unix::net::UnixStream;
     use std::sync::atomic::AtomicU64;
-    use std::sync::mpsc::sync_channel;
+    use std::sync::mpsc::{channel, sync_channel};
     use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -1067,6 +1100,82 @@ mod tests {
         assert_eq!(limits.listener_backlog, 64);
         assert_eq!(limits.frame_io_deadline, Duration::from_millis(5_000));
         assert_eq!(limits.accept_poll_interval, Duration::from_millis(25));
+    }
+
+    #[test]
+    fn workers_never_keep_startup_copied_policy_limits() {
+        let client_key = SigningKey::from_bytes(&[0x6a; 32]);
+        let service = Arc::new(
+            HandshakeService::new_for_transport_test(
+                client_key.verifying_key().to_bytes(),
+                PeerIdentity::new_for_test(geteuid().as_raw(), getegid().as_raw()),
+                UnixMillis::new(1_000),
+                UnixMillis::new(20_000),
+            )
+            .unwrap(),
+        );
+        service.force_effective_limits_for_transport_test(effective_limits(4_096, 2_000));
+        let runtime = Arc::clone(service.runtime());
+        let (sender, receiver) = sync_channel(1);
+        let (outcome_tx, outcome_rx) = channel();
+        let shutdown = Shutdown::new();
+        let worker = spawn_worker(
+            Arc::new(Mutex::new(receiver)),
+            Arc::clone(&service),
+            Arc::clone(&runtime),
+            ServerLimits::for_test(1, 1, Duration::from_secs(1)).with_worker_connection_observer(
+                WorkerConnectionObserver {
+                    outcomes: outcome_tx,
+                },
+            ),
+            Arc::new(TestClock::new(2_000)),
+            shutdown.clone(),
+            None,
+        )
+        .unwrap();
+
+        let (mut old_client, old_server) = UnixStream::pair().unwrap();
+        sender.try_send(old_server).unwrap();
+        old_client.write_all(&1_025_u32.to_be_bytes()).unwrap();
+        old_client.shutdown(NetworkShutdown::Write).unwrap();
+        let old_outcome = outcome_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            old_outcome.result,
+            Err(ConnectionFailure::Local(StableCode::ProtocolTruncatedFrame))
+        );
+
+        let closed = runtime.close_and_drain().unwrap();
+        let old_snapshot = runtime.snapshot().unwrap();
+        assert_eq!(old_snapshot.generation(), 1);
+        assert_eq!(old_snapshot.effective_limits().frame_bytes(), 4_096);
+        let new_generation = old_snapshot.generation().checked_add(1).unwrap();
+        runtime
+            .force_replace_snapshot_for_test(
+                old_snapshot.with_limit_for_test(effective_limits(1_024, 2_000), new_generation),
+            )
+            .unwrap();
+        let published = runtime.snapshot().unwrap();
+        assert_eq!(published.generation(), 2);
+        assert_eq!(published.effective_limits().frame_bytes(), 1_024);
+        closed.reopen();
+
+        let (mut new_client, new_server) = UnixStream::pair().unwrap();
+        sender.try_send(new_server).unwrap();
+        new_client.write_all(&1_025_u32.to_be_bytes()).unwrap();
+        new_client.shutdown(NetworkShutdown::Write).unwrap();
+        let new_outcome = outcome_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(new_outcome.worker, old_outcome.worker);
+        assert_eq!(
+            new_outcome.result,
+            Err(ConnectionFailure::Local(StableCode::ProtocolFrameTooLarge))
+        );
+
+        shutdown.request();
+        drop(old_client);
+        drop(new_client);
+        drop(sender);
+        worker.join().unwrap();
+        assert!(!shutdown.is_fatal());
     }
 
     #[test]

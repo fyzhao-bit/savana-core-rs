@@ -396,6 +396,7 @@ impl Installation {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_profile(
     daemon_uid: u32,
     daemon_gid: u32,

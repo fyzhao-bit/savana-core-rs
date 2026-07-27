@@ -75,8 +75,7 @@ impl DaemonPolicyRuntimeSnapshot {
 }
 
 #[cfg(test)]
-#[path = "../../savana-policy-core/tests/support/mod.rs"]
-mod policy_test_support;
+use crate::startup_identity_tests::policy_support as policy_test_support;
 
 #[derive(Clone)]
 pub(crate) struct CandidateRuntimeData {
@@ -521,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn workers_never_keep_startup_copied_policy_limits() {
+    fn fresh_dispatch_reads_the_published_policy_limits() {
         let fixture = runtime_fixture();
         let initial = fixture.runtime.dispatch_lease().unwrap();
         assert_eq!(initial.snapshot().effective_limits().frame_bytes(), 4_096);
@@ -735,8 +734,8 @@ mod tests {
 
         let _process_guard = PROCESS_TEST_LOCK.lock().unwrap();
         let restore = UmaskRestore(umask(Mode::from_bits_truncate(0o117)));
-        let fixture = policy_test_support::current_policy_fixture();
-        assert_ne!(fixture.release().release_digest().as_bytes(), &[0; 32]);
+        let fixture = runtime_fixture();
+        assert_eq!(fixture.runtime.snapshot().unwrap().generation(), 1);
         drop(fixture);
         drop(restore);
     }

@@ -1,5 +1,5 @@
 #[path = "../../savana-policy-core/tests/support/mod.rs"]
-mod policy_support;
+pub(crate) mod policy_support;
 
 use std::fs::{self, OpenOptions};
 use std::os::fd::OwnedFd;

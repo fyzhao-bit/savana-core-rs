@@ -156,7 +156,7 @@ pub fn current_policy_and_identity() -> (CurrentPolicyCapability, savana_policy_
 pub fn current_policy_and_identity_from(
     mut policy: TestPolicy,
 ) -> (CurrentPolicyCapability, PolicyIdentity) {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture_tempdir();
     let root_path = fs::canonicalize(root.path()).unwrap();
     let canonical_resources = minicbor::to_vec(policy.resources).unwrap();
     let mut resource_hasher = Sha256::new();
@@ -200,7 +200,7 @@ pub fn current_policy_and_identity_from(
 pub fn current_policy_and_identity_with_clients(
     client_count: usize,
 ) -> (CurrentPolicyCapability, PolicyIdentity) {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture_tempdir();
     let root_path = fs::canonicalize(root.path()).unwrap();
     let profile = fixture_profile_with_client_count(client_count);
     let profile_digest: [u8; 32] = Sha256::digest(&profile).into();
@@ -263,7 +263,7 @@ pub struct RolloverFixture {
 
 impl RolloverFixture {
     pub fn new() -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let root = fixture_tempdir();
         let fixture = current_policy_fixture_at(root.path());
         let release = fixture.release();
         let verifier = release.policy_verifier().unwrap();
@@ -790,10 +790,16 @@ impl CurrentPolicyFixture {
 }
 
 pub fn current_policy_fixture() -> CurrentPolicyFixture {
-    let root = tempfile::tempdir().unwrap();
+    let root = fixture_tempdir();
     let mut fixture = current_policy_fixture_at(root.path());
     fixture._root = Some(root);
     fixture
+}
+
+fn fixture_tempdir() -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    root
 }
 
 pub fn current_policy_fixture_at(root: &Path) -> CurrentPolicyFixture {

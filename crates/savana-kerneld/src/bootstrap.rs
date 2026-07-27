@@ -975,14 +975,8 @@ impl PreparedRuntime {
             state_common,
         };
         retained.recheck()?;
-        let server = KernelServer::new_preflight(
-            service,
-            socket,
-            Arc::clone(&audit),
-            clock,
-            Arc::clone(&runtime),
-        )
-        .map_err(DaemonError::stable)?;
+        let server = KernelServer::new_preflight(service, socket, Arc::clone(&audit), clock)
+            .map_err(DaemonError::stable)?;
         Ok(BoundRuntime {
             server,
             retained,
