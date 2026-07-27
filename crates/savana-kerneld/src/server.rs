@@ -709,6 +709,10 @@ fn handle_connection(
     let context = service
         .finish(&peer, pending, finish, now)
         .map_err(|code| handshake_service_failure(audit, code))?;
+    let connection_audit_id = audit
+        .map(|sink| sink.connection_audit_id_for_context(&context))
+        .transpose()
+        .map_err(ConnectionFailure::Fatal)?;
     write_server_message(
         stream,
         &ServerMessageV1::Accepted(context.accepted()),
@@ -741,6 +745,13 @@ fn handle_connection(
         OperationV1::MaterializeExecution(_) => OperationTag::MaterializeExecution,
         OperationV1::CommitToolResult(_) => OperationTag::CommitToolResult,
     };
+    let requested_run_audit_id = match &request.operation {
+        OperationV1::IngestUserInput(request) => audit
+            .map(|sink| sink.run_audit_id_for_context(&context, request.run))
+            .transpose()
+            .map_err(ConnectionFailure::Fatal)?,
+        _ => None,
+    };
     let now = match clock.wall_now() {
         Ok(now) => now,
         Err(code) => {
@@ -749,6 +760,8 @@ fn handle_connection(
                 operation_tag,
                 RequestCode::Error(code),
                 request_started,
+                connection_audit_id,
+                requested_run_audit_id,
             )?;
             return Err(ConnectionFailure::Fatal(code));
         }
@@ -761,6 +774,8 @@ fn handle_connection(
                 operation_tag,
                 RequestCode::Error(code),
                 request_started,
+                connection_audit_id,
+                requested_run_audit_id,
             )?;
             return Err(classify_service_failure(code));
         }
@@ -777,6 +792,13 @@ fn handle_connection(
         ResponseBodyV1::Ok(_) => RequestCode::Ok,
         ResponseBodyV1::Err(code) => RequestCode::Error(*code),
     };
+    let completed_run_audit_id = match &response.body {
+        ResponseBodyV1::Ok(ResponsePayloadV1::BeginRun(begin)) => audit
+            .map(|sink| sink.run_audit_id_for_context(&context, begin.run))
+            .transpose()
+            .map_err(ConnectionFailure::Fatal)?,
+        _ => requested_run_audit_id,
+    };
     let write_result = write_server_message(
         stream,
         &ServerMessageV1::Response(response),
@@ -790,7 +812,14 @@ fn handle_connection(
             RequestCode::Error(code)
         }
     };
-    record_request_completion(audit, operation_tag, completion_code, request_started)?;
+    record_request_completion(
+        audit,
+        operation_tag,
+        completion_code,
+        request_started,
+        connection_audit_id,
+        completed_run_audit_id,
+    )?;
     write_result
 }
 
@@ -821,13 +850,19 @@ fn record_request_completion(
     operation_tag: OperationTag,
     code: RequestCode,
     started: Instant,
+    connection_audit_id: Option<crate::audit::AuditId>,
+    run_audit_id: Option<crate::audit::AuditId>,
 ) -> Result<(), ConnectionFailure> {
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     if let Some(sink) = audit {
+        let connection_audit_id =
+            connection_audit_id.ok_or(ConnectionFailure::Fatal(StableCode::KernelUnavailable))?;
         sink.emit(AuditEvent::RequestCompleted {
             operation_tag,
             code,
             latency_ms,
+            connection_audit_id,
+            run_audit_id,
         })
         .map_err(ConnectionFailure::Fatal)?;
     }
@@ -1112,6 +1147,7 @@ mod tests {
     use crate::handshake::HandshakeService;
     use crate::peer::PeerIdentity;
     use crate::policy_runtime::LockEvent;
+    use crate::runtime_deps::AuditSecret;
     use crate::socket::{SocketConfig, PROCESS_TEST_LOCK};
 
     #[test]
@@ -1710,8 +1746,12 @@ mod tests {
         let (_client, server) = UnixStream::pair().unwrap();
         let (audit_writer, mut audit_reader) = UnixStream::pair().unwrap();
         let audit_writer: OwnedFd = audit_writer.into();
-        let audit =
-            AuditSink::from_owned_for_test(audit_writer, Duration::from_millis(100)).unwrap();
+        let audit = AuditSink::from_owned_for_test(
+            AuditSecret::from_test_bytes([0xa5; 32]),
+            audit_writer,
+            Duration::from_millis(100),
+        )
+        .unwrap();
 
         assert_eq!(
             handle_connection(
@@ -1755,8 +1795,12 @@ mod tests {
         let (audit_writer, audit_reader) = UnixStream::pair().unwrap();
         drop(audit_reader);
         let audit_writer: OwnedFd = audit_writer.into();
-        let audit =
-            AuditSink::from_owned_for_test(audit_writer, Duration::from_millis(100)).unwrap();
+        let audit = AuditSink::from_owned_for_test(
+            AuditSecret::from_test_bytes([0xa5; 32]),
+            audit_writer,
+            Duration::from_millis(100),
+        )
+        .unwrap();
 
         assert_eq!(
             handle_connection(
@@ -2162,7 +2206,12 @@ mod tests {
         let (audit_writer, mut audit_reader) = UnixStream::pair().unwrap();
         let audit_writer: OwnedFd = audit_writer.into();
         let audit = Arc::new(
-            AuditSink::from_owned_for_test(audit_writer, Duration::from_millis(100)).unwrap(),
+            AuditSink::from_owned_for_test(
+                AuditSecret::from_test_bytes([0xa5; 32]),
+                audit_writer,
+                Duration::from_millis(100),
+            )
+            .unwrap(),
         );
         let worker_audit = Arc::clone(&audit);
         let handle = thread::spawn(move || {

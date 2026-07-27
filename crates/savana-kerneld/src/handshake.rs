@@ -343,6 +343,10 @@ impl ConnectionContext {
         self.boot_id
     }
 
+    pub(crate) const fn generation(&self) -> u64 {
+        self.generation
+    }
+
     pub(crate) const fn protocol(&self) -> ProtocolVersion {
         self.protocol
     }

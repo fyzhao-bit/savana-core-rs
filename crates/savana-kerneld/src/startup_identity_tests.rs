@@ -1431,6 +1431,19 @@ impl MappedInstallation {
         )
     }
 
+    pub(crate) fn prepare_with_random_for_entropy_test(
+        &self,
+        boot_id: savana_kernel_protocol::BootId,
+        random: Arc<dyn RandomSource + Send + Sync>,
+    ) -> Result<PreparedRuntime, DaemonError> {
+        PreparedRuntime::prepare_with_dependencies(
+            &self.config,
+            boot_id,
+            Arc::new(FixedClock::default()),
+            random,
+        )
+    }
+
     fn prepare_after_update_lock_corruption(
         &self,
         corruption: UpdateLockCorruption,
@@ -1563,7 +1576,12 @@ impl MappedInstallation {
     fn audit(&self) -> (Arc<AuditSink>, std::os::unix::net::UnixStream) {
         let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
         let writer: OwnedFd = writer.into();
-        let audit = AuditSink::from_owned_for_test(writer, Duration::from_millis(100)).unwrap();
+        let audit = AuditSink::from_owned_for_test(
+            crate::runtime_deps::AuditSecret::from_test_bytes([0xa5; 32]),
+            writer,
+            Duration::from_millis(100),
+        )
+        .unwrap();
         (Arc::new(audit), reader)
     }
 

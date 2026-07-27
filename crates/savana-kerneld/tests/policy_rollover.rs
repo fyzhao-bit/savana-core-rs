@@ -100,6 +100,7 @@ fn asynchronous_lifecycle_response_write_failure_is_fatal() {
         .arg(&installation.config)
         .env("SAVANA_TEST_LIFECYCLE_CONTROL", "stdio-v1")
         .env_remove("SAVANA_TEST_POLICY_CORE_LIVE_PERSISTENCE_FAULT")
+        .env_remove("SAVANA_TEST_PROCESS_ENTROPY")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

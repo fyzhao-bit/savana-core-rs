@@ -24,6 +24,7 @@ serde_json = "=1.0.151"
 minicbor = { version = "=0.25.1", features = ["std", "derive"] }
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["std", "fast", "zeroize", "pkcs8"] }
 sha2 = "=0.10.9"
+hmac = "=0.12.1"
 getrandom = "=0.2.17"
 zeroize = { version = "=1.8.1", features = ["derive"] }
 nix = { version = "=0.29.0", default-features = false, features = ["socket", "user", "fs", "signal"] }

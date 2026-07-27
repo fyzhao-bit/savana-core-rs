@@ -279,10 +279,137 @@ use std::path::Path;
 use std::sync::Arc;
 
 use audit::{AuditEvent, AuditSink};
+#[cfg(all(feature = "test-support", debug_assertions))]
+use bootstrap::BootstrapContext;
 use bootstrap::{acquire_run_ownership, PreparedRuntime};
 use panic_report::PanicHookGuard;
+use runtime_deps::{ProcessSecrets, SystemClock, SystemRandom};
 use savana_kernel_protocol::StableCode;
+use savana_policy_core::{Clock, RandomSource};
 use signal_control::{SignalController, SignalMaskGuard, SigpipeGuard};
+
+#[cfg(all(feature = "test-support", debug_assertions))]
+const TEST_PROCESS_ENTROPY_ENV: &str = "SAVANA_TEST_PROCESS_ENTROPY";
+
+#[cfg(all(feature = "test-support", debug_assertions))]
+enum ProcessEntropyStep {
+    Fill(u8),
+    Error,
+    Short,
+    Zero,
+}
+
+#[cfg(all(feature = "test-support", debug_assertions))]
+struct ScriptedProcessRandom {
+    steps: std::sync::Mutex<std::collections::VecDeque<ProcessEntropyStep>>,
+}
+
+#[cfg(all(feature = "test-support", debug_assertions))]
+impl ScriptedProcessRandom {
+    fn from_environment_value(value: &std::ffi::OsStr) -> Result<Self, StableCode> {
+        use std::os::unix::ffi::OsStrExt;
+
+        let steps = match value.as_bytes() {
+            b"fail-boot" => vec![ProcessEntropyStep::Error],
+            b"short-boot" => vec![ProcessEntropyStep::Short],
+            b"zero-boot" => vec![ProcessEntropyStep::Zero],
+            b"fail-audit" => vec![ProcessEntropyStep::Fill(0x11), ProcessEntropyStep::Error],
+            b"short-audit" => vec![ProcessEntropyStep::Fill(0x11), ProcessEntropyStep::Short],
+            b"zero-audit" => vec![ProcessEntropyStep::Fill(0x11), ProcessEntropyStep::Zero],
+            b"fail-engine" => vec![
+                ProcessEntropyStep::Fill(0x11),
+                ProcessEntropyStep::Fill(0x22),
+                ProcessEntropyStep::Error,
+            ],
+            b"short-engine" => vec![
+                ProcessEntropyStep::Fill(0x11),
+                ProcessEntropyStep::Fill(0x22),
+                ProcessEntropyStep::Short,
+            ],
+            b"zero-engine" => vec![
+                ProcessEntropyStep::Fill(0x11),
+                ProcessEntropyStep::Fill(0x22),
+                ProcessEntropyStep::Zero,
+            ],
+            _ => return Err(StableCode::KernelUnavailable),
+        };
+        Ok(Self {
+            steps: std::sync::Mutex::new(steps.into()),
+        })
+    }
+}
+
+#[cfg(all(feature = "test-support", debug_assertions))]
+impl RandomSource for ScriptedProcessRandom {
+    fn fill(&self, output: &mut [u8]) -> Result<usize, StableCode> {
+        let step = self
+            .steps
+            .lock()
+            .map_err(|_| StableCode::KernelUnavailable)?
+            .pop_front()
+            .ok_or(StableCode::KernelUnavailable)?;
+        match step {
+            ProcessEntropyStep::Fill(fill) => {
+                output.fill(fill);
+                Ok(output.len())
+            }
+            ProcessEntropyStep::Error => Err(StableCode::KernelUnavailable),
+            ProcessEntropyStep::Short => {
+                output.fill(0x5a);
+                Ok(output.len().saturating_sub(1))
+            }
+            ProcessEntropyStep::Zero => {
+                output.fill(0);
+                Ok(output.len())
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "test-support", debug_assertions))]
+fn select_process_random(
+    context: &BootstrapContext,
+) -> Result<Arc<dyn RandomSource + Send + Sync>, StableCode> {
+    let Some(value) = std::env::var_os(TEST_PROCESS_ENTROPY_ENV) else {
+        return Ok(Arc::new(SystemRandom));
+    };
+    let random = scripted_entropy_for_mapped_root(context.uses_mapped_layout(), &value)?;
+    Ok(Arc::new(random))
+}
+
+#[cfg(all(feature = "test-support", debug_assertions))]
+fn scripted_entropy_for_mapped_root(
+    mapped_root_is_verified: bool,
+    value: &std::ffi::OsStr,
+) -> Result<ScriptedProcessRandom, StableCode> {
+    if !mapped_root_is_verified {
+        return Err(StableCode::KernelUnavailable);
+    }
+    ScriptedProcessRandom::from_environment_value(value)
+}
+
+#[cfg(all(test, feature = "test-support", debug_assertions))]
+mod process_entropy_tests {
+    use std::ffi::OsStr;
+
+    use super::*;
+
+    #[test]
+    fn entropy_script_requires_a_verified_mapped_root_and_known_value() {
+        assert!(matches!(
+            scripted_entropy_for_mapped_root(false, OsStr::new("fail-boot")),
+            Err(StableCode::KernelUnavailable)
+        ));
+        assert!(matches!(
+            scripted_entropy_for_mapped_root(true, OsStr::new("unknown-script")),
+            Err(StableCode::KernelUnavailable)
+        ));
+        assert!(matches!(
+            scripted_entropy_for_mapped_root(true, OsStr::new("")),
+            Err(StableCode::KernelUnavailable)
+        ));
+    }
+}
 
 pub fn run(config_path: &Path) -> Result<(), DaemonError> {
     acquire_run_ownership()?;
@@ -292,7 +419,42 @@ pub fn run(config_path: &Path) -> Result<(), DaemonError> {
         Ok(sigpipe) => sigpipe,
         Err(code) => return finish_before_audit(code, mask, None),
     };
-    let (audit, panic_descriptor) = match AuditSink::establish() {
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    let prepared_context = match BootstrapContext::open(config_path) {
+        Ok(context) => context,
+        Err(error) => {
+            let secrets = match ProcessSecrets::draw(&SystemRandom) {
+                Ok(secrets) => secrets,
+                Err(code) => return finish_before_audit(code, mask, Some(sigpipe)),
+            };
+            let (audit, panic_descriptor) = match AuditSink::establish(secrets.audit_secret) {
+                Ok(established) => established,
+                Err(code) => return finish_before_audit(code, mask, Some(sigpipe)),
+            };
+            let audit = Arc::new(audit);
+            let panic = PanicHookGuard::install(panic_descriptor);
+            let signals = match SignalController::install(mask, sigpipe) {
+                Ok(signals) => signals,
+                Err((code, mask, sigpipe)) => {
+                    return finish_signal_install_failure(code, &audit, panic, mask, sigpipe);
+                }
+            };
+            return finish_bootstrap_failure(error.code(), &audit, panic, signals);
+        }
+    };
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    let random = match select_process_random(&prepared_context) {
+        Ok(random) => random,
+        Err(code) => return finish_before_audit(code, mask, Some(sigpipe)),
+    };
+    #[cfg(not(all(feature = "test-support", debug_assertions)))]
+    let random: Arc<dyn RandomSource + Send + Sync> = Arc::new(SystemRandom);
+    let secrets = match ProcessSecrets::draw(random.as_ref()) {
+        Ok(secrets) => secrets,
+        Err(code) => return finish_before_audit(code, mask, Some(sigpipe)),
+    };
+    let boot_id = secrets.boot_id;
+    let (audit, panic_descriptor) = match AuditSink::establish(secrets.audit_secret) {
         Ok(established) => established,
         Err(code) => return finish_before_audit(code, mask, Some(sigpipe)),
     };
@@ -305,7 +467,14 @@ pub fn run(config_path: &Path) -> Result<(), DaemonError> {
         }
     };
 
-    let prepared = match PreparedRuntime::prepare(config_path) {
+    let clock: Arc<dyn Clock + Send + Sync> = Arc::new(SystemClock::new());
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    let prepared_result =
+        PreparedRuntime::prepare_from_context(prepared_context, boot_id, clock, random);
+    #[cfg(not(all(feature = "test-support", debug_assertions)))]
+    let prepared_result =
+        PreparedRuntime::prepare_with_dependencies(config_path, boot_id, clock, random);
+    let prepared = match prepared_result {
         Ok(prepared) => prepared,
         Err(error) => {
             return finish_bootstrap_failure(error.code(), &audit, panic, signals);

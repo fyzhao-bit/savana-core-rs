@@ -8,10 +8,145 @@ use std::time::{Duration, Instant};
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
 use rustix::fs::{fcntl_getfl, fcntl_setfl, fstat, FileType, OFlags};
 use rustix::io::{fcntl_dupfd_cloexec, fcntl_getfd, fcntl_setfd, write, Errno, FdFlags};
-use savana_kernel_protocol::{ServerIdentityV1, StableCode};
+use savana_kernel_protocol::{
+    BootId, ClientId, Digest32, Nonce32, RunHandle, ServerIdentityV1, StableCode,
+};
+
+use crate::handshake::ConnectionContext;
+use crate::runtime_deps::AuditSecret;
 
 const MAXIMUM_AUDIT_LINE_BYTES: usize = 1024;
 const AUDIT_IO_DEADLINE: Duration = Duration::from_secs(5);
+const AUDIT_CONNECTION_DOMAIN: &[u8] = b"SAVANA_AUDIT_CONNECTION_V1\0";
+const AUDIT_RUN_DOMAIN: &[u8] = b"SAVANA_AUDIT_RUN_V1\0";
+
+type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AuditId(Digest32);
+
+impl std::fmt::Debug for AuditId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AuditId(<opaque>)")
+    }
+}
+
+#[cfg(test)]
+impl AuditId {
+    fn to_hex(self) -> String {
+        let mut output = String::with_capacity(64);
+        push_hex(&mut output, self.0.as_bytes());
+        output
+    }
+}
+
+struct AuditConnectionIdentity {
+    boot_id: BootId,
+    generation: u64,
+    client_id: ClientId,
+    peer_uid: u32,
+    connection_id: Nonce32,
+}
+
+impl AuditConnectionIdentity {
+    fn from_context(context: &ConnectionContext) -> Self {
+        Self {
+            boot_id: context.boot_id(),
+            generation: context.generation(),
+            client_id: context.client_id().clone(),
+            peer_uid: context.peer().uid(),
+            connection_id: context.connection_id(),
+        }
+    }
+
+    #[cfg(test)]
+    fn new(
+        boot_id: BootId,
+        generation: u64,
+        client_id: ClientId,
+        peer_uid: u32,
+        connection_id: Nonce32,
+    ) -> Self {
+        Self {
+            boot_id,
+            generation,
+            client_id,
+            peer_uid,
+            connection_id,
+        }
+    }
+
+    fn canonical(&self) -> Result<Vec<u8>, StableCode> {
+        minicbor::to_vec(CanonicalAuditConnectionIdentity {
+            boot_id: self.boot_id,
+            generation: self.generation,
+            client_id: &self.client_id,
+            peer_uid: self.peer_uid,
+            connection_id: self.connection_id,
+        })
+        .map_err(|_| StableCode::KernelUnavailable)
+    }
+}
+
+struct AuditRunIdentity {
+    boot_id: BootId,
+    generation: u64,
+    run_handle: RunHandle,
+}
+
+impl AuditRunIdentity {
+    fn from_connection(context: &ConnectionContext, run_handle: RunHandle) -> Self {
+        Self {
+            boot_id: context.boot_id(),
+            generation: context.generation(),
+            run_handle,
+        }
+    }
+
+    #[cfg(test)]
+    fn new(boot_id: BootId, generation: u64, run_handle: RunHandle) -> Self {
+        Self {
+            boot_id,
+            generation,
+            run_handle,
+        }
+    }
+
+    fn canonical(&self) -> Result<Vec<u8>, StableCode> {
+        minicbor::to_vec(CanonicalAuditRunIdentity {
+            boot_id: self.boot_id,
+            generation: self.generation,
+            run_handle: self.run_handle,
+        })
+        .map_err(|_| StableCode::KernelUnavailable)
+    }
+}
+
+#[derive(minicbor::Encode)]
+#[cbor(array)]
+struct CanonicalAuditConnectionIdentity<'a> {
+    #[n(0)]
+    boot_id: BootId,
+    #[n(1)]
+    generation: u64,
+    #[n(2)]
+    client_id: &'a ClientId,
+    #[n(3)]
+    peer_uid: u32,
+    #[n(4)]
+    connection_id: Nonce32,
+}
+
+#[derive(minicbor::Encode)]
+#[cbor(array)]
+struct CanonicalAuditRunIdentity {
+    #[n(0)]
+    boot_id: BootId,
+    #[n(1)]
+    generation: u64,
+    #[n(2)]
+    run_handle: RunHandle,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OperationTag {
@@ -90,6 +225,8 @@ pub(crate) enum AuditEvent<'identity> {
         operation_tag: OperationTag,
         code: RequestCode,
         latency_ms: u64,
+        connection_audit_id: AuditId,
+        run_audit_id: Option<AuditId>,
     },
     Fatal {
         code: StableCode,
@@ -106,6 +243,7 @@ struct AuditWriter {
 
 pub(crate) struct AuditSink {
     writer: Mutex<AuditWriter>,
+    secret: AuditSecret,
 }
 
 impl std::fmt::Debug for AuditSink {
@@ -115,23 +253,36 @@ impl std::fmt::Debug for AuditSink {
 }
 
 impl AuditSink {
-    pub(crate) fn establish() -> Result<(Self, OwnedFd), StableCode> {
+    pub(crate) fn establish(secret: AuditSecret) -> Result<(Self, OwnedFd), StableCode> {
         let owned = fcntl_dupfd_cloexec(rustix::stdio::stderr(), 3)
             .map_err(|_| StableCode::KernelUnavailable)?;
-        let sink = Self::from_owned(owned, AUDIT_IO_DEADLINE)?;
+        let sink = Self::from_owned(secret, owned, AUDIT_IO_DEADLINE)?;
         let panic_descriptor = sink.duplicate_for_panic()?;
         Ok((sink, panic_descriptor))
     }
 
     #[cfg(test)]
     pub(crate) fn from_owned_for_test(
+        secret: AuditSecret,
         owned: OwnedFd,
         timeout: Duration,
     ) -> Result<Self, StableCode> {
-        Self::from_owned(owned, timeout)
+        Self::from_owned(secret, owned, timeout)
     }
 
-    fn from_owned(owned: OwnedFd, timeout: Duration) -> Result<Self, StableCode> {
+    #[cfg(test)]
+    fn with_secret_for_test(secret: [u8; 32], timeout: Duration) -> Result<Self, StableCode> {
+        let (writer, reader) =
+            std::os::unix::net::UnixStream::pair().map_err(|_| StableCode::KernelUnavailable)?;
+        drop(reader);
+        Self::from_owned(AuditSecret::from_test_bytes(secret), writer.into(), timeout)
+    }
+
+    fn from_owned(
+        secret: AuditSecret,
+        owned: OwnedFd,
+        timeout: Duration,
+    ) -> Result<Self, StableCode> {
         if timeout.is_zero() || timeout > AUDIT_IO_DEADLINE {
             return Err(StableCode::KernelUnavailable);
         }
@@ -163,6 +314,7 @@ impl AuditSink {
         }
         Ok(Self {
             writer: Mutex::new(AuditWriter { file, timeout }),
+            secret,
         })
     }
 
@@ -181,6 +333,42 @@ impl AuditSink {
             .lock()
             .map_err(|_| StableCode::KernelUnavailable)?;
         fcntl_dupfd_cloexec(&writer.file, 3).map_err(|_| StableCode::KernelUnavailable)
+    }
+
+    fn connection_audit_id(
+        &self,
+        identity: &AuditConnectionIdentity,
+    ) -> Result<AuditId, StableCode> {
+        self.correlate(AUDIT_CONNECTION_DOMAIN, &identity.canonical()?)
+    }
+
+    fn run_audit_id(&self, identity: &AuditRunIdentity) -> Result<AuditId, StableCode> {
+        self.correlate(AUDIT_RUN_DOMAIN, &identity.canonical()?)
+    }
+
+    pub(crate) fn connection_audit_id_for_context(
+        &self,
+        context: &ConnectionContext,
+    ) -> Result<AuditId, StableCode> {
+        self.connection_audit_id(&AuditConnectionIdentity::from_context(context))
+    }
+
+    pub(crate) fn run_audit_id_for_context(
+        &self,
+        context: &ConnectionContext,
+        run_handle: RunHandle,
+    ) -> Result<AuditId, StableCode> {
+        self.run_audit_id(&AuditRunIdentity::from_connection(context, run_handle))
+    }
+
+    fn correlate(&self, domain: &'static [u8], canonical: &[u8]) -> Result<AuditId, StableCode> {
+        use hmac::Mac;
+
+        let mut mac = HmacSha256::new_from_slice(self.secret.as_bytes())
+            .map_err(|_| StableCode::KernelUnavailable)?;
+        mac.update(domain);
+        mac.update(canonical);
+        Ok(AuditId(Digest32::new(mac.finalize().into_bytes().into())))
     }
 }
 
@@ -306,18 +494,28 @@ fn encode_event(event: AuditEvent<'_>) -> Result<Vec<u8>, StableCode> {
             operation_tag,
             code,
             latency_ms,
+            connection_audit_id,
+            run_audit_id,
         } => {
             write!(
                 output,
                 concat!(
                     r#"{{"event":"RequestCompleted","operation_tag":"{}","#,
-                    r#""code":"{}","latency_ms":{}}}"#
+                    r#""code":"{}","latency_ms":{},"connection_audit_id":""#
                 ),
                 operation_tag.as_str(),
                 code.as_str(),
                 latency_ms
             )
             .map_err(|_| StableCode::KernelUnavailable)?;
+            push_hex(&mut output, connection_audit_id.0.as_bytes());
+            output.push('"');
+            if let Some(run_audit_id) = run_audit_id {
+                output.push_str(r#","run_audit_id":""#);
+                push_hex(&mut output, run_audit_id.0.as_bytes());
+                output.push('"');
+            }
+            output.push('}');
         }
         AuditEvent::Fatal { code } => {
             write!(output, r#"{{"event":"Fatal","code":"{}"}}"#, code.as_str())
@@ -355,18 +553,84 @@ mod tests {
     use std::time::Duration;
 
     use savana_kernel_protocol::{
-        BootId, Digest32, KeyId, ProtocolVersion, ServerIdentityV1, StableCode,
+        BootId, ClientId, Digest32, KeyId, Nonce32, ProtocolVersion, RunHandle, ServerIdentityV1,
+        StableCode,
     };
     #[cfg(target_os = "macos")]
     use std::fs::File;
 
     use super::*;
 
+    fn test_secret() -> AuditSecret {
+        AuditSecret::from_test_bytes([0xa5; 32])
+    }
+
+    fn test_audit_id(byte: u8) -> AuditId {
+        AuditId(Digest32::new([byte; 32]))
+    }
+
+    #[test]
+    fn audit_hmac_vectors_and_domains_are_exact() {
+        let sink = AuditSink::with_secret_for_test([0xa5; 32], Duration::from_millis(100)).unwrap();
+        let connection = AuditConnectionIdentity::new(
+            BootId::new([0x01; 32]),
+            1,
+            ClientId::try_from("client-a").unwrap(),
+            501,
+            Nonce32::new([0x02; 32]),
+        );
+        let run = AuditRunIdentity::new(BootId::new([0x01; 32]), 1, run_handle_with_byte(0x03));
+        assert_eq!(
+            sink.connection_audit_id(&connection).unwrap().to_hex(),
+            "e7777129814628ad7123004249636a39bad3560a51eb0debbb2290ea7a52ca75"
+        );
+        assert_eq!(
+            sink.run_audit_id(&run).unwrap().to_hex(),
+            "2e1162eca89842ce32fc77ca0478da873321eb15328219447217718d83809263"
+        );
+        assert_ne!(
+            sink.connection_audit_id(&connection).unwrap().to_hex(),
+            sink.run_audit_id(&run).unwrap().to_hex()
+        );
+    }
+
+    #[test]
+    fn correlation_is_stable_within_one_boot_and_unlinkable_across_boots() {
+        let identity = AuditConnectionIdentity::new(
+            BootId::new([0x11; 32]),
+            7,
+            ClientId::try_from("client-a").unwrap(),
+            501,
+            Nonce32::new([0x22; 32]),
+        );
+        let first =
+            AuditSink::with_secret_for_test([0x61; 32], Duration::from_millis(100)).unwrap();
+        let second =
+            AuditSink::with_secret_for_test([0x62; 32], Duration::from_millis(100)).unwrap();
+        assert_eq!(
+            first.connection_audit_id(&identity).unwrap(),
+            first.connection_audit_id(&identity).unwrap()
+        );
+        assert_ne!(
+            first.connection_audit_id(&identity).unwrap(),
+            second.connection_audit_id(&identity).unwrap()
+        );
+    }
+
+    fn run_handle_with_byte(byte: u8) -> RunHandle {
+        let mut encoded = Vec::with_capacity(34);
+        encoded.extend_from_slice(&[0x58, 0x20]);
+        encoded.extend_from_slice(&[byte; 32]);
+        minicbor::decode(&encoded).unwrap()
+    }
+
     #[test]
     fn closed_events_have_fixed_order_bounded_redacted_json_lines() {
         let (writer, mut reader) = UnixStream::pair().unwrap();
         let writer: OwnedFd = writer.into();
-        let sink = AuditSink::from_owned_for_test(writer, Duration::from_millis(100)).unwrap();
+        let sink =
+            AuditSink::from_owned_for_test(test_secret(), writer, Duration::from_millis(100))
+                .unwrap();
         let identity = ServerIdentityV1 {
             daemon_key_id: KeyId::try_from("not-emitted").unwrap(),
             boot_id: BootId::new([0x01; 32]),
@@ -395,6 +659,8 @@ mod tests {
             operation_tag: OperationTag::Health,
             code: RequestCode::Ok,
             latency_ms: 9,
+            connection_audit_id: test_audit_id(0x07),
+            run_audit_id: None,
         })
         .unwrap();
         sink.emit(AuditEvent::Fatal {
@@ -436,7 +702,13 @@ mod tests {
         );
         assert_eq!(
             lines[3],
-            r#"{"event":"RequestCompleted","operation_tag":"health","code":"OK","latency_ms":9}"#
+            format!(
+                concat!(
+                    r#"{{"event":"RequestCompleted","operation_tag":"health","code":"OK","latency_ms":9,"#,
+                    r#""connection_audit_id":"{}"}}"#
+                ),
+                "07".repeat(32)
+            )
         );
         assert_eq!(lines[4], r#"{"event":"Fatal","code":"KERNEL_UNAVAILABLE"}"#);
         assert_eq!(lines[5], r#"{"event":"Stopped","reason":"sigterm"}"#);
@@ -450,7 +722,7 @@ mod tests {
         let owned: OwnedFd = file.into();
 
         assert_eq!(
-            AuditSink::from_owned_for_test(owned, Duration::from_millis(100))
+            AuditSink::from_owned_for_test(test_secret(), owned, Duration::from_millis(100))
                 .err()
                 .unwrap(),
             StableCode::KernelUnavailable
@@ -462,7 +734,9 @@ mod tests {
         let _panic_guard = crate::panic_report::PROCESS_PANIC_TEST_LOCK.lock().unwrap();
         let (writer, _reader) = UnixStream::pair().unwrap();
         let writer: OwnedFd = writer.into();
-        let sink = AuditSink::from_owned_for_test(writer, Duration::from_millis(100)).unwrap();
+        let sink =
+            AuditSink::from_owned_for_test(test_secret(), writer, Duration::from_millis(100))
+                .unwrap();
 
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = sink.writer.lock().unwrap();
@@ -482,7 +756,9 @@ mod tests {
         let (writer, reader) = UnixStream::pair().unwrap();
         drop(reader);
         let writer: OwnedFd = writer.into();
-        let sink = AuditSink::from_owned_for_test(writer, Duration::from_millis(100)).unwrap();
+        let sink =
+            AuditSink::from_owned_for_test(test_secret(), writer, Duration::from_millis(100))
+                .unwrap();
 
         assert_eq!(
             sink.emit(AuditEvent::Fatal {
@@ -506,7 +782,8 @@ mod tests {
             }
         }
         let writer: OwnedFd = writer.into();
-        let sink = AuditSink::from_owned_for_test(writer, Duration::from_millis(10)).unwrap();
+        let sink = AuditSink::from_owned_for_test(test_secret(), writer, Duration::from_millis(10))
+            .unwrap();
         let started = Instant::now();
 
         assert_eq!(
@@ -525,7 +802,7 @@ mod tests {
         let owned: OwnedFd = file.into();
 
         assert_eq!(
-            AuditSink::from_owned_for_test(owned, Duration::from_millis(100))
+            AuditSink::from_owned_for_test(test_secret(), owned, Duration::from_millis(100))
                 .err()
                 .unwrap(),
             StableCode::KernelUnavailable

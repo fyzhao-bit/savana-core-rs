@@ -25,6 +25,7 @@ nix.workspace = true
 rustix.workspace = true
 signal-hook.workspace = true
 sha2.workspace = true
+hmac.workspace = true
 getrandom.workspace = true
 minicbor.workspace = true
 

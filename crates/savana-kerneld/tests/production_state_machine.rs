@@ -33,6 +33,10 @@ use sha2::{Digest, Sha256};
 
 const DAEMON_HELLO_DOMAIN: &[u8] = b"SAVANA_DAEMON_HELLO_V1\0";
 const CLIENT_FINISH_DOMAIN: &[u8] = b"SAVANA_CLIENT_FINISH_V1\0";
+const TEST_PROCESS_ENTROPY_ENV: &str = "SAVANA_TEST_PROCESS_ENTROPY";
+const LIFECYCLE_CONTROL_ENV: &str = "SAVANA_TEST_LIFECYCLE_CONTROL";
+const POLICY_CORE_LIVE_PERSISTENCE_FAULT_ENV: &str =
+    "SAVANA_TEST_POLICY_CORE_LIVE_PERSISTENCE_FAULT";
 
 #[derive(Debug, Clone, Copy)]
 enum Corruption {
@@ -58,6 +62,7 @@ fn complete_mapped_installation_authenticates_health_and_retains_durable_state()
     let mut child = Command::new(&installation.executable)
         .arg("--config")
         .arg(&installation.config)
+        .env_remove(TEST_PROCESS_ENTROPY_ENV)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -177,6 +182,37 @@ fn daemon_implements_core_dependencies_and_pins_one_boot_across_components() {
     }
 }
 
+#[test]
+fn two_process_starts_get_distinct_nonzero_boot_ids() {
+    let installation = Installation::build();
+    let first = installation.start_query_and_stop();
+    let second = installation.start_query_and_stop();
+    assert_ne!(first.as_bytes(), &[0; 32]);
+    assert_ne!(second.as_bytes(), &[0; 32]);
+    assert_ne!(first, second);
+}
+
+#[test]
+fn scripted_zero_short_and_failed_process_entropy_never_accepts() {
+    for script in [
+        "fail-boot",
+        "short-boot",
+        "zero-boot",
+        "fail-audit",
+        "short-audit",
+        "zero-audit",
+        "fail-engine",
+        "short-engine",
+        "zero-engine",
+        "unknown-script",
+    ] {
+        let installation = Installation::build();
+        let output = installation.spawn_with_entropy_script(script);
+        assert!(!output.status.success(), "{script}");
+        assert!(!installation.socket_accepts(), "{script}");
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum DependencyFault {
     Healthy,
@@ -274,7 +310,7 @@ const fn socket_permission_fallback_allowed(host_socket_available: bool) -> bool
     !host_socket_available
 }
 
-fn assert_authenticated_health(installation: &Installation) {
+fn assert_authenticated_health(installation: &Installation) -> BootId {
     let limits = HardLimits::COMPILED
         .lower(&policy_support::compiled_resources())
         .unwrap();
@@ -315,6 +351,7 @@ fn assert_authenticated_health(installation: &Installation) {
         .unwrap();
 
     let identity = &signed.transcript.server;
+    let boot_id = identity.boot_id;
     assert_eq!(identity.daemon_key_id.as_str(), "daemon-key");
     assert_eq!(identity.protocol, ProtocolVersion::new(1, 0));
     assert_eq!(identity.release_digest, installation.release_digest);
@@ -373,6 +410,7 @@ fn assert_authenticated_health(installation: &Installation) {
         other => panic!("expected Health success, got {other:?}"),
     }
     assert_eq!(stream.read(&mut [0_u8; 1]).unwrap(), 0);
+    boot_id
 }
 
 fn write_client(
@@ -464,6 +502,7 @@ impl Installation {
         let mut child = Command::new(&self.executable)
             .arg("--config")
             .arg(&self.config)
+            .env_remove(TEST_PROCESS_ENTROPY_ENV)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -494,6 +533,84 @@ impl Installation {
             }
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn start_query_and_stop(&self) -> BootId {
+        let mut child = Command::new(&self.executable)
+            .arg("--config")
+            .arg(&self.config)
+            .env_remove(TEST_PROCESS_ENTROPY_ENV)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "daemon exited before authenticated health ({status}): {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            if self.socket.exists() {
+                let boot_id = assert_authenticated_health(self);
+                kill(
+                    Pid::from_raw(i32::try_from(child.id()).unwrap()),
+                    Signal::SIGTERM,
+                )
+                .unwrap();
+                let output = child.wait_with_output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                return boot_id;
+            }
+            assert!(Instant::now() < deadline, "daemon did not bind");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn spawn_with_entropy_script(&self, script: &str) -> Output {
+        let mut child = Command::new(&self.executable)
+            .arg("--config")
+            .arg(&self.config)
+            .env_remove(LIFECYCLE_CONTROL_ENV)
+            .env_remove(POLICY_CORE_LIVE_PERSISTENCE_FAULT_ENV)
+            .env(TEST_PROCESS_ENTROPY_ENV, script)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                return child.wait_with_output().unwrap();
+            }
+            if self.socket.exists() {
+                let _ = child.kill();
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "entropy-faulted daemon reached socket bind ({script}): {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "entropy-faulted daemon neither exited nor bound ({script}): {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn socket_accepts(&self) -> bool {
+        UnixStream::connect(&self.socket).is_ok()
     }
 
     fn corrupt(&self, corruption: Corruption) {

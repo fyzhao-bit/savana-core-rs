@@ -34,6 +34,7 @@ const LIFECYCLE_CONTROL_ENV: &str = "SAVANA_TEST_LIFECYCLE_CONTROL";
 const LIFECYCLE_CONTROL_MODE: &str = "stdio-v1";
 const POLICY_CORE_LIVE_PERSISTENCE_FAULT_ENV: &str =
     "SAVANA_TEST_POLICY_CORE_LIVE_PERSISTENCE_FAULT";
+const TEST_PROCESS_ENTROPY_ENV: &str = "SAVANA_TEST_PROCESS_ENTROPY";
 const CONTROL_RESPONSE_BYTES: usize = 72;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -800,6 +801,7 @@ impl Installation {
             .arg(&self.config)
             .env(LIFECYCLE_CONTROL_ENV, LIFECYCLE_CONTROL_MODE)
             .env_remove(POLICY_CORE_LIVE_PERSISTENCE_FAULT_ENV)
+            .env_remove(TEST_PROCESS_ENTROPY_ENV)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

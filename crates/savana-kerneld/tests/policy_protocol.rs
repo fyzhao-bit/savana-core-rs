@@ -27,6 +27,7 @@ use sha2::Digest;
 const DAEMON_HELLO_DOMAIN: &[u8] = b"SAVANA_DAEMON_HELLO_V1\0";
 const CLIENT_FINISH_DOMAIN: &[u8] = b"SAVANA_CLIENT_FINISH_V1\0";
 const INGRESS_DOMAIN: &[u8] = b"SAVANA_INGRESS_V1\0";
+const TEST_PROCESS_ENTROPY_ENV: &str = "SAVANA_TEST_PROCESS_ENTROPY";
 
 #[test]
 fn begin_and_ingest_dispatch_through_authenticated_context() {
@@ -85,7 +86,23 @@ fn policy_handles_follow_authenticated_client_not_original_connection() {
         ResponseBodyV1::Err(StableCode::HandleWrongConnection)
     );
     assert_eof(&mut client_b.stream);
-    daemon.stop();
+    drop(client_b);
+    let audit = daemon.stop_and_collect_audit();
+    let failed_ingest = audit
+        .lines()
+        .find(|line| {
+            line.contains(r#""operation_tag":"ingest_user_input""#)
+                && line.contains(r#""code":"HANDLE_WRONG_CLIENT""#)
+        })
+        .expect("failed IngestUserInput completion audit");
+    assert!(
+        failed_ingest.contains(r#""connection_audit_id":""#),
+        "{failed_ingest}"
+    );
+    assert!(
+        failed_ingest.contains(r#""run_audit_id":""#),
+        "{failed_ingest}"
+    );
 }
 
 #[test]
@@ -109,6 +126,41 @@ fn every_policy_connection_still_has_exactly_one_request_and_response() {
     daemon.stop();
 }
 
+#[test]
+fn request_audit_never_emits_raw_sensitive_ingress_identity() {
+    let installation = Installation::build();
+    let mut daemon = RunningDaemon::start(&installation);
+    let limits = HardLimits::COMPILED
+        .lower(&policy_support::compiled_resources())
+        .expect("fixture limits");
+    let mut begin_connection = authenticated_connection(&installation, &limits, Client::A, 0xa7);
+    let begin = expect_begin(&mut begin_connection, &limits, 0xa8);
+    assert_eof(&mut begin_connection.stream);
+    drop(begin_connection);
+
+    let mut ingest_connection = authenticated_connection(&installation, &limits, Client::A, 0xa9);
+    let ingest = ingest_request(&ingest_connection, begin.run, 0xaa);
+    assert!(matches!(
+        request_once(&mut ingest_connection.stream, &limits, ingest).body,
+        ResponseBodyV1::Ok(ResponsePayloadV1::IngestUserInput(_))
+    ));
+    assert_eof(&mut ingest_connection.stream);
+    drop(ingest_connection);
+
+    let audit = daemon.stop_and_collect_audit();
+    for forbidden in [
+        "principal-1",
+        "conversation-1",
+        "operator",
+        &"44".repeat(32),
+        &"55".repeat(32),
+    ] {
+        assert!(!audit.contains(forbidden), "{forbidden}: {audit}");
+    }
+    assert!(audit.contains(r#""connection_audit_id":""#), "{audit}");
+    assert!(audit.contains(r#""run_audit_id":""#), "{audit}");
+}
+
 struct RunningDaemon {
     child: Option<Child>,
 }
@@ -118,6 +170,7 @@ impl RunningDaemon {
         let mut child = Command::new(&installation.executable)
             .arg("--config")
             .arg(&installation.config)
+            .env_remove(TEST_PROCESS_ENTROPY_ENV)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -140,8 +193,12 @@ impl RunningDaemon {
     }
 
     fn stop(&mut self) {
+        let _ = self.stop_and_collect_audit();
+    }
+
+    fn stop_and_collect_audit(&mut self) -> String {
         let Some(child) = self.child.take() else {
-            return;
+            return String::new();
         };
         kill(
             Pid::from_raw(i32::try_from(child.id()).expect("child pid")),
@@ -154,6 +211,7 @@ impl RunningDaemon {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        String::from_utf8(output.stderr).expect("audit is utf-8")
     }
 }
 
@@ -358,7 +416,7 @@ fn signed_ingress(
         issued_at: UnixMillis::new(now.saturating_sub(1)),
         expires_at: UnixMillis::new(now.checked_add(10_000).expect("ingress expiry")),
         nonce: Nonce32::new([nonce; 32]),
-        authority_session_id: Nonce32::new([0x66; 32]),
+        authority_session_id: Nonce32::new([0x44; 32]),
         authentication_context_digest: Digest32::new([0x55; 32]),
         role: RoleId::new("operator").expect("role"),
         policy_digest: connection.transcript.server.policy_digest,

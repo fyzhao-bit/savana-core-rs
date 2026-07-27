@@ -28,7 +28,7 @@ use crate::lifecycle_control::{TestLifecycle, TestLifecycleControl};
 use crate::policy_runtime::{
     CandidateRuntimeData, DaemonPolicyRuntimeSnapshot, PolicyRolloverCoordinator, PolicyRuntime,
 };
-use crate::runtime_deps::{checked_clock, draw_boot_id, SystemClock, SystemRandom};
+use crate::runtime_deps::checked_clock;
 use crate::selected_policy::{SelectedPolicySource, SelectedPolicyUpdateGuard};
 use crate::server::{KernelServer, ServerLifecycle};
 use crate::socket::{preflight_socket, SocketConfig, SocketPreflight};
@@ -357,7 +357,7 @@ impl BootstrapTrustRootSource {
     }
 }
 
-struct BootstrapContext {
+pub(crate) struct BootstrapContext {
     layout: FixedLayout,
     anchor: BootstrapAnchor,
     bootstrap_parent: DirectoryCapability,
@@ -375,7 +375,7 @@ impl std::fmt::Debug for BootstrapContext {
 }
 
 impl BootstrapContext {
-    fn open(config_path: &Path) -> Result<Self, DaemonError> {
+    pub(crate) fn open(config_path: &Path) -> Result<Self, DaemonError> {
         #[cfg(not(any(test, feature = "test-support")))]
         let (layout, owner_uid, owner_gid, ()) = select_layout(config_path)?;
         #[cfg(any(test, feature = "test-support"))]
@@ -651,7 +651,7 @@ impl BootstrapContext {
         Ok(())
     }
 
-    const fn uses_mapped_layout(&self) -> bool {
+    pub(crate) const fn uses_mapped_layout(&self) -> bool {
         #[cfg(any(test, feature = "test-support"))]
         {
             self.mapped_root.is_some()
@@ -737,18 +737,30 @@ where
 }
 
 impl PreparedRuntime {
-    pub(crate) fn prepare(config_path: &Path) -> Result<Self, DaemonError> {
-        let clock: Arc<dyn Clock + Send + Sync> = Arc::new(SystemClock::new());
-        let random: Arc<dyn RandomSource + Send + Sync> = Arc::new(SystemRandom);
-        let boot_id = draw_boot_id(random.as_ref()).map_err(DaemonError::stable)?;
+    pub(crate) fn prepare_with_dependencies(
+        config_path: &Path,
+        boot_id: savana_kernel_protocol::BootId,
+        clock: Arc<dyn Clock + Send + Sync>,
+        random: Arc<dyn RandomSource + Send + Sync>,
+    ) -> Result<Self, DaemonError> {
+        let context = BootstrapContext::open(config_path)?;
+        Self::prepare_from_context(context, boot_id, clock, random)
+    }
+
+    pub(crate) fn prepare_from_context(
+        context: BootstrapContext,
+        boot_id: savana_kernel_protocol::BootId,
+        clock: Arc<dyn Clock + Send + Sync>,
+        random: Arc<dyn RandomSource + Send + Sync>,
+    ) -> Result<Self, DaemonError> {
         #[cfg(test)]
-        return Self::prepare_inner(config_path, boot_id, clock, random, None);
+        return Self::prepare_inner(context, boot_id, clock, random, None);
         #[cfg(not(test))]
-        Self::prepare_inner(config_path, boot_id, clock, random)
+        Self::prepare_inner(context, boot_id, clock, random)
     }
 
     fn prepare_inner(
-        config_path: &Path,
+        context: BootstrapContext,
         boot_id: savana_kernel_protocol::BootId,
         clock: Arc<dyn Clock + Send + Sync>,
         random: Arc<dyn RandomSource + Send + Sync>,
@@ -758,7 +770,6 @@ impl PreparedRuntime {
             return Err(unavailable());
         }
         let clock = checked_clock(clock);
-        let context = BootstrapContext::open(config_path)?;
         let startup_now = clock.wall_now().map_err(|_| unavailable())?;
         let release = context.verify_current_release(startup_now)?;
         let rollover_release = release.clone();
@@ -875,16 +886,6 @@ impl PreparedRuntime {
     }
 
     #[cfg(test)]
-    pub(crate) fn prepare_with_dependencies(
-        config_path: &Path,
-        boot_id: savana_kernel_protocol::BootId,
-        clock: Arc<dyn Clock + Send + Sync>,
-        random: Arc<dyn RandomSource + Send + Sync>,
-    ) -> Result<Self, DaemonError> {
-        Self::prepare_inner(config_path, boot_id, clock, random, None)
-    }
-
-    #[cfg(test)]
     pub(crate) fn prepare_with_source_hook_for_test(
         config_path: &Path,
         boot_id: savana_kernel_protocol::BootId,
@@ -892,7 +893,8 @@ impl PreparedRuntime {
         random: Arc<dyn RandomSource + Send + Sync>,
         source_hook: SelectedPolicySourceHook,
     ) -> Result<Self, DaemonError> {
-        Self::prepare_inner(config_path, boot_id, clock, random, Some(source_hook))
+        let context = BootstrapContext::open(config_path)?;
+        Self::prepare_inner(context, boot_id, clock, random, Some(source_hook))
     }
 
     #[cfg(test)]
@@ -960,10 +962,7 @@ impl PreparedRuntime {
         clock: Arc<dyn Clock + Send + Sync>,
         random: Arc<dyn RandomSource + Send + Sync>,
     ) -> Result<Self, DaemonError> {
-        #[cfg(test)]
-        return Self::prepare_inner(config_path, boot_id, clock, random, None);
-        #[cfg(not(test))]
-        Self::prepare_inner(config_path, boot_id, clock, random)
+        Self::prepare_with_dependencies(config_path, boot_id, clock, random)
     }
 
     #[cfg(feature = "test-support")]
