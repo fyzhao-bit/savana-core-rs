@@ -22,6 +22,7 @@ pub(crate) struct DaemonConfig {
     release_digest: Digest32,
     policy_digest: Digest32,
     policy_version: u64,
+    policy_key_epoch: u64,
     model_manifest_digest: Digest32,
     approval_key_set_digest: Digest32,
     resource_profile_digest: Digest32,
@@ -139,6 +140,7 @@ impl DaemonConfig {
             release_digest: release.release_digest(),
             policy_digest: policy.identity().digest,
             policy_version: policy.identity().policy_version,
+            policy_key_epoch: policy.identity().key_epoch,
             model_manifest_digest: release.model_manifest_digest(),
             approval_key_set_digest: release.approval_key_set_digest(),
             resource_profile_digest: policy.resource_profile_digest(),
@@ -190,6 +192,10 @@ impl DaemonConfig {
 
     pub(crate) const fn policy_version(&self) -> u64 {
         self.policy_version
+    }
+
+    pub(crate) const fn policy_key_epoch(&self) -> u64 {
+        self.policy_key_epoch
     }
 
     pub(crate) const fn model_manifest_digest(&self) -> Digest32 {

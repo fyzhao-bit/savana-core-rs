@@ -9,6 +9,10 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -16,11 +20,12 @@ use ed25519_dalek::{Signature, Signer, SigningKey};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::{getegid, geteuid, Pid};
 use savana_kernel_protocol::{
-    decode_server_message, encode_client_message, read_frame, write_frame, ClientFinishV1,
+    decode_server_message, encode_client_message, read_frame, write_frame, BootId, ClientFinishV1,
     ClientHelloV1, ClientMessageV1, Digest32, HardLimits, Nonce32, OperationV1, ProtocolVersion,
     RequestEnvelopeV1, RequestId, RequestedMode, ResponseBodyV1, ResponsePayloadV1,
-    ServerMessageV1, Signature64, UnixMillis,
+    ServerMessageV1, Signature64, StableCode, UnixMillis,
 };
+use savana_policy_core::{Clock, RandomSource};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -245,6 +250,96 @@ fn socket_permission_fallback_requires_an_independent_host_denial() {
 }
 
 #[test]
+fn daemon_implements_core_dependencies_and_pins_one_boot_across_components() {
+    let installation = Installation::build();
+    let identities = installation
+        .prepare_with_fault(DependencyFault::Healthy)
+        .unwrap();
+    assert_ne!(identities.engine_boot_id.as_bytes(), &[0; 32]);
+    assert_eq!(identities.engine_boot_id, identities.handshake_boot_id);
+    assert_eq!(
+        identities.engine_policy_identity,
+        identities.handshake_policy_identity
+    );
+
+    for fault in [
+        DependencyFault::WallError(StableCode::PolicyExpired),
+        DependencyFault::RandomError(StableCode::ProtocolIo),
+        DependencyFault::RandomShort,
+        DependencyFault::RandomZero,
+        DependencyFault::MonotonicRegression,
+    ] {
+        let installation = Installation::build();
+        assert_eq!(
+            installation.prepare_with_fault(fault).unwrap_err().code(),
+            StableCode::KernelUnavailable
+        );
+        assert!(!installation.socket.exists());
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DependencyFault {
+    Healthy,
+    WallError(StableCode),
+    RandomError(StableCode),
+    RandomShort,
+    RandomZero,
+    MonotonicRegression,
+}
+
+struct TestDependencies {
+    fault: DependencyFault,
+    monotonic_calls: AtomicUsize,
+}
+
+impl TestDependencies {
+    const fn new(fault: DependencyFault) -> Self {
+        Self {
+            fault,
+            monotonic_calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Clock for TestDependencies {
+    fn wall_now(&self) -> Result<UnixMillis, StableCode> {
+        match self.fault {
+            DependencyFault::WallError(code) => Err(code),
+            _ => Ok(UnixMillis::new(system_now_ms())),
+        }
+    }
+
+    fn monotonic_now_millis(&self) -> Result<u64, StableCode> {
+        let call = self.monotonic_calls.fetch_add(1, Ordering::AcqRel);
+        match self.fault {
+            DependencyFault::MonotonicRegression => Ok(if call == 0 { 9 } else { 8 }),
+            _ => Ok(u64::try_from(call).unwrap()),
+        }
+    }
+}
+
+impl RandomSource for TestDependencies {
+    fn fill(&self, output: &mut [u8]) -> Result<usize, StableCode> {
+        match self.fault {
+            DependencyFault::RandomError(code) => Err(code),
+            DependencyFault::RandomShort => {
+                output.fill(0x41);
+                Ok(output.len().saturating_sub(1))
+            }
+            DependencyFault::RandomZero => {
+                output.fill(0);
+                Ok(output.len())
+            }
+            _ => {
+                output.fill(0x41);
+                Ok(output.len())
+            }
+        }
+    }
+}
+
+#[test]
 fn durable_policy_rejection_precedes_daemon_seed_read_in_real_startup() {
     let installation = Installation::build();
     let newer_ledger = policy_support::encode_ledger(POLICY_VERSION + 1, POLICY_EPOCH, [0xe1; 32]);
@@ -430,6 +525,20 @@ fn assert_process_result(output: &Output, authenticated_health: bool, host_socke
 }
 
 impl Installation {
+    fn prepare_with_fault(
+        &self,
+        fault: DependencyFault,
+    ) -> Result<savana_kerneld::test_support::RuntimeIdentities, savana_kerneld::DaemonError> {
+        let dependencies: Arc<dyn Clock + Send + Sync> = Arc::new(TestDependencies::new(fault));
+        let random: Arc<dyn RandomSource + Send + Sync> = Arc::new(TestDependencies::new(fault));
+        savana_kerneld::test_support::prepare_with_dependencies(
+            &self.config,
+            BootId::new([0x61; 32]),
+            dependencies,
+            random,
+        )
+    }
+
     fn spawn_and_wait(&self) -> Output {
         let mut child = Command::new(&self.executable)
             .arg("--config")
@@ -617,6 +726,14 @@ impl Installation {
         ensure_directory(selected_policy.parent().unwrap(), 0o755);
         write_file(&selected_policy, &policy_bytes, 0o444);
         write_file(&selected_signature, policy_signature.as_bytes(), 0o444);
+        write_file(
+            &selected_policy
+                .parent()
+                .unwrap()
+                .join(".selected-policy-v1.update.lock"),
+            &[],
+            0o640,
+        );
 
         let key = mapped(&root, daemon_key_path());
         ensure_directory(key.parent().unwrap(), 0o750);

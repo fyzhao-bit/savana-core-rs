@@ -197,6 +197,8 @@ mod key_file;
 mod panic_report;
 #[allow(dead_code)]
 mod peer;
+mod runtime_deps;
+mod selected_policy;
 #[allow(dead_code)]
 mod server;
 mod signal_control;
@@ -210,6 +212,45 @@ mod state;
 pub(crate) use config::DaemonConfig;
 pub use error::DaemonError;
 pub(crate) use key_file::DaemonSigningIdentity;
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod test_support {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use savana_kernel_protocol::BootId;
+    use savana_policy_core::{Clock, PolicyIdentity, RandomSource};
+
+    use crate::bootstrap::PreparedRuntime;
+    use crate::DaemonError;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct RuntimeIdentities {
+        pub engine_boot_id: BootId,
+        pub handshake_boot_id: BootId,
+        pub engine_policy_identity: PolicyIdentity,
+        pub handshake_policy_identity: PolicyIdentity,
+    }
+
+    pub fn prepare_with_dependencies(
+        config_path: &Path,
+        boot_id: BootId,
+        clock: Arc<dyn Clock + Send + Sync>,
+        random: Arc<dyn RandomSource + Send + Sync>,
+    ) -> Result<RuntimeIdentities, DaemonError> {
+        let prepared =
+            PreparedRuntime::prepare_with_test_dependencies(config_path, boot_id, clock, random)?;
+        let (engine_boot_id, handshake_boot_id, engine_policy_identity, handshake_policy_identity) =
+            prepared.test_identities()?;
+        Ok(RuntimeIdentities {
+            engine_boot_id,
+            handshake_boot_id,
+            engine_policy_identity,
+            handshake_policy_identity,
+        })
+    }
+}
 
 use std::path::Path;
 use std::sync::Arc;

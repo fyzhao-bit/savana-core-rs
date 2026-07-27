@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::RefCell;
 #[cfg(any(test, feature = "test-support"))]
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
@@ -6,13 +8,15 @@ use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(test)]
+use std::sync::Mutex;
 
 use nix::unistd::{getegid, geteuid};
-use savana_kernel_protocol::{Digest32, KeyId, Signature64, StableCode, UnixMillis};
+use savana_kernel_protocol::{Digest32, KeyId, StableCode, UnixMillis};
 use savana_policy_core::{
-    PolicyStateCapability, PolicyStore, PolicyVerifier, ReleaseStage, ReleaseTrustRootV1,
-    ReleaseVerifier, VerifiedReleaseIdentity,
+    AuthenticatedContextIssuer, Clock, PolicyEngine, PolicyStateCapability, PolicyStore,
+    PolicyVerifier, RandomSource, ReleaseStage, ReleaseTrustRootV1, ReleaseVerifier,
+    VerifiedReleaseIdentity,
 };
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +24,8 @@ use crate::audit::{AuditEvent, AuditSink};
 use crate::fs_cap::{DirectoryCapability, FileCapability, FileExpectation, LengthRule};
 use crate::handshake::HandshakeService;
 use crate::key_file::DaemonKeyCapability;
+use crate::runtime_deps::{checked_clock, draw_boot_id, SystemClock, SystemRandom};
+use crate::selected_policy::{SelectedPolicySource, SelectedPolicyUpdateGuard};
 use crate::server::{KernelServer, ServerLifecycle};
 use crate::socket::{preflight_socket, SocketConfig, SocketPreflight};
 use crate::{DaemonConfig, DaemonError};
@@ -28,8 +34,6 @@ const PRODUCTION_BOOTSTRAP_PATH: &str = "/etc/savana/kerneld-bootstrap-v1.json";
 const KERNEL_LOCK_PATH: &str = "/etc/savana/kernel-lock.json";
 const MAXIMUM_BOOTSTRAP_BYTES: usize = 64 * 1024;
 const MAXIMUM_BOOTSTRAP_BYTES_U64: u64 = 64 * 1024;
-const MAXIMUM_KERNEL_LOCK_BYTES: u64 = 256 * 1024;
-const MAXIMUM_SELECTED_POLICY_BYTES: u64 = 8 * 1024 * 1024;
 const DOCUMENTED_FIXTURE_PUBLIC_KEYS: [&str; 4] = [
     "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
     "c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a",
@@ -38,6 +42,86 @@ const DOCUMENTED_FIXTURE_PUBLIC_KEYS: [&str; 4] = [
 ];
 
 static RUN_OWNED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BootstrapEvent {
+    ReleaseVerified,
+    ReleaseVerifierBound,
+    LedgerLifetimeLockAcquired,
+    SelectedUpdateSharedLockAcquired,
+    CandidateRead,
+    CandidateStatelesslyVerified,
+    FixedLockVerified,
+    FinalDescriptorRecheck,
+    LedgerPersisted,
+    CurrentCapabilityReturned,
+    DaemonKeyLoaded,
+    EngineConstructed,
+    WorkersActivated,
+    SelectedUpdateSharedLockReleased,
+}
+
+#[cfg(test)]
+thread_local! {
+    static BOOTSTRAP_TRACE: RefCell<Option<Arc<Mutex<Vec<BootstrapEvent>>>>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct BootstrapTraceGuard {
+    trace: Arc<Mutex<Vec<BootstrapEvent>>>,
+}
+
+#[cfg(test)]
+impl BootstrapTraceGuard {
+    pub(crate) fn install() -> Self {
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        BOOTSTRAP_TRACE.with(|slot| {
+            assert!(
+                slot.borrow().is_none(),
+                "a bootstrap trace is already installed"
+            );
+            *slot.borrow_mut() = Some(Arc::clone(&trace));
+        });
+        Self { trace }
+    }
+
+    pub(crate) fn events(&self) -> Vec<BootstrapEvent> {
+        self.trace
+            .lock()
+            .expect("bootstrap trace mutex is not poisoned")
+            .clone()
+    }
+}
+
+#[cfg(test)]
+impl Drop for BootstrapTraceGuard {
+    fn drop(&mut self) {
+        BOOTSTRAP_TRACE.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+fn trace_bootstrap(event: BootstrapEvent) {
+    BOOTSTRAP_TRACE.with(|slot| {
+        if let Some(trace) = slot.borrow().as_ref() {
+            trace
+                .lock()
+                .expect("bootstrap trace mutex is not poisoned")
+                .push(event);
+        }
+    });
+}
+
+macro_rules! bootstrap_trace {
+    ($event:expr) => {{
+        #[cfg(test)]
+        trace_bootstrap($event);
+    }};
+}
+
+#[cfg(test)]
+type SelectedPolicySourceHook = Box<dyn FnOnce(&SelectedPolicySource) + Send>;
 
 pub(crate) fn acquire_run_ownership() -> Result<(), DaemonError> {
     RUN_OWNED
@@ -351,8 +435,17 @@ impl BootstrapContext {
         &self,
         now: UnixMillis,
     ) -> Result<VerifiedReleaseIdentity, DaemonError> {
-        let current_executable = std::env::current_exe().map_err(|_| release_mismatch())?;
-        #[cfg(feature = "test-support")]
+        let current_executable = {
+            #[cfg(any(test, feature = "test-support"))]
+            if self.mapped_root.is_some() {
+                self.layout.release_stage.join("bin/savana-kerneld")
+            } else {
+                std::env::current_exe().map_err(|_| release_mismatch())?
+            }
+            #[cfg(not(any(test, feature = "test-support")))]
+            std::env::current_exe().map_err(|_| release_mismatch())?
+        };
+        #[cfg(any(test, feature = "test-support"))]
         let stage = if self.mapped_root.is_some() {
             ReleaseStage::open_mapped_for_test_support(
                 &self.layout.release_stage,
@@ -364,7 +457,7 @@ impl BootstrapContext {
             ReleaseStage::open_compiled(&current_executable)
         }
         .map_err(|error| DaemonError::stable(error.code()))?;
-        #[cfg(not(feature = "test-support"))]
+        #[cfg(not(any(test, feature = "test-support")))]
         let stage = ReleaseStage::open_compiled(&current_executable)
             .map_err(|error| DaemonError::stable(error.code()))?;
         let verified = self
@@ -376,81 +469,28 @@ impl BootstrapContext {
         Ok(verified)
     }
 
-    fn open_root_artifacts(&self) -> Result<RootArtifacts, DaemonError> {
-        let lock_parent_path = self
-            .layout
-            .kernel_lock
-            .parent()
-            .ok_or_else(release_mismatch)?;
-        let lock_leaf = self
-            .layout
-            .kernel_lock
-            .file_name()
-            .ok_or_else(release_mismatch)?;
-        let lock_parent = DirectoryCapability::open_final(
-            lock_parent_path,
+    fn open_selected_policy_source(
+        &self,
+        release: &VerifiedReleaseIdentity,
+    ) -> Result<Arc<SelectedPolicySource>, DaemonError> {
+        let mapped = self.uses_mapped_layout();
+        let update_lock_owner_uid = if mapped { self.owner_uid } else { 0 };
+        let update_lock_owner_gid = if mapped {
+            self.owner_gid
+        } else {
+            release.daemon_gid()
+        };
+        let source = SelectedPolicySource::open(
+            &self.layout.kernel_lock,
+            &self.layout.selected_policy,
+            &self.layout.selected_policy_signature,
             self.owner_uid,
             self.owner_gid,
-            0o755,
-            StableCode::IdentityReleaseMismatch,
-        )?;
-        let lock = lock_parent.open_file(
-            lock_leaf,
-            FileExpectation {
-                owner_uid: self.owner_uid,
-                owner_gid: self.owner_gid,
-                permissions: 0o444,
-                length: LengthRule::Maximum(MAXIMUM_KERNEL_LOCK_BYTES),
-            },
-        )?;
-
-        let policy_parent_path = self
-            .layout
-            .selected_policy
-            .parent()
-            .ok_or_else(release_mismatch)?;
-        if self.layout.selected_policy_signature.parent() != Some(policy_parent_path) {
-            return Err(release_mismatch());
-        }
-        let policy_parent = DirectoryCapability::open_final(
-            policy_parent_path,
-            self.owner_uid,
-            self.owner_gid,
-            0o755,
-            StableCode::IdentityReleaseMismatch,
-        )?;
-        let selected_policy = policy_parent.open_file(
-            self.layout
-                .selected_policy
-                .file_name()
-                .ok_or_else(release_mismatch)?,
-            FileExpectation {
-                owner_uid: self.owner_uid,
-                owner_gid: self.owner_gid,
-                permissions: 0o444,
-                length: LengthRule::Maximum(MAXIMUM_SELECTED_POLICY_BYTES),
-            },
-        )?;
-        let selected_policy_signature = policy_parent.open_file(
-            self.layout
-                .selected_policy_signature
-                .file_name()
-                .ok_or_else(release_mismatch)?,
-            FileExpectation {
-                owner_uid: self.owner_uid,
-                owner_gid: self.owner_gid,
-                permissions: 0o444,
-                length: LengthRule::Exact(64),
-            },
+            update_lock_owner_uid,
+            update_lock_owner_gid,
         )?;
         self.recheck()?;
-        Ok(RootArtifacts {
-            lock_parent,
-            lock,
-            policy_parent,
-            selected_policy,
-            selected_policy_signature,
-        })
+        Ok(source)
     }
 
     fn open_daemon_key(
@@ -562,7 +602,7 @@ impl BootstrapContext {
         release: &VerifiedReleaseIdentity,
     ) -> Result<SocketPreflight, DaemonError> {
         let mapped = self.uses_mapped_layout();
-        #[cfg(feature = "test-support")]
+        #[cfg(any(test, feature = "test-support"))]
         let config = if mapped {
             SocketConfig::from_mapped_release(
                 release,
@@ -574,7 +614,7 @@ impl BootstrapContext {
             SocketConfig::from_release(release)
         }
         .map_err(DaemonError::stable)?;
-        #[cfg(not(feature = "test-support"))]
+        #[cfg(not(any(test, feature = "test-support")))]
         let config = {
             let _ = mapped;
             SocketConfig::from_release(release).map_err(DaemonError::stable)?
@@ -608,58 +648,14 @@ impl BootstrapContext {
     }
 
     const fn uses_mapped_layout(&self) -> bool {
-        #[cfg(feature = "test-support")]
+        #[cfg(any(test, feature = "test-support"))]
         {
             self.mapped_root.is_some()
         }
-        #[cfg(not(feature = "test-support"))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             false
         }
-    }
-}
-
-struct RootArtifacts {
-    lock_parent: DirectoryCapability,
-    lock: FileCapability,
-    policy_parent: DirectoryCapability,
-    selected_policy: FileCapability,
-    selected_policy_signature: FileCapability,
-}
-
-impl std::fmt::Debug for RootArtifacts {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("RootArtifacts(<verified>)")
-    }
-}
-
-impl RootArtifacts {
-    fn read_lock(&self) -> Result<Vec<u8>, DaemonError> {
-        let bytes = self.lock.read_bounded(MAXIMUM_KERNEL_LOCK_BYTES)?;
-        self.lock_parent.recheck()?;
-        Ok(bytes)
-    }
-
-    fn read_selected_policy(&self) -> Result<(Vec<u8>, Signature64), DaemonError> {
-        let policy = self
-            .selected_policy
-            .read_bounded(MAXIMUM_SELECTED_POLICY_BYTES)?;
-        let signature = self.selected_policy_signature.read_bounded(64)?;
-        let signature: [u8; 64] = signature
-            .as_slice()
-            .try_into()
-            .map_err(|_| release_mismatch())?;
-        self.policy_parent.recheck()?;
-        Ok((policy, Signature64::new(signature)))
-    }
-
-    fn recheck(&self) -> Result<(), DaemonError> {
-        self.lock.recheck()?;
-        self.lock_parent.recheck()?;
-        self.selected_policy.recheck()?;
-        self.selected_policy_signature.recheck()?;
-        self.policy_parent.recheck()?;
-        Ok(())
     }
 }
 
@@ -698,14 +694,23 @@ impl std::fmt::Debug for OpenedPolicyStore {
     }
 }
 
+impl OpenedPolicyStore {
+    fn into_parts(self) -> (DirectoryCapability, PolicyStore) {
+        (self.common, self.store)
+    }
+}
+
 pub(crate) struct PreparedRuntime {
     context: BootstrapContext,
-    root_artifacts: RootArtifacts,
     daemon_key: DaemonKeyCapability,
-    policy_store: OpenedPolicyStore,
+    state_common: DirectoryCapability,
     config: DaemonConfig,
     service: HandshakeService,
     socket: SocketPreflight,
+    clock: Arc<dyn Clock + Send + Sync>,
+    engine: PolicyEngine,
+    issuer: AuthenticatedContextIssuer,
+    selected_guard: Option<SelectedPolicyUpdateGuard>,
 }
 
 impl std::fmt::Debug for PreparedRuntime {
@@ -729,82 +734,207 @@ where
 
 impl PreparedRuntime {
     pub(crate) fn prepare(config_path: &Path) -> Result<Self, DaemonError> {
+        let clock: Arc<dyn Clock + Send + Sync> = Arc::new(SystemClock::new());
+        let random: Arc<dyn RandomSource + Send + Sync> = Arc::new(SystemRandom);
+        let boot_id = draw_boot_id(random.as_ref()).map_err(DaemonError::stable)?;
+        #[cfg(test)]
+        return Self::prepare_inner(config_path, boot_id, clock, random, None);
+        #[cfg(not(test))]
+        Self::prepare_inner(config_path, boot_id, clock, random)
+    }
+
+    fn prepare_inner(
+        config_path: &Path,
+        boot_id: savana_kernel_protocol::BootId,
+        clock: Arc<dyn Clock + Send + Sync>,
+        random: Arc<dyn RandomSource + Send + Sync>,
+        #[cfg(test)] source_hook: Option<SelectedPolicySourceHook>,
+    ) -> Result<Self, DaemonError> {
+        if boot_id.as_bytes() == &[0; 32] {
+            return Err(unavailable());
+        }
+        let clock = checked_clock(clock);
         let context = BootstrapContext::open(config_path)?;
-        let startup_now = system_now()?;
-        let root_artifacts = context.open_root_artifacts()?;
+        let startup_now = clock.wall_now().map_err(|_| unavailable())?;
         let release = context.verify_current_release(startup_now)?;
+        bootstrap_trace!(BootstrapEvent::ReleaseVerified);
         context.verify_process_identity(&release)?;
-
-        let daemon_key = context.open_daemon_key(&release)?;
-        let policy_state = context.open_policy_state(&release)?;
-        let socket = context.preflight_socket(&release)?;
-
-        let (policy_bytes, policy_signature) = root_artifacts.read_selected_policy()?;
         let policy_verifier = release
             .policy_verifier()
             .map_err(|error| DaemonError::stable(error.code()))?;
+        bootstrap_trace!(BootstrapEvent::ReleaseVerifierBound);
+        let policy_state = context.open_policy_state(&release)?;
+        let opened_store = policy_state.into_store(policy_verifier.clone())?;
+        bootstrap_trace!(BootstrapEvent::LedgerLifetimeLockAcquired);
+        let (state_common, policy_store) = opened_store.into_parts();
+        let selected_source = context.open_selected_policy_source(&release)?;
+        #[cfg(test)]
+        if let Some(source_hook) = source_hook {
+            source_hook(&selected_source);
+        }
+        let selected_guard = selected_source.acquire()?;
+        bootstrap_trace!(BootstrapEvent::SelectedUpdateSharedLockAcquired);
+        let candidate = selected_guard.read_candidate()?;
+        bootstrap_trace!(BootstrapEvent::CandidateRead);
         let stateless_policy = policy_verifier
-            .verify(&policy_bytes, &policy_signature, startup_now)
+            .verify(&candidate.policy_bytes, &candidate.signature, startup_now)
             .map_err(|error| DaemonError::stable(error.code()))?;
-        let lock_bytes = root_artifacts.read_lock()?;
+        bootstrap_trace!(BootstrapEvent::CandidateStatelesslyVerified);
         let config = DaemonConfig::from_verified(
-            &lock_bytes,
+            &candidate.kernel_lock_bytes,
             &release,
             &stateless_policy,
-            &policy_signature,
+            &candidate.signature,
         )?;
+        bootstrap_trace!(BootstrapEvent::FixedLockVerified);
         context.verify_signed_fixed_paths(&config)?;
-
+        if startup_now.get() >= release.expires_at().get() {
+            return Err(release_mismatch());
+        }
+        let daemon_key = context.open_daemon_key(&release)?;
+        let socket = context.preflight_socket(&release)?;
         context.recheck()?;
-        root_artifacts.recheck()?;
         daemon_key.recheck()?;
+        state_common.recheck()?;
         socket.recheck().map_err(DaemonError::stable)?;
-
-        let mut policy_store = policy_state.into_store(policy_verifier)?;
-        let (_, signing_identity) = finish_policy_acceptance_before_key_load(
-            || {
-                let durable_policy = policy_store
-                    .store
-                    .verify_and_accept(&policy_bytes, &policy_signature, startup_now)
-                    .map_err(|error| DaemonError::stable(error.code()))?;
-                if durable_policy.identity() != stateless_policy.identity() {
-                    return Err(DaemonError::stable(StableCode::KernelUnavailable));
-                }
-                policy_store
-                    .store
-                    .recheck_storage()
-                    .map_err(|error| DaemonError::stable(error.code()))?;
-                policy_store.common.recheck()?;
-                Ok(durable_policy)
-            },
-            || daemon_key.load(release.daemon_identity().public_key()),
-        )?;
-
-        let service = HandshakeService::new(&config, signing_identity, startup_now)
-            .map_err(DaemonError::stable)?;
-        let pre_bind_now = system_now()?;
+        selected_guard.final_recheck()?;
+        bootstrap_trace!(BootstrapEvent::FinalDescriptorRecheck);
+        let daemon_public_key = *release.daemon_identity().public_key();
+        let current = policy_store
+            .verify_and_accept_initial(
+                release,
+                &candidate.policy_bytes,
+                &candidate.signature,
+                startup_now,
+            )
+            .map_err(|error| DaemonError::stable(error.code()))?;
+        bootstrap_trace!(BootstrapEvent::LedgerPersisted);
+        bootstrap_trace!(BootstrapEvent::CurrentCapabilityReturned);
+        let signing_identity = daemon_key.load(&daemon_public_key)?;
+        bootstrap_trace!(BootstrapEvent::DaemonKeyLoaded);
+        let (engine, issuer) =
+            PolicyEngine::new(current, boot_id, Arc::clone(&clock), Arc::clone(&random))
+                .map_err(|error| DaemonError::stable(error.code()))?;
+        bootstrap_trace!(BootstrapEvent::EngineConstructed);
+        clock.monotonic_now_millis().map_err(|_| unavailable())?;
+        let service = HandshakeService::new(
+            &config,
+            signing_identity,
+            startup_now,
+            boot_id,
+            Arc::clone(&random),
+        )
+        .map_err(DaemonError::stable)?;
+        let pre_bind_now = clock.wall_now().map_err(|_| unavailable())?;
         service
             .refresh_before_bind(pre_bind_now)
             .map_err(DaemonError::stable)?;
 
         context.recheck()?;
-        root_artifacts.recheck()?;
         daemon_key.recheck()?;
-        policy_store
-            .store
-            .recheck_storage()
-            .map_err(|error| DaemonError::stable(error.code()))?;
+        state_common.recheck()?;
         socket.recheck().map_err(DaemonError::stable)?;
 
         Ok(Self {
             context,
-            root_artifacts,
             daemon_key,
-            policy_store,
+            state_common,
             config,
             service,
             socket,
+            clock,
+            engine,
+            issuer,
+            selected_guard: Some(selected_guard),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepare_with_dependencies(
+        config_path: &Path,
+        boot_id: savana_kernel_protocol::BootId,
+        clock: Arc<dyn Clock + Send + Sync>,
+        random: Arc<dyn RandomSource + Send + Sync>,
+    ) -> Result<Self, DaemonError> {
+        Self::prepare_inner(config_path, boot_id, clock, random, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepare_with_source_hook_for_test(
+        config_path: &Path,
+        boot_id: savana_kernel_protocol::BootId,
+        clock: Arc<dyn Clock + Send + Sync>,
+        random: Arc<dyn RandomSource + Send + Sync>,
+        source_hook: SelectedPolicySourceHook,
+    ) -> Result<Self, DaemonError> {
+        Self::prepare_inner(config_path, boot_id, clock, random, Some(source_hook))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn live_selected_artifact_descriptor_sets(&self) -> usize {
+        self.selected_guard
+            .as_ref()
+            .map_or(0, SelectedPolicyUpdateGuard::live_artifact_sets)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selected_artifact_drop_probe(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        self.selected_guard
+            .as_ref()
+            .expect("prepared runtime retains the selected-policy guard")
+            .artifact_drop_probe()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn exercise_startup_guard_for_test(
+        &mut self,
+        lifecycle: &mut dyn ServerLifecycle,
+    ) -> Result<(), DaemonError> {
+        let selected_guard = self.selected_guard.take().ok_or_else(unavailable)?;
+        let mut guarded = StartupGuardLifecycle {
+            inner: lifecycle,
+            selected_guard: Some(selected_guard),
+        };
+        let result = guarded.workers_started();
+        drop(guarded);
+        result.map_err(DaemonError::stable)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn prepare_with_test_dependencies(
+        config_path: &Path,
+        boot_id: savana_kernel_protocol::BootId,
+        clock: Arc<dyn Clock + Send + Sync>,
+        random: Arc<dyn RandomSource + Send + Sync>,
+    ) -> Result<Self, DaemonError> {
+        #[cfg(test)]
+        return Self::prepare_inner(config_path, boot_id, clock, random, None);
+        #[cfg(not(test))]
+        Self::prepare_inner(config_path, boot_id, clock, random)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn test_identities(
+        &self,
+    ) -> Result<
+        (
+            savana_kernel_protocol::BootId,
+            savana_kernel_protocol::BootId,
+            savana_policy_core::PolicyIdentity,
+            savana_policy_core::PolicyIdentity,
+        ),
+        DaemonError,
+    > {
+        let handshake = self
+            .service
+            .started_identity()
+            .map_err(DaemonError::stable)?;
+        Ok((
+            self.engine.boot_id_for_test(),
+            handshake.boot_id,
+            self.engine.current_policy_identity(),
+            self.service.policy_identity_for_test(),
+        ))
     }
 
     pub(crate) const fn release_digest(&self) -> Digest32 {
@@ -818,27 +948,33 @@ impl PreparedRuntime {
             .map_err(DaemonError::stable)?;
         let Self {
             context,
-            root_artifacts,
             daemon_key,
-            policy_store,
+            state_common,
             config,
             service,
             socket,
+            clock,
+            engine,
+            issuer,
+            selected_guard,
         } = self;
         let retained = RuntimeRetention {
             context,
-            root_artifacts,
             daemon_key,
-            policy_store,
+            state_common,
         };
         retained.recheck()?;
-        let server = KernelServer::new_preflight(&config, service, socket, Arc::clone(&audit))
-            .map_err(DaemonError::stable)?;
+        let server =
+            KernelServer::new_preflight(&config, service, socket, Arc::clone(&audit), clock)
+                .map_err(DaemonError::stable)?;
         Ok(BoundRuntime {
             server,
             retained,
             audit,
             identity,
+            selected_guard,
+            engine,
+            issuer,
         })
     }
 }
@@ -848,6 +984,9 @@ pub(crate) struct BoundRuntime {
     retained: RuntimeRetention,
     audit: Arc<AuditSink>,
     identity: savana_kernel_protocol::ServerIdentityV1,
+    selected_guard: Option<SelectedPolicyUpdateGuard>,
+    engine: PolicyEngine,
+    issuer: AuthenticatedContextIssuer,
 }
 
 impl std::fmt::Debug for BoundRuntime {
@@ -863,6 +1002,9 @@ impl BoundRuntime {
             retained,
             audit,
             identity,
+            selected_guard,
+            engine,
+            issuer,
         } = self;
         if audit
             .emit(AuditEvent::Started {
@@ -875,7 +1017,14 @@ impl BoundRuntime {
             return Err(DaemonError::stable(StableCode::KernelUnavailable));
         }
 
-        let server_result = server.run_with_lifecycle(lifecycle);
+        let mut lifecycle = StartupGuardLifecycle {
+            inner: lifecycle,
+            selected_guard,
+        };
+        let server_result = server.run_with_lifecycle(&mut lifecycle);
+        drop(lifecycle);
+        let _ = &engine;
+        let _ = &issuer;
         let retained_result = retained.recheck();
         if let Err(code) = server_result {
             return Err(DaemonError::stable(code));
@@ -886,31 +1035,39 @@ impl BoundRuntime {
 
 struct RuntimeRetention {
     context: BootstrapContext,
-    root_artifacts: RootArtifacts,
     daemon_key: DaemonKeyCapability,
-    policy_store: OpenedPolicyStore,
+    state_common: DirectoryCapability,
 }
 
 impl RuntimeRetention {
     fn recheck(&self) -> Result<(), DaemonError> {
         self.context.recheck()?;
-        self.root_artifacts.recheck()?;
         self.daemon_key.recheck()?;
-        self.policy_store
-            .store
-            .recheck_storage()
-            .map_err(|error| DaemonError::stable(error.code()))?;
-        self.policy_store.common.recheck()
+        self.state_common.recheck()
     }
 }
 
-fn system_now() -> Result<UnixMillis, DaemonError> {
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| DaemonError::stable(StableCode::KernelUnavailable))?;
-    let milliseconds = u64::try_from(elapsed.as_millis())
-        .map_err(|_| DaemonError::stable(StableCode::KernelUnavailable))?;
-    Ok(UnixMillis::new(milliseconds))
+struct StartupGuardLifecycle<'lifecycle> {
+    inner: &'lifecycle mut dyn ServerLifecycle,
+    selected_guard: Option<SelectedPolicyUpdateGuard>,
+}
+
+impl ServerLifecycle for StartupGuardLifecycle<'_> {
+    fn workers_started(&mut self) -> Result<(), StableCode> {
+        self.inner.workers_started()?;
+        bootstrap_trace!(BootstrapEvent::WorkersActivated);
+        drop(self.selected_guard.take());
+        bootstrap_trace!(BootstrapEvent::SelectedUpdateSharedLockReleased);
+        Ok(())
+    }
+
+    fn poll_shutdown(&mut self) -> Result<bool, StableCode> {
+        self.inner.poll_shutdown()
+    }
+}
+
+const fn unavailable() -> DaemonError {
+    DaemonError::stable(StableCode::KernelUnavailable)
 }
 
 #[cfg(not(any(test, feature = "test-support")))]
@@ -1436,13 +1593,30 @@ mod tests {
         fs::set_permissions(&policy, fs::Permissions::from_mode(0o444)).unwrap();
         fs::set_permissions(&signature, fs::Permissions::from_mode(0o444)).unwrap();
 
+        let update_lock = policy
+            .parent()
+            .unwrap()
+            .join(".selected-policy-v1.update.lock");
+        fs::write(&update_lock, []).unwrap();
+        fs::set_permissions(&update_lock, fs::Permissions::from_mode(0o640)).unwrap();
+
         let context = BootstrapContext::open(&config).unwrap();
-        let artifacts = context.open_root_artifacts().unwrap();
-        assert_eq!(artifacts.read_lock().unwrap(), b"{\"lock\":true}");
-        let (policy_bytes, signature_bytes) = artifacts.read_selected_policy().unwrap();
-        assert_eq!(policy_bytes, b"selected-policy");
-        assert_eq!(signature_bytes.as_bytes(), &[0x73; 64]);
-        artifacts.recheck().unwrap();
+        let source = SelectedPolicySource::open(
+            &context.layout.kernel_lock,
+            &context.layout.selected_policy,
+            &context.layout.selected_policy_signature,
+            context.owner_uid,
+            context.owner_gid,
+            context.owner_uid,
+            context.owner_gid,
+        )
+        .unwrap();
+        let guard = source.acquire().unwrap();
+        let candidate = guard.read_candidate().unwrap();
+        assert_eq!(candidate.kernel_lock_bytes, b"{\"lock\":true}");
+        assert_eq!(candidate.policy_bytes, b"selected-policy");
+        assert_eq!(candidate.signature.as_bytes(), &[0x73; 64]);
+        guard.final_recheck().unwrap();
     }
 
     #[test]

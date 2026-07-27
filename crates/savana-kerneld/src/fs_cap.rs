@@ -221,6 +221,23 @@ impl std::fmt::Debug for FileCapability {
 }
 
 impl FileCapability {
+    pub(crate) fn try_clone_file(&self) -> Result<File, DaemonError> {
+        self.recheck()?;
+        let duplicate = self
+            .file
+            .try_clone()
+            .map_err(|_| DaemonError::stable(self.failure))?;
+        let duplicate_identity = NodeIdentity::from_metadata(
+            &duplicate
+                .metadata()
+                .map_err(|_| DaemonError::stable(self.failure))?,
+        );
+        if duplicate_identity != self.identity {
+            return Err(DaemonError::stable(self.failure));
+        }
+        Ok(duplicate)
+    }
+
     pub(crate) fn read_bounded(&self, maximum: u64) -> Result<Vec<u8>, DaemonError> {
         self.recheck()?;
         if self.identity.length > maximum {

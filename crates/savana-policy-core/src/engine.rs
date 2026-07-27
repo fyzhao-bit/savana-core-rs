@@ -183,6 +183,13 @@ impl PolicyEngine {
     }
 }
 
+impl PolicyEngine {
+    #[cfg(feature = "test-support")]
+    pub fn boot_id_for_test(&self) -> BootId {
+        self.inner.boot_id
+    }
+}
+
 fn checked_engine_limits(
     client_count: usize,
     replay_per_client: u64,

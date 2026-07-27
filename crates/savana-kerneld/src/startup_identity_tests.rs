@@ -1,12 +1,14 @@
 #[path = "../../savana-policy-core/tests/support/mod.rs"]
 mod policy_support;
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{
+    atomic::{AtomicU64, Ordering},
     mpsc::{self, RecvTimeoutError},
-    MutexGuard,
+    Arc, MutexGuard,
 };
 use std::thread;
 use std::time::Duration;
@@ -14,14 +16,21 @@ use std::time::Duration;
 use crate::key_file::DaemonKeyCapability;
 use crate::{DaemonConfig, DaemonError, DaemonSigningIdentity};
 use ed25519_dalek::{Signer, SigningKey};
+use nix::fcntl::{Flock, FlockArg};
 use nix::sys::stat::{umask, Mode};
 use savana_kernel_protocol::{Digest32, KeyId, Signature64, StableCode, UnixMillis};
 use savana_policy_core::{
-    PolicyVerifier, ReleaseTrustRootV1, ReleaseVerifier, VerifiedPolicyV1, VerifiedReleaseIdentity,
+    Clock, PolicyVerifier, RandomSource, ReleaseTrustRootV1, ReleaseVerifier, VerifiedPolicyV1,
+    VerifiedReleaseIdentity,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+
+use crate::audit::AuditSink;
+use crate::bootstrap::{BootstrapEvent, BootstrapTraceGuard, PreparedRuntime};
+use crate::selected_policy::{SelectedPolicySource, UpdateLockRacePoint};
+use crate::server::ServerLifecycle;
 
 const RELEASE_DOMAIN: &[u8] = b"SAVANA_RELEASE_V1\0";
 const TARGET_DOMAIN: &[u8] = b"SAVANA_RELEASE_TARGET_V1\0";
@@ -91,6 +100,7 @@ struct TestLock {
 
 struct StartupFixture {
     _stage: TempDir,
+    stage_path: PathBuf,
     _key_dir: TempDir,
     release: VerifiedReleaseIdentity,
     policy: VerifiedPolicyV1,
@@ -354,7 +364,7 @@ fn every_lock_manifest_profile_and_policy_identity_is_cross_checked() {
         ),
         (
             "platform",
-            Box::new(|lock| lock.platform = "macos".to_owned()),
+            Box::new(|lock| lock.platform = other_platform_name().to_owned()),
         ),
         (
             "daemon key ID",
@@ -680,6 +690,7 @@ fn assert_lock_bytes_error(fixture: &StartupFixture, bytes: &[u8]) {
 fn startup_fixture() -> StartupFixture {
     let process_guard = crate::socket::PROCESS_TEST_LOCK.lock().unwrap();
     let stage = tempfile::tempdir().unwrap();
+    let stage_path = fs::canonicalize(stage.path()).unwrap();
     let key_dir = tempfile::tempdir().unwrap();
     fs::set_permissions(key_dir.path(), PermissionsExt::from_mode(0o750)).unwrap();
     let owner = fs::metadata(key_dir.path()).unwrap();
@@ -746,7 +757,7 @@ fn startup_fixture() -> StartupFixture {
             "installation/kernel-installation-profile-v1.cbor",
             profile_bytes,
         ),
-        ("runtime/libonnxruntime.so", b"onnx-runtime".to_vec()),
+        (runtime_library_path(), b"onnx-runtime".to_vec()),
         ("model/assets/model.bin", b"model-asset".to_vec()),
     ];
     files.sort_by(|left, right| canonical_text_cmp(left.0, right.0));
@@ -815,7 +826,7 @@ fn startup_fixture() -> StartupFixture {
         source_commit: "a".repeat(40),
         installation_profile_digest: hex(profile_digest),
         installation_id: hex([0x71; 32]),
-        platform: "linux".to_owned(),
+        platform: compiled_platform_name().to_owned(),
         daemon_identity: LockPublicKey {
             key_id: "daemon-key".to_owned(),
             public_key: hex(daemon_key.verifying_key().to_bytes()),
@@ -837,9 +848,9 @@ fn startup_fixture() -> StartupFixture {
         daemon_uid,
         daemon_gid,
         jarvis_uid,
-        socket_path: "/run/savana/kernel/kerneld.sock".to_owned(),
-        selected_policy_path: "/etc/savana/kernel/selected-policy-v1.cbor".to_owned(),
-        selected_policy_signature_path: "/etc/savana/kernel/selected-policy-v1.sig".to_owned(),
+        socket_path: socket_path().to_owned(),
+        selected_policy_path: selected_policy_path().to_owned(),
+        selected_policy_signature_path: selected_policy_signature_path().to_owned(),
         socket_parent_mode: 0o750,
         socket_mode: 0o660,
         minimum_policy_version: 1,
@@ -857,6 +868,7 @@ fn startup_fixture() -> StartupFixture {
 
     StartupFixture {
         _stage: stage,
+        stage_path,
         _key_dir: key_dir,
         release,
         policy,
@@ -885,7 +897,7 @@ fn encode_profile(
         .unwrap()
         .bytes(&[0x71; 32])
         .unwrap()
-        .u8(0)
+        .u8(compiled_platform_tag())
         .unwrap()
         .array(2)
         .unwrap()
@@ -918,11 +930,11 @@ fn encode_profile(
         .unwrap()
         .u32(jarvis_uid)
         .unwrap()
-        .str("/run/savana/kernel/kerneld.sock")
+        .str(socket_path())
         .unwrap()
-        .str("/etc/savana/kernel/selected-policy-v1.cbor")
+        .str(selected_policy_path())
         .unwrap()
-        .str("/etc/savana/kernel/selected-policy-v1.sig")
+        .str(selected_policy_signature_path())
         .unwrap()
         .u16(0o750)
         .unwrap()
@@ -1110,4 +1122,694 @@ fn decode_nibble(value: u8) -> u8 {
         b'a'..=b'f' => value - b'a' + 10,
         _ => panic!("fixture hex is lowercase"),
     }
+}
+
+#[test]
+fn update_lock_requires_exact_inode_owner_group_mode_link_and_length() {
+    for corruption in [
+        UpdateLockCorruption::Symlink,
+        UpdateLockCorruption::Directory,
+        UpdateLockCorruption::WrongOwner,
+        UpdateLockCorruption::WrongGroup,
+        UpdateLockCorruption::Mode0600,
+        UpdateLockCorruption::Mode0644,
+        UpdateLockCorruption::HardLink,
+        UpdateLockCorruption::NonEmpty,
+    ] {
+        let installation = MappedInstallation::new();
+        assert_eq!(
+            installation
+                .prepare_after_update_lock_corruption(corruption)
+                .unwrap_err()
+                .code(),
+            StableCode::KernelUnavailable,
+            "{corruption:?}"
+        );
+        assert_eq!(
+            installation.ledger_bytes(),
+            installation.initial_ledger_bytes()
+        );
+    }
+}
+
+#[test]
+fn active_exclusive_updater_makes_daemon_shared_lock_fail_closed() {
+    let installation = MappedInstallation::new();
+    let exclusive = installation.lock_update_file_exclusive();
+    assert_eq!(
+        installation.prepare().unwrap_err().code(),
+        StableCode::KernelUnavailable
+    );
+    assert_eq!(
+        installation.ledger_bytes(),
+        installation.initial_ledger_bytes()
+    );
+    drop(exclusive);
+}
+
+#[test]
+fn replacing_update_lock_inode_before_or_after_flock_is_rejected() {
+    for point in [
+        UpdateLockRacePoint::BeforeSharedFlock,
+        UpdateLockRacePoint::AfterSharedFlock,
+    ] {
+        let installation = MappedInstallation::new();
+        assert_eq!(
+            installation
+                .prepare_with_update_lock_race(point)
+                .unwrap_err()
+                .code(),
+            StableCode::KernelUnavailable
+        );
+        assert_eq!(
+            installation.ledger_bytes(),
+            installation.initial_ledger_bytes()
+        );
+    }
+}
+
+#[test]
+fn initial_boot_order_and_shared_guard_lifetime_are_exact() {
+    let installation = MappedInstallation::new();
+    let trace = BootstrapTraceGuard::install();
+    let mut prepared = installation
+        .prepare()
+        .unwrap_or_else(|error| panic!("{error:?}; trace: {:?}", trace.events()));
+    let probe = prepared.selected_artifact_drop_probe();
+    assert_eq!(probe.load(Ordering::Acquire), 1);
+    assert_eq!(
+        trace.events(),
+        vec![
+            BootstrapEvent::ReleaseVerified,
+            BootstrapEvent::ReleaseVerifierBound,
+            BootstrapEvent::LedgerLifetimeLockAcquired,
+            BootstrapEvent::SelectedUpdateSharedLockAcquired,
+            BootstrapEvent::CandidateRead,
+            BootstrapEvent::CandidateStatelesslyVerified,
+            BootstrapEvent::FixedLockVerified,
+            BootstrapEvent::FinalDescriptorRecheck,
+            BootstrapEvent::LedgerPersisted,
+            BootstrapEvent::CurrentCapabilityReturned,
+            BootstrapEvent::DaemonKeyLoaded,
+            BootstrapEvent::EngineConstructed,
+        ]
+    );
+    assert!(!installation.socket.exists());
+    assert!(!installation.update_lock_exclusive_is_available());
+
+    let mut lifecycle = ImmediateShutdownLifecycle {
+        update_lock: installation.update_lock.clone(),
+        saw_guard_held: false,
+    };
+    if installation.supports_socket_binding() {
+        let (audit, _audit_reader) = installation.audit();
+        let bound = prepared.bind(audit).unwrap();
+        assert!(installation.socket.exists());
+        assert!(!installation.update_lock_exclusive_is_available());
+        bound.run(&mut lifecycle).unwrap();
+    } else {
+        prepared
+            .exercise_startup_guard_for_test(&mut lifecycle)
+            .unwrap();
+    }
+    assert!(lifecycle.saw_guard_held);
+    assert_eq!(probe.load(Ordering::Acquire), 0);
+    assert!(!installation.socket.exists());
+    assert!(installation.update_lock_exclusive_is_available());
+    let events = trace.events();
+    assert_eq!(
+        &events[events.len() - 2..],
+        &[
+            BootstrapEvent::WorkersActivated,
+            BootstrapEvent::SelectedUpdateSharedLockReleased,
+        ]
+    );
+}
+
+#[test]
+fn candidate_descriptors_are_not_lifetime_retained_after_activation() {
+    let installation = MappedInstallation::new();
+    let mut prepared = installation.prepare().unwrap();
+    let probe = prepared.selected_artifact_drop_probe();
+    assert_eq!(probe.load(Ordering::Acquire), 1);
+    let mut lifecycle = ImmediateShutdownLifecycle {
+        update_lock: installation.update_lock.clone(),
+        saw_guard_held: false,
+    };
+    if installation.supports_socket_binding() {
+        let (audit, _audit_reader) = installation.audit();
+        let bound = prepared.bind(audit).unwrap();
+        bound.run(&mut lifecycle).unwrap();
+    } else {
+        prepared
+            .exercise_startup_guard_for_test(&mut lifecycle)
+            .unwrap();
+    }
+    assert!(lifecycle.saw_guard_held);
+    assert_eq!(probe.load(Ordering::Acquire), 0);
+    installation.install_next_candidate_under_exclusive_lock();
+    assert_ne!(
+        fs::metadata(&installation.selected_policy).unwrap().ino(),
+        installation.initial_selected_policy_inode
+    );
+}
+
+#[test]
+fn failed_worker_activation_keeps_the_guard_until_server_cleanup() {
+    let installation = MappedInstallation::new();
+    let mut prepared = installation.prepare().unwrap();
+    let probe = prepared.selected_artifact_drop_probe();
+    let mut lifecycle = FailingActivationLifecycle {
+        update_lock: installation.update_lock.clone(),
+        saw_guard_held: false,
+    };
+    if installation.supports_socket_binding() {
+        let (audit, _audit_reader) = installation.audit();
+        let bound = prepared.bind(audit).unwrap();
+        assert_eq!(
+            bound.run(&mut lifecycle).unwrap_err().code(),
+            StableCode::KernelUnavailable
+        );
+    } else {
+        assert_eq!(
+            prepared
+                .exercise_startup_guard_for_test(&mut lifecycle)
+                .unwrap_err()
+                .code(),
+            StableCode::KernelUnavailable
+        );
+    }
+    assert!(lifecycle.saw_guard_held);
+    assert_eq!(probe.load(Ordering::Acquire), 0);
+    assert!(!installation.socket.exists());
+    assert!(installation.update_lock_exclusive_is_available());
+}
+
+#[derive(Debug, Clone, Copy)]
+enum UpdateLockCorruption {
+    Symlink,
+    Directory,
+    WrongOwner,
+    WrongGroup,
+    Mode0600,
+    Mode0644,
+    HardLink,
+    NonEmpty,
+}
+
+struct MappedInstallation {
+    _fixture: StartupFixture,
+    _root: TempDir,
+    config: PathBuf,
+    selected_policy: PathBuf,
+    update_lock: PathBuf,
+    ledger: PathBuf,
+    socket: PathBuf,
+    initial_selected_policy_inode: u64,
+    uid: u32,
+    gid: u32,
+}
+
+impl MappedInstallation {
+    fn new() -> Self {
+        let fixture = startup_fixture();
+        let root = tempfile::Builder::new()
+            .prefix("skd-")
+            .tempdir_in("/private/tmp")
+            .unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        nix::unistd::chown(
+            &root_path,
+            None,
+            Some(nix::unistd::Gid::from_raw(nix::unistd::getegid().as_raw())),
+        )
+        .unwrap();
+        fs::set_permissions(&root_path, PermissionsExt::from_mode(0o700)).unwrap();
+        let owner = fs::metadata(&root_path).unwrap();
+        let uid = owner.uid();
+        let gid = owner.gid();
+
+        let release_stage = mapped_path(&root_path, release_stage_path());
+        copy_release_stage(&fixture.stage_path, &release_stage);
+
+        let config = mapped_path(&root_path, "/etc/savana/kerneld-bootstrap-v1.json");
+        let kernel_lock = mapped_path(&root_path, "/etc/savana/kernel-lock.json");
+        let selected_policy = mapped_path(&root_path, selected_policy_path());
+        let selected_signature = mapped_path(&root_path, selected_policy_signature_path());
+        let update_lock = selected_policy
+            .parent()
+            .unwrap()
+            .join(".selected-policy-v1.update.lock");
+        let daemon_key = mapped_path(&root_path, daemon_key_path());
+        let ledger = mapped_path(&root_path, ledger_path());
+        let socket = mapped_path(&root_path, socket_path());
+
+        ensure_directory(config.parent().unwrap(), 0o755);
+        ensure_directory(kernel_lock.parent().unwrap(), 0o755);
+        ensure_directory(selected_policy.parent().unwrap(), 0o755);
+        ensure_directory(daemon_key.parent().unwrap(), 0o750);
+        ensure_directory(ledger.parent().unwrap(), 0o700);
+        ensure_directory(socket.parent().unwrap(), 0o750);
+        ensure_directory(ledger.parent().unwrap().parent().unwrap(), 0o755);
+
+        write_mapped_file(
+            &config,
+            &bootstrap_anchor_bytes(fixture.release.release_digest()),
+            0o444,
+        );
+        write_mapped_file(&kernel_lock, &fixture.lock_bytes(), 0o444);
+        write_mapped_file(
+            &selected_policy,
+            &fs::read(fixture.stage_path.join("policy/default-policy-v1.cbor")).unwrap(),
+            0o444,
+        );
+        write_mapped_file(
+            &selected_signature,
+            &fs::read(fixture.stage_path.join("policy/default-policy-v1.sig")).unwrap(),
+            0o444,
+        );
+        write_mapped_file(&update_lock, &[], 0o640);
+        write_mapped_file(&daemon_key, &[0x61; 32], 0o600);
+
+        let initial_selected_policy_inode = fs::metadata(&selected_policy).unwrap().ino();
+        Self {
+            _fixture: fixture,
+            _root: root,
+            config,
+            selected_policy,
+            update_lock,
+            ledger,
+            socket,
+            initial_selected_policy_inode,
+            uid,
+            gid,
+        }
+    }
+
+    fn prepare(&self) -> Result<PreparedRuntime, DaemonError> {
+        PreparedRuntime::prepare_with_dependencies(
+            &self.config,
+            savana_kernel_protocol::BootId::new([0x31; 32]),
+            Arc::new(FixedClock::default()),
+            Arc::new(FixedRandom),
+        )
+    }
+
+    fn prepare_after_update_lock_corruption(
+        &self,
+        corruption: UpdateLockCorruption,
+    ) -> Result<PreparedRuntime, DaemonError> {
+        self.corrupt_update_lock(corruption);
+        match corruption {
+            UpdateLockCorruption::WrongOwner => self.prepare_with_source_hook(Box::new({
+                let uid = self.uid.wrapping_add(1);
+                let gid = self.gid;
+                move |source| source.install_update_lock_owner_override(uid, gid)
+            })),
+            UpdateLockCorruption::WrongGroup => self.prepare_with_source_hook(Box::new({
+                let uid = self.uid;
+                let gid = self.gid.wrapping_add(1);
+                move |source| source.install_update_lock_owner_override(uid, gid)
+            })),
+            _ => self.prepare(),
+        }
+    }
+
+    fn prepare_with_update_lock_race(
+        &self,
+        point: UpdateLockRacePoint,
+    ) -> Result<PreparedRuntime, DaemonError> {
+        let replacement = self.update_lock.with_extension("replacement");
+        write_mapped_file(&replacement, &[], 0o640);
+        let update_lock = self.update_lock.clone();
+        self.prepare_with_source_hook(Box::new(move |source| {
+            source.install_update_lock_race_hook(
+                point,
+                Box::new(move || fs::rename(&replacement, update_lock).unwrap()),
+            );
+        }))
+    }
+
+    fn prepare_with_source_hook(
+        &self,
+        source_hook: Box<dyn FnOnce(&SelectedPolicySource) + Send>,
+    ) -> Result<PreparedRuntime, DaemonError> {
+        PreparedRuntime::prepare_with_source_hook_for_test(
+            &self.config,
+            savana_kernel_protocol::BootId::new([0x31; 32]),
+            Arc::new(FixedClock::default()),
+            Arc::new(FixedRandom),
+            source_hook,
+        )
+    }
+
+    fn corrupt_update_lock(&self, corruption: UpdateLockCorruption) {
+        match corruption {
+            UpdateLockCorruption::Symlink => {
+                fs::remove_file(&self.update_lock).unwrap();
+                symlink("selected-policy-v1.cbor", &self.update_lock).unwrap();
+            }
+            UpdateLockCorruption::Directory => {
+                fs::remove_file(&self.update_lock).unwrap();
+                fs::create_dir(&self.update_lock).unwrap();
+            }
+            UpdateLockCorruption::WrongOwner | UpdateLockCorruption::WrongGroup => {}
+            UpdateLockCorruption::Mode0600 => set_mode(&self.update_lock, 0o600),
+            UpdateLockCorruption::Mode0644 => set_mode(&self.update_lock, 0o644),
+            UpdateLockCorruption::HardLink => {
+                fs::hard_link(
+                    &self.update_lock,
+                    self.update_lock.with_extension("hard-link"),
+                )
+                .unwrap();
+            }
+            UpdateLockCorruption::NonEmpty => {
+                set_mode(&self.update_lock, 0o640);
+                fs::write(&self.update_lock, b"not empty").unwrap();
+                set_mode(&self.update_lock, 0o640);
+            }
+        }
+    }
+
+    fn lock_update_file_exclusive(&self) -> Flock<std::fs::File> {
+        Flock::lock(
+            OpenOptions::new()
+                .read(true)
+                .open(&self.update_lock)
+                .unwrap(),
+            FlockArg::LockExclusiveNonblock,
+        )
+        .unwrap()
+    }
+
+    fn update_lock_exclusive_is_available(&self) -> bool {
+        match Flock::lock(
+            OpenOptions::new()
+                .read(true)
+                .open(&self.update_lock)
+                .unwrap(),
+            FlockArg::LockExclusiveNonblock,
+        ) {
+            Ok(lock) => {
+                drop(lock);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn supports_socket_binding(&self) -> bool {
+        match std::os::unix::net::UnixListener::bind(&self.socket) {
+            Ok(listener) => {
+                drop(listener);
+                fs::remove_file(&self.socket).unwrap();
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => false,
+            Err(error) => {
+                panic!("fixture Unix-socket capability probe failed unexpectedly: {error}")
+            }
+        }
+    }
+
+    fn ledger_bytes(&self) -> Option<Vec<u8>> {
+        match fs::read(&self.ledger) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => panic!("could not read fixture ledger: {error}"),
+        }
+    }
+
+    const fn initial_ledger_bytes(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    fn audit(&self) -> (Arc<AuditSink>, std::os::unix::net::UnixStream) {
+        let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let writer: OwnedFd = writer.into();
+        let audit = AuditSink::from_owned_for_test(writer, Duration::from_millis(100)).unwrap();
+        (Arc::new(audit), reader)
+    }
+
+    fn install_next_candidate_under_exclusive_lock(&self) {
+        let exclusive = self.lock_update_file_exclusive();
+        let replacement = self.selected_policy.with_extension("next");
+        write_mapped_file(
+            &replacement,
+            &fs::read(&self.selected_policy).unwrap(),
+            0o444,
+        );
+        fs::rename(&replacement, &self.selected_policy).unwrap();
+        drop(exclusive);
+    }
+}
+
+struct ImmediateShutdownLifecycle {
+    update_lock: PathBuf,
+    saw_guard_held: bool,
+}
+
+impl ServerLifecycle for ImmediateShutdownLifecycle {
+    fn workers_started(&mut self) -> Result<(), StableCode> {
+        self.saw_guard_held = !update_lock_exclusive_is_available(&self.update_lock);
+        Ok(())
+    }
+
+    fn poll_shutdown(&mut self) -> Result<bool, StableCode> {
+        Ok(true)
+    }
+}
+
+struct FailingActivationLifecycle {
+    update_lock: PathBuf,
+    saw_guard_held: bool,
+}
+
+impl ServerLifecycle for FailingActivationLifecycle {
+    fn workers_started(&mut self) -> Result<(), StableCode> {
+        self.saw_guard_held = !update_lock_exclusive_is_available(&self.update_lock);
+        Err(StableCode::KernelUnavailable)
+    }
+
+    fn poll_shutdown(&mut self) -> Result<bool, StableCode> {
+        Ok(false)
+    }
+}
+
+#[derive(Default)]
+struct FixedClock {
+    monotonic: AtomicU64,
+}
+
+impl Clock for FixedClock {
+    fn wall_now(&self) -> Result<UnixMillis, StableCode> {
+        Ok(UnixMillis::new(NOW))
+    }
+
+    fn monotonic_now_millis(&self) -> Result<u64, StableCode> {
+        Ok(self.monotonic.fetch_add(1, Ordering::AcqRel))
+    }
+}
+
+struct FixedRandom;
+
+impl RandomSource for FixedRandom {
+    fn fill(&self, output: &mut [u8]) -> Result<usize, StableCode> {
+        output.fill(0x41);
+        Ok(output.len())
+    }
+}
+
+#[derive(Serialize)]
+struct BootstrapFixtureTrustRoot {
+    key_id: String,
+    public_key: String,
+    not_before_unix_ms: u64,
+    not_after_unix_ms: u64,
+    revoked: bool,
+}
+
+#[derive(Serialize)]
+struct BootstrapFixture {
+    schema_version: u16,
+    platform: &'static str,
+    release_trust_roots: Vec<BootstrapFixtureTrustRoot>,
+    allowed_release_digest: String,
+}
+
+fn bootstrap_anchor_bytes(release_digest: Digest32) -> Vec<u8> {
+    let release_key = SigningKey::from_bytes(&[0x51; 32]);
+    serde_json::to_vec(&BootstrapFixture {
+        schema_version: 1,
+        platform: compiled_platform_name(),
+        release_trust_roots: vec![BootstrapFixtureTrustRoot {
+            key_id: "release-root".to_owned(),
+            public_key: hex(release_key.verifying_key().to_bytes()),
+            not_before_unix_ms: 500,
+            not_after_unix_ms: 5_000,
+            revoked: false,
+        }],
+        allowed_release_digest: hex(*release_digest.as_bytes()),
+    })
+    .unwrap()
+}
+
+fn mapped_path(root: &Path, production_path: &str) -> PathBuf {
+    root.join(production_path.trim_start_matches('/'))
+}
+
+#[cfg(target_os = "linux")]
+const fn compiled_platform_name() -> &'static str {
+    "linux"
+}
+
+#[cfg(target_os = "macos")]
+const fn compiled_platform_name() -> &'static str {
+    "macos"
+}
+
+#[cfg(target_os = "linux")]
+const fn other_platform_name() -> &'static str {
+    "macos"
+}
+
+#[cfg(target_os = "macos")]
+const fn other_platform_name() -> &'static str {
+    "linux"
+}
+
+#[cfg(target_os = "linux")]
+const fn compiled_platform_tag() -> u8 {
+    0
+}
+
+#[cfg(target_os = "macos")]
+const fn compiled_platform_tag() -> u8 {
+    1
+}
+
+#[cfg(target_os = "linux")]
+const fn runtime_library_path() -> &'static str {
+    "runtime/libonnxruntime.so"
+}
+
+#[cfg(target_os = "macos")]
+const fn runtime_library_path() -> &'static str {
+    "runtime/libonnxruntime.dylib"
+}
+
+#[cfg(target_os = "linux")]
+const fn release_stage_path() -> &'static str {
+    "/opt/savana/kernel/release"
+}
+
+#[cfg(target_os = "macos")]
+const fn release_stage_path() -> &'static str {
+    "/Library/Application Support/Savana/Kernel/release"
+}
+
+#[cfg(target_os = "linux")]
+const fn daemon_key_path() -> &'static str {
+    "/var/lib/savana/kernel/private/daemon-identity-v1.seed"
+}
+
+#[cfg(target_os = "macos")]
+const fn daemon_key_path() -> &'static str {
+    "/Library/Application Support/Savana/Kernel/private/daemon-identity-v1.seed"
+}
+
+#[cfg(target_os = "linux")]
+const fn ledger_path() -> &'static str {
+    "/var/lib/savana/kernel/state/policy-ledger-v1.cbor"
+}
+
+#[cfg(target_os = "macos")]
+const fn ledger_path() -> &'static str {
+    "/Library/Application Support/Savana/Kernel/state/policy-ledger-v1.cbor"
+}
+
+#[cfg(target_os = "linux")]
+const fn selected_policy_path() -> &'static str {
+    "/etc/savana/kernel/selected-policy-v1.cbor"
+}
+
+#[cfg(target_os = "macos")]
+const fn selected_policy_path() -> &'static str {
+    "/Library/Application Support/Savana/Kernel/selected-policy-v1.cbor"
+}
+
+#[cfg(target_os = "linux")]
+const fn selected_policy_signature_path() -> &'static str {
+    "/etc/savana/kernel/selected-policy-v1.sig"
+}
+
+#[cfg(target_os = "macos")]
+const fn selected_policy_signature_path() -> &'static str {
+    "/Library/Application Support/Savana/Kernel/selected-policy-v1.sig"
+}
+
+#[cfg(target_os = "linux")]
+const fn socket_path() -> &'static str {
+    "/run/savana/kernel/kerneld.sock"
+}
+
+#[cfg(target_os = "macos")]
+const fn socket_path() -> &'static str {
+    "/var/run/savana/kernel/kerneld.sock"
+}
+
+fn ensure_directory(path: &Path, mode: u32) {
+    fs::create_dir_all(path).unwrap();
+    set_mode(path, mode);
+}
+
+fn write_mapped_file(path: &Path, bytes: &[u8], mode: u32) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, bytes).unwrap();
+    set_mode(path, mode);
+}
+
+fn copy_release_stage(source: &Path, destination: &Path) {
+    ensure_directory(destination, 0o755);
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let metadata = entry.metadata().unwrap();
+        if metadata.is_dir() {
+            copy_release_stage(&source_path, &destination_path);
+        } else {
+            fs::copy(&source_path, &destination_path).unwrap();
+            let mode = if source_path
+                .file_name()
+                .is_some_and(|name| name == "savana-kerneld")
+                && source_path
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|name| name == "bin")
+            {
+                0o555
+            } else {
+                0o444
+            };
+            set_mode(&destination_path, mode);
+        }
+    }
+}
+
+fn update_lock_exclusive_is_available(path: &Path) -> bool {
+    match Flock::lock(
+        OpenOptions::new().read(true).open(path).unwrap(),
+        FlockArg::LockExclusiveNonblock,
+    ) {
+        Ok(lock) => {
+            drop(lock);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn set_mode(path: &Path, mode: u32) {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
 }

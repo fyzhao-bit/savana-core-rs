@@ -1,6 +1,6 @@
 #[cfg(test)]
 use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use savana_kernel_protocol::{
@@ -8,11 +8,12 @@ use savana_kernel_protocol::{
     HandshakeTranscriptV1, KeyId, Nonce32, ProtocolVersion, RequestedMode, ServerIdentityV1,
     SignedServerHelloV1, StableCode, UnixMillis, PROTOCOL_MAJOR, PROTOCOL_MINOR,
 };
-use savana_policy_core::InstallationClientRoleV1;
+use savana_policy_core::{InstallationClientRoleV1, RandomSource};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::peer::PeerIdentity;
+use crate::runtime_deps::draw_nonzero_32;
 use crate::state::ReplayState;
 #[cfg(test)]
 use crate::state::ReplayStatus;
@@ -43,6 +44,7 @@ struct RuntimeIdentity {
     release_digest: Digest32,
     policy_digest: Digest32,
     policy_version: u64,
+    policy_key_epoch: u64,
     model_manifest_digest: Digest32,
     approval_key_set_digest: Digest32,
     resource_profile_digest: Digest32,
@@ -75,6 +77,7 @@ impl RuntimeIdentity {
             release_digest: config.release_digest(),
             policy_digest: config.policy_digest(),
             policy_version: config.policy_version(),
+            policy_key_epoch: config.policy_key_epoch(),
             model_manifest_digest: config.model_manifest_digest(),
             approval_key_set_digest: config.approval_key_set_digest(),
             resource_profile_digest: config.resource_profile_digest(),
@@ -119,18 +122,6 @@ impl RuntimeIdentity {
     }
 }
 
-trait EntropySource: Send + Sync {
-    fn fill_32(&self, output: &mut [u8; 32]) -> Result<(), ()>;
-}
-
-struct SystemEntropy;
-
-impl EntropySource for SystemEntropy {
-    fn fill_32(&self, output: &mut [u8; 32]) -> Result<(), ()> {
-        getrandom::getrandom(output).map_err(|_| ())
-    }
-}
-
 #[cfg(test)]
 struct TransportTestEntropy {
     next: AtomicU8,
@@ -146,14 +137,17 @@ impl TransportTestEntropy {
 }
 
 #[cfg(test)]
-impl EntropySource for TransportTestEntropy {
-    fn fill_32(&self, output: &mut [u8; 32]) -> Result<(), ()> {
+impl RandomSource for TransportTestEntropy {
+    fn fill(&self, output: &mut [u8]) -> Result<usize, StableCode> {
+        if output.len() != 32 {
+            return Err(StableCode::KernelUnavailable);
+        }
         let value = self.next.fetch_add(1, AtomicOrdering::AcqRel);
         if value == 0 {
-            return Err(());
+            return Err(StableCode::KernelUnavailable);
         }
         output.fill(value);
-        Ok(())
+        Ok(output.len())
     }
 }
 
@@ -161,7 +155,7 @@ pub(crate) struct HandshakeService {
     runtime: RuntimeIdentity,
     signing_identity: DaemonSigningIdentity,
     boot_id: BootId,
-    entropy: Box<dyn EntropySource>,
+    random: Arc<dyn RandomSource + Send + Sync>,
     state: Mutex<ReplayState>,
 }
 
@@ -237,12 +231,15 @@ impl HandshakeService {
         config: &DaemonConfig,
         signing_identity: DaemonSigningIdentity,
         startup_now: UnixMillis,
+        boot_id: BootId,
+        random: Arc<dyn RandomSource + Send + Sync>,
     ) -> Result<Self, StableCode> {
         let service = Self::new_inner(
             RuntimeIdentity::from_config(config),
             signing_identity,
             startup_now,
-            Box::new(SystemEntropy),
+            boot_id,
+            random,
         )?;
         config
             .server_identity(
@@ -274,20 +271,21 @@ impl HandshakeService {
         runtime: RuntimeIdentity,
         signing_identity: DaemonSigningIdentity,
         startup_now: UnixMillis,
-        entropy: Box<dyn EntropySource>,
+        boot_id: BootId,
+        random: Arc<dyn RandomSource + Send + Sync>,
     ) -> Result<Self, StableCode> {
         if !(1..=MAXIMUM_CLIENTS).contains(&runtime.clients.len())
             || signing_identity.public_key() != runtime.daemon_public_key
+            || boot_id.as_bytes() == &[0; 32]
         {
             return Err(StableCode::IdentityKeyPermissions);
         }
-        let boot_id = BootId::new(nonzero_entropy(entropy.as_ref())?);
         let state = Mutex::new(ReplayState::new(runtime.clients.len(), startup_now));
         Ok(Self {
             runtime,
             signing_identity,
             boot_id,
-            entropy,
+            random,
             state,
         })
     }
@@ -338,6 +336,7 @@ impl HandshakeService {
             release_digest: Digest32::new([0x81; 32]),
             policy_digest: Digest32::new([0x82; 32]),
             policy_version: 7,
+            policy_key_epoch: 3,
             model_manifest_digest: Digest32::new([0x83; 32]),
             approval_key_set_digest: Digest32::new([0x84; 32]),
             resource_profile_digest: Digest32::new([0x85; 32]),
@@ -348,7 +347,8 @@ impl HandshakeService {
             runtime,
             DaemonSigningIdentity::from_seed_for_test([0x61; 32]),
             startup_now,
-            Box::new(TransportTestEntropy::new()),
+            BootId::new([0x31; 32]),
+            Arc::new(TransportTestEntropy::new()),
         )
     }
 
@@ -366,13 +366,14 @@ impl HandshakeService {
     }
 
     #[cfg(test)]
-    fn new_with_entropy_for_test(
+    fn new_with_random_for_test(
         runtime: RuntimeIdentity,
         signing_identity: DaemonSigningIdentity,
         startup_now: UnixMillis,
-        entropy: Box<dyn EntropySource>,
+        boot_id: BootId,
+        random: Arc<dyn RandomSource + Send + Sync>,
     ) -> Result<Self, StableCode> {
-        Self::new_inner(runtime, signing_identity, startup_now, entropy)
+        Self::new_inner(runtime, signing_identity, startup_now, boot_id, random)
     }
 
     pub(crate) fn start(
@@ -399,7 +400,7 @@ impl HandshakeService {
         verify_peer(client, peer)?;
         let slot_index = state.reserve_slot(client_index, hello.client_nonce, now)?;
 
-        let server_nonce = Nonce32::new(nonzero_entropy(self.entropy.as_ref())?);
+        let server_nonce = Nonce32::new(draw_nonzero_32(self.random.as_ref())?);
         let transcript = HandshakeTranscriptV1 {
             client: hello,
             server_nonce,
@@ -464,7 +465,7 @@ impl HandshakeService {
             return Err(StableCode::IdentityTranscriptMismatch);
         }
         verify_client_finish(client, &finish)?;
-        let capability = nonzero_capability(self.entropy.as_ref())?;
+        let capability = nonzero_capability(self.random.as_ref())?;
         let context = ConnectionContext {
             capability,
             client_id: client.client_id.clone(),
@@ -591,6 +592,16 @@ impl HandshakeService {
         self.boot_id
     }
 
+    #[cfg(feature = "test-support")]
+    pub(crate) fn policy_identity_for_test(&self) -> savana_policy_core::PolicyIdentity {
+        savana_policy_core::PolicyIdentity {
+            digest: self.runtime.policy_digest,
+            policy_version: self.runtime.policy_version,
+            key_epoch: self.runtime.policy_key_epoch,
+            expires_at: self.runtime.policy_expires_at,
+        }
+    }
+
     #[cfg(test)]
     fn poison_state_for_test(&self) {
         let _panic_guard = crate::panic_report::PROCESS_PANIC_TEST_LOCK.lock().unwrap();
@@ -667,26 +678,8 @@ fn verify_client_finish(
         .map_err(|_| StableCode::IdentityInvalidSignature)
 }
 
-fn nonzero_entropy(source: &dyn EntropySource) -> Result<[u8; 32], StableCode> {
-    let mut value = [0_u8; 32];
-    source
-        .fill_32(&mut value)
-        .map_err(|_| StableCode::KernelUnavailable)?;
-    if value == [0; 32] {
-        return Err(StableCode::KernelUnavailable);
-    }
-    Ok(value)
-}
-
-fn nonzero_capability(source: &dyn EntropySource) -> Result<Zeroizing<[u8; 32]>, StableCode> {
-    let mut value = Zeroizing::new([0_u8; 32]);
-    source
-        .fill_32(&mut value)
-        .map_err(|_| StableCode::KernelUnavailable)?;
-    if value.iter().all(|byte| *byte == 0) {
-        return Err(StableCode::KernelUnavailable);
-    }
-    Ok(value)
+fn nonzero_capability(random: &dyn RandomSource) -> Result<Zeroizing<[u8; 32]>, StableCode> {
+    Ok(Zeroizing::new(draw_nonzero_32(random)?))
 }
 
 fn canonical_transcript(transcript: &HandshakeTranscriptV1) -> Result<Vec<u8>, StableCode> {
@@ -1570,11 +1563,12 @@ mod tests {
     fn concurrent_same_nonce_admission_has_exactly_one_winner() {
         let runtime = test_runtime(1);
         let calls = Arc::new(AtomicUsize::new(0));
-        let service = HandshakeService::new_with_entropy_for_test(
+        let service = HandshakeService::new_with_random_for_test(
             runtime.clone(),
             DaemonSigningIdentity::from_seed_for_test([0x61; 32]),
             STARTUP_NOW,
-            Box::new(CountingEntropy {
+            BootId::new([0x31; 32]),
+            Arc::new(CountingEntropy {
                 calls: Arc::clone(&calls),
             }),
         )
@@ -2218,21 +2212,29 @@ mod tests {
         }
     }
 
-    impl EntropySource for ScriptedEntropy {
-        fn fill_32(&self, output: &mut [u8; 32]) -> Result<(), ()> {
-            match self.steps.lock().map_err(|_| ())?.pop_front() {
+    impl RandomSource for ScriptedEntropy {
+        fn fill(&self, output: &mut [u8]) -> Result<usize, StableCode> {
+            if output.len() != 32 {
+                return Err(StableCode::KernelUnavailable);
+            }
+            match self
+                .steps
+                .lock()
+                .map_err(|_| StableCode::KernelUnavailable)?
+                .pop_front()
+            {
                 Some(EntropyStep::Value(value)) => {
-                    *output = value;
-                    Ok(())
+                    output.copy_from_slice(&value);
+                    Ok(output.len())
                 }
                 Some(EntropyStep::Zero) => {
-                    *output = [0; 32];
-                    Ok(())
+                    output.fill(0);
+                    Ok(output.len())
                 }
-                Some(EntropyStep::Fail) => Err(()),
+                Some(EntropyStep::Fail) => Err(StableCode::ProtocolIo),
                 None => {
-                    *output = [0x66; 32];
-                    Ok(())
+                    output.fill(0x66);
+                    Ok(output.len())
                 }
             }
         }
@@ -2242,11 +2244,14 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
-    impl EntropySource for CountingEntropy {
-        fn fill_32(&self, output: &mut [u8; 32]) -> Result<(), ()> {
+    impl RandomSource for CountingEntropy {
+        fn fill(&self, output: &mut [u8]) -> Result<usize, StableCode> {
+            if output.len() != 32 {
+                return Err(StableCode::KernelUnavailable);
+            }
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
-            *output = [0x22_u8.wrapping_add(u8::try_from(call).unwrap_or(0)); 32];
-            Ok(())
+            output.fill(0x22_u8.wrapping_add(u8::try_from(call).unwrap_or(0)));
+            Ok(output.len())
         }
     }
 
@@ -2350,11 +2355,19 @@ mod tests {
         startup_now: UnixMillis,
         steps: Vec<EntropyStep>,
     ) -> Result<HandshakeService, StableCode> {
-        HandshakeService::new_with_entropy_for_test(
+        let boot_entropy = steps.first().ok_or(StableCode::KernelUnavailable)?;
+        let boot_id = match boot_entropy {
+            EntropyStep::Value(value) if *value != [0; 32] => BootId::new(*value),
+            EntropyStep::Value(_) | EntropyStep::Zero | EntropyStep::Fail => {
+                return Err(StableCode::KernelUnavailable)
+            }
+        };
+        HandshakeService::new_with_random_for_test(
             runtime,
             DaemonSigningIdentity::from_seed_for_test([0x61; 32]),
             startup_now,
-            Box::new(ScriptedEntropy::new(steps)),
+            boot_id,
+            Arc::new(ScriptedEntropy::new(steps.into_iter().skip(1).collect())),
         )
     }
 
@@ -2394,6 +2407,7 @@ mod tests {
             release_digest: Digest32::new([0x31; 32]),
             policy_digest: Digest32::new([0x32; 32]),
             policy_version: 7,
+            policy_key_epoch: 3,
             model_manifest_digest: Digest32::new([0x33; 32]),
             approval_key_set_digest: Digest32::new([0x34; 32]),
             resource_profile_digest: Digest32::new([0x35; 32]),

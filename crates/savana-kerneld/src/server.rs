@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use nix::fcntl::{fcntl, FcntlArg, FdFlag};
 use savana_kernel_protocol::{
@@ -17,6 +17,7 @@ use savana_kernel_protocol::{
     ResponseBodyV1, ResponseEnvelopeV1, ResponsePayloadV1, ServerIdentityV1, ServerMessageV1,
     StableCode, UnixMillis,
 };
+use savana_policy_core::Clock;
 
 use crate::audit::{AuditEvent, AuditSink, OperationTag, RequestCode};
 use crate::handshake::{ConnectionContext, HandshakeService};
@@ -197,23 +198,6 @@ impl Shutdown {
     }
 }
 
-trait Clock: Send + Sync {
-    fn now(&self) -> Result<UnixMillis, StableCode>;
-}
-
-struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now(&self) -> Result<UnixMillis, StableCode> {
-        let elapsed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| StableCode::KernelUnavailable)?;
-        let millis =
-            u64::try_from(elapsed.as_millis()).map_err(|_| StableCode::KernelUnavailable)?;
-        Ok(UnixMillis::new(millis))
-    }
-}
-
 pub(crate) trait ServerLifecycle {
     fn workers_started(&mut self) -> Result<(), StableCode>;
 
@@ -251,7 +235,7 @@ pub(crate) struct KernelServer {
     service: Arc<HandshakeService>,
     effective_limits: EffectiveLimits,
     limits: ServerLimits,
-    clock: Arc<dyn Clock>,
+    clock: Arc<dyn Clock + Send + Sync>,
     shutdown: Shutdown,
     audit: Option<Arc<AuditSink>>,
 }
@@ -262,6 +246,7 @@ impl KernelServer {
         service: HandshakeService,
         socket: SocketPreflight,
         audit: Arc<AuditSink>,
+        clock: Arc<dyn Clock + Send + Sync>,
     ) -> Result<Self, StableCode> {
         let bound = bind_preflight(socket)?;
         Ok(Self {
@@ -269,7 +254,7 @@ impl KernelServer {
             service: Arc::new(service),
             effective_limits: *config.effective_limits(),
             limits: ServerLimits::production(),
-            clock: Arc::new(SystemClock),
+            clock,
             shutdown: Shutdown::new(),
             audit: Some(audit),
         })
@@ -281,7 +266,7 @@ impl KernelServer {
         service: HandshakeService,
         effective_limits: EffectiveLimits,
         limits: ServerLimits,
-        clock: Arc<dyn Clock>,
+        clock: Arc<dyn Clock + Send + Sync>,
     ) -> Result<(Self, Shutdown), StableCode> {
         let bound = bind_socket(&socket_config)?;
         let shutdown = Shutdown::new();
@@ -460,7 +445,7 @@ fn spawn_worker(
     service: Arc<HandshakeService>,
     effective_limits: EffectiveLimits,
     limits: ServerLimits,
-    clock: Arc<dyn Clock>,
+    clock: Arc<dyn Clock + Send + Sync>,
     shutdown: Shutdown,
     audit: Option<Arc<AuditSink>>,
 ) -> Result<JoinHandle<()>, StableCode> {
@@ -593,7 +578,9 @@ fn handle_connection(
             ));
         }
     };
-    let now = clock.now().map_err(ConnectionFailure::Fatal)?;
+    let now = clock
+        .wall_now()
+        .map_err(|_| ConnectionFailure::Fatal(StableCode::KernelUnavailable))?;
     let (pending, signed_hello) = service
         .start(&peer, hello, now)
         .map_err(|code| handshake_service_failure(audit, code))?;
@@ -617,7 +604,9 @@ fn handle_connection(
             ));
         }
     };
-    let now = clock.now().map_err(ConnectionFailure::Fatal)?;
+    let now = clock
+        .wall_now()
+        .map_err(|_| ConnectionFailure::Fatal(StableCode::KernelUnavailable))?;
     let context = service
         .finish(&peer, pending, finish, now)
         .map_err(|code| handshake_service_failure(audit, code))?;
@@ -653,7 +642,7 @@ fn handle_connection(
         OperationV1::MaterializeExecution(_) => OperationTag::MaterializeExecution,
         OperationV1::CommitToolResult(_) => OperationTag::CommitToolResult,
     };
-    let now = match clock.now() {
+    let now = match clock.wall_now() {
         Ok(now) => now,
         Err(code) => {
             record_request_completion(
@@ -2095,8 +2084,12 @@ mod tests {
     }
 
     impl Clock for TestClock {
-        fn now(&self) -> Result<UnixMillis, StableCode> {
+        fn wall_now(&self) -> Result<UnixMillis, StableCode> {
             Ok(UnixMillis::new(self.next.fetch_add(1, Ordering::AcqRel)))
+        }
+
+        fn monotonic_now_millis(&self) -> Result<u64, StableCode> {
+            Ok(self.next.fetch_add(1, Ordering::AcqRel))
         }
     }
 

@@ -111,7 +111,7 @@ impl SocketConfig {
         }
     }
 
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn from_mapped_release(
         release: &VerifiedReleaseIdentity,
         path: PathBuf,
