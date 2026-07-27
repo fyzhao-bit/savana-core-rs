@@ -1,7 +1,15 @@
+#[cfg(all(feature = "test-support", debug_assertions))]
+use std::os::unix::net::UnixStream;
+#[cfg(all(feature = "test-support", debug_assertions))]
+use std::sync::atomic::{AtomicU64, Ordering as LifecycleOrdering};
 #[cfg(test)]
 use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
+#[cfg(all(feature = "test-support", debug_assertions))]
+use ed25519_dalek::Signer;
+#[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+use ed25519_dalek::SigningKey;
 use ed25519_dalek::{Signature, VerifyingKey};
 use savana_kernel_protocol::{
     BootId, ClientFinishV1, ClientHelloV1, ClientId, Digest32, HandshakeAcceptedV1,
@@ -14,6 +22,8 @@ use savana_policy_core::{
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+#[cfg(all(feature = "test-support", debug_assertions))]
+use crate::peer::peer_identity;
 use crate::peer::PeerIdentity;
 use crate::policy_runtime::{DaemonPolicyRuntimeSnapshot, PolicyRuntime};
 use crate::runtime_deps::draw_nonzero_32;
@@ -25,6 +35,9 @@ use crate::{DaemonConfig, DaemonSigningIdentity};
 const PENDING_WINDOW_MS: u64 = 5_000;
 const MAXIMUM_CLIENTS: usize = 16;
 const CLIENT_FINISH_DOMAIN: &[u8] = b"SAVANA_CLIENT_FINISH_V1\0";
+
+#[cfg(all(feature = "test-support", debug_assertions))]
+static TEST_LIFECYCLE_CLIENT_NONCE: AtomicU64 = AtomicU64::new(0x9100);
 
 #[derive(Clone)]
 struct ConfiguredClient {
@@ -145,6 +158,42 @@ impl RuntimeIdentity {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_server_lock_trace_test(
+        policy_identity: PolicyIdentity,
+        resource_profile_digest: Digest32,
+        peer_uid: u32,
+        peer_gid: u32,
+    ) -> Self {
+        let daemon = SigningKey::from_bytes(&[0x61; 32]);
+        let client = SigningKey::from_bytes(&[0x62; 32]);
+        Self {
+            protocol_major: PROTOCOL_MAJOR,
+            minimum_minor: PROTOCOL_MINOR,
+            maximum_minor: PROTOCOL_MINOR,
+            daemon_key_id: KeyId::try_from("trace-daemon-key").expect("test key id"),
+            daemon_public_key: daemon.verifying_key().to_bytes(),
+            clients: vec![ConfiguredClient {
+                client_id: ClientId::try_from("jarvis-client").expect("test client id"),
+                key_id: KeyId::try_from("jarvis-key").expect("test client key id"),
+                public_key: client.verifying_key().to_bytes(),
+                role: InstallationClientRoleV1::JarvisKernelClient,
+                peer_uid,
+                peer_gid,
+            }]
+            .into_boxed_slice(),
+            release_digest: Digest32::new([0x31; 32]),
+            policy_digest: policy_identity.digest,
+            policy_version: policy_identity.policy_version,
+            policy_key_epoch: policy_identity.key_epoch,
+            model_manifest_digest: Digest32::new([0x32; 32]),
+            approval_key_set_digest: Digest32::new([0x33; 32]),
+            resource_profile_digest,
+            release_expires_at: UnixMillis::new(4_000),
+            policy_expires_at: policy_identity.expires_at,
+        }
+    }
+
     fn server_identity(
         &self,
         boot_id: BootId,
@@ -255,6 +304,12 @@ pub(crate) struct ConnectionContext {
     connection_binding_digest: Digest32,
     generation: u64,
     expires_at: UnixMillis,
+}
+
+#[cfg(all(feature = "test-support", debug_assertions))]
+pub(crate) struct TestLifecycleHandshake {
+    pub(crate) context: ConnectionContext,
+    pub(crate) client_nonce: Nonce32,
 }
 
 impl std::fmt::Debug for ConnectionContext {
@@ -467,12 +522,14 @@ impl HandshakeService {
         hello: ClientHelloV1,
         now: UnixMillis,
     ) -> Result<(PendingHandshake, SignedServerHelloV1), StableCode> {
-        let snapshot = self.runtime.snapshot()?;
+        let snapshot = self.runtime.handshake_snapshot()?;
         let runtime = snapshot.runtime_identity();
         let mut state = self
             .state
             .lock()
             .map_err(|_| StableCode::KernelUnavailable)?;
+        #[cfg(test)]
+        self.runtime.record_replay_lock_for_test();
         state.observe(now)?;
         let expires_at = UnixMillis::new(
             now.get()
@@ -586,6 +643,89 @@ impl HandshakeService {
         };
         state.mark_finished(pending.partition_index, pending.slot_index)?;
         Ok(context)
+    }
+
+    /// Creates an ordinary authenticated context using the fixed mapped-test
+    /// client key.  This is only compiled into the debug test-support binary;
+    /// it first proves that the selected mapped installation actually contains
+    /// that client public key, then runs the normal start/finish handshake.
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    pub(crate) fn establish_test_lifecycle_context(
+        &self,
+        now: UnixMillis,
+    ) -> Result<TestLifecycleHandshake, StableCode> {
+        let snapshot = self.runtime.snapshot()?;
+        let runtime = snapshot.runtime_identity();
+        let client = runtime
+            .clients
+            .first()
+            .ok_or(StableCode::KernelUnavailable)?;
+        let signing_key = SigningKey::from_bytes(&[0x62; 32]);
+        if client.public_key != signing_key.verifying_key().to_bytes() {
+            return Err(StableCode::KernelUnavailable);
+        }
+        let (peer_stream, _other_end) =
+            UnixStream::pair().map_err(|_| StableCode::KernelUnavailable)?;
+        let peer = peer_identity(&peer_stream)?;
+        let nonce = TEST_LIFECYCLE_CLIENT_NONCE.fetch_add(1, LifecycleOrdering::AcqRel);
+        let mut nonce_bytes = [0x91; 32];
+        nonce_bytes[..8].copy_from_slice(&nonce.to_be_bytes());
+        let client_nonce = Nonce32::new(nonce_bytes);
+        let hello = ClientHelloV1 {
+            client_nonce,
+            supported_versions: vec![ProtocolVersion::new(PROTOCOL_MAJOR, PROTOCOL_MINOR)],
+            client_id: client.client_id.clone(),
+            client_key_id: client.key_id.clone(),
+            requested_mode: RequestedMode::Required,
+        };
+        let (pending, signed) = self.start(&peer, hello, now)?;
+        let digest = transcript_digest(&signed.transcript)?;
+        let mut signed_finish = Vec::with_capacity(CLIENT_FINISH_DOMAIN.len() + 32);
+        signed_finish.extend_from_slice(CLIENT_FINISH_DOMAIN);
+        signed_finish.extend_from_slice(digest.as_bytes());
+        let context = self.finish(
+            &peer,
+            pending,
+            ClientFinishV1 {
+                transcript_digest: digest,
+                signature: savana_kernel_protocol::Signature64::new(
+                    signing_key.sign(&signed_finish).to_bytes(),
+                ),
+            },
+            now,
+        )?;
+        Ok(TestLifecycleHandshake {
+            context,
+            client_nonce,
+        })
+    }
+
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    pub(crate) fn test_lifecycle_replay_is_retained(
+        &self,
+        client_nonce: Nonce32,
+        now: UnixMillis,
+    ) -> Result<bool, StableCode> {
+        let snapshot = self.runtime.snapshot()?;
+        let runtime = snapshot.runtime_identity();
+        let client = runtime
+            .clients
+            .first()
+            .ok_or(StableCode::KernelUnavailable)?;
+        let (peer_stream, _other_end) =
+            UnixStream::pair().map_err(|_| StableCode::KernelUnavailable)?;
+        let peer = peer_identity(&peer_stream)?;
+        let hello = ClientHelloV1 {
+            client_nonce,
+            supported_versions: vec![ProtocolVersion::new(PROTOCOL_MAJOR, PROTOCOL_MINOR)],
+            client_id: client.client_id.clone(),
+            client_key_id: client.key_id.clone(),
+            requested_mode: RequestedMode::Required,
+        };
+        match self.start(&peer, hello, now) {
+            Err(StableCode::IdentityReplay) => Ok(true),
+            Ok(_) | Err(_) => Ok(false),
+        }
     }
 
     pub(crate) fn validate_context_identity(

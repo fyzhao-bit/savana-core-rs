@@ -41,3 +41,13 @@ required-features = ["test-support"]
 name = "policy_protocol"
 path = "tests/policy_protocol.rs"
 required-features = ["test-support"]
+
+[[test]]
+name = "policy_rollover"
+path = "tests/policy_rollover.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "policy_fail_stop"
+path = "tests/policy_fail_stop.rs"
+required-features = ["test-support"]

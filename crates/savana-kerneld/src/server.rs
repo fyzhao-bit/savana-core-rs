@@ -212,6 +212,10 @@ impl Shutdown {
 pub(crate) trait ServerLifecycle {
     fn workers_started(&mut self) -> Result<(), StableCode>;
 
+    fn activation_completed(&mut self) -> Result<(), StableCode> {
+        Ok(())
+    }
+
     fn poll_shutdown(&mut self) -> Result<bool, StableCode>;
 }
 
@@ -304,6 +308,11 @@ impl KernelServer {
 
     pub(crate) fn close(self) -> Result<(), StableCode> {
         self.bound.close()
+    }
+
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    pub(crate) fn test_lifecycle_handshake_service(&self) -> Arc<HandshakeService> {
+        Arc::clone(&self.service)
     }
 
     pub(crate) fn run(self) -> Result<(), StableCode> {
@@ -866,6 +875,13 @@ fn response_for_request(
             },
         },
     };
+    #[cfg(test)]
+    if matches!(&body, ResponseBodyV1::Ok(ResponsePayloadV1::BeginRun(_))) {
+        // The actual operation dispatcher has accepted a BeginRun; this is
+        // deliberately recorded after dispatch rather than synthesized by a
+        // lock-order test.
+        runtime.record_engine_write_for_test();
+    }
     ResponseEnvelopeV1 {
         version: context.protocol(),
         request_id: request.request_id,
@@ -1078,18 +1094,24 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use nix::unistd::{getegid, geteuid};
     use savana_kernel_protocol::{
-        decode_client_message, decode_server_message, encode_client_message, BootId,
-        ClientFinishV1, ClientHelloV1, ClientMessageV1, Digest32, HandshakeAcceptedV1, HardLimits,
-        Nonce32, OperationV1, ProtocolVersion, RequestEnvelopeV1, RequestId, RequestedMode,
-        ResourceLimitsV1, ResponseBodyV1, ResponseEnvelopeV1, ResponsePayloadV1, ServerMessageV1,
-        Signature64, SignedServerHelloV1, StableCode, UnixMillis,
+        decode_client_message, decode_server_message, encode_client_message,
+        ingress_request_digest, AttemptKindV1, BeginRunRequest, BootId, BoundedText,
+        ClientFinishV1, ClientHelloV1, ClientMessageV1, ConstraintId, Digest32,
+        HandshakeAcceptedV1, HardLimits, IngressEnvelopeV1, IngressRequestCommitmentV1,
+        KernelValue, KeyId, Nonce32, OperationV1, PrincipalId, ProtocolVersion, RegistrySnapshotV1,
+        RequestEnvelopeV1, RequestId, RequestedMode, ResourceLimitsV1, ResponseBodyV1,
+        ResponseEnvelopeV1, ResponsePayloadV1, RoleId, ServerMessageV1, Signature64,
+        SignedIngressEnvelopeV1, SignedRegistrySnapshotV1, SignedServerHelloV1, StableCode,
+        ToolDescriptorV1, ToolExecutionIdentity, ToolName, UnixMillis,
     };
+    use savana_policy_core::PolicyIdentity;
     use sha2::{Digest, Sha256};
 
     use super::*;
     use crate::audit::AuditSink;
     use crate::handshake::HandshakeService;
     use crate::peer::PeerIdentity;
+    use crate::policy_runtime::LockEvent;
     use crate::socket::{SocketConfig, PROCESS_TEST_LOCK};
 
     #[test]
@@ -1176,6 +1198,91 @@ mod tests {
         drop(sender);
         worker.join().unwrap();
         assert!(!shutdown.is_fatal());
+    }
+
+    #[test]
+    fn normal_request_lock_order_is_exact() {
+        let (runtime, clock) =
+            crate::policy_runtime::PolicyRuntime::new_for_server_lock_trace_test(1_001, 1_003);
+        let service = HandshakeService::new(
+            Arc::clone(&runtime),
+            crate::DaemonSigningIdentity::from_seed_for_test([0x61; 32]),
+            UnixMillis::new(2_000),
+            BootId::new([0xa1; 32]),
+            crate::startup_identity_tests::policy_support::random(
+                crate::startup_identity_tests::policy_support::RandomBehavior::Filled(0x5a),
+            ),
+        )
+        .expect("real handshake service");
+        let peer = PeerIdentity::new_for_test(1_001, 1_003);
+
+        // This is the real normal request ordering: hold the dispatch
+        // generation before handshake state, then pass the authenticated
+        // BeginRun through the normal policy operation dispatcher.
+        let dispatch = runtime.dispatch_lease().unwrap();
+        let snapshot = Arc::clone(dispatch.snapshot());
+        let client_key = SigningKey::from_bytes(&[0x62; 32]);
+        let hello = ClientHelloV1 {
+            client_nonce: Nonce32::new([0x91; 32]),
+            supported_versions: vec![ProtocolVersion::new(1, 0)],
+            client_id: "jarvis-client".try_into().unwrap(),
+            client_key_id: "jarvis-key".try_into().unwrap(),
+            requested_mode: RequestedMode::Required,
+        };
+        let now = UnixMillis::new(clock.now());
+        let (pending, signed) = service.start(&peer, hello, now).unwrap();
+        let transcript = minicbor::to_vec(&signed.transcript).unwrap();
+        let digest = Digest32::new(Sha256::digest(transcript).into());
+        let mut finish_message = b"SAVANA_CLIENT_FINISH_V1\0".to_vec();
+        finish_message.extend_from_slice(digest.as_bytes());
+        let context = service
+            .finish(
+                &peer,
+                pending,
+                ClientFinishV1 {
+                    transcript_digest: digest,
+                    signature: Signature64::new(client_key.sign(&finish_message).to_bytes()),
+                },
+                now,
+            )
+            .unwrap();
+        let identity = service
+            .validate_context_identity_in_snapshot(&context, now, snapshot.as_ref())
+            .unwrap();
+        let request = RequestEnvelopeV1 {
+            version: ProtocolVersion::new(1, 0),
+            request_id: RequestId::new([0x91; 16]),
+            deadline_unix_ms: UnixMillis::new(2_500),
+            operation: OperationV1::BeginRun(real_begin_request(
+                &context,
+                snapshot.policy_identity(),
+            )),
+        };
+        let response = response_for_request(
+            runtime.as_ref(),
+            &context,
+            identity,
+            request,
+            now,
+            &snapshot.effective_limits(),
+        );
+        assert!(
+            matches!(
+                response.body,
+                ResponseBodyV1::Ok(ResponsePayloadV1::BeginRun(_))
+            ),
+            "unexpected normal BeginRun response: {response:?}"
+        );
+        drop(dispatch);
+        assert_eq!(
+            runtime.normal_lock_trace_for_test(),
+            vec![
+                LockEvent::DispatchLease,
+                LockEvent::HandshakeRuntimeRead,
+                LockEvent::HandshakeReplay,
+                LockEvent::EngineWrite,
+            ]
+        );
     }
 
     #[test]
@@ -1920,7 +2027,7 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_unknown_operation_has_no_trusted_response_id() {
+    fn authenticated_v1_tag_20_has_no_trusted_response_id() {
         let effective = effective_limits(1024 * 1024, 2_000);
         let (mut client, key, handle) = spawn_session(0x89, UnixMillis::new(20_000), effective);
         complete_client_handshake(&mut client, &key, &effective, RequestedMode::Required, 0x61);
@@ -1934,7 +2041,7 @@ mod tests {
             .windows(3)
             .rposition(|window| window == [0x82, 0x00, 0x80])
             .unwrap();
-        payload[operation + 1] = 0x01;
+        payload[operation + 1] = 20;
         client.write_all(&framed(&payload)).unwrap();
         assert_silent_close(&mut client);
         assert_eq!(
@@ -2445,6 +2552,74 @@ mod tests {
             request_id: RequestId::new([request_id; 16]),
             deadline_unix_ms: deadline,
             operation: OperationV1::Health,
+        }
+    }
+
+    fn real_begin_request(
+        context: &crate::handshake::ConnectionContext,
+        identity: PolicyIdentity,
+    ) -> BeginRunRequest {
+        let input = KernelValue::Null;
+        let commitment = IngressRequestCommitmentV1::BeginRun {
+            input: input.clone(),
+        };
+        let unsigned = IngressEnvelopeV1 {
+            principal: PrincipalId::new("principal-1").unwrap(),
+            conversation_id: "conversation-1".try_into().unwrap(),
+            request_digest: ingress_request_digest(&commitment).unwrap(),
+            issued_at: UnixMillis::new(1_900),
+            expires_at: identity.expires_at,
+            nonce: Nonce32::new([0x93; 32]),
+            authority_session_id: Nonce32::new([0x66; 32]),
+            authentication_context_digest: Digest32::new([0x55; 32]),
+            role: RoleId::new("operator").unwrap(),
+            policy_digest: identity.digest,
+            boot_id: context.boot_id(),
+            connection_binding_digest: context.connection_binding_digest(),
+        };
+        let ingress_key = SigningKey::from_bytes(&[0x70; 32]);
+        let mut signed = b"SAVANA_INGRESS_V1\0".to_vec();
+        signed.extend_from_slice(&minicbor::to_vec(&unsigned).unwrap());
+        BeginRunRequest {
+            ingress: SignedIngressEnvelopeV1 {
+                signature: Signature64::new(ingress_key.sign(&signed).to_bytes()),
+                unsigned,
+                key_id: KeyId::new("role-00").unwrap(),
+            },
+            input,
+            registry: real_registry(identity),
+        }
+    }
+
+    fn real_registry(identity: PolicyIdentity) -> SignedRegistrySnapshotV1 {
+        let unsigned = RegistrySnapshotV1 {
+            version: 1,
+            previous_digest: None,
+            tools: vec![ToolDescriptorV1 {
+                identity: ToolExecutionIdentity {
+                    name: ToolName::new("tool-00").unwrap(),
+                    descriptor_digest: Digest32::new([0x21; 32]),
+                    registry_version: 1,
+                },
+                provider_id: BoundedText::new("provider-1").unwrap(),
+                roles: vec![RoleId::new("operator").unwrap()],
+                input_schema_digest: Digest32::new([0x31; 32]),
+                output_schema_digest: Digest32::new([0x32; 32]),
+                attempt: AttemptKindV1::Read,
+                constraint_ids: vec![ConstraintId::new("constraint-00").unwrap()],
+                validator_ids: Vec::new(),
+                projection_digest: Digest32::new([0x33; 32]),
+            }],
+            issued_at: UnixMillis::new(1_900),
+            expires_at: identity.expires_at,
+        };
+        let signer = SigningKey::from_bytes(&[0x72; 32]);
+        let mut signed = b"SAVANA_REGISTRY_V1\0".to_vec();
+        signed.extend_from_slice(&minicbor::to_vec(&unsigned).unwrap());
+        SignedRegistrySnapshotV1 {
+            signature: Signature64::new(signer.sign(&signed).to_bytes()),
+            unsigned,
+            key_id: KeyId::new("role-02").unwrap(),
         }
     }
 

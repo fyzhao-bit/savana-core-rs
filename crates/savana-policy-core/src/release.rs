@@ -896,6 +896,19 @@ impl VerifiedReleaseIdentity {
         self.manifest.expires_at
     }
 
+    /// Rejects use of this retained release outside of its verified validity window.
+    ///
+    /// The timestamps themselves remain encapsulated; consumers only receive a
+    /// stable release-identity failure when the clock is before issuance or at
+    /// or after expiry.
+    pub fn ensure_valid_at(&self, now: UnixMillis) -> Result<(), PolicyError> {
+        if now.get() < self.manifest.issued_at.get() || now.get() >= self.manifest.expires_at.get()
+        {
+            return Err(release_mismatch());
+        }
+        Ok(())
+    }
+
     pub(crate) const fn issued_at(&self) -> UnixMillis {
         self.manifest.issued_at
     }

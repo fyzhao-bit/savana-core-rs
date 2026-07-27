@@ -23,7 +23,11 @@ use crate::audit::{AuditEvent, AuditSink};
 use crate::fs_cap::{DirectoryCapability, FileCapability, FileExpectation, LengthRule};
 use crate::handshake::HandshakeService;
 use crate::key_file::DaemonKeyCapability;
-use crate::policy_runtime::{CandidateRuntimeData, DaemonPolicyRuntimeSnapshot, PolicyRuntime};
+#[cfg(all(feature = "test-support", debug_assertions))]
+use crate::lifecycle_control::{TestLifecycle, TestLifecycleControl};
+use crate::policy_runtime::{
+    CandidateRuntimeData, DaemonPolicyRuntimeSnapshot, PolicyRolloverCoordinator, PolicyRuntime,
+};
 use crate::runtime_deps::{checked_clock, draw_boot_id, SystemClock, SystemRandom};
 use crate::selected_policy::{SelectedPolicySource, SelectedPolicyUpdateGuard};
 use crate::server::{KernelServer, ServerLifecycle};
@@ -709,6 +713,7 @@ pub(crate) struct PreparedRuntime {
     socket: SocketPreflight,
     clock: Arc<dyn Clock + Send + Sync>,
     runtime: Arc<PolicyRuntime>,
+    rollover: Arc<PolicyRolloverCoordinator>,
     selected_guard: Option<SelectedPolicyUpdateGuard>,
 }
 
@@ -756,6 +761,7 @@ impl PreparedRuntime {
         let context = BootstrapContext::open(config_path)?;
         let startup_now = clock.wall_now().map_err(|_| unavailable())?;
         let release = context.verify_current_release(startup_now)?;
+        let rollover_release = release.clone();
         bootstrap_trace!(BootstrapEvent::ReleaseVerified);
         context.verify_process_identity(&release)?;
         let policy_verifier = release
@@ -829,6 +835,12 @@ impl PreparedRuntime {
             .map_err(DaemonError::stable)?,
         );
         let runtime = Arc::new(PolicyRuntime::new(snapshot, engine, Arc::new(issuer)));
+        let rollover = Arc::new(PolicyRolloverCoordinator::new(
+            Arc::clone(&selected_source),
+            rollover_release,
+            Arc::clone(&runtime),
+            Arc::clone(&clock),
+        ));
         clock.monotonic_now_millis().map_err(|_| unavailable())?;
         let service = HandshakeService::new(
             Arc::clone(&runtime),
@@ -857,6 +869,7 @@ impl PreparedRuntime {
             socket,
             clock,
             runtime,
+            rollover,
             selected_guard: Some(selected_guard),
         })
     }
@@ -895,6 +908,34 @@ impl PreparedRuntime {
             .as_ref()
             .expect("prepared runtime retains the selected-policy guard")
             .artifact_drop_probe()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn refresh_selected_policy_for_test(
+        &self,
+    ) -> Result<crate::policy_runtime::RefreshOutcome, StableCode> {
+        self.rollover.refresh_selected_policy()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn policy_runtime_for_test(&self) -> &Arc<PolicyRuntime> {
+        &self.runtime
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rollover_probe_counts_for_test(&self) -> (usize, usize, usize, usize) {
+        let probe = self.rollover.probe_snapshot();
+        (
+            probe.snapshot_prebuilds,
+            probe.dispatch_close_attempts,
+            probe.handshake_write_locks,
+            probe.engine_prepares,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rollover_lock_trace_for_test(&self) -> Vec<crate::policy_runtime::LockEvent> {
+        self.rollover.lock_trace()
     }
 
     #[cfg(test)]
@@ -949,6 +990,18 @@ impl PreparedRuntime {
         ))
     }
 
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    pub(crate) fn begin_test_lifecycle_control(&self) -> Result<TestLifecycleControl, DaemonError> {
+        if !self.context.uses_mapped_layout() {
+            return Err(unavailable());
+        }
+        Ok(TestLifecycleControl::new(
+            Arc::clone(&self.runtime),
+            Arc::clone(&self.rollover),
+            Arc::clone(&self.clock),
+        ))
+    }
+
     pub(crate) const fn release_digest(&self) -> Digest32 {
         self.config.release_digest()
     }
@@ -966,6 +1019,7 @@ impl PreparedRuntime {
             socket,
             clock,
             runtime,
+            rollover,
             selected_guard,
             ..
         } = self;
@@ -984,6 +1038,7 @@ impl PreparedRuntime {
             identity,
             selected_guard,
             runtime,
+            rollover,
         })
     }
 }
@@ -995,6 +1050,7 @@ pub(crate) struct BoundRuntime {
     identity: savana_kernel_protocol::ServerIdentityV1,
     selected_guard: Option<SelectedPolicyUpdateGuard>,
     runtime: Arc<PolicyRuntime>,
+    rollover: Arc<PolicyRolloverCoordinator>,
 }
 
 impl std::fmt::Debug for BoundRuntime {
@@ -1012,6 +1068,7 @@ impl BoundRuntime {
             identity,
             selected_guard,
             runtime,
+            rollover,
         } = self;
         if audit
             .emit(AuditEvent::Started {
@@ -1030,7 +1087,54 @@ impl BoundRuntime {
         };
         let server_result = server.run_with_lifecycle(&mut lifecycle);
         drop(lifecycle);
-        let _ = &runtime;
+        let _ = (&runtime, &rollover);
+        let retained_result = retained.recheck();
+        if let Err(code) = server_result {
+            return Err(DaemonError::stable(code));
+        }
+        retained_result
+    }
+
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    pub(crate) fn run_with_test_lifecycle(
+        self,
+        lifecycle: &mut dyn ServerLifecycle,
+        control: TestLifecycleControl,
+    ) -> Result<(), DaemonError> {
+        let Self {
+            server,
+            retained,
+            audit,
+            identity,
+            selected_guard,
+            runtime,
+            rollover,
+        } = self;
+        if audit
+            .emit(AuditEvent::Started {
+                identity: &identity,
+            })
+            .is_err()
+        {
+            let _ = server.close();
+            let _ = retained.recheck();
+            return Err(DaemonError::stable(StableCode::KernelUnavailable));
+        }
+        control
+            .attach_handshake_service(server.test_lifecycle_handshake_service())
+            .map_err(DaemonError::stable)?;
+        let mut controlled = TestLifecycle::new(lifecycle, control);
+        let mut guarded = StartupGuardLifecycle {
+            inner: &mut controlled,
+            selected_guard,
+        };
+        let server_result = server.run_with_lifecycle(&mut guarded);
+        drop(guarded);
+        if let Err(code) = server_result {
+            controlled.report_startup_failure(code);
+        }
+        drop(controlled);
+        let _ = (&runtime, &rollover);
         let retained_result = retained.recheck();
         if let Err(code) = server_result {
             return Err(DaemonError::stable(code));
@@ -1064,7 +1168,7 @@ impl ServerLifecycle for StartupGuardLifecycle<'_> {
         bootstrap_trace!(BootstrapEvent::WorkersActivated);
         drop(self.selected_guard.take());
         bootstrap_trace!(BootstrapEvent::SelectedUpdateSharedLockReleased);
-        Ok(())
+        self.inner.activation_completed()
     }
 
     fn poll_shutdown(&mut self) -> Result<bool, StableCode> {

@@ -22,6 +22,43 @@ mod acceptance_tests;
 const LEDGER_SCHEMA_VERSION: u16 = 1;
 const MAXIMUM_LEDGER_BYTES: u64 = 128;
 const LEDGER_DOMAIN: &[u8] = b"SAVANA_POLICY_LEDGER_V1\0";
+#[cfg(all(feature = "test-support", debug_assertions))]
+const TEST_LIFECYCLE_CONTROL_ENV: &str = "SAVANA_TEST_LIFECYCLE_CONTROL";
+#[cfg(all(feature = "test-support", debug_assertions))]
+const TEST_LIFECYCLE_CONTROL_MODE: &str = "stdio-v1";
+#[cfg(all(feature = "test-support", debug_assertions))]
+const TEST_LIVE_PERSISTENCE_FAULT_ENV: &str = "SAVANA_TEST_POLICY_CORE_LIVE_PERSISTENCE_FAULT";
+
+#[cfg(all(feature = "test-support", debug_assertions))]
+fn test_support_live_persistence_fault_from_environment(
+) -> Result<Option<PersistencePhase>, PolicyError> {
+    let lifecycle = std::env::var_os(TEST_LIFECYCLE_CONTROL_ENV);
+    let fault = std::env::var_os(TEST_LIVE_PERSISTENCE_FAULT_ENV);
+    test_support_live_persistence_fault_from_values(lifecycle.as_deref(), fault.as_deref())
+}
+
+#[cfg(all(feature = "test-support", debug_assertions))]
+fn test_support_live_persistence_fault_from_values(
+    lifecycle: Option<&OsStr>,
+    fault: Option<&OsStr>,
+) -> Result<Option<PersistencePhase>, PolicyError> {
+    match (lifecycle, fault) {
+        (_, None) => Ok(None),
+        (Some(mode), Some(value))
+            if mode == OsStr::new(TEST_LIFECYCLE_CONTROL_MODE)
+                && value == OsStr::new("before-rename-v1") =>
+        {
+            Ok(Some(PersistencePhase::BeforeRename))
+        }
+        (Some(mode), Some(value))
+            if mode == OsStr::new(TEST_LIFECYCLE_CONTROL_MODE)
+                && value == OsStr::new("after-rename-v1") =>
+        {
+            Ok(Some(PersistencePhase::AfterRename))
+        }
+        _ => Err(PolicyError::stable(StableCode::ProtocolIo)),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RollbackLedgerV1 {
@@ -163,7 +200,7 @@ pub struct PolicyStore {
     ledger: RollbackLedgerV1,
     poisoned: bool,
     _lock: LedgerLock,
-    #[cfg(test)]
+    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
     live_persistence_fault: Option<PersistencePhase>,
 }
 
@@ -233,7 +270,7 @@ impl PolicyStore {
             ledger,
             poisoned: false,
             _lock: lock,
-            #[cfg(test)]
+            #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
             live_persistence_fault: None,
         })
     }
@@ -253,6 +290,10 @@ impl PolicyStore {
         verifier: PolicyVerifier,
     ) -> Result<Self, PolicyError> {
         let PolicyStateCapability { ledger_path, state } = capability;
+        #[cfg(all(feature = "test-support", debug_assertions))]
+        let live_persistence_fault = test_support_live_persistence_fault_from_environment()?;
+        #[cfg(all(test, not(all(feature = "test-support", debug_assertions))))]
+        let live_persistence_fault = None;
         let lock = LedgerLock::acquire_at(
             &state.parent,
             OsStr::new(".policy-ledger-v1.cbor.lock"),
@@ -275,8 +316,8 @@ impl PolicyStore {
             ledger,
             poisoned: false,
             _lock: lock,
-            #[cfg(test)]
-            live_persistence_fault: None,
+            #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+            live_persistence_fault,
         })
     }
 
@@ -466,25 +507,32 @@ impl PolicyStore {
         next: RollbackLedgerV1,
         canonical: &[u8],
     ) -> Result<DurableAcceptanceGuard, LedgerAcceptanceFailure> {
-        #[cfg(test)]
-        let injected = self.live_persistence_fault.take().map(|phase| match phase {
-            PersistencePhase::BeforeRename => atomic_file::ReplaceError::before_rename(
-                PolicyError::stable(StableCode::ProtocolIo),
-            ),
-            PersistencePhase::AfterRename => {
-                atomic_file::ReplaceError::after_rename(PolicyError::stable(StableCode::ProtocolIo))
-            }
-        });
-        #[cfg(not(test))]
-        let injected: Option<atomic_file::ReplaceError> = None;
+        #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+        let injected = self.live_persistence_fault.take();
+        #[cfg(not(any(test, all(feature = "test-support", debug_assertions))))]
+        let injected: Option<PersistencePhase> = None;
 
-        let result = if let Some(error) = injected {
-            Err(error)
-        } else {
-            match &self.anchored {
-                Some(state) => state.replace(canonical),
-                None => atomic_file::replace(&self.ledger_path, canonical),
-            }
+        let replace = || match &self.anchored {
+            Some(state) => state.replace(canonical),
+            None => atomic_file::replace(&self.ledger_path, canonical),
+        };
+        let result = match injected {
+            // This deliberately fails before the engine-owned store attempts
+            // a rename, so the old durable ledger and generation remain live.
+            Some(PersistencePhase::BeforeRename) => Err(atomic_file::ReplaceError::before_rename(
+                PolicyError::stable(StableCode::ProtocolIo),
+            )),
+            // The write, rename, and parent sync have actually completed.
+            // Only then report an after-rename error, which forces the engine
+            // into its real commit-uncertain fail-stop path while leaving the
+            // next ledger bytes durable for restart recovery.
+            Some(PersistencePhase::AfterRename) => match replace() {
+                Ok(()) => Err(atomic_file::ReplaceError::after_rename(
+                    PolicyError::stable(StableCode::ProtocolIo),
+                )),
+                Err(error) => Err(error),
+            },
+            None => replace(),
         };
         match result {
             Ok(()) => {
@@ -859,6 +907,8 @@ fn malformed() -> PolicyError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "test-support")]
+    use std::ffi::OsStr;
     use std::fs;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
@@ -867,6 +917,51 @@ mod tests {
 
     use super::*;
     use crate::PolicyTrustRootV1;
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn lifecycle_fault_prearm_requires_the_exact_lifecycle_mode_and_fault_value() {
+        assert_eq!(
+            test_support_live_persistence_fault_from_values(None, None).unwrap(),
+            None
+        );
+        assert_eq!(
+            test_support_live_persistence_fault_from_values(Some(OsStr::new("stdio-v1")), None,)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            test_support_live_persistence_fault_from_values(
+                Some(OsStr::new("stdio-v1")),
+                Some(OsStr::new("before-rename-v1")),
+            )
+            .unwrap(),
+            Some(PersistencePhase::BeforeRename)
+        );
+        assert_eq!(
+            test_support_live_persistence_fault_from_values(
+                Some(OsStr::new("stdio-v1")),
+                Some(OsStr::new("after-rename-v1")),
+            )
+            .unwrap(),
+            Some(PersistencePhase::AfterRename)
+        );
+        for (lifecycle, fault) in [
+            (None, Some(OsStr::new("after-rename-v1"))),
+            (
+                Some(OsStr::new("wrong")),
+                Some(OsStr::new("after-rename-v1")),
+            ),
+            (Some(OsStr::new("stdio-v1")), Some(OsStr::new("wrong"))),
+        ] {
+            assert_eq!(
+                test_support_live_persistence_fault_from_values(lifecycle, fault)
+                    .unwrap_err()
+                    .code(),
+                StableCode::ProtocolIo
+            );
+        }
+    }
 
     #[test]
     fn anchored_store_holds_the_exact_state_directory_and_sibling_lock() {

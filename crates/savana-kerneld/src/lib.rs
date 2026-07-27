@@ -165,6 +165,25 @@ use savana_kerneld::PanicHookGuard;
 use savana_kerneld::SignalController;
 ```
 
+Live policy rollover has no public trigger, coordinator, lifecycle control, or
+test-support escape hatch:
+
+```compile_fail
+use savana_kerneld::PolicyRolloverCoordinator;
+```
+
+```compile_fail
+use savana_kerneld::DaemonPublicationGuard;
+```
+
+```compile_fail
+use savana_kerneld::TestLifecycleControl;
+```
+
+```compile_fail
+use savana_kerneld::test_support::refresh_selected_policy;
+```
+
 External callers cannot substitute an arbitrary socket path:
 
 ```compile_fail
@@ -193,6 +212,8 @@ mod fs_cap;
 #[allow(dead_code)]
 mod handshake;
 mod key_file;
+#[cfg(all(feature = "test-support", debug_assertions))]
+mod lifecycle_control;
 mod ops;
 mod panic_report;
 #[allow(dead_code)]
@@ -290,17 +311,60 @@ pub fn run(config_path: &Path) -> Result<(), DaemonError> {
             return finish_bootstrap_failure(error.code(), &audit, panic, signals);
         }
     };
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    let (test_control, controlled_shutdown) = match lifecycle_control::requested() {
+        Ok(false) => (None, None),
+        Ok(true) => {
+            let mut control = match prepared.begin_test_lifecycle_control() {
+                Ok(control) => control,
+                Err(error) => {
+                    return finish_bootstrap_failure(error.code(), &audit, panic, signals);
+                }
+            };
+            let completion = control.graceful_completion_marker();
+            if let Err(code) = control.wait_for_continue() {
+                return finish_bootstrap_failure(code, &audit, panic, signals);
+            }
+            (Some(control), Some(completion))
+        }
+        Err(code) => return finish_bootstrap_failure(code, &audit, panic, signals),
+    };
     if panic.publish_release(prepared.release_digest()).is_err() {
+        #[cfg(all(feature = "test-support", debug_assertions))]
+        if let Some(control) = test_control.as_ref() {
+            control.report_pre_activation_failure(StableCode::KernelUnavailable);
+        }
         return finish_bootstrap_failure(StableCode::KernelUnavailable, &audit, panic, signals);
     }
     let bound = match prepared.bind(Arc::clone(&audit)) {
         Ok(bound) => bound,
         Err(error) => {
+            #[cfg(all(feature = "test-support", debug_assertions))]
+            if let Some(control) = test_control.as_ref() {
+                control.report_pre_activation_failure(error.code());
+            }
             return finish_bootstrap_failure(error.code(), &audit, panic, signals);
         }
     };
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    let runtime_result = match test_control {
+        Some(control) => bound.run_with_test_lifecycle(&mut signals, control),
+        None => bound.run(&mut signals),
+    };
+    #[cfg(not(all(feature = "test-support", debug_assertions)))]
     let runtime_result = bound.run(&mut signals);
-    finish_runtime(runtime_result, &audit, panic, signals)
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    let controlled_shutdown = controlled_shutdown
+        .as_ref()
+        .is_some_and(|marker| marker.load(std::sync::atomic::Ordering::Acquire));
+    finish_runtime(
+        runtime_result,
+        &audit,
+        panic,
+        signals,
+        #[cfg(all(feature = "test-support", debug_assertions))]
+        controlled_shutdown,
+    )
 }
 
 fn finish_before_audit(
@@ -373,18 +437,22 @@ fn finish_runtime(
     audit: &AuditSink,
     panic: PanicHookGuard,
     mut signals: SignalController,
+    #[cfg(all(feature = "test-support", debug_assertions))] controlled_shutdown: bool,
 ) -> Result<(), DaemonError> {
     let mut fatal = runtime_result.err().map(DaemonError::code);
     if signals.final_drain_and_restore().is_err() {
         fatal = Some(StableCode::KernelUnavailable);
     }
     let reason = signals.shutdown_reason();
-    if fatal.is_none() && reason.is_none() {
+    if fatal.is_none() && reason.is_none() && !cfg!(all(feature = "test-support", debug_assertions))
+    {
         fatal = Some(StableCode::KernelUnavailable);
     }
     let final_audit = match (fatal, reason) {
         (Some(code), _) => audit.emit(AuditEvent::Fatal { code }),
         (None, Some(reason)) => audit.emit(AuditEvent::Stopped { reason }),
+        #[cfg(all(feature = "test-support", debug_assertions))]
+        (None, None) if controlled_shutdown => Ok(()),
         (None, None) => Err(StableCode::KernelUnavailable),
     };
     if final_audit.is_err() {

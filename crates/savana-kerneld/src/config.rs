@@ -97,17 +97,31 @@ struct KernelLockV1 {
 }
 
 impl DaemonConfig {
+    /// Verifies only the descriptor-anchored fixed lock binding.
+    ///
+    /// This deliberately does not construct the long-lived daemon projection:
+    /// exact-equal live refreshes must decide their read-only disposition
+    /// before allocating a replacement client table or runtime identity.
+    pub(crate) fn verify_candidate(
+        lock_bytes: &[u8],
+        release: &VerifiedReleaseIdentity,
+        policy: &VerifiedPolicyV1,
+        selected_policy_signature: &Signature64,
+    ) -> Result<(), DaemonError> {
+        release
+            .verify_selected_policy_binding(policy, selected_policy_signature)
+            .map_err(|_| release_mismatch())?;
+        let lock = parse_canonical_lock(lock_bytes)?;
+        verify_lock(&lock, release, policy, selected_policy_signature)
+    }
+
     pub fn from_verified(
         lock_bytes: &[u8],
         release: &VerifiedReleaseIdentity,
         policy: &VerifiedPolicyV1,
         selected_policy_signature: &Signature64,
     ) -> Result<Self, DaemonError> {
-        release
-            .verify_selected_policy_binding(policy, selected_policy_signature)
-            .map_err(|_| release_mismatch())?;
-        let lock = parse_canonical_lock(lock_bytes)?;
-        verify_lock(&lock, release, policy, selected_policy_signature)?;
+        Self::verify_candidate(lock_bytes, release, policy, selected_policy_signature)?;
         let socket_client_gid = release
             .daemon_clients()
             .first()

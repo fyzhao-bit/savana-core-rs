@@ -225,6 +225,30 @@ fn raw_replacement(engine: &PolicyEngine, policy: VerifiedPolicyV1) {
     engine.replace_policy(policy);
 }
 ```
+
+Live persistence-fault selection is an engine-internal test seam.  It is not
+part of the public API, including when the debug-only `test-support` feature
+is enabled:
+
+```compile_fail
+use savana_policy_core::LivePersistenceFault;
+```
+
+```compile_fail
+use savana_policy_core::PolicyEngine;
+
+fn inject() {
+    let _ = PolicyEngine::inject_live_persistence_fault_for_test;
+}
+```
+
+```compile_fail
+use savana_policy_core::PolicyStore;
+
+fn inject() {
+    let _ = PolicyStore::inject_live_persistence_fault;
+}
+```
 "#]
 
 #[cfg(test)]

@@ -1317,11 +1317,13 @@ enum UpdateLockCorruption {
     NonEmpty,
 }
 
-struct MappedInstallation {
+pub(crate) struct MappedInstallation {
     _fixture: StartupFixture,
     _root: TempDir,
     config: PathBuf,
+    kernel_lock: PathBuf,
     selected_policy: PathBuf,
+    selected_signature: PathBuf,
     update_lock: PathBuf,
     ledger: PathBuf,
     socket: PathBuf,
@@ -1331,7 +1333,7 @@ struct MappedInstallation {
 }
 
 impl MappedInstallation {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let fixture = startup_fixture();
         let root = tempfile::Builder::new()
             .prefix("skd-")
@@ -1396,7 +1398,9 @@ impl MappedInstallation {
             _fixture: fixture,
             _root: root,
             config,
+            kernel_lock,
             selected_policy,
+            selected_signature,
             update_lock,
             ledger,
             socket,
@@ -1406,11 +1410,23 @@ impl MappedInstallation {
         }
     }
 
-    fn prepare(&self) -> Result<PreparedRuntime, DaemonError> {
+    pub(crate) fn prepare(&self) -> Result<PreparedRuntime, DaemonError> {
         PreparedRuntime::prepare_with_dependencies(
             &self.config,
             savana_kernel_protocol::BootId::new([0x31; 32]),
             Arc::new(FixedClock::default()),
+            Arc::new(FixedRandom),
+        )
+    }
+
+    pub(crate) fn prepare_with_clock_for_test(
+        &self,
+        clock: Arc<dyn Clock + Send + Sync>,
+    ) -> Result<PreparedRuntime, DaemonError> {
+        PreparedRuntime::prepare_with_dependencies(
+            &self.config,
+            savana_kernel_protocol::BootId::new([0x31; 32]),
+            clock,
             Arc::new(FixedRandom),
         )
     }
@@ -1532,7 +1548,7 @@ impl MappedInstallation {
         }
     }
 
-    fn ledger_bytes(&self) -> Option<Vec<u8>> {
+    pub(crate) fn ledger_bytes(&self) -> Option<Vec<u8>> {
         match fs::read(&self.ledger) {
             Ok(bytes) => Some(bytes),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -1561,6 +1577,53 @@ impl MappedInstallation {
         );
         fs::rename(&replacement, &self.selected_policy).unwrap();
         drop(exclusive);
+    }
+
+    pub(crate) fn install_next_candidate(&self) -> savana_policy_core::PolicyIdentity {
+        self.install_candidate_for_test(8, 1_000)
+    }
+
+    pub(crate) fn install_candidate_for_test(
+        &self,
+        policy_version: u64,
+        issued_at: u64,
+    ) -> savana_policy_core::PolicyIdentity {
+        let mut policy = policy_support::valid_policy(policy_version, 3);
+        policy.issued_at = issued_at;
+        policy.release.compatible_release_target_ids =
+            vec![*self._fixture.release.release_target_id().as_bytes()];
+        let (policy_bytes, signature) = policy_support::signed(&policy);
+        let identity = self
+            ._fixture
+            .release
+            .policy_verifier()
+            .unwrap()
+            .verify(&policy_bytes, &signature, UnixMillis::new(NOW))
+            .unwrap()
+            .identity();
+        let mut lock = self._fixture.lock.clone();
+        lock.selected_policy_digest = hex(*identity.digest.as_bytes());
+        lock.selected_policy_signature_digest = hex(sha256(signature.as_bytes()));
+        lock.selected_policy_version = identity.policy_version;
+        lock.selected_policy_key_epoch = identity.key_epoch;
+        let lock_bytes = serde_json::to_vec(&lock).unwrap();
+
+        let lock_next = self.kernel_lock.with_file_name("kernel-lock.json.next");
+        let policy_next = self
+            .selected_policy
+            .with_file_name("selected-policy-v1.cbor.next");
+        let signature_next = self
+            .selected_signature
+            .with_file_name("selected-policy-v1.sig.next");
+        write_mapped_file(&lock_next, &lock_bytes, 0o444);
+        write_mapped_file(&policy_next, &policy_bytes, 0o444);
+        write_mapped_file(&signature_next, signature.as_bytes(), 0o444);
+        let exclusive = self.lock_update_file_exclusive();
+        fs::rename(lock_next, &self.kernel_lock).unwrap();
+        fs::rename(policy_next, &self.selected_policy).unwrap();
+        fs::rename(signature_next, &self.selected_signature).unwrap();
+        drop(exclusive);
+        identity
     }
 }
 
@@ -1765,7 +1828,16 @@ fn ensure_directory(path: &Path, mode: u32) {
 
 fn write_mapped_file(path: &Path, bytes: &[u8], mode: u32) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, bytes).unwrap();
+    fs::write(path, bytes).unwrap_or_else(|error| {
+        let parent = fs::metadata(path.parent().unwrap()).expect("fixture parent metadata");
+        panic!(
+            "write mapped fixture file {} (parent mode {:o}, uid {}, gid {}): {error}",
+            path.display(),
+            parent.mode() & 0o7777,
+            parent.uid(),
+            parent.gid(),
+        )
+    });
     set_mode(path, mode);
 }
 

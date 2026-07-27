@@ -929,6 +929,35 @@ fn begin_run_round_trip_is_canonical() {
 }
 
 #[test]
+fn v1_request_boundary_accepts_only_health_and_tags_10_through_19() {
+    let accepted =
+        std::iter::once((0_u8, OperationV1::Health)).chain((10_u8..=19).zip(policy_operations()));
+    for (tag, operation) in accepted {
+        let message = request(operation.clone());
+        let encoded = encode_client_message(&message).unwrap();
+        assert_eq!(
+            decode_client_message(&encoded, &support::compiled_effective_limits()).unwrap(),
+            message
+        );
+
+        // Mutate the actual operation tag inside a complete canonical V1
+        // Request envelope.  This covers the decoder boundary, rather than
+        // only OperationV1's standalone minicbor implementation.
+        let operation_wire = minicbor::to_vec(&operation).unwrap();
+        assert_eq!(&operation_wire[..2], &[0x82, tag]);
+        let offset = encoded
+            .windows(operation_wire.len())
+            .position(|window| window == operation_wire)
+            .expect("request contains its operation wire value");
+        let mut unknown = encoded;
+        unknown[offset + 1] = 20;
+        let error = decode_client_message(&unknown, &support::compiled_effective_limits())
+            .expect_err("tag 20 must remain outside the frozen V1 operation set");
+        assert_eq!(error.code(), StableCode::ProtocolUnknownOperation);
+    }
+}
+
+#[test]
 fn no_policy_operation_contains_host_trust_facts() {
     let schema = format!("{:?}", policy_operations()).to_ascii_lowercase();
     for forbidden in [
