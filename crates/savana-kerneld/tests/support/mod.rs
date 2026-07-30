@@ -51,6 +51,8 @@ const LIFECYCLE_CONTROL_MODE: &str = "stdio-v1";
 const POLICY_CORE_LIVE_PERSISTENCE_FAULT_ENV: &str =
     "SAVANA_TEST_POLICY_CORE_LIVE_PERSISTENCE_FAULT";
 const TEST_PROCESS_ENTROPY_ENV: &str = "SAVANA_TEST_PROCESS_ENTROPY";
+const TEST_V1_RUNTIME_ENV: &str = "SAVANA_TEST_V1_RUNTIME";
+const TEST_V1_RUNTIME_VALUE: &str = "frozen-regression-v1";
 const CONTROL_RESPONSE_BYTES: usize = 72;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -962,6 +964,7 @@ impl Installation {
         command
             .arg("--config")
             .arg(&self.config)
+            .env(TEST_V1_RUNTIME_ENV, TEST_V1_RUNTIME_VALUE)
             .env(LIFECYCLE_CONTROL_ENV, LIFECYCLE_CONTROL_MODE)
             .env_remove(POLICY_CORE_LIVE_PERSISTENCE_FAULT_ENV)
             .env_remove(TEST_PROCESS_ENTROPY_ENV)
@@ -1238,6 +1241,7 @@ impl RunningDaemon {
         let mut child = Command::new(&installation.executable)
             .arg("--config")
             .arg(&installation.config)
+            .env(TEST_V1_RUNTIME_ENV, TEST_V1_RUNTIME_VALUE)
             .env_remove(LIFECYCLE_CONTROL_ENV)
             .env_remove(POLICY_CORE_LIVE_PERSISTENCE_FAULT_ENV)
             .env_remove(TEST_PROCESS_ENTROPY_ENV)
@@ -1913,6 +1917,9 @@ fn read_update_lock_identity(path: &Path) -> Result<UpdateLockIdentity, StrictUp
     Ok(identity)
 }
 
+// libc mode constants have different integer widths across supported Unix
+// targets, so keep the explicit widening in this shared test fixture.
+#[allow(clippy::useless_conversion)]
 fn update_lock_identity_from_metadata(metadata: &fs::Metadata) -> UpdateLockIdentity {
     UpdateLockIdentity {
         file_type: metadata.mode() & u32::from(nix::libc::S_IFMT),
@@ -1926,6 +1933,7 @@ fn update_lock_identity_from_metadata(metadata: &fs::Metadata) -> UpdateLockIden
     }
 }
 
+#[allow(clippy::useless_conversion)]
 fn validate_update_lock_identity(identity: UpdateLockIdentity) -> Result<(), StrictUpdaterError> {
     if identity.file_type != u32::from(nix::libc::S_IFREG)
         || identity.mode != 0o640

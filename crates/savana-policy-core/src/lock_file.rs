@@ -119,6 +119,12 @@ impl LedgerLock {
         }
         Ok(())
     }
+
+    pub(crate) fn matches_file(&self, expected: &File) -> Result<bool, PolicyError> {
+        let locked = self._file.metadata().map_err(PolicyError::io)?;
+        let expected = expected.metadata().map_err(PolicyError::io)?;
+        Ok(locked.dev() == expected.dev() && locked.ino() == expected.ino())
+    }
 }
 
 fn validate_opened_at(

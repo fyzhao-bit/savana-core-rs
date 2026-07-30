@@ -1,4 +1,7 @@
-use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockWriteGuard};
+use std::{
+    sync::{Arc, Condvar, Mutex, RwLock, RwLockWriteGuard},
+    time::Instant,
+};
 
 use savana_kernel_protocol::{Digest32, EffectiveLimits, Signature64, StableCode};
 use savana_policy_core::{
@@ -6,8 +9,10 @@ use savana_policy_core::{
     PolicyRolloverDisposition, PolicyRolloverFailure, VerifiedPolicyV1, VerifiedReleaseIdentity,
 };
 
+use crate::deployment_trust::VerifiedDaemonStartupV2;
 use crate::handshake::RuntimeIdentity;
 use crate::selected_policy::{SelectedPolicySource, SelectedPolicyUpdateGuard};
+use crate::v2_edge::{V2ActiveGenerationSnapshot, VerifiedServiceEdgeV2};
 use crate::DaemonConfig;
 
 #[cfg(test)]
@@ -627,8 +632,9 @@ impl Drop for DaemonPublicationGuard<'_, '_> {
 }
 
 pub(crate) struct PolicyRuntime {
-    dispatch_gate: DispatchGate,
+    dispatch_gate: Arc<DispatchGate>,
     snapshot: RwLock<Arc<DaemonPolicyRuntimeSnapshot>>,
+    v2_generation: RwLock<Option<Arc<V2ActiveGenerationSnapshot>>>,
     engine: PolicyEngine,
     issuer: Arc<AuthenticatedContextIssuer>,
     #[cfg(test)]
@@ -643,6 +649,82 @@ impl std::fmt::Debug for PolicyRuntime {
     }
 }
 
+pub(crate) struct V2GenerationRuntime {
+    dispatch_gate: Arc<DispatchGate>,
+    active: RwLock<Option<Arc<V2ActiveGenerationSnapshot>>>,
+}
+
+impl std::fmt::Debug for V2GenerationRuntime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("V2GenerationRuntime(<generation-scoped>)")
+    }
+}
+
+impl V2GenerationRuntime {
+    pub(crate) fn new() -> Self {
+        Self {
+            dispatch_gate: Arc::new(DispatchGate::new()),
+            active: RwLock::new(None),
+        }
+    }
+
+    pub(crate) fn activate(&self, startup: &VerifiedDaemonStartupV2) -> Result<(), StableCode> {
+        let active = V2ActiveGenerationSnapshot::from_verified_startup(startup)
+            .map_err(|_| StableCode::IdentityReleaseMismatch)?;
+        self.activate_snapshot(active)
+    }
+
+    pub(crate) fn acquire(
+        &self,
+        edge: &VerifiedServiceEdgeV2,
+        deadline: Instant,
+    ) -> Result<V2GenerationLease, StableCode> {
+        if Instant::now() >= deadline {
+            return Err(StableCode::DeadlineExceeded);
+        }
+        let dispatch = self.dispatch_gate.v2_lease()?;
+        let active = self
+            .active
+            .read()
+            .map_err(|_| StableCode::KernelUnavailable)?
+            .as_ref()
+            .cloned()
+            .ok_or(StableCode::KernelUnavailable)?;
+        if !active.matches_edge(edge) {
+            return Err(StableCode::IdentityReleaseMismatch);
+        }
+        Ok(V2GenerationLease {
+            dispatch,
+            active,
+            edge_digest: edge.edge_digest(),
+        })
+    }
+
+    pub(crate) fn close_and_drain(&self) -> Result<ClosedDispatchGate<'_>, StableCode> {
+        self.dispatch_gate.close_and_drain()
+    }
+
+    fn activate_snapshot(&self, active: V2ActiveGenerationSnapshot) -> Result<(), StableCode> {
+        let mut current = self
+            .active
+            .write()
+            .map_err(|_| StableCode::KernelUnavailable)?;
+        if current.is_some() {
+            return Err(StableCode::IdentityReleaseMismatch);
+        }
+        *current = Some(Arc::new(active));
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn activate_for_test(
+        &self,
+        active: V2ActiveGenerationSnapshot,
+    ) -> Result<(), StableCode> {
+        self.activate_snapshot(active)
+    }
+}
+
 impl PolicyRuntime {
     pub(crate) fn new(
         snapshot: Arc<DaemonPolicyRuntimeSnapshot>,
@@ -650,8 +732,9 @@ impl PolicyRuntime {
         issuer: Arc<AuthenticatedContextIssuer>,
     ) -> Self {
         Self {
-            dispatch_gate: DispatchGate::new(),
+            dispatch_gate: Arc::new(DispatchGate::new()),
             snapshot: RwLock::new(snapshot),
+            v2_generation: RwLock::new(None),
             engine,
             issuer,
             #[cfg(test)]
@@ -661,7 +744,7 @@ impl PolicyRuntime {
         }
     }
 
-    pub(crate) fn dispatch_lease(&self) -> Result<DispatchLease<'_>, StableCode> {
+    pub(crate) fn dispatch_lease(&self) -> Result<DispatchLease, StableCode> {
         self.dispatch_gate.lease(self)
     }
 
@@ -671,6 +754,62 @@ impl PolicyRuntime {
 
     pub(crate) fn close_and_drain(&self) -> Result<ClosedDispatchGate<'_>, StableCode> {
         self.dispatch_gate.close_and_drain()
+    }
+
+    pub(crate) fn activate_v2_generation(
+        &self,
+        startup: &VerifiedDaemonStartupV2,
+    ) -> Result<(), StableCode> {
+        let generation = Arc::new(
+            V2ActiveGenerationSnapshot::from_verified_startup(startup)
+                .map_err(|_| StableCode::IdentityReleaseMismatch)?,
+        );
+        let mut current = self
+            .v2_generation
+            .write()
+            .map_err(|_| StableCode::KernelUnavailable)?;
+        if current.is_some() {
+            return Err(StableCode::IdentityReleaseMismatch);
+        }
+        *current = Some(generation);
+        Ok(())
+    }
+
+    pub(crate) fn acquire_v2_generation_lease(
+        &self,
+        edge: &VerifiedServiceEdgeV2,
+        deadline: Instant,
+    ) -> Result<V2GenerationLease, StableCode> {
+        if Instant::now() >= deadline {
+            return Err(StableCode::DeadlineExceeded);
+        }
+        let dispatch = self.dispatch_gate.v2_lease()?;
+        let active = self
+            .v2_generation
+            .read()
+            .map_err(|_| StableCode::KernelUnavailable)?
+            .as_ref()
+            .cloned()
+            .ok_or(StableCode::KernelUnavailable)?;
+        if !active.matches_edge(edge) {
+            return Err(StableCode::IdentityReleaseMismatch);
+        }
+        Ok(V2GenerationLease {
+            dispatch,
+            active,
+            edge_digest: edge.edge_digest(),
+        })
+    }
+
+    pub(crate) fn v2_generation_snapshot(
+        &self,
+    ) -> Result<Arc<V2ActiveGenerationSnapshot>, StableCode> {
+        self.v2_generation
+            .read()
+            .map_err(|_| StableCode::KernelUnavailable)?
+            .as_ref()
+            .cloned()
+            .ok_or(StableCode::KernelUnavailable)
     }
 
     pub(crate) fn snapshot(&self) -> Result<Arc<DaemonPolicyRuntimeSnapshot>, StableCode> {
@@ -715,6 +854,22 @@ impl PolicyRuntime {
             .write()
             .map_err(|_| StableCode::KernelUnavailable)?;
         *current = Arc::new(snapshot);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn activate_v2_generation_for_test(
+        &self,
+        generation: V2ActiveGenerationSnapshot,
+    ) -> Result<(), StableCode> {
+        let mut current = self
+            .v2_generation
+            .write()
+            .map_err(|_| StableCode::KernelUnavailable)?;
+        if current.is_some() {
+            return Err(StableCode::IdentityReleaseMismatch);
+        }
+        *current = Some(Arc::new(generation));
         Ok(())
     }
 
@@ -819,18 +974,82 @@ impl PolicyRuntime {
     }
 }
 
-pub(crate) struct DispatchLease<'gate> {
-    gate: &'gate DispatchGate,
+pub(crate) struct DispatchLease {
+    gate: Arc<DispatchGate>,
     snapshot: Arc<DaemonPolicyRuntimeSnapshot>,
 }
 
-impl DispatchLease<'_> {
+impl DispatchLease {
     pub(crate) const fn snapshot(&self) -> &Arc<DaemonPolicyRuntimeSnapshot> {
         &self.snapshot
     }
 }
 
-impl Drop for DispatchLease<'_> {
+impl Drop for DispatchLease {
+    fn drop(&mut self) {
+        self.gate.release();
+    }
+}
+
+pub(crate) struct V2GenerationLease {
+    dispatch: V2DispatchLease,
+    active: Arc<V2ActiveGenerationSnapshot>,
+    edge_digest: savana_kernel_protocol::v2::Digest32V2,
+}
+
+impl V2GenerationLease {
+    pub(crate) fn deployment_generation(&self) -> u64 {
+        self.active.deployment_generation()
+    }
+
+    pub(crate) fn effect_fence_epoch(&self) -> u64 {
+        self.active.effect_fence_epoch()
+    }
+
+    pub(crate) fn active_state_manifest_digest(&self) -> savana_kernel_protocol::v2::Digest32V2 {
+        self.active.active_state_manifest_digest()
+    }
+
+    pub(crate) fn protocol_abi_digest(&self) -> savana_kernel_protocol::v2::Digest32V2 {
+        self.active.protocol_abi_digest()
+    }
+
+    pub(crate) const fn edge_digest(&self) -> savana_kernel_protocol::v2::Digest32V2 {
+        self.edge_digest
+    }
+
+    pub(crate) fn revalidate(&self, active: &V2ActiveGenerationSnapshot) -> Result<(), StableCode> {
+        if active == self.active.as_ref() {
+            Ok(())
+        } else {
+            Err(StableCode::IdentityReleaseMismatch)
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_dispatch_test(
+        active_state_manifest_digest: savana_kernel_protocol::v2::Digest32V2,
+        deployment_generation: u64,
+    ) -> Self {
+        let dispatch = Arc::new(DispatchGate::new())
+            .v2_lease()
+            .expect("synthetic V2 dispatch lease");
+        Self {
+            dispatch,
+            active: Arc::new(V2ActiveGenerationSnapshot::for_dispatch_test(
+                active_state_manifest_digest,
+                deployment_generation,
+            )),
+            edge_digest: savana_kernel_protocol::v2::Digest32V2::new([0xd6; 32]),
+        }
+    }
+}
+
+pub(crate) struct V2DispatchLease {
+    gate: Arc<DispatchGate>,
+}
+
+impl Drop for V2DispatchLease {
     fn drop(&mut self) {
         self.gate.release();
     }
@@ -889,10 +1108,7 @@ impl DispatchGate {
         }
     }
 
-    fn lease<'gate>(
-        &'gate self,
-        runtime: &'gate PolicyRuntime,
-    ) -> Result<DispatchLease<'gate>, StableCode> {
+    fn lease(self: &Arc<Self>, runtime: &PolicyRuntime) -> Result<DispatchLease, StableCode> {
         let mut state = self.lock_until_open()?;
         state.active = state
             .active
@@ -908,7 +1124,7 @@ impl DispatchGate {
                 #[cfg(test)]
                 runtime.record_lock(LockEvent::DispatchLease);
                 Ok(DispatchLease {
-                    gate: self,
+                    gate: Arc::clone(self),
                     snapshot,
                 })
             }
@@ -920,6 +1136,17 @@ impl DispatchGate {
                 Err(code)
             }
         }
+    }
+
+    fn v2_lease(self: &Arc<Self>) -> Result<V2DispatchLease, StableCode> {
+        let mut state = self.lock_until_open()?;
+        state.active = state
+            .active
+            .checked_add(1)
+            .ok_or(StableCode::KernelUnavailable)?;
+        Ok(V2DispatchLease {
+            gate: Arc::clone(self),
+        })
     }
 
     fn admission_lease(&self) -> Result<AdmissionLease<'_>, StableCode> {
@@ -1003,10 +1230,12 @@ mod tests {
     use savana_policy_core::PolicyEngine;
 
     use super::*;
+    use crate::deployment_trust::ClosedServiceEdgeIdV2;
     use crate::handshake::RuntimeIdentity;
     use crate::server::ServerLifecycle;
     use crate::socket::PROCESS_TEST_LOCK;
     use crate::startup_identity_tests::MappedInstallation;
+    use crate::v2_edge::{V2ActiveGenerationSnapshot, VerifiedServiceEdgeV2};
 
     struct RolloverFixture {
         installation: MappedInstallation,
@@ -1266,6 +1495,99 @@ mod tests {
             lease.snapshot().runtime_identity().policy_digest(),
             fixture.runtime.engine.current_policy_identity().digest
         );
+    }
+
+    #[test]
+    fn v2_generation_lease_binds_edge_and_participates_in_rollover_drain() {
+        let fixture = runtime_fixture();
+        let edge = VerifiedServiceEdgeV2::for_generation_test(
+            ClosedServiceEdgeIdV2::AgentKernel,
+            7,
+            8,
+            0x91,
+        );
+        let active = V2ActiveGenerationSnapshot::for_generation_test(&edge);
+        fixture
+            .runtime
+            .activate_v2_generation_for_test(active.clone())
+            .unwrap();
+        let lease = fixture
+            .runtime
+            .acquire_v2_generation_lease(&edge, std::time::Instant::now() + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(lease.deployment_generation(), 7);
+        assert_eq!(lease.effect_fence_epoch(), 8);
+        lease.revalidate(&active).unwrap();
+
+        let stale = active.with_fence_for_test(9);
+        assert_eq!(
+            lease.revalidate(&stale),
+            Err(StableCode::IdentityReleaseMismatch)
+        );
+
+        let runtime = Arc::clone(&fixture.runtime);
+        let (drained_tx, drained_rx) = mpsc::channel();
+        let closer = thread::spawn(move || {
+            let closed = runtime.close_and_drain().unwrap();
+            drained_tx.send(()).unwrap();
+            closed.reopen();
+        });
+        wait_until_closing(&fixture.runtime);
+        assert!(drained_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        drop(lease);
+        drained_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        closer.join().unwrap();
+    }
+
+    #[test]
+    fn v2_only_generation_runtime_needs_no_v1_policy_snapshot_and_still_drains() {
+        let edge = VerifiedServiceEdgeV2::for_generation_test(
+            ClosedServiceEdgeIdV2::AgentKernel,
+            7,
+            8,
+            0x91,
+        );
+        let active = V2ActiveGenerationSnapshot::for_generation_test(&edge);
+        let runtime = Arc::new(V2GenerationRuntime::new());
+        runtime.activate_for_test(active.clone()).unwrap();
+        let lease = runtime
+            .acquire(&edge, std::time::Instant::now() + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(lease.deployment_generation(), 7);
+        lease.revalidate(&active).unwrap();
+
+        let closing = Arc::clone(&runtime);
+        let (drained_tx, drained_rx) = mpsc::channel();
+        let closer = thread::spawn(move || {
+            let closed = closing.close_and_drain().unwrap();
+            drained_tx.send(()).unwrap();
+            closed.reopen();
+        });
+        assert!(drained_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        drop(lease);
+        drained_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        closer.join().unwrap();
+    }
+
+    #[test]
+    fn v2_generation_lease_is_owned_and_can_cross_the_state_owner_boundary() {
+        let fixture = runtime_fixture();
+        let edge = VerifiedServiceEdgeV2::for_generation_test(
+            ClosedServiceEdgeIdV2::AgentKernel,
+            7,
+            8,
+            0x91,
+        );
+        fixture
+            .runtime
+            .activate_v2_generation_for_test(V2ActiveGenerationSnapshot::for_generation_test(&edge))
+            .unwrap();
+        let lease = fixture
+            .runtime
+            .acquire_v2_generation_lease(&edge, std::time::Instant::now() + Duration::from_secs(1))
+            .unwrap();
+
+        thread::spawn(move || drop(lease)).join().unwrap();
     }
 
     #[test]

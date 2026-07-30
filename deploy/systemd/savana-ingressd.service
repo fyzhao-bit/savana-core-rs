@@ -1,0 +1,59 @@
+[Unit]
+Description=Savana browser ingress authority V2
+Requires=savana-ingressd-http.socket
+After=local-fs.target savana-kerneld-ingress.socket savana-approvald-ingress.socket
+
+[Service]
+Type=simple
+User=savana-ingress
+Group=savana-ingress
+ExecStart=/usr/libexec/savana/savana-ingressd --config /etc/savana/ingressd-bootstrap-v2.json
+Restart=on-failure
+RestartSec=1s
+TimeoutStopSec=15s
+UMask=0077
+RuntimeDirectory=savana/ingressd
+RuntimeDirectoryMode=0711
+ReadOnlyPaths=/etc/savana
+ReadWritePaths=/run/savana/ingressd
+InaccessiblePaths=/var/lib/savana/kerneld /var/lib/savana/agentd /var/lib/savana/approvald /var/lib/savana/execd
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+KeyringMode=private
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@clock @debug @module @mount @obsolete @privileged @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX AF_INET
+IPAddressDeny=any
+IPAddressAllow=localhost
+SocketBindDeny=any
+LoadCredentialEncrypted=ingress-kernel-v2.seed:/etc/savana/credentials/ingressd/ingress-kernel-v2.seed.cred
+LoadCredentialEncrypted=ingress-approval-v2.seed:/etc/savana/credentials/ingressd/ingress-approval-v2.seed.cred
+LoadCredentialEncrypted=parser-descriptor-v2.seed:/etc/savana/credentials/ingressd/parser-descriptor-v2.seed.cred
+LoadCredentialEncrypted=ingressd-boot-v2.id:/etc/savana/credentials/shared/ingressd-boot-v2.id.cred
+LoadCredentialEncrypted=kerneld-boot-v2.id:/etc/savana/credentials/shared/kerneld-boot-v2.id.cred
+LoadCredentialEncrypted=approvald-boot-v2.id:/etc/savana/credentials/shared/approvald-boot-v2.id.cred
+
+[Install]
+WantedBy=savana-kernel.target

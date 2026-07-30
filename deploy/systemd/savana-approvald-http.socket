@@ -1,0 +1,12 @@
+[Unit]
+Description=Savana approval UI loopback socket
+
+[Socket]
+ListenStream=127.0.0.1:8766
+FreeBind=no
+BindIPv6Only=both
+FileDescriptorName=savana-approval-http
+Service=savana-approvald.service
+
+[Install]
+WantedBy=sockets.target

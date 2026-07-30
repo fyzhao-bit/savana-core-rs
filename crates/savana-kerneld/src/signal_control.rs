@@ -138,13 +138,13 @@ impl SignalController {
     pub(crate) fn install(
         mask: SignalMaskGuard,
         sigpipe: SigpipeGuard,
-    ) -> Result<Self, (StableCode, SignalMaskGuard, SigpipeGuard)> {
+    ) -> Result<Self, Box<(StableCode, SignalMaskGuard, SigpipeGuard)>> {
         if mask.state != MaskState::Blocked {
-            return Err((StableCode::KernelUnavailable, mask, sigpipe));
+            return Err(Box::new((StableCode::KernelUnavailable, mask, sigpipe)));
         }
         let signals = match Signals::new([SIGTERM, SIGINT]) {
             Ok(signals) => signals,
-            Err(_) => return Err((StableCode::KernelUnavailable, mask, sigpipe)),
+            Err(_) => return Err(Box::new((StableCode::KernelUnavailable, mask, sigpipe))),
         };
         Ok(Self {
             signals: Some(signals),

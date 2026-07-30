@@ -34,6 +34,8 @@ use sha2::{Digest, Sha256};
 const DAEMON_HELLO_DOMAIN: &[u8] = b"SAVANA_DAEMON_HELLO_V1\0";
 const CLIENT_FINISH_DOMAIN: &[u8] = b"SAVANA_CLIENT_FINISH_V1\0";
 const TEST_PROCESS_ENTROPY_ENV: &str = "SAVANA_TEST_PROCESS_ENTROPY";
+const TEST_V1_RUNTIME_ENV: &str = "SAVANA_TEST_V1_RUNTIME";
+const TEST_V1_RUNTIME_VALUE: &str = "frozen-regression-v1";
 const LIFECYCLE_CONTROL_ENV: &str = "SAVANA_TEST_LIFECYCLE_CONTROL";
 const POLICY_CORE_LIVE_PERSISTENCE_FAULT_ENV: &str =
     "SAVANA_TEST_POLICY_CORE_LIVE_PERSISTENCE_FAULT";
@@ -61,6 +63,7 @@ fn complete_mapped_installation_authenticates_health_and_retains_durable_state()
     let mut child = Command::new(&installation.executable)
         .arg("--config")
         .arg(&installation.config)
+        .env(TEST_V1_RUNTIME_ENV, TEST_V1_RUNTIME_VALUE)
         .env_remove(TEST_PROCESS_ENTROPY_ENV)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -469,6 +472,7 @@ impl Installation {
         let mut child = Command::new(&self.executable)
             .arg("--config")
             .arg(&self.config)
+            .env(TEST_V1_RUNTIME_ENV, TEST_V1_RUNTIME_VALUE)
             .env_remove(TEST_PROCESS_ENTROPY_ENV)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -506,6 +510,7 @@ impl Installation {
         let mut child = Command::new(&self.executable)
             .arg("--config")
             .arg(&self.config)
+            .env(TEST_V1_RUNTIME_ENV, TEST_V1_RUNTIME_VALUE)
             .env_remove(TEST_PROCESS_ENTROPY_ENV)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -544,6 +549,7 @@ impl Installation {
         let mut child = Command::new(&self.executable)
             .arg("--config")
             .arg(&self.config)
+            .env(TEST_V1_RUNTIME_ENV, TEST_V1_RUNTIME_VALUE)
             .env_remove(LIFECYCLE_CONTROL_ENV)
             .env_remove(POLICY_CORE_LIVE_PERSISTENCE_FAULT_ENV)
             .env(TEST_PROCESS_ENTROPY_ENV, script)

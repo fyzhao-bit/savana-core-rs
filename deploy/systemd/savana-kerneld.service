@@ -1,0 +1,67 @@
+[Unit]
+Description=Savana policy kernel V2
+Requires=savana-kerneld-agent.socket savana-kerneld-ingress.socket
+After=local-fs.target savana-execd.socket
+
+[Service]
+Type=simple
+User=savana-kernel
+Group=savana-kernel
+ExecStart=/usr/libexec/savana/savana-kerneld --config /etc/savana/kerneld-bootstrap-v2.json
+Restart=on-failure
+RestartSec=1s
+TimeoutStopSec=15s
+UMask=0077
+RuntimeDirectory=savana/kerneld
+RuntimeDirectoryMode=0711
+StateDirectory=savana/kerneld
+StateDirectoryMode=0700
+ReadOnlyPaths=/etc/savana
+ReadWritePaths=/var/lib/savana/kerneld /run/savana/kerneld
+InaccessiblePaths=/var/lib/savana/agentd /var/lib/savana/approvald /var/lib/savana/execd
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+KeyringMode=private
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@clock @debug @module @mount @obsolete @privileged @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+SocketBindDeny=any
+LoadCredentialEncrypted=agent-kernel-v2.seed:/etc/savana/credentials/kerneld/agent-kernel-v2.seed.cred
+LoadCredentialEncrypted=kerneld-boot-v2.id:/etc/savana/credentials/shared/kerneld-boot-v2.id.cred
+LoadCredentialEncrypted=ingress-kernel-v2.seed:/etc/savana/credentials/kerneld/ingress-kernel-v2.seed.cred
+LoadCredentialEncrypted=envelope-signing-v2.seed:/etc/savana/credentials/kerneld/envelope-signing-v2.seed.cred
+LoadCredentialEncrypted=authority-envelope-v2.seed:/etc/savana/credentials/kerneld/authority-envelope-v2.seed.cred
+LoadCredentialEncrypted=task-correlation-v2.seed:/etc/savana/credentials/kerneld/task-correlation-v2.seed.cred
+LoadCredentialEncrypted=vault-encryption-v2.key:/etc/savana/credentials/kerneld/vault-encryption-v2.key.cred
+LoadCredentialEncrypted=vault-anchor-authentication-v2.key:/etc/savana/credentials/kerneld/vault-anchor-authentication-v2.key.cred
+LoadCredentialEncrypted=agent-authority-state-encryption-v2.key:/etc/savana/credentials/kerneld/agent-authority-state-encryption-v2.key.cred
+LoadCredentialEncrypted=agent-authority-anchor-authentication-v2.key:/etc/savana/credentials/kerneld/agent-authority-anchor-authentication-v2.key.cred
+LoadCredentialEncrypted=g4-state-encryption-v2.key:/etc/savana/credentials/kerneld/g4-state-encryption-v2.key.cred
+LoadCredentialEncrypted=g4-anchor-authentication-v2.key:/etc/savana/credentials/kerneld/g4-anchor-authentication-v2.key.cred
+LoadCredentialEncrypted=executor-kernel-v2.seed:/etc/savana/credentials/kerneld/executor-kernel-v2.seed.cred
+
+[Install]
+WantedBy=savana-kernel.target

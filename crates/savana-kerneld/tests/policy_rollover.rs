@@ -98,6 +98,7 @@ fn asynchronous_lifecycle_response_write_failure_is_fatal() {
     let mut child = Command::new(&installation.executable)
         .arg("--config")
         .arg(&installation.config)
+        .env("SAVANA_TEST_V1_RUNTIME", "frozen-regression-v1")
         .env("SAVANA_TEST_LIFECYCLE_CONTROL", "stdio-v1")
         .env_remove("SAVANA_TEST_POLICY_CORE_LIVE_PERSISTENCE_FAULT")
         .env_remove("SAVANA_TEST_PROCESS_ENTROPY")

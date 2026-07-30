@@ -207,6 +207,8 @@ mod audit;
 #[allow(dead_code)]
 mod bootstrap;
 mod config;
+#[allow(dead_code)] // Consumed by V2 daemon startup before readiness publication.
+mod deployment_trust;
 mod error;
 mod fs_cap;
 #[allow(dead_code)]
@@ -215,11 +217,13 @@ mod key_file;
 #[cfg(all(feature = "test-support", debug_assertions))]
 mod lifecycle_control;
 mod ops;
+#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
 mod panic_report;
 #[allow(dead_code)]
 mod peer;
 #[allow(dead_code)]
 mod policy_runtime;
+#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
 mod runtime_deps;
 mod selected_policy;
 #[allow(dead_code)]
@@ -231,6 +235,47 @@ mod socket;
 mod startup_identity_tests;
 #[allow(dead_code)]
 mod state;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod v2_activation;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod v2_agent_authority;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod v2_agent_durable;
+#[allow(dead_code)] // Activated after V2 mutual authentication completes.
+mod v2_channel;
+#[allow(dead_code)] // Activated after V2 mutual authentication completes.
+mod v2_connection;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod v2_core_services;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod v2_data_plane;
+#[allow(dead_code)] // Activated by the V2 authenticated dispatch routes.
+mod v2_dispatch;
+#[allow(dead_code)] // Activated by the verified V2 listener startup path.
+mod v2_edge;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod v2_executor_client;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod v2_ingress_authority;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod v2_input_owner;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod v2_kernel_owner;
+#[allow(dead_code)] // Activated by the final V2 daemon startup path.
+mod v2_listener;
+#[allow(dead_code)] // Activated by the V2 startup recovery pass.
+mod v2_recovery;
+#[allow(dead_code)] // Activated by the V2 authenticated dispatch routes.
+mod v2_runtime;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod v2_server;
+mod v2_startup;
+#[allow(dead_code)] // Activated by the V2 authenticated dispatch routes.
+mod v2_state_owner;
+#[allow(dead_code)] // Activated by the native V2 listener entry point.
+mod v2_transport_owner;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod v2_value_owner;
 
 pub(crate) use config::DaemonConfig;
 pub use error::DaemonError;
@@ -273,23 +318,73 @@ pub mod test_support {
             handshake_policy_identity,
         })
     }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct V2IngressReleaseEvidence {
+        pub protected_value_count: usize,
+        pub provenance_root_evidence_count: usize,
+        pub vault_segment_count: usize,
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_v2_ingress_pipeline_for_release_evidence(
+        input_runtime: &savana_input_runtime::InputRuntimeV2,
+        vault: &mut savana_vault::DurableVaultServiceV2,
+        transfer: savana_ingressd::IngressKernelTransferV2,
+        installation_id: savana_kernel_protocol::v2::Digest32V2,
+        active_state_manifest_digest: savana_kernel_protocol::v2::Digest32V2,
+        producer_identity: savana_kernel_protocol::v2::ProducerIdentityV2,
+        durable_task_id: savana_kernel_protocol::v2::DurableTaskIdV2,
+        durable_run_id: savana_kernel_protocol::v2::DurableRunIdV2,
+        now: savana_kernel_protocol::v2::UnixMillisV2,
+        expires_at: savana_kernel_protocol::v2::UnixMillisV2,
+    ) -> Result<V2IngressReleaseEvidence, DaemonError> {
+        let accepted = crate::v2_runtime::accept_ingress_into_kernel(
+            input_runtime,
+            vault,
+            transfer,
+            installation_id,
+            active_state_manifest_digest,
+            producer_identity,
+            durable_task_id,
+            durable_run_id,
+            savana_policy_core::v2::EffectSetV2::SEND,
+            now,
+            expires_at,
+        )
+        .map_err(|_| DaemonError::stable(savana_kernel_protocol::StableCode::KernelUnavailable))?;
+        Ok(V2IngressReleaseEvidence {
+            protected_value_count: accepted.gated_input().protected_values().len(),
+            provenance_root_evidence_count: accepted.provenance().root_evidence().as_slice().len(),
+            vault_segment_count: vault.segment_count(),
+        })
+    }
 }
 
 use std::path::Path;
 use std::sync::Arc;
 
 use audit::{AuditEvent, AuditSink};
+use bootstrap::acquire_run_ownership;
 #[cfg(all(feature = "test-support", debug_assertions))]
 use bootstrap::BootstrapContext;
-use bootstrap::{acquire_run_ownership, PreparedRuntime};
+#[cfg(all(feature = "test-support", debug_assertions))]
+use bootstrap::PreparedRuntime;
 use panic_report::PanicHookGuard;
-use runtime_deps::{ProcessSecrets, SystemClock, SystemRandom};
+#[cfg(all(feature = "test-support", debug_assertions))]
+use runtime_deps::SystemClock;
+use runtime_deps::{ProcessSecrets, SystemRandom};
 use savana_kernel_protocol::StableCode;
+#[cfg(all(feature = "test-support", debug_assertions))]
 use savana_policy_core::{Clock, RandomSource};
 use signal_control::{SignalController, SignalMaskGuard, SigpipeGuard};
 
 #[cfg(all(feature = "test-support", debug_assertions))]
 const TEST_PROCESS_ENTROPY_ENV: &str = "SAVANA_TEST_PROCESS_ENTROPY";
+#[cfg(all(feature = "test-support", debug_assertions))]
+const TEST_V1_RUNTIME_ENV: &str = "SAVANA_TEST_V1_RUNTIME";
+#[cfg(all(feature = "test-support", debug_assertions))]
+const TEST_V1_RUNTIME_VALUE: &str = "frozen-regression-v1";
 
 #[cfg(all(feature = "test-support", debug_assertions))]
 enum ProcessEntropyStep {
@@ -412,6 +507,58 @@ mod process_entropy_tests {
 }
 
 pub fn run(config_path: &Path) -> Result<(), DaemonError> {
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    if std::env::var_os(TEST_V1_RUNTIME_ENV)
+        .as_deref()
+        .is_some_and(|value| value == std::ffi::OsStr::new(TEST_V1_RUNTIME_VALUE))
+    {
+        return run_v1_test_support(config_path);
+    }
+    run_v2_production(config_path)
+}
+
+fn run_v2_production(config_path: &Path) -> Result<(), DaemonError> {
+    acquire_run_ownership()?;
+
+    let mask = SignalMaskGuard::block_shutdown().map_err(DaemonError::stable)?;
+    let sigpipe = match SigpipeGuard::install() {
+        Ok(sigpipe) => sigpipe,
+        Err(code) => return finish_before_audit(code, mask, None),
+    };
+    let secrets = match ProcessSecrets::draw(&SystemRandom) {
+        Ok(secrets) => secrets,
+        Err(code) => return finish_before_audit(code, mask, Some(sigpipe)),
+    };
+    let boot_id = savana_kernel_protocol::v2::BootIdV2::new(*secrets.boot_id.as_bytes());
+    let (audit, panic_descriptor) = match AuditSink::establish(secrets.audit_secret) {
+        Ok(established) => established,
+        Err(code) => return finish_before_audit(code, mask, Some(sigpipe)),
+    };
+    let audit = Arc::new(audit);
+    let panic = PanicHookGuard::install(panic_descriptor);
+    let mut signals = match SignalController::install(mask, sigpipe) {
+        Ok(signals) => signals,
+        Err(error) => {
+            let (code, mask, sigpipe) = *error;
+            return finish_signal_install_failure(code, &audit, panic, mask, sigpipe);
+        }
+    };
+
+    match v2_startup::run(config_path, boot_id, &mut signals) {
+        Ok(()) => finish_runtime(
+            Ok(()),
+            &audit,
+            panic,
+            signals,
+            #[cfg(all(feature = "test-support", debug_assertions))]
+            false,
+        ),
+        Err(code) => finish_bootstrap_failure(code, &audit, panic, signals),
+    }
+}
+
+#[cfg(all(feature = "test-support", debug_assertions))]
+fn run_v1_test_support(config_path: &Path) -> Result<(), DaemonError> {
     acquire_run_ownership()?;
 
     let mask = SignalMaskGuard::block_shutdown().map_err(DaemonError::stable)?;
@@ -435,7 +582,8 @@ pub fn run(config_path: &Path) -> Result<(), DaemonError> {
             let panic = PanicHookGuard::install(panic_descriptor);
             let signals = match SignalController::install(mask, sigpipe) {
                 Ok(signals) => signals,
-                Err((code, mask, sigpipe)) => {
+                Err(error) => {
+                    let (code, mask, sigpipe) = *error;
                     return finish_signal_install_failure(code, &audit, panic, mask, sigpipe);
                 }
             };
@@ -462,7 +610,8 @@ pub fn run(config_path: &Path) -> Result<(), DaemonError> {
     let panic = PanicHookGuard::install(panic_descriptor);
     let mut signals = match SignalController::install(mask, sigpipe) {
         Ok(signals) => signals,
-        Err((code, mask, sigpipe)) => {
+        Err(error) => {
+            let (code, mask, sigpipe) = *error;
             return finish_signal_install_failure(code, &audit, panic, mask, sigpipe);
         }
     };

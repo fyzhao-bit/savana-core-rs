@@ -1,0 +1,15 @@
+[Unit]
+Description=Savana kerneld ingress role socket
+
+[Socket]
+ListenStream=/run/savana/kerneld/ingressd/kerneld.sock
+FileDescriptorName=savana-ingress-kernel
+SocketUser=savana-kernel
+SocketGroup=savana-ingress
+SocketMode=0660
+DirectoryMode=0710
+Service=savana-kerneld.service
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

@@ -14,8 +14,15 @@ default = []
 test-support = ["savana-policy-core/test-support"]
 
 [dependencies]
+savana-agentd = { path = "../savana-agentd" }
+savana-approvald = { path = "../savana-approvald" }
+savana-execd = { path = "../savana-execd" }
+savana-ingressd = { path = "../savana-ingressd" }
+savana-input-runtime = { path = "../savana-input-runtime" }
 savana-kernel-protocol = { path = "../savana-kernel-protocol" }
+savana-platform-identity = { path = "../savana-platform-identity" }
 savana-policy-core = { path = "../savana-policy-core" }
+savana-vault = { path = "../savana-vault" }
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -28,6 +35,9 @@ sha2.workspace = true
 hmac.workspace = true
 getrandom.workspace = true
 minicbor.workspace = true
+x25519-dalek.workspace = true
+hkdf.workspace = true
+chacha20poly1305.workspace = true
 
 [dev-dependencies]
 tempfile = "=3.23.0"
@@ -56,4 +66,9 @@ required-features = ["test-support"]
 [[test]]
 name = "policy_attack_matrix"
 path = "tests/policy_attack_matrix.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "v2_end_to_end"
+path = "tests/v2_end_to_end.rs"
 required-features = ["test-support"]

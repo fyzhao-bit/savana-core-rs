@@ -2,7 +2,7 @@
 
 > Date: 2026-07-28
 >
-> Status: written-spec review pending
+> Status: approved for implementation
 >
 > Extends:
 > [Savana Secure Kernel V2](./2026-07-27-savana-secure-kernel-v2-design.md),

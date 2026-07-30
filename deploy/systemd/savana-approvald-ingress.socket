@@ -1,0 +1,15 @@
+[Unit]
+Description=Savana approvald ingress role socket
+
+[Socket]
+ListenStream=/run/savana/approvald/ingressd/approvald.sock
+FileDescriptorName=savana-ingress-approval
+SocketUser=savana-approval
+SocketGroup=savana-ingress
+SocketMode=0660
+DirectoryMode=0710
+Service=savana-approvald.service
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

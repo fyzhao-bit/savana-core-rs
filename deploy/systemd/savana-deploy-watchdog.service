@@ -1,0 +1,42 @@
+[Unit]
+Description=Savana root deployment recovery watchdog V2
+DefaultDependencies=no
+After=local-fs.target
+Before=savana-deployment-recovery.target savana-kernel.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=root
+Group=root
+ExecStart=/usr/libexec/savana/savana-deploy-watchdog
+Restart=on-failure
+RestartSec=2s
+TimeoutStartSec=90s
+TimeoutStopSec=30s
+UMask=0077
+ReadOnlyPaths=/etc/savana /usr/libexec/savana
+ReadWritePaths=/var/lib/savana/deployment /var/lib/savana-deploy /run/savana
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=no
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+KeyringMode=private
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+SocketBindDeny=any
+
+[Install]
+WantedBy=savana-deployment-recovery.target

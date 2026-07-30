@@ -1,17 +1,6 @@
 name: ci
 on: [push, pull_request]
 jobs:
-  rust:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.12' }
-      - uses: dtolnay/rust-toolchain@1.82.0
-        with: { components: clippy, rustfmt }
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test -p libsavana-ner
   kerneld:
     strategy:
       fail-fast: false
@@ -23,18 +12,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.82.0
         with: { components: clippy, rustfmt }
       - run: cargo fmt --all -- --check
-      - run: >-
-          cargo clippy -p savana-kernel-protocol -p savana-policy-core
-          -p savana-kerneld --all-targets --features test-support
-          --locked -- -D warnings
-      - run: >-
-          cargo test -p savana-kernel-protocol -p savana-policy-core
-          -p savana-kerneld --all-targets --locked
-      - run: >-
-          cargo test -p savana-kerneld --features test-support
-          --test production_state_machine --locked
-      - run: >-
-          cargo test -p savana-kerneld --features test-support
-          --test policy_protocol --test policy_rollover --test policy_fail_stop
-          --test policy_attack_matrix
-          --locked
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --workspace --all-targets --all-features --locked
+      - if: runner.os == 'macOS'
+        run: cargo test -p savana-platform-identity --test macos_worker_sandbox --all-features --locked
+        env:
+          SAVANA_REQUIRE_NATIVE_MACOS_SANDBOX_TEST: "1"
+      - run: cargo doc --workspace --all-features --no-deps --locked
+      - run: cargo build --workspace --release --locked
+      - if: runner.os == 'Linux'
+        run: systemd-analyze verify deploy/systemd/*

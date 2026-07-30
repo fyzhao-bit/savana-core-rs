@@ -1,0 +1,37 @@
+[package]
+name = "savana-platform-identity"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "savana-worker-sandbox-probe"
+path = "tests/support/sandbox_probe.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "macos_worker_sandbox"
+path = "tests/macos_worker_sandbox.rs"
+required-features = ["test-support"]
+
+[lints.rust]
+unsafe_code = "deny"
+
+[features]
+default = []
+test-support = ["dep:ed25519-dalek"]
+
+[dependencies]
+nix.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+ed25519-dalek = { workspace = true, optional = true }
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
+tempfile = "=3.23.0"

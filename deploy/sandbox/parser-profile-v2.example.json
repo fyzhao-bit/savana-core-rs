@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "worker_program": "/usr/libexec/savana/savana-parser-worker",
+  "read_only_paths": [
+    "/opt/savana/parser-models"
+  ],
+  "memory_limit_bytes": 1073741824,
+  "cpu_time_seconds": 120,
+  "output_file_limit_bytes": 0,
+  "open_file_limit": 16,
+  "process_limit": 1,
+  "deny_all_network": true
+}

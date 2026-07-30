@@ -24,14 +24,13 @@ fn malformed_cli_is_silent_and_exits_64() {
 }
 
 #[test]
-fn daemon_error_exits_1_and_only_emits_typed_redacted_audit() {
-    let canary_path = "/absolute/secret-canary-bootstrap.json";
-    let output = run(&["--config", canary_path]);
+fn unavailable_v2_startup_exits_1_and_only_emits_typed_redacted_audit() {
+    let output = run(&["--config", "/etc/savana/kerneld-bootstrap-v2.json"]);
 
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "{\"event\":\"BootstrapFailed\",\"code\":\"IDENTITY_RELEASE_MISMATCH\"}\n"
+        "{\"event\":\"BootstrapFailed\",\"code\":\"KERNEL_UNAVAILABLE\"}\n"
     );
 }

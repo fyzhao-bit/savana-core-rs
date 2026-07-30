@@ -1,21 +1,39 @@
 use std::ffi::{OsStr, OsString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+const PRODUCTION_CONFIG_PATH_V2: &str = "/etc/savana/kerneld-bootstrap-v2.json";
+#[cfg(all(feature = "test-support", debug_assertions))]
+const TEST_V1_RUNTIME_ENV: &str = "SAVANA_TEST_V1_RUNTIME";
+#[cfg(all(feature = "test-support", debug_assertions))]
+const TEST_V1_RUNTIME_VALUE: &str = "frozen-regression-v1";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CliError;
 
-fn parse_args(mut arguments: impl Iterator<Item = OsString>) -> Result<PathBuf, CliError> {
+fn parse_args(
+    mut arguments: impl Iterator<Item = OsString>,
+    allow_test_support_path: bool,
+) -> Result<PathBuf, CliError> {
     let _program = arguments.next().ok_or(CliError)?;
     let token = arguments.next().ok_or(CliError)?;
     let path = PathBuf::from(arguments.next().ok_or(CliError)?);
-    if token != OsStr::new("--config") || !path.is_absolute() || arguments.next().is_some() {
+    if token != OsStr::new("--config")
+        || (path != Path::new(PRODUCTION_CONFIG_PATH_V2)
+            && !(allow_test_support_path && path.is_absolute()))
+        || arguments.next().is_some()
+    {
         return Err(CliError);
     }
     Ok(path)
 }
 
 fn main() {
-    let exit_code = match parse_args(std::env::args_os()) {
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    let allow_test_support_path = std::env::var_os(TEST_V1_RUNTIME_ENV)
+        .as_deref()
+        .is_some_and(|value| value == OsStr::new(TEST_V1_RUNTIME_VALUE));
+    #[cfg(not(all(feature = "test-support", debug_assertions)))]
+    let allow_test_support_path = false;
+    let exit_code = match parse_args(std::env::args_os(), allow_test_support_path) {
         Ok(path) => match savana_kerneld::run(&path) {
             Ok(()) => 0,
             Err(_) => 1,
@@ -39,12 +57,13 @@ mod tests {
                 [
                     OsString::from("savana-kerneld"),
                     OsString::from("--config"),
-                    OsString::from("/etc/savana/kerneld-bootstrap-v1.json"),
+                    OsString::from(PRODUCTION_CONFIG_PATH_V2),
                 ]
-                .into_iter()
+                .into_iter(),
+                false,
             )
             .unwrap(),
-            Path::new("/etc/savana/kerneld-bootstrap-v1.json")
+            Path::new(PRODUCTION_CONFIG_PATH_V2)
         );
 
         for arguments in [
@@ -53,7 +72,7 @@ mod tests {
             vec![
                 OsString::from("savana-kerneld"),
                 OsString::from("-c"),
-                OsString::from("/etc/savana/kerneld-bootstrap-v1.json"),
+                OsString::from(PRODUCTION_CONFIG_PATH_V2),
             ],
             vec![
                 OsString::from("savana-kerneld"),
@@ -63,11 +82,21 @@ mod tests {
             vec![
                 OsString::from("savana-kerneld"),
                 OsString::from("--config"),
-                OsString::from("/etc/savana/kerneld-bootstrap-v1.json"),
+                OsString::from(PRODUCTION_CONFIG_PATH_V2),
                 OsString::from("extra"),
             ],
         ] {
-            assert_eq!(parse_args(arguments.into_iter()), Err(CliError));
+            assert_eq!(parse_args(arguments.into_iter(), false), Err(CliError));
         }
+        assert!(parse_args(
+            [
+                OsString::from("savana-kerneld"),
+                OsString::from("--config"),
+                OsString::from("/tmp/v1-test-support.json"),
+            ]
+            .into_iter(),
+            true,
+        )
+        .is_ok());
     }
 }

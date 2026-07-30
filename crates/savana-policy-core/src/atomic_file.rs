@@ -11,6 +11,13 @@ use crate::PolicyError;
 const TEMP_ATTEMPTS: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AtomicReplaceBoundary {
+    FileFlushed,
+    RenamedBeforeDirectoryFlush,
+    DirectoryFlushed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PersistencePhase {
     BeforeRename,
     AfterRename,
@@ -61,12 +68,37 @@ pub(crate) fn replace_at<F>(
 where
     F: FnOnce() -> Result<(), PolicyError>,
 {
+    replace_at_observed(
+        parent,
+        final_leaf,
+        bytes,
+        owner_uid,
+        owner_gid,
+        pre_rename,
+        |_| Ok(()),
+    )
+}
+
+pub(crate) fn replace_at_observed<F, O>(
+    parent: &File,
+    final_leaf: &std::ffi::OsStr,
+    bytes: &[u8],
+    owner_uid: u32,
+    owner_gid: u32,
+    pre_rename: F,
+    mut observe: O,
+) -> Result<(), ReplaceError>
+where
+    F: FnOnce() -> Result<(), PolicyError>,
+    O: FnMut(AtomicReplaceBoundary) -> Result<(), PolicyError>,
+{
     let (temporary_leaf, mut temporary) =
         create_temporary_at(parent, final_leaf, owner_uid, owner_gid)
             .map_err(ReplaceError::before_rename)?;
     let before_rename = (|| {
         temporary.write_all(bytes).map_err(PolicyError::io)?;
         temporary.sync_all().map_err(PolicyError::io)?;
+        observe(AtomicReplaceBoundary::FileFlushed)?;
         validate_at(
             parent,
             &temporary_leaf,
@@ -87,6 +119,8 @@ where
         let _ = unlinkat(parent, &temporary_leaf, AtFlags::empty());
         return Err(ReplaceError::before_rename(PolicyError::io(error)));
     }
+    observe(AtomicReplaceBoundary::RenamedBeforeDirectoryFlush)
+        .map_err(ReplaceError::after_rename)?;
     validate_at(
         parent,
         final_leaf,
@@ -100,7 +134,8 @@ where
     parent
         .sync_all()
         .map_err(PolicyError::io)
-        .map_err(ReplaceError::after_rename)
+        .map_err(ReplaceError::after_rename)?;
+    observe(AtomicReplaceBoundary::DirectoryFlushed).map_err(ReplaceError::after_rename)
 }
 
 pub(crate) fn replace_with_parent_sync<F>(

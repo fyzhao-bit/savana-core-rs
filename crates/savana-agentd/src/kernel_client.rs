@@ -1,0 +1,1268 @@
+use std::io::{Read as _, Write as _};
+use std::net::Shutdown;
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use ed25519_dalek::SigningKey;
+use minicbor::Encode as _;
+use savana_kernel_protocol::v2::{
+    decode_authenticate_agent_ui_response_v2, decode_authorize_release_response_v2,
+    decode_authorize_tool_call_response_v2, decode_cancel_kernel_task_response_v2,
+    decode_claim_agent_session_response_v2, decode_close_agent_session_response_v2,
+    decode_commit_planner_value_response_v2, decode_dispatch_execution_response_v2,
+    decode_dispatch_release_response_v2, decode_evaluate_tool_call_response_v2,
+    decode_get_agent_session_status_response_v2, decode_get_execution_status_response_v2,
+    decode_get_kernel_task_status_response_v2, decode_get_release_status_response_v2,
+    decode_kernel_agent_health_response_v2, decode_kernel_service_application_request_v2,
+    decode_kernel_service_application_response_v2, decode_prepare_followup_ingress_response_v2,
+    decode_prepare_new_ingress_response_v2, decode_prepare_planner_call_response_v2,
+    decode_prepare_release_response_v2, decode_propose_tool_call_response_v2,
+    decode_read_agent_view_response_v2, decode_resume_committed_agent_authentication_response_v2,
+    decode_revoke_vault_response_v2, encode_kernel_service_application_request_v2,
+    encode_signed_durable_task_correlation_v2, AgentUiAuthenticationPreparationHandleV2,
+    AuthenticateAgentUiRequestV2, AuthenticateAgentUiResponseV2, AuthorizeReleaseRequestV2,
+    AuthorizeReleaseResponseV2, AuthorizeToolCallRequestV2, AuthorizeToolCallResponseV2, BootIdV2,
+    CancelKernelTaskRequestV2, ClaimAgentSessionRequestV2, ClaimAgentSessionResponseV2,
+    CloseAgentSessionRequestV2, CloseAgentSessionResponseV2, CommitPlannerValueRequestV2,
+    CommitPlannerValueResponseV2, Digest32V2, DispatchExecutionRequestV2,
+    DispatchExecutionResponseV2, DispatchReleaseRequestV2, DispatchReleaseResponseV2,
+    Ed25519KeyIdV2, EndpointRoleV2, EvaluateToolCallRequestV2, EvaluateToolCallResponseV2,
+    GetAgentSessionStatusRequestV2, GetAgentSessionStatusResponseV2, GetExecutionStatusRequestV2,
+    GetExecutionStatusResponseV2, GetKernelTaskStatusRequestV2, GetReleaseStatusRequestV2,
+    GetReleaseStatusResponseV2, KernelAgentHealthRequestV2, KernelAgentOperationV2,
+    KernelAgentViewCursorV2, KernelServiceApplicationRequestV2,
+    KernelServiceApplicationResponseBodyV2, KernelServiceHandshakeEdgeV2, KernelServiceOperationV2,
+    MaskedDocumentHandleV2, Nonce32V2, PeerIdentityBindingV2, PrepareFollowupIngressRequestV2,
+    PrepareFollowupIngressResponseV2, PrepareNewIngressRequestV2, PrepareNewIngressResponseV2,
+    PreparePlannerCallRequestV2, PreparePlannerCallResponseV2, PrepareReleaseRequestV2,
+    PrepareReleaseResponseV2, ProposeToolCallRequestV2, ProposeToolCallResponseV2,
+    PublicServiceStateV2, PublicStableCodeV2, PublicTaskStatusV2, ReadAgentViewRequestV2,
+    ReadAgentViewResponseV2, RequestIdV2, ResumeCommittedAgentAuthenticationRequestV2,
+    ResumeCommittedAgentAuthenticationResponseV2, RevokeVaultRequestV2, RevokeVaultResponseV2,
+    SignedAgentAuthenticationAttemptClosureProofV2, SignedDurableTaskCorrelationV2,
+    SignedUiAuthenticationSettlementV2, UnixMillisV2, V2ClientHandshake,
+    HANDSHAKE_FRAME_HEADER_BYTES_V2, MAX_HANDSHAKE_BODY_BYTES_V2, MAX_RECORD_CIPHERTEXT_BYTES_V2,
+    MAX_RECORD_HEADER_BYTES_V2, RECORD_FRAME_HEADER_BYTES_V2,
+};
+use sha2::{Digest as _, Sha256};
+use x25519_dalek::StaticSecret;
+
+use crate::{
+    AgentControlKernelClientErrorV2, AgentControlKernelClientV2, KernelTaskCancellationRequestV2,
+    KernelTaskPreparationRequestV2, KernelTaskStatusRequestV2, VerifiedKernelCancellationV2,
+    VerifiedKernelTaskPreparationV2, VerifiedKernelTaskStatusV2,
+};
+
+const AGENT_KERNEL_SOCKET_PATH_V2: &str = "/run/savana/kerneld/agentd/kerneld.sock";
+const HANDSHAKE_MAGIC_V2: &[u8; 8] = b"SAVANA2\0";
+const RECORD_MAGIC_V2: &[u8; 4] = b"SV2R";
+const MAX_CONNECTION_DURATION_V2: Duration = Duration::from_secs(5);
+const KERNEL_BOOTSTRAP_BINDING_DOMAIN_V2: &[u8] = b"SAVANA_KERNEL_BOOTSTRAP_BINDING_V2\0";
+const KERNEL_TASK_AUTHORITY_BINDING_DOMAIN_V2: &[u8] =
+    b"SAVANA_KERNEL_AGENT_TASK_AUTHORITY_BINDING_V2\0";
+const KERNEL_CANCELLATION_COMMIT_DOMAIN_V2: &[u8] =
+    b"SAVANA_AGENTD_KERNEL_CANCELLATION_COMMIT_V2\0";
+const KERNEL_OPERATION_REQUEST_ID_DOMAIN_V2: &[u8] =
+    b"SAVANA_AGENTD_KERNEL_OPERATION_REQUEST_ID_V2\0";
+
+pub struct SuiteOneAgentKernelClientV2 {
+    edge: KernelServiceHandshakeEdgeV2,
+    client_boot_id: BootIdV2,
+    expected_observed_peer: PeerIdentityBindingV2,
+    client_signing_key: SigningKey,
+    server_public_key: [u8; 32],
+    task_authority_key_id: Ed25519KeyIdV2,
+    task_authority_public_key: [u8; 32],
+    socket_path: PathBuf,
+}
+
+impl std::fmt::Debug for SuiteOneAgentKernelClientV2 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SuiteOneAgentKernelClientV2(<deployment-bound-keys-redacted>)")
+    }
+}
+
+impl SuiteOneAgentKernelClientV2 {
+    pub fn from_verified_deployment(
+        edge: KernelServiceHandshakeEdgeV2,
+        client_boot_id: BootIdV2,
+        expected_observed_peer: PeerIdentityBindingV2,
+        client_signing_key: SigningKey,
+        server_public_key: [u8; 32],
+        task_authority_key_id: Ed25519KeyIdV2,
+        task_authority_public_key: [u8; 32],
+    ) -> Result<Self, AgentControlKernelClientErrorV2> {
+        if edge.role() != EndpointRoleV2::AgentKernel
+            || client_boot_id.as_bytes().iter().all(|byte| *byte == 0)
+            || server_public_key.iter().all(|byte| *byte == 0)
+            || savana_kernel_protocol::v2::derive_ed25519_key_id_v2(task_authority_public_key)
+                != task_authority_key_id
+        {
+            return Err(AgentControlKernelClientErrorV2::Unavailable);
+        }
+        Ok(Self {
+            edge,
+            client_boot_id,
+            expected_observed_peer,
+            client_signing_key,
+            server_public_key,
+            task_authority_key_id,
+            task_authority_public_key,
+            socket_path: PathBuf::from(AGENT_KERNEL_SOCKET_PATH_V2),
+        })
+    }
+
+    #[cfg(test)]
+    fn with_socket_path_for_test(mut self, socket_path: PathBuf) -> Self {
+        self.socket_path = socket_path;
+        self
+    }
+
+    fn health_exchange(
+        &self,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+    ) -> Result<PublicServiceStateV2, AgentControlKernelClientErrorV2> {
+        let io_deadline = io_deadline(deadline)?;
+        let stream = UnixStream::connect(&self.socket_path)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        self.health_over_stream(stream, request_id, deadline, io_deadline)
+    }
+
+    fn health_over_stream(
+        &self,
+        stream: UnixStream,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+        io_deadline: Instant,
+    ) -> Result<PublicServiceStateV2, AgentControlKernelClientErrorV2> {
+        let body = self.operation_over_stream(
+            stream,
+            request_id,
+            deadline,
+            io_deadline,
+            KernelServiceOperationV2::agent(KernelAgentOperationV2::Health(
+                KernelAgentHealthRequestV2,
+            )),
+        )?;
+        let health = decode_kernel_agent_health_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        Ok(health.state())
+    }
+
+    fn operation_exchange(
+        &self,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+        operation: KernelServiceOperationV2,
+    ) -> Result<Vec<u8>, AgentControlKernelClientErrorV2> {
+        let io_deadline = io_deadline(deadline)?;
+        let stream = UnixStream::connect(&self.socket_path)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        self.operation_over_stream(stream, request_id, deadline, io_deadline, operation)
+    }
+
+    fn operation_exchange_stable(
+        &self,
+        deadline: UnixMillisV2,
+        operation: KernelServiceOperationV2,
+    ) -> Result<Vec<u8>, AgentControlKernelClientErrorV2> {
+        let provisional = KernelServiceApplicationRequestV2::new(
+            operation.role(),
+            RequestIdV2::new([1; 16]),
+            UnixMillisV2::new(1),
+            operation,
+        )
+        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        let canonical = encode_kernel_service_application_request_v2(&provisional)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        let mut hasher = Sha256::new();
+        hasher.update(KERNEL_OPERATION_REQUEST_ID_DOMAIN_V2);
+        hasher.update(&canonical);
+        let digest: [u8; 32] = hasher.finalize().into();
+        let mut request_id = [0_u8; 16];
+        request_id.copy_from_slice(&digest[..16]);
+        if request_id == [0; 16] {
+            request_id[15] = 1;
+        }
+        let (_, _, _, operation) = decode_kernel_service_application_request_v2(&canonical)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?
+            .into_parts();
+        self.operation_exchange(RequestIdV2::new(request_id), deadline, operation)
+    }
+
+    pub fn resume_committed_agent_authentication(
+        &self,
+        correlation: SignedDurableTaskCorrelationV2,
+        client_request_nonce: Nonce32V2,
+        prior_attempt_closure_proof: Option<SignedAgentAuthenticationAttemptClosureProofV2>,
+        deadline: UnixMillisV2,
+    ) -> Result<ResumeCommittedAgentAuthenticationResponseV2, AgentControlKernelClientErrorV2> {
+        let request = ResumeCommittedAgentAuthenticationRequestV2::new(
+            correlation,
+            client_request_nonce,
+            prior_attempt_closure_proof,
+        )
+        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        let body = self.operation_exchange_stable(
+            deadline,
+            KernelServiceOperationV2::agent(
+                KernelAgentOperationV2::ResumeCommittedAgentAuthentication(request),
+            ),
+        )?;
+        decode_resume_committed_agent_authentication_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn authenticate_agent_ui(
+        &self,
+        authentication_preparation: AgentUiAuthenticationPreparationHandleV2,
+        settlement: SignedUiAuthenticationSettlementV2,
+        deadline: UnixMillisV2,
+    ) -> Result<AuthenticateAgentUiResponseV2, AgentControlKernelClientErrorV2> {
+        let request = AuthenticateAgentUiRequestV2::new(authentication_preparation, settlement)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        let body = self.operation_exchange_stable(
+            deadline,
+            KernelServiceOperationV2::agent(KernelAgentOperationV2::AuthenticateAgentUi(request)),
+        )?;
+        decode_authenticate_agent_ui_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn claim_agent_session(
+        &self,
+        authorization: savana_kernel_protocol::v2::AgentUiAuthorizationHandleV2,
+        deadline: UnixMillisV2,
+    ) -> Result<ClaimAgentSessionResponseV2, AgentControlKernelClientErrorV2> {
+        let body = self.operation_exchange_stable(
+            deadline,
+            KernelServiceOperationV2::agent(KernelAgentOperationV2::ClaimAgentSession(
+                ClaimAgentSessionRequestV2::new(authorization),
+            )),
+        )?;
+        decode_claim_agent_session_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn read_agent_view(
+        &self,
+        document: MaskedDocumentHandleV2,
+        cursor: Option<KernelAgentViewCursorV2>,
+        maximum_encoded_bytes: u32,
+        client_request_nonce: Nonce32V2,
+        deadline: UnixMillisV2,
+    ) -> Result<ReadAgentViewResponseV2, AgentControlKernelClientErrorV2> {
+        let request = ReadAgentViewRequestV2::new(
+            document,
+            cursor,
+            maximum_encoded_bytes,
+            client_request_nonce,
+        )
+        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        let body = self.operation_exchange_stable(
+            deadline,
+            KernelServiceOperationV2::agent(KernelAgentOperationV2::ReadAgentView(request)),
+        )?;
+        decode_read_agent_view_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn prepare_followup_ingress(
+        &self,
+        request: PrepareFollowupIngressRequestV2,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+    ) -> Result<PrepareFollowupIngressResponseV2, AgentControlKernelClientErrorV2> {
+        let body = self.operation_exchange(
+            request_id,
+            deadline,
+            KernelServiceOperationV2::agent(KernelAgentOperationV2::PrepareFollowupIngress(
+                request,
+            )),
+        )?;
+        decode_prepare_followup_ingress_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn get_agent_session_status(
+        &self,
+        request: GetAgentSessionStatusRequestV2,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+    ) -> Result<GetAgentSessionStatusResponseV2, AgentControlKernelClientErrorV2> {
+        let body = self.operation_exchange(
+            request_id,
+            deadline,
+            KernelServiceOperationV2::agent(KernelAgentOperationV2::GetAgentSessionStatus(request)),
+        )?;
+        decode_get_agent_session_status_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn prepare_planner_call(
+        &self,
+        request: PreparePlannerCallRequestV2,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+    ) -> Result<PreparePlannerCallResponseV2, AgentControlKernelClientErrorV2> {
+        let body = self.operation_exchange(
+            request_id,
+            deadline,
+            KernelServiceOperationV2::agent(KernelAgentOperationV2::PreparePlannerCall(request)),
+        )?;
+        decode_prepare_planner_call_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn commit_planner_value(
+        &self,
+        request: CommitPlannerValueRequestV2,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+    ) -> Result<CommitPlannerValueResponseV2, AgentControlKernelClientErrorV2> {
+        let body = self.operation_exchange(
+            request_id,
+            deadline,
+            KernelServiceOperationV2::agent(KernelAgentOperationV2::CommitPlannerValue(request)),
+        )?;
+        decode_commit_planner_value_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn propose_tool_call(
+        &self,
+        request: ProposeToolCallRequestV2,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+    ) -> Result<ProposeToolCallResponseV2, AgentControlKernelClientErrorV2> {
+        let body = self.operation_exchange(
+            request_id,
+            deadline,
+            KernelServiceOperationV2::agent(KernelAgentOperationV2::ProposeToolCall(request)),
+        )?;
+        decode_propose_tool_call_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn evaluate_tool_call(
+        &self,
+        request: EvaluateToolCallRequestV2,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+    ) -> Result<EvaluateToolCallResponseV2, AgentControlKernelClientErrorV2> {
+        let body = self.operation_exchange(
+            request_id,
+            deadline,
+            KernelServiceOperationV2::agent(KernelAgentOperationV2::EvaluateToolCall(request)),
+        )?;
+        decode_evaluate_tool_call_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn authorize_tool_call(
+        &self,
+        request: AuthorizeToolCallRequestV2,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+    ) -> Result<AuthorizeToolCallResponseV2, AgentControlKernelClientErrorV2> {
+        let body = self.operation_exchange(
+            request_id,
+            deadline,
+            KernelServiceOperationV2::agent(KernelAgentOperationV2::AuthorizeToolCall(request)),
+        )?;
+        decode_authorize_tool_call_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn dispatch_execution(
+        &self,
+        request: DispatchExecutionRequestV2,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+    ) -> Result<DispatchExecutionResponseV2, AgentControlKernelClientErrorV2> {
+        let body = self.operation_exchange(
+            request_id,
+            deadline,
+            KernelServiceOperationV2::agent(KernelAgentOperationV2::DispatchExecution(request)),
+        )?;
+        decode_dispatch_execution_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn get_execution_status(
+        &self,
+        request: GetExecutionStatusRequestV2,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+    ) -> Result<GetExecutionStatusResponseV2, AgentControlKernelClientErrorV2> {
+        let body = self.operation_exchange(
+            request_id,
+            deadline,
+            KernelServiceOperationV2::agent(KernelAgentOperationV2::GetExecutionStatus(request)),
+        )?;
+        decode_get_execution_status_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn prepare_release(
+        &self,
+        request: PrepareReleaseRequestV2,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+    ) -> Result<PrepareReleaseResponseV2, AgentControlKernelClientErrorV2> {
+        let body = self.operation_exchange(
+            request_id,
+            deadline,
+            KernelServiceOperationV2::agent(KernelAgentOperationV2::PrepareRelease(request)),
+        )?;
+        decode_prepare_release_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn authorize_release(
+        &self,
+        request: AuthorizeReleaseRequestV2,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+    ) -> Result<AuthorizeReleaseResponseV2, AgentControlKernelClientErrorV2> {
+        let body = self.operation_exchange(
+            request_id,
+            deadline,
+            KernelServiceOperationV2::agent(KernelAgentOperationV2::AuthorizeRelease(request)),
+        )?;
+        decode_authorize_release_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn dispatch_release(
+        &self,
+        request: DispatchReleaseRequestV2,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+    ) -> Result<DispatchReleaseResponseV2, AgentControlKernelClientErrorV2> {
+        let body = self.operation_exchange(
+            request_id,
+            deadline,
+            KernelServiceOperationV2::agent(KernelAgentOperationV2::DispatchRelease(request)),
+        )?;
+        decode_dispatch_release_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn get_release_status(
+        &self,
+        request: GetReleaseStatusRequestV2,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+    ) -> Result<GetReleaseStatusResponseV2, AgentControlKernelClientErrorV2> {
+        let body = self.operation_exchange(
+            request_id,
+            deadline,
+            KernelServiceOperationV2::agent(KernelAgentOperationV2::GetReleaseStatus(request)),
+        )?;
+        decode_get_release_status_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn revoke_vault(
+        &self,
+        request: RevokeVaultRequestV2,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+    ) -> Result<RevokeVaultResponseV2, AgentControlKernelClientErrorV2> {
+        let body = self.operation_exchange(
+            request_id,
+            deadline,
+            KernelServiceOperationV2::agent(KernelAgentOperationV2::RevokeVault(request)),
+        )?;
+        decode_revoke_vault_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn close_agent_session(
+        &self,
+        request: CloseAgentSessionRequestV2,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+    ) -> Result<CloseAgentSessionResponseV2, AgentControlKernelClientErrorV2> {
+        let body = self.operation_exchange(
+            request_id,
+            deadline,
+            KernelServiceOperationV2::agent(KernelAgentOperationV2::CloseAgentSession(request)),
+        )?;
+        decode_close_agent_session_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    fn operation_over_stream(
+        &self,
+        mut stream: UnixStream,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+        io_deadline: Instant,
+        operation: KernelServiceOperationV2,
+    ) -> Result<Vec<u8>, AgentControlKernelClientErrorV2> {
+        let result = (|| {
+            let client_nonce = Nonce32V2::new(random_nonzero_32()?);
+            let ephemeral_secret = StaticSecret::from(random_nonzero_32()?);
+            let (pending, hello) = V2ClientHandshake::start(
+                self.edge,
+                self.client_boot_id,
+                client_nonce,
+                self.expected_observed_peer.clone(),
+                ephemeral_secret,
+                &self.client_signing_key,
+            )
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+            write_handshake_frame(&mut stream, &hello, io_deadline)?;
+            let server_hello = read_handshake_frame(&mut stream, io_deadline)?;
+            let (finish, mut session) = pending
+                .accept_server_hello(
+                    &server_hello,
+                    self.server_public_key,
+                    &self.client_signing_key,
+                )
+                .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+            write_handshake_frame(&mut stream, &finish, io_deadline)?;
+            let confirmation = read_record_frame(&mut stream, io_deadline)?;
+            session
+                .accept_server_confirmation(&confirmation)
+                .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+
+            let operation_tag = operation.tag();
+            let request = KernelServiceApplicationRequestV2::new(
+                EndpointRoleV2::AgentKernel,
+                request_id,
+                deadline,
+                operation,
+            )
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+            let plaintext = encode_kernel_service_application_request_v2(&request)
+                .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+            let record = session
+                .seal_application_request(request_id, operation_tag, &plaintext)
+                .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+            write_record_frame(&mut stream, &record, io_deadline)?;
+            let response_record = read_record_frame(&mut stream, io_deadline)?;
+            let opened = session
+                .open_application_response(&response_record)
+                .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+            let response = decode_kernel_service_application_response_v2(
+                opened.plaintext(),
+                EndpointRoleV2::AgentKernel,
+                operation_tag,
+            )
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+            if response.request_id() != request_id || response.operation_tag() != operation_tag {
+                return Err(AgentControlKernelClientErrorV2::Unavailable);
+            }
+            match response.body() {
+                KernelServiceApplicationResponseBodyV2::Success(body) => Ok(body.to_vec()),
+                KernelServiceApplicationResponseBodyV2::Error(
+                    PublicStableCodeV2::DeadlineExceeded,
+                ) => Err(AgentControlKernelClientErrorV2::DeadlineExceeded),
+                KernelServiceApplicationResponseBodyV2::Error(_) => {
+                    Err(AgentControlKernelClientErrorV2::Unavailable)
+                }
+            }
+        })();
+        let _ = stream.shutdown(Shutdown::Both);
+        result
+    }
+
+    fn verify_preparation_response(
+        &self,
+        request: KernelTaskPreparationRequestV2,
+        response: PrepareNewIngressResponseV2,
+        now: UnixMillisV2,
+    ) -> Result<VerifiedKernelTaskPreparationV2, AgentControlKernelClientErrorV2> {
+        let (preparation, correlation, ingress_transfer) = match response {
+            PrepareNewIngressResponseV2::Prepared {
+                preparation,
+                correlation,
+                ingress_transfer,
+            }
+            | PrepareNewIngressResponseV2::Reconciled {
+                preparation,
+                correlation,
+                ingress_transfer,
+                ..
+            } => (preparation, correlation, ingress_transfer),
+        };
+        let unsigned = correlation
+            .verify(
+                self.task_authority_key_id,
+                self.task_authority_public_key,
+                request.installation_id(),
+                request.active_state_manifest_digest(),
+                request.agentd_identity(),
+                now,
+            )
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        if unsigned.deployment_generation() != request.deployment_generation()
+            || unsigned.agentd_kernel_client_boot_id() != request.agentd_server_boot_id()
+            || unsigned.kerneld_server_boot_id() != request.kerneld_server_boot_id()
+            || unsigned.machine_boot_id() != request.machine_boot_id()
+        {
+            return Err(AgentControlKernelClientErrorV2::Unavailable);
+        }
+        let mut encoder = minicbor::Encoder::new(Vec::new());
+        encoder
+            .array(2)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        preparation
+            .encode(&mut encoder, &mut ())
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        ingress_transfer
+            .encode(&mut encoder, &mut ())
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        let encoded_bootstrap = encoder.into_writer();
+        let kernel_bootstrap_binding_digest =
+            domain_digest(KERNEL_BOOTSTRAP_BINDING_DOMAIN_V2, &encoded_bootstrap);
+        let correlation_digest = correlation
+            .correlation_digest()
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        VerifiedKernelTaskPreparationV2::from_verified_kernel_response(
+            unsigned.durable_task_id(),
+            correlation_digest,
+            kernel_bootstrap_binding_digest,
+            unsigned.task_logical_expires_at(),
+            unsigned.status_retain_until(),
+            task_authority_binding_digest(
+                self.task_authority_key_id,
+                self.task_authority_public_key,
+            ),
+            preparation,
+            correlation,
+            ingress_transfer,
+        )
+        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+}
+
+impl AgentControlKernelClientV2 for SuiteOneAgentKernelClientV2 {
+    fn health(
+        &mut self,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+    ) -> Result<PublicServiceStateV2, AgentControlKernelClientErrorV2> {
+        self.health_exchange(request_id, deadline)
+    }
+
+    fn prepare_task(
+        &mut self,
+        request: KernelTaskPreparationRequestV2,
+    ) -> Result<VerifiedKernelTaskPreparationV2, AgentControlKernelClientErrorV2> {
+        let operation = KernelServiceOperationV2::agent(KernelAgentOperationV2::PrepareNewIngress(
+            PrepareNewIngressRequestV2::new(
+                request.client_request_nonce(),
+                request.client_request_nonce(),
+            )
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?,
+        ));
+        let body = self.operation_exchange(request.request_id(), request.deadline(), operation)?;
+        let response = decode_prepare_new_ingress_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        let now = current_unix_millis()?;
+        self.verify_preparation_response(request, response, now)
+    }
+
+    fn cancel_task(
+        &mut self,
+        request: KernelTaskCancellationRequestV2,
+    ) -> Result<VerifiedKernelCancellationV2, AgentControlKernelClientErrorV2> {
+        let preparation = request.kernel_preparation();
+        let correlation = request.kernel_correlation().clone();
+        let canonical_correlation = encode_signed_durable_task_correlation_v2(&correlation)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        let canonical_preparation = minicbor::to_vec(preparation)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        let operation = KernelServiceOperationV2::agent(KernelAgentOperationV2::CancelKernelTask(
+            CancelKernelTaskRequestV2::new(preparation, correlation),
+        ));
+        let body = self.operation_exchange(request.request_id(), request.deadline(), operation)?;
+        let response = decode_cancel_kernel_task_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        if response.status() != PublicTaskStatusV2::Cancelled {
+            return Err(AgentControlKernelClientErrorV2::Unavailable);
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(KERNEL_CANCELLATION_COMMIT_DOMAIN_V2);
+        hasher.update(request.request_id().as_bytes());
+        hasher.update(request.durable_task_id().as_bytes());
+        hasher.update(request.correlation_digest().as_bytes());
+        hasher.update(request.status_revision().to_be_bytes());
+        hasher.update(&canonical_preparation);
+        hasher.update(&canonical_correlation);
+        hasher.update(&body);
+        VerifiedKernelCancellationV2::cancelled(
+            request.durable_task_id(),
+            request.correlation_digest(),
+            Digest32V2::new(hasher.finalize().into()),
+            task_authority_binding_digest(
+                self.task_authority_key_id,
+                self.task_authority_public_key,
+            ),
+        )
+        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    fn query_task(
+        &mut self,
+        request: KernelTaskStatusRequestV2,
+    ) -> Result<VerifiedKernelTaskStatusV2, AgentControlKernelClientErrorV2> {
+        let operation =
+            KernelServiceOperationV2::agent(KernelAgentOperationV2::GetKernelTaskStatus(
+                GetKernelTaskStatusRequestV2::new(request.kernel_correlation().clone()),
+            ));
+        let body = self.operation_exchange(request.request_id(), request.deadline(), operation)?;
+        let response = decode_get_kernel_task_status_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        let next_revision = request
+            .status_revision()
+            .checked_add(1)
+            .ok_or(AgentControlKernelClientErrorV2::Unavailable)?;
+        VerifiedKernelTaskStatusV2::from_verified_query(
+            request.durable_task_id(),
+            request.correlation_digest(),
+            response.status(),
+            next_revision,
+            task_authority_binding_digest(
+                self.task_authority_key_id,
+                self.task_authority_public_key,
+            ),
+        )
+        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+}
+
+fn io_deadline(deadline: UnixMillisV2) -> Result<Instant, AgentControlKernelClientErrorV2> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+    let now_millis =
+        u64::try_from(now.as_millis()).map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+    let remaining_millis = deadline
+        .get()
+        .checked_sub(now_millis)
+        .ok_or(AgentControlKernelClientErrorV2::DeadlineExceeded)?;
+    if remaining_millis == 0 {
+        return Err(AgentControlKernelClientErrorV2::DeadlineExceeded);
+    }
+    Ok(Instant::now() + Duration::from_millis(remaining_millis).min(MAX_CONNECTION_DURATION_V2))
+}
+
+fn current_unix_millis() -> Result<UnixMillisV2, AgentControlKernelClientErrorV2> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+    let milliseconds =
+        u64::try_from(now.as_millis()).map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+    if milliseconds == 0 {
+        return Err(AgentControlKernelClientErrorV2::Unavailable);
+    }
+    Ok(UnixMillisV2::new(milliseconds))
+}
+
+fn domain_digest(domain: &[u8], value: &[u8]) -> Digest32V2 {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+    Digest32V2::new(hasher.finalize().into())
+}
+
+fn task_authority_binding_digest(key_id: Ed25519KeyIdV2, public_key: [u8; 32]) -> Digest32V2 {
+    let mut hasher = Sha256::new();
+    hasher.update(KERNEL_TASK_AUTHORITY_BINDING_DOMAIN_V2);
+    hasher.update(key_id.as_bytes());
+    hasher.update(public_key);
+    Digest32V2::new(hasher.finalize().into())
+}
+
+fn random_nonzero_32() -> Result<[u8; 32], AgentControlKernelClientErrorV2> {
+    let mut bytes = [0_u8; 32];
+    getrandom::getrandom(&mut bytes).map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+    if bytes.iter().all(|byte| *byte == 0) {
+        return Err(AgentControlKernelClientErrorV2::Unavailable);
+    }
+    Ok(bytes)
+}
+
+fn set_deadline(
+    stream: &UnixStream,
+    deadline: Instant,
+) -> Result<(), AgentControlKernelClientErrorV2> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(AgentControlKernelClientErrorV2::DeadlineExceeded);
+    }
+    stream
+        .set_read_timeout(Some(remaining))
+        .and_then(|_| stream.set_write_timeout(Some(remaining)))
+        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+}
+
+fn read_handshake_frame(
+    stream: &mut UnixStream,
+    deadline: Instant,
+) -> Result<Vec<u8>, AgentControlKernelClientErrorV2> {
+    set_deadline(stream, deadline)?;
+    let mut header = [0_u8; HANDSHAKE_FRAME_HEADER_BYTES_V2];
+    stream
+        .read_exact(&mut header)
+        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+    if &header[..8] != HANDSHAKE_MAGIC_V2 {
+        return Err(AgentControlKernelClientErrorV2::Unavailable);
+    }
+    let body_length = u32::from_be_bytes(
+        header[HANDSHAKE_FRAME_HEADER_BYTES_V2 - 4..]
+            .try_into()
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?,
+    ) as usize;
+    if body_length == 0 || body_length > MAX_HANDSHAKE_BODY_BYTES_V2 {
+        return Err(AgentControlKernelClientErrorV2::Unavailable);
+    }
+    let total = HANDSHAKE_FRAME_HEADER_BYTES_V2
+        .checked_add(body_length)
+        .ok_or(AgentControlKernelClientErrorV2::Unavailable)?;
+    let mut frame = Vec::new();
+    frame
+        .try_reserve_exact(total)
+        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+    frame.extend_from_slice(&header);
+    frame.resize(total, 0);
+    stream
+        .read_exact(&mut frame[HANDSHAKE_FRAME_HEADER_BYTES_V2..])
+        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+    Ok(frame)
+}
+
+fn write_handshake_frame(
+    stream: &mut UnixStream,
+    frame: &[u8],
+    deadline: Instant,
+) -> Result<(), AgentControlKernelClientErrorV2> {
+    if frame.len() < HANDSHAKE_FRAME_HEADER_BYTES_V2 || &frame[..8] != HANDSHAKE_MAGIC_V2 {
+        return Err(AgentControlKernelClientErrorV2::Unavailable);
+    }
+    let body_length = u32::from_be_bytes(
+        frame[HANDSHAKE_FRAME_HEADER_BYTES_V2 - 4..HANDSHAKE_FRAME_HEADER_BYTES_V2]
+            .try_into()
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?,
+    ) as usize;
+    if body_length == 0
+        || body_length > MAX_HANDSHAKE_BODY_BYTES_V2
+        || frame.len() != HANDSHAKE_FRAME_HEADER_BYTES_V2 + body_length
+    {
+        return Err(AgentControlKernelClientErrorV2::Unavailable);
+    }
+    set_deadline(stream, deadline)?;
+    stream
+        .write_all(frame)
+        .and_then(|_| stream.flush())
+        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+}
+
+fn read_record_frame(
+    stream: &mut UnixStream,
+    deadline: Instant,
+) -> Result<Vec<u8>, AgentControlKernelClientErrorV2> {
+    set_deadline(stream, deadline)?;
+    let mut header = [0_u8; RECORD_FRAME_HEADER_BYTES_V2];
+    stream
+        .read_exact(&mut header)
+        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+    let (header_length, ciphertext_length) = record_lengths(&header)?;
+    let total = RECORD_FRAME_HEADER_BYTES_V2
+        .checked_add(header_length)
+        .and_then(|value| value.checked_add(ciphertext_length))
+        .ok_or(AgentControlKernelClientErrorV2::Unavailable)?;
+    let mut frame = Vec::new();
+    frame
+        .try_reserve_exact(total)
+        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+    frame.extend_from_slice(&header);
+    frame.resize(total, 0);
+    stream
+        .read_exact(&mut frame[RECORD_FRAME_HEADER_BYTES_V2..])
+        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+    Ok(frame)
+}
+
+fn write_record_frame(
+    stream: &mut UnixStream,
+    frame: &[u8],
+    deadline: Instant,
+) -> Result<(), AgentControlKernelClientErrorV2> {
+    if frame.len() < RECORD_FRAME_HEADER_BYTES_V2 {
+        return Err(AgentControlKernelClientErrorV2::Unavailable);
+    }
+    let (header_length, ciphertext_length) =
+        record_lengths(&frame[..RECORD_FRAME_HEADER_BYTES_V2])?;
+    if frame.len() != RECORD_FRAME_HEADER_BYTES_V2 + header_length + ciphertext_length {
+        return Err(AgentControlKernelClientErrorV2::Unavailable);
+    }
+    set_deadline(stream, deadline)?;
+    stream
+        .write_all(frame)
+        .and_then(|_| stream.flush())
+        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+}
+
+fn record_lengths(header: &[u8]) -> Result<(usize, usize), AgentControlKernelClientErrorV2> {
+    if header.len() != RECORD_FRAME_HEADER_BYTES_V2 || &header[..4] != RECORD_MAGIC_V2 {
+        return Err(AgentControlKernelClientErrorV2::Unavailable);
+    }
+    let header_length = usize::from(u16::from_be_bytes(
+        header[4..6]
+            .try_into()
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?,
+    ));
+    let ciphertext_length = u32::from_be_bytes(
+        header[6..10]
+            .try_into()
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?,
+    ) as usize;
+    if header_length == 0
+        || header_length > MAX_RECORD_HEADER_BYTES_V2
+        || !(16..=MAX_RECORD_CIPHERTEXT_BYTES_V2).contains(&ciphertext_length)
+    {
+        return Err(AgentControlKernelClientErrorV2::Unavailable);
+    }
+    Ok((header_length, ciphertext_length))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::net::UnixListener;
+    use std::thread;
+
+    use savana_kernel_protocol::v2::{
+        decode_kernel_service_application_request_v2, derive_ed25519_key_id_v2,
+        encode_cancel_kernel_task_response_v2, encode_kernel_agent_health_response_v2,
+        encode_kernel_service_application_response_v2, CancelKernelTaskResponseV2, Digest32V2,
+        DurableTaskIdV2, KernelAgentHealthResponseV2, KernelIngressBootstrapTransferCapabilityV2,
+        KernelServiceApplicationResponseV2, NewTaskPreparationHandleV2, PublicServiceStateV2,
+        ServiceIdentityV2, SignedDurableTaskCorrelationV2, UnsignedDurableTaskCorrelationV2,
+        V2ServerHandshake,
+    };
+
+    use super::*;
+
+    #[test]
+    fn suite_one_health_uses_mutual_authentication_and_encrypted_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("agent-kernel.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let client_key = SigningKey::from_bytes(&[0x21; 32]);
+        let server_key = SigningKey::from_bytes(&[0x22; 32]);
+        let server_public_key = server_key.verifying_key().to_bytes();
+        let task_authority_key = SigningKey::from_bytes(&[0x28; 32]);
+        let task_authority_public_key = task_authority_key.verifying_key().to_bytes();
+        let edge = edge(&client_key, &server_key);
+        let observed_peer =
+            PeerIdentityBindingV2::linux(501, 20, 42, 99, Digest32V2::new([0x23; 32])).unwrap();
+        let server_observed_peer = observed_peer.clone();
+        let client_public_key = client_key.verifying_key().to_bytes();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let io_deadline = Instant::now() + Duration::from_secs(2);
+            let hello = read_handshake_frame(&mut stream, io_deadline).unwrap();
+            let (pending, server_hello) = V2ServerHandshake::accept_client_hello(
+                edge,
+                server_observed_peer,
+                &hello,
+                Nonce32V2::new([0x24; 32]),
+                StaticSecret::from([0x25; 32]),
+                client_public_key,
+                &server_key,
+            )
+            .unwrap();
+            write_handshake_frame(&mut stream, &server_hello, io_deadline).unwrap();
+            let finish = read_handshake_frame(&mut stream, io_deadline).unwrap();
+            let (accepted, mut session, _) = pending.accept_client_finish(&finish).unwrap();
+            write_record_frame(&mut stream, &accepted, io_deadline).unwrap();
+            let request_record = read_record_frame(&mut stream, io_deadline).unwrap();
+            let opened = session.open_application_request(&request_record).unwrap();
+            let request = decode_kernel_service_application_request_v2(opened.plaintext()).unwrap();
+            assert_eq!(request.role(), EndpointRoleV2::AgentKernel);
+            assert_eq!(request.operation().tag(), 0);
+            let health = encode_kernel_agent_health_response_v2(&KernelAgentHealthResponseV2::new(
+                true,
+                PublicServiceStateV2::Ready,
+            ))
+            .unwrap();
+            let response = KernelServiceApplicationResponseV2::success(
+                EndpointRoleV2::AgentKernel,
+                opened.request_id(),
+                opened.operation_tag(),
+                health,
+            )
+            .unwrap();
+            let plaintext = encode_kernel_service_application_response_v2(&response).unwrap();
+            let response_record = session
+                .seal_application_response(opened.request_id(), opened.operation_tag(), &plaintext)
+                .unwrap();
+            write_record_frame(&mut stream, &response_record, io_deadline).unwrap();
+        });
+        let mut client = SuiteOneAgentKernelClientV2::from_verified_deployment(
+            edge,
+            BootIdV2::new([0x26; 32]),
+            observed_peer,
+            client_key,
+            server_public_key,
+            derive_ed25519_key_id_v2(task_authority_public_key),
+            task_authority_public_key,
+        )
+        .unwrap()
+        .with_socket_path_for_test(socket_path);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        assert_eq!(
+            client
+                .health(RequestIdV2::new([0x27; 16]), UnixMillisV2::new(now + 2_000),)
+                .unwrap(),
+            PublicServiceStateV2::Ready,
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn suite_one_cancel_sends_exact_authority_and_accepts_only_authenticated_cancelled() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("agent-kernel-cancel.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let client_key = SigningKey::from_bytes(&[0x51; 32]);
+        let server_key = SigningKey::from_bytes(&[0x52; 32]);
+        let server_public_key = server_key.verifying_key().to_bytes();
+        let task_authority_key = SigningKey::from_bytes(&[0x53; 32]);
+        let task_authority_public_key = task_authority_key.verifying_key().to_bytes();
+        let edge = edge(&client_key, &server_key);
+        let observed_peer =
+            PeerIdentityBindingV2::linux(501, 20, 42, 99, Digest32V2::new([0x54; 32])).unwrap();
+        let server_observed_peer = observed_peer.clone();
+        let client_public_key = client_key.verifying_key().to_bytes();
+        let durable_task_id = DurableTaskIdV2::new([0x55; 32]);
+        let preparation = NewTaskPreparationHandleV2::from_authority_entropy([0x56; 32]).unwrap();
+        let unsigned = UnsignedDurableTaskCorrelationV2::new(
+            Digest32V2::new([1; 32]),
+            Digest32V2::new([6; 32]),
+            7,
+            durable_task_id,
+            ServiceIdentityV2::new([2; 32]),
+            BootIdV2::new([0x57; 32]),
+            BootIdV2::new([4; 32]),
+            BootIdV2::new([0x58; 32]),
+            UnixMillisV2::new(1),
+            UnixMillisV2::new(u64::MAX - 1),
+            UnixMillisV2::new(u64::MAX),
+        )
+        .unwrap();
+        let correlation =
+            SignedDurableTaskCorrelationV2::sign(unsigned, &task_authority_key).unwrap();
+        let correlation_digest = correlation.correlation_digest().unwrap();
+        let expected_correlation = correlation.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let io_deadline = Instant::now() + Duration::from_secs(2);
+            let hello = read_handshake_frame(&mut stream, io_deadline).unwrap();
+            let (pending, server_hello) = V2ServerHandshake::accept_client_hello(
+                edge,
+                server_observed_peer,
+                &hello,
+                Nonce32V2::new([0x59; 32]),
+                StaticSecret::from([0x5a; 32]),
+                client_public_key,
+                &server_key,
+            )
+            .unwrap();
+            write_handshake_frame(&mut stream, &server_hello, io_deadline).unwrap();
+            let finish = read_handshake_frame(&mut stream, io_deadline).unwrap();
+            let (accepted, mut session, _) = pending.accept_client_finish(&finish).unwrap();
+            write_record_frame(&mut stream, &accepted, io_deadline).unwrap();
+            let request_record = read_record_frame(&mut stream, io_deadline).unwrap();
+            let opened = session.open_application_request(&request_record).unwrap();
+            let request = decode_kernel_service_application_request_v2(opened.plaintext()).unwrap();
+            let KernelServiceOperationV2::Agent(KernelAgentOperationV2::CancelKernelTask(cancel)) =
+                request.operation()
+            else {
+                panic!("expected exact cancel operation");
+            };
+            assert_eq!(cancel.preparation(), preparation);
+            assert_eq!(cancel.correlation(), &expected_correlation);
+            let cancelled = encode_cancel_kernel_task_response_v2(
+                &CancelKernelTaskResponseV2::new(PublicTaskStatusV2::Cancelled),
+            )
+            .unwrap();
+            let response = KernelServiceApplicationResponseV2::success(
+                EndpointRoleV2::AgentKernel,
+                opened.request_id(),
+                opened.operation_tag(),
+                cancelled,
+            )
+            .unwrap();
+            let plaintext = encode_kernel_service_application_response_v2(&response).unwrap();
+            let response_record = session
+                .seal_application_response(opened.request_id(), opened.operation_tag(), &plaintext)
+                .unwrap();
+            write_record_frame(&mut stream, &response_record, io_deadline).unwrap();
+        });
+        let mut client = SuiteOneAgentKernelClientV2::from_verified_deployment(
+            edge,
+            BootIdV2::new([0x57; 32]),
+            observed_peer,
+            client_key,
+            server_public_key,
+            derive_ed25519_key_id_v2(task_authority_public_key),
+            task_authority_public_key,
+        )
+        .unwrap()
+        .with_socket_path_for_test(socket_path);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let request = KernelTaskCancellationRequestV2::from_pending(
+            RequestIdV2::new([0x5b; 16]),
+            durable_task_id,
+            correlation_digest,
+            1,
+            preparation,
+            correlation,
+            UnixMillisV2::new(now + 2_000),
+        )
+        .unwrap();
+
+        assert!(client.cancel_task(request).is_ok());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn preparation_response_requires_the_exact_signed_deployment_and_boot_binding() {
+        let client_key = SigningKey::from_bytes(&[0x31; 32]);
+        let server_key = SigningKey::from_bytes(&[0x32; 32]);
+        let task_authority_key = SigningKey::from_bytes(&[0x33; 32]);
+        let task_authority_public_key = task_authority_key.verifying_key().to_bytes();
+        let observed_peer =
+            PeerIdentityBindingV2::linux(501, 20, 42, 99, Digest32V2::new([0x34; 32])).unwrap();
+        let client = SuiteOneAgentKernelClientV2::from_verified_deployment(
+            edge(&client_key, &server_key),
+            BootIdV2::new([0x35; 32]),
+            observed_peer,
+            client_key,
+            server_key.verifying_key().to_bytes(),
+            derive_ed25519_key_id_v2(task_authority_public_key),
+            task_authority_public_key,
+        )
+        .unwrap();
+        let request = KernelTaskPreparationRequestV2::from_authenticated_control(
+            RequestIdV2::new([0x36; 16]),
+            Nonce32V2::new([0x37; 32]),
+            Digest32V2::new([1; 32]),
+            Digest32V2::new([6; 32]),
+            7,
+            Digest32V2::new([9; 32]),
+            ServiceIdentityV2::new([2; 32]),
+            BootIdV2::new([0x38; 32]),
+            BootIdV2::new([0x39; 32]),
+            BootIdV2::new([0x35; 32]),
+            BootIdV2::new([4; 32]),
+            UnixMillisV2::new(500),
+        )
+        .unwrap();
+        let unsigned = UnsignedDurableTaskCorrelationV2::new(
+            request.installation_id(),
+            request.active_state_manifest_digest(),
+            request.deployment_generation(),
+            DurableTaskIdV2::new([0x40; 32]),
+            request.agentd_identity(),
+            request.agentd_server_boot_id(),
+            request.kerneld_server_boot_id(),
+            request.machine_boot_id(),
+            UnixMillisV2::new(90),
+            UnixMillisV2::new(1_000),
+            UnixMillisV2::new(2_000),
+        )
+        .unwrap();
+        let response = PrepareNewIngressResponseV2::Prepared {
+            preparation: NewTaskPreparationHandleV2::from_authority_entropy([0x41; 32]).unwrap(),
+            correlation: SignedDurableTaskCorrelationV2::sign(unsigned, &task_authority_key)
+                .unwrap(),
+            ingress_transfer: KernelIngressBootstrapTransferCapabilityV2::from_authority_entropy(
+                [0x42; 32],
+            )
+            .unwrap(),
+        };
+        let expected_correlation = match &response {
+            PrepareNewIngressResponseV2::Prepared { correlation, .. }
+            | PrepareNewIngressResponseV2::Reconciled { correlation, .. } => correlation.clone(),
+        };
+        assert!(client
+            .verify_preparation_response(request, response.clone(), UnixMillisV2::new(100))
+            .is_ok_and(|verified| {
+                verified.kernel_preparation()
+                    == NewTaskPreparationHandleV2::from_authority_entropy([0x41; 32])
+                    && verified.kernel_correlation() == Some(&expected_correlation)
+            }));
+
+        let wrong_boot_unsigned = UnsignedDurableTaskCorrelationV2::new(
+            request.installation_id(),
+            request.active_state_manifest_digest(),
+            request.deployment_generation(),
+            DurableTaskIdV2::new([0x40; 32]),
+            request.agentd_identity(),
+            BootIdV2::new([0x43; 32]),
+            request.kerneld_server_boot_id(),
+            request.machine_boot_id(),
+            UnixMillisV2::new(90),
+            UnixMillisV2::new(1_000),
+            UnixMillisV2::new(2_000),
+        )
+        .unwrap();
+        let wrong = PrepareNewIngressResponseV2::Prepared {
+            preparation: NewTaskPreparationHandleV2::from_authority_entropy([0x41; 32]).unwrap(),
+            correlation: SignedDurableTaskCorrelationV2::sign(
+                wrong_boot_unsigned,
+                &task_authority_key,
+            )
+            .unwrap(),
+            ingress_transfer: KernelIngressBootstrapTransferCapabilityV2::from_authority_entropy(
+                [0x42; 32],
+            )
+            .unwrap(),
+        };
+        assert_eq!(
+            client.verify_preparation_response(request, wrong, UnixMillisV2::new(100)),
+            Err(AgentControlKernelClientErrorV2::Unavailable)
+        );
+    }
+
+    fn edge(client_key: &SigningKey, server_key: &SigningKey) -> KernelServiceHandshakeEdgeV2 {
+        KernelServiceHandshakeEdgeV2::from_verified_deployment(
+            EndpointRoleV2::AgentKernel,
+            Digest32V2::new([1; 32]),
+            ServiceIdentityV2::new([2; 32]),
+            ServiceIdentityV2::new([3; 32]),
+            derive_ed25519_key_id_v2(client_key.verifying_key().to_bytes()),
+            derive_ed25519_key_id_v2(server_key.verifying_key().to_bytes()),
+            BootIdV2::new([4; 32]),
+            5,
+            Digest32V2::new([6; 32]),
+            7,
+            8,
+            Digest32V2::new([9; 32]),
+            Digest32V2::new([10; 32]),
+            Digest32V2::new([11; 32]),
+            Digest32V2::new([12; 32]),
+            Digest32V2::new([13; 32]),
+            Digest32V2::new([14; 32]),
+        )
+        .unwrap()
+    }
+}

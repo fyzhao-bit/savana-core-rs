@@ -291,6 +291,9 @@ struct LeafIdentity {
 }
 
 impl LeafIdentity {
+    // libc exposes these fields with different integer widths across Unix
+    // targets; the explicit widening is only redundant on Linux.
+    #[allow(clippy::useless_conversion)]
     fn from_stat(stat: &FileStat) -> Self {
         Self {
             dev: i128::from(stat.st_dev),

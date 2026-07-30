@@ -11,18 +11,25 @@ workspace = true
 
 [features]
 default = []
-test-support = []
+filesystem-integration-authority = []
+test-support = ["savana-platform-identity/test-support"]
 
 [dependencies]
 savana-kernel-protocol = { path = "../savana-kernel-protocol" }
+savana-platform-identity = { path = "../savana-platform-identity" }
 thiserror.workspace = true
 minicbor.workspace = true
 ed25519-dalek.workspace = true
 sha2.workspace = true
 getrandom.workspace = true
+hmac.workspace = true
+aes-gcm.workspace = true
 zeroize.workspace = true
+unicode-normalization.workspace = true
 nix.workspace = true
 rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 savana-policy-core-test-support = { package = "savana-policy-core", path = ".", features = ["test-support"] }

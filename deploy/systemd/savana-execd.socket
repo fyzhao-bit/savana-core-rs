@@ -1,0 +1,15 @@
+[Unit]
+Description=Savana execd kernel role socket
+
+[Socket]
+ListenStream=/run/savana/execd/kerneld/execd.sock
+FileDescriptorName=savana-kernel-executor
+SocketUser=savana-exec
+SocketGroup=savana-kernel
+SocketMode=0660
+DirectoryMode=0710
+Service=savana-execd.service
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

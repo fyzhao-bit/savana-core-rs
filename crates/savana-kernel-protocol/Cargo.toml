@@ -12,10 +12,17 @@ workspace = true
 [dependencies]
 thiserror.workspace = true
 minicbor.workspace = true
+base64.workspace = true
 sha2.workspace = true
+hmac.workspace = true
+chacha20poly1305.workspace = true
+hkdf.workspace = true
+x25519-dalek.workspace = true
+unicode-normalization.workspace = true
 zeroize.workspace = true
+ed25519-dalek.workspace = true
 
 [dev-dependencies]
-ed25519-dalek.workspace = true
 getrandom.workspace = true
 rustix.workspace = true
+serde_json.workspace = true

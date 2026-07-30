@@ -597,9 +597,9 @@ struct ConnectionRuntime<'runtime> {
     peer_lookup_failures: Option<&'runtime AtomicUsize>,
 }
 
-struct LeasedConnection<'runtime> {
+struct LeasedConnection {
     stream: Option<UnixStream>,
-    dispatch: DispatchLease<'runtime>,
+    dispatch: DispatchLease,
     #[cfg(test)]
     stream_closed_probe: Option<LeasedConnectionDropProbe>,
 }
@@ -610,7 +610,7 @@ struct LeasedConnectionDropProbe {
     resume_drop: Receiver<()>,
 }
 
-impl Drop for LeasedConnection<'_> {
+impl Drop for LeasedConnection {
     fn drop(&mut self) {
         drop(self.stream.take());
         #[cfg(test)]

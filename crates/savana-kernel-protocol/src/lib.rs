@@ -15,6 +15,8 @@ mod primitives;
 mod registry;
 mod value;
 
+pub mod v2;
+
 pub use approval::{
     approval_display_digest, ApprovalAuthMethod, ApprovalChallengeV1, ApprovalDecision,
     ApprovalPurposeV1, ApprovalReceiptV1, ApprovalSubjectV1, MaskedDisplayBundleV1,
