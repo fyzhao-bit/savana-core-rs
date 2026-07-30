@@ -286,6 +286,7 @@ mod macos {
                 parser_descriptor: &parser_descriptor,
                 effect_receipt: &effect_receipt,
                 agentd_boot,
+                jarvis_boot,
                 approvald_boot,
                 execd_boot,
                 machine_boot,
@@ -313,6 +314,7 @@ mod macos {
         parser_descriptor: &'a Ed25519Material,
         effect_receipt: &'a Ed25519Material,
         agentd_boot: [u8; 32],
+        jarvis_boot: [u8; 32],
         approvald_boot: [u8; 32],
         execd_boot: [u8; 32],
         machine_boot: [u8; 32],
@@ -784,6 +786,54 @@ mod macos {
                 server.key_id,
             )?;
         }
+        let jarvis_control_identity = agent
+            .get("jarvis_control_identity")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "agent config has no JARVIS control identity".to_owned())?
+            .to_owned();
+        let agentd_identity = template
+            .get("services")
+            .and_then(|services| services.get("agentd"))
+            .and_then(|agentd| agentd.get("service_identity"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| "manifest template has no agentd identity".to_owned())?
+            .to_owned();
+        let active_manifest = template
+            .get("active_state_manifest_digest")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "manifest template has no active-state digest".to_owned())?
+            .to_owned();
+        let generation = template
+            .get("deployment_generation")
+            .and_then(Value::as_u64)
+            .filter(|generation| *generation != 0)
+            .ok_or_else(|| "manifest template has no deployment generation".to_owned())?;
+        let mut jarvis = read_json(&root.join("config/jarvis-python-v2.json"))?;
+        set_value(&mut jarvis, &["protocol_major"], Value::from(2_u16))?;
+        set_value(&mut jarvis, &["protocol_minor"], Value::from(0_u16))?;
+        set_value(
+            &mut jarvis,
+            &["deployment_generation"],
+            Value::from(generation),
+        )?;
+        set_value(
+            &mut jarvis,
+            &["active_state_manifest_digest"],
+            Value::String(active_manifest),
+        )?;
+        set_hex(&mut jarvis, &["caller_boot_id"], patch.jarvis_boot)?;
+        set_value(
+            &mut jarvis,
+            &["caller_identity"],
+            Value::String(jarvis_control_identity),
+        )?;
+        set_hex(&mut jarvis, &["service_boot_id"], patch.agentd_boot)?;
+        set_value(
+            &mut jarvis,
+            &["service_identity"],
+            Value::String(agentd_identity),
+        )?;
+        write_json(&root.join("config/jarvis-python-v2.json"), &jarvis)?;
         write_json(
             &root.join("config/development-manifest-template-v2.json"),
             &template,

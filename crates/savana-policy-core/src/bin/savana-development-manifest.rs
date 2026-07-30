@@ -211,6 +211,7 @@ mod macos {
         patch_bootstrap_configs(&root, &observations, &jarvis_identity)?;
         let services = measure_services(&root, &layouts, &template.services)?;
         let edges = measure_edges(&services, &template.edges)?;
+        patch_jarvis_client_config(&root, &template, &services)?;
         let payload = encode_payload(&template, &services, &edges)?;
         let signing_key = SigningKey::from_bytes(&seed);
         let key_id = derive_ed25519_key_id_v2(signing_key.verifying_key().to_bytes());
@@ -392,6 +393,80 @@ mod macos {
             )?;
         }
         Ok(())
+    }
+
+    fn patch_jarvis_client_config(
+        root: &Path,
+        template: &Template,
+        services: &[ServiceMeasurement],
+    ) -> Result<(), String> {
+        let agentd = services
+            .iter()
+            .find(|service| service.name == "agentd")
+            .ok_or_else(|| "agentd service measurement is missing".to_owned())?;
+        let agent_config_path = root.join("config/agentd-bootstrap-v2.json");
+        let agent_config: serde_json::Value =
+            serde_json::from_slice(&read_bounded(&agent_config_path, MAX_CONFIG_BYTES)?)
+                .map_err(|_| "agentd bootstrap config is invalid".to_owned())?;
+        let caller_identity = agent_config
+            .get("jarvis_control_identity")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "agentd bootstrap has no JARVIS identity".to_owned())?;
+        let path = root.join("config/jarvis-python-v2.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&read_bounded(&path, MAX_CONFIG_BYTES)?)
+                .map_err(|_| "JARVIS client config is invalid".to_owned())?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| "JARVIS client config is not an object".to_owned())?;
+        let required: [(&str, serde_json::Value); 11] = [
+            (
+                "deployment_generation",
+                serde_json::Value::from(template.deployment_generation),
+            ),
+            (
+                "active_state_manifest_digest",
+                template.active_state_manifest_digest.clone().into(),
+            ),
+            ("caller_identity", caller_identity.to_owned().into()),
+            (
+                "service_identity",
+                template.services.agentd.service_identity.clone().into(),
+            ),
+            ("agentd_expected_uid", serde_json::Value::from(agentd.uid)),
+            ("agentd_expected_gid", serde_json::Value::from(agentd.gid)),
+            (
+                "agentd_bundle_id",
+                agentd.code_identity.bundle_id().as_str().to_owned().into(),
+            ),
+            (
+                "agentd_team_id",
+                agentd.code_identity.team_id().as_str().to_owned().into(),
+            ),
+            (
+                "agentd_code_directory_measurement",
+                hex(agentd.code_identity.code_directory_measurement()).into(),
+            ),
+            (
+                "agentd_designated_requirement_measurement",
+                hex(agentd.code_identity.designated_requirement_measurement()).into(),
+            ),
+            (
+                "agentd_entitlement_measurement",
+                hex(agentd.code_identity.entitlement_measurement()).into(),
+            ),
+        ];
+        for (field, replacement) in required {
+            if !object.contains_key(field) {
+                return Err(format!("JARVIS client config is missing {field}"));
+            }
+            object.insert(field.to_owned(), replacement);
+        }
+        replace_file(
+            &path,
+            &serde_json::to_vec(&value)
+                .map_err(|_| "JARVIS client config serialization failed".to_owned())?,
+        )
     }
 
     fn measure_services(
