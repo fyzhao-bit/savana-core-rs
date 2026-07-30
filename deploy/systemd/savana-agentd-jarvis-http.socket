@@ -1,0 +1,12 @@
+[Unit]
+Description=Savana JARVIS shell loopback socket
+
+[Socket]
+ListenStream=127.0.0.1:8765
+FreeBind=no
+BindIPv6Only=both
+FileDescriptorName=savana-jarvis-http
+Service=savana-agentd.service
+
+[Install]
+WantedBy=sockets.target

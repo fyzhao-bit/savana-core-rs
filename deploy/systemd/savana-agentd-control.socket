@@ -1,0 +1,15 @@
+[Unit]
+Description=Savana JARVIS authenticated control socket
+
+[Socket]
+ListenStream=/run/savana/agentd/jarvis/control.sock
+FileDescriptorName=savana-jarvis-agent-control
+SocketUser=savana-agent
+SocketGroup=savana-jarvis
+SocketMode=0660
+DirectoryMode=0710
+Service=savana-agentd.service
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

@@ -1,0 +1,23 @@
+[package]
+name = "savana-input-runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+savana-kernel-protocol = { path = "../savana-kernel-protocol" }
+thiserror.workspace = true
+minicbor.workspace = true
+ed25519-dalek.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
+unicode-normalization.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+tempfile = "=3.23.0"

@@ -1,0 +1,5 @@
+[Unit]
+Description=Savana authenticated deployment recovery gate V2
+Requires=savana-deploy-watchdog.service
+After=local-fs.target savana-deploy-watchdog.service
+Before=savana-kernel.target

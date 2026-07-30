@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.savana.development.approvald</string>
+  <key>Program</key>
+  <string>/Library/PrivilegedHelperTools/SavanaDevelopment/savana-approvald</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/PrivilegedHelperTools/SavanaDevelopment/savana-approvald</string>
+    <string>--config</string>
+    <string>/Library/Application Support/Savana/Development/config/approvald-bootstrap-v2.json</string>
+  </array>
+  <key>UserName</key>
+  <string>_savana_approval_dev</string>
+  <key>GroupName</key>
+  <string>_savana_approval_dev</string>
+  <key>InitGroups</key>
+  <true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SAVANA_AUTHORITY_CLASS</key>
+    <string>development</string>
+  </dict>
+  <key>Sockets</key>
+  <dict>
+    <key>savana-agent-approval</key>
+    <dict>
+      <key>SockPathName</key>
+      <string>/Library/Application Support/Savana/Development/run/approvald/agentd/approvald.sock</string>
+      <key>SockPathMode</key>
+      <integer>432</integer>
+      <key>SockPathOwner</key>
+      <string>_savana_approval_dev</string>
+      <key>SockPathGroup</key>
+      <string>_savana_agent_approval_dev</string>
+      <key>SockType</key>
+      <string>stream</string>
+    </dict>
+    <key>savana-ingress-approval</key>
+    <dict>
+      <key>SockPathName</key>
+      <string>/Library/Application Support/Savana/Development/run/approvald/ingressd/approvald.sock</string>
+      <key>SockPathMode</key>
+      <integer>432</integer>
+      <key>SockPathOwner</key>
+      <string>_savana_approval_dev</string>
+      <key>SockPathGroup</key>
+      <string>_savana_ingress_approval_dev</string>
+      <key>SockType</key>
+      <string>stream</string>
+    </dict>
+    <key>savana-admin-approval</key>
+    <dict>
+      <key>SockPathName</key>
+      <string>/Library/Application Support/Savana/Development/run/approvald/admin/approvald.sock</string>
+      <key>SockPathMode</key>
+      <integer>384</integer>
+      <key>SockPathOwner</key>
+      <string>root</string>
+      <key>SockPathGroup</key>
+      <string>wheel</string>
+      <key>SockType</key>
+      <string>stream</string>
+    </dict>
+    <key>savana-approval-http</key>
+    <dict>
+      <key>SockNodeName</key>
+      <string>127.0.0.1</string>
+      <key>SockServiceName</key>
+      <string>8766</string>
+      <key>SockType</key>
+      <string>stream</string>
+    </dict>
+  </dict>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Library/Logs/Savana/Development/approvald.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Library/Logs/Savana/Development/approvald.error.log</string>
+</dict>
+</plist>

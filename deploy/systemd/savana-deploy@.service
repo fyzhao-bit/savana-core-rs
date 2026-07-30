@@ -1,0 +1,36 @@
+[Unit]
+Description=Savana authenticated deployment apply V2 (%i)
+Requires=savana-deploy-watchdog.service
+After=local-fs.target savana-deploy-watchdog.service
+Before=savana-kernel.target
+Conflicts=savana-kernel.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/libexec/savana/savana-deploy apply %i
+TimeoutStartSec=15min
+UMask=0077
+ReadOnlyPaths=/etc/savana /usr/libexec/savana
+ReadWritePaths=/var/lib/savana/deployment /var/lib/savana-deploy /run/savana
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=no
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+KeyringMode=private
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+SocketBindDeny=any

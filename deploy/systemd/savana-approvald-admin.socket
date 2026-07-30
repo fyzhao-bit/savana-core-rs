@@ -1,0 +1,15 @@
+[Unit]
+Description=Savana approvald root administration socket
+
+[Socket]
+ListenStream=/run/savana/approvald/admin/approvald.sock
+FileDescriptorName=savana-admin-approval
+SocketUser=root
+SocketGroup=root
+SocketMode=0600
+DirectoryMode=0700
+Service=savana-approvald.service
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

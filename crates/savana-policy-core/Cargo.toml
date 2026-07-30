@@ -1,0 +1,53 @@
+[package]
+name = "savana-policy-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+filesystem-integration-authority = []
+macos-development-authority = ["savana-platform-identity/macos-development-authority"]
+test-support = ["savana-platform-identity/test-support"]
+
+[[test]]
+name = "macos_development_startup"
+path = "tests/macos_development_startup.rs"
+required-features = ["macos-development-authority"]
+
+[[bin]]
+name = "savana-development-manifest"
+path = "src/bin/savana-development-manifest.rs"
+required-features = ["macos-development-authority"]
+
+[[bin]]
+name = "savana-development-material"
+path = "src/bin/savana-development-material.rs"
+required-features = ["macos-development-authority"]
+
+[dependencies]
+savana-kernel-protocol = { path = "../savana-kernel-protocol" }
+savana-platform-identity = { path = "../savana-platform-identity" }
+thiserror.workspace = true
+minicbor.workspace = true
+ed25519-dalek.workspace = true
+sha2.workspace = true
+getrandom.workspace = true
+hmac.workspace = true
+aes-gcm.workspace = true
+zeroize.workspace = true
+unicode-normalization.workspace = true
+nix.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+x25519-dalek.workspace = true
+
+[dev-dependencies]
+savana-policy-core-test-support = { package = "savana-policy-core", path = ".", features = ["test-support"] }
+tempfile = "=3.23.0"

@@ -1,0 +1,96 @@
+[package]
+name = "savana-kerneld"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+test-support = ["savana-policy-core/test-support"]
+macos-development-authority = [
+    "savana-agentd/macos-development-authority",
+    "savana-approvald/macos-development-authority",
+    "savana-execd/macos-development-authority",
+    "savana-ingressd/macos-development-authority",
+    "savana-policy-core/macos-development-authority",
+]
+
+[dependencies]
+savana-agentd = { path = "../savana-agentd" }
+savana-approvald = { path = "../savana-approvald" }
+savana-execd = { path = "../savana-execd" }
+savana-ingressd = { path = "../savana-ingressd" }
+savana-input-runtime = { path = "../savana-input-runtime" }
+savana-kernel-protocol = { path = "../savana-kernel-protocol" }
+savana-platform-identity = { path = "../savana-platform-identity" }
+savana-policy-core = { path = "../savana-policy-core" }
+savana-vault = { path = "../savana-vault" }
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ed25519-dalek.workspace = true
+zeroize.workspace = true
+nix.workspace = true
+rustix.workspace = true
+signal-hook.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+getrandom.workspace = true
+minicbor.workspace = true
+x25519-dalek.workspace = true
+hkdf.workspace = true
+chacha20poly1305.workspace = true
+
+[dev-dependencies]
+tempfile = "=3.23.0"
+savana-policy-core = { path = "../savana-policy-core", features = ["test-support"] }
+
+[[bin]]
+name = "savana-development-build-inputs"
+path = "src/bin/savana-development-build-inputs.rs"
+required-features = ["macos-development-authority"]
+
+[[test]]
+name = "production_state_machine"
+path = "tests/production_state_machine.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "policy_protocol"
+path = "tests/policy_protocol.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "policy_rollover"
+path = "tests/policy_rollover.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "policy_fail_stop"
+path = "tests/policy_fail_stop.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "policy_attack_matrix"
+path = "tests/policy_attack_matrix.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "v2_end_to_end"
+path = "tests/v2_end_to_end.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "macos_startup"
+path = "tests/macos_startup.rs"
+required-features = ["test-support", "macos-development-authority"]
+
+[[test]]
+name = "macos_deployment"
+path = "tests/macos_deployment.rs"
+required-features = ["macos-development-authority"]

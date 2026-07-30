@@ -1,0 +1,42 @@
+[package]
+name = "savana-approvald"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+macos-development-authority = ["savana-policy-core/macos-development-authority"]
+
+[dependencies]
+savana-kernel-protocol = { path = "../savana-kernel-protocol" }
+savana-platform-identity = { path = "../savana-platform-identity" }
+savana-policy-core = { path = "../savana-policy-core" }
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+p256.workspace = true
+ed25519-dalek.workspace = true
+minicbor.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
+getrandom.workspace = true
+aes-gcm.workspace = true
+hmac.workspace = true
+rustix.workspace = true
+nix.workspace = true
+x25519-dalek.workspace = true
+
+[dev-dependencies]
+tempfile = "=3.23.0"
+
+[[test]]
+name = "macos_startup"
+path = "tests/macos_startup.rs"
+required-features = ["macos-development-authority"]

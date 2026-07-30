@@ -1,14 +1,26 @@
 name: ci
 on: [push, pull_request]
 jobs:
-  rust:
-    runs-on: ubuntu-latest
+  kerneld:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.12' }
       - uses: dtolnay/rust-toolchain@1.82.0
         with: { components: clippy, rustfmt }
+      - run: tools/check-frozen-v2-core.sh
+      - run: sh tools/tests/check-frozen-v2-core.sh tools/check-frozen-v2-core.sh
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test -p libsavana-ner
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --workspace --all-targets --all-features --locked
+      - if: runner.os == 'macOS'
+        run: cargo test -p savana-platform-identity --test macos_worker_sandbox --all-features --locked
+        env:
+          SAVANA_REQUIRE_NATIVE_MACOS_SANDBOX_TEST: "1"
+      - run: cargo doc --workspace --all-features --no-deps --locked
+      - run: cargo build --workspace --release --locked
+      - if: runner.os == 'Linux'
+        run: systemd-analyze verify deploy/systemd/*

@@ -1,0 +1,77 @@
+[
+  {
+    "service": "kerneld",
+    "service_identity": "REPLACE_WITH_64_LOWERCASE_HEX",
+    "process_uid": 64001,
+    "process_gid": 64001,
+    "executable_path": "/usr/libexec/savana/savana-kerneld",
+    "config_path": "/etc/savana/kerneld-bootstrap-v2.json",
+    "endpoint": {
+      "kind": "unix-socket",
+      "path": "/run/savana/kerneld/agentd/kerneld.sock"
+    },
+    "sandbox_profile_path": "/usr/lib/systemd/system/savana-kerneld.service",
+    "keystore_authority_identity": "REPLACE_WITH_64_LOWERCASE_HEX",
+    "rollback_authority_identity": "REPLACE_WITH_64_LOWERCASE_HEX"
+  },
+  {
+    "service": "agentd",
+    "service_identity": "REPLACE_WITH_64_LOWERCASE_HEX",
+    "process_uid": 64002,
+    "process_gid": 64002,
+    "executable_path": "/usr/libexec/savana/savana-agentd",
+    "config_path": "/etc/savana/agentd-bootstrap-v2.json",
+    "endpoint": {
+      "kind": "unix-socket",
+      "path": "/run/savana/agentd/jarvis/control.sock"
+    },
+    "sandbox_profile_path": "/usr/lib/systemd/system/savana-agentd.service",
+    "keystore_authority_identity": "REPLACE_WITH_64_LOWERCASE_HEX",
+    "rollback_authority_identity": "REPLACE_WITH_64_LOWERCASE_HEX"
+  },
+  {
+    "service": "ingressd",
+    "service_identity": "REPLACE_WITH_64_LOWERCASE_HEX",
+    "process_uid": 64003,
+    "process_gid": 64003,
+    "executable_path": "/usr/libexec/savana/savana-ingressd",
+    "config_path": "/etc/savana/ingressd-bootstrap-v2.json",
+    "endpoint": {
+      "kind": "loopback-tcp",
+      "port": 8767
+    },
+    "sandbox_profile_path": "/usr/lib/systemd/system/savana-ingressd.service",
+    "keystore_authority_identity": "REPLACE_WITH_64_LOWERCASE_HEX",
+    "rollback_authority_identity": "REPLACE_WITH_64_LOWERCASE_HEX"
+  },
+  {
+    "service": "approvald",
+    "service_identity": "REPLACE_WITH_64_LOWERCASE_HEX",
+    "process_uid": 64004,
+    "process_gid": 64004,
+    "executable_path": "/usr/libexec/savana/savana-approvald",
+    "config_path": "/etc/savana/approvald-bootstrap-v2.json",
+    "endpoint": {
+      "kind": "loopback-tcp",
+      "port": 8766
+    },
+    "sandbox_profile_path": "/usr/lib/systemd/system/savana-approvald.service",
+    "keystore_authority_identity": "REPLACE_WITH_64_LOWERCASE_HEX",
+    "rollback_authority_identity": "REPLACE_WITH_64_LOWERCASE_HEX"
+  },
+  {
+    "service": "execd",
+    "service_identity": "REPLACE_WITH_64_LOWERCASE_HEX",
+    "process_uid": 64005,
+    "process_gid": 64005,
+    "executable_path": "/usr/libexec/savana/savana-execd",
+    "config_path": "/etc/savana/execd-bootstrap-v2.json",
+    "endpoint": {
+      "kind": "unix-socket",
+      "path": "/run/savana/execd/kerneld/execd.sock"
+    },
+    "sandbox_profile_path": "/usr/lib/systemd/system/savana-execd.service",
+    "keystore_authority_identity": "REPLACE_WITH_64_LOWERCASE_HEX",
+    "rollback_authority_identity": "REPLACE_WITH_64_LOWERCASE_HEX"
+  }
+]

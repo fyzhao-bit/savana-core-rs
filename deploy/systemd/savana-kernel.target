@@ -1,0 +1,7 @@
+[Unit]
+Description=Savana secure kernel V2
+Requires=savana-deployment-recovery.target savana-kerneld.service savana-execd.service savana-approvald.service savana-ingressd.service savana-agentd.service
+After=savana-deployment-recovery.target savana-kerneld.service savana-execd.service savana-approvald.service savana-ingressd.service savana-agentd.service
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Savana ingress UI loopback socket
+
+[Socket]
+ListenStream=127.0.0.1:8767
+FreeBind=no
+BindIPv6Only=both
+FileDescriptorName=savana-ingress-http
+Service=savana-ingressd.service
+
+[Install]
+WantedBy=sockets.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=Savana kerneld agent role socket
+
+[Socket]
+ListenStream=/run/savana/kerneld/agentd/kerneld.sock
+FileDescriptorName=savana-agent-kernel
+SocketUser=savana-kernel
+SocketGroup=savana-agent
+SocketMode=0660
+DirectoryMode=0710
+Service=savana-kerneld.service
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

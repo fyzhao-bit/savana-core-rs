@@ -1,0 +1,12 @@
+[Unit]
+Description=Savana authenticated agent UI loopback socket
+
+[Socket]
+ListenStream=127.0.0.1:8768
+FreeBind=no
+BindIPv6Only=both
+FileDescriptorName=savana-agent-http
+Service=savana-agentd.service
+
+[Install]
+WantedBy=sockets.target

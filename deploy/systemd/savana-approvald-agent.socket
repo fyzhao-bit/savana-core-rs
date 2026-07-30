@@ -1,0 +1,15 @@
+[Unit]
+Description=Savana approvald agent role socket
+
+[Socket]
+ListenStream=/run/savana/approvald/agentd/approvald.sock
+FileDescriptorName=savana-agent-approval
+SocketUser=savana-approval
+SocketGroup=savana-agent
+SocketMode=0660
+DirectoryMode=0710
+Service=savana-approvald.service
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target
