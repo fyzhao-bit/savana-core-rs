@@ -1,4 +1,4 @@
-mod ffi;
+pub(crate) mod ffi;
 
 use sha2::{Digest as _, Sha256};
 

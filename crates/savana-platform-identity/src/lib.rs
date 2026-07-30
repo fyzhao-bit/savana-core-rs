@@ -7,6 +7,8 @@ mod deployment_invocation;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+mod macos_activation;
 mod worker_sandbox;
 
 #[cfg(test)]
@@ -27,6 +29,15 @@ pub use linux::{
 pub use macos::{
     current_process_audit_token_v2, measure_macos_peer_v2, parse_macos_audit_token_v2,
     MacOsAuditIdentityV2,
+};
+#[cfg(target_os = "macos")]
+pub use macos_activation::{
+    take_launchd_tcp_listeners_v2, take_launchd_unix_listeners_v2, InheritedTcpListenerV2,
+    InheritedUnixListenerV2,
+};
+#[cfg(all(target_os = "macos", feature = "test-support"))]
+pub use macos_activation::{
+    take_launchd_tcp_listeners_with_v2, take_launchd_unix_listeners_with_v2,
 };
 pub use worker_sandbox::{run_worker_sandbox_v2, WorkerSandboxErrorV2};
 
@@ -1015,7 +1026,7 @@ fn parse_systemd_listener_activation_v2(
         .collect()
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn valid_listener_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128

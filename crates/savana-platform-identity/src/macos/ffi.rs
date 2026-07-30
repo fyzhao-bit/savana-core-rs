@@ -2,7 +2,10 @@
 
 use core::ffi::{c_char, c_void};
 use core::ptr;
+use std::collections::BTreeSet;
 use std::ffi::CStr;
+use std::mem::{offset_of, size_of};
+use std::os::fd::{FromRawFd as _, OwnedFd};
 
 use crate::NativeIdentityErrorV2;
 
@@ -17,6 +20,8 @@ const MAX_REQUIREMENT_BYTES: usize = 64 * 1024;
 const MAX_ENTITLEMENT_BYTES: usize = 1024 * 1024;
 const MAX_IDENTITY_UTF8_BYTES: usize = 255;
 const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+const PROC_PIDFDSOCKETINFO: i32 = 3;
+const PROC_PIDFDSOCKETINFO_SIZE: usize = 792;
 
 type CFIndex = isize;
 type CFTypeId = usize;
@@ -27,6 +32,65 @@ type CFDataRef = *const c_void;
 type CFDictionaryRef = *const c_void;
 type SecCodeRef = *const c_void;
 type SecRequirementRef = *const c_void;
+
+#[repr(C)]
+struct ProcFileInfoV2 {
+    open_flags: u32,
+    status: u32,
+    offset: i64,
+    file_type: i32,
+    guard_flags: u32,
+}
+
+#[repr(C)]
+struct VinfoStatV2 {
+    device: u32,
+    mode: u16,
+    link_count: u16,
+    inode: u64,
+    uid: u32,
+    gid: u32,
+    access_time: i64,
+    access_time_nsec: i64,
+    modification_time: i64,
+    modification_time_nsec: i64,
+    change_time: i64,
+    change_time_nsec: i64,
+    birth_time: i64,
+    birth_time_nsec: i64,
+    size: i64,
+    blocks: i64,
+    block_size: i32,
+    flags: u32,
+    generation: u32,
+    raw_device: u32,
+    spare: [i64; 2],
+}
+
+#[repr(C)]
+struct SocketInfoPrefixV2 {
+    stat: VinfoStatV2,
+    socket: u64,
+    protocol_control_block: u64,
+    socket_type: i32,
+    protocol: i32,
+    family: i32,
+    options: i16,
+}
+
+#[repr(C)]
+struct SocketFdInfoPrefixV2 {
+    file: ProcFileInfoV2,
+    socket: SocketInfoPrefixV2,
+}
+
+#[repr(C, align(8))]
+struct SocketFdInfoBufferV2([u8; PROC_PIDFDSOCKETINFO_SIZE]);
+
+const _: [(); 24] = [(); size_of::<ProcFileInfoV2>()];
+const _: [(); 136] = [(); size_of::<VinfoStatV2>()];
+const _: [(); 164] = [(); offset_of!(SocketInfoPrefixV2, options)];
+const _: [(); 24] = [(); offset_of!(SocketFdInfoPrefixV2, socket)];
 
 pub(super) struct OwnedMacOsCodeIdentityV2 {
     pub(super) bundle_id: String,
@@ -82,6 +146,86 @@ pub(super) fn current_process_audit_token_v2() -> Result<[u8; 32], NativeIdentit
         bytes[index * 4..index * 4 + 4].copy_from_slice(&word.to_ne_bytes());
     }
     Ok(bytes)
+}
+
+pub(crate) fn launch_activate_socket_v2(
+    name: &CStr,
+) -> Result<Vec<OwnedFd>, NativeIdentityErrorV2> {
+    let mut descriptors = ptr::null_mut();
+    let mut count = 0_usize;
+    // SAFETY: `name` is NUL terminated; both output pointers address
+    // initialized writable storage. launchd allocates the returned array and
+    // transfers every descriptor in it to this process on success.
+    let status = unsafe { launch_activate_socket(name.as_ptr(), &mut descriptors, &mut count) };
+    if status != 0 {
+        return Err(NativeIdentityErrorV2::Io);
+    }
+    if descriptors.is_null() {
+        return if count == 0 {
+            Ok(Vec::new())
+        } else {
+            Err(NativeIdentityErrorV2::InvalidMeasurement)
+        };
+    }
+    // SAFETY: successful launch activation returned an allocation containing
+    // exactly `count` file descriptors. Copy them before releasing the array.
+    let raw_descriptors = unsafe { std::slice::from_raw_parts(descriptors, count) }.to_vec();
+    // SAFETY: launch_activate_socket documents that the caller owns this
+    // allocation and must release it with free(3), including a zero-count
+    // allocation.
+    unsafe { nix::libc::free(descriptors.cast()) };
+
+    let mut unique = BTreeSet::new();
+    let valid = raw_descriptors
+        .iter()
+        .all(|descriptor| *descriptor >= 0 && unique.insert(*descriptor));
+    if !valid {
+        for descriptor in unique {
+            let _ = nix::unistd::close(descriptor);
+        }
+        return Err(NativeIdentityErrorV2::InvalidMeasurement);
+    }
+
+    Ok(raw_descriptors
+        .into_iter()
+        .map(|descriptor| {
+            // SAFETY: launchd transferred one unique live descriptor and no
+            // Rust owner was constructed before this exact conversion.
+            unsafe { OwnedFd::from_raw_fd(descriptor) }
+        })
+        .collect())
+}
+
+pub(crate) fn socket_is_listening_v2(descriptor: i32) -> Result<bool, NativeIdentityErrorV2> {
+    if descriptor < 0 {
+        return Err(NativeIdentityErrorV2::InvalidMeasurement);
+    }
+    let mut buffer = SocketFdInfoBufferV2([0_u8; PROC_PIDFDSOCKETINFO_SIZE]);
+    let buffer_size = i32::try_from(buffer.0.len()).map_err(|_| NativeIdentityErrorV2::Io)?;
+    // SAFETY: the buffer is writable, correctly aligned for the documented
+    // socket_fdinfo layout, and its exact byte capacity is passed to libproc.
+    // The call inspects a descriptor in this process and does not mutate it.
+    let written = unsafe {
+        nix::libc::proc_pidfdinfo(
+            nix::libc::getpid(),
+            descriptor,
+            PROC_PIDFDSOCKETINFO,
+            buffer.0.as_mut_ptr().cast(),
+            buffer_size,
+        )
+    };
+    let options_end = offset_of!(SocketFdInfoPrefixV2, socket)
+        + offset_of!(SocketInfoPrefixV2, options)
+        + size_of::<i16>();
+    if written < i32::try_from(options_end).map_err(|_| NativeIdentityErrorV2::Io)? {
+        return Err(NativeIdentityErrorV2::Io);
+    }
+    // SAFETY: libproc initialized at least through the options field, the
+    // backing buffer has eight-byte alignment, and the Rust prefix layout is
+    // compile-time checked against Apple's public C layout.
+    let information = unsafe { &*buffer.0.as_ptr().cast::<SocketFdInfoPrefixV2>() };
+    Ok(information.socket.socket_type == nix::libc::SOCK_STREAM
+        && (i32::from(information.socket.options) & nix::libc::SO_ACCEPTCONN) != 0)
 }
 
 pub(super) fn copy_code_identity_v2(
@@ -390,6 +534,7 @@ extern "C" {
 #[link(name = "System")]
 extern "C" {
     static mach_task_self_: u32;
+    fn launch_activate_socket(name: *const c_char, fds: *mut *mut i32, count: *mut usize) -> i32;
     fn task_info(
         target_task: u32,
         flavor: i32,
