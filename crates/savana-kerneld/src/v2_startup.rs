@@ -12,23 +12,23 @@ pub(crate) fn run(
     boot_id: BootIdV2,
     lifecycle: &mut dyn ServerLifecycle,
 ) -> Result<(), StableCode> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        linux::run(config_path, boot_id, lifecycle)
+        native::run(config_path, boot_id, lifecycle)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (config_path, boot_id, lifecycle);
         Err(StableCode::KernelUnavailable)
     }
 }
 
-#[cfg(target_os = "linux")]
-mod linux {
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod native {
     use std::fs;
     use std::io::Write as _;
+    use std::os::unix::fs::MetadataExt as _;
     use std::os::unix::fs::OpenOptionsExt as _;
-    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -42,15 +42,14 @@ mod linux {
     };
     use savana_kernel_protocol::StableCode;
     use savana_policy_core::v2::{
-        activate_internal_validator_registry, load_verified_filesystem_startup_v2,
-        ActiveToolRegistryV2, ContextFieldV2, DurableG4StateV2, DurableStateNamespaceV2,
-        FilesystemServiceObservationConfigV2, InternalValidatorBuildV2,
-        InternalValidatorDeclarationV2, InternalValidatorImplementationKindV2, OntologyExprV2,
-        OntologyOperandV2, OntologyScalarV2, SignedToolDescriptorV2,
-        VerifiedInternalValidatorRegistryV2, VerifiedManifestToolConstraintSetV2,
-        VerifiedManifestToolConstraintV2, VerifiedPolicyDispositionV2,
-        VerifiedPolicyToolActivationV2, VerifiedPolicyToolSetV2, VerifiedRegistryPublisherV2,
-        VerifiedToolRegistryV2,
+        activate_internal_validator_registry, ActiveToolRegistryV2, ContextFieldV2,
+        DurableG4StateV2, DurableStateNamespaceV2, FilesystemServiceObservationConfigV2,
+        InternalValidatorBuildV2, InternalValidatorDeclarationV2,
+        InternalValidatorImplementationKindV2, OntologyExprV2, OntologyOperandV2, OntologyScalarV2,
+        SignedToolDescriptorV2, VerifiedInternalValidatorRegistryV2,
+        VerifiedManifestToolConstraintSetV2, VerifiedManifestToolConstraintV2,
+        VerifiedPolicyDispositionV2, VerifiedPolicyToolActivationV2, VerifiedPolicyToolSetV2,
+        VerifiedRegistryPublisherV2, VerifiedToolRegistryV2,
     };
     use serde::Deserialize;
     use sha2::{Digest as _, Sha256};
@@ -61,7 +60,13 @@ mod linux {
         ClosedServiceEdgeIdV2, ClosedServiceIdV2, VerifiedDaemonStartupV2,
     };
     use crate::policy_runtime::V2GenerationRuntime;
+    #[cfg(target_os = "linux")]
     use crate::v2_activation::take_kerneld_systemd_listeners_v2;
+    #[cfg(target_os = "macos")]
+    use crate::v2_activation::{
+        verify_kerneld_inherited_listeners_v2, InheritedListenerV2,
+        VerifiedInheritedKerneldListenersV2, AGENT_KERNEL_FD_NAME_V2, INGRESS_KERNEL_FD_NAME_V2,
+    };
     use crate::v2_agent_authority::{
         KernelAgentAuthorityV2, KernelAgentSecurityConfigV2, KernelG4G5RuntimeV2,
         KernelG7RuntimeV2, KernelToolApprovalConfigV2,
@@ -74,16 +79,52 @@ mod linux {
     use crate::v2_ingress_authority::{KernelIngressAuthorityV2, KernelIngressSecurityConfigV2};
     use crate::v2_input_owner::KernelParserTrustV2;
     use crate::v2_kernel_owner::KernelRuntimeOwnerV2;
-    use crate::v2_listener::{KerneldV2EndpointListener, LinuxNativeUnixPeerVerifierV2};
+    use crate::v2_listener::KerneldV2EndpointListener;
+    #[cfg(target_os = "linux")]
+    use crate::v2_listener::LinuxNativeUnixPeerVerifierV2;
+    #[cfg(target_os = "macos")]
+    use crate::v2_listener::NativeUnixPeerVerifierV2;
     use crate::v2_server::run_kerneld_v2_workers;
     use crate::v2_transport_owner::KernelV2HandshakeOwner;
 
-    const PRODUCTION_BOOTSTRAP_PATH_V2: &str = "/etc/savana/kerneld-bootstrap-v2.json";
+    #[cfg(target_os = "linux")]
+    const NATIVE_BOOTSTRAP_PATH_V2: &str = "/etc/savana/kerneld-bootstrap-v2.json";
+    #[cfg(target_os = "linux")]
     const MANIFEST_ROOT_PATH_V2: &str = "/etc/savana/trust/deployment-manifest-root-v2.json";
+    #[cfg(target_os = "linux")]
     const AGENT_CLIENT_PUBLIC_KEY_PATH_V2: &str = "/etc/savana/kerneld/keys/agentd-kernel-v2.pub";
+    #[cfg(target_os = "linux")]
     const INGRESS_CLIENT_PUBLIC_KEY_PATH_V2: &str =
         "/etc/savana/kerneld/keys/ingressd-kernel-v2.pub";
-    const SYSTEMD_CREDENTIAL_DIRECTORY_V2: &str = "/run/credentials/savana-kerneld.service";
+    #[cfg(target_os = "linux")]
+    const NATIVE_CREDENTIAL_DIRECTORY_V2: &str = "/run/credentials/savana-kerneld.service";
+    #[cfg(target_os = "linux")]
+    const EXECUTOR_SERVER_PUBLIC_KEY_PATH_V2: &str = "/etc/savana/kerneld/keys/execd-kernel-v2.pub";
+
+    #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
+    const DEVELOPMENT_ROOT_V2: &str = "/Library/Application Support/Savana/Development";
+    #[cfg(target_os = "macos")]
+    const NATIVE_BOOTSTRAP_PATH_V2: &str =
+        "/Library/Application Support/Savana/Development/config/kerneld-bootstrap-v2.json";
+    #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
+    const MANIFEST_ROOT_PATH_V2: &str = "/Library/Application Support/Savana/Development/config/trust/deployment-manifest-root-v2.json";
+    #[cfg(target_os = "macos")]
+    const AGENT_CLIENT_PUBLIC_KEY_PATH_V2: &str =
+        "/Library/Application Support/Savana/Development/config/kerneld/keys/agentd-kernel-v2.pub";
+    #[cfg(target_os = "macos")]
+    const INGRESS_CLIENT_PUBLIC_KEY_PATH_V2: &str = "/Library/Application Support/Savana/Development/config/kerneld/keys/ingressd-kernel-v2.pub";
+    #[cfg(target_os = "macos")]
+    const EXECUTOR_SERVER_PUBLIC_KEY_PATH_V2: &str =
+        "/Library/Application Support/Savana/Development/config/kerneld/keys/execd-kernel-v2.pub";
+    #[cfg(target_os = "macos")]
+    const NATIVE_CREDENTIAL_DIRECTORY_V2: &str =
+        "/Library/Application Support/Savana/Development/credentials/kerneld";
+    #[cfg(target_os = "macos")]
+    const AGENT_KERNEL_SOCKET_PATH_V2: &str =
+        "/Library/Application Support/Savana/Development/run/kerneld/agentd/kerneld.sock";
+    #[cfg(target_os = "macos")]
+    const INGRESS_KERNEL_SOCKET_PATH_V2: &str =
+        "/Library/Application Support/Savana/Development/run/kerneld/ingressd/kerneld.sock";
     const AGENT_SERVER_SEED_CREDENTIAL_V2: &str = "agent-kernel-v2.seed";
     const KERNELD_BOOT_ID_CREDENTIAL_V2: &str = "kerneld-boot-v2.id";
     const INGRESS_SERVER_SEED_CREDENTIAL_V2: &str = "ingress-kernel-v2.seed";
@@ -101,7 +142,6 @@ mod linux {
     const G4_STATE_ANCHOR_AUTHENTICATION_KEY_CREDENTIAL_V2: &str =
         "g4-anchor-authentication-v2.key";
     const EXECUTOR_CLIENT_SEED_CREDENTIAL_V2: &str = "executor-kernel-v2.seed";
-    const EXECUTOR_SERVER_PUBLIC_KEY_PATH_V2: &str = "/etc/savana/kerneld/keys/execd-kernel-v2.pub";
     const MAX_BOOTSTRAP_BYTES_V2: usize = 128 * 1024;
     const MAX_ARTIFACT_BYTES_V2: usize = 256 * 1024 * 1024;
     const MAX_SERVICE_COUNT_V2: usize = 5;
@@ -114,9 +154,21 @@ mod linux {
     const AUTHENTICATED_ANCHOR_BYTES_V2: usize = 80;
 
     #[derive(Deserialize)]
+    #[cfg_attr(
+        all(target_os = "macos", not(feature = "macos-development-authority")),
+        allow(dead_code)
+    )]
     #[serde(deny_unknown_fields)]
     struct BootstrapDtoV2 {
+        #[cfg_attr(
+            all(target_os = "macos", not(feature = "macos-development-authority")),
+            allow(dead_code)
+        )]
         signed_manifest_path: PathBuf,
+        #[cfg_attr(
+            all(target_os = "macos", not(feature = "macos-development-authority")),
+            allow(dead_code)
+        )]
         effect_ledger_projection_path: PathBuf,
         input_runtime_assets_path: PathBuf,
         input_runtime_publisher_key_id: String,
@@ -289,6 +341,78 @@ mod linux {
         executor_receipt_public_key: [u8; 32],
     }
 
+    #[cfg(target_os = "macos")]
+    struct MacOsNativeUnixPeerVerifierV2;
+
+    #[cfg(target_os = "macos")]
+    impl NativeUnixPeerVerifierV2 for MacOsNativeUnixPeerVerifierV2 {
+        fn verify(
+            &self,
+            stream: &std::os::unix::net::UnixStream,
+            edge: &VerifiedServiceEdgeV2,
+        ) -> Result<
+            crate::v2_edge::VerifiedAcceptedPeerV2,
+            crate::deployment_trust::DeploymentTrustErrorV2,
+        > {
+            let measurement = savana_platform_identity::measure_macos_unix_peer_v2(stream)
+                .map_err(|_| crate::deployment_trust::DeploymentTrustErrorV2::EdgeLockMismatch)?;
+            edge.verify_native_peer(&measurement)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn take_kerneld_native_listeners_v2(
+        agent_listener_identity: Digest32V2,
+        ingress_listener_identity: Digest32V2,
+    ) -> Result<
+        crate::v2_activation::VerifiedInheritedKerneldListenersV2,
+        crate::deployment_trust::DeploymentTrustErrorV2,
+    > {
+        take_kerneld_systemd_listeners_v2(agent_listener_identity, ingress_listener_identity)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn take_kerneld_native_listeners_v2(
+        agent_listener_identity: Digest32V2,
+        ingress_listener_identity: Digest32V2,
+    ) -> Result<VerifiedInheritedKerneldListenersV2, crate::deployment_trust::DeploymentTrustErrorV2>
+    {
+        let inherited = savana_platform_identity::take_launchd_unix_listeners_v2(&[
+            AGENT_KERNEL_FD_NAME_V2,
+            INGRESS_KERNEL_FD_NAME_V2,
+        ])
+        .map_err(|_| crate::deployment_trust::DeploymentTrustErrorV2::UnsafeSocket)?;
+        let mut inherited = inherited.into_iter();
+        let (agent_name, agent_listener) = inherited
+            .next()
+            .ok_or(crate::deployment_trust::DeploymentTrustErrorV2::UnsafeSocket)?
+            .into_parts();
+        let (ingress_name, ingress_listener) = inherited
+            .next()
+            .ok_or(crate::deployment_trust::DeploymentTrustErrorV2::UnsafeSocket)?
+            .into_parts();
+        if inherited.next().is_some()
+            || agent_name != AGENT_KERNEL_FD_NAME_V2
+            || ingress_name != INGRESS_KERNEL_FD_NAME_V2
+        {
+            return Err(crate::deployment_trust::DeploymentTrustErrorV2::UnsafeSocket);
+        }
+        verify_kerneld_inherited_listeners_v2(
+            [
+                InheritedListenerV2::new(AGENT_KERNEL_FD_NAME_V2, agent_listener),
+                InheritedListenerV2::new(INGRESS_KERNEL_FD_NAME_V2, ingress_listener),
+            ],
+            (
+                Path::new(AGENT_KERNEL_SOCKET_PATH_V2),
+                agent_listener_identity,
+            ),
+            (
+                Path::new(INGRESS_KERNEL_SOCKET_PATH_V2),
+                ingress_listener_identity,
+            ),
+        )
+    }
+
     pub(super) fn run(
         config_path: &Path,
         _process_boot_id: BootIdV2,
@@ -298,10 +422,19 @@ mod linux {
         let self_lock = startup
             .service_lock(ClosedServiceIdV2::Kerneld)
             .ok_or(StableCode::KernelUnavailable)?;
+        #[cfg(target_os = "linux")]
         let _self_process = savana_platform_identity::pin_current_linux_service_v2(
             self_lock.uid,
             self_lock.gid,
             *self_lock.executable_digest.as_bytes(),
+        )
+        .map_err(|_| StableCode::KernelUnavailable)?;
+        #[cfg(target_os = "macos")]
+        let _self_process = savana_platform_identity::pin_current_macos_service_v2(
+            self_lock.uid,
+            self_lock.gid,
+            *self_lock.executable_digest.as_bytes(),
+            *self_lock.code_identity_digest.as_bytes(),
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
         let boot_id = BootIdV2::new(keys.boot_id);
@@ -319,7 +452,7 @@ mod linux {
             )
             .map_err(|_| StableCode::KernelUnavailable)?,
         );
-        let inherited = take_kerneld_systemd_listeners_v2(
+        let inherited = take_kerneld_native_listeners_v2(
             agent_edge.listener_identity_digest(),
             ingress_edge.listener_identity_digest(),
         )
@@ -367,7 +500,7 @@ mod linux {
             runtime_material.vault_store_id,
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
-        let vault_anchor = LinuxAuthenticatedAnchorFileV2::new(
+        let vault_anchor = PosixAuthenticatedAnchorFileV2::new(
             runtime_material.vault_rollback_anchor_path,
             startup.installation_id(),
             runtime_material.vault_store_id,
@@ -404,7 +537,7 @@ mod linux {
             runtime_material.ui_settlement_public_key,
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
-        let agent_anchor = LinuxAuthenticatedAnchorFileV2::new(
+        let agent_anchor = PosixAuthenticatedAnchorFileV2::new(
             runtime_material.agent_authority_rollback_anchor_path,
             startup.installation_id(),
             runtime_material.agent_authority_store_id,
@@ -427,7 +560,7 @@ mod linux {
             runtime_material.g4_store_id,
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
-        let g4_anchor = LinuxAuthenticatedAnchorFileV2::new(
+        let g4_anchor = PosixAuthenticatedAnchorFileV2::new(
             runtime_material.g4_rollback_anchor_path,
             startup.installation_id(),
             runtime_material.g4_store_id,
@@ -467,7 +600,7 @@ mod linux {
         let executor_client = SuiteOneKernelExecutorClientV2::from_verified_deployment(
             executor_edge,
             boot_id,
-            current_linux_self_peer_binding()?,
+            current_native_self_peer_binding()?,
             keys.executor_client_signing_key,
             keys.executor_server_public_key,
         )
@@ -563,7 +696,10 @@ mod linux {
             )
             .map_err(|_| StableCode::KernelUnavailable)?,
         );
+        #[cfg(target_os = "linux")]
         let peer_verifier = Arc::new(LinuxNativeUnixPeerVerifierV2);
+        #[cfg(target_os = "macos")]
+        let peer_verifier = Arc::new(MacOsNativeUnixPeerVerifierV2);
         let agent = KerneldV2EndpointListener::new_agent(
             agent_listener,
             Arc::clone(&agent_edge),
@@ -595,7 +731,7 @@ mod linux {
         ),
         StableCode,
     > {
-        if config_path != Path::new(PRODUCTION_BOOTSTRAP_PATH_V2) {
+        if config_path != Path::new(NATIVE_BOOTSTRAP_PATH_V2) {
             return Err(StableCode::KernelUnavailable);
         }
         let bootstrap_bytes =
@@ -605,19 +741,87 @@ mod linux {
         if bootstrap.services.len() != MAX_SERVICE_COUNT_V2 {
             return Err(StableCode::KernelUnavailable);
         }
-        let startup = load_verified_filesystem_startup_v2(
-            Path::new(MANIFEST_ROOT_PATH_V2),
-            &bootstrap.signed_manifest_path,
-            &bootstrap.effect_ledger_projection_path,
-            &bootstrap.services,
-        )
-        .map_err(|_| StableCode::KernelUnavailable)?;
+        let startup = load_native_deployment_startup(&bootstrap)?;
         startup
             .verify_loaded_service_config_v2(ClosedServiceIdV2::Kerneld, &bootstrap_bytes)
             .map_err(|_| StableCode::KernelUnavailable)?;
         let keys = load_key_material(&startup)?;
         let runtime = load_runtime_material(&bootstrap)?;
         Ok((startup, keys, runtime))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn load_native_deployment_startup(
+        bootstrap: &BootstrapDtoV2,
+    ) -> Result<VerifiedDaemonStartupV2, StableCode> {
+        savana_policy_core::v2::load_verified_filesystem_startup_v2(
+            Path::new(MANIFEST_ROOT_PATH_V2),
+            &bootstrap.signed_manifest_path,
+            &bootstrap.effect_ledger_projection_path,
+            &bootstrap.services,
+        )
+        .map_err(|_| StableCode::KernelUnavailable)
+    }
+
+    #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
+    fn load_native_deployment_startup(
+        bootstrap: &BootstrapDtoV2,
+    ) -> Result<VerifiedDaemonStartupV2, StableCode> {
+        require_macos_development_bootstrap_paths(bootstrap)?;
+        savana_policy_core::load_verified_macos_development_startup_v2(
+            Path::new(MANIFEST_ROOT_PATH_V2),
+            &bootstrap.signed_manifest_path,
+            &bootstrap.effect_ledger_projection_path,
+            &bootstrap.services,
+        )
+        .map_err(|_| StableCode::KernelUnavailable)
+    }
+
+    #[cfg(all(target_os = "macos", not(feature = "macos-development-authority")))]
+    fn load_native_deployment_startup(
+        _bootstrap: &BootstrapDtoV2,
+    ) -> Result<VerifiedDaemonStartupV2, StableCode> {
+        Err(StableCode::KernelUnavailable)
+    }
+
+    #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
+    fn require_macos_development_bootstrap_paths(
+        bootstrap: &BootstrapDtoV2,
+    ) -> Result<(), StableCode> {
+        let mut paths = vec![
+            &bootstrap.signed_manifest_path,
+            &bootstrap.effect_ledger_projection_path,
+            &bootstrap.input_runtime_assets_path,
+            &bootstrap.vault_state_path,
+            &bootstrap.vault_rollback_anchor_path,
+            &bootstrap.agent_authority_state_path,
+            &bootstrap.agent_authority_rollback_anchor_path,
+            &bootstrap.g4_state_path,
+            &bootstrap.g4_rollback_anchor_path,
+        ];
+        paths.extend(bootstrap.policy_runtime.signed_tool_descriptor_paths.iter());
+        if paths
+            .into_iter()
+            .all(|path| is_macos_development_path(path.as_path()))
+        {
+            Ok(())
+        } else {
+            Err(StableCode::KernelUnavailable)
+        }
+    }
+
+    #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
+    fn is_macos_development_path(path: &Path) -> bool {
+        path.is_absolute()
+            && path.starts_with(Path::new(DEVELOPMENT_ROOT_V2))
+            && !path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::CurDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
     }
 
     fn read_regular_file(
@@ -663,31 +867,29 @@ mod linux {
         let executor_server_public_key =
             read_exact_key(Path::new(EXECUTOR_SERVER_PUBLIC_KEY_PATH_V2), 0o444)?;
         let agent_server_seed =
-            Zeroizing::new(read_systemd_credential(AGENT_SERVER_SEED_CREDENTIAL_V2)?);
+            Zeroizing::new(read_native_credential(AGENT_SERVER_SEED_CREDENTIAL_V2)?);
         let ingress_server_seed =
-            Zeroizing::new(read_systemd_credential(INGRESS_SERVER_SEED_CREDENTIAL_V2)?);
-        let envelope_seed = Zeroizing::new(read_systemd_credential(
-            ENVELOPE_SIGNING_SEED_CREDENTIAL_V2,
-        )?);
-        let authority_envelope_seed = Zeroizing::new(read_systemd_credential(
+            Zeroizing::new(read_native_credential(INGRESS_SERVER_SEED_CREDENTIAL_V2)?);
+        let envelope_seed =
+            Zeroizing::new(read_native_credential(ENVELOPE_SIGNING_SEED_CREDENTIAL_V2)?);
+        let authority_envelope_seed = Zeroizing::new(read_native_credential(
             AUTHORITY_ENVELOPE_SEED_CREDENTIAL_V2,
         )?);
-        let task_correlation_seed = Zeroizing::new(read_systemd_credential(
-            TASK_CORRELATION_SEED_CREDENTIAL_V2,
-        )?);
-        let vault_encryption_key = read_systemd_credential(VAULT_ENCRYPTION_KEY_CREDENTIAL_V2)?;
+        let task_correlation_seed =
+            Zeroizing::new(read_native_credential(TASK_CORRELATION_SEED_CREDENTIAL_V2)?);
+        let vault_encryption_key = read_native_credential(VAULT_ENCRYPTION_KEY_CREDENTIAL_V2)?;
         let vault_anchor_authentication_key =
-            read_systemd_credential(VAULT_ANCHOR_AUTHENTICATION_KEY_CREDENTIAL_V2)?;
+            read_native_credential(VAULT_ANCHOR_AUTHENTICATION_KEY_CREDENTIAL_V2)?;
         let agent_state_encryption_key =
-            read_systemd_credential(AGENT_STATE_ENCRYPTION_KEY_CREDENTIAL_V2)?;
+            read_native_credential(AGENT_STATE_ENCRYPTION_KEY_CREDENTIAL_V2)?;
         let agent_state_anchor_authentication_key =
-            read_systemd_credential(AGENT_STATE_ANCHOR_AUTHENTICATION_KEY_CREDENTIAL_V2)?;
+            read_native_credential(AGENT_STATE_ANCHOR_AUTHENTICATION_KEY_CREDENTIAL_V2)?;
         let g4_state_encryption_key =
-            read_systemd_credential(G4_STATE_ENCRYPTION_KEY_CREDENTIAL_V2)?;
+            read_native_credential(G4_STATE_ENCRYPTION_KEY_CREDENTIAL_V2)?;
         let g4_anchor_authentication_key =
-            read_systemd_credential(G4_STATE_ANCHOR_AUTHENTICATION_KEY_CREDENTIAL_V2)?;
+            read_native_credential(G4_STATE_ANCHOR_AUTHENTICATION_KEY_CREDENTIAL_V2)?;
         let executor_client_seed =
-            Zeroizing::new(read_systemd_credential(EXECUTOR_CLIENT_SEED_CREDENTIAL_V2)?);
+            Zeroizing::new(read_native_credential(EXECUTOR_CLIENT_SEED_CREDENTIAL_V2)?);
         let agent_server_signing_key = SigningKey::from_bytes(&agent_server_seed);
         let ingress_server_signing_key = SigningKey::from_bytes(&ingress_server_seed);
         let envelope_signing_key = SigningKey::from_bytes(&envelope_seed);
@@ -730,7 +932,7 @@ mod linux {
             return Err(StableCode::KernelUnavailable);
         }
         Ok(KernelKeyMaterialV2 {
-            boot_id: read_systemd_credential(KERNELD_BOOT_ID_CREDENTIAL_V2)?,
+            boot_id: read_native_credential(KERNELD_BOOT_ID_CREDENTIAL_V2)?,
             agent_client_public_key,
             ingress_client_public_key,
             agent_server_signing_key,
@@ -1042,7 +1244,7 @@ mod linux {
         }
     }
 
-    fn read_systemd_credential(name: &str) -> Result<[u8; 32], StableCode> {
+    fn read_native_credential(name: &str) -> Result<[u8; 32], StableCode> {
         if name.is_empty()
             || name.contains('/')
             || !name
@@ -1051,7 +1253,7 @@ mod linux {
         {
             return Err(StableCode::KernelUnavailable);
         }
-        let directory = Path::new(SYSTEMD_CREDENTIAL_DIRECTORY_V2);
+        let directory = Path::new(NATIVE_CREDENTIAL_DIRECTORY_V2);
         let directory_metadata =
             fs::symlink_metadata(directory).map_err(|_| StableCode::KernelUnavailable)?;
         if directory_metadata.file_type().is_symlink()
@@ -1077,7 +1279,7 @@ mod linux {
         bytes.try_into().map_err(|_| StableCode::KernelUnavailable)
     }
 
-    struct LinuxAuthenticatedAnchorFileV2 {
+    struct PosixAuthenticatedAnchorFileV2 {
         path: PathBuf,
         installation_id: Digest32V2,
         store_id: Digest32V2,
@@ -1086,7 +1288,7 @@ mod linux {
         magic: [u8; 8],
     }
 
-    impl LinuxAuthenticatedAnchorFileV2 {
+    impl PosixAuthenticatedAnchorFileV2 {
         fn new(
             path: PathBuf,
             installation_id: Digest32V2,
@@ -1219,7 +1421,7 @@ mod linux {
         }
     }
 
-    impl savana_vault::VaultRollbackAnchorV2 for LinuxAuthenticatedAnchorFileV2 {
+    impl savana_vault::VaultRollbackAnchorV2 for PosixAuthenticatedAnchorFileV2 {
         fn current_head(
             &self,
         ) -> Result<savana_vault::VaultStateHeadV2, savana_vault::VaultErrorV2> {
@@ -1260,7 +1462,7 @@ mod linux {
     }
 
     impl crate::v2_agent_durable::KernelAgentAuthorityRollbackAnchorV2
-        for LinuxAuthenticatedAnchorFileV2
+        for PosixAuthenticatedAnchorFileV2
     {
         fn current_head(
             &self,
@@ -1287,7 +1489,7 @@ mod linux {
         }
     }
 
-    impl savana_policy_core::v2::RollbackProtectedStateAnchorV2 for LinuxAuthenticatedAnchorFileV2 {
+    impl savana_policy_core::v2::RollbackProtectedStateAnchorV2 for PosixAuthenticatedAnchorFileV2 {
         fn current_head(
             &self,
         ) -> Result<
@@ -1342,7 +1544,8 @@ mod linux {
         Ok(UnixMillisV2::new(milliseconds))
     }
 
-    fn current_linux_self_peer_binding() -> Result<PeerIdentityBindingV2, StableCode> {
+    #[cfg(target_os = "linux")]
+    fn current_native_self_peer_binding() -> Result<PeerIdentityBindingV2, StableCode> {
         let (left, right) =
             std::os::unix::net::UnixStream::pair().map_err(|_| StableCode::KernelUnavailable)?;
         let pinned = savana_platform_identity::measure_linux_peer_v2(&left)
@@ -1361,6 +1564,34 @@ mod linux {
                 *pid,
                 *process_start_time,
                 Digest32V2::new(*executable_measurement),
+            )
+            .map_err(|_| StableCode::KernelUnavailable),
+            _ => Err(StableCode::KernelUnavailable),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn current_native_self_peer_binding() -> Result<PeerIdentityBindingV2, StableCode> {
+        let audit_token = savana_platform_identity::current_process_audit_token_v2()
+            .map_err(|_| StableCode::KernelUnavailable)?;
+        let measurement = savana_platform_identity::measure_macos_peer_v2(audit_token)
+            .map_err(|_| StableCode::KernelUnavailable)?;
+        match measurement {
+            savana_platform_identity::NativePeerMeasurementV2::MacOs {
+                audit_token,
+                euid,
+                egid,
+                bundle_id,
+                team_id,
+                code_directory_measurement,
+                ..
+            } => PeerIdentityBindingV2::macos(
+                audit_token,
+                euid,
+                egid,
+                bundle_id.as_str().to_owned(),
+                team_id.as_str().to_owned(),
+                Digest32V2::new(code_directory_measurement),
             )
             .map_err(|_| StableCode::KernelUnavailable),
             _ => Err(StableCode::KernelUnavailable),

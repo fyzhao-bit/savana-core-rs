@@ -29,8 +29,9 @@ pub use linux::{
 };
 #[cfg(target_os = "macos")]
 pub use macos::{
-    current_process_audit_token_v2, measure_macos_peer_v2, parse_macos_audit_token_v2,
-    MacOsAuditIdentityV2,
+    current_process_audit_token_v2, measure_macos_peer_v2, measure_macos_static_code_v2,
+    parse_macos_audit_token_v2, pin_current_macos_service_v2, MacOsAuditIdentityV2,
+    MacOsCodeIdentityMeasurementV2, PinnedMacOsServiceV2,
 };
 #[cfg(target_os = "macos")]
 pub use macos_activation::{

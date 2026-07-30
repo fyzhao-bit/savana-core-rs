@@ -12,6 +12,13 @@ workspace = true
 [features]
 default = []
 test-support = ["savana-policy-core/test-support"]
+macos-development-authority = [
+    "savana-agentd/macos-development-authority",
+    "savana-approvald/macos-development-authority",
+    "savana-execd/macos-development-authority",
+    "savana-ingressd/macos-development-authority",
+    "savana-policy-core/macos-development-authority",
+]
 
 [dependencies]
 savana-agentd = { path = "../savana-agentd" }
@@ -72,3 +79,8 @@ required-features = ["test-support"]
 name = "v2_end_to_end"
 path = "tests/v2_end_to_end.rs"
 required-features = ["test-support"]
+
+[[test]]
+name = "macos_startup"
+path = "tests/macos_startup.rs"
+required-features = ["test-support", "macos-development-authority"]

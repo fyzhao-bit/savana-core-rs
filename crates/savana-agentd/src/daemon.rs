@@ -8,13 +8,15 @@ pub enum AgentdDaemonErrorV2 {
     EndpointUnavailable,
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos")),
+    allow(dead_code, unused_imports)
+)]
 mod implementation {
     use std::fs::{self, File};
     use std::io::{Read as _, Write as _};
     use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
     use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
-    #[cfg(target_os = "linux")]
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
     use std::sync::{mpsc, Arc, Mutex};
@@ -41,13 +43,17 @@ mod implementation {
     };
     #[cfg(target_os = "linux")]
     use savana_platform_identity::{
-        measure_linux_peer_v2, pin_current_linux_service_v2, verify_native_peer_v2,
-        BoundedIdentityStringV2, NativePeerMeasurementV2, PinnedLinuxPeerMeasurementV2,
+        measure_linux_peer_v2, pin_current_linux_service_v2, PinnedLinuxPeerMeasurementV2,
+    };
+    #[cfg(target_os = "macos")]
+    use savana_platform_identity::{pin_current_macos_service_v2, PinnedMacOsServiceV2};
+    use savana_platform_identity::{
+        verify_native_peer_v2, BoundedIdentityStringV2, NativePeerMeasurementV2,
     };
     use savana_policy_core::v2::{
-        decode_hex_32_v2, load_verified_filesystem_startup_v2, read_verified_regular_file_v2,
-        AuthenticatedFileAnchorV2, ClosedServiceEdgeIdV2, ClosedServiceIdV2,
-        FilesystemServiceObservationConfigV2, VerifiedDaemonStartupV2,
+        decode_hex_32_v2, read_verified_regular_file_v2, AuthenticatedFileAnchorV2,
+        ClosedServiceEdgeIdV2, ClosedServiceIdV2, FilesystemServiceObservationConfigV2,
+        VerifiedDaemonStartupV2,
     };
     use serde::Deserialize;
     use sha2::{Digest as _, Sha256};
@@ -61,14 +67,36 @@ mod implementation {
         PinnedMtlsAgentPlannerClientV2, SuiteOneAgentKernelClientV2, VerifiedAgentControlPeerV2,
     };
 
-    const PRODUCTION_BOOTSTRAP_PATH_V2: &str = "/etc/savana/agentd-bootstrap-v2.json";
+    #[cfg(target_os = "linux")]
+    const NATIVE_BOOTSTRAP_PATH_V2: &str = "/etc/savana/agentd-bootstrap-v2.json";
+    #[cfg(target_os = "macos")]
+    const NATIVE_BOOTSTRAP_PATH_V2: &str =
+        "/Library/Application Support/Savana/Development/config/agentd-bootstrap-v2.json";
+    #[cfg(target_os = "linux")]
     const MANIFEST_ROOT_PATH_V2: &str = "/etc/savana/trust/deployment-manifest-root-v2.json";
+    #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
+    const MANIFEST_ROOT_PATH_V2: &str = "/Library/Application Support/Savana/Development/config/trust/deployment-manifest-root-v2.json";
+    #[cfg(target_os = "linux")]
     const KERNEL_SERVER_PUBLIC_KEY_PATH_V2: &str = "/etc/savana/agentd/keys/kerneld-agent-v2.pub";
+    #[cfg(target_os = "macos")]
+    const KERNEL_SERVER_PUBLIC_KEY_PATH_V2: &str =
+        "/Library/Application Support/Savana/Development/config/agentd/keys/kerneld-agent-v2.pub";
+    #[cfg(target_os = "linux")]
     const KERNEL_TASK_AUTHORITY_PUBLIC_KEY_PATH_V2: &str =
         "/etc/savana/agentd/keys/kerneld-task-authority-v2.pub";
+    #[cfg(target_os = "macos")]
+    const KERNEL_TASK_AUTHORITY_PUBLIC_KEY_PATH_V2: &str = "/Library/Application Support/Savana/Development/config/agentd/keys/kerneld-task-authority-v2.pub";
+    #[cfg(target_os = "linux")]
     const APPROVAL_SERVER_PUBLIC_KEY_PATH_V2: &str =
         "/etc/savana/agentd/keys/approvald-agent-v2.pub";
+    #[cfg(target_os = "macos")]
+    const APPROVAL_SERVER_PUBLIC_KEY_PATH_V2: &str =
+        "/Library/Application Support/Savana/Development/config/agentd/keys/approvald-agent-v2.pub";
+    #[cfg(target_os = "linux")]
     const CREDENTIAL_DIRECTORY_V2: &str = "/run/credentials/savana-agentd.service";
+    #[cfg(target_os = "macos")]
+    const CREDENTIAL_DIRECTORY_V2: &str =
+        "/Library/Application Support/Savana/Development/credentials/agentd";
     const AGENT_CLIENT_SEED_CREDENTIAL_V2: &str = "agent-kernel-v2.seed";
     const APPROVAL_CLIENT_SEED_CREDENTIAL_V2: &str = "agent-approval-v2.seed";
     const STATE_ENCRYPTION_CREDENTIAL_V2: &str = "task-state-encryption-v2.key";
@@ -84,7 +112,11 @@ mod implementation {
     const CONTROL_FD_NAME_V2: &str = "savana-jarvis-agent-control";
     const JARVIS_HTTP_FD_NAME_V2: &str = "savana-jarvis-http";
     const AGENT_HTTP_FD_NAME_V2: &str = "savana-agent-http";
+    #[cfg(target_os = "linux")]
     const CONTROL_SOCKET_PATH_V2: &str = "/run/savana/agentd/jarvis/control.sock";
+    #[cfg(target_os = "macos")]
+    const CONTROL_SOCKET_PATH_V2: &str =
+        "/Library/Application Support/Savana/Development/run/agentd/jarvis/control.sock";
     const MAX_BOOTSTRAP_BYTES_V2: usize = 128 * 1024;
     const MAX_TLS_CREDENTIAL_BYTES_V2: usize = 64 * 1024;
     const MAX_CONTROL_FRAME_BYTES_V2: usize = 1024 * 1024;
@@ -100,6 +132,10 @@ mod implementation {
     const BOOTSTRAP_HTML_V2: &[u8] = b"<!doctype html><html><head><meta charset=\"utf-8\"><title>Savana bootstrap</title></head><body><main data-bootstrap=\"true\"><h1>Secure kernel bootstrap</h1><p id=\"savana-status\">Validating the one-time selector...</p></main><script src=\"/v2/savana-ui.js\" defer></script></body></html>";
 
     #[derive(Deserialize)]
+    #[cfg_attr(
+        all(target_os = "macos", not(feature = "macos-development-authority")),
+        allow(dead_code)
+    )]
     #[serde(deny_unknown_fields)]
     struct BootstrapDtoV2 {
         signed_manifest_path: PathBuf,
@@ -124,7 +160,11 @@ mod implementation {
         jarvis_os_peer_class: String,
         jarvis_expected_uid: u32,
         jarvis_expected_gid: u32,
+        #[cfg_attr(target_os = "macos", allow(dead_code))]
         jarvis_executable_digest: String,
+        #[cfg_attr(target_os = "linux", allow(dead_code))]
+        #[serde(default)]
+        jarvis_code_identity_digest: Option<String>,
     }
 
     struct AgentTaskAnchorAdapterV2 {
@@ -162,14 +202,14 @@ mod implementation {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     pub(crate) fn run(_config_path: &Path) -> Result<(), AgentdDaemonErrorV2> {
         Err(AgentdDaemonErrorV2::DeploymentUnavailable)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn run(config_path: &Path) -> Result<(), AgentdDaemonErrorV2> {
-        if config_path != Path::new(PRODUCTION_BOOTSTRAP_PATH_V2) {
+        if config_path != Path::new(NATIVE_BOOTSTRAP_PATH_V2) {
             return Err(AgentdDaemonErrorV2::DeploymentUnavailable);
         }
         let bytes =
@@ -185,23 +225,26 @@ mod implementation {
         {
             return Err(AgentdDaemonErrorV2::DeploymentUnavailable);
         }
-        let startup = load_verified_filesystem_startup_v2(
-            Path::new(MANIFEST_ROOT_PATH_V2),
-            &bootstrap.signed_manifest_path,
-            &bootstrap.effect_ledger_projection_path,
-            &bootstrap.services,
-        )
-        .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
+        let startup = load_native_startup(&bootstrap)?;
         startup
             .verify_loaded_service_config_v2(ClosedServiceIdV2::Agentd, &bytes)
             .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
         let self_lock = startup
             .service_lock(ClosedServiceIdV2::Agentd)
             .ok_or(AgentdDaemonErrorV2::DeploymentUnavailable)?;
+        #[cfg(target_os = "linux")]
         let self_process = pin_current_linux_service_v2(
             self_lock.uid,
             self_lock.gid,
             *self_lock.executable_digest.as_bytes(),
+        )
+        .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
+        #[cfg(target_os = "macos")]
+        let self_process = pin_current_macos_service_v2(
+            self_lock.uid,
+            self_lock.gid,
+            *self_lock.executable_digest.as_bytes(),
+            *self_lock.code_identity_digest.as_bytes(),
         )
         .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
         let (control_listener, jarvis_http_listener, agent_http_listener) =
@@ -424,8 +467,17 @@ mod implementation {
             jarvis_identity,
             expected_uid: bootstrap.jarvis_expected_uid,
             expected_gid: bootstrap.jarvis_expected_gid,
-            expected_executable_digest: decode_hex_32_v2(&bootstrap.jarvis_executable_digest)
+            #[cfg(target_os = "linux")]
+            expected_identity_digest: decode_hex_32_v2(&bootstrap.jarvis_executable_digest)
                 .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?,
+            #[cfg(target_os = "macos")]
+            expected_identity_digest: decode_hex_32_v2(
+                bootstrap
+                    .jarvis_code_identity_digest
+                    .as_deref()
+                    .ok_or(AgentdDaemonErrorV2::DeploymentUnavailable)?,
+            )
+            .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?,
         };
         serve(
             control_listener,
@@ -438,6 +490,67 @@ mod implementation {
     }
 
     #[cfg(target_os = "linux")]
+    fn load_native_startup(
+        bootstrap: &BootstrapDtoV2,
+    ) -> Result<VerifiedDaemonStartupV2, AgentdDaemonErrorV2> {
+        savana_policy_core::v2::load_verified_filesystem_startup_v2(
+            Path::new(MANIFEST_ROOT_PATH_V2),
+            &bootstrap.signed_manifest_path,
+            &bootstrap.effect_ledger_projection_path,
+            &bootstrap.services,
+        )
+        .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)
+    }
+
+    #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
+    fn load_native_startup(
+        bootstrap: &BootstrapDtoV2,
+    ) -> Result<VerifiedDaemonStartupV2, AgentdDaemonErrorV2> {
+        let root = Path::new("/Library/Application Support/Savana/Development");
+        let paths = [
+            &bootstrap.signed_manifest_path,
+            &bootstrap.effect_ledger_projection_path,
+            &bootstrap.effect_gate_path,
+            &bootstrap.task_state_path,
+            &bootstrap.rollback_anchor_path,
+        ];
+        if paths
+            .into_iter()
+            .any(|path| !closed_development_path(root, path))
+        {
+            return Err(AgentdDaemonErrorV2::DeploymentUnavailable);
+        }
+        savana_policy_core::load_verified_macos_development_startup_v2(
+            Path::new(MANIFEST_ROOT_PATH_V2),
+            &bootstrap.signed_manifest_path,
+            &bootstrap.effect_ledger_projection_path,
+            &bootstrap.services,
+        )
+        .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)
+    }
+
+    #[cfg(all(target_os = "macos", not(feature = "macos-development-authority")))]
+    fn load_native_startup(
+        _bootstrap: &BootstrapDtoV2,
+    ) -> Result<VerifiedDaemonStartupV2, AgentdDaemonErrorV2> {
+        Err(AgentdDaemonErrorV2::DeploymentUnavailable)
+    }
+
+    #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
+    fn closed_development_path(root: &Path, path: &Path) -> bool {
+        path.is_absolute()
+            && path.starts_with(root)
+            && !path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::CurDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[derive(Clone, Copy)]
     struct PeerTemplateV2 {
         jarvis_principal: Digest32V2,
@@ -447,10 +560,10 @@ mod implementation {
         jarvis_identity: ServiceIdentityV2,
         expected_uid: u32,
         expected_gid: u32,
-        expected_executable_digest: [u8; 32],
+        expected_identity_digest: [u8; 32],
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn serve(
         control_listener: UnixListener,
         jarvis_http_listener: TcpListener,
@@ -502,7 +615,7 @@ mod implementation {
             .map_err(|_| AgentdDaemonErrorV2::EndpointUnavailable)?
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn serve_control(
         listener: UnixListener,
         dispatcher: Arc<AgentControlDispatcherV2>,
@@ -522,11 +635,13 @@ mod implementation {
             let (stream, _) = listener
                 .accept()
                 .map_err(|_| AgentdDaemonErrorV2::EndpointUnavailable)?;
+            #[cfg(target_os = "linux")]
             let measurement = match measure_linux_peer_v2(&stream) {
                 Ok(value) => value,
                 Err(_) => continue,
             };
-            if !matches!(
+            #[cfg(target_os = "linux")]
+            let measurement_matches = matches!(
                 measurement.measurement(),
                 NativePeerMeasurementV2::Linux {
                     uid,
@@ -535,8 +650,26 @@ mod implementation {
                     ..
                 } if *uid == peer.expected_uid
                     && *gid == peer.expected_gid
-                    && *executable_measurement == peer.expected_executable_digest
-            ) {
+                    && *executable_measurement == peer.expected_identity_digest
+            );
+            #[cfg(target_os = "macos")]
+            let measurement = match savana_platform_identity::measure_macos_unix_peer_v2(&stream) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            #[cfg(target_os = "macos")]
+            let measurement_matches = matches!(
+                &measurement,
+                NativePeerMeasurementV2::MacOs {
+                    euid,
+                    egid,
+                    code_directory_measurement,
+                    ..
+                } if *euid == peer.expected_uid
+                    && *egid == peer.expected_gid
+                    && *code_directory_measurement == peer.expected_identity_digest
+            );
+            if !measurement_matches {
                 continue;
             }
             let verified_peer = VerifiedAgentControlPeerV2::from_mutual_authentication(
@@ -560,7 +693,7 @@ mod implementation {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn serve_http(
         listener: TcpListener,
         service: FixedHttpServiceV2,
@@ -591,7 +724,7 @@ mod implementation {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn http_worker_loop(
         receiver: Arc<Mutex<mpsc::Receiver<TcpStream>>>,
         service: FixedHttpServiceV2,
@@ -615,7 +748,7 @@ mod implementation {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn serve_http_stream(
         mut stream: TcpStream,
         service: FixedHttpServiceV2,
@@ -726,7 +859,7 @@ mod implementation {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn write_http(
         stream: &mut TcpStream,
         status: u16,
@@ -744,7 +877,14 @@ mod implementation {
         verified_peer: VerifiedAgentControlPeerV2,
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(target_os = "macos")]
+    struct ControlJobV2 {
+        stream: UnixStream,
+        measurement: NativePeerMeasurementV2,
+        verified_peer: VerifiedAgentControlPeerV2,
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn control_worker_loop(
         receiver: Arc<Mutex<mpsc::Receiver<ControlJobV2>>>,
         dispatcher: Arc<AgentControlDispatcherV2>,
@@ -762,7 +902,7 @@ mod implementation {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn serve_control_stream(
         mut stream: UnixStream,
         dispatcher: Arc<AgentControlDispatcherV2>,
@@ -782,7 +922,7 @@ mod implementation {
         write_frame(&mut stream, &response)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>, AgentdDaemonErrorV2> {
         let mut length = [0_u8; 4];
         stream
@@ -799,7 +939,7 @@ mod implementation {
         Ok(bytes)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> Result<(), AgentdDaemonErrorV2> {
         let length =
             u32::try_from(bytes.len()).map_err(|_| AgentdDaemonErrorV2::EndpointUnavailable)?;
@@ -839,6 +979,41 @@ mod implementation {
                 *pid,
                 *process_start_time,
                 Digest32V2::new(*executable_measurement),
+            )
+            .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable),
+            _ => Err(AgentdDaemonErrorV2::DeploymentUnavailable),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn current_process_binding(
+        edge: &savana_policy_core::v2::ServiceEdgeLockV2,
+        pinned: &PinnedMacOsServiceV2,
+    ) -> Result<PeerIdentityBindingV2, AgentdDaemonErrorV2> {
+        let role = BoundedIdentityStringV2::new(
+            ClosedServiceEdgeIdV2::AgentKernel
+                .role_identity()
+                .to_owned(),
+        )
+        .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
+        verify_native_peer_v2(&edge.expected_client, &role, pinned.measurement())
+            .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
+        match pinned.measurement() {
+            NativePeerMeasurementV2::MacOs {
+                audit_token,
+                euid,
+                egid,
+                bundle_id,
+                team_id,
+                code_directory_measurement,
+                ..
+            } => PeerIdentityBindingV2::macos(
+                *audit_token,
+                *euid,
+                *egid,
+                bundle_id.as_str().to_owned(),
+                team_id.as_str().to_owned(),
+                Digest32V2::new(*code_directory_measurement),
             )
             .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable),
             _ => Err(AgentdDaemonErrorV2::DeploymentUnavailable),
@@ -899,6 +1074,60 @@ mod implementation {
         Ok((listener, jarvis_http, agent_http))
     }
 
+    #[cfg(target_os = "macos")]
+    fn take_verified_listeners(
+        startup: &VerifiedDaemonStartupV2,
+    ) -> Result<(UnixListener, TcpListener, TcpListener), AgentdDaemonErrorV2> {
+        let inherited =
+            savana_platform_identity::take_launchd_unix_listeners_v2(&[CONTROL_FD_NAME_V2])
+                .map_err(|_| AgentdDaemonErrorV2::EndpointUnavailable)?;
+        let mut inherited = inherited.into_iter();
+        let (name, listener) = inherited
+            .next()
+            .ok_or(AgentdDaemonErrorV2::EndpointUnavailable)?
+            .into_parts();
+        let tcp = savana_platform_identity::take_launchd_tcp_listeners_v2(&[
+            JARVIS_HTTP_FD_NAME_V2,
+            AGENT_HTTP_FD_NAME_V2,
+        ])
+        .map_err(|_| AgentdDaemonErrorV2::EndpointUnavailable)?;
+        let mut tcp = tcp.into_iter();
+        let (jarvis_name, jarvis_http) = tcp
+            .next()
+            .ok_or(AgentdDaemonErrorV2::EndpointUnavailable)?
+            .into_parts();
+        let (agent_name, agent_http) = tcp
+            .next()
+            .ok_or(AgentdDaemonErrorV2::EndpointUnavailable)?
+            .into_parts();
+        let path = Path::new(CONTROL_SOCKET_PATH_V2);
+        let service = startup
+            .service_lock(ClosedServiceIdV2::Agentd)
+            .ok_or(AgentdDaemonErrorV2::DeploymentUnavailable)?;
+        let metadata =
+            fs::symlink_metadata(path).map_err(|_| AgentdDaemonErrorV2::EndpointUnavailable)?;
+        if inherited.next().is_some()
+            || tcp.next().is_some()
+            || name != CONTROL_FD_NAME_V2
+            || listener
+                .local_addr()
+                .map_err(|_| AgentdDaemonErrorV2::EndpointUnavailable)?
+                .as_pathname()
+                != Some(path)
+            || metadata.file_type().is_symlink()
+            || !metadata.file_type().is_socket()
+            || metadata.uid() != service.socket_uid
+            || metadata.gid() != service.socket_gid
+            || metadata.mode() & 0o7777 != service.socket_mode
+            || path_digest(path)? != service.socket_path_digest
+        {
+            return Err(AgentdDaemonErrorV2::EndpointUnavailable);
+        }
+        verify_tcp_listener(&jarvis_http, jarvis_name, JARVIS_HTTP_FD_NAME_V2, 8765)?;
+        verify_tcp_listener(&agent_http, agent_name, AGENT_HTTP_FD_NAME_V2, 8768)?;
+        Ok((listener, jarvis_http, agent_http))
+    }
+
     #[cfg(target_os = "linux")]
     fn verify_tcp_listener(
         listener: &TcpListener,
@@ -911,6 +1140,24 @@ mod implementation {
             || !getsockopt(listener, AcceptConn)
                 .map_err(|_| AgentdDaemonErrorV2::EndpointUnavailable)?
             || FileType::from_raw_mode(descriptor.st_mode) != FileType::Socket
+            || listener
+                .local_addr()
+                .map_err(|_| AgentdDaemonErrorV2::EndpointUnavailable)?
+                != SocketAddr::from((Ipv4Addr::LOCALHOST, port))
+        {
+            return Err(AgentdDaemonErrorV2::EndpointUnavailable);
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn verify_tcp_listener(
+        listener: &TcpListener,
+        actual_name: String,
+        expected_name: &str,
+        port: u16,
+    ) -> Result<(), AgentdDaemonErrorV2> {
+        if actual_name != expected_name
             || listener
                 .local_addr()
                 .map_err(|_| AgentdDaemonErrorV2::EndpointUnavailable)?
@@ -1011,7 +1258,7 @@ mod implementation {
         Ok(UnixMillisV2::new(millis))
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn decode_form_transfer(body: &[u8]) -> Result<[u8; 32], AgentdDaemonErrorV2> {
         let encoded = body
             .strip_prefix(b"transfer=")

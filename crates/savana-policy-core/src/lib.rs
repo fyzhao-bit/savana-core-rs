@@ -399,6 +399,9 @@ mod test_support;
 #[cfg(all(feature = "test-support", not(debug_assertions)))]
 compile_error!("test-support cannot be enabled in a release build");
 
+#[cfg(all(feature = "macos-development-authority", not(debug_assertions)))]
+compile_error!("macos-development-authority cannot be enabled in a release build");
+
 mod atomic_file;
 mod bundle;
 mod current_policy;
@@ -412,7 +415,13 @@ mod runtime;
 mod signature;
 mod validate;
 
+#[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
+mod macos_development_startup;
+
 pub mod v2;
+
+#[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
+pub use macos_development_startup::load_verified_macos_development_startup_v2;
 
 pub use bundle::AuthorityRoleV1;
 pub use current_policy::CurrentPolicyCapability;

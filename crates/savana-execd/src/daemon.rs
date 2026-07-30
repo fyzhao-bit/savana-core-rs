@@ -8,13 +8,15 @@ pub enum ExecdDaemonErrorV2 {
     EndpointUnavailable,
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos")),
+    allow(dead_code, unused_imports)
+)]
 mod implementation {
     use std::fs::{self, File};
     use std::io::Write as _;
     use std::net::SocketAddr;
     use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, OpenOptionsExt as _};
-    #[cfg(target_os = "linux")]
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
     use std::sync::{mpsc, Arc, Mutex};
@@ -31,13 +33,13 @@ mod implementation {
         HpkeX25519KeyIdV2, PeerIdentityBindingV2, UnixMillisV2,
     };
     #[cfg(target_os = "linux")]
+    use savana_platform_identity::{measure_linux_peer_v2, PinnedLinuxPeerMeasurementV2};
     use savana_platform_identity::{
-        measure_linux_peer_v2, verify_native_peer_v2, BoundedIdentityStringV2,
-        NativePeerMeasurementV2, PinnedLinuxPeerMeasurementV2,
+        verify_native_peer_v2, BoundedIdentityStringV2, NativePeerMeasurementV2,
     };
     use savana_policy_core::v2::{
-        listener_identity_digest_v2, load_verified_filesystem_startup_v2, ClosedServiceEdgeIdV2,
-        ClosedServiceIdV2, FilesystemServiceObservationConfigV2, VerifiedDaemonStartupV2,
+        listener_identity_digest_v2, ClosedServiceEdgeIdV2, ClosedServiceIdV2,
+        FilesystemServiceObservationConfigV2, VerifiedDaemonStartupV2,
     };
     use serde::Deserialize;
     use sha2::{Digest as _, Sha256};
@@ -55,12 +57,31 @@ mod implementation {
         VerifiedExecdDeploymentV2,
     };
 
-    const PRODUCTION_BOOTSTRAP_PATH_V2: &str = "/etc/savana/execd-bootstrap-v2.json";
+    #[cfg(target_os = "linux")]
+    const NATIVE_BOOTSTRAP_PATH_V2: &str = "/etc/savana/execd-bootstrap-v2.json";
+    #[cfg(target_os = "macos")]
+    const NATIVE_BOOTSTRAP_PATH_V2: &str =
+        "/Library/Application Support/Savana/Development/config/execd-bootstrap-v2.json";
+    #[cfg(target_os = "linux")]
     const MANIFEST_ROOT_PATH_V2: &str = "/etc/savana/trust/deployment-manifest-root-v2.json";
+    #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
+    const MANIFEST_ROOT_PATH_V2: &str = "/Library/Application Support/Savana/Development/config/trust/deployment-manifest-root-v2.json";
+    #[cfg(target_os = "linux")]
     const KERNEL_CLIENT_PUBLIC_KEY_PATH_V2: &str = "/etc/savana/execd/keys/kerneld-executor-v2.pub";
+    #[cfg(target_os = "macos")]
+    const KERNEL_CLIENT_PUBLIC_KEY_PATH_V2: &str =
+        "/Library/Application Support/Savana/Development/config/execd/keys/kerneld-executor-v2.pub";
+    #[cfg(target_os = "linux")]
     const KERNEL_ENVELOPE_PUBLIC_KEY_PATH_V2: &str =
         "/etc/savana/execd/keys/kerneld-envelope-v2.pub";
+    #[cfg(target_os = "macos")]
+    const KERNEL_ENVELOPE_PUBLIC_KEY_PATH_V2: &str =
+        "/Library/Application Support/Savana/Development/config/execd/keys/kerneld-envelope-v2.pub";
+    #[cfg(target_os = "linux")]
     const SYSTEMD_CREDENTIAL_DIRECTORY_V2: &str = "/run/credentials/savana-execd.service";
+    #[cfg(target_os = "macos")]
+    const SYSTEMD_CREDENTIAL_DIRECTORY_V2: &str =
+        "/Library/Application Support/Savana/Development/credentials/execd";
     const SERVER_SEED_CREDENTIAL_V2: &str = "executor-server-v2.seed";
     const BOOT_ID_CREDENTIAL_V2: &str = "execd-boot-v2.id";
     const EFFECT_RECEIPT_SEED_CREDENTIAL_V2: &str = "effect-receipt-v2.seed";
@@ -70,7 +91,11 @@ mod implementation {
     const CONNECTOR_DESCRIPTOR_SEED_CREDENTIAL_V2: &str = "connector-descriptor-v2.seed";
     const PROVIDER_TLS_PRIVATE_KEY_CREDENTIAL_V2: &str = "provider-tls-private-key-v2.der";
     const EXECUTOR_FD_NAME_V2: &str = "savana-kernel-executor";
+    #[cfg(target_os = "linux")]
     const EXECUTOR_SOCKET_PATH_V2: &str = "/run/savana/execd/kerneld/execd.sock";
+    #[cfg(target_os = "macos")]
+    const EXECUTOR_SOCKET_PATH_V2: &str =
+        "/Library/Application Support/Savana/Development/run/execd/kerneld/execd.sock";
     const MAX_BOOTSTRAP_BYTES_V2: usize = 128 * 1024;
     const MAX_ARTIFACT_BYTES_V2: usize = 256 * 1024 * 1024;
     const MAX_CREDENTIAL_BYTES_V2: usize = 128 * 1024;
@@ -84,6 +109,10 @@ mod implementation {
     const AUTHENTICATED_ANCHOR_BYTES_V2: usize = 80;
 
     #[derive(Deserialize)]
+    #[cfg_attr(
+        all(target_os = "macos", not(feature = "macos-development-authority")),
+        allow(dead_code)
+    )]
     #[serde(deny_unknown_fields)]
     struct BootstrapDtoV2 {
         signed_manifest_path: PathBuf,
@@ -156,22 +185,38 @@ mod implementation {
         _pinned: PinnedLinuxPeerMeasurementV2,
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    struct VerifiedAcceptedConnectionV2 {
+        stream: UnixStream,
+        binding: PeerIdentityBindingV2,
+        _measurement: NativePeerMeasurementV2,
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     pub(crate) fn run(_config_path: &Path) -> Result<(), ExecdDaemonErrorV2> {
         Err(ExecdDaemonErrorV2::DeploymentUnavailable)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn run(config_path: &Path) -> Result<(), ExecdDaemonErrorV2> {
         let loaded = load_verified_startup(config_path)?;
         let self_lock = loaded
             .startup
             .service_lock(ClosedServiceIdV2::Execd)
             .ok_or(ExecdDaemonErrorV2::DeploymentUnavailable)?;
+        #[cfg(target_os = "linux")]
         let _self_process = savana_platform_identity::pin_current_linux_service_v2(
             self_lock.uid,
             self_lock.gid,
             *self_lock.executable_digest.as_bytes(),
+        )
+        .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
+        #[cfg(target_os = "macos")]
+        let _self_process = savana_platform_identity::pin_current_macos_service_v2(
+            self_lock.uid,
+            self_lock.gid,
+            *self_lock.executable_digest.as_bytes(),
+            *self_lock.code_identity_digest.as_bytes(),
         )
         .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
         let edge = loaded
@@ -363,7 +408,7 @@ mod implementation {
         ))
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn serve(
         listener: UnixListener,
         expected_client: savana_platform_identity::ExpectedNativePeerV2,
@@ -390,23 +435,47 @@ mod implementation {
             let (stream, _) = listener
                 .accept()
                 .map_err(|_| ExecdDaemonErrorV2::EndpointUnavailable)?;
+            #[cfg(target_os = "linux")]
             let pinned = match measure_linux_peer_v2(&stream) {
                 Ok(value) => value,
                 Err(_) => continue,
             };
+            #[cfg(target_os = "linux")]
             if verify_native_peer_v2(&expected_client, &role_identity, pinned.measurement())
                 .is_err()
             {
                 continue;
             }
+            #[cfg(target_os = "linux")]
             let binding = match peer_binding(pinned.measurement()) {
                 Ok(value) => value,
                 Err(()) => continue,
             };
+            #[cfg(target_os = "linux")]
             let connection = VerifiedAcceptedConnectionV2 {
                 stream,
                 binding,
                 _pinned: pinned,
+            };
+            #[cfg(target_os = "macos")]
+            let measurement = match savana_platform_identity::measure_macos_unix_peer_v2(&stream) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            #[cfg(target_os = "macos")]
+            if verify_native_peer_v2(&expected_client, &role_identity, &measurement).is_err() {
+                continue;
+            }
+            #[cfg(target_os = "macos")]
+            let binding = match peer_binding(&measurement) {
+                Ok(value) => value,
+                Err(()) => continue,
+            };
+            #[cfg(target_os = "macos")]
+            let connection = VerifiedAcceptedConnectionV2 {
+                stream,
+                binding,
+                _measurement: measurement,
             };
             if sender.try_send(connection).is_err() {
                 continue;
@@ -414,7 +483,7 @@ mod implementation {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn worker_loop(
         receiver: Arc<Mutex<mpsc::Receiver<VerifiedAcceptedConnectionV2>>>,
         server: Arc<ExecdSuiteOneServerV2>,
@@ -435,7 +504,7 @@ mod implementation {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn peer_binding(measurement: &NativePeerMeasurementV2) -> Result<PeerIdentityBindingV2, ()> {
         match measurement {
             NativePeerMeasurementV2::Linux {
@@ -450,6 +519,23 @@ mod implementation {
                 *pid,
                 *process_start_time,
                 Digest32V2::new(*executable_measurement),
+            )
+            .map_err(|_| ()),
+            NativePeerMeasurementV2::MacOs {
+                audit_token,
+                euid,
+                egid,
+                bundle_id,
+                team_id,
+                code_directory_measurement,
+                ..
+            } => PeerIdentityBindingV2::macos(
+                *audit_token,
+                *euid,
+                *egid,
+                bundle_id.as_str().to_owned(),
+                team_id.as_str().to_owned(),
+                Digest32V2::new(*code_directory_measurement),
             )
             .map_err(|_| ()),
             _ => Err(()),
@@ -515,8 +601,57 @@ mod implementation {
         Ok(listener)
     }
 
+    #[cfg(target_os = "macos")]
+    fn take_verified_listener(
+        startup: &VerifiedDaemonStartupV2,
+    ) -> Result<UnixListener, ExecdDaemonErrorV2> {
+        let inherited =
+            savana_platform_identity::take_launchd_unix_listeners_v2(&[EXECUTOR_FD_NAME_V2])
+                .map_err(|_| ExecdDaemonErrorV2::EndpointUnavailable)?;
+        let mut inherited = inherited.into_iter();
+        let (name, listener) = inherited
+            .next()
+            .ok_or(ExecdDaemonErrorV2::EndpointUnavailable)?
+            .into_parts();
+        let path = Path::new(EXECUTOR_SOCKET_PATH_V2);
+        let metadata =
+            fs::symlink_metadata(path).map_err(|_| ExecdDaemonErrorV2::EndpointUnavailable)?;
+        let edge = startup
+            .edge_lock(ClosedServiceEdgeIdV2::KernelExecutor)
+            .ok_or(ExecdDaemonErrorV2::DeploymentUnavailable)?;
+        let service = startup
+            .service_lock(ClosedServiceIdV2::Execd)
+            .ok_or(ExecdDaemonErrorV2::DeploymentUnavailable)?;
+        let mode = metadata.mode() & 0o7777;
+        if inherited.next().is_some()
+            || name != EXECUTOR_FD_NAME_V2
+            || listener
+                .local_addr()
+                .map_err(|_| ExecdDaemonErrorV2::EndpointUnavailable)?
+                .as_pathname()
+                != Some(path)
+            || metadata.file_type().is_symlink()
+            || !metadata.file_type().is_socket()
+            || metadata.uid() != service.socket_uid
+            || metadata.gid() != service.socket_gid
+            || mode != 0o660
+            || listener_identity_digest_v2(
+                EndpointRoleV2::KernelExecutor,
+                path,
+                metadata.uid(),
+                metadata.gid(),
+                mode,
+            )
+            .map_err(|_| ExecdDaemonErrorV2::EndpointUnavailable)?
+                != edge.listener_identity_digest
+        {
+            return Err(ExecdDaemonErrorV2::EndpointUnavailable);
+        }
+        Ok(listener)
+    }
+
     fn load_verified_startup(config_path: &Path) -> Result<LoadedStartupV2, ExecdDaemonErrorV2> {
-        if config_path != Path::new(PRODUCTION_BOOTSTRAP_PATH_V2) {
+        if config_path != Path::new(NATIVE_BOOTSTRAP_PATH_V2) {
             return Err(ExecdDaemonErrorV2::DeploymentUnavailable);
         }
         let bootstrap_bytes =
@@ -526,13 +661,7 @@ mod implementation {
         if bootstrap.services.len() != SERVICE_COUNT_V2 {
             return Err(ExecdDaemonErrorV2::DeploymentUnavailable);
         }
-        let startup = load_verified_filesystem_startup_v2(
-            Path::new(MANIFEST_ROOT_PATH_V2),
-            &bootstrap.signed_manifest_path,
-            &bootstrap.effect_ledger_projection_path,
-            &bootstrap.services,
-        )
-        .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
+        let startup = load_native_deployment_startup(&bootstrap)?;
         startup
             .verify_loaded_service_config_v2(ClosedServiceIdV2::Execd, &bootstrap_bytes)
             .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
@@ -542,6 +671,73 @@ mod implementation {
             bootstrap,
             keys,
         })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn load_native_deployment_startup(
+        bootstrap: &BootstrapDtoV2,
+    ) -> Result<VerifiedDaemonStartupV2, ExecdDaemonErrorV2> {
+        savana_policy_core::v2::load_verified_filesystem_startup_v2(
+            Path::new(MANIFEST_ROOT_PATH_V2),
+            &bootstrap.signed_manifest_path,
+            &bootstrap.effect_ledger_projection_path,
+            &bootstrap.services,
+        )
+        .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)
+    }
+
+    #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
+    fn load_native_deployment_startup(
+        bootstrap: &BootstrapDtoV2,
+    ) -> Result<VerifiedDaemonStartupV2, ExecdDaemonErrorV2> {
+        let root = Path::new("/Library/Application Support/Savana/Development");
+        let mut paths = vec![
+            &bootstrap.signed_manifest_path,
+            &bootstrap.effect_ledger_projection_path,
+            &bootstrap.journal_path,
+            &bootstrap.rollback_anchor_path,
+            &bootstrap.effect_gate_path,
+            &bootstrap.worker.sandbox_program_path,
+            &bootstrap.worker.worker_program_path,
+            &bootstrap.worker.no_network_profile_path,
+            &bootstrap.worker.credential_absence_profile_path,
+            &bootstrap.provider.root_certificate_path,
+        ];
+        paths.extend(bootstrap.provider.client_certificate_paths.iter());
+        if paths
+            .into_iter()
+            .any(|path| !closed_development_path(root, path))
+        {
+            return Err(ExecdDaemonErrorV2::DeploymentUnavailable);
+        }
+        savana_policy_core::load_verified_macos_development_startup_v2(
+            Path::new(MANIFEST_ROOT_PATH_V2),
+            &bootstrap.signed_manifest_path,
+            &bootstrap.effect_ledger_projection_path,
+            &bootstrap.services,
+        )
+        .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)
+    }
+
+    #[cfg(all(target_os = "macos", not(feature = "macos-development-authority")))]
+    fn load_native_deployment_startup(
+        _bootstrap: &BootstrapDtoV2,
+    ) -> Result<VerifiedDaemonStartupV2, ExecdDaemonErrorV2> {
+        Err(ExecdDaemonErrorV2::DeploymentUnavailable)
+    }
+
+    #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
+    fn closed_development_path(root: &Path, path: &Path) -> bool {
+        path.is_absolute()
+            && path.starts_with(root)
+            && !path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::CurDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
     }
 
     fn read_regular_file(

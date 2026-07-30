@@ -32,7 +32,9 @@ type CFAllocatorRef = *const c_void;
 type CFStringRef = *const c_void;
 type CFDataRef = *const c_void;
 type CFDictionaryRef = *const c_void;
+type CFURLRef = *const c_void;
 type SecCodeRef = *const c_void;
+type SecStaticCodeRef = *const c_void;
 type SecRequirementRef = *const c_void;
 
 #[repr(C)]
@@ -315,12 +317,52 @@ pub(super) fn copy_code_identity_v2(
         return Err(NativeIdentityErrorV2::CodeIdentityUnavailable);
     }
 
+    copy_signing_identity_v2(guest.as_type())
+}
+
+pub(super) fn copy_static_code_identity_v2(
+    path: &[u8],
+) -> Result<OwnedMacOsCodeIdentityV2, NativeIdentityErrorV2> {
+    if path.is_empty() {
+        return Err(NativeIdentityErrorV2::CodeIdentityUnavailable);
+    }
+    let path_length = CFIndex::try_from(path.len())
+        .map_err(|_| NativeIdentityErrorV2::CodeIdentityUnavailable)?;
+    // SAFETY: CFURLCreateFromFileSystemRepresentation copies the exact path
+    // byte range before returning. The caller has already resolved a file,
+    // rather than a directory, at this startup boundary.
+    let url = OwnedCf::new(unsafe {
+        CFURLCreateFromFileSystemRepresentation(ptr::null(), path.as_ptr(), path_length, 0)
+    })?;
+    let mut code: SecStaticCodeRef = ptr::null();
+    // SAFETY: `url` is a live file URL and `code` addresses initialized,
+    // writable storage. Security returns one retained static-code object.
+    let create_status =
+        unsafe { SecStaticCodeCreateWithPath(url.as_type(), K_SEC_CS_DEFAULT_FLAGS, &mut code) };
+    if create_status != ERR_SEC_SUCCESS {
+        return Err(NativeIdentityErrorV2::CodeIdentityUnavailable);
+    }
+    let code = OwnedCf::new(code)?;
+    // SAFETY: `code` is a live SecStaticCode. A null requirement asks
+    // Security.framework to validate the code against its own signature.
+    let validity_status =
+        unsafe { SecStaticCodeCheckValidity(code.as_type(), K_SEC_CS_DEFAULT_FLAGS, ptr::null()) };
+    if validity_status != ERR_SEC_SUCCESS {
+        return Err(NativeIdentityErrorV2::CodeIdentityUnavailable);
+    }
+    copy_signing_identity_v2(code.as_type())
+}
+
+fn copy_signing_identity_v2(
+    code: CFTypeRef,
+) -> Result<OwnedMacOsCodeIdentityV2, NativeIdentityErrorV2> {
     let mut information: CFDictionaryRef = ptr::null();
-    // SAFETY: `guest` may be passed where SecStaticCodeRef is accepted by this
-    // API. On success `information` receives exactly one retained dictionary.
+    // SAFETY: the caller passes a Security.framework code object whose
+    // signature has already been validated. On success `information` receives
+    // exactly one retained dictionary.
     let information_status = unsafe {
         SecCodeCopySigningInformation(
-            guest.as_type(),
+            code,
             K_SEC_CS_SIGNING_INFORMATION | K_SEC_CS_REQUIREMENT_INFORMATION,
             &mut information,
         )
@@ -523,6 +565,12 @@ extern "C" {
         value_callbacks: *const c_void,
     ) -> CFDictionaryRef;
     fn CFDictionaryGetValue(dictionary: CFDictionaryRef, key: CFTypeRef) -> CFTypeRef;
+    fn CFURLCreateFromFileSystemRepresentation(
+        allocator: CFAllocatorRef,
+        buffer: *const u8,
+        buffer_length: CFIndex,
+        is_directory: u8,
+    ) -> CFURLRef;
     fn CFStringGetTypeID() -> CFTypeId;
     fn CFStringGetCString(
         string: CFStringRef,
@@ -552,6 +600,12 @@ extern "C" {
         code: SecCodeRef,
         flags: u32,
         information: *mut CFDictionaryRef,
+    ) -> i32;
+    fn SecStaticCodeCreateWithPath(path: CFURLRef, flags: u32, code: *mut SecStaticCodeRef) -> i32;
+    fn SecStaticCodeCheckValidity(
+        code: SecStaticCodeRef,
+        flags: u32,
+        requirement: SecRequirementRef,
     ) -> i32;
     fn SecRequirementGetTypeID() -> CFTypeId;
     fn SecRequirementCopyData(

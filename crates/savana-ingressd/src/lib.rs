@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+#[cfg(all(feature = "macos-development-authority", not(debug_assertions)))]
+compile_error!("macos-development-authority is forbidden in release builds");
+
 use std::fmt;
 
 use hmac::{Hmac, Mac as _};

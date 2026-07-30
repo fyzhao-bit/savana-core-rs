@@ -202,6 +202,8 @@ fn substitute_path() {
 
 #[cfg(all(feature = "test-support", not(debug_assertions)))]
 compile_error!("test-support cannot be enabled in a release build");
+#[cfg(all(feature = "macos-development-authority", not(debug_assertions)))]
+compile_error!("macos-development-authority is forbidden in release builds");
 
 mod audit;
 #[allow(dead_code)]
@@ -292,6 +294,68 @@ pub mod test_support {
 
     use crate::bootstrap::PreparedRuntime;
     use crate::DaemonError;
+
+    #[cfg(target_os = "macos")]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct MacOsV2StartupProbe {
+        result: Result<(), savana_kernel_protocol::StableCode>,
+        workers_started: usize,
+        activation_completed: usize,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl MacOsV2StartupProbe {
+        pub const fn result(self) -> Result<(), savana_kernel_protocol::StableCode> {
+            self.result
+        }
+
+        pub const fn workers_started(self) -> usize {
+            self.workers_started
+        }
+
+        pub const fn activation_completed(self) -> usize {
+            self.activation_completed
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn probe_macos_v2_startup(path: &Path) -> MacOsV2StartupProbe {
+        struct ProbeLifecycle {
+            workers_started: usize,
+            activation_completed: usize,
+        }
+
+        impl crate::server::ServerLifecycle for ProbeLifecycle {
+            fn workers_started(&mut self) -> Result<(), savana_kernel_protocol::StableCode> {
+                self.workers_started += 1;
+                Ok(())
+            }
+
+            fn activation_completed(&mut self) -> Result<(), savana_kernel_protocol::StableCode> {
+                self.activation_completed += 1;
+                Ok(())
+            }
+
+            fn poll_shutdown(&mut self) -> Result<bool, savana_kernel_protocol::StableCode> {
+                Ok(true)
+            }
+        }
+
+        let mut lifecycle = ProbeLifecycle {
+            workers_started: 0,
+            activation_completed: 0,
+        };
+        let result = crate::v2_startup::run(
+            path,
+            savana_kernel_protocol::v2::BootIdV2::new([0x51; 32]),
+            &mut lifecycle,
+        );
+        MacOsV2StartupProbe {
+            result,
+            workers_started: lifecycle.workers_started,
+            activation_completed: lifecycle.activation_completed,
+        }
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct RuntimeIdentities {

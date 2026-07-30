@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+#[cfg(all(feature = "macos-development-authority", not(debug_assertions)))]
+compile_error!("macos-development-authority is forbidden in release builds");
+
 use base64::Engine as _;
 use ed25519_dalek::{
     Signature as Ed25519Signature, Signer as _, SigningKey, VerifyingKey as Ed25519VerifyingKey,

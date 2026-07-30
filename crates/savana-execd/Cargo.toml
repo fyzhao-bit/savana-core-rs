@@ -9,6 +9,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+macos-development-authority = ["savana-policy-core/macos-development-authority"]
+
 [dependencies]
 savana-kernel-protocol = { path = "../savana-kernel-protocol" }
 savana-platform-identity = { path = "../savana-platform-identity" }
@@ -32,3 +36,8 @@ rustls.workspace = true
 
 [dev-dependencies]
 tempfile = "=3.23.0"
+
+[[test]]
+name = "macos_startup"
+path = "tests/macos_startup.rs"
+required-features = ["macos-development-authority"]

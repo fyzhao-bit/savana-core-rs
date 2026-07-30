@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+#[cfg(all(feature = "macos-development-authority", not(debug_assertions)))]
+compile_error!("macos-development-authority is forbidden in release builds");
+
 #[allow(dead_code)] // Wired by the production agentd runtime owner.
 mod effect_gate;
 #[allow(dead_code)] // Wired by the production planner/kernel client.

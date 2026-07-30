@@ -1,5 +1,11 @@
 pub(crate) mod ffi;
 
+use std::fs::File;
+use std::io::{Read as _, Seek as _, SeekFrom};
+use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::fs::MetadataExt as _;
+use std::path::Path;
+
 use sha2::{Digest as _, Sha256};
 
 use crate::{BoundedIdentityStringV2, NativeIdentityErrorV2, NativePeerMeasurementV2};
@@ -14,6 +20,54 @@ pub struct MacOsAuditIdentityV2 {
     pid: u32,
     euid: u32,
     egid: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacOsCodeIdentityMeasurementV2 {
+    bundle_id: BoundedIdentityStringV2,
+    team_id: BoundedIdentityStringV2,
+    code_directory_measurement: [u8; 32],
+    designated_requirement_measurement: [u8; 32],
+    entitlement_measurement: [u8; 32],
+}
+
+impl MacOsCodeIdentityMeasurementV2 {
+    pub fn bundle_id(&self) -> &BoundedIdentityStringV2 {
+        &self.bundle_id
+    }
+
+    pub fn team_id(&self) -> &BoundedIdentityStringV2 {
+        &self.team_id
+    }
+
+    pub const fn code_directory_measurement(&self) -> [u8; 32] {
+        self.code_directory_measurement
+    }
+
+    pub const fn designated_requirement_measurement(&self) -> [u8; 32] {
+        self.designated_requirement_measurement
+    }
+
+    pub const fn entitlement_measurement(&self) -> [u8; 32] {
+        self.entitlement_measurement
+    }
+}
+
+pub struct PinnedMacOsServiceV2 {
+    measurement: NativePeerMeasurementV2,
+    _executable: File,
+}
+
+impl PinnedMacOsServiceV2 {
+    pub const fn measurement(&self) -> &NativePeerMeasurementV2 {
+        &self.measurement
+    }
+}
+
+impl std::fmt::Debug for PinnedMacOsServiceV2 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PinnedMacOsServiceV2(<redacted>)")
+    }
 }
 
 impl MacOsAuditIdentityV2 {
@@ -62,20 +116,123 @@ pub fn measure_macos_peer_v2(
     audit_token: [u8; 32],
 ) -> Result<NativePeerMeasurementV2, NativeIdentityErrorV2> {
     let audit_identity = parse_macos_audit_token_v2(audit_token)?;
-    let code_identity = ffi::copy_code_identity_v2(audit_token)?;
+    let code_identity = measurement_from_owned(ffi::copy_code_identity_v2(audit_token)?)?;
     NativePeerMeasurementV2::macos(
         audit_token,
         audit_identity.euid,
         audit_identity.egid,
-        BoundedIdentityStringV2::new(code_identity.bundle_id)?,
-        BoundedIdentityStringV2::new(code_identity.team_id)?,
-        domain_hash(CODE_DIRECTORY_DOMAIN_V2, &code_identity.code_directory),
-        domain_hash(
+        code_identity.bundle_id,
+        code_identity.team_id,
+        code_identity.code_directory_measurement,
+        code_identity.designated_requirement_measurement,
+        code_identity.entitlement_measurement,
+    )
+}
+
+pub fn measure_macos_static_code_v2(
+    path: &Path,
+) -> Result<MacOsCodeIdentityMeasurementV2, NativeIdentityErrorV2> {
+    measurement_from_owned(ffi::copy_static_code_identity_v2(
+        path.as_os_str().as_bytes(),
+    )?)
+}
+
+pub fn pin_current_macos_service_v2(
+    expected_euid: u32,
+    expected_egid: u32,
+    expected_executable_measurement: [u8; 32],
+    expected_code_directory_measurement: [u8; 32],
+) -> Result<PinnedMacOsServiceV2, NativeIdentityErrorV2> {
+    if expected_euid == 0
+        || expected_egid == 0
+        || expected_executable_measurement
+            .iter()
+            .all(|byte| *byte == 0)
+        || expected_code_directory_measurement
+            .iter()
+            .all(|byte| *byte == 0)
+    {
+        return Err(NativeIdentityErrorV2::InvalidMeasurement);
+    }
+
+    let executable_path =
+        std::env::current_exe().map_err(|_| NativeIdentityErrorV2::CodeIdentityUnavailable)?;
+    let mut executable =
+        File::open(executable_path).map_err(|_| NativeIdentityErrorV2::CodeIdentityUnavailable)?;
+    let metadata = executable
+        .metadata()
+        .map_err(|_| NativeIdentityErrorV2::CodeIdentityUnavailable)?;
+    let actual_euid = nix::unistd::geteuid().as_raw();
+    let actual_egid = nix::unistd::getegid().as_raw();
+    let trusted_owner = (metadata.uid() == 0 && metadata.gid() == 0)
+        || (cfg!(debug_assertions)
+            && metadata.uid() == actual_euid
+            && metadata.gid() == actual_egid);
+    if !metadata.file_type().is_file()
+        || metadata.nlink() != 1
+        || !trusted_owner
+        || metadata.mode() & 0o022 != 0
+        || metadata.mode() & 0o6000 != 0
+        || metadata.mode() & 0o111 == 0
+    {
+        return Err(NativeIdentityErrorV2::InvalidMeasurement);
+    }
+
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = executable
+            .read(&mut buffer)
+            .map_err(|_| NativeIdentityErrorV2::Io)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    executable
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| NativeIdentityErrorV2::Io)?;
+    let executable_measurement: [u8; 32] = hasher.finalize().into();
+
+    let measurement = measure_macos_peer_v2(current_process_audit_token_v2()?)?;
+    match &measurement {
+        NativePeerMeasurementV2::MacOs {
+            euid,
+            egid,
+            code_directory_measurement,
+            ..
+        } if *euid == expected_euid
+            && *egid == expected_egid
+            && actual_euid == expected_euid
+            && actual_egid == expected_egid
+            && executable_measurement == expected_executable_measurement
+            && *code_directory_measurement == expected_code_directory_measurement =>
+        {
+            Ok(PinnedMacOsServiceV2 {
+                measurement,
+                _executable: executable,
+            })
+        }
+        _ => Err(NativeIdentityErrorV2::IdentityMismatch),
+    }
+}
+
+fn measurement_from_owned(
+    code_identity: ffi::OwnedMacOsCodeIdentityV2,
+) -> Result<MacOsCodeIdentityMeasurementV2, NativeIdentityErrorV2> {
+    Ok(MacOsCodeIdentityMeasurementV2 {
+        bundle_id: BoundedIdentityStringV2::new(code_identity.bundle_id)?,
+        team_id: BoundedIdentityStringV2::new(code_identity.team_id)?,
+        code_directory_measurement: domain_hash(
+            CODE_DIRECTORY_DOMAIN_V2,
+            &code_identity.code_directory,
+        ),
+        designated_requirement_measurement: domain_hash(
             DESIGNATED_REQUIREMENT_DOMAIN_V2,
             &code_identity.designated_requirement,
         ),
-        domain_hash(ENTITLEMENT_DOMAIN_V2, &code_identity.entitlements),
-    )
+        entitlement_measurement: domain_hash(ENTITLEMENT_DOMAIN_V2, &code_identity.entitlements),
+    })
 }
 
 fn domain_hash(domain: &[u8], bytes: &[u8]) -> [u8; 32] {

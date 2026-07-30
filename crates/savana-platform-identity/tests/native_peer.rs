@@ -184,6 +184,38 @@ fn macos_audit_token_parser_and_security_measurement_fail_closed() {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_static_code_measurement_rejects_unsigned_files() {
+    use std::io::Write as _;
+
+    use savana_platform_identity::measure_macos_static_code_v2;
+
+    let mut executable = tempfile::NamedTempFile::new().unwrap();
+    executable.write_all(b"not signed Mach-O code").unwrap();
+    executable.flush().unwrap();
+
+    assert_eq!(
+        measure_macos_static_code_v2(executable.path()),
+        Err(NativeIdentityErrorV2::CodeIdentityUnavailable)
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_current_service_pin_rejects_unlocked_identity() {
+    use savana_platform_identity::pin_current_macos_service_v2;
+
+    assert_eq!(
+        pin_current_macos_service_v2(501, 20, [0; 32], [1; 32]).unwrap_err(),
+        NativeIdentityErrorV2::InvalidMeasurement
+    );
+    assert_eq!(
+        pin_current_macos_service_v2(501, 20, [1; 32], [0; 32]).unwrap_err(),
+        NativeIdentityErrorV2::InvalidMeasurement
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_measures_the_live_unix_peer_and_executable() {

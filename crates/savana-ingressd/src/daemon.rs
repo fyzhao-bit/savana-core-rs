@@ -6,11 +6,12 @@ pub enum IngressdDaemonErrorV2 {
     EndpointUnavailable,
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos")),
+    allow(dead_code, unused_imports)
+)]
 mod implementation {
     use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-    #[cfg(target_os = "linux")]
-    use std::os::unix::net::UnixStream;
     use std::path::{Path, PathBuf};
     use std::sync::{mpsc, Arc, Mutex};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -31,15 +32,14 @@ mod implementation {
         KernelIngressBootstrapTransferCapabilityV2, PeerIdentityBindingV2, UnixMillisV2, VersionV2,
         SAVANA_BROWSER_SCRIPT_V2,
     };
+    use savana_platform_identity::NativePeerMeasurementV2;
     #[cfg(target_os = "linux")]
-    use savana_platform_identity::{
-        measure_linux_peer_v2, pin_current_linux_service_v2, NativePeerMeasurementV2,
-        PinnedLinuxPeerMeasurementV2,
-    };
+    use savana_platform_identity::{pin_current_linux_service_v2, PinnedLinuxPeerMeasurementV2};
+    #[cfg(target_os = "macos")]
+    use savana_platform_identity::{pin_current_macos_service_v2, PinnedMacOsServiceV2};
     use savana_policy_core::v2::{
-        decode_hex_32_v2, load_verified_filesystem_startup_v2, read_verified_regular_file_v2,
-        ClosedServiceEdgeIdV2, ClosedServiceIdV2, FilesystemServiceObservationConfigV2,
-        ServiceDeploymentLockV2,
+        decode_hex_32_v2, read_verified_regular_file_v2, ClosedServiceEdgeIdV2, ClosedServiceIdV2,
+        FilesystemServiceObservationConfigV2, ServiceDeploymentLockV2, VerifiedDaemonStartupV2,
     };
     use serde::Deserialize;
     use sha2::{Digest as _, Sha256};
@@ -49,12 +49,30 @@ mod implementation {
     use crate::protocol_parser::{ParserProfileV2, ProtocolParserRuntimeV2};
     use crate::{IngressBrowserAuthorityV2, SuiteOneIngressKernelClientV2};
 
-    const PRODUCTION_BOOTSTRAP_PATH_V2: &str = "/etc/savana/ingressd-bootstrap-v2.json";
+    #[cfg(target_os = "linux")]
+    const NATIVE_BOOTSTRAP_PATH_V2: &str = "/etc/savana/ingressd-bootstrap-v2.json";
+    #[cfg(target_os = "macos")]
+    const NATIVE_BOOTSTRAP_PATH_V2: &str =
+        "/Library/Application Support/Savana/Development/config/ingressd-bootstrap-v2.json";
+    #[cfg(target_os = "linux")]
     const MANIFEST_ROOT_PATH_V2: &str = "/etc/savana/trust/deployment-manifest-root-v2.json";
+    #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
+    const MANIFEST_ROOT_PATH_V2: &str = "/Library/Application Support/Savana/Development/config/trust/deployment-manifest-root-v2.json";
+    #[cfg(target_os = "linux")]
     const KERNEL_SERVER_PUBLIC_KEY_PATH_V2: &str =
         "/etc/savana/ingressd/keys/kerneld-ingress-v2.pub";
+    #[cfg(target_os = "macos")]
+    const KERNEL_SERVER_PUBLIC_KEY_PATH_V2: &str = "/Library/Application Support/Savana/Development/config/ingressd/keys/kerneld-ingress-v2.pub";
+    #[cfg(target_os = "linux")]
     const APPROVAL_SERVER_PUBLIC_KEY_PATH_V2: &str = "/etc/savana/ingressd/keys/approvald-v2.pub";
+    #[cfg(target_os = "macos")]
+    const APPROVAL_SERVER_PUBLIC_KEY_PATH_V2: &str =
+        "/Library/Application Support/Savana/Development/config/ingressd/keys/approvald-v2.pub";
+    #[cfg(target_os = "linux")]
     const CREDENTIAL_DIRECTORY_V2: &str = "/run/credentials/savana-ingressd.service";
+    #[cfg(target_os = "macos")]
+    const CREDENTIAL_DIRECTORY_V2: &str =
+        "/Library/Application Support/Savana/Development/credentials/ingressd";
     const KERNEL_CLIENT_SEED_CREDENTIAL_V2: &str = "ingress-kernel-v2.seed";
     const APPROVAL_CLIENT_SEED_CREDENTIAL_V2: &str = "ingress-approval-v2.seed";
     const PARSER_DESCRIPTOR_SEED_CREDENTIAL_V2: &str = "parser-descriptor-v2.seed";
@@ -69,6 +87,10 @@ mod implementation {
     const REQUEST_DIGEST_DOMAIN_V2: &[u8] = b"SAVANA_INGRESS_HTTP_REQUEST_V2\0";
 
     #[derive(Deserialize)]
+    #[cfg_attr(
+        all(target_os = "macos", not(feature = "macos-development-authority")),
+        allow(dead_code)
+    )]
     #[serde(deny_unknown_fields)]
     struct BootstrapDtoV2 {
         signed_manifest_path: PathBuf,
@@ -105,14 +127,14 @@ mod implementation {
         file_owner_gid: u32,
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     pub(crate) fn run(_config_path: &Path) -> Result<(), IngressdDaemonErrorV2> {
         Err(IngressdDaemonErrorV2::DeploymentUnavailable)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn run(config_path: &Path) -> Result<(), IngressdDaemonErrorV2> {
-        if config_path != Path::new(PRODUCTION_BOOTSTRAP_PATH_V2) {
+        if config_path != Path::new(NATIVE_BOOTSTRAP_PATH_V2) {
             return Err(IngressdDaemonErrorV2::DeploymentUnavailable);
         }
         let bytes =
@@ -120,13 +142,7 @@ mod implementation {
                 .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)?;
         let bootstrap: BootstrapDtoV2 = serde_json::from_slice(&bytes)
             .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)?;
-        let startup = load_verified_filesystem_startup_v2(
-            Path::new(MANIFEST_ROOT_PATH_V2),
-            &bootstrap.signed_manifest_path,
-            &bootstrap.effect_ledger_projection_path,
-            &bootstrap.services,
-        )
-        .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)?;
+        let startup = load_native_startup(&bootstrap)?;
         startup
             .verify_loaded_service_config_v2(ClosedServiceIdV2::Ingressd, &bytes)
             .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)?;
@@ -137,10 +153,19 @@ mod implementation {
         let self_lock = startup
             .service_lock(ClosedServiceIdV2::Ingressd)
             .ok_or(IngressdDaemonErrorV2::DeploymentUnavailable)?;
+        #[cfg(target_os = "linux")]
         let self_process = pin_current_linux_service_v2(
             self_lock.uid,
             self_lock.gid,
             *self_lock.executable_digest.as_bytes(),
+        )
+        .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)?;
+        #[cfg(target_os = "macos")]
+        let self_process = pin_current_macos_service_v2(
+            self_lock.uid,
+            self_lock.gid,
+            *self_lock.executable_digest.as_bytes(),
+            *self_lock.code_identity_digest.as_bytes(),
         )
         .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)?;
         let self_binding = current_process_binding(self_lock, &self_process)?;
@@ -256,6 +281,67 @@ mod implementation {
     }
 
     #[cfg(target_os = "linux")]
+    fn load_native_startup(
+        bootstrap: &BootstrapDtoV2,
+    ) -> Result<VerifiedDaemonStartupV2, IngressdDaemonErrorV2> {
+        savana_policy_core::v2::load_verified_filesystem_startup_v2(
+            Path::new(MANIFEST_ROOT_PATH_V2),
+            &bootstrap.signed_manifest_path,
+            &bootstrap.effect_ledger_projection_path,
+            &bootstrap.services,
+        )
+        .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)
+    }
+
+    #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
+    fn load_native_startup(
+        bootstrap: &BootstrapDtoV2,
+    ) -> Result<VerifiedDaemonStartupV2, IngressdDaemonErrorV2> {
+        let root = Path::new("/Library/Application Support/Savana/Development");
+        let paths = [
+            &bootstrap.signed_manifest_path,
+            &bootstrap.effect_ledger_projection_path,
+            &bootstrap.parser.sandbox_program_path,
+            &bootstrap.parser.worker_program_path,
+            &bootstrap.parser.sandbox_profile_path,
+        ];
+        if paths
+            .into_iter()
+            .any(|path| !closed_development_path(root, path))
+        {
+            return Err(IngressdDaemonErrorV2::DeploymentUnavailable);
+        }
+        savana_policy_core::load_verified_macos_development_startup_v2(
+            Path::new(MANIFEST_ROOT_PATH_V2),
+            &bootstrap.signed_manifest_path,
+            &bootstrap.effect_ledger_projection_path,
+            &bootstrap.services,
+        )
+        .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)
+    }
+
+    #[cfg(all(target_os = "macos", not(feature = "macos-development-authority")))]
+    fn load_native_startup(
+        _bootstrap: &BootstrapDtoV2,
+    ) -> Result<VerifiedDaemonStartupV2, IngressdDaemonErrorV2> {
+        Err(IngressdDaemonErrorV2::DeploymentUnavailable)
+    }
+
+    #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
+    fn closed_development_path(root: &Path, path: &Path) -> bool {
+        path.is_absolute()
+            && path.starts_with(root)
+            && !path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::CurDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn serve_http(
         listener: TcpListener,
         authority: Arc<IngressBrowserAuthorityV2>,
@@ -292,7 +378,7 @@ mod implementation {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn serve_http_stream(
         mut stream: TcpStream,
         authority: Arc<IngressBrowserAuthorityV2>,
@@ -360,7 +446,7 @@ mod implementation {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn route_matches_request(route: FixedHttpRouteV2, request: &IngressBrowserRequestV2) -> bool {
         matches!(
             (route, request),
@@ -380,7 +466,7 @@ mod implementation {
         )
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn write_http(
         stream: &mut TcpStream,
         status: u16,
@@ -404,6 +490,27 @@ mod implementation {
             || name != HTTP_FD_NAME_V2
             || !getsockopt(&listener, AcceptConn)
                 .map_err(|_| IngressdDaemonErrorV2::EndpointUnavailable)?
+            || listener
+                .local_addr()
+                .map_err(|_| IngressdDaemonErrorV2::EndpointUnavailable)?
+                != SocketAddr::from((Ipv4Addr::LOCALHOST, 8767))
+        {
+            return Err(IngressdDaemonErrorV2::EndpointUnavailable);
+        }
+        Ok(listener)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn take_verified_listener() -> Result<TcpListener, IngressdDaemonErrorV2> {
+        let inherited = savana_platform_identity::take_launchd_tcp_listeners_v2(&[HTTP_FD_NAME_V2])
+            .map_err(|_| IngressdDaemonErrorV2::EndpointUnavailable)?;
+        let mut inherited = inherited.into_iter();
+        let (name, listener) = inherited
+            .next()
+            .ok_or(IngressdDaemonErrorV2::EndpointUnavailable)?
+            .into_parts();
+        if inherited.next().is_some()
+            || name != HTTP_FD_NAME_V2
             || listener
                 .local_addr()
                 .map_err(|_| IngressdDaemonErrorV2::EndpointUnavailable)?
@@ -443,6 +550,38 @@ mod implementation {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn current_process_binding(
+        lock: &ServiceDeploymentLockV2,
+        pinned: &PinnedMacOsServiceV2,
+    ) -> Result<PeerIdentityBindingV2, IngressdDaemonErrorV2> {
+        match pinned.measurement() {
+            NativePeerMeasurementV2::MacOs {
+                audit_token,
+                euid,
+                egid,
+                bundle_id,
+                team_id,
+                code_directory_measurement,
+                ..
+            } if *euid == lock.uid
+                && *egid == lock.gid
+                && Digest32V2::new(*code_directory_measurement) == lock.code_identity_digest =>
+            {
+                PeerIdentityBindingV2::macos(
+                    *audit_token,
+                    *euid,
+                    *egid,
+                    bundle_id.as_str().to_owned(),
+                    team_id.as_str().to_owned(),
+                    lock.code_identity_digest,
+                )
+                .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)
+            }
+            _ => Err(IngressdDaemonErrorV2::DeploymentUnavailable),
+        }
+    }
+
     fn read_public_key(path: &Path) -> Result<[u8; 32], IngressdDaemonErrorV2> {
         let bytes = read_verified_regular_file_v2(path, 32, Some((0, 0, 0o444)))
             .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)?;
@@ -475,7 +614,7 @@ mod implementation {
             .map(|value| value.map(Digest32V2::new))
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn decode_form_transfer(body: &[u8]) -> Result<[u8; 32], IngressdDaemonErrorV2> {
         let encoded = body
             .strip_prefix(b"transfer=")
@@ -495,7 +634,7 @@ mod implementation {
         Ok(transfer)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn request_digest(bytes: &[u8]) -> Digest32V2 {
         let mut hasher = Sha256::new();
         hasher.update(REQUEST_DIGEST_DOMAIN_V2);
