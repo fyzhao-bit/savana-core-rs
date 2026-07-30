@@ -20,6 +20,8 @@ const MAX_REQUIREMENT_BYTES: usize = 64 * 1024;
 const MAX_ENTITLEMENT_BYTES: usize = 1024 * 1024;
 const MAX_IDENTITY_UTF8_BYTES: usize = 255;
 const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+const SOL_LOCAL: i32 = 0;
+const LOCAL_PEERTOKEN: i32 = 0x006;
 const PROC_PIDFDSOCKETINFO: i32 = 3;
 const PROC_PIDFDSOCKETINFO_SIZE: usize = 792;
 
@@ -226,6 +228,34 @@ pub(crate) fn socket_is_listening_v2(descriptor: i32) -> Result<bool, NativeIden
     let information = unsafe { &*buffer.0.as_ptr().cast::<SocketFdInfoPrefixV2>() };
     Ok(information.socket.socket_type == nix::libc::SOCK_STREAM
         && (i32::from(information.socket.options) & nix::libc::SO_ACCEPTCONN) != 0)
+}
+
+pub(crate) fn unix_peer_audit_token_v2(descriptor: i32) -> Result<[u8; 32], NativeIdentityErrorV2> {
+    if descriptor < 0 {
+        return Err(NativeIdentityErrorV2::InvalidMeasurement);
+    }
+    let mut token = [0_u8; 32];
+    let mut length = nix::libc::socklen_t::try_from(token.len())
+        .map_err(|_| NativeIdentityErrorV2::InvalidMeasurement)?;
+    // SAFETY: `token` is writable for exactly `length` bytes and `length`
+    // itself is writable. LOCAL_PEERTOKEN copies the connected peer's fixed
+    // audit_token_t without consuming or mutating the stream.
+    let status = unsafe {
+        nix::libc::getsockopt(
+            descriptor,
+            SOL_LOCAL,
+            LOCAL_PEERTOKEN,
+            token.as_mut_ptr().cast(),
+            &mut length,
+        )
+    };
+    if status != 0
+        || usize::try_from(length).ok() != Some(token.len())
+        || token.iter().all(|byte| *byte == 0)
+    {
+        return Err(NativeIdentityErrorV2::InvalidMeasurement);
+    }
+    Ok(token)
 }
 
 pub(super) fn copy_code_identity_v2(

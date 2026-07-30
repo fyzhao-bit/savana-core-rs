@@ -9,6 +9,8 @@ mod linux;
 mod macos;
 #[cfg(target_os = "macos")]
 mod macos_activation;
+#[cfg(target_os = "macos")]
+mod macos_peer;
 mod worker_sandbox;
 
 #[cfg(test)]
@@ -39,6 +41,8 @@ pub use macos_activation::{
 pub use macos_activation::{
     take_launchd_tcp_listeners_with_v2, take_launchd_unix_listeners_with_v2,
 };
+#[cfg(target_os = "macos")]
+pub use macos_peer::{macos_unix_peer_audit_token_v2, measure_macos_unix_peer_v2};
 pub use worker_sandbox::{run_worker_sandbox_v2, WorkerSandboxErrorV2};
 
 /// Fail-closed production boundary for the target-specific non-exportable
