@@ -42,6 +42,8 @@ kernel IPC operation.
   `/Library/PrivilegedHelperTools/SavanaDevelopment`.
 - FIFO:
   `/Library/Application Support/Savana/Development/run/kerneld-audit.fifo`.
+  It is owned by `_savana_kernel_dev:_savana_audit_dev` with mode `0640`;
+  kerneld is the sole writer and the bridge group is the sole reader.
 - Log: `/Library/Logs/Savana/Development/kerneld-audit.log`, mode `0600`.
 - Account: `_savana_audit_dev`, with no login shell and no membership in any
   service-edge group.
@@ -65,9 +67,11 @@ disappears later, kerneld's existing nonblocking audit writes fail according to
 the frozen kernel policy; there is no fallback to a regular file or
 `/dev/null`.
 
-Rollback and uninstall boot out the bridge first, remove the FIFO and launch
-image, and remove the dedicated account only through the same guarded
-development cleanup path used for the other accounts.
+Rollback and uninstall boot out the product jobs before the bridge and remove
+the FIFO and launch image. The uninstaller retains only service accounts whose
+UID/GID, primary group, `/var/empty` home, `/usr/bin/false` shell, and hidden
+flag match the closed locked-account contract. Runtime and IPC edge groups are
+removed.
 
 ## Packaging
 
@@ -93,7 +97,8 @@ The bridge has unit/integration tests for FIFO validation, symlink rejection,
 private-log validation, byte forwarding, partial writes, interrupted system
 calls, reader restart behavior, and fail-closed startup.
 
-End-to-end verification installs the signed package, proves all six product
-services stay running, exercises the Python V2 call path from the server UI,
+End-to-end verification installs the signed package, waits up to 180 seconds
+for the real `http://localhost:8765/v2/shell` endpoint, proves all six product
+services and the audit bridge stay running, exercises the Python V2 call path,
 checks that kernel audit events reach the private log, and runs the frozen V2
 core checker to prove the kernel itself did not change.

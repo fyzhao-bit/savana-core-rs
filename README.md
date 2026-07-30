@@ -1,5 +1,7 @@
 # savana-core-rs
 
+[简体中文](README.zh-CN.md)
+
 Savana's Rust security-kernel workspace. Production crates forbid unsafe Rust
 except for the narrowly audited native boundary in
 `savana-platform-identity`: systemd descriptor ownership transfer and the
@@ -221,7 +223,99 @@ authenticated connection capabilities, and policy-rollover coordination
 remain internal. JARVIS transports canonical signed artifacts and opaque
 handles; it does not select a role or receive a Rust capability.
 
-The byte-level contract is documented in
+## Exposed interfaces
+
+V2 has one product integration boundary: JARVIS, including a Python server,
+connects to `agentd`; it does not connect directly to `kerneld`, `ingressd`,
+`approvald`, `execd`, the vault, or a G1-G7 state machine. A Python package can
+wrap the agent-control protocol without changing the Rust kernel, provided the
+Python process satisfies the pinned local process identity and deployment
+manifest.
+
+### JARVIS / Python control IPC
+
+The production endpoint is the local Unix socket
+`/run/savana/agentd/jarvis/control.sock`. It uses the authenticated Suite-1
+transport, canonical CBOR, one request and one response per connection, opaque
+handles, fixed deadlines, and bounded messages. The complete operation set is:
+
+| Tag | Operation | Purpose |
+| ---: | --- | --- |
+| 0 | `Health` | Return the public service state; includes authenticated kerneld availability. |
+| 10 | `PrepareIngress` | Create a task and return an opaque task handle plus a one-time browser bootstrap action. |
+| 11 | `GetTaskStatus` | Read the public state of a task using its opaque handle. |
+| 12 | `CancelTask` | Request cancellation using the task-bound cancellation authority. |
+
+There is no generic `execute`, raw policy-evaluation, vault-read, key-export,
+socket-selection, role-selection, or arbitrary-operation call on this
+boundary.
+
+### Browser loopback HTTP
+
+The browser surface binds only to `localhost`, uses exact hosts and origins,
+rejects cookies and authorization headers, disables CORS, applies a fixed CSP,
+caps request bodies at 1 MiB, and accepts only the routes below:
+
+| Origin | Routes |
+| --- | --- |
+| `http://localhost:8765` | `GET /v2/shell`; `GET /v2/bootstrap/{ingress\|approval\|agent}/{selector}`; `POST /v2/bootstrap/continue` |
+| `http://localhost:8766` | `GET /v2/enrollment/bootstrap`; `POST /v2/ui-auth/{accept\|begin\|finish}`; `POST /v2/approval/display`; `POST /v2/approval/decision/{begin\|finish}`; `POST /v2/webauthn/enroll/{begin\|finish}` |
+| `http://localhost:8767` | `POST /v2/bootstrap/accept`; `POST /v2/ui-auth/complete`; `POST /v2/input/{begin\|chunk\|finalize\|abort}` |
+| `http://localhost:8768` | `POST /v2/ui-auth/complete`; `POST /v2/agent/view`; `POST /v2/agent/action` |
+
+Every origin also serves `GET /v2/savana-ui.js`. Dynamic bootstrap selectors,
+tab capabilities, document references, and authentication transfers are
+single-purpose opaque capabilities rather than bearer access to a general
+API.
+
+### Authenticated service IPC
+
+These endpoints are exposed only to their pinned local service peer. They are
+not supported application or Python interfaces:
+
+| Role | Production endpoint | Closed operations |
+| --- | --- | --- |
+| `AgentKernel` | `/run/savana/kerneld/agentd/kerneld.sock` | `Health`, `ClaimAgentSession`, `PrepareFollowupIngress`, `GetAgentSessionStatus`, `PreparePlannerCall`, `CommitPlannerValue`, `DeriveValue`, `ProposeToolCall`, `EvaluateToolCall`, `AuthorizeToolCall`, `DispatchExecution`, `GetExecutionStatus`, `ReadAgentView`, `PrepareRelease`, `AuthorizeRelease`, `DispatchRelease`, `GetReleaseStatus`, `RevokeVault`, `CloseAgentSession`, `PrepareNewIngress`, `PrepareAgentUiAuthentication`, `AuthenticateAgentUi`, `GetKernelTaskStatus`, `CancelKernelTask`, `ResumeCommittedAgentAuthentication` |
+| `IngressKernel` | `/run/savana/kerneld/ingressd/kerneld.sock` | `Health`, `BeginInput`, `AppendInputChunk`, `FinalizeInput`, `CommitInputSettlement`, `AbortInput`, `GetInputStatus`, `PrepareIngressUiAuthentication`, `AuthenticateIngressUi`, `RegisterParserWorkerJob`, `AppendParserWorkerPageFrame`, `CommitParserWorkerResult` |
+| `KernelExecutor` | `/run/savana/execd/kerneld/execd.sock` | `Health`, `Dispatch`, `QueryByExecutionNonce`, `AcknowledgeCommittedCompletion`, `FetchCompletion` |
+| `AgentApproval` | `/run/savana/approvald/agentd/approvald.sock` | `AgentHealth`, `RegisterAgentApproval`, `GetAgentApprovalSettlement`, `RegisterAgentUiAuthentication`, `ConsumeAgentUiAuthenticationSettlement`, `CloseAgentAuthenticationAttempt` |
+| `IngressApproval` | `/run/savana/approvald/ingressd/approvald.sock` | `IngressHealth`, `RegisterIngressApproval`, `GetIngressApprovalSettlement`, `RegisterIngressUiAuthentication`, `ConsumeIngressUiAuthenticationSettlement` |
+| `ApprovalAdmin` | `/run/savana/approvald/admin/approvald.sock` | `AdminHealth`, `CreateEnrollmentCode`, `RevokeCredential` |
+
+The `ApprovalAdmin` socket is root-only and is consumed by the private
+`savana-approvalctl` command. macOS development deployment uses the same
+listener names and operation sets under
+`/Library/Application Support/Savana/Development/run/`; those paths are not a
+separate API.
+
+### Rust embedding and protocol crates
+
+Each installed daemon has a fixed-path startup function:
+
+```rust
+savana_kerneld::run(config_path)
+savana_agentd::run(config_path)
+savana_ingressd::run(config_path)
+savana_approvald::run(config_path)
+savana_execd::run(config_path)
+```
+
+The daemon validates the compiled production or explicitly gated development
+config path and inherits its listeners from systemd or launchd; callers cannot
+choose an arbitrary listener. `savana-kernel-protocol` publishes the bounded
+V2 wire types and canonical encoders/decoders required to implement an
+authorized client, but constructing a protocol value does not grant a
+capability.
+
+V1, raw G1-G7 controls, vault contents, plaintext secrets, signing/private
+keys, peer credentials, handshake state, executor nonces, and internal owner
+threads are not exposed as production interfaces. The
+`savana-development-audit-bridge`, parser worker, and connector-codec worker
+are fixed deployment helpers, not service APIs.
+
+The authoritative V2 interface definitions are the closed types in
+[`crates/savana-kernel-protocol/src/v2`](crates/savana-kernel-protocol/src/v2).
+The frozen V1 compatibility contract is documented separately in
 [`docs/protocol-v1.md`](docs/protocol-v1.md). Cross-language fixtures and
 deterministic regeneration commands are in
 [`vectors/kerneld/README.md`](vectors/kerneld/README.md).

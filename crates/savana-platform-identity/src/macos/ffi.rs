@@ -377,11 +377,6 @@ fn copy_signing_identity_v2(
         // SAFETY: imported Security constants are immortal CFString objects.
         unsafe { kSecCodeInfoIdentifier },
     )?;
-    let team_id = copy_required_string(
-        information.as_type(),
-        // SAFETY: imported Security constants are immortal CFString objects.
-        unsafe { kSecCodeInfoTeamIdentifier },
-    )?;
     let code_directory = copy_required_data(
         information.as_type(),
         // SAFETY: imported Security constants are immortal CFString objects.
@@ -402,6 +397,17 @@ fn copy_signing_identity_v2(
         MAX_ENTITLEMENT_BYTES,
     )?
     .unwrap_or_default();
+    let team_id = resolve_team_identifier_v2(
+        copy_optional_string(
+            information.as_type(),
+            // SAFETY: imported Security constants are immortal CFString objects.
+            unsafe { kSecCodeInfoTeamIdentifier },
+        )?,
+        cfg!(all(
+            debug_assertions,
+            feature = "macos-development-authority"
+        )),
+    )?;
 
     Ok(OwnedMacOsCodeIdentityV2 {
         bundle_id,
@@ -433,7 +439,21 @@ fn copy_required_string(
     dictionary: CFDictionaryRef,
     key: CFStringRef,
 ) -> Result<String, NativeIdentityErrorV2> {
-    let value = dictionary_value(dictionary, key)?;
+    copy_optional_string(dictionary, key)?.ok_or(NativeIdentityErrorV2::CodeIdentityUnavailable)
+}
+
+fn copy_optional_string(
+    dictionary: CFDictionaryRef,
+    key: CFStringRef,
+) -> Result<Option<String>, NativeIdentityErrorV2> {
+    if dictionary.is_null() || key.is_null() {
+        return Err(NativeIdentityErrorV2::CodeIdentityUnavailable);
+    }
+    // SAFETY: both arguments are live CoreFoundation objects.
+    let value = unsafe { CFDictionaryGetValue(dictionary, key) };
+    if value.is_null() {
+        return Ok(None);
+    }
     // SAFETY: CFGetTypeID accepts every non-null CF object.
     if unsafe { CFGetTypeID(value) } != unsafe { CFStringGetTypeID() } {
         return Err(NativeIdentityErrorV2::CodeIdentityUnavailable);
@@ -457,7 +477,19 @@ fn copy_required_string(
     let bytes = unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_bytes();
     std::str::from_utf8(bytes)
         .map(str::to_owned)
+        .map(Some)
         .map_err(|_| NativeIdentityErrorV2::CodeIdentityUnavailable)
+}
+
+fn resolve_team_identifier_v2(
+    native_team_identifier: Option<String>,
+    development_authority: bool,
+) -> Result<String, NativeIdentityErrorV2> {
+    match native_team_identifier {
+        Some(team_identifier) if !team_identifier.is_empty() => Ok(team_identifier),
+        None if development_authority => Ok("SAVANADEV1".to_owned()),
+        _ => Err(NativeIdentityErrorV2::CodeIdentityUnavailable),
+    }
 }
 
 fn copy_required_data(
@@ -625,4 +657,29 @@ extern "C" {
         task_info_out: *mut i32,
         task_info_out_count: *mut u32,
     ) -> i32;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn development_authority_maps_an_absent_apple_team_to_the_closed_label() {
+        assert_eq!(
+            resolve_team_identifier_v2(None, true).unwrap(),
+            "SAVANADEV1"
+        );
+    }
+
+    #[test]
+    fn production_rejects_an_absent_apple_team_and_preserves_a_native_team() {
+        assert_eq!(
+            resolve_team_identifier_v2(None, false),
+            Err(NativeIdentityErrorV2::CodeIdentityUnavailable)
+        );
+        assert_eq!(
+            resolve_team_identifier_v2(Some("APPLE12345".into()), false).unwrap(),
+            "APPLE12345"
+        );
+    }
 }

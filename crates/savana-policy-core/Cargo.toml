@@ -12,7 +12,7 @@ workspace = true
 [features]
 default = []
 filesystem-integration-authority = []
-macos-development-authority = []
+macos-development-authority = ["savana-platform-identity/macos-development-authority"]
 test-support = ["savana-platform-identity/test-support"]
 
 [[test]]

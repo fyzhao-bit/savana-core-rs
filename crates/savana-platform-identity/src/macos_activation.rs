@@ -1,12 +1,24 @@
 use std::ffi::CString;
 use std::net::TcpListener;
 use std::os::fd::{AsRawFd as _, OwnedFd};
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::net::UnixListener;
+use std::path::Path;
 
 use nix::fcntl::{fcntl, FcntlArg, FdFlag};
 use nix::sys::socket::{getsockname, AddressFamily, SockaddrLike as _, SockaddrStorage};
 
 use crate::{macos::ffi, valid_listener_name, NativeIdentityErrorV2};
+
+pub fn launchd_unix_socket_path_matches_v2(actual: &Path, expected: &Path) -> bool {
+    let actual = actual.as_os_str().as_bytes();
+    let expected = expected.as_os_str().as_bytes();
+    let logical_length = actual
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(actual.len());
+    actual[..logical_length] == *expected && actual[logical_length..].iter().all(|byte| *byte == 0)
+}
 
 pub struct InheritedUnixListenerV2 {
     name: String,
@@ -189,4 +201,31 @@ where
     fcntl(descriptor.as_raw_fd(), FcntlArg::F_SETFD(flags))
         .map_err(|_| NativeIdentityErrorV2::Io)?;
     Ok(descriptor)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+    use std::path::{Path, PathBuf};
+
+    use super::launchd_unix_socket_path_matches_v2;
+
+    #[test]
+    fn launchd_zero_padded_socket_path_matches_the_expected_path() {
+        let expected = Path::new("/private/tmp/savana.sock");
+        let mut padded = expected.as_os_str().as_encoded_bytes().to_vec();
+        padded.resize(104, 0);
+        let actual = PathBuf::from(OsString::from_vec(padded));
+        assert!(launchd_unix_socket_path_matches_v2(&actual, expected));
+    }
+
+    #[test]
+    fn launchd_socket_path_rejects_nonzero_trailing_bytes() {
+        let expected = Path::new("/private/tmp/savana.sock");
+        let mut padded = expected.as_os_str().as_encoded_bytes().to_vec();
+        padded.extend_from_slice(&[0, 0, b'x']);
+        let actual = PathBuf::from(OsString::from_vec(padded));
+        assert!(!launchd_unix_socket_path_matches_v2(&actual, expected));
+    }
 }

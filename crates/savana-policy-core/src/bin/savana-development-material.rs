@@ -369,13 +369,13 @@ mod macos {
             ),
             (
                 "agent_authority_state_path",
-                "state/kerneld/agent-authority-state-v2.cbor",
+                "state/kerneld/kernel-agent-authority-state-v2.cbor",
             ),
             (
                 "agent_authority_rollback_anchor_path",
                 "state/kerneld/agent-authority-anchor-v2.cbor",
             ),
-            ("g4_state_path", "state/kerneld/g4-state-v2.cbor"),
+            ("g4_state_path", "state/kerneld/kernel-g4-state-v2.cbor"),
             ("g4_rollback_anchor_path", "state/kerneld/g4-anchor-v2.cbor"),
         ] {
             set_value(&mut kernel, &[field], fixed_path(root, leaf))?;
@@ -458,7 +458,7 @@ mod macos {
         set_value(
             &mut agent,
             &["task_state_path"],
-            fixed_path(root, "state/agentd/task-state-v2.cbor"),
+            fixed_path(root, "state/agentd/agent-task-state-v2.cbor"),
         )?;
         set_value(
             &mut agent,
@@ -549,6 +549,17 @@ mod macos {
             &["parser", "sandbox_profile_digest"],
             parser_profile_digest,
         )?;
+        let (ingress_uid, ingress_gid) = account_identity("_savana_ingress_dev")?;
+        set_value(
+            &mut ingress,
+            &["parser", "file_owner_uid"],
+            Value::from(ingress_uid),
+        )?;
+        set_value(
+            &mut ingress,
+            &["parser", "file_owner_gid"],
+            Value::from(ingress_gid),
+        )?;
         write_json(&root.join("config/ingressd-bootstrap-v2.json"), &ingress)?;
 
         let mut approval = read_json(&root.join("config/approvald-bootstrap-v2.json"))?;
@@ -565,7 +576,7 @@ mod macos {
         set_value(
             &mut approval,
             &["state_path"],
-            fixed_path(root, "state/approvald/approval-state-v2.cbor"),
+            fixed_path(root, "state/approvald/approval-protocol-state-v2.cbor"),
         )?;
         set_value(
             &mut approval,
@@ -624,6 +635,16 @@ mod macos {
             )?;
             set_hex(&mut approval, &[id_field], material.key_id)?;
         }
+        set_value(
+            &mut approval,
+            &["agent_listener_gid"],
+            Value::from(group_identity("_savana_agent_approval_dev")?),
+        )?;
+        set_value(
+            &mut approval,
+            &["ingress_listener_gid"],
+            Value::from(group_identity("_savana_ingress_approval_dev")?),
+        )?;
         write_json(&root.join("config/approvald-bootstrap-v2.json"), &approval)?;
 
         let root_certificate_path = root.join("config/tls/runtime-root-v2.der");
@@ -646,7 +667,7 @@ mod macos {
         set_value(
             &mut exec,
             &["journal_path"],
-            fixed_path(root, "state/execd/execution-journal-v2.cbor"),
+            fixed_path(root, "state/execd/execd-journal-v2.cbor"),
         )?;
         set_value(
             &mut exec,
@@ -943,6 +964,29 @@ mod macos {
             }
         }
         Err("secure entropy did not produce unique material".to_owned())
+    }
+
+    fn account_identity(name: &str) -> Result<(u32, u32), String> {
+        let account = nix::unistd::User::from_name(name)
+            .map_err(|_| format!("development account lookup failed: {name}"))?
+            .ok_or_else(|| format!("development account is missing: {name}"))?;
+        let uid = account.uid.as_raw();
+        let gid = account.gid.as_raw();
+        if uid == 0 || gid == 0 {
+            return Err(format!("development account is privileged: {name}"));
+        }
+        Ok((uid, gid))
+    }
+
+    fn group_identity(name: &str) -> Result<u32, String> {
+        let group = nix::unistd::Group::from_name(name)
+            .map_err(|_| format!("development group lookup failed: {name}"))?
+            .ok_or_else(|| format!("development group is missing: {name}"))?;
+        let gid = group.gid.as_raw();
+        if gid == 0 {
+            return Err(format!("development group is privileged: {name}"));
+        }
+        Ok(gid)
     }
 
     fn write_credentials(

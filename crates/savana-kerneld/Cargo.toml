@@ -50,6 +50,11 @@ chacha20poly1305.workspace = true
 tempfile = "=3.23.0"
 savana-policy-core = { path = "../savana-policy-core", features = ["test-support"] }
 
+[[bin]]
+name = "savana-development-build-inputs"
+path = "src/bin/savana-development-build-inputs.rs"
+required-features = ["macos-development-authority"]
+
 [[test]]
 name = "production_state_machine"
 path = "tests/production_state_machine.rs"

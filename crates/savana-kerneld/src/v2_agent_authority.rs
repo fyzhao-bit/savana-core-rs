@@ -4325,9 +4325,10 @@ fn seal_execution_payload(
 }
 
 fn hpke_x25519_key_id(public_key: [u8; 32]) -> HpkeX25519KeyIdV2 {
-    HpkeX25519KeyIdV2::new(
-        *domain_digest(b"SAVANA_HPKE_X25519_KEY_ID_V2\0", &[&public_key]).as_bytes(),
-    )
+    let mut hasher = Sha256::new();
+    hasher.update(b"SAVANA_HPKE_X25519_KEY_ID_V2\0");
+    hasher.update(public_key);
+    HpkeX25519KeyIdV2::new(hasher.finalize().into())
 }
 
 fn public_executor_status(status: &ExecutorStatusV2) -> PublicExecutionStatusV2 {
@@ -4608,8 +4609,9 @@ mod tests {
         ResumeCommittedAgentAuthenticationRequestV2, ResumeCommittedAgentAuthenticationResponseV2,
         ServiceIdentityV2, UnixMillisV2,
     };
+    use sha2::{Digest as _, Sha256};
 
-    use super::{KernelAgentAuthorityV2, KernelAgentSecurityConfigV2};
+    use super::{hpke_x25519_key_id, KernelAgentAuthorityV2, KernelAgentSecurityConfigV2};
     use crate::v2_agent_durable::{
         KernelAgentAuthorityRollbackAnchorV2, KernelAgentAuthorityStateHeadV2,
     };
@@ -4637,6 +4639,18 @@ mod tests {
             *head = next;
             Ok(())
         }
+    }
+
+    #[test]
+    fn g7_uses_the_protocol_hpke_x25519_key_identifier_derivation() {
+        let public_key = [0x55; 32];
+        let mut hasher = Sha256::new();
+        hasher.update(b"SAVANA_HPKE_X25519_KEY_ID_V2\0");
+        hasher.update(public_key);
+        assert_eq!(
+            hpke_x25519_key_id(public_key).as_bytes(),
+            &<[u8; 32]>::from(hasher.finalize())
+        );
     }
 
     #[test]

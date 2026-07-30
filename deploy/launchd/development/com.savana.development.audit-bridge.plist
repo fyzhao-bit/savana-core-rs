@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.savana.development.audit-bridge</string>
+  <key>Program</key>
+  <string>/Library/PrivilegedHelperTools/SavanaDevelopment/savana-development-audit-bridge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/PrivilegedHelperTools/SavanaDevelopment/savana-development-audit-bridge</string>
+  </array>
+  <key>UserName</key>
+  <string>_savana_audit_dev</string>
+  <key>GroupName</key>
+  <string>_savana_audit_dev</string>
+  <key>InitGroups</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Library/Logs/Savana/Development/audit-bridge.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Library/Logs/Savana/Development/audit-bridge.error.log</string>
+</dict>
+</plist>

@@ -5,10 +5,10 @@
   <key>Label</key>
   <string>com.savana.development.execd</string>
   <key>Program</key>
-  <string>/Library/Application Support/Savana/Development/bin/savana-execd</string>
+  <string>/Library/PrivilegedHelperTools/SavanaDevelopment/savana-execd</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Library/Application Support/Savana/Development/bin/savana-execd</string>
+    <string>/Library/PrivilegedHelperTools/SavanaDevelopment/savana-execd</string>
     <string>--config</string>
     <string>/Library/Application Support/Savana/Development/config/execd-bootstrap-v2.json</string>
   </array>
@@ -16,6 +16,8 @@
   <string>_savana_exec_dev</string>
   <key>GroupName</key>
   <string>_savana_exec_dev</string>
+  <key>InitGroups</key>
+  <true/>
   <key>EnvironmentVariables</key>
   <dict>
     <key>SAVANA_AUTHORITY_CLASS</key>
@@ -42,8 +44,8 @@
   <key>ProcessType</key>
   <string>Background</string>
   <key>StandardOutPath</key>
-  <string>/Library/Application Support/Savana/Development/log/execd.log</string>
+  <string>/Library/Logs/Savana/Development/execd.log</string>
   <key>StandardErrorPath</key>
-  <string>/Library/Application Support/Savana/Development/log/execd.error.log</string>
+  <string>/Library/Logs/Savana/Development/execd.error.log</string>
 </dict>
 </plist>

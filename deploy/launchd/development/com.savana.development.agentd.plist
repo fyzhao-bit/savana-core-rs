@@ -5,10 +5,10 @@
   <key>Label</key>
   <string>com.savana.development.agentd</string>
   <key>Program</key>
-  <string>/Library/Application Support/Savana/Development/bin/savana-agentd</string>
+  <string>/Library/PrivilegedHelperTools/SavanaDevelopment/savana-agentd</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Library/Application Support/Savana/Development/bin/savana-agentd</string>
+    <string>/Library/PrivilegedHelperTools/SavanaDevelopment/savana-agentd</string>
     <string>--config</string>
     <string>/Library/Application Support/Savana/Development/config/agentd-bootstrap-v2.json</string>
   </array>
@@ -16,6 +16,8 @@
   <string>_savana_agent_dev</string>
   <key>GroupName</key>
   <string>_savana_agent_dev</string>
+  <key>InitGroups</key>
+  <true/>
   <key>EnvironmentVariables</key>
   <dict>
     <key>SAVANA_AUTHORITY_CLASS</key>
@@ -60,8 +62,8 @@
   <key>ProcessType</key>
   <string>Background</string>
   <key>StandardOutPath</key>
-  <string>/Library/Application Support/Savana/Development/log/agentd.log</string>
+  <string>/Library/Logs/Savana/Development/agentd.log</string>
   <key>StandardErrorPath</key>
-  <string>/Library/Application Support/Savana/Development/log/agentd.error.log</string>
+  <string>/Library/Logs/Savana/Development/agentd.error.log</string>
 </dict>
 </plist>

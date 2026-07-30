@@ -5,16 +5,18 @@
   <key>Label</key>
   <string>com.savana.development.jarvis-python</string>
   <key>Program</key>
-  <string>/Library/Application Support/Savana/Development/bin/savana-jarvis-python</string>
+  <string>/Library/PrivilegedHelperTools/SavanaDevelopment/savana-jarvis-python</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Library/Application Support/Savana/Development/bin/savana-jarvis-python</string>
+    <string>/Library/PrivilegedHelperTools/SavanaDevelopment/savana-jarvis-python</string>
     <string>/Library/Application Support/Savana/Development/config/jarvis-python-v2.json</string>
   </array>
   <key>UserName</key>
   <string>_savana_jarvis_dev</string>
   <key>GroupName</key>
   <string>_savana_jarvis_dev</string>
+  <key>InitGroups</key>
+  <true/>
   <key>EnvironmentVariables</key>
   <dict>
     <key>SAVANA_AUTHORITY_CLASS</key>
@@ -25,8 +27,8 @@
   <key>ProcessType</key>
   <string>Background</string>
   <key>StandardOutPath</key>
-  <string>/Library/Application Support/Savana/Development/log/jarvis-python.log</string>
+  <string>/Library/Logs/Savana/Development/jarvis-python.log</string>
   <key>StandardErrorPath</key>
-  <string>/Library/Application Support/Savana/Development/log/jarvis-python.error.log</string>
+  <string>/Library/Logs/Savana/Development/jarvis-python.error.log</string>
 </dict>
 </plist>

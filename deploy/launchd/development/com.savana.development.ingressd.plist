@@ -5,10 +5,10 @@
   <key>Label</key>
   <string>com.savana.development.ingressd</string>
   <key>Program</key>
-  <string>/Library/Application Support/Savana/Development/bin/savana-ingressd</string>
+  <string>/Library/PrivilegedHelperTools/SavanaDevelopment/savana-ingressd</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Library/Application Support/Savana/Development/bin/savana-ingressd</string>
+    <string>/Library/PrivilegedHelperTools/SavanaDevelopment/savana-ingressd</string>
     <string>--config</string>
     <string>/Library/Application Support/Savana/Development/config/ingressd-bootstrap-v2.json</string>
   </array>
@@ -16,6 +16,8 @@
   <string>_savana_ingress_dev</string>
   <key>GroupName</key>
   <string>_savana_ingress_dev</string>
+  <key>InitGroups</key>
+  <true/>
   <key>EnvironmentVariables</key>
   <dict>
     <key>SAVANA_AUTHORITY_CLASS</key>
@@ -38,8 +40,8 @@
   <key>ProcessType</key>
   <string>Background</string>
   <key>StandardOutPath</key>
-  <string>/Library/Application Support/Savana/Development/log/ingressd.log</string>
+  <string>/Library/Logs/Savana/Development/ingressd.log</string>
   <key>StandardErrorPath</key>
-  <string>/Library/Application Support/Savana/Development/log/ingressd.error.log</string>
+  <string>/Library/Logs/Savana/Development/ingressd.error.log</string>
 </dict>
 </plist>

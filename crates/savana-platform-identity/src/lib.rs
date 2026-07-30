@@ -35,8 +35,8 @@ pub use macos::{
 };
 #[cfg(target_os = "macos")]
 pub use macos_activation::{
-    take_launchd_tcp_listeners_v2, take_launchd_unix_listeners_v2, InheritedTcpListenerV2,
-    InheritedUnixListenerV2,
+    launchd_unix_socket_path_matches_v2, take_launchd_tcp_listeners_v2,
+    take_launchd_unix_listeners_v2, InheritedTcpListenerV2, InheritedUnixListenerV2,
 };
 #[cfg(all(target_os = "macos", feature = "test-support"))]
 pub use macos_activation::{

@@ -5,10 +5,10 @@
   <key>Label</key>
   <string>com.savana.development.kerneld</string>
   <key>Program</key>
-  <string>/Library/Application Support/Savana/Development/bin/savana-kerneld</string>
+  <string>/Library/PrivilegedHelperTools/SavanaDevelopment/savana-kerneld</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Library/Application Support/Savana/Development/bin/savana-kerneld</string>
+    <string>/Library/PrivilegedHelperTools/SavanaDevelopment/savana-kerneld</string>
     <string>--config</string>
     <string>/Library/Application Support/Savana/Development/config/kerneld-bootstrap-v2.json</string>
   </array>
@@ -16,6 +16,8 @@
   <string>_savana_kernel_dev</string>
   <key>GroupName</key>
   <string>_savana_kernel_dev</string>
+  <key>InitGroups</key>
+  <true/>
   <key>EnvironmentVariables</key>
   <dict>
     <key>SAVANA_AUTHORITY_CLASS</key>
@@ -55,8 +57,8 @@
   <key>ProcessType</key>
   <string>Background</string>
   <key>StandardOutPath</key>
-  <string>/Library/Application Support/Savana/Development/log/kerneld.log</string>
+  <string>/Library/Logs/Savana/Development/kerneld.log</string>
   <key>StandardErrorPath</key>
-  <string>/Library/Application Support/Savana/Development/log/kerneld.error.log</string>
+  <string>/Library/Application Support/Savana/Development/run/kerneld-audit.fifo</string>
 </dict>
 </plist>

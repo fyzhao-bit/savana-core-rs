@@ -45,6 +45,18 @@ for service in $labels; do
   /usr/bin/plutil -lint "$plist" >/dev/null
 done
 
+bridge_binary="$build_directory/bin/savana-development-audit-bridge"
+bridge_plist="$plist_directory/com.savana.development.audit-bridge.plist"
+[ -f "$bridge_binary" ] && [ -x "$bridge_binary" ] && [ ! -L "$bridge_binary" ] || {
+  echo "missing audit bridge executable: $bridge_binary" >&2
+  exit 66
+}
+[ -f "$bridge_plist" ] && [ ! -L "$bridge_plist" ] || {
+  echo "missing audit bridge launchd plist: $bridge_plist" >&2
+  exit 66
+}
+/usr/bin/plutil -lint "$bridge_plist" >/dev/null
+
 for worker in savana-worker-sandbox savana-parser-worker savana-connector-worker; do
   path="$build_directory/bin/$worker"
   [ -f "$path" ] && [ -x "$path" ] && [ ! -L "$path" ] || {
@@ -86,6 +98,7 @@ done
 artifact_files="
 effect-ledger-projection-v2.cbor
 input-runtime-assets-v2.cbor
+development-draft-report-tool-v2.cbor
 "
 for leaf in $artifact_files; do
   path="$build_directory/artifacts/$leaf"
@@ -105,7 +118,7 @@ seed="$build_directory/signing/deployment-manifest-v2.seed"
   exit 66
 }
 
-for helper in savana-development-manifest savana-development-material savana-macos-code-identity; do
+for helper in savana-development-manifest savana-development-material savana-development-attestation-root savana-macos-code-identity; do
   path="$build_directory/libexec/$helper"
   [ -f "$path" ] && [ -x "$path" ] && [ ! -L "$path" ] || {
     echo "missing deployment helper: $path" >&2
@@ -124,5 +137,6 @@ done
 echo "validated build directory: $build_directory"
 echo "planned installation root: /Library/Application Support/Savana/Development"
 echo "planned launchd labels: com.savana.development.kerneld com.savana.development.agentd com.savana.development.ingressd com.savana.development.approvald com.savana.development.execd com.savana.development.jarvis-python"
+echo "planned deployment helper label: com.savana.development.audit-bridge"
 echo "planned signing subject: CN=Savana Development Code Signing,OU=SAVANADEV1"
-echo "planned Security.framework Team ID: SAVANADEV1"
+echo "planned logical development authority ID: SAVANADEV1"

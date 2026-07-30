@@ -5,10 +5,10 @@
   <key>Label</key>
   <string>com.savana.development.approvald</string>
   <key>Program</key>
-  <string>/Library/Application Support/Savana/Development/bin/savana-approvald</string>
+  <string>/Library/PrivilegedHelperTools/SavanaDevelopment/savana-approvald</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Library/Application Support/Savana/Development/bin/savana-approvald</string>
+    <string>/Library/PrivilegedHelperTools/SavanaDevelopment/savana-approvald</string>
     <string>--config</string>
     <string>/Library/Application Support/Savana/Development/config/approvald-bootstrap-v2.json</string>
   </array>
@@ -16,6 +16,8 @@
   <string>_savana_approval_dev</string>
   <key>GroupName</key>
   <string>_savana_approval_dev</string>
+  <key>InitGroups</key>
+  <true/>
   <key>EnvironmentVariables</key>
   <dict>
     <key>SAVANA_AUTHORITY_CLASS</key>
@@ -77,8 +79,8 @@
   <key>ProcessType</key>
   <string>Background</string>
   <key>StandardOutPath</key>
-  <string>/Library/Application Support/Savana/Development/log/approvald.log</string>
+  <string>/Library/Logs/Savana/Development/approvald.log</string>
   <key>StandardErrorPath</key>
-  <string>/Library/Application Support/Savana/Development/log/approvald.error.log</string>
+  <string>/Library/Logs/Savana/Development/approvald.error.log</string>
 </dict>
 </plist>

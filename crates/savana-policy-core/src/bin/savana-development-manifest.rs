@@ -896,6 +896,8 @@ mod macos {
         file.write_all(bytes)
             .and_then(|()| file.flush())
             .map_err(|_| format!("cannot write {}", path.display()))?;
+        file.set_permissions(fs::Permissions::from_mode(0o444))
+            .map_err(|_| format!("cannot set mode on {}", path.display()))?;
         file.sync_all()
             .map_err(|_| format!("cannot sync {}", path.display()))?;
         Ok(())
@@ -926,5 +928,20 @@ mod macos {
         fs::set_permissions(path, fs::Permissions::from_mode(0o444))
             .map_err(|_| format!("cannot set mode on {}", path.display()))?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::os::unix::fs::MetadataExt as _;
+
+        use super::write_new;
+
+        #[test]
+        fn new_manifest_outputs_have_exact_world_readable_mode() {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("manifest");
+            write_new(&path, b"signed").unwrap();
+            assert_eq!(std::fs::metadata(path).unwrap().mode() & 0o7777, 0o444);
+        }
     }
 }

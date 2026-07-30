@@ -137,7 +137,9 @@ fn verify_listener_v2(
     let local = listener
         .local_addr()
         .map_err(|_| DeploymentTrustErrorV2::UnsafeSocket)?;
-    if local.as_pathname() != Some(expected_path) {
+    if !local.as_pathname().is_some_and(|actual_path| {
+        savana_platform_identity::launchd_unix_socket_path_matches_v2(actual_path, expected_path)
+    }) {
         return Err(DeploymentTrustErrorV2::UnsafeSocket);
     }
     let descriptor = fstat(listener).map_err(|_| DeploymentTrustErrorV2::UnsafeSocket)?;

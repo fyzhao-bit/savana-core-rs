@@ -1,0 +1,14 @@
+[req]
+distinguished_name = dn
+prompt = no
+x509_extensions = v3_ca
+
+[dn]
+CN = Savana Development WebAuthn Attestation Root
+OU = SAVANADEV1
+
+[v3_ca]
+basicConstraints = critical,CA:true,pathlen:0
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always

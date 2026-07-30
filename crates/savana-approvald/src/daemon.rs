@@ -131,8 +131,10 @@ mod implementation {
         server_key_id: String,
         agent_client_public_key_path: PathBuf,
         agent_client_key_id: String,
+        agent_listener_gid: u32,
         ingress_client_public_key_path: PathBuf,
         ingress_client_key_id: String,
+        ingress_listener_gid: u32,
         admin_client_public_key_path: PathBuf,
         admin_client_key_id: String,
         admin_client_identity: String,
@@ -217,6 +219,7 @@ mod implementation {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn run(config_path: &Path) -> Result<(), ApprovaldDaemonErrorV2> {
+        development_stage("begin");
         if config_path != Path::new(NATIVE_BOOTSTRAP_PATH_V2) {
             return Err(ApprovaldDaemonErrorV2::DeploymentUnavailable);
         }
@@ -229,6 +232,7 @@ mod implementation {
         startup
             .verify_loaded_service_config_v2(ClosedServiceIdV2::Approvald, &bytes)
             .map_err(|_| ApprovaldDaemonErrorV2::DeploymentUnavailable)?;
+        development_stage("startup-verified");
         let self_lock = startup
             .service_lock(ClosedServiceIdV2::Approvald)
             .ok_or(ApprovaldDaemonErrorV2::DeploymentUnavailable)?;
@@ -247,8 +251,14 @@ mod implementation {
             *self_lock.code_identity_digest.as_bytes(),
         )
         .map_err(|_| ApprovaldDaemonErrorV2::DeploymentUnavailable)?;
+        development_stage("self-pinned");
         let (agent_listener, ingress_listener, admin_listener, http_listener) =
-            take_verified_listeners(&startup)?;
+            take_verified_listeners(
+                &startup,
+                bootstrap.agent_listener_gid,
+                bootstrap.ingress_listener_gid,
+            )?;
+        development_stage("listeners-verified");
         let approvald_boot_id = BootIdV2::new(read_credential_32(APPROVALD_BOOT_CREDENTIAL_V2)?);
         let server_seed = Zeroizing::new(read_credential_32(SERVER_SEED_CREDENTIAL_V2)?);
         let server_key = SigningKey::from_bytes(&server_seed);
@@ -264,6 +274,7 @@ mod implementation {
         {
             return Err(ApprovaldDaemonErrorV2::DeploymentUnavailable);
         }
+        development_stage("service-keys-verified");
         let kernel_envelope_public_key =
             read_public_key(&bootstrap.kernel_envelope_public_key_path)?;
         if derive_ed25519_key_id_v2(kernel_envelope_public_key)
@@ -278,6 +289,7 @@ mod implementation {
         if derive_ed25519_key_id_v2(kernel_correlation_public_key) != kernel_correlation_key_id {
             return Err(ApprovaldDaemonErrorV2::DeploymentUnavailable);
         }
+        development_stage("kernel-keys-verified");
         let approvald_identity = startup
             .service_identity(ClosedServiceIdV2::Approvald)
             .ok_or(ApprovaldDaemonErrorV2::DeploymentUnavailable)?;
@@ -300,6 +312,7 @@ mod implementation {
         load_enrollment_profiles(&mut deployment, &bootstrap.enrollment_profiles)?;
         load_hardware_credentials(&mut deployment, &bootstrap.hardware_credentials)?;
         let attestation_roots = load_attestation_roots(&bootstrap.attestation_roots)?;
+        development_stage("protocol-deployment-verified");
         let namespace = DurableApprovalNamespaceV2::from_verified_installation(
             startup.installation_id(),
             Digest32V2::new(parse_hex_32(&bootstrap.store_id)?),
@@ -323,6 +336,7 @@ mod implementation {
             128,
         )
         .map_err(|_| ApprovaldDaemonErrorV2::DurableStateUnavailable)?;
+        development_stage("durable-state-open");
         let authority = Arc::new(
             ApprovalUiAuthorityV2::new(state, 65_536, attestation_roots)
                 .map_err(|_| ApprovaldDaemonErrorV2::DurableStateUnavailable)?,
@@ -342,6 +356,7 @@ mod implementation {
         {
             return Err(ApprovaldDaemonErrorV2::DeploymentUnavailable);
         }
+        development_stage("client-keys-verified");
         let agent_edge = startup
             .approval_service_handshake_edge(
                 EndpointRoleV2::AgentApproval,
@@ -398,6 +413,7 @@ mod implementation {
             )
             .map_err(|_| ApprovaldDaemonErrorV2::DeploymentUnavailable)?,
         );
+        development_stage("servers-constructed");
         let agent_peer = peer_policy(
             startup
                 .service_lock(ClosedServiceIdV2::Agentd)
@@ -425,6 +441,7 @@ mod implementation {
                     .ok_or(ApprovaldDaemonErrorV2::DeploymentUnavailable)?,
             )?),
         };
+        development_stage("serving");
         serve(
             agent_listener,
             ingress_listener,
@@ -439,6 +456,14 @@ mod implementation {
             admin_peer,
         )
     }
+
+    #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
+    fn development_stage(stage: &str) {
+        eprintln!("SAVANA_APPROVALD_DEVELOPMENT_STAGE={stage}");
+    }
+
+    #[cfg(not(all(target_os = "macos", feature = "macos-development-authority")))]
+    fn development_stage(_stage: &str) {}
 
     #[cfg(target_os = "linux")]
     fn load_native_startup(
@@ -947,6 +972,8 @@ mod implementation {
     #[cfg(target_os = "linux")]
     fn take_verified_listeners(
         startup: &VerifiedDaemonStartupV2,
+        agent_listener_gid: u32,
+        ingress_listener_gid: u32,
     ) -> Result<(UnixListener, UnixListener, UnixListener, TcpListener), ApprovaldDaemonErrorV2>
     {
         let inherited = savana_platform_identity::take_systemd_listeners_v2(&[
@@ -984,23 +1011,17 @@ mod implementation {
         let approval_service = startup
             .service_lock(ClosedServiceIdV2::Approvald)
             .ok_or(ApprovaldDaemonErrorV2::DeploymentUnavailable)?;
-        let agent_service = startup
-            .service_lock(ClosedServiceIdV2::Agentd)
-            .ok_or(ApprovaldDaemonErrorV2::DeploymentUnavailable)?;
-        let ingress_service = startup
-            .service_lock(ClosedServiceIdV2::Ingressd)
-            .ok_or(ApprovaldDaemonErrorV2::DeploymentUnavailable)?;
         verify_role_unix_listener(
             &agent_listener,
             Path::new(AGENT_SOCKET_PATH_V2),
             approval_service.uid,
-            agent_service.gid,
+            agent_listener_gid,
         )?;
         verify_role_unix_listener(
             &ingress_listener,
             Path::new(INGRESS_SOCKET_PATH_V2),
             approval_service.uid,
-            ingress_service.gid,
+            ingress_listener_gid,
         )?;
         verify_admin_unix_listener(&admin_listener, Path::new(ADMIN_SOCKET_PATH_V2))?;
         if !getsockopt(&http_listener, AcceptConn)
@@ -1023,6 +1044,8 @@ mod implementation {
     #[cfg(target_os = "macos")]
     fn take_verified_listeners(
         startup: &VerifiedDaemonStartupV2,
+        agent_listener_gid: u32,
+        ingress_listener_gid: u32,
     ) -> Result<(UnixListener, UnixListener, UnixListener, TcpListener), ApprovaldDaemonErrorV2>
     {
         let inherited = savana_platform_identity::take_launchd_unix_listeners_v2(&[
@@ -1063,23 +1086,17 @@ mod implementation {
         let approval_service = startup
             .service_lock(ClosedServiceIdV2::Approvald)
             .ok_or(ApprovaldDaemonErrorV2::DeploymentUnavailable)?;
-        let agent_service = startup
-            .service_lock(ClosedServiceIdV2::Agentd)
-            .ok_or(ApprovaldDaemonErrorV2::DeploymentUnavailable)?;
-        let ingress_service = startup
-            .service_lock(ClosedServiceIdV2::Ingressd)
-            .ok_or(ApprovaldDaemonErrorV2::DeploymentUnavailable)?;
         verify_role_unix_listener(
             &agent_listener,
             Path::new(AGENT_SOCKET_PATH_V2),
             approval_service.uid,
-            agent_service.gid,
+            agent_listener_gid,
         )?;
         verify_role_unix_listener(
             &ingress_listener,
             Path::new(INGRESS_SOCKET_PATH_V2),
             approval_service.uid,
-            ingress_service.gid,
+            ingress_listener_gid,
         )?;
         verify_admin_unix_listener(&admin_listener, Path::new(ADMIN_SOCKET_PATH_V2))?;
         if http_listener
@@ -1168,7 +1185,9 @@ mod implementation {
             .local_addr()
             .map_err(|_| ApprovaldDaemonErrorV2::EndpointUnavailable)?
             .as_pathname()
-            != Some(path)
+            .is_none_or(|actual| {
+                !savana_platform_identity::launchd_unix_socket_path_matches_v2(actual, path)
+            })
             || metadata.file_type().is_symlink()
             || !metadata.file_type().is_socket()
             || metadata.uid() != expected_uid
@@ -1191,7 +1210,9 @@ mod implementation {
             .local_addr()
             .map_err(|_| ApprovaldDaemonErrorV2::EndpointUnavailable)?
             .as_pathname()
-            != Some(path)
+            .is_none_or(|actual| {
+                !savana_platform_identity::launchd_unix_socket_path_matches_v2(actual, path)
+            })
             || metadata.file_type().is_symlink()
             || !metadata.file_type().is_socket()
             || metadata.uid() != 0

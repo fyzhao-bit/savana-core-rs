@@ -1113,7 +1113,9 @@ mod implementation {
                 .local_addr()
                 .map_err(|_| AgentdDaemonErrorV2::EndpointUnavailable)?
                 .as_pathname()
-                != Some(path)
+                .is_none_or(|actual| {
+                    !savana_platform_identity::launchd_unix_socket_path_matches_v2(actual, path)
+                })
             || metadata.file_type().is_symlink()
             || !metadata.file_type().is_socket()
             || metadata.uid() != service.socket_uid
