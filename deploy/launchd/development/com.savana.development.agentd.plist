@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.savana.development.agentd</string>
+  <key>Program</key>
+  <string>/Library/Application Support/Savana/Development/bin/savana-agentd</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/Application Support/Savana/Development/bin/savana-agentd</string>
+    <string>--config</string>
+    <string>/Library/Application Support/Savana/Development/config/agentd-bootstrap-v2.json</string>
+  </array>
+  <key>UserName</key>
+  <string>_savana_agent_dev</string>
+  <key>GroupName</key>
+  <string>_savana_agent_dev</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SAVANA_AUTHORITY_CLASS</key>
+    <string>development</string>
+  </dict>
+  <key>Sockets</key>
+  <dict>
+    <key>savana-jarvis-agent-control</key>
+    <dict>
+      <key>SockPathName</key>
+      <string>/Library/Application Support/Savana/Development/run/agentd/jarvis/control.sock</string>
+      <key>SockPathMode</key>
+      <integer>432</integer>
+      <key>SockPathOwner</key>
+      <string>_savana_agent_dev</string>
+      <key>SockPathGroup</key>
+      <string>_savana_jarvis_agent_dev</string>
+      <key>SockType</key>
+      <string>stream</string>
+    </dict>
+    <key>savana-jarvis-http</key>
+    <dict>
+      <key>SockNodeName</key>
+      <string>127.0.0.1</string>
+      <key>SockServiceName</key>
+      <string>8765</string>
+      <key>SockType</key>
+      <string>stream</string>
+    </dict>
+    <key>savana-agent-http</key>
+    <dict>
+      <key>SockNodeName</key>
+      <string>127.0.0.1</string>
+      <key>SockServiceName</key>
+      <string>8768</string>
+      <key>SockType</key>
+      <string>stream</string>
+    </dict>
+  </dict>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Library/Application Support/Savana/Development/log/agentd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Library/Application Support/Savana/Development/log/agentd.error.log</string>
+</dict>
+</plist>

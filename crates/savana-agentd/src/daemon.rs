@@ -1207,14 +1207,23 @@ mod implementation {
         let directory = Path::new(CREDENTIAL_DIRECTORY_V2);
         let metadata = fs::symlink_metadata(directory)
             .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
+        #[cfg(target_os = "linux")]
+        let credential_identity = (0, 0, 0o400);
+        #[cfg(target_os = "macos")]
+        let credential_identity = (0, nix::unistd::getegid().as_raw(), 0o440);
+        #[cfg(target_os = "linux")]
+        let valid_directory_identity = metadata.uid() == 0;
+        #[cfg(target_os = "macos")]
+        let valid_directory_identity =
+            metadata.uid() == 0 && metadata.gid() == credential_identity.1;
         if metadata.file_type().is_symlink()
             || !metadata.is_dir()
-            || metadata.uid() != 0
+            || !valid_directory_identity
             || metadata.mode() & 0o022 != 0
         {
             return Err(AgentdDaemonErrorV2::DeploymentUnavailable);
         }
-        read_verified_regular_file_v2(&directory.join(name), 32, Some((0, 0, 0o400)))
+        read_verified_regular_file_v2(&directory.join(name), 32, Some(credential_identity))
             .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?
             .try_into()
             .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)
@@ -1230,9 +1239,18 @@ mod implementation {
         let directory = Path::new(CREDENTIAL_DIRECTORY_V2);
         let metadata = fs::symlink_metadata(directory)
             .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
+        #[cfg(target_os = "linux")]
+        let credential_identity = (0, 0, 0o400);
+        #[cfg(target_os = "macos")]
+        let credential_identity = (0, nix::unistd::getegid().as_raw(), 0o440);
+        #[cfg(target_os = "linux")]
+        let valid_directory_identity = metadata.uid() == 0;
+        #[cfg(target_os = "macos")]
+        let valid_directory_identity =
+            metadata.uid() == 0 && metadata.gid() == credential_identity.1;
         if metadata.file_type().is_symlink()
             || !metadata.is_dir()
-            || metadata.uid() != 0
+            || !valid_directory_identity
             || metadata.mode() & 0o022 != 0
         {
             return Err(AgentdDaemonErrorV2::DeploymentUnavailable);
@@ -1240,7 +1258,7 @@ mod implementation {
         let bytes = read_verified_regular_file_v2(
             &directory.join(name),
             maximum_bytes,
-            Some((0, 0, 0o400)),
+            Some(credential_identity),
         )
         .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
         if bytes.is_empty() {

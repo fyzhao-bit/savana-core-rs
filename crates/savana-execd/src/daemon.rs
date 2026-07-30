@@ -829,9 +829,14 @@ mod implementation {
         let directory = Path::new(SYSTEMD_CREDENTIAL_DIRECTORY_V2);
         let metadata = fs::symlink_metadata(directory)
             .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
+        #[cfg(target_os = "linux")]
+        let valid_directory_identity = metadata.uid() == 0;
+        #[cfg(target_os = "macos")]
+        let valid_directory_identity =
+            metadata.uid() == 0 && metadata.gid() == nix::unistd::getegid().as_raw();
         if metadata.file_type().is_symlink()
             || !metadata.is_dir()
-            || metadata.uid() != 0
+            || !valid_directory_identity
             || metadata.mode() & 0o022 != 0
         {
             return Err(ExecdDaemonErrorV2::DeploymentUnavailable);
@@ -840,14 +845,28 @@ mod implementation {
     }
 
     fn read_exact_credential(name: &str) -> Result<[u8; 32], ExecdDaemonErrorV2> {
-        read_exact_key(&credential_path(name)?, 0o400)
+        let path = credential_path(name)?;
+        #[cfg(target_os = "linux")]
+        let identity = (0, 0, 0o400);
+        #[cfg(target_os = "macos")]
+        let identity = (0, nix::unistd::getegid().as_raw(), 0o440);
+        read_regular_file(&path, 32, Some(identity))?
+            .try_into()
+            .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)
     }
 
     fn read_variable_credential(name: &str, maximum: usize) -> Result<Vec<u8>, ExecdDaemonErrorV2> {
         let path = credential_path(name)?;
         let metadata =
             fs::symlink_metadata(&path).map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
-        if metadata.mode() & 0o7777 != 0o400 {
+        #[cfg(target_os = "linux")]
+        let identity = (0, 0, 0o400);
+        #[cfg(target_os = "macos")]
+        let identity = (0, nix::unistd::getegid().as_raw(), 0o440);
+        if metadata.uid() != identity.0
+            || metadata.gid() != identity.1
+            || metadata.mode() & 0o7777 != identity.2
+        {
             return Err(ExecdDaemonErrorV2::DeploymentUnavailable);
         }
         let bytes = read_regular_file(&path, maximum, None)?;

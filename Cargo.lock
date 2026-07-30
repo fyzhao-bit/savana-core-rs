@@ -863,6 +863,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "unicode-normalization",
+ "x25519-dalek",
  "zeroize",
 ]
 

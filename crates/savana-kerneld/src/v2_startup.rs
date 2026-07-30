@@ -1256,14 +1256,26 @@ mod native {
         let directory = Path::new(NATIVE_CREDENTIAL_DIRECTORY_V2);
         let directory_metadata =
             fs::symlink_metadata(directory).map_err(|_| StableCode::KernelUnavailable)?;
+        #[cfg(target_os = "linux")]
+        let valid_directory_identity = directory_metadata.uid() == 0;
+        #[cfg(target_os = "macos")]
+        let valid_directory_identity = directory_metadata.uid() == 0
+            && directory_metadata.gid() == nix::unistd::getegid().as_raw()
+            && directory_metadata.mode() & 0o7777 == 0o750;
         if directory_metadata.file_type().is_symlink()
             || !directory_metadata.is_dir()
-            || directory_metadata.uid() != 0
+            || !valid_directory_identity
             || directory_metadata.mode() & 0o022 != 0
         {
             return Err(StableCode::KernelUnavailable);
         }
-        read_exact_key(&directory.join(name), 0o400)
+        #[cfg(target_os = "linux")]
+        let identity = (0, 0, 0o400);
+        #[cfg(target_os = "macos")]
+        let identity = (0, nix::unistd::getegid().as_raw(), 0o440);
+        read_regular_file(&directory.join(name), 32, Some(identity))?
+            .try_into()
+            .map_err(|_| StableCode::KernelUnavailable)
     }
 
     fn read_exact_key(path: &Path, mode: u32) -> Result<[u8; 32], StableCode> {

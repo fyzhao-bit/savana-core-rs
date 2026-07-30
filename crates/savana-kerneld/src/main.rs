@@ -2,6 +2,9 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 const PRODUCTION_CONFIG_PATH_V2: &str = "/etc/savana/kerneld-bootstrap-v2.json";
+#[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
+const DEVELOPMENT_CONFIG_PATH_V2: &str =
+    "/Library/Application Support/Savana/Development/config/kerneld-bootstrap-v2.json";
 #[cfg(all(feature = "test-support", debug_assertions))]
 const TEST_V1_RUNTIME_ENV: &str = "SAVANA_TEST_V1_RUNTIME";
 #[cfg(all(feature = "test-support", debug_assertions))]
@@ -18,12 +21,25 @@ fn parse_args(
     let path = PathBuf::from(arguments.next().ok_or(CliError)?);
     if token != OsStr::new("--config")
         || (path != Path::new(PRODUCTION_CONFIG_PATH_V2)
+            && !development_config_path(&path)
             && !(allow_test_support_path && path.is_absolute()))
         || arguments.next().is_some()
     {
         return Err(CliError);
     }
     Ok(path)
+}
+
+fn development_config_path(path: &Path) -> bool {
+    #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
+    {
+        path == Path::new(DEVELOPMENT_CONFIG_PATH_V2)
+    }
+    #[cfg(not(all(target_os = "macos", feature = "macos-development-authority")))]
+    {
+        let _ = path;
+        false
+    }
 }
 
 fn main() {
@@ -64,6 +80,20 @@ mod tests {
             )
             .unwrap(),
             Path::new(PRODUCTION_CONFIG_PATH_V2)
+        );
+        #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
+        assert_eq!(
+            parse_args(
+                [
+                    OsString::from("savana-kerneld"),
+                    OsString::from("--config"),
+                    OsString::from(DEVELOPMENT_CONFIG_PATH_V2),
+                ]
+                .into_iter(),
+                false,
+            )
+            .unwrap(),
+            Path::new(DEVELOPMENT_CONFIG_PATH_V2)
         );
 
         for arguments in [

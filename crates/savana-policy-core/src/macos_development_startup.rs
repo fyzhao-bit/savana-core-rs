@@ -92,6 +92,9 @@ pub fn load_verified_macos_development_startup_v2(
     ] {
         require_development_path(path)?;
     }
+    if std::env::var("SAVANA_AUTHORITY_CLASS").as_deref() != Ok("development") {
+        return Err(DeploymentTrustErrorV2::MissingPlatformAuthority);
+    }
     if services.len() != SERVICE_COUNT_V2 {
         return Err(DeploymentTrustErrorV2::IncompleteManifest);
     }

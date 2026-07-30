@@ -84,3 +84,8 @@ required-features = ["test-support"]
 name = "macos_startup"
 path = "tests/macos_startup.rs"
 required-features = ["test-support", "macos-development-authority"]
+
+[[test]]
+name = "macos_deployment"
+path = "tests/macos_deployment.rs"
+required-features = ["macos-development-authority"]

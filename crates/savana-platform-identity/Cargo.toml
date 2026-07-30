@@ -11,6 +11,11 @@ name = "savana-worker-sandbox-probe"
 path = "tests/support/sandbox_probe.rs"
 required-features = ["test-support"]
 
+[[bin]]
+name = "savana-macos-code-identity"
+path = "src/bin/savana-macos-code-identity.rs"
+required-features = ["macos-development-authority"]
+
 [[test]]
 name = "macos_worker_sandbox"
 path = "tests/macos_worker_sandbox.rs"
@@ -21,6 +26,7 @@ unsafe_code = "deny"
 
 [features]
 default = []
+macos-development-authority = []
 test-support = ["dep:ed25519-dalek"]
 
 [dependencies]

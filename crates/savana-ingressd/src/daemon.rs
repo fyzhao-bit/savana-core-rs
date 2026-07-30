@@ -593,7 +593,11 @@ mod implementation {
 
     fn read_credential_32(name: &str) -> Result<[u8; 32], IngressdDaemonErrorV2> {
         let path = Path::new(CREDENTIAL_DIRECTORY_V2).join(name);
-        let bytes = read_verified_regular_file_v2(&path, 32, Some((0, 0, 0o400)))
+        #[cfg(target_os = "linux")]
+        let identity = (0, 0, 0o400);
+        #[cfg(target_os = "macos")]
+        let identity = (0, nix::unistd::getegid().as_raw(), 0o440);
+        let bytes = read_verified_regular_file_v2(&path, 32, Some(identity))
             .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)?;
         bytes
             .as_slice()
