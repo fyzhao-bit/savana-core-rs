@@ -192,6 +192,25 @@ fn installer_and_uninstaller_reject_open_invocation_shapes() {
 }
 
 #[test]
+fn installer_copies_each_deployment_helper_exactly_once() {
+    let install = deployment_root().join("deploy/macos/development/install.sh");
+    let source = fs::read_to_string(install).unwrap();
+    for helper in [
+        "savana-development-manifest",
+        "savana-development-material",
+        "savana-macos-code-identity",
+    ] {
+        assert_eq!(
+            source
+                .matches(&format!("\"$build_directory/libexec/{helper}\""))
+                .count(),
+            1,
+            "{helper} must be supplied to install exactly once"
+        );
+    }
+}
+
+#[test]
 fn validator_accepts_only_a_complete_nonmutating_build_fixture() {
     let fixture = tempfile::tempdir().unwrap();
     for directory in [
