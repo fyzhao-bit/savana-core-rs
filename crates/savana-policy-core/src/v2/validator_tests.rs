@@ -411,3 +411,96 @@ fn intent_flow_confinement_has_its_own_closed_implementation_id() {
         );
     }
 }
+
+#[test]
+fn decision_branch_meet_is_a_greatest_lower_bound() {
+    use crate::v2::validator::G5DecisionBranchV2 as B;
+
+    const ALL: [B; 3] = [B::Permit, B::RequireApproval, B::Deny];
+
+    // Deny absorbs, Permit is the identity: the two properties the decision
+    // path relies on when folding ontology, validators, and policy together.
+    for branch in ALL {
+        assert_eq!(B::Deny.meet(branch), B::Deny);
+        assert_eq!(branch.meet(B::Deny), B::Deny);
+        assert_eq!(B::Permit.meet(branch), branch);
+        assert_eq!(branch.meet(B::Permit), branch);
+        assert_eq!(branch.meet(branch), branch);
+    }
+
+    // Commutative and associative, so the fold order over the activated
+    // validator set cannot change a decision.
+    for left in ALL {
+        for right in ALL {
+            assert_eq!(left.meet(right), right.meet(left));
+            for third in ALL {
+                assert_eq!(
+                    left.meet(right).meet(third),
+                    left.meet(right.meet(third)),
+                    "meet must be associative"
+                );
+            }
+        }
+    }
+
+    assert_eq!(B::RequireApproval.meet(B::Permit), B::RequireApproval);
+    assert_eq!(B::RequireApproval.meet(B::Deny), B::Deny);
+}
+
+#[test]
+fn meet_never_widens_what_policy_allowed() {
+    use crate::v2::validator::G5DecisionBranchV2 as B;
+
+    const ALL: [B; 3] = [B::Permit, B::RequireApproval, B::Deny];
+
+    // The safety invariant for the whole three-way mechanism: whatever the
+    // validators say, the combined branch is never more permissive than the
+    // policy disposition alone. A compromised or buggy validator can only
+    // narrow authority, never grant it.
+    for policy in ALL {
+        for validators in ALL {
+            for ontology in ALL {
+                let combined = ontology.meet(validators).meet(policy);
+                assert!(
+                    rank(combined) <= rank(policy),
+                    "combined {combined:?} must not outrank policy {policy:?}"
+                );
+                assert!(rank(combined) <= rank(validators));
+                assert!(rank(combined) <= rank(ontology));
+            }
+        }
+    }
+
+    fn rank(branch: B) -> u8 {
+        match branch {
+            B::Deny => 0,
+            B::RequireApproval => 1,
+            B::Permit => 2,
+        }
+    }
+}
+
+#[test]
+fn binding_validators_deny_and_flow_confinement_escalates() {
+    use crate::v2::validator::G5DecisionBranchV2 as B;
+
+    // The five original validators check bindings: a failure means the call is
+    // malformed and no human answer repairs it, so their behaviour is
+    // unchanged by the three-way mechanism.
+    for kind in [
+        InternalValidatorImplementationKindV2::ArgumentBindingIntegrity,
+        InternalValidatorImplementationKindV2::LabelEffectConfinement,
+        InternalValidatorImplementationKindV2::RootEvidencePresence,
+        InternalValidatorImplementationKindV2::ProjectionBindingIntegrity,
+        InternalValidatorImplementationKindV2::TokenExecutorBinding,
+    ] {
+        assert_eq!(kind.failure_branch(), B::Deny, "{kind:?} must keep denying");
+    }
+
+    // Intent flow confinement asks a question a person can answer — "should
+    // untrusted data steer this effect?" — so it escalates instead.
+    assert_eq!(
+        InternalValidatorImplementationKindV2::IntentFlowConfinement.failure_branch(),
+        B::RequireApproval
+    );
+}
