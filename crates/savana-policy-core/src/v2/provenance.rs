@@ -264,8 +264,24 @@ pub enum DeclassificationTransitionV2 {
     MaskTokenizeAndLeakCheck,
     BuildPlannerEnvelope,
     BuildApprovalDisplay,
-    BuildExecutionEnvelope,
-    BuildFinalRelease,
+    /// Hands the value to ONE exact executor, named by its identity digest.
+    ///
+    /// The identity rides in the variant rather than alongside it so the
+    /// transition cannot be named without naming its reader. `ReaderSetV2` can
+    /// only say "an executor may read this"; the design requires "this executor
+    /// may read this", and a class bit cannot express the difference.
+    BuildExecutionEnvelope {
+        executor_identity_digest: Digest32V2,
+    },
+    /// Hands the value to ONE exact external sink, named by its identity digest.
+    ///
+    /// This is the egress boundary — the transition after which the value has
+    /// left. Binding the exact sink is what distinguishes a release the user
+    /// asked for from a release to somewhere else entirely; the reader class
+    /// alone treats both as "an external sink".
+    BuildFinalRelease {
+        sink_identity_digest: Digest32V2,
+    },
 }
 
 impl DeclassificationTransitionV2 {
@@ -274,8 +290,8 @@ impl DeclassificationTransitionV2 {
             Self::MaskTokenizeAndLeakCheck => 1,
             Self::BuildPlannerEnvelope => 2,
             Self::BuildApprovalDisplay => 3,
-            Self::BuildExecutionEnvelope => 4,
-            Self::BuildFinalRelease => 5,
+            Self::BuildExecutionEnvelope { .. } => 4,
+            Self::BuildFinalRelease { .. } => 5,
         }
     }
 
@@ -296,9 +312,9 @@ impl DeclassificationTransitionV2 {
             Self::MaskTokenizeAndLeakCheck | Self::BuildPlannerEnvelope => {
                 LeakGateDutyV2::BlocklistAndNoResidualPii
             }
-            Self::BuildApprovalDisplay | Self::BuildExecutionEnvelope | Self::BuildFinalRelease => {
-                LeakGateDutyV2::BlocklistOnly
-            }
+            Self::BuildApprovalDisplay
+            | Self::BuildExecutionEnvelope { .. }
+            | Self::BuildFinalRelease { .. } => LeakGateDutyV2::BlocklistOnly,
         }
     }
 
@@ -313,8 +329,31 @@ impl DeclassificationTransitionV2 {
                 ConfidentialityV2::AgentMasked,
                 ReaderSetV2::APPROVAL_DISPLAY,
             ),
-            Self::BuildExecutionEnvelope => (ConfidentialityV2::VaultBound, ReaderSetV2::EXECUTOR),
-            Self::BuildFinalRelease => (ConfidentialityV2::VaultBound, ReaderSetV2::EXTERNAL_SINK),
+            Self::BuildExecutionEnvelope { .. } => {
+                (ConfidentialityV2::VaultBound, ReaderSetV2::EXECUTOR)
+            }
+            Self::BuildFinalRelease { .. } => {
+                (ConfidentialityV2::VaultBound, ReaderSetV2::EXTERNAL_SINK)
+            }
+        }
+    }
+
+    /// The exact reader this transition names, for the two that name one.
+    ///
+    /// Bound into the declassification's provenance node so the record says
+    /// which executor or sink the value was released to, not merely that it was
+    /// released to some member of a class.
+    const fn exact_reader_identity(self) -> Option<Digest32V2> {
+        match self {
+            Self::BuildExecutionEnvelope {
+                executor_identity_digest: identity,
+            }
+            | Self::BuildFinalRelease {
+                sink_identity_digest: identity,
+            } => Some(identity),
+            Self::MaskTokenizeAndLeakCheck
+            | Self::BuildPlannerEnvelope
+            | Self::BuildApprovalDisplay => None,
         }
     }
 }
@@ -861,6 +900,23 @@ impl ProvenanceRecordV2 {
         // assert a check the kernel cannot verify happened, at the one point
         // where the kernel gives up a confidentiality guarantee.
         let leak_gate_digest = enforce_for_declassification(value, transition.leak_gate_duty())?;
+        let mut evidence = vec![
+            rule_digest,
+            implementation_digest,
+            leak_gate_digest,
+            token_set_digest,
+            purpose_digest,
+        ];
+        // The two transitions that hand the value to one exact reader bind that
+        // reader's identity into the node, so the record says WHERE the value
+        // went and not merely that it left. An all-zero digest names nobody, and
+        // accepting it would collapse "one exact sink" back into the class bit.
+        if let Some(identity) = transition.exact_reader_identity() {
+            if identity.as_bytes().iter().all(|byte| *byte == 0) {
+                return Err(G3Error::BindingMismatch);
+            }
+            evidence.push(identity);
+        }
         let value_digest = value_digest_v2(value)?;
         let parent_label = derived_label(parents, policy_allowed_effects)?;
         let (confidentiality, readers) = transition.target();
@@ -875,13 +931,7 @@ impl ProvenanceRecordV2 {
             value_digest,
             context,
             parents,
-            vec![
-                rule_digest,
-                implementation_digest,
-                leak_gate_digest,
-                token_set_digest,
-                purpose_digest,
-            ],
+            evidence,
             label,
         )
     }

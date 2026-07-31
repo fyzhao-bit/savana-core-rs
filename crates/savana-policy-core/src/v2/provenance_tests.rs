@@ -347,12 +347,16 @@ fn external_and_private_sources_force_their_closed_labels() {
             ReaderSetV2::APPROVAL_DISPLAY,
         ),
         (
-            DeclassificationTransitionV2::BuildExecutionEnvelope,
+            DeclassificationTransitionV2::BuildExecutionEnvelope {
+                executor_identity_digest: digest(90),
+            },
             ConfidentialityV2::VaultBound,
             ReaderSetV2::EXECUTOR,
         ),
         (
-            DeclassificationTransitionV2::BuildFinalRelease,
+            DeclassificationTransitionV2::BuildFinalRelease {
+                sink_identity_digest: digest(91),
+            },
             ConfidentialityV2::VaultBound,
             ReaderSetV2::EXTERNAL_SINK,
         ),
@@ -503,8 +507,12 @@ const ALL_TRANSITIONS: [DeclassificationTransitionV2; 5] = [
     DeclassificationTransitionV2::MaskTokenizeAndLeakCheck,
     DeclassificationTransitionV2::BuildPlannerEnvelope,
     DeclassificationTransitionV2::BuildApprovalDisplay,
-    DeclassificationTransitionV2::BuildExecutionEnvelope,
-    DeclassificationTransitionV2::BuildFinalRelease,
+    DeclassificationTransitionV2::BuildExecutionEnvelope {
+        executor_identity_digest: Digest32V2::new([90; 32]),
+    },
+    DeclassificationTransitionV2::BuildFinalRelease {
+        sink_identity_digest: Digest32V2::new([91; 32]),
+    },
 ];
 
 fn gate_parent() -> ProvenanceRecordV2 {
@@ -577,8 +585,12 @@ fn residual_pii_is_refused_exactly_where_a_model_reads() {
 
     for transition in [
         DeclassificationTransitionV2::BuildApprovalDisplay,
-        DeclassificationTransitionV2::BuildExecutionEnvelope,
-        DeclassificationTransitionV2::BuildFinalRelease,
+        DeclassificationTransitionV2::BuildExecutionEnvelope {
+            executor_identity_digest: digest(90),
+        },
+        DeclassificationTransitionV2::BuildFinalRelease {
+            sink_identity_digest: digest(91),
+        },
     ] {
         assert!(
             declassify(unmasked, transition).is_ok(),
@@ -614,7 +626,9 @@ fn the_gate_reaches_text_nested_in_lists_and_objects() {
         ProvenanceRecordV2::kernel_declassification(
             &nested,
             context(1, 2),
-            DeclassificationTransitionV2::BuildFinalRelease,
+            DeclassificationTransitionV2::BuildFinalRelease {
+                sink_identity_digest: digest(91),
+            },
             digest(80),
             digest(81),
             digest(83),
@@ -654,4 +668,54 @@ fn gate_digest_is_reproducible_and_binds_value_and_duty() {
             .unwrap(),
         "the value examined must be bound in"
     );
+}
+
+/// The design gives the last two transitions "one exact EXECUTOR" and "one
+/// exact EXTERNAL_SINK". A reader class can only say that some executor or some
+/// sink may read the value, which is the difference between a release the user
+/// asked for and a release to somewhere else — so the exact identity is bound
+/// into the node, and a digest naming nobody is refused.
+#[test]
+fn an_exactly_named_reader_is_bound_and_a_null_identity_is_refused() {
+    let released = declassify(
+        "the quarterly report is attached",
+        DeclassificationTransitionV2::BuildFinalRelease {
+            sink_identity_digest: digest(91),
+        },
+    )
+    .unwrap();
+    assert!(
+        released.root_evidence().as_slice().contains(&digest(91)),
+        "the sink the value was released to must appear in its provenance"
+    );
+
+    // Releasing the same value to a different sink is a different record, so a
+    // node cannot vouch for a release that went somewhere else.
+    let elsewhere = declassify(
+        "the quarterly report is attached",
+        DeclassificationTransitionV2::BuildFinalRelease {
+            sink_identity_digest: digest(92),
+        },
+    )
+    .unwrap();
+    assert_ne!(
+        released.provenance_digest(),
+        elsewhere.provenance_digest(),
+        "the destination must change the record"
+    );
+
+    for transition in [
+        DeclassificationTransitionV2::BuildFinalRelease {
+            sink_identity_digest: Digest32V2::new([0; 32]),
+        },
+        DeclassificationTransitionV2::BuildExecutionEnvelope {
+            executor_identity_digest: Digest32V2::new([0; 32]),
+        },
+    ] {
+        assert_eq!(
+            declassify("the quarterly report is attached", transition),
+            Err(G3Error::BindingMismatch),
+            "a digest naming nobody must not stand in for an exact reader"
+        );
+    }
 }
