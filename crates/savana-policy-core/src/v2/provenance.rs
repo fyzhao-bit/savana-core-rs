@@ -899,6 +899,23 @@ impl ProvenanceRecordV2 {
         // saw. Taking `leak_gate_digest` as a parameter would let the caller
         // assert a check the kernel cannot verify happened, at the one point
         // where the kernel gives up a confidentiality guarantee.
+        // A declassification is only legitimate after a signed rule authorized
+        // it, so a node whose rule, implementation, token set, or purpose is
+        // all zeroes binds nothing and must not be built: it would claim
+        // authority from a rule that names nothing. `from_verified_kernel_input`
+        // already refuses null bindings; there is no reason for the path that
+        // gives up confidentiality to be the laxer of the two.
+        if [
+            rule_digest.as_bytes(),
+            implementation_digest.as_bytes(),
+            token_set_digest.as_bytes(),
+            purpose_digest.as_bytes(),
+        ]
+        .iter()
+        .any(|digest| digest.iter().all(|byte| *byte == 0))
+        {
+            return Err(G3Error::BindingMismatch);
+        }
         let leak_gate_digest = enforce_for_declassification(value, transition.leak_gate_duty())?;
         let mut evidence = vec![
             rule_digest,

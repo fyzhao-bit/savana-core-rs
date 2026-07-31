@@ -719,3 +719,50 @@ fn an_exactly_named_reader_is_bound_and_a_null_identity_is_refused() {
         );
     }
 }
+
+/// A declassification is legitimate only after a signed rule authorized it, so
+/// a node whose rule, implementation, token set, or purpose names nothing must
+/// not be built — it would claim authority from a rule that does not exist.
+#[test]
+fn a_declassification_with_a_null_binding_is_refused() {
+    let null = Digest32V2::new([0; 32]);
+    let parent = gate_parent();
+    let clean = KernelValueV2::text("the quarterly report is attached").unwrap();
+
+    // Position 0 is the rule, 1 the implementation, 2 the token set, 3 the
+    // purpose; each must be refused on its own, not merely as a group.
+    for position in 0..4 {
+        let mut bindings = [digest(80), digest(81), digest(83), digest(84)];
+        bindings[position] = null;
+        assert_eq!(
+            ProvenanceRecordV2::kernel_declassification(
+                &clean,
+                context(1, 2),
+                DeclassificationTransitionV2::BuildPlannerEnvelope,
+                bindings[0],
+                bindings[1],
+                bindings[2],
+                bindings[3],
+                &[&parent],
+                EffectSetV2::READ,
+            ),
+            Err(G3Error::BindingMismatch),
+            "binding {position} must not be allowed to name nothing"
+        );
+    }
+
+    // All four present still builds, so the refusals above are the null check
+    // and not a broken path.
+    assert!(ProvenanceRecordV2::kernel_declassification(
+        &clean,
+        context(1, 2),
+        DeclassificationTransitionV2::BuildPlannerEnvelope,
+        digest(80),
+        digest(81),
+        digest(83),
+        digest(84),
+        &[&parent],
+        EffectSetV2::READ,
+    )
+    .is_ok());
+}
