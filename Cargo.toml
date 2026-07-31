@@ -4,6 +4,7 @@ members = [
   "crates/savana-agentd",
   "crates/savana-approvald",
   "crates/savana-execd",
+  "crates/savana-leak-gate",
   "crates/savana-ingressd",
   "crates/savana-input-runtime",
   "crates/savana-kernel-protocol",

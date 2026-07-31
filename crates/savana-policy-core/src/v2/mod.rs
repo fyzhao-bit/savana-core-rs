@@ -47,9 +47,6 @@ mod installation_evidence_store;
 mod intent;
 mod labels;
 mod leak_gate;
-mod leak_gate_tables;
-#[cfg(test)]
-mod leak_gate_tests;
 
 #[allow(dead_code)] // Closed AST is activated only through the G4 verified-state adapter.
 mod ontology;

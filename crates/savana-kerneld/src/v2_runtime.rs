@@ -339,14 +339,17 @@ fn encode_masked_agent_view(
             let token = BoundedAgentTextV2::new(placeholder.token().to_owned())
                 .map_err(|_| KernelIngressPipelineErrorV2::InputGate)?;
             let class = match placeholder.class() {
-                savana_input_runtime::DetectionClassV2::EmailAddress
-                | savana_input_runtime::DetectionClassV2::PhoneNumber => {
+                savana_input_runtime::DetectionClassV2::PersonalData => {
                     ClosedRedactionClassV2::PersonalData
                 }
-                savana_input_runtime::DetectionClassV2::CredentialAssignment
-                | savana_input_runtime::DetectionClassV2::BearerToken
-                | savana_input_runtime::DetectionClassV2::PrivateKeyMaterial => {
+                savana_input_runtime::DetectionClassV2::Credential => {
                     ClosedRedactionClassV2::Credential
+                }
+                // A path or filename that discloses protected content by its
+                // name alone is neither a credential nor data about a person;
+                // it is protected because policy says the reference itself is.
+                savana_input_runtime::DetectionClassV2::ProtectedReference => {
+                    ClosedRedactionClassV2::PolicyProtected
                 }
             };
             PlaceholderViewV2::new(ordinal, token, class)

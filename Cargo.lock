@@ -835,6 +835,7 @@ dependencies = [
  "getrandom 0.2.17",
  "minicbor",
  "savana-kernel-protocol",
+ "savana-leak-gate",
  "sha2",
  "tempfile",
  "thiserror",
@@ -894,6 +895,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "savana-leak-gate"
+version = "0.1.0"
+dependencies = [
+ "fancy-regex",
+ "regex",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "savana-platform-identity"
 version = "0.1.0"
 dependencies = [
@@ -913,7 +924,6 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "ed25519-dalek",
- "fancy-regex",
  "getrandom 0.2.17",
  "hmac",
  "minicbor",
@@ -921,6 +931,7 @@ dependencies = [
  "regex",
  "rustix",
  "savana-kernel-protocol",
+ "savana-leak-gate",
  "savana-platform-identity",
  "savana-policy-core",
  "serde",
