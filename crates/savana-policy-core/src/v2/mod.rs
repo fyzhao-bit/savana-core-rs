@@ -46,6 +46,13 @@ mod installation_evidence_store;
 #[allow(dead_code)] // Intent construction is consumed by the kerneld transaction adapter.
 mod intent;
 mod labels;
+#[allow(dead_code)] // Activated when `kernel_declassification` is wired to the gate.
+mod leak_gate;
+#[allow(dead_code)] // Vendored table slices; only the classes the gate uses are read.
+mod leak_gate_tables;
+#[cfg(test)]
+mod leak_gate_tests;
+
 #[allow(dead_code)] // Closed AST is activated only through the G4 verified-state adapter.
 mod ontology;
 mod production;

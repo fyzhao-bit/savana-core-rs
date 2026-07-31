@@ -100,6 +100,11 @@ crates/savana-policy-core/src/v2/intent.rs
 crates/savana-policy-core/src/v2/intent_tests.rs
 crates/savana-policy-core/src/v2/labels.rs
 crates/savana-policy-core/src/v2/labels_tests.rs
+crates/savana-policy-core/src/v2/leak_gate.rs
+crates/savana-policy-core/src/v2/leak_gate_fuzz_vectors.json
+crates/savana-policy-core/src/v2/leak_gate_tables.rs
+crates/savana-policy-core/src/v2/leak_gate_tests.rs
+crates/savana-policy-core/src/v2/leak_gate_vectors.json
 crates/savana-policy-core/src/v2/mod.rs
 crates/savana-policy-core/src/v2/ontology.rs
 crates/savana-policy-core/src/v2/ontology_tests.rs
