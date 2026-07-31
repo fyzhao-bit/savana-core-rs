@@ -81,6 +81,9 @@ struct ValueRecordV2 {
 }
 
 pub(crate) struct KernelResolvedG4ValueV2<'value> {
+    // Carried so a resolved value names the run it was resolved under. G4
+    // callers bind the run through the action intent record instead.
+    #[allow(dead_code)]
     durable_run_id: DurableRunIdV2,
     active_state_manifest_digest: Digest32V2,
     value_internal_id: ValueInternalIdV2,
@@ -89,6 +92,7 @@ pub(crate) struct KernelResolvedG4ValueV2<'value> {
 }
 
 impl KernelResolvedG4ValueV2<'_> {
+    #[allow(dead_code)]
     pub(crate) const fn durable_run_id(&self) -> DurableRunIdV2 {
         self.durable_run_id
     }

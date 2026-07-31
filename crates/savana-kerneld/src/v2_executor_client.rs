@@ -72,7 +72,10 @@ impl SuiteOneKernelExecutorClientV2 {
         })
     }
 
+    // Retained for tests that need to redirect the fixed production socket
+    // path; no current test exercises it.
     #[cfg(test)]
+    #[allow(dead_code)]
     fn with_socket_path_for_test(mut self, socket_path: PathBuf) -> Self {
         self.socket_path = socket_path;
         self

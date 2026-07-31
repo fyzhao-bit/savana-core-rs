@@ -363,7 +363,15 @@ mod tests {
             verify_kernel_service_response_envelope_v2(&response, key_id, public_key).unwrap();
         assert_eq!(decoded.operation_tag(), 29);
         let mut eof = [0_u8; 1];
-        assert_eq!(client.read(&mut eof).unwrap(), 0);
+        // The second request above is written deliberately and never read: the
+        // server answers exactly one and closes. Closing a stream socket that
+        // still holds unread data resets the connection on Linux and reports a
+        // clean EOF on macOS, so accept either. Both say the server closed
+        // after one response without consuming the second request.
+        match client.read(&mut eof) {
+            Ok(read) => assert_eq!(read, 0),
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset),
+        }
         assert_eq!(server_thread.join().unwrap(), Ok(()));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }

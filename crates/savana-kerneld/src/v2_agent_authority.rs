@@ -318,7 +318,11 @@ struct IntentRecordV2 {
     principal: PrincipalIdV2,
     role: RoleIdV2,
     descriptor_digest: Digest32V2,
+    // Retained for the record's own audit shape. Both are already bound into
+    // `policy_binding`, and the authority reads them from there.
+    #[allow(dead_code)]
     plan_revision_digest: PlanRevisionDigestV2,
+    #[allow(dead_code)]
     internal_step_id: savana_kernel_protocol::v2::InternalStepIdV2,
     policy_binding: savana_policy_core::v2::ToolExecutionSemanticBindingV2,
     semantic_binding: savana_kernel_protocol::v2::ToolExecutionSemanticBindingV2,
@@ -334,6 +338,11 @@ struct IntentRecordV2 {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum IntentRecordStateV2 {
     Proposed,
+    // Mapped to the public `ActionIntentCurrentStateV2::Evaluating` but never
+    // entered: G5 evaluation completes inside one owner-thread operation, so a
+    // record moves from `Proposed` straight to `Denied`, `AwaitingApproval`, or
+    // `Authorized`. The variant is kept so the public projection stays total.
+    #[allow(dead_code)]
     Evaluating,
     Denied,
     AwaitingApproval,
@@ -376,11 +385,16 @@ struct ToolApprovalRecordV2 {
 }
 
 struct PendingReleaseRecordV2 {
+    // The handles are held so the record owns them for its lifetime; the
+    // release path authenticates against the commitments below instead.
+    #[allow(dead_code)]
     pending: PendingReleaseHandleV2,
     pending_commitment: Digest32V2,
+    #[allow(dead_code)]
     approval: ReleaseKernelApprovalHandleV2,
     approval_commitment: Digest32V2,
     document: MaskedDocumentHandleV2,
+    #[allow(dead_code)]
     run: savana_kernel_protocol::v2::RunHandleV2,
     durable_run_id: DurableRunIdV2,
     durable_task_id: DurableTaskIdV2,
