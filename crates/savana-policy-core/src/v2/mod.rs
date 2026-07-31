@@ -210,6 +210,7 @@ pub use intent::{
 };
 pub use labels::{
     ConfidentialityV2, EffectSetV2, G3Error, IntegrityV2, ReaderSetV2, SecurityLabelV2,
+    UNTRUSTED_EFFECT_CEILING_V2,
 };
 pub use ontology::{
     AttemptKindV2, ContextFieldV2, FieldPathV2, G4Error, OntologyExprV2, OntologyOperandV2,

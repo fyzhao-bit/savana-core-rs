@@ -256,7 +256,28 @@ pub struct SecurityLabelV2 {
     effects: EffectSetV2,
 }
 
+/// The effects an `ExternalUntrusted` value may carry. Untrusted data may be
+/// read and analysed — that is what an agent is for — but it may not carry the
+/// capability to authorize an effect.
+///
+/// Without this ceiling a value's effect set comes from the session-wide
+/// `policy_allowed_effects`, so planner output and tool results carry the same
+/// effects as user input and a recipient fabricated from fetched content
+/// passes [`SecurityLabelV2::effects`]-based confinement. The ceiling is
+/// applied on every construction and every derivation below, so no provenance
+/// source can hand an untrusted value an authorizing effect.
+pub const UNTRUSTED_EFFECT_CEILING_V2: EffectSetV2 = EffectSetV2::READ;
+
 impl SecurityLabelV2 {
+    /// Applies the [`UNTRUSTED_EFFECT_CEILING_V2`] invariant:
+    /// `integrity == ExternalUntrusted` implies `effects ⊆ {READ}`.
+    const fn confined_effects(integrity: IntegrityV2, effects: EffectSetV2) -> EffectSetV2 {
+        match integrity {
+            IntegrityV2::ExternalUntrusted => effects.intersection(UNTRUSTED_EFFECT_CEILING_V2),
+            IntegrityV2::UserAuthorized | IntegrityV2::KernelTrusted => effects,
+        }
+    }
+
     pub(crate) const fn from_verified_source(
         integrity: IntegrityV2,
         confidentiality: ConfidentialityV2,
@@ -267,7 +288,7 @@ impl SecurityLabelV2 {
             integrity,
             confidentiality,
             readers,
-            effects,
+            effects: Self::confined_effects(integrity, effects),
         }
     }
 
@@ -287,6 +308,10 @@ impl SecurityLabelV2 {
             derived.effects = derived.effects.intersection(parent.effects);
         }
         derived.effects = derived.effects.intersection(policy_allowed_effects);
+        // Re-apply the ceiling after the join: a value derived from a trusted
+        // and an untrusted parent becomes `ExternalUntrusted` here, and must
+        // lose the authorizing effects its trusted parent contributed.
+        derived.effects = Self::confined_effects(derived.integrity, derived.effects);
         Ok(derived)
     }
 
