@@ -292,3 +292,122 @@ pub(super) fn evaluation_fixture(
         stored,
     )
 }
+
+#[test]
+fn intent_flow_confinement_blocks_untrusted_arguments_on_authorizing_effects() {
+    use crate::v2::validator::intent_flow_is_confined;
+    use crate::v2::{EffectSetV2, IntegrityV2};
+
+    // Every authorizing effect refuses an `ExternalUntrusted` argument. These
+    // are the integrities carried by planner output and by tool results, so
+    // this is what stops fetched content from choosing the destination of a
+    // state-changing call.
+    for effect in [
+        EffectSetV2::CREATE,
+        EffectSetV2::UPDATE,
+        EffectSetV2::DELETE,
+        EffectSetV2::SEND,
+        EffectSetV2::EXECUTE,
+        EffectSetV2::FINAL_RELEASE,
+    ] {
+        assert!(
+            !intent_flow_is_confined(effect, [IntegrityV2::ExternalUntrusted].into_iter()),
+            "{effect:?} must refuse an ExternalUntrusted argument"
+        );
+        // One untrusted argument among trusted ones is still refused.
+        assert!(!intent_flow_is_confined(
+            effect,
+            [
+                IntegrityV2::UserAuthorized,
+                IntegrityV2::ExternalUntrusted,
+                IntegrityV2::KernelTrusted,
+            ]
+            .into_iter()
+        ));
+        // The ordinary path is unaffected: a recipient the user supplied
+        // through ingress stays `UserAuthorized` even when the planner selects
+        // it by internal id.
+        assert!(intent_flow_is_confined(
+            effect,
+            [IntegrityV2::UserAuthorized, IntegrityV2::KernelTrusted].into_iter()
+        ));
+    }
+}
+
+#[test]
+fn intent_flow_confinement_permits_reads_and_holds_over_effect_combinations() {
+    use crate::v2::validator::intent_flow_is_confined;
+    use crate::v2::{EffectSetV2, IntegrityV2};
+
+    // A pure read may be steered by untrusted data — analysing fetched content
+    // is the point. Only authorizing effects are confined.
+    assert!(intent_flow_is_confined(
+        EffectSetV2::READ,
+        [IntegrityV2::ExternalUntrusted].into_iter()
+    ));
+    assert!(intent_flow_is_confined(
+        EffectSetV2::EMPTY,
+        [IntegrityV2::ExternalUntrusted].into_iter()
+    ));
+    // A read combined with any authorizing effect is confined, so a descriptor
+    // cannot launder SEND past the check by also declaring READ.
+    assert!(!intent_flow_is_confined(
+        EffectSetV2::READ.union(EffectSetV2::SEND),
+        [IntegrityV2::ExternalUntrusted].into_iter()
+    ));
+    assert!(!intent_flow_is_confined(
+        EffectSetV2::ALL,
+        [IntegrityV2::ExternalUntrusted].into_iter()
+    ));
+    // No arguments is vacuously confined; the fact only constrains steering
+    // data that actually exists.
+    assert!(intent_flow_is_confined(
+        EffectSetV2::SEND,
+        std::iter::empty()
+    ));
+}
+
+#[test]
+fn effect_authorizing_set_covers_every_effect_except_read() {
+    use crate::v2::validator::EFFECT_AUTHORIZING_V2;
+    use crate::v2::EffectSetV2;
+
+    // Pin the partition so a new effect bit cannot silently land outside the
+    // confined set: ALL minus READ must be exactly the authorizing set.
+    assert_eq!(
+        EFFECT_AUTHORIZING_V2.union(EffectSetV2::READ),
+        EffectSetV2::ALL
+    );
+    assert!(!EFFECT_AUTHORIZING_V2.contains(EffectSetV2::READ));
+    assert_eq!(
+        EFFECT_AUTHORIZING_V2.bits(),
+        EffectSetV2::ALL.bits() & !EffectSetV2::READ.bits()
+    );
+}
+
+#[test]
+fn intent_flow_confinement_has_its_own_closed_implementation_id() {
+    // The kind must be distinct from the five pre-existing validators and must
+    // keep implementation id 6; `savana-kerneld`'s startup decoder maps that
+    // tag, and a shifted id would silently activate the wrong validator.
+    assert_eq!(
+        InternalValidatorImplementationKindV2::IntentFlowConfinement
+            .implementation_id()
+            .get(),
+        6
+    );
+    for other in [
+        InternalValidatorImplementationKindV2::ArgumentBindingIntegrity,
+        InternalValidatorImplementationKindV2::LabelEffectConfinement,
+        InternalValidatorImplementationKindV2::RootEvidencePresence,
+        InternalValidatorImplementationKindV2::ProjectionBindingIntegrity,
+        InternalValidatorImplementationKindV2::TokenExecutorBinding,
+    ] {
+        assert_ne!(
+            other.implementation_id().get(),
+            InternalValidatorImplementationKindV2::IntentFlowConfinement
+                .implementation_id()
+                .get()
+        );
+    }
+}

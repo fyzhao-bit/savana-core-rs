@@ -1240,6 +1240,7 @@ mod native {
             3 => Ok(InternalValidatorImplementationKindV2::RootEvidencePresence),
             4 => Ok(InternalValidatorImplementationKindV2::ProjectionBindingIntegrity),
             5 => Ok(InternalValidatorImplementationKindV2::TokenExecutorBinding),
+            6 => Ok(InternalValidatorImplementationKindV2::IntentFlowConfinement),
             _ => Err(StableCode::KernelUnavailable),
         }
     }

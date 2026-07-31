@@ -9,7 +9,7 @@ use super::intent::projection_output_digest;
 use super::ontology::OntologyEvaluationV2;
 use super::{
     action_intent_id_v2, tool_execution_semantic_binding_digest_v2, ActionIntentRecordV2,
-    InternalValidatorDeclarationV2, VerifiedStoredBindingsV2,
+    EffectSetV2, IntegrityV2, InternalValidatorDeclarationV2, VerifiedStoredBindingsV2,
 };
 
 const MAX_INTERNAL_VALIDATORS: usize = 32;
@@ -54,6 +54,7 @@ pub enum InternalValidatorImplementationKindV2 {
     RootEvidencePresence,
     ProjectionBindingIntegrity,
     TokenExecutorBinding,
+    IntentFlowConfinement,
 }
 
 impl InternalValidatorImplementationKindV2 {
@@ -64,9 +65,23 @@ impl InternalValidatorImplementationKindV2 {
             Self::RootEvidencePresence => 3,
             Self::ProjectionBindingIntegrity => 4,
             Self::TokenExecutorBinding => 5,
+            Self::IntentFlowConfinement => 6,
         })
     }
 }
+
+/// Effects that leave the kernel or mutate state outside it. An argument whose
+/// integrity is `ExternalUntrusted` never authorizes one of these: planner
+/// output and tool results carry that integrity, so a value fabricated by the
+/// planner or lifted out of fetched content cannot select the destination of a
+/// state-changing call. `READ` is deliberately absent — untrusted data may be
+/// read and analysed, it just may not authorize an effect.
+pub const EFFECT_AUTHORIZING_V2: EffectSetV2 = EffectSetV2::CREATE
+    .union(EffectSetV2::UPDATE)
+    .union(EffectSetV2::DELETE)
+    .union(EffectSetV2::SEND)
+    .union(EffectSetV2::EXECUTE)
+    .union(EffectSetV2::FINAL_RELEASE);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ValidatorBuildManifestIdentityV2 {
@@ -285,6 +300,7 @@ struct ClosedValidatorFactsV2 {
     root_evidence_presence: bool,
     projection_binding_integrity: bool,
     token_executor_binding: bool,
+    intent_flow_confinement: bool,
 }
 
 impl VerifiedG5EvaluationInputV2 {
@@ -366,12 +382,30 @@ impl VerifiedG5EvaluationInputV2 {
             .tokens()
             .iter()
             .all(|token| token.executor_identity_digest() == binding.executor_identity_digest());
+        // A call carrying an authorizing effect must not be steered by data the
+        // kernel does not trust. `label_effect_confinement` above asks which
+        // effect class a value may participate in; it does not ask where the
+        // value came from, and the session-wide `policy_allowed_effects` grants
+        // planner output and tool results the same effect set as user input.
+        // This fact closes that gap: planner output and tool results are
+        // `ExternalUntrusted`, while values the user supplied through ingress
+        // stay `UserAuthorized` even when the planner selects them by internal
+        // id, so ordinary calls are unaffected and fetched content cannot
+        // choose the destination of a state-changing call.
+        let intent_flow_confinement = intent_flow_is_confined(
+            descriptor.effects(),
+            stored
+                .arguments()
+                .iter()
+                .map(|argument| argument.label().integrity()),
+        );
         let validator_facts = ClosedValidatorFactsV2 {
             argument_binding_integrity,
             label_effect_confinement,
             root_evidence_presence,
             projection_binding_integrity,
             token_executor_binding,
+            intent_flow_confinement,
         };
         let evaluation_input_digest = evaluation_input_digest(
             record,
@@ -563,6 +597,18 @@ enum PrivateValidatorOutcomeV2 {
     Deny,
 }
 
+/// `IntentFlowConfinement`: a call that carries an authorizing effect is
+/// confined only when no argument steering it is `ExternalUntrusted`. A call
+/// whose effects are entirely outside [`EFFECT_AUTHORIZING_V2`] — a read — is
+/// confined regardless of argument integrity.
+pub(crate) fn intent_flow_is_confined(
+    descriptor_effects: EffectSetV2,
+    mut argument_integrities: impl Iterator<Item = IntegrityV2>,
+) -> bool {
+    descriptor_effects.intersection(EFFECT_AUTHORIZING_V2) == EffectSetV2::EMPTY
+        || !argument_integrities.any(|integrity| integrity == IntegrityV2::ExternalUntrusted)
+}
+
 fn evaluate_internal_validator(
     kind: InternalValidatorImplementationKindV2,
     facts: ClosedValidatorFactsV2,
@@ -579,6 +625,9 @@ fn evaluate_internal_validator(
             facts.projection_binding_integrity
         }
         InternalValidatorImplementationKindV2::TokenExecutorBinding => facts.token_executor_binding,
+        InternalValidatorImplementationKindV2::IntentFlowConfinement => {
+            facts.intent_flow_confinement
+        }
     };
     if permits {
         PrivateValidatorOutcomeV2::Permit
@@ -595,7 +644,7 @@ fn evaluation_input_digest(
     facts: ClosedValidatorFactsV2,
 ) -> Result<Digest32V2, G5Error> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
-    encoder.array(14).map_err(|_| G5Error::DigestFailure)?;
+    encoder.array(15).map_err(|_| G5Error::DigestFailure)?;
     record
         .action_intent_id
         .encode(&mut encoder, &mut ())
@@ -633,6 +682,7 @@ fn evaluation_input_digest(
         .and_then(|encoder| encoder.bool(facts.root_evidence_presence))
         .and_then(|encoder| encoder.bool(facts.projection_binding_integrity))
         .and_then(|encoder| encoder.bool(facts.token_executor_binding))
+        .and_then(|encoder| encoder.bool(facts.intent_flow_confinement))
         .map_err(|_| G5Error::DigestFailure)?;
     Ok(domain_hash(EVALUATION_INPUT_DOMAIN, &encoder.into_writer()))
 }
