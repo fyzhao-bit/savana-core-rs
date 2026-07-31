@@ -38,8 +38,11 @@
 use std::sync::OnceLock;
 
 use fancy_regex::Regex as Fancy;
+use savana_kernel_protocol::v2::Digest32V2;
+use sha2::{Digest as _, Sha256};
 
 use super::leak_gate_tables::{PY_DECIMAL_RANGES, PY_WORD_RANGES, WS_SET};
+use super::{value_digest_v2, G3Error, KernelValueV2};
 
 /// Security content blocklist — the 21 deterministic patterns
 /// (`_SECURITY_PATTERNS`, l2_envelope.py:155-184), joined with `|` and matched
@@ -67,29 +70,6 @@ const SECURITY_PATTERNS: &[&str] = &[
     r"\bimpersonate\s+(a\s+)?(president|celebrity|politician|official)",
     r"\b(child\s+(pornography|abuse|exploitation)|csam|lolita|pedophil)",
 ];
-
-// ── Unicode primitives (all vs pinned CPython 15.0.0) ──
-
-#[inline]
-fn is_ws(c: char) -> bool {
-    WS_SET.binary_search(&(c as u32)).is_ok()
-}
-
-#[inline]
-fn is_py_decimal(c: char) -> bool {
-    let cp = c as u32;
-    PY_DECIMAL_RANGES
-        .binary_search_by(|&(lo, hi)| {
-            if cp < lo {
-                std::cmp::Ordering::Greater
-            } else if cp > hi {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        })
-        .is_ok()
-}
 
 // ── Regex fragment builders (version-locked to CPython 15.0.0) ──
 
@@ -290,19 +270,95 @@ pub fn redact_pii(text: &str) -> String {
     out
 }
 
-/// Python `re.escape` (3.7+): escape exactly the 24 "special" chars.
-/// `pub(crate)` — reused by `body_pipeline`'s leak-gate vault-value regex.
-pub(crate) fn py_re_escape(s: &str) -> String {
-    const SPECIAL: &[char] = &[
-        '(', ')', '[', ']', '{', '}', '?', '*', '+', '-', '|', '^', '$', '\\', '.', '&', '~', '#',
-        ' ', '\t', '\n', '\r', '\u{0b}', '\u{0c}',
-    ];
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if SPECIAL.contains(&c) {
-            out.push('\\');
+// ── The kernel-facing gate ──
+
+/// What the gate must prove about a value before a particular declassification.
+///
+/// The duty is not uniform across transitions, and making it uniform would
+/// break the system in one of two directions. Requiring PII to be absent from
+/// the approval display would render the human's decision meaningless — nobody
+/// can meaningfully approve "send [电话号码] to [邮箱]?" — and the human-in-the-
+/// loop control is what the whole design rests on. Requiring it of the
+/// execution envelope would leave the executor with nothing real to act on.
+/// Conversely, letting the planner envelope through unredacted would hand raw
+/// personal data to an external model, which is the leak the gate exists to
+/// stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LeakGateDutyV2 {
+    /// The recipient is entitled to see real values, so only the content
+    /// blocklist applies. Injected instructions are not "data the recipient is
+    /// entitled to" under any transition, so this is never empty.
+    BlocklistOnly,
+    /// The recipient is a language model, so the value must additionally carry
+    /// no residual PII.
+    BlocklistAndNoResidualPii,
+}
+
+/// Identity of the gate that ran: the blocklist and the PII table it used.
+///
+/// Bound into every gate digest so a record proves WHICH gate cleared it. Without
+/// this a replay under an edited pattern set would reproduce the digest of a
+/// check that never happened, and silently revalidate a value the current gate
+/// would reject.
+fn pattern_set_digest() -> Digest32V2 {
+    static D: OnceLock<Digest32V2> = OnceLock::new();
+    *D.get_or_init(|| {
+        let mut hasher = Sha256::new();
+        hasher.update(b"SAVANA_LEAK_GATE_PATTERNS_V2\0");
+        hasher.update((SECURITY_PATTERNS.len() as u32).to_be_bytes());
+        for pattern in SECURITY_PATTERNS {
+            hasher.update((pattern.len() as u32).to_be_bytes());
+            hasher.update(pattern.as_bytes());
         }
-        out.push(c);
+        let redactions = redact_patterns();
+        hasher.update((redactions.len() as u32).to_be_bytes());
+        for redaction in redactions {
+            hasher.update((redaction.repl.len() as u32).to_be_bytes());
+            hasher.update(redaction.repl.as_bytes());
+        }
+        Digest32V2::new(hasher.finalize().into())
+    })
+}
+
+/// Run the gate over every text leaf of `value` and return the evidence digest,
+/// or reject the declassification.
+///
+/// The digest is computed here rather than accepted from the caller. A caller-
+/// supplied digest is an assertion that the check happened, and the kernel
+/// cannot distinguish an honest assertion from a fabricated one — which would
+/// make the gate optional in exactly the place that gives up a confidentiality
+/// guarantee. Detection may still be delegated to a measured worker that
+/// proposes spans; this decision may not be.
+pub(crate) fn enforce_for_declassification(
+    value: &KernelValueV2,
+    duty: LeakGateDutyV2,
+) -> Result<Digest32V2, G3Error> {
+    let mut rejection = None;
+    value.every_text_leaf(&mut |text| {
+        if security_match(text) {
+            rejection = Some(G3Error::LeakGateBlockedContent);
+            return false;
+        }
+        // Idempotence is the check: if redaction would still change this text,
+        // the masking step either did not run or did not finish, so the value is
+        // not in the state this transition claims it is.
+        if duty == LeakGateDutyV2::BlocklistAndNoResidualPii && redact_pii(text) != text {
+            rejection = Some(G3Error::LeakGateResidualPii);
+            return false;
+        }
+        true
+    });
+    if let Some(error) = rejection {
+        return Err(error);
     }
-    out
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"SAVANA_LEAK_GATE_V2\0");
+    hasher.update(pattern_set_digest().as_bytes());
+    hasher.update(match duty {
+        LeakGateDutyV2::BlocklistOnly => [1u8],
+        LeakGateDutyV2::BlocklistAndNoResidualPii => [2u8],
+    });
+    hasher.update(value_digest_v2(value)?.as_bytes());
+    Ok(Digest32V2::new(hasher.finalize().into()))
 }

@@ -5,6 +5,7 @@ use savana_kernel_protocol::v2::{
 use sha2::{Digest as _, Sha256};
 use unicode_normalization::UnicodeNormalization as _;
 
+use super::leak_gate::{enforce_for_declassification, LeakGateDutyV2};
 use super::{
     value_digest_v2, ArgumentNameV2, ConfidentialityV2, EffectSetV2, G3Error, IntegrityV2,
     KernelValueV2, ReaderSetV2, SecurityLabelV2,
@@ -275,6 +276,29 @@ impl DeclassificationTransitionV2 {
             Self::BuildApprovalDisplay => 3,
             Self::BuildExecutionEnvelope => 4,
             Self::BuildFinalRelease => 5,
+        }
+    }
+
+    /// What the leak gate must prove before this transition may run.
+    ///
+    /// The split follows who reads the result, not how far confidentiality
+    /// drops. A language model is the one recipient that cannot be trusted to
+    /// hold personal data without it becoming training input, prompt context,
+    /// or an outbound request, so those two transitions must be free of
+    /// residual PII. The human approving the action, and the executor carrying
+    /// it out, both need the real values to do their job at all — masking
+    /// those would not be a stricter gate, it would be a broken one.
+    ///
+    /// The blocklist applies everywhere: injected instructions are not data any
+    /// recipient is entitled to, under any transition.
+    const fn leak_gate_duty(self) -> LeakGateDutyV2 {
+        match self {
+            Self::MaskTokenizeAndLeakCheck | Self::BuildPlannerEnvelope => {
+                LeakGateDutyV2::BlocklistAndNoResidualPii
+            }
+            Self::BuildApprovalDisplay | Self::BuildExecutionEnvelope | Self::BuildFinalRelease => {
+                LeakGateDutyV2::BlocklistOnly
+            }
         }
     }
 
@@ -827,12 +851,16 @@ impl ProvenanceRecordV2 {
         transition: DeclassificationTransitionV2,
         rule_digest: Digest32V2,
         implementation_digest: Digest32V2,
-        leak_gate_digest: Digest32V2,
         token_set_digest: Digest32V2,
         purpose_digest: Digest32V2,
         parents: &[&Self],
         policy_allowed_effects: EffectSetV2,
     ) -> Result<Self, G3Error> {
+        // The gate runs here, and its digest is derived from what it actually
+        // saw. Taking `leak_gate_digest` as a parameter would let the caller
+        // assert a check the kernel cannot verify happened, at the one point
+        // where the kernel gives up a confidentiality guarantee.
+        let leak_gate_digest = enforce_for_declassification(value, transition.leak_gate_duty())?;
         let value_digest = value_digest_v2(value)?;
         let parent_label = derived_label(parents, policy_allowed_effects)?;
         let (confidentiality, readers) = transition.target();

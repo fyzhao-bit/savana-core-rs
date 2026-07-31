@@ -202,6 +202,10 @@ closed_bit_set_v2!(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum G3Error {
+    #[error("G3 declassification blocked: value carries blocklisted content")]
+    LeakGateBlockedContent,
+    #[error("G3 declassification blocked: value still carries unmasked personal data")]
+    LeakGateResidualPii,
     #[error("G3 derivation requires at least one parent")]
     EmptyParents,
     #[error("G3 root evidence contains a duplicate")]

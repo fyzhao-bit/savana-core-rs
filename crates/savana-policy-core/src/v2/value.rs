@@ -199,6 +199,30 @@ impl KernelValueV2 {
         }
     }
 
+    /// Visit every `Text` leaf in document order, stopping at the first leaf the
+    /// visitor rejects. Used by the G2 leak gate, which must see every string a
+    /// declassification would hand onward, not just a top-level one — text
+    /// nested inside a list or an object field is exactly as readable to the
+    /// recipient. `Bytes` leaves are deliberately not visited: the gate's
+    /// patterns are defined over CPython `str`, and treating arbitrary bytes as
+    /// text would mean guessing an encoding inside a security check.
+    pub(crate) fn every_text_leaf(&self, visit: &mut impl FnMut(&str) -> bool) -> bool {
+        match &self.0 {
+            KernelValueKindV2::Text(text) => visit(text.as_str()),
+            KernelValueKindV2::List(values) => {
+                values.iter().all(|value| value.every_text_leaf(visit))
+            }
+            KernelValueKindV2::Object(fields) => {
+                fields.iter().all(|(_, value)| value.every_text_leaf(visit))
+            }
+            KernelValueKindV2::Null
+            | KernelValueKindV2::Bool(_)
+            | KernelValueKindV2::I64(_)
+            | KernelValueKindV2::Bytes(_)
+            | KernelValueKindV2::InternalSlot(_) => true,
+        }
+    }
+
     pub(crate) fn try_clone_internal(&self) -> Result<Self, G3Error> {
         let kind = match &self.0 {
             KernelValueKindV2::Null => KernelValueKindV2::Null,
