@@ -1,10 +1,16 @@
 # Savana V2 Declassification: Signed Rules and the Gated Pipeline
 
-Status: accepted design, v1 (2026-08-01). This document specifies the signed
+Status: accepted design, v1.1 (2026-08-01). This document specifies the signed
 declassification rule surface and the wiring that routes every confidentiality
 widening through `kernel_declassification`. It changes no code by itself.
 Decisions O1 (manifest delivery) and O2 (closed purpose vocabulary) are
 resolved; see §17.
+
+v1.1: a conformance audit of the live egress and tool-execution pipelines
+(§18) corrected §1.5 — consent machinery largely *exists* — rebased §10.2–10.3
+onto the real settlement flow instead of a new consent object, resolved O3 and
+O4 by audit, and added failure row F14 plus the S3 intent-vocabulary
+prerequisite.
 
 Companion reading: `docs/protocol-v1.md` for the V1 byte-level conventions this
 design mirrors (domain separation, canonical CBOR, fail-closed dispatch).
@@ -64,10 +70,20 @@ The consequences, with evidence:
    either dimension. Today the kernel is safe because *nothing ever widens*
    — safety by inertness, not safety by gated widening.
 
-5. **Consent does not exist.** `EffectSetV2::FINAL_RELEASE` is defined
-   (`labels.rs:200`) and `BuildFinalRelease` names an exact sink, but there
-   is no representation of "the user approved this release, recently,
-   for this purpose."
+5. **The egress pipeline exists, is strong, and bypasses the gate.**
+   *(Corrected in v1.1 — the v1 draft wrongly said consent does not exist.)*
+   `prepare_release` / `authorize_release` / `dispatch_release`
+   (`crates/savana-kerneld/src/v2_agent_authority.rs:3160,3348,3449`) already
+   implement approval envelopes with challenge nonces, approvald-signed
+   settlement verification bound to principal and manifest
+   (`:3393-3406`), single-use consumption (`:3439`), quota, effect-gate
+   leases, durable dispatch, payload-digest re-verification (`:3497-3506`)
+   and HPKE sealing to the exact executor key (`:3578-3584`). What is
+   missing is precisely four things: no leak gate ever runs over the
+   released plaintext, no `KernelDeclassification` node is minted, no
+   signed rule authorizes the sink, and the token-set scope is stubbed
+   empty (`token_set_digest_v2(&[])`, `:3216`). §18 carries the full
+   audit.
 
 The design goal is the one the transition vocabulary already states: **every
 confidentiality widening is a recorded transition, authorized by a signed
@@ -90,8 +106,9 @@ Goals:
   handoff judgments refuse recipients outside a value's reader set, and
   envelope builders refuse values whose lineage lacks the matching
   declassification node.
-- G-E: a **consent record** minted from the existing approval settlement
-  flow, demanded by rule for `BuildFinalRelease`.
+- G-E: consent **bound to the existing approvald-signed release
+  settlements** (§10.3), demanded by rule for `BuildFinalRelease` — no new
+  consent object.
 
 Non-goals:
 
@@ -345,10 +362,16 @@ consent_requirement = array(1)[0]                       — none
                     | array(2)[1, max_age_unix_ms:u64]  — required, fresh within max_age
 ```
 
-Present ⇒ the entry demands a matching, unconsumed `ConsentRecordV2` (§10)
-no older than `max_age_unix_ms` (proposed default: 300 000 = 5 minutes).
+Present ⇒ the entry demands a matching consumed-exact release settlement
+(§10.3) no older than `max_age_unix_ms`. The default is not a new choice:
+the codebase already compiled it — `TOOL_APPROVAL_TTL_MS = 5 * 60 * 1_000`
+(`v2_agent_authority.rs:79`); a rule's `max_age` must be ≤ the approval
+envelope TTL or it demands a freshness the envelope cannot prove.
 MUST be absent for tags 1–4: consent is an egress concept; demanding it
-mid-pipeline would train users to click through.
+mid-pipeline would train users to click through. (Tool-execution approvals
+— `ApprovalPurposeV2::ToolExecution`, `v2_agent_authority.rs:2468` — are
+G5-side *action authorization*, a different question answered by the policy
+engine; they are untouched by this design and are not this consent.)
 
 ### 6.5 Purpose vocabulary (**decided — O2**)
 
@@ -401,7 +424,7 @@ impl ProvenanceRecordV2 {
         rule_set: &DeclassificationRuleSetV2,
         purpose_digest: Digest32V2,
         token_set_digest: Digest32V2,
-        consent: Option<&ConsentRecordV2>,   // stage 5; earlier stages: None
+        consent: Option<&VerifiedFinalReleaseSettlementV2>, // stage 5; earlier: None
         parents: &[&Self],
         policy_allowed_effects: EffectSetV2,
         at_unix_ms: u64,
@@ -562,46 +585,89 @@ envelope flow already present in `v2_agent_authority.rs`
 
 ### 10.2 D: execution envelope (`BuildExecutionEnvelope`)
 
-The executor handoff declassifies with the exact executor identity digest in
-the transition (`provenance.rs:273-275`), checked against the rule's reader
-allowlist (§6.1). Identity source: the platform identity the kernel already
-holds for the executor connection (`savana-platform-identity` /
-`ServiceIdentityV2` — the same identity `verify_agent_caller`-style checks
-use). Duty `BlocklistOnly`. The sealed execution envelope
-(`SealedExecutionEnvelopePayloadV2`) carries the node digest.
+*(v1.1: rebased onto the live pipeline.)* The executor handoff already
+exists and already pins its reader: G7 policy holds the exact executor —
+identity (`prepare_release` refuses `request.executor() != g7.executor_identity`,
+`v2_agent_authority.rs:3196`), seal public key (`:3580`), signing key, and
+connector-registry digest (`:3537-3539`). The tool path HPKE-seals the
+plaintext arguments to that key and signs the sealed envelope (`:2780`);
+the release path does the same (`:3585`).
 
-### 10.3 E: final release (`BuildFinalRelease`) and `ConsentRecordV2`
+What the transition adds on top of G7's pin:
 
-The egress transition demands both authorities (§3): a rule whose reader
-allowlist contains the sink, **and** — when the rule says so, which for
-`FINAL_RELEASE` effects it always should — a fresh consent record.
+- `declassify(..., BuildExecutionEnvelope { executor_identity_digest }, ...)`
+  runs immediately before the HPKE seal, so the leak gate's blocklist duty
+  covers the exact plaintext being sealed, and the
+  `KernelDeclassification` node records the handoff in the value's lineage.
+- The rule's reader allowlist (§6.1) is checked by *membership*, G7's pin by
+  *equality* — both must pass. A rule naming an executor that G7 does not
+  pin authorizes nothing; the redundancy is deliberate (two failure domains:
+  rule-signing key vs. G7 policy channel).
+- The sealed envelope (`SealedExecutionEnvelopePayloadV2`) carries the node
+  digest.
 
-```text
-ConsentRecordV2 (kernel-minted, vault-persisted, single-use):
-    consent_id:                  nonce32
-    run:                         run identity
-    purpose_digest:              bytes32   — must equal the rule lookup purpose
-    sink_identity_digest:        bytes32   — must equal transition.exact_reader_identity()
-    token_set_digest:            bytes32   — scope: which substitution set / values were approved
-    approval_display_node_digest bytes32   — §10.1: what the human actually saw
-    approval_settlement_digest:  bytes32   — the signed settlement that closed the round-trip
-    granted_at_unix_ms:          u64
-    consumed:                    bool      — flipped atomically with dispatch
-```
+Duty `BlocklistOnly` (`provenance.rs:316`).
 
-Minting: only upon a verified approval settlement (the existing
-`SignedUiAuthenticationSettlementV2`-style round-trip). Consent is
-kernel-internal state derived from a signed human action — it needs no new
-signature domain of its own in stage 5; its integrity rides on the vault and
-the settlement digest it embeds (see O3 for the alternative).
+### 10.3 E: final release (`BuildFinalRelease`) — consent is the settlement
 
-Matching at `declassify` (§7 step 6): equal `purpose_digest`, equal
-`sink_identity_digest`, `token_set_digest` scope match, age ≤ rule's
-`max_age`, `consumed == false`. Consumption flips in the same vault
-transaction that journals the release dispatch — a crash between consume and
-send burns the consent (user re-approves) rather than ever double-sending.
-Single-use is deliberate: replaying one "yes" into two releases is the exact
-attack consent exists to stop.
+*(v1.1: the v1 draft specified a new `ConsentRecordV2`; the audit (§18)
+found the machinery already built. This section now binds to it instead of
+duplicating it.)*
+
+What exists today, end to end (`v2_agent_authority.rs`):
+
+1. `prepare_release` (`:3160`) — builds an
+   `ApprovalPurposeV2::FinalRelease` envelope with a challenge nonce,
+   principal binding, display digests, and a 5-minute TTL (`:3266-3283`);
+   signs it; pairs it with a UI-authentication envelope for the approval
+   display (`:3290-3313`); records the pending release with a vault binding
+   whose `destination_digest` covers the destination projection **and** the
+   executor identity (`:3225-3229`).
+2. `authorize_release` (`:3348`) — verifies the approvald-signed settlement
+   against the settlement key, installation, manifest digest, deployment
+   generation, envelope digest, principal, and challenge (`:3393-3406`);
+   refuses any decision but `Approve`; converts it into a
+   `VerifiedFinalReleaseSettlementV2` via `from_consumed_exact_settlement`
+   (`:3422-3429`); marks the pending release consumed — **single-use is
+   already implemented** (`:3439`), with idempotent ticket replay
+   (`:3369-3379`).
+3. `dispatch_release` (`:3449`) — re-reads the plaintext and re-verifies its
+   digest against the authorized binding (`:3497-3506`), enforces quota and
+   the effect-gate lease, prepares durable dispatch, HPKE-seals to the
+   executor key, dispatches.
+
+That settlement **is** the consent: signed by approvald, challenge-fresh,
+principal-bound, display-digest-bound, single-use. The design therefore
+binds rather than mints — `declassify`'s consent input (§7) is
+`Option<&VerifiedFinalReleaseSettlementV2>`, and step 6 checks: the
+settlement's binding digest matches the release binding whose
+`destination_digest` is the transition's `sink_identity_digest`; envelope
+age ≤ the rule's `max_age`; the underlying pending release is unconsumed at
+authorization time (existing semantics). No new consent object, no new
+signature domain, no parallel state.
+
+What is still missing on this path — the actual v1.1 gap list:
+
+- **No leak gate over the released plaintext.** The blocklist duty for
+  `BuildFinalRelease` never runs; plaintext goes from vault read to HPKE
+  seal (`:3497 → :3578`) on digest checks alone. Wiring point: `declassify`
+  runs between the payload re-verification and the seal, over the exact
+  bytes being sealed.
+- **No `KernelDeclassification` node**: the release leaves no transition in
+  any value's lineage; the label never moves; §11's judgments have nothing
+  to read. (Provenance is *touched* today only as evidence digests attached
+  at prepare, `:3199-3215` — necessary, not sufficient.)
+- **No signed rule**: the sink is whatever the request proposed and the
+  human approved. The rule's reader allowlist (§6.1, entries =
+  `destination_digest` values) adds the machine-checkable constraint that
+  this sink class is releasable *at all* — the human approves an instance,
+  the rule authorizes the class.
+- **Token scope is a stub**: `token_set_digest_v2(&[])` (`:3216`).
+  The scope of what the approval covers must be the real substitution/value
+  set. Note the trap: the digest of an *empty* set is a valid non-zero
+  digest, so the constructor's null-binding guard (`provenance.rs:908-918`)
+  does not catch it — the entry must refuse an empty token set for tag 5
+  **semantically** (failure row F14).
 
 ## 11. Making `readers` and `confidentiality` load-bearing
 
@@ -717,6 +783,7 @@ Failure-mode table (each row a distinct error and at least one test):
 | F11 | value without matching declassification node offered to an envelope | lineage check fails | envelope construction denied |
 | F12 | rule set verifies but `signed_digest` ≠ deployment-manifest pin | refused at load | kernel starts with no active set (I8) |
 | F13 | unknown purpose digest, or transition/purpose owner mismatch | `InvalidDeclassificationRuleSet` (decode-time) | set never constructed |
+| F14 | empty token set on a tag-5 declassification (digest-of-empty is non-zero, so the null guard cannot catch it) | `BindingMismatch` (semantic emptiness check in the entry) | release refused |
 
 ## 15. Test plan
 
@@ -743,7 +810,8 @@ Failure-mode table (each row a distinct error and at least one test):
 - **attack rows** (extend `policy_attack_matrix`): forged rule-set signature;
   rule set signed by a Deployment-purpose key; stale predecessor replay;
   consent replay across two releases; consent for sink A presented for
-  sink B.
+  sink B; empty-token-set release (F14); blocklisted content in a release
+  payload refused *before* HPKE sealing.
 - **G5 replay**: a recorded declassification decision replays bit-exact from
   (value bytes, rule set bytes, clock) — no ambient inputs.
 
@@ -757,11 +825,20 @@ Five stages, each independently shippable, tests green at every boundary:
 | S2 | kerneld loads the manifest-pinned set, verifies chain + pin at startup+rollover; masking routed (§8); vault record binding | ingress fails closed without a valid, pinned rule set |
 | S3 | planner envelope routed (§9) | planner calls fail closed without their rule |
 | S4 | reader-dimension facts + envelope lineage checks (§11) | mislabeled/unlabeled handoffs refuse |
-| S5 | approval display routed + `ConsentRecordV2` + final release (§10) | egress demands consent |
+| S5 | approval display routed; tool + release dispatch routed through `declassify` (gate over plaintext before HPKE seal, node minted, rule lookup, real token scope); consent bound to existing settlements (§10.3) | egress and executor handoffs demand a rule; releases demand fresh settlement + non-empty scope |
 
 S1 is pure addition and can merge immediately after review. S2 is the first
 stage with operational impact and needs a rule set authored for the dev
 deployment before it lands.
+
+S3 has a prerequisite outside this design's scope: the planner intent
+vocabulary must become real. Today every planner call hardcodes
+`PlannerIntentKindV2::SummarizeDocument`, `StaticTemplateIdV2::new(1)`, and
+fixed limits (`v2_agent_authority.rs:1797-1802`), so a rule for
+`BuildPlannerEnvelope` would authorize a constant fiction rather than the
+run's actual intent (§18, A4). S5's scope *shrank* in v1.1: consent,
+single-use, quota, effect leases, and executor pinning already exist — S5
+adds the gate, the node, the rule, and the scope, nothing else.
 
 ## 17. Decisions and remaining open items
 
@@ -777,14 +854,18 @@ Resolved (numbering kept stable for traceability):
   and owner mismatches refused at decode (F13). Growth is a kernel release
   plus a new rule-set generation — signed and visible, never silent.
 
+- **O3 — Consent signature: resolved by audit (v1.1).** The question assumed
+  consent had to be built; it exists as the approvald-signed release
+  settlement, verified against the settlement key with challenge, principal,
+  and manifest bindings (`v2_agent_authority.rs:3393-3406`) — already a
+  signed object, stronger than either drafted option. §10.3 binds to it.
+- **O4 — Consent freshness default: resolved by audit (v1.1).** The codebase
+  compiled it years before the question was asked:
+  `TOOL_APPROVAL_TTL_MS = 300_000` (`v2_agent_authority.rs:79`). Rule
+  `max_age` must be ≤ the envelope TTL (§6.4).
+
 Remaining open items (proposed defaults apply until revisited):
 
-- **O3 — Consent signature**: §10.3 keeps consent kernel-internal (vault +
-  settlement digest). Alternative: a fully signed consent object under its
-  own domain, verifiable outside the kernel. Recommendation: internal for
-  S5; revisit if an external auditor needs standalone consent proofs.
-- **O4 — Consent freshness default**: proposed 300 s. Product decision;
-  encodable per rule (§6.4), so the default only matters for rule authoring.
 - **O5 — Registry assignments**: signature tag (presumptively 29), binding
   tag 3, purpose 5, `ClosedSecurityDomainV2` variant value, hard-limit
   numbers (64 rules / 16 readers). Assign against the authoritative
@@ -794,7 +875,34 @@ Remaining open items (proposed defaults apply until revisited):
   privacy-sensitive deployments? Deployment-specific; the mechanism (§6.2)
   supports either.
 
+## 18. Conformance audit addendum (v1.1)
+
+A second audit pass over the live kerneld pipelines, run after v1 was
+accepted. Each finding carries its evidence and its disposition into the
+staged plan. A-numbered to keep them distinct from failure rows.
+
+| # | Finding | Evidence | Disposition |
+|---|---|---|---|
+| A1 | The final-release pipeline exists and is elaborate — approval envelope, settlement verification, single-use, quota, effect lease, durable dispatch, payload re-verification, HPKE seal — and none of it runs the leak gate, mints a declassification node, consults a rule, or carries a real token scope | `v2_agent_authority.rs:3160-3626` | §10.3 rewritten around it; the four gaps are S5's exact scope |
+| A2 | The tool-execution pipeline is equally complete (intent state machine Proposed → Evaluating → AwaitingApproval / Authorized / Denied; `ToolExecution` approval envelopes; semantic-binding checks; HPKE seal) and equally gate-free | `:2242-2540` (state machine), `:2468,2494` (approvals), `:2780` (seal) | `BuildExecutionEnvelope` wiring point is the seal site; §10.2 rebased |
+| A3 | G7 policy already pins the exact executor — identity equality check, seal key, connector-registry digest — so the exact-reader half of tag 4 exists today at the policy layer | `:3196`, `:3537-3539`, `:3580` | Rule allowlist checks membership, G7 checks equality, both must pass (§10.2); deliberate two-domain redundancy |
+| A4 | Every planner call hardcodes intent `SummarizeDocument`, template id 1, and fixed limits — the intent vocabulary is not yet real, so a planner rule would authorize a constant, not an intent | `:1797-1802` | Prerequisite for S3, outside this design (§16) |
+| A5 | The approval display binds *what to approve* by digest chain — `display_digest = H(payload, evidence, destination)` and a UI-authentication envelope — but the artifact the human actually sees is rendered outside any gate, with the display projection chosen by the agent's request | `:3230-3242`, `:3290-3313` | §10.1's wiring point sharpened: the gated `BuildApprovalDisplay` constructs the rendered artifact whose digest enters this chain |
+| A6 | `token_set_digest_v2(&[])` — release scope stubbed empty; the empty set digests to a valid non-zero value, escaping the null-binding guard | `:3216`; guard at `provenance.rs:908-918` | F14: semantic emptiness refused for tag 5; real scope is S5 work |
+| A7 | Provenance already reaches the release record as sorted evidence digests resolved from value handles — necessary but not sufficient: the released value's own lineage never transitions | `:3199-3215` | Kept as-is; the node from `declassify` completes it |
+| A8 | Audited conformant: parentless planner output labels `(ExternalUntrusted, PlannerAbstract, KERNEL)`; the agent's data-plane read surface is a single endpoint that serves only the masked-view record tag | `provenance.rs:816-826`; `v2_data_plane.rs:16,392` | No action |
+| A9 | `SourceKindV2::KernelExtraction` (tag 2) has no production caller — a second defined-but-unwired vocabulary item alongside declassification | grep: kerneld + input-runtime, zero non-test hits | Note only; extraction wiring is out of scope here and should follow the same pattern when it lands |
+
+Two corrections the audit forced on v1 of this document, recorded so the
+reasoning is auditable too: consent was declared missing when it exists
+(§1.5, §10.3 — the v1 map pass looked for `kernel_declassification` callers
+and concluded "no egress"; the egress simply does not use provenance), and
+the consent design duplicated machinery instead of binding it. The general
+lesson stands for future revisions: **absence of a symbol is not absence of
+a pipeline** — audit by data flow, not by grep alone.
+
 ---
 
 *Every file:line reference in this document was verified against the working
-tree at commit `ed567d6` on `claude/security-capabilities-assessment-06bjbl`.*
+tree at commit `ed567d6` on `claude/security-capabilities-assessment-06bjbl`;
+the v1.1 audit rows (§18) were verified against the same tree.*
