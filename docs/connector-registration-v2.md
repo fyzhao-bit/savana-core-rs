@@ -1,10 +1,15 @@
 # Savana V2 Connector Registration: Self-Service Through the Signed Channel
 
-Status: design proposal, v1 (2026-08-01). Specifies how a user adds an MCP
+Status: design proposal, v1.1 (2026-08-01). Specifies how a user adds an MCP
 server (or any connector) to a running installation without a deployment
 rollover — while keeping the kernel's rule that **registration verbs exist
 only in signed channels; the runtime only verifies**. Changes no code by
 itself.
+
+v1.1: connectors gain explicit **tiers** (§5.1–5.3) — the capability-ceiling
+pattern `labels.rs` already applies to values, lifted to connectors — with
+per-tier ID namespaces and monotonic transitions; the host allowlist (O2,
+now resolved) is specified in §5.4 and scoped to the user tier only.
 
 Companion reading: `docs/declassification-v2.md` (the release-rule surface
 this design composes with, cited below as *DECL*), `docs/protocol-v1.md`.
@@ -116,9 +121,10 @@ ConnectorRegistryStateV2:
 
 ```text
 ConnectorDescriptorV2 (canonical CBOR, bounded, digested):
-    connector_id:          bytes32  — hash_domain over (display_name, transport identity)
+    connector_id:          bytes32  — per-TIER hash domain over (display_name,
+                                      transport identity); see §5.2
     display_name:          bounded UTF-8 (closed identifier language, G3Error::InvalidIdentifier rules)
-    origin:                u16      — 1 DeploymentShipped | 2 UserRegistered
+    tier:                  u16      — ConnectorTierV2: 1 DeploymentShipped | 2 UserRegistered
     transport:             tagged   — Stdio { package_digest } | Https { url, tls_identity_pin }
     tool_descriptors:      array    — same shape G4 validates today (descriptor.rs:600),
                                       bounded by MAX_ACTIVE_TOOL_DESCRIPTORS
@@ -128,17 +134,97 @@ ConnectorDescriptorV2 (canonical CBOR, bounded, digested):
 
 Validation highlights:
 
-- `origin = UserRegistered` ⇒ `requested_effects` MUST NOT contain
-  `FINAL_RELEASE` (`labels.rs:200`). Refused at decode, not at use: a
-  user-registered connector *cannot ask* to be an egress sink through this
-  channel (§8 explains the channel that can).
+- `requested_effects` is clipped by the **tier ceiling** (§5.1) at decode,
+  not at use — a descriptor that asks past its tier is refused outright.
 - The transport identity is pinned (package digest for local processes, TLS
-  identity for remote) — how deep the pin goes is O2.
-- Tool descriptors of user-registered connectors enter the G4 surface
-  co-signed by the connector-authority key rather than the
-  manifest-authenticated registry publisher, and carry the `UserRegistered`
-  origin so policy can discriminate (e.g. tighter quotas, no
-  auto-approval classes).
+  identity for remote); user-tier hosts must additionally clear the
+  allowlist (§5.4).
+- Tool descriptors of user-tier connectors enter the G4 surface co-signed
+  by the connector-authority key rather than the manifest-authenticated
+  registry publisher, and carry the tier so policy can discriminate.
+- `tier` is encoded on the wire and cross-checked against the
+  `connector_id` derivation domain (§5.2) — encoded-then-recomputed, the
+  same discipline as `decode_member`'s `key_id` check
+  (`deployment_operational_trust.rs:707`). A mismatch is a decode error.
+
+### 5.1 Tiers as capability ceilings
+
+The kernel already has this pattern for values:
+`UNTRUSTED_EFFECT_CEILING_V2` (`labels.rs:273`) — *integrity level implies
+effect ceiling*, applied on every construction and derivation so no source
+can hand an untrusted value an authorizing effect. `ConnectorTierV2` lifts
+the same rule to connectors: **tier implies capability profile**, applied at
+descriptor decode so no channel can register a connector past its tier.
+
+| | `DeploymentShipped` (1) | `UserRegistered` (2) |
+|---|---|---|
+| Effect ceiling | up to policy-allowed | `∩ ¬FINAL_RELEASE` (`labels.rs:200`) |
+| Host constraint | none at runtime — the descriptor itself is deployment-signed; a runtime allowlist constraining genesis would let a narrowed list strand the deployment's own connectors | must clear the user-tier host allowlist (§5.4) |
+| Quota class | standard | tightened (hosted by the existing quota machinery) |
+| Tool-execution approval class | per policy | policy may default to per-call approval |
+
+What v1 expressed as a one-off rule ("UserRegistered must not request
+`FINAL_RELEASE`", old CF5) is now one row of this table; new capability
+dimensions get a column entry per tier instead of a new scattered special
+case.
+
+### 5.2 Namespace separation: tier lives in the identifier
+
+```text
+connector_id = hash_domain("savana.connector.deployment.v2\0", name || transport)   // tier 1
+connector_id = hash_domain("savana.connector.user.v2\0",       name || transport)   // tier 2
+```
+
+Per-tier derivation domains make the two ID spaces **disjoint**: a
+user-registered connector cannot collide with or impersonate a
+deployment-shipped one at the identifier level, whatever it names itself.
+The tier shown on the approval display is derived from the verified ID
+domain, not read from a claimable field — the badge cannot lie.
+
+### 5.3 Monotonic transitions and promotion
+
+Generalizing C7's "failure shrinks, never grows" into a channel rule:
+
+- The **runtime channel** (this design) can only create tier-2 connectors
+  and remove connectors of any tier. It can never mint tier 1.
+- Only a **deployment generation** creates tier 1 — including *promotion*:
+  the next genesis re-ships a formerly user-registered connector as
+  deployment-shipped. Promotion changes the derivation domain, hence the
+  `connector_id`, hence the `destination_digest` — **deliberately**. Any
+  release rule that named the old identity does not silently follow the
+  promotion; releasing to the promoted connector requires re-authoring the
+  rule against its new identity. Promotion is re-authorization, not
+  relabeling — consistent with the two-authority split (§8).
+
+### 5.4 The user-tier host allowlist (resolves O2)
+
+The allowlist constrains where a **tier-2** remote connector may point.
+Split precisely across data / logic / enforcement:
+
+- **Data**: a deployment-signed field in G7 material, next to the genesis
+  digest and authority key (§4). Empty list = no tier-2 remote connectors
+  at all (fail-closed default; a deployment must opt hosts in).
+- **Logic**: ONE shared predicate in `savana-policy-core`, called by both
+  daemons — the masker/verifier lesson (`ed567d6`) applied preemptively:
+  two implementations of suffix matching would drift, and suffix matching
+  is a classic vulnerability class. The predicate specifies:
+  - host normalization: lowercase, strip trailing dot, IDNA/punycode
+    normalized before comparison;
+  - **label-boundary suffix match**: `example.com` matches
+    `api.example.com` and `example.com`, never `evilexample.com`;
+  - IP literals match exactly only — never by suffix.
+- **Enforcement points** (four, two per daemon):
+
+| Who | When | What it stops |
+|---|---|---|
+| kerneld | at proposal, before the approval envelope is built | a forbidden descriptor never reaches the human — approval attention is not spent on something the deployment already refused |
+| kerneld | at delta signing + every chain load | chain hygiene: invalid-by-policy descriptors never enter the chain; and the allowlist is a **standing constraint** — a new generation narrowing the list makes a previously registered connector inert (CF9) until removed or re-allowed |
+| execd | at connector load | independent re-check against current G7 material — defense against a kerneld bug or a chain accepted under an older generation |
+| execd | at connect time | the half only execd can do: TLS identity pin, connect-time host verification, no cross-host redirects (`provider_transport.rs`) |
+
+The kernel judges "is this descriptor lawful"; the executor proves "did the
+connection actually go where the descriptor said". Neither can do the
+other's half.
 
 ## 6. The delta: `ConnectorRegistryDeltaV2`
 
@@ -225,9 +311,11 @@ The two-authority split from DECL applies with full force here:
 - Release (DECL §6.1, deployment channel, rule-signed) is what makes a
   destination an authorized egress sink: a `BuildFinalRelease` rule's reader
   allowlist must name the connector's `destination_digest`. This design
-  **cannot** produce that: `UserRegistered` descriptors cannot carry
-  `FINAL_RELEASE` (§5), and rule sets are signed by the
-  `DeclassificationAuthority` key, which this flow does not hold.
+  **cannot** produce that: the tier-2 ceiling strips `FINAL_RELEASE` at
+  decode (§5.1), and rule sets are signed by the
+  `DeclassificationAuthority` key, which this flow does not hold. Promotion
+  (§5.3) does not leak through either: the promoted connector is a new
+  identity, so old rules cannot accidentally cover it.
 
 So the worst a socially-engineered approval can yield is a tool the agent
 may propose calls against — with the human approving each effectful intent
@@ -258,14 +346,22 @@ act through the deployment channel. That asymmetry is the point.
   the human saw.
 - **C3**: kerneld and execd never act on different registries — the lease
   head comparison fails dispatch on any divergence.
-- **C4**: `UserRegistered` ⇒ `FINAL_RELEASE ∉ requested_effects`, enforced
-  at decode; release authorization is unreachable from this channel.
+- **C4**: every descriptor's capabilities respect its tier ceiling (§5.1),
+  enforced at decode; in particular tier 2 ⇒
+  `FINAL_RELEASE ∉ requested_effects` — release authorization is
+  unreachable from this channel.
 - **C5**: the connector-authority key signs deltas and nothing else
   (domain separation), is never exported, and is distinct from every other
   kernel key.
 - **C6**: zero authority key in G7 ⇒ the feature does not exist at runtime.
 - **C7**: chain loss shrinks the registry to genesis; no failure mode grows
   it.
+- **C8** *(v1.1)*: tier transitions are monotonic per channel — the runtime
+  channel never mints tier 1; only a deployment generation does, and
+  promotion changes the connector's identity (§5.3).
+- **C9** *(v1.1)*: tier ID namespaces are disjoint by derivation domain
+  (§5.2); a tier claim inconsistent with the ID domain is a decode error,
+  so the displayed tier cannot be forged.
 
 | # | Condition | Effect |
 |---|---|---|
@@ -273,10 +369,12 @@ act through the deployment channel. That asymmetry is the point.
 | CF2 | sequence gap, fork, previous-head mismatch | delta refused |
 | CF3 | settlement missing, stale, non-Approve, or replayed on Add | pending registration refused; user re-approves |
 | CF4 | descriptor over limits, malformed identifier, zero digests | decode refusal |
-| CF5 | `UserRegistered` requesting `FINAL_RELEASE` | decode refusal (C4) |
+| CF5 | descriptor requesting capabilities past its tier ceiling (e.g. tier 2 with `FINAL_RELEASE`) | decode refusal (C4) |
 | CF6 | kerneld/execd head divergence | dispatch fails closed until convergence |
 | CF7 | registry at `max_user_connectors` | Add refused; remove first |
 | CF8 | proposal from a non-UI origin (agent channel) | operation does not exist in that vocabulary |
+| CF9 | tier-2 host outside the user-tier allowlist — at proposal, at chain load, or after a generation narrows the list | refused / connector inert until removed or re-allowed (§5.4) |
+| CF10 | `tier` field inconsistent with the `connector_id` derivation domain | decode refusal (C9) |
 
 ## 11. Test plan
 
@@ -288,6 +386,16 @@ act through the deployment channel. That asymmetry is the point.
 - Effects: CF5 decode refusal; a registered connector's destination digest
   absent from every release-rule allowlist ⇒ `declassify` tag 5 refuses
   (composition test with DECL).
+- Tiers *(v1.1)*: ID-domain disjointness (same name+transport in both tiers
+  yields different ids); tier/domain mismatch refused (CF10); promotion
+  changes identity and old release rules do not cover the new id; runtime
+  channel cannot mint tier 1.
+- Host allowlist *(v1.1)*: shared-predicate suite — `evilexample.com` vs
+  `api.example.com` label boundary, IDNA/punycode normalization, trailing
+  dot, IP literal exact-only; empty list refuses all tier-2 remotes;
+  generation-narrowing renders an existing connector inert (CF9) on both
+  daemons; kerneld and execd agree on every vector (differential test over
+  one shared function).
 - Convergence: execd behind by one delta ⇒ dispatch fails, then succeeds
   after sync; wiped execd chain ⇒ genesis fallback both sides.
 - Origin: the proposal operation absent from the agent-facing protocol
@@ -297,7 +405,7 @@ act through the deployment channel. That asymmetry is the point.
 
 | Stage | Content | Behavior change |
 |---|---|---|
-| R1 | Descriptor/delta/chain objects + G7 fields + validation tests | none (authority key zero everywhere) |
+| R1 | Descriptor/delta/chain objects + `ConnectorTierV2` + per-tier ID domains + shared host predicate + G7 fields (genesis, authority key, allowlist) + validation tests | none (authority key zero everywhere) |
 | R2 | kerneld: pending-registration flow, purpose 4 envelopes, settlement verify, delta signing, durable chain | none until a deployment ships an authority key |
 | R3 | execd: chain verification + connector runtime consumption; lease check moves to chain head | self-service live where enabled |
 | R4 | G4 co-signed descriptor path + DECL composition tests | user-registered tools proposable |
@@ -310,10 +418,12 @@ ahead of any product decision to enable the feature.
 - **O1 — Default posture**: shipped default is disabled (zero authority
   key). Which deployments enable it is a product/ops decision per
   installation class.
-- **O2 — Transport pinning depth**: package digest and TLS identity pin are
-  specified; whether remote connectors additionally require an allowlisted
-  host suffix set (deployment-authored) is open. Recommendation: yes, as a
-  G7 field, empty = any host — decide before R3.
+- **O2 — Host allowlist: resolved (v1.1), §5.4.** Yes — as a
+  deployment-signed G7 field scoped to tier 2 only, with one shared
+  predicate in policy-core and four enforcement points across both daemons.
+  One change from the v1 recommendation: **empty = refuse all tier-2
+  remotes**, not "any host" — a deployment must opt hosts in, consistent
+  with every other fail-closed default in this kernel.
 - **O3 — Registration quota semantics**: `max_user_connectors = 16` is a
   hard limit; whether a per-principal or per-time-window quota also applies
   (the existing quota machinery could host it) is open.
