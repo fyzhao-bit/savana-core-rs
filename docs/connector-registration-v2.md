@@ -1,6 +1,6 @@
 # Savana V2 Connector Registration: Self-Service Through the Signed Channel
 
-Status: design proposal, v1.1 (2026-08-01). Specifies how a user adds an MCP
+Status: accepted design, v1.2 (2026-08-01). Specifies how a user adds an MCP
 server (or any connector) to a running installation without a deployment
 rollover — while keeping the kernel's rule that **registration verbs exist
 only in signed channels; the runtime only verifies**. Changes no code by
@@ -10,6 +10,9 @@ v1.1: connectors gain explicit **tiers** (§5.1–5.3) — the capability-ceilin
 pattern `labels.rs` already applies to values, lifted to connectors — with
 per-tier ID namespaces and monotonic transitions; the host allowlist (O2,
 now resolved) is specified in §5.4 and scoped to the user tier only.
+
+v1.2: O1, O3, and O4 resolved (§13). Every question this document raised is
+now decided; nothing remains open.
 
 Companion reading: `docs/declassification-v2.md` (the release-rule surface
 this design composes with, cited below as *DECL*), `docs/protocol-v1.md`.
@@ -113,7 +116,8 @@ ConnectorRegistryStateV2:
   independently from (genesis, deltas).
 - A deployment that ships a zero `connector_authority_public_key` has
   **self-service disabled**: the chain can never grow past genesis, and the
-  system behaves exactly as today. Off is the shipped default (O1).
+  system behaves exactly as today. **Off is the shipped default — decided
+  (O1)**: enabling is a per-deployment opt-in, never implicit.
 - Wiped or corrupted local chain state ⇒ fall back to genesis. Failure
   shrinks the registry, never grows it.
 
@@ -252,8 +256,8 @@ does.
 
 Chain validation mirrors the predecessor discipline used everywhere else
 (`deployment_operational_trust.rs:321-341`): sequence `+1`, previous head
-equality, canonical re-encode, bounded total (`max_user_connectors`,
-proposed 16, alongside the existing hard-limits family).
+equality, canonical re-encode, bounded total (`max_user_connectors = 16`,
+decided — O3, alongside the existing hard-limits family).
 
 ## 7. The registration flow
 
@@ -413,24 +417,32 @@ act through the deployment channel. That asymmetry is the point.
 R1–R2 are inert without a deployment opting in (C6), so they can land
 ahead of any product decision to enable the feature.
 
-## 13. Open questions
+## 13. Decisions
 
-- **O1 — Default posture**: shipped default is disabled (zero authority
-  key). Which deployments enable it is a product/ops decision per
-  installation class.
-- **O2 — Host allowlist: resolved (v1.1), §5.4.** Yes — as a
-  deployment-signed G7 field scoped to tier 2 only, with one shared
-  predicate in policy-core and four enforcement points across both daemons.
-  One change from the v1 recommendation: **empty = refuse all tier-2
-  remotes**, not "any host" — a deployment must opt hosts in, consistent
-  with every other fail-closed default in this kernel.
-- **O3 — Registration quota semantics**: `max_user_connectors = 16` is a
-  hard limit; whether a per-principal or per-time-window quota also applies
-  (the existing quota machinery could host it) is open.
-- **O4 — Approval on removal**: this design says none (§9). The dissenting
-  view — removal of a monitoring-ish connector could aid an attacker —
-  is noted; if adopted later, `Remove` gains the same settlement binding
-  `Add` has, at the cost of consent fatigue.
+All questions this document raised are resolved; numbering kept stable.
+
+- **O1 — Default posture: decided — shipped disabled.** The deployment
+  ships a zero authority key (§4, C6); the feature does not exist at
+  runtime until a deployment explicitly enrolls a key. Enabling is a
+  deliberate per-deployment act, never a side effect.
+- **O2 — Host allowlist: decided (v1.1), §5.4.** A deployment-signed G7
+  field scoped to tier 2 only, one shared predicate in policy-core, four
+  enforcement points across both daemons. Empty = refuse all tier-2
+  remotes — a deployment must opt hosts in, consistent with every other
+  fail-closed default in this kernel.
+- **O3 — Registration quota: decided — hard limit only, for now.**
+  `max_user_connectors = 16` joins the compiled hard-limits family. Finer
+  quotas (per-principal, per-time-window) are deliberately NOT schema:
+  when a deployment wants them, they are policy-authored subjects hosted
+  by the existing quota machinery (`DispatchQuotaSubjectV2` pattern,
+  `v2_agent_authority.rs:3525-3530`) — no wire change, no new object, no
+  blocker for R1–R4.
+- **O4 — Approval on removal: decided — none.** Removal shrinks the effect
+  surface and must never wait on a consent round-trip (§9); it remains
+  signed, chained, and journaled. The dissenting view — removing a
+  monitoring-ish connector could aid an attacker — stays recorded: if it
+  ever prevails, `Remove` gains the same settlement binding `Add` has, a
+  purely additive change to §6, at the cost of consent fatigue.
 
 ---
 
