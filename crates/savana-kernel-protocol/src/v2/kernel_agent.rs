@@ -475,6 +475,10 @@ impl PlannerPlanV2 {
     pub fn steps(&self) -> &[PlannerStepV2] {
         &self.steps
     }
+
+    pub fn canonical_encoded_len(&self) -> Result<usize, ProtocolError> {
+        encode_planner_plan_v2(self).map(|encoded| encoded.len())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -5,43 +5,45 @@ use getrandom::getrandom;
 use hkdf::Hkdf;
 use savana_kernel_protocol::v2::{
     approval_display_digest_v2, derive_ed25519_key_id_v2, ActionIntentCurrentStateV2,
-    ActionIntentHandleV2, ActionIntentIdV2, ActiveToolViewV2, AgentAuthenticationClosureEvidenceV2,
-    AgentSessionHandleV2, AgentSessionStatusV2, AgentUiAuthenticationPreparationHandleV2,
-    AgentUiAuthorizationHandleV2, ApprovalBindingV2, ApprovalDecisionV2, ApprovalPurposeV2,
-    AuthorityHandleKeyV2, AuthorizeToolCallResponseV2, BootIdV2, BoundedCiphertextV2,
-    CancelKernelTaskRequestV2, CancelKernelTaskResponseV2, ClaimAgentSessionRequestV2,
-    ClaimAgentSessionResponseV2, CommitPlannerValueRequestV2, CommitPlannerValueResponseV2,
-    Digest32V2, DispatchCoreV2 as ProtocolDispatchCoreV2, DispatchExecutionResponseV2,
-    DispatchRequestV2, DispatchSubjectV2 as ProtocolDispatchSubjectV2, DurableRunIdV2,
-    DurableTaskIdV2, Ed25519KeyIdV2, EvaluateToolCallRequestV2, EvaluateToolCallResponseV2,
-    ExecutionHandleV2, ExecutionStatusTargetV2, ExecutionTicketHandleV2, ExecutorIdentityV2,
-    ExecutorStatusV2, FixedBytes32V2, FixedOriginV2, GetAgentSessionStatusRequestV2,
-    GetAgentSessionStatusResponseV2, GetExecutionStatusRequestV2, GetExecutionStatusResponseV2,
-    GetKernelTaskStatusRequestV2, GetKernelTaskStatusResponseV2, GetReleaseStatusRequestV2,
-    GetReleaseStatusResponseV2, HpkeX25519KeyIdV2, KernelIngressBootstrapTransferCapabilityV2,
-    MaskedDocumentHandleV2, NewTaskPreparationHandleV2, Nonce32V2, PendingReleaseHandleV2,
-    PendingToolCallHandleV2, PlanRevisionDigestV2, PlanStepHandleV2, PlannerAbstractSlotV2,
-    PlannerEnvelopeV2, PlannerIntentKindV2, PlannerLimitsV2, PlannerPurposeV2, PlannerRouteIdV2,
-    PlannerSlotCardinalityV2, PlannerSlotConfidentialityV2, PlannerSlotRefV2,
-    PlannerTicketHandleV2, PrepareAgentUiAuthenticationRequestV2,
-    PrepareAgentUiAuthenticationResponseV2, PrepareFollowupIngressRequestV2,
-    PrepareFollowupIngressResponseV2, PrepareNewIngressRequestV2, PrepareNewIngressResponseV2,
-    PreparePlannerCallRequestV2, PreparePlannerCallResponseV2, PrepareReleaseRequestV2,
-    PrepareReleaseResponseV2, PrincipalIdV2, ProducerIdentityV2, ProposeToolCallRequestV2,
-    ProposeToolCallResponseV2, PublicDecisionTraceV2 as ProtocolDecisionTraceV2,
-    PublicDispatchAcceptedStateV2, PublicDispatchCompletionV2, PublicExecutionStatusV2,
-    PublicFailureClassV2, PublicStableCodeV2, PublicTaskStatusV2, QueryByExecutionNonceRequestV2,
-    ReadAgentViewRequestV2, ReleaseHandleV2, ReleaseKernelApprovalHandleV2, ReleaseStatusTargetV2,
-    ReleaseTicketHandleV2, ResumeCommittedAgentAuthenticationRequestV2,
-    ResumeCommittedAgentAuthenticationResponseV2, RevokeVaultRequestV2, RoleIdV2,
-    RunRevisionDigestV2, RunRevisionObservationV2, SealedExecutionEnvelopePayloadV2,
-    ServiceIdentityV2, SignedAgentAuthenticationClosureDescriptorV2, SignedApprovalEnvelopeV2,
+    ActionIntentHandleV2, ActionIntentIdV2, ActionTemplateIdV2, ActiveToolViewV2,
+    AgentAuthenticationClosureEvidenceV2, AgentSessionHandleV2, AgentSessionStatusV2,
+    AgentUiAuthenticationPreparationHandleV2, AgentUiAuthorizationHandleV2, ApprovalBindingV2,
+    ApprovalDecisionV2, ApprovalPurposeV2, AuthorityHandleKeyV2, AuthorizeToolCallResponseV2,
+    BootIdV2, BoundedCiphertextV2, CancelKernelTaskRequestV2, CancelKernelTaskResponseV2,
+    ClaimAgentSessionRequestV2, ClaimAgentSessionResponseV2, CommitPlannerValueRequestV2,
+    CommitPlannerValueResponseV2, Digest32V2, DispatchCoreV2 as ProtocolDispatchCoreV2,
+    DispatchExecutionResponseV2, DispatchRequestV2, DispatchSubjectV2 as ProtocolDispatchSubjectV2,
+    DurableRunIdV2, DurableTaskIdV2, Ed25519KeyIdV2, EvaluateToolCallRequestV2,
+    EvaluateToolCallResponseV2, ExecutionHandleV2, ExecutionStatusTargetV2,
+    ExecutionTicketHandleV2, ExecutorIdentityV2, ExecutorStatusV2, FixedBytes32V2, FixedOriginV2,
+    GetAgentSessionStatusRequestV2, GetAgentSessionStatusResponseV2, GetExecutionStatusRequestV2,
+    GetExecutionStatusResponseV2, GetKernelTaskStatusRequestV2, GetKernelTaskStatusResponseV2,
+    GetReleaseStatusRequestV2, GetReleaseStatusResponseV2, HpkeX25519KeyIdV2,
+    KernelIngressBootstrapTransferCapabilityV2, MaskedDocumentHandleV2, NewTaskPreparationHandleV2,
+    Nonce32V2, PendingReleaseHandleV2, PendingToolCallHandleV2, PlanRevisionDigestV2,
+    PlanStepHandleV2, PlannerAbstractSlotV2, PlannerEnvelopeV2, PlannerIntentKindV2,
+    PlannerLimitsV2, PlannerPlanV2, PlannerPurposeV2, PlannerRouteIdV2, PlannerSlotCardinalityV2,
+    PlannerSlotConfidentialityV2, PlannerSlotRefV2, PlannerTicketHandleV2,
+    PrepareAgentUiAuthenticationRequestV2, PrepareAgentUiAuthenticationResponseV2,
+    PrepareFollowupIngressRequestV2, PrepareFollowupIngressResponseV2, PrepareNewIngressRequestV2,
+    PrepareNewIngressResponseV2, PreparePlannerCallRequestV2, PreparePlannerCallResponseV2,
+    PrepareReleaseRequestV2, PrepareReleaseResponseV2, PrincipalIdV2, ProducerIdentityV2,
+    ProposeToolCallRequestV2, ProposeToolCallResponseV2,
+    PublicDecisionTraceV2 as ProtocolDecisionTraceV2, PublicDispatchAcceptedStateV2,
+    PublicDispatchCompletionV2, PublicExecutionStatusV2, PublicFailureClassV2, PublicStableCodeV2,
+    PublicTaskStatusV2, QueryByExecutionNonceRequestV2, ReadAgentViewRequestV2, ReleaseHandleV2,
+    ReleaseKernelApprovalHandleV2, ReleaseStatusTargetV2, ReleaseTicketHandleV2,
+    ResumeCommittedAgentAuthenticationRequestV2, ResumeCommittedAgentAuthenticationResponseV2,
+    RevokeVaultRequestV2, RoleIdV2, RunRevisionDigestV2, RunRevisionObservationV2,
+    SealedExecutionEnvelopePayloadV2, ServiceIdentityV2,
+    SignedAgentAuthenticationClosureDescriptorV2, SignedApprovalEnvelopeV2,
     SignedDurableTaskCorrelationV2, SignedSealedExecutionEnvelopeV2,
     SignedUiAuthenticationEnvelopeV2, SignedUiAuthenticationSettlementV2, SlotKindV2,
-    StaticTemplateIdV2, ToolHandleV2, ToolKernelApprovalHandleV2, UiAuthenticationBindingV2,
-    UiAuthenticationPurposeV2, UnixMillisV2, UnsignedAgentAuthenticationClosureDescriptorV2,
-    UnsignedApprovalEnvelopeV2, UnsignedDurableTaskCorrelationV2,
-    UnsignedUiAuthenticationEnvelopeV2, V2DecodeContext, ValueHandleV2,
+    StaticTemplateIdV2, ToolClassIdV2, ToolHandleV2, ToolKernelApprovalHandleV2,
+    UiAuthenticationBindingV2, UiAuthenticationPurposeV2, UnixMillisV2,
+    UnsignedAgentAuthenticationClosureDescriptorV2, UnsignedApprovalEnvelopeV2,
+    UnsignedDurableTaskCorrelationV2, UnsignedUiAuthenticationEnvelopeV2, V2DecodeContext,
+    ValueHandleV2,
 };
 use savana_policy_core::v2::{
     decode_provenance_record_v2, encode_provenance_record_v2, provenance_digest_v2,
@@ -92,13 +94,14 @@ pub(crate) enum KernelAgentAuthorityErrorV2 {
     Unavailable,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SignedPlannerPolicyV2 {
     planner_route: PlannerRouteIdV2,
     task_template: StaticTemplateIdV2,
     intent: PlannerIntentKindV2,
     purpose: PlannerPurposeV2,
     limits: PlannerLimitsV2,
+    allowed_action_templates: Vec<ActionTemplateIdV2>,
 }
 
 impl SignedPlannerPolicyV2 {
@@ -125,18 +128,73 @@ impl SignedPlannerPolicyV2 {
         if envelope.planner_route().get() == 0 || task_template.get() == 0 {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
+        let allowed_action_templates = envelope.allowed_action_templates().to_vec();
+        if allowed_action_templates.is_empty() {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
         Ok(Self {
             planner_route: envelope.planner_route(),
             task_template,
             intent,
             purpose: PlannerPurposeV2::PlannerCall,
             limits,
+            allowed_action_templates,
         })
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EffectivePlannerPolicyV2 {
+    limits: PlannerLimitsV2,
+    allowed_action_templates: Vec<ActionTemplateIdV2>,
+    allowed_tool_classes: Vec<ToolClassIdV2>,
+    task_template: StaticTemplateIdV2,
+    intent: PlannerIntentKindV2,
+    purpose: PlannerPurposeV2,
+}
+
+impl EffectivePlannerPolicyV2 {
+    fn validate_committed_plan(
+        &self,
+        plan: &PlannerPlanV2,
+        encoded_len: usize,
+    ) -> Result<(), KernelAgentAuthorityErrorV2> {
+        let retained_binding = (self.task_template, self.intent, self.purpose);
+        if retained_binding.0.get() == 0 || retained_binding.2 != PlannerPurposeV2::PlannerCall {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        if encoded_len
+            > usize::try_from(self.limits.maximum_encoded_plan_bytes())
+                .map_err(|_| KernelAgentAuthorityErrorV2::LimitExceeded)?
+            || plan.steps().len() > usize::from(self.limits.maximum_steps())
+        {
+            return Err(KernelAgentAuthorityErrorV2::LimitExceeded);
+        }
+        for step in plan.steps() {
+            if step.dependencies().len() > usize::from(self.limits.maximum_dependencies_per_step())
+                || step.slot_bindings().len()
+                    > usize::from(self.limits.maximum_arguments_per_step())
+            {
+                return Err(KernelAgentAuthorityErrorV2::LimitExceeded);
+            }
+            if self
+                .allowed_action_templates
+                .binary_search(&step.action_template())
+                .is_err()
+                || self
+                    .allowed_tool_classes
+                    .binary_search(&step.tool_class())
+                    .is_err()
+            {
+                return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+            }
+        }
+        Ok(())
+    }
+}
+
 fn intersect_planner_request(
-    policy: SignedPlannerPolicyV2,
+    policy: &SignedPlannerPolicyV2,
     planner_route: PlannerRouteIdV2,
     task_template: StaticTemplateIdV2,
     intent: PlannerIntentKindV2,
@@ -385,6 +443,7 @@ struct PlannerTicketRecordV2 {
     ticket: PlannerTicketHandleV2,
     run: savana_kernel_protocol::v2::RunHandleV2,
     planner_route: savana_kernel_protocol::v2::PlannerRouteIdV2,
+    effective_policy: EffectivePlannerPolicyV2,
     prompt_values: Vec<savana_kernel_protocol::v2::ValueHandleV2>,
     slot_bindings: Vec<PlannerSlotBindingRecordV2>,
     envelope_nonce: Nonce32V2,
@@ -1860,7 +1919,7 @@ impl KernelAgentAuthorityV2 {
         if self.planner_tickets.len() >= self.maximum_records {
             return Err(KernelAgentAuthorityErrorV2::LimitExceeded);
         }
-        let signed_planner_policy = self
+        let (signed_planner_policy, session_role) = self
             .sessions
             .iter()
             .find(|session| {
@@ -1870,16 +1929,48 @@ impl KernelAgentAuthorityV2 {
                         AgentSessionStatusV2::Ready | AgentSessionStatusV2::Running
                     )
             })
-            .map(|session| session.signed_planner_policy)
+            .map(|session| (session.signed_planner_policy.clone(), session.role))
             .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
         let effective_limits = intersect_planner_request(
-            signed_planner_policy,
+            &signed_planner_policy,
             request.planner_route(),
             request.task_template(),
             request.intent(),
             request.purpose(),
             request.limits(),
         )?;
+        let policy = self
+            .policy
+            .as_ref()
+            .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
+        let mut allowed_tool_classes = Vec::new();
+        allowed_tool_classes
+            .try_reserve_exact(policy.active_tools.len())
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        for active in policy.active_tools.records() {
+            let descriptor = active.descriptor();
+            if signed_planner_policy
+                .allowed_action_templates
+                .binary_search(&descriptor.unsigned().action_template())
+                .is_ok()
+                && policy
+                    .active_tools
+                    .resolve(descriptor.descriptor_digest(), session_role, now)
+                    .is_some()
+            {
+                allowed_tool_classes.push(descriptor.unsigned().tool_class());
+            }
+        }
+        allowed_tool_classes.sort_unstable();
+        allowed_tool_classes.dedup();
+        let effective_policy = EffectivePlannerPolicyV2 {
+            limits: effective_limits,
+            allowed_action_templates: signed_planner_policy.allowed_action_templates.clone(),
+            allowed_tool_classes,
+            task_template: signed_planner_policy.task_template,
+            intent: signed_planner_policy.intent,
+            purpose: signed_planner_policy.purpose,
+        };
         values
             .validate_run_values(request.run(), request.prompt_values(), now)
             .map_err(map_value_error)?;
@@ -1934,7 +2025,7 @@ impl KernelAgentAuthorityV2 {
             request.planner_route(),
             request.task_template(),
             request.intent(),
-            Vec::new(),
+            signed_planner_policy.allowed_action_templates.clone(),
             slots,
             Vec::new(),
             effective_limits,
@@ -1975,10 +2066,6 @@ impl KernelAgentAuthorityV2 {
         .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
         let envelope_value = KernelValueV2::bytes(canonical)
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
-        let policy = self
-            .policy
-            .as_ref()
-            .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
         let declassification_rules = policy
             .declassification_rules
             .snapshot()
@@ -2020,6 +2107,7 @@ impl KernelAgentAuthorityV2 {
             ticket,
             run: request.run(),
             planner_route: request.planner_route(),
+            effective_policy,
             prompt_values: request.prompt_values().to_vec(),
             slot_bindings,
             envelope_nonce,
@@ -2080,6 +2168,13 @@ impl KernelAgentAuthorityV2 {
         if now.get() >= record.expires_at.get() {
             return Err(KernelAgentAuthorityErrorV2::Expired);
         }
+        let encoded_plan_len = request
+            .plan()
+            .canonical_encoded_len()
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        record
+            .effective_policy
+            .validate_committed_plan(request.plan(), encoded_plan_len)?;
         let session = self
             .sessions
             .iter()
@@ -4917,13 +5012,24 @@ fn encode_prepared_claim_material(
         .u16(material.policy_allowed_effects.bits())
         .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
     encoder
-        .array(5)
+        .array(6)
         .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
     encode_recovery_value(encoder, &material.signed_planner_policy.planner_route)?;
     encode_recovery_value(encoder, &material.signed_planner_policy.task_template)?;
     encode_recovery_value(encoder, &material.signed_planner_policy.intent)?;
     encode_recovery_value(encoder, &material.signed_planner_policy.purpose)?;
     encode_recovery_value(encoder, &material.signed_planner_policy.limits)?;
+    encoder
+        .array(
+            material
+                .signed_planner_policy
+                .allowed_action_templates
+                .len() as u64,
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    for action_template in &material.signed_planner_policy.allowed_action_templates {
+        encode_recovery_value(encoder, action_template)?;
+    }
     encode_recovery_value(encoder, &material.expires_at)
 }
 
@@ -5041,13 +5147,37 @@ fn decode_prepared_claim_material(
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?,
     )
     .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
-    require_recovery_array(decoder, 5)?;
+    require_recovery_array(decoder, 6)?;
+    let planner_route = decode_recovery_value(decoder, context)?;
+    let task_template = decode_recovery_value(decoder, context)?;
+    let intent = decode_recovery_value(decoder, context)?;
+    let purpose = decode_recovery_value(decoder, context)?;
+    let limits = decode_recovery_value(decoder, context)?;
+    let action_template_count = decode_recovery_count(decoder, 256)?;
+    let mut allowed_action_templates = Vec::new();
+    allowed_action_templates
+        .try_reserve_exact(action_template_count)
+        .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    for _ in 0..action_template_count {
+        allowed_action_templates.push(decode_recovery_value(decoder, context)?);
+    }
+    if allowed_action_templates.is_empty()
+        || allowed_action_templates
+            .iter()
+            .any(|template: &ActionTemplateIdV2| template.get() == 0)
+        || allowed_action_templates
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+    }
     let signed_planner_policy = SignedPlannerPolicyV2 {
-        planner_route: decode_recovery_value(decoder, context)?,
-        task_template: decode_recovery_value(decoder, context)?,
-        intent: decode_recovery_value(decoder, context)?,
-        purpose: decode_recovery_value(decoder, context)?,
-        limits: decode_recovery_value(decoder, context)?,
+        planner_route,
+        task_template,
+        intent,
+        purpose,
+        limits,
+        allowed_action_templates,
     };
     let expires_at = decode_recovery_value(decoder, context)?;
     PreparedAgentClaimMaterialV2::from_verified_ingress(
@@ -5068,14 +5198,37 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::{Arc, Mutex};
 
-    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::{Signer as _, SigningKey};
+    use minicbor::Encode as _;
+    use savana_input_runtime::{
+        InputChannelV2, InputRuntimeV2, SignedInputRuntimeAssetsV2, VerifiedInputRuntimeAssetsV2,
+    };
     use savana_kernel_protocol::v2::{
-        derive_ed25519_key_id_v2, BootIdV2, CancelKernelTaskRequestV2, Digest32V2, DurableRunIdV2,
-        GetKernelTaskStatusRequestV2, Nonce32V2, PlannerIntentKindV2, PlannerLimitsV2,
-        PlannerPurposeV2, PlannerRouteIdV2, PrepareNewIngressRequestV2,
-        PrepareNewIngressResponseV2, PrincipalIdV2, PublicTaskStatusV2,
-        ResumeCommittedAgentAuthenticationRequestV2, ResumeCommittedAgentAuthenticationResponseV2,
-        ServiceIdentityV2, StaticTemplateIdV2, UnixMillisV2,
+        derive_ed25519_key_id_v2, encode_planner_plan_v2, ActionTemplateIdV2, AgentSessionHandleV2,
+        AgentSessionStatusV2, ArgumentNameV2, BootIdV2, CancelKernelTaskRequestV2,
+        CommitPlannerValueRequestV2, Digest32V2, DurableRunIdV2, DurableTaskIdV2, Ed25519KeyIdV2,
+        ExecutorIdentityV2, GetKernelTaskStatusRequestV2, MaskedDocumentHandleV2, Nonce32V2,
+        PlannerIntentKindV2, PlannerLimitsV2, PlannerPlanV2, PlannerPurposeV2, PlannerRouteIdV2,
+        PlannerSlotRefV2, PlannerStepV2, PrepareNewIngressRequestV2, PrepareNewIngressResponseV2,
+        PreparePlannerCallRequestV2, PrincipalIdV2, ProducerIdentityV2, ProjectionIdV2,
+        PublicTaskStatusV2, ResumeCommittedAgentAuthenticationRequestV2,
+        ResumeCommittedAgentAuthenticationResponseV2, RoleIdV2, RunRevisionDigestV2,
+        RunRevisionObservationV2, ServiceIdentityV2, StaticTemplateIdV2, ToolClassIdV2,
+        UnixMillisV2, VersionV2,
+    };
+    use savana_policy_core::v2::{
+        activate_internal_validator_registry, declassification_implementation_digest_v2,
+        descriptor_digest_v2, ActiveToolRegistryV2, AttemptKindV2, BoundedConnectorRetryPolicyV2,
+        ClosedDeclassificationPurposeV2, ContextFieldV2, DeclassificationRuleSetV2,
+        DeclassificationRuleV2, DurableG4StateV2, DurableStateNamespaceV2, EffectSetV2,
+        ExecutorIdempotencyContractV2, IdentifierV2, InternalValidatorDeclarationV2, KernelValueV2,
+        LeakGateDutyV2, OntologyExprV2, OntologyOperandV2, OntologyScalarV2,
+        OperationalTrustRootPurposeV2, OperationalTrustRootSetItemV2, OperationalTrustRootSetV2,
+        ProvenanceContextV2, ProvenanceRecordV2, RollbackProtectedStateAnchorV2,
+        RollbackProtectedStateHeadV2, SignedToolDescriptorV2, UnsignedToolDescriptorV2,
+        VerifiedManifestToolConstraintSetV2, VerifiedManifestToolConstraintV2,
+        VerifiedPolicyDispositionV2, VerifiedPolicyToolActivationV2, VerifiedPolicyToolSetV2,
+        VerifiedRegistryPublisherV2, VerifiedToolRegistryV2,
     };
     use sha2::{Digest as _, Sha256};
 
@@ -5083,12 +5236,13 @@ mod tests {
         gate_execution_before_durable_prepare, hpke_x25519_key_id, intersect_planner_request,
         presealed_execution_payload_digest, presealed_final_release_payload_digest,
         KernelAgentAuthorityErrorV2, KernelAgentAuthorityV2, KernelAgentSecurityConfigV2,
-        SignedPlannerPolicyV2,
+        KernelG4G5RuntimeV2, KernelToolApprovalConfigV2, SessionRecordV2, SignedPlannerPolicyV2,
     };
     use crate::v2_agent_durable::{
         KernelAgentAuthorityRollbackAnchorV2, KernelAgentAuthorityStateHeadV2,
     };
     use crate::v2_ingress_authority::{KernelIngressAuthorityV2, KernelIngressSecurityConfigV2};
+    use crate::v2_value_owner::KernelValueOwnerV2;
 
     #[derive(Clone, Default)]
     struct TestAgentStateAnchorV2(Arc<Mutex<KernelAgentAuthorityStateHeadV2>>);
@@ -5114,6 +5268,538 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct TestG4StateAnchorV2(Arc<Mutex<RollbackProtectedStateHeadV2>>);
+
+    impl Default for TestG4StateAnchorV2 {
+        fn default() -> Self {
+            Self(Arc::new(Mutex::new(
+                RollbackProtectedStateHeadV2::new(0, Digest32V2::new([0; 32])).unwrap(),
+            )))
+        }
+    }
+
+    impl RollbackProtectedStateAnchorV2 for TestG4StateAnchorV2 {
+        fn current_head(
+            &self,
+        ) -> Result<RollbackProtectedStateHeadV2, savana_policy_core::v2::G4Error> {
+            self.0
+                .lock()
+                .map(|head| *head)
+                .map_err(|_| savana_policy_core::v2::G4Error::DurableStateIo)
+        }
+
+        fn compare_and_advance(
+            &mut self,
+            expected: RollbackProtectedStateHeadV2,
+            next: RollbackProtectedStateHeadV2,
+        ) -> Result<(), savana_policy_core::v2::G4Error> {
+            let mut head = self
+                .0
+                .lock()
+                .map_err(|_| savana_policy_core::v2::G4Error::DurableStateIo)?;
+            if *head != expected {
+                return Err(savana_policy_core::v2::G4Error::DurableStateRollback);
+            }
+            *head = next;
+            Ok(())
+        }
+    }
+
+    struct PlannerAuthorityFixtureV2 {
+        _directory: tempfile::TempDir,
+        authority: KernelAgentAuthorityV2,
+        values: KernelValueOwnerV2,
+        caller_identity: ServiceIdentityV2,
+        run: savana_kernel_protocol::v2::RunHandleV2,
+        prompt: savana_kernel_protocol::v2::ValueHandleV2,
+    }
+
+    impl PlannerAuthorityFixtureV2 {
+        fn prepare(
+            &mut self,
+            limits: PlannerLimitsV2,
+        ) -> (
+            savana_kernel_protocol::v2::PlannerTicketHandleV2,
+            Nonce32V2,
+            PlannerSlotRefV2,
+        ) {
+            let prepared = self
+                .authority
+                .prepare_planner_call(
+                    &PreparePlannerCallRequestV2::new(
+                        self.run,
+                        PlannerRouteIdV2::new(7),
+                        StaticTemplateIdV2::new(11),
+                        PlannerIntentKindV2::SendMessage,
+                        PlannerPurposeV2::PlannerCall,
+                        limits,
+                        vec![self.prompt],
+                    )
+                    .unwrap(),
+                    &self.values,
+                    self.caller_identity,
+                    UnixMillisV2::new(200),
+                )
+                .unwrap();
+            let slot = self.authority.planner_tickets.last().unwrap().slot_bindings[0]
+                .slot
+                .reference();
+            (
+                prepared.ticket(),
+                prepared.envelope().envelope_nonce(),
+                slot,
+            )
+        }
+
+        fn commit(
+            &mut self,
+            ticket: savana_kernel_protocol::v2::PlannerTicketHandleV2,
+            plan: PlannerPlanV2,
+        ) -> Result<
+            savana_kernel_protocol::v2::CommitPlannerValueResponseV2,
+            KernelAgentAuthorityErrorV2,
+        > {
+            self.authority.commit_planner_value(
+                &CommitPlannerValueRequestV2::new(self.run, ticket, plan),
+                &mut self.values,
+                self.caller_identity,
+                UnixMillisV2::new(201),
+            )
+        }
+    }
+
+    fn planner_authority_fixture() -> PlannerAuthorityFixtureV2 {
+        let caller_identity = ServiceIdentityV2::new([0x81; 32]);
+        let producer = ProducerIdentityV2::new([0x82; 32]);
+        let durable_run_id = DurableRunIdV2::new([0x83; 32]);
+        let durable_task_id = DurableTaskIdV2::new([0x84; 32]);
+        let manifest = Digest32V2::new([0x85; 32]);
+        let mut values = KernelValueOwnerV2::new(4, 32).unwrap();
+        let run = values
+            .open_verified_run(
+                producer,
+                durable_run_id,
+                manifest,
+                UnixMillisV2::new(100),
+                UnixMillisV2::new(10_000),
+                EffectSetV2::SEND,
+            )
+            .unwrap();
+        let prompt_value = KernelValueV2::text("private planner prompt").unwrap();
+        let prompt_provenance = ProvenanceRecordV2::planner_output(
+            &prompt_value,
+            ProvenanceContextV2::from_authenticated_runtime(
+                producer,
+                durable_run_id,
+                manifest,
+                UnixMillisV2::new(100),
+                UnixMillisV2::new(10_000),
+            )
+            .unwrap(),
+            Digest32V2::new([0x86; 32]),
+            Digest32V2::new([0x87; 32]),
+            Digest32V2::new([0x88; 32]),
+            &[],
+            EffectSetV2::SEND,
+        )
+        .unwrap();
+        let prompt = values
+            .register_verified_value(run, prompt_value, prompt_provenance)
+            .unwrap()
+            .handle();
+
+        let input_runtime = planner_input_runtime();
+        let gated = input_runtime
+            .process(
+                InputChannelV2::ChatText,
+                "send to alice@example.com",
+                UnixMillisV2::new(100),
+            )
+            .unwrap();
+        let signed_planner_policy =
+            SignedPlannerPolicyV2::from_verified_input(gated.planner_envelope()).unwrap();
+
+        let security = KernelAgentSecurityConfigV2::new(
+            Digest32V2::new([0x89; 32]),
+            ServiceIdentityV2::new([0x8a; 32]),
+            caller_identity,
+            ServiceIdentityV2::new([0x8b; 32]),
+            BootIdV2::new([0x8c; 32]),
+            BootIdV2::new([0x8d; 32]),
+            BootIdV2::new([0x8e; 32]),
+            BootIdV2::new([0x8f; 32]),
+            SigningKey::from_bytes(&[0x90; 32]),
+            SigningKey::from_bytes(&[0x91; 32]),
+            derive_ed25519_key_id_v2(
+                SigningKey::from_bytes(&[0x92; 32])
+                    .verifying_key()
+                    .to_bytes(),
+            ),
+            SigningKey::from_bytes(&[0x92; 32])
+                .verifying_key()
+                .to_bytes(),
+        )
+        .unwrap();
+        let mut authority = KernelAgentAuthorityV2::new(security, 32).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        authority.policy = Some(planner_policy_runtime(directory.path()));
+        authority.sessions.push(SessionRecordV2 {
+            session: AgentSessionHandleV2::from_authority_entropy([0x93; 32]).unwrap(),
+            run,
+            durable_run_id,
+            durable_task_id,
+            active_state_manifest_digest: manifest,
+            principal: PrincipalIdV2::new([0x94; 32]),
+            producer_identity: producer,
+            role: RoleIdV2::new(1),
+            policy_allowed_effects: EffectSetV2::SEND,
+            signed_planner_policy,
+            expires_at: UnixMillisV2::new(10_000),
+            revision: RunRevisionObservationV2::new(
+                durable_run_id,
+                1,
+                RunRevisionDigestV2::new([0x95; 32]),
+            )
+            .unwrap(),
+            initial_document: MaskedDocumentHandleV2::from_authority_entropy([0x96; 32]).unwrap(),
+            status: AgentSessionStatusV2::Ready,
+        });
+        PlannerAuthorityFixtureV2 {
+            _directory: directory,
+            authority,
+            values,
+            caller_identity,
+            run,
+            prompt,
+        }
+    }
+
+    fn planner_input_runtime() -> InputRuntimeV2 {
+        const ASSET_DIGEST_DOMAIN: &[u8] = b"SAVANA_INPUT_RUNTIME_ASSET_V2\0";
+        const ASSET_SIGNATURE_DOMAIN: &[u8] = b"SAVANA_INPUT_RUNTIME_ASSET_SIGNATURE_V2\0";
+
+        let mut payload = minicbor::Encoder::new(Vec::new());
+        payload
+            .array(7)
+            .unwrap()
+            .u16(2)
+            .unwrap()
+            .u64(1)
+            .unwrap()
+            .u64(10_000)
+            .unwrap();
+        PlannerRouteIdV2::new(7)
+            .encode(&mut payload, &mut ())
+            .unwrap();
+        payload
+            .array(6)
+            .unwrap()
+            .u32(4096)
+            .unwrap()
+            .u16(32)
+            .unwrap()
+            .u16(4)
+            .unwrap()
+            .u16(1)
+            .unwrap()
+            .u16(1)
+            .unwrap()
+            .u32(65_536)
+            .unwrap()
+            .array(0)
+            .unwrap()
+            .array(1)
+            .unwrap()
+            .array(6)
+            .unwrap()
+            .u32(1)
+            .unwrap()
+            .str("send")
+            .unwrap()
+            .u16(1)
+            .unwrap()
+            .u32(11)
+            .unwrap()
+            .array(1)
+            .unwrap();
+        ActionTemplateIdV2::new(21)
+            .encode(&mut payload, &mut ())
+            .unwrap();
+        payload.null().unwrap();
+        let payload = payload.into_writer();
+        let signing_key = SigningKey::from_bytes(&[0x97; 32]);
+        let key_id = Ed25519KeyIdV2::new([0x98; 32]);
+        let asset_digest: [u8; 32] = Sha256::new()
+            .chain_update(ASSET_DIGEST_DOMAIN)
+            .chain_update(&payload)
+            .finalize()
+            .into();
+        let mut signature_input = Vec::from(ASSET_SIGNATURE_DOMAIN);
+        signature_input.extend_from_slice(&asset_digest);
+        let mut signed = minicbor::Encoder::new(Vec::new());
+        signed.array(3).unwrap().bytes(&payload).unwrap();
+        key_id.encode(&mut signed, &mut ()).unwrap();
+        signed
+            .bytes(&signing_key.sign(&signature_input).to_bytes())
+            .unwrap();
+        let signed =
+            SignedInputRuntimeAssetsV2::from_canonical_bytes(&signed.into_writer()).unwrap();
+        InputRuntimeV2::new(
+            VerifiedInputRuntimeAssetsV2::verify(
+                &signed,
+                key_id,
+                signing_key.verifying_key().to_bytes(),
+                UnixMillisV2::new(100),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn planner_policy_runtime(directory: &std::path::Path) -> KernelG4G5RuntimeV2 {
+        let active_tools = planner_active_tools();
+        let declassification_rules = planner_declassification_rules();
+        let durable = DurableG4StateV2::open(
+            &directory.join("kernel-g4-state-v2.cbor"),
+            [0x99; 32],
+            DurableStateNamespaceV2::from_verified_installation(
+                Digest32V2::new([0x9a; 32]),
+                Digest32V2::new([0x9b; 32]),
+            )
+            .unwrap(),
+            Box::new(TestG4StateAnchorV2::default()),
+        )
+        .unwrap();
+        let settlement_key = SigningKey::from_bytes(&[0x9c; 32]);
+        KernelG4G5RuntimeV2::from_verified_policy(
+            declassification_rules,
+            active_tools,
+            activate_internal_validator_registry(Vec::new()).unwrap(),
+            durable,
+            RoleIdV2::new(1),
+            OntologyExprV2::eq(
+                OntologyOperandV2::context(ContextFieldV2::Role),
+                OntologyOperandV2::literal(OntologyScalarV2::integer(1)),
+            ),
+            VerifiedPolicyDispositionV2::permit_from_verified_policy(),
+            KernelToolApprovalConfigV2::from_verified_manifest(
+                ServiceIdentityV2::new([0x9d; 32]),
+                derive_ed25519_key_id_v2(settlement_key.verifying_key().to_bytes()),
+                settlement_key.verifying_key().to_bytes(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn planner_declassification_rules(
+    ) -> crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2 {
+        let installer = SigningKey::from_bytes(&[0x9e; 32]);
+        let authority = SigningKey::from_bytes(&[0x9f; 32]);
+        let family = Digest32V2::new([0xa0; 32]);
+        let roots = OperationalTrustRootSetV2::new_declassification_signed_for_test(
+            family,
+            1,
+            None,
+            vec![OperationalTrustRootSetItemV2::new(
+                OperationalTrustRootPurposeV2::DeclassificationAuthority,
+                authority.verifying_key().to_bytes(),
+                1,
+                1,
+                10_000,
+            )
+            .unwrap()],
+            1,
+            10_000,
+            &installer,
+            1,
+        )
+        .unwrap();
+        let rule = DeclassificationRuleV2::new_for_test(
+            2,
+            ClosedDeclassificationPurposeV2::PlannerCall,
+            declassification_implementation_digest_v2(2).unwrap(),
+            LeakGateDutyV2::BlocklistAndNoResidualPii,
+            None,
+            None,
+            1,
+            10_000,
+        )
+        .unwrap();
+        let rules = DeclassificationRuleSetV2::new_signed_for_test(
+            family,
+            1,
+            None,
+            vec![rule],
+            1,
+            10_000,
+            &roots,
+            &authority,
+            1,
+            100,
+        )
+        .unwrap();
+        crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2::new(
+            rules,
+            Arc::new(roots),
+        )
+        .unwrap()
+    }
+
+    fn planner_active_tools() -> ActiveToolRegistryV2 {
+        let registry_version = VersionV2::new(1, 0, 0);
+        let publisher_key = SigningKey::from_bytes(&[0xa1; 32]);
+        let publisher_key_id = Ed25519KeyIdV2::new([0xa2; 32]);
+        let publisher = VerifiedRegistryPublisherV2::from_verified_manifest(
+            publisher_key_id,
+            publisher_key.verifying_key().to_bytes(),
+            UnixMillisV2::new(1),
+            UnixMillisV2::new(10_000),
+        )
+        .unwrap();
+        let mut descriptors = vec![
+            verified_planner_descriptor(
+                registry_version,
+                &publisher,
+                &publisher_key,
+                publisher_key_id,
+                "mail.allowed",
+                ActionTemplateIdV2::new(21),
+                ToolClassIdV2::new(31),
+            ),
+            verified_planner_descriptor(
+                registry_version,
+                &publisher,
+                &publisher_key,
+                publisher_key_id,
+                "mail.unlisted",
+                ActionTemplateIdV2::new(22),
+                ToolClassIdV2::new(32),
+            ),
+        ];
+        let registry = VerifiedToolRegistryV2::from_verified_descriptors(
+            registry_version,
+            descriptors.clone(),
+        )
+        .unwrap();
+        let mut activations = descriptors
+            .iter()
+            .enumerate()
+            .map(|(ordinal, descriptor)| {
+                (
+                    descriptor.descriptor_digest(),
+                    VerifiedPolicyToolActivationV2::from_verified_policy(
+                        descriptor.descriptor_digest(),
+                        ordinal as u32,
+                        Digest32V2::new([0xa3_u8.wrapping_add(ordinal as u8); 32]),
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        activations.sort_unstable_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+        let policy = VerifiedPolicyToolSetV2::from_verified_policy(
+            activations
+                .into_iter()
+                .map(|(_, activation)| activation)
+                .collect(),
+        )
+        .unwrap();
+        descriptors.sort_unstable_by(|left, right| {
+            left.descriptor_digest()
+                .as_bytes()
+                .cmp(right.descriptor_digest().as_bytes())
+        });
+        let constraints = VerifiedManifestToolConstraintSetV2::from_manifest(
+            descriptors
+                .iter()
+                .map(|descriptor| {
+                    VerifiedManifestToolConstraintV2::from_manifest(
+                        descriptor.descriptor_digest(),
+                        2,
+                        500_000_000,
+                        Vec::new(),
+                    )
+                    .unwrap()
+                })
+                .collect(),
+        )
+        .unwrap();
+        ActiveToolRegistryV2::intersect(&registry, &policy, &constraints).unwrap()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn verified_planner_descriptor(
+        registry_version: VersionV2,
+        publisher: &VerifiedRegistryPublisherV2,
+        publisher_key: &SigningKey,
+        publisher_key_id: Ed25519KeyIdV2,
+        provider_tool_id: &str,
+        action_template: ActionTemplateIdV2,
+        tool_class: ToolClassIdV2,
+    ) -> savana_policy_core::v2::VerifiedToolDescriptorV2 {
+        let unsigned = UnsignedToolDescriptorV2::from_verified_manifest(
+            2,
+            registry_version,
+            Digest32V2::new([0xa4; 32]),
+            IdentifierV2::new(provider_tool_id).unwrap(),
+            action_template,
+            tool_class,
+            Digest32V2::new([0xa5; 32]),
+            Digest32V2::new([0xa6; 32]),
+            vec![RoleIdV2::new(1)],
+            EffectSetV2::SEND,
+            AttemptKindV2::ToolWrite,
+            BoundedConnectorRetryPolicyV2::new(
+                ExecutorIdempotencyContractV2::ConnectorIdempotentByExecutionNonce,
+                3,
+                1_000_000_000,
+            )
+            .unwrap(),
+            Vec::<InternalValidatorDeclarationV2>::new(),
+            ExecutorIdentityV2::new([0xa7; 32]),
+            ProjectionIdV2::new(3),
+            Digest32V2::new([0xa8; 32]),
+            savana_kernel_protocol::v2::DisplayProjectionIdV2::new(4),
+            Digest32V2::new([0xa9; 32]),
+            ExecutorIdempotencyContractV2::ConnectorIdempotentByExecutionNonce,
+            UnixMillisV2::new(1),
+            UnixMillisV2::new(10_000),
+        )
+        .unwrap();
+        let descriptor_digest = descriptor_digest_v2(&unsigned).unwrap();
+        let mut signature_input = b"SAVANA_TOOL_DESCRIPTOR_SIGNATURE_V2\0".to_vec();
+        signature_input.extend_from_slice(descriptor_digest.as_bytes());
+        let unsigned_payload = minicbor::to_vec(&unsigned).unwrap();
+        let mut signed = minicbor::Encoder::new(Vec::new());
+        signed.array(3).unwrap().bytes(&unsigned_payload).unwrap();
+        publisher_key_id.encode(&mut signed, &mut ()).unwrap();
+        signed
+            .bytes(&publisher_key.sign(&signature_input).to_bytes())
+            .unwrap();
+        SignedToolDescriptorV2::from_canonical_bytes(&signed.into_writer())
+            .unwrap()
+            .verify(publisher, registry_version, UnixMillisV2::new(100))
+            .unwrap()
+    }
+
+    fn planner_step(
+        ordinal: u16,
+        action_template: u32,
+        tool_class: u32,
+        slot: PlannerSlotRefV2,
+        dependencies: Vec<u16>,
+    ) -> PlannerStepV2 {
+        PlannerStepV2::new(
+            ordinal,
+            ActionTemplateIdV2::new(action_template),
+            ToolClassIdV2::new(tool_class),
+            vec![(ArgumentNameV2::new("input".to_owned()).unwrap(), slot)],
+            dependencies,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn g7_uses_the_protocol_hpke_x25519_key_identifier_derivation() {
         let public_key = [0x55; 32];
@@ -5134,9 +5820,10 @@ mod tests {
             intent: PlannerIntentKindV2::SummarizeDocument,
             purpose: PlannerPurposeV2::PlannerCall,
             limits: PlannerLimitsV2::new(8, 8, 8, 65_536).unwrap(),
+            allowed_action_templates: vec![ActionTemplateIdV2::new(21)],
         };
         let effective = intersect_planner_request(
-            policy,
+            &policy,
             PlannerRouteIdV2::new(7),
             StaticTemplateIdV2::new(11),
             PlannerIntentKindV2::SummarizeDocument,
@@ -5151,7 +5838,7 @@ mod tests {
 
         for mismatch in [
             intersect_planner_request(
-                policy,
+                &policy,
                 PlannerRouteIdV2::new(9),
                 StaticTemplateIdV2::new(11),
                 PlannerIntentKindV2::SummarizeDocument,
@@ -5159,7 +5846,7 @@ mod tests {
                 policy.limits,
             ),
             intersect_planner_request(
-                policy,
+                &policy,
                 PlannerRouteIdV2::new(7),
                 StaticTemplateIdV2::new(12),
                 PlannerIntentKindV2::SummarizeDocument,
@@ -5167,7 +5854,7 @@ mod tests {
                 policy.limits,
             ),
             intersect_planner_request(
-                policy,
+                &policy,
                 PlannerRouteIdV2::new(7),
                 StaticTemplateIdV2::new(11),
                 PlannerIntentKindV2::Search,
@@ -5177,6 +5864,221 @@ mod tests {
         ] {
             assert_eq!(mismatch, Err(KernelAgentAuthorityErrorV2::BindingMismatch));
         }
+    }
+
+    #[test]
+    fn planner_commit_enforces_retained_signed_policy_step_limit_atomically() {
+        let mut fixture = planner_authority_fixture();
+        let (ticket, nonce, slot) = fixture.prepare(PlannerLimitsV2::new(1, 1, 1, 65_536).unwrap());
+        let plan = PlannerPlanV2::new(
+            nonce,
+            vec![
+                planner_step(1, 21, 31, slot, vec![]),
+                planner_step(2, 21, 31, slot, vec![1]),
+            ],
+        )
+        .unwrap();
+        let values_before = format!("{:?}", fixture.values);
+        let steps_before = fixture.authority.plan_steps.len();
+
+        assert_eq!(
+            fixture.commit(ticket, plan),
+            Err(KernelAgentAuthorityErrorV2::LimitExceeded)
+        );
+        assert_eq!(format!("{:?}", fixture.values), values_before);
+        assert_eq!(fixture.authority.plan_steps.len(), steps_before);
+        assert!(
+            !fixture
+                .authority
+                .planner_tickets
+                .iter()
+                .find(|record| record.ticket == ticket)
+                .unwrap()
+                .consumed
+        );
+    }
+
+    #[test]
+    fn planner_commit_enforces_retained_signed_policy_dependency_limit_atomically() {
+        let mut fixture = planner_authority_fixture();
+        let (ticket, nonce, slot) = fixture.prepare(PlannerLimitsV2::new(3, 1, 1, 65_536).unwrap());
+        let plan = PlannerPlanV2::new(
+            nonce,
+            vec![
+                planner_step(1, 21, 31, slot, vec![]),
+                planner_step(2, 21, 31, slot, vec![1]),
+                planner_step(3, 21, 31, slot, vec![1, 2]),
+            ],
+        )
+        .unwrap();
+        let values_before = format!("{:?}", fixture.values);
+        let steps_before = fixture.authority.plan_steps.len();
+
+        assert_eq!(
+            fixture.commit(ticket, plan),
+            Err(KernelAgentAuthorityErrorV2::LimitExceeded)
+        );
+        assert_eq!(format!("{:?}", fixture.values), values_before);
+        assert_eq!(fixture.authority.plan_steps.len(), steps_before);
+        assert!(
+            !fixture
+                .authority
+                .planner_tickets
+                .iter()
+                .find(|record| record.ticket == ticket)
+                .unwrap()
+                .consumed
+        );
+    }
+
+    #[test]
+    fn planner_commit_enforces_retained_signed_policy_argument_limit_atomically() {
+        let mut fixture = planner_authority_fixture();
+        let (ticket, nonce, slot) = fixture.prepare(PlannerLimitsV2::new(2, 1, 1, 65_536).unwrap());
+        let plan = PlannerPlanV2::new(
+            nonce,
+            vec![PlannerStepV2::new(
+                1,
+                ActionTemplateIdV2::new(21),
+                ToolClassIdV2::new(31),
+                vec![
+                    (ArgumentNameV2::new("first".to_owned()).unwrap(), slot),
+                    (ArgumentNameV2::new("second".to_owned()).unwrap(), slot),
+                ],
+                vec![],
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let values_before = format!("{:?}", fixture.values);
+        let steps_before = fixture.authority.plan_steps.len();
+
+        assert_eq!(
+            fixture.commit(ticket, plan),
+            Err(KernelAgentAuthorityErrorV2::LimitExceeded)
+        );
+        assert_eq!(format!("{:?}", fixture.values), values_before);
+        assert_eq!(fixture.authority.plan_steps.len(), steps_before);
+        assert!(
+            !fixture
+                .authority
+                .planner_tickets
+                .iter()
+                .find(|record| record.ticket == ticket)
+                .unwrap()
+                .consumed
+        );
+    }
+
+    #[test]
+    fn planner_commit_enforces_retained_signed_policy_encoded_size_limit_atomically() {
+        let dummy_plan = PlannerPlanV2::new(
+            Nonce32V2::new([1; 32]),
+            vec![planner_step(
+                1,
+                21,
+                31,
+                PlannerSlotRefV2::new([1; 16]),
+                vec![],
+            )],
+        )
+        .unwrap();
+        let encoded_len =
+            u32::try_from(encode_planner_plan_v2(&dummy_plan).unwrap().len()).unwrap();
+        let mut fixture = planner_authority_fixture();
+        let (ticket, nonce, slot) =
+            fixture.prepare(PlannerLimitsV2::new(2, 1, 1, encoded_len - 1).unwrap());
+        let plan = PlannerPlanV2::new(nonce, vec![planner_step(1, 21, 31, slot, vec![])]).unwrap();
+        assert_eq!(
+            u32::try_from(encode_planner_plan_v2(&plan).unwrap().len()).unwrap(),
+            encoded_len
+        );
+        let values_before = format!("{:?}", fixture.values);
+        let steps_before = fixture.authority.plan_steps.len();
+
+        assert_eq!(
+            fixture.commit(ticket, plan),
+            Err(KernelAgentAuthorityErrorV2::LimitExceeded)
+        );
+        assert_eq!(format!("{:?}", fixture.values), values_before);
+        assert_eq!(fixture.authority.plan_steps.len(), steps_before);
+        assert!(
+            !fixture
+                .authority
+                .planner_tickets
+                .iter()
+                .find(|record| record.ticket == ticket)
+                .unwrap()
+                .consumed
+        );
+    }
+
+    #[test]
+    fn planner_commit_enforces_retained_signed_policy_action_and_tool_allowlist_atomically() {
+        let mut fixture = planner_authority_fixture();
+        let (ticket, nonce, slot) = fixture.prepare(PlannerLimitsV2::new(2, 1, 1, 65_536).unwrap());
+        let plan = PlannerPlanV2::new(nonce, vec![planner_step(1, 22, 32, slot, vec![])]).unwrap();
+        let values_before = format!("{:?}", fixture.values);
+        let steps_before = fixture.authority.plan_steps.len();
+
+        assert_eq!(
+            fixture.commit(ticket, plan),
+            Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+        );
+        assert_eq!(format!("{:?}", fixture.values), values_before);
+        assert_eq!(fixture.authority.plan_steps.len(), steps_before);
+        assert!(
+            !fixture
+                .authority
+                .planner_tickets
+                .iter()
+                .find(|record| record.ticket == ticket)
+                .unwrap()
+                .consumed
+        );
+    }
+
+    #[test]
+    fn planner_commit_enforces_retained_signed_policy_accepts_boundary_equal_plan() {
+        let dummy_slot = PlannerSlotRefV2::new([1; 16]);
+        let dummy_plan = PlannerPlanV2::new(
+            Nonce32V2::new([1; 32]),
+            vec![
+                planner_step(1, 21, 31, dummy_slot, vec![]),
+                planner_step(2, 21, 31, dummy_slot, vec![1]),
+            ],
+        )
+        .unwrap();
+        let exact_encoded_len =
+            u32::try_from(encode_planner_plan_v2(&dummy_plan).unwrap().len()).unwrap();
+        let mut fixture = planner_authority_fixture();
+        let (ticket, nonce, slot) =
+            fixture.prepare(PlannerLimitsV2::new(2, 1, 1, exact_encoded_len).unwrap());
+        let plan = PlannerPlanV2::new(
+            nonce,
+            vec![
+                planner_step(1, 21, 31, slot, vec![]),
+                planner_step(2, 21, 31, slot, vec![1]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            u32::try_from(encode_planner_plan_v2(&plan).unwrap().len()).unwrap(),
+            exact_encoded_len
+        );
+
+        let committed = fixture.commit(ticket, plan).unwrap();
+
+        assert_eq!(committed.steps().len(), 2);
+        assert!(
+            fixture
+                .authority
+                .planner_tickets
+                .iter()
+                .find(|record| record.ticket == ticket)
+                .unwrap()
+                .consumed
+        );
     }
 
     #[test]

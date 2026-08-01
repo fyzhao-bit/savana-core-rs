@@ -302,6 +302,10 @@ impl PlannerEnvelopeV2 {
         self.intent
     }
 
+    pub fn allowed_action_templates(&self) -> &[ActionTemplateIdV2] {
+        &self.allowed_action_templates
+    }
+
     pub const fn effective_limits(&self) -> PlannerLimitsV2 {
         self.effective_limits
     }
