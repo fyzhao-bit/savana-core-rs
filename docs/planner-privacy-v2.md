@@ -1,12 +1,14 @@
 # Savana V2 Planner Privacy: Value, Shape, and Intent
 
-Status: design proposal, v1.1 (2026-08-01). Specifies how the system withholds
+Status: design proposal, v1.2 (2026-08-01). Specifies how the system withholds
 not just data **values** but the **shape** and **intent** of a workflow from
 an untrusted remote planning model, without touching the kernel. Changes no
 code by itself.
 
 v1.1: O2 resolved — the intent trust boundary (§5) is **user-configured,
 within a deployment ceiling, fail-safe to private**.
+v1.2: O3 resolved — `structural_role` is **signed into the descriptor**
+(§10), like `effect_class`.
 
 Companion reading: `docs/connector-registration-v2.md` (*REG*, the connector
 registry this design projects its semantic catalog from), and the current
@@ -353,7 +355,8 @@ Two judgments justify this split:
 - **But it is privacy-relevant.** The rich description is exactly what must be
   withheld from the remote planner, so it lives only where mapperd lives
   (§5). The coarse `structural_role` + `effect_class` do not reveal business,
-  so they may be signed into the descriptor and sent in the structural graph.
+  so they are both signed into the descriptor (O3, decided) and sent in the
+  structural graph.
 
 This closes the loop with *REG*: register once, and the kernel authorization
 table, the mapperd semantic catalog, and the decode table all fall out as
@@ -373,10 +376,14 @@ as a deployment-shipped one does.
   user, within a deployment ceiling, fail-safe to private, overridable per
   task. Safe because the boundary is confidentiality-only (§8): a user's
   choice trades only their own intent privacy and cannot affect authorization.
-- **O3 — Signed vs local structural_role.** §10 signs the coarse
-  `structural_role` into the descriptor for integrity. An alternative keeps
-  even that local. Recommendation: sign it — it is not business-revealing and
-  integrity aids planning consistency.
+- **O3 — Signed vs local `structural_role`: resolved (v1.2) — signed.**
+  `structural_role` is signed into the descriptor alongside `effect_class`
+  (§10). It is not business-revealing (a per-connector SOURCE/SINK role
+  discloses nothing; only a concrete plan's shape does, which the remote
+  planner sees anyway), so signing leaks nothing; and it buys integrity plus
+  planning consistency for free. A mislabel surfaces as a bad plan, never an
+  unauthorized action — the kernel still authorizes every step — so this was
+  low-risk either way; signing simply takes the free integrity.
 - **O4 — Catalog for deployment-shipped connectors.** REG covers user-tier
   registration cleanly; the same descriptor extension must be authored for
   deployment-shipped connectors at manifest build time. Mechanically
