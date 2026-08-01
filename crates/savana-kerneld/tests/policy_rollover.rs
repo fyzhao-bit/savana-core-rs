@@ -9,10 +9,73 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use savana_kernel_protocol::HardLimits;
+use savana_kerneld::test_support::{
+    probe_v2_declassification_rollover, V2DeclassificationRolloverScenario,
+};
 use support::{
     ControlOpcode, ControlStatus, Installation, StrictUpdaterError, UpdaterEvent,
     STRICT_UPDATER_EVENTS,
 };
+
+#[test]
+fn v2_valid_generation_successor_reaches_both_active_rule_consumers() {
+    let observed =
+        probe_v2_declassification_rollover(V2DeclassificationRolloverScenario::ValidSuccessor);
+
+    assert_eq!(observed.result(), Ok(()));
+    assert_ne!(observed.old_digest(), observed.candidate_digest());
+    assert_eq!(observed.ingress_digest(), observed.candidate_digest());
+    assert_eq!(observed.agent_digest(), observed.candidate_digest());
+    assert_eq!(observed.active_generation(), 2);
+    assert!(observed.admission_resumed());
+}
+
+fn assert_v2_rollover_rejected_without_partial_publication(
+    scenario: V2DeclassificationRolloverScenario,
+) {
+    let observed = probe_v2_declassification_rollover(scenario);
+
+    assert!(observed.result().is_err());
+    assert_eq!(observed.ingress_digest(), observed.old_digest());
+    assert_eq!(observed.agent_digest(), observed.old_digest());
+    assert_eq!(observed.active_generation(), 1);
+    assert!(observed.admission_resumed());
+}
+
+#[test]
+fn v2_rule_set_rollback_retains_the_old_complete_runtime() {
+    assert_v2_rollover_rejected_without_partial_publication(
+        V2DeclassificationRolloverScenario::RuleSetRollback,
+    );
+}
+
+#[test]
+fn v2_wrong_manifest_pin_retains_the_old_complete_runtime() {
+    assert_v2_rollover_rejected_without_partial_publication(
+        V2DeclassificationRolloverScenario::WrongManifestPin,
+    );
+}
+
+#[test]
+fn v2_bad_rule_set_signature_retains_the_old_complete_runtime() {
+    assert_v2_rollover_rejected_without_partial_publication(
+        V2DeclassificationRolloverScenario::BadRuleSetSignature,
+    );
+}
+
+#[test]
+fn v2_expired_rule_set_retains_the_old_complete_runtime() {
+    assert_v2_rollover_rejected_without_partial_publication(
+        V2DeclassificationRolloverScenario::ExpiredRuleSet,
+    );
+}
+
+#[test]
+fn v2_partial_runtime_generation_retains_the_old_complete_runtime() {
+    assert_v2_rollover_rejected_without_partial_publication(
+        V2DeclassificationRolloverScenario::PartialRuntimeGeneration,
+    );
+}
 
 #[test]
 fn rollover_closes_admission_and_drains_in_flight_dispatch() {

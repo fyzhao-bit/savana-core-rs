@@ -12,6 +12,9 @@ use savana_policy_core::{
 use crate::deployment_trust::VerifiedDaemonStartupV2;
 use crate::handshake::RuntimeIdentity;
 use crate::selected_policy::{SelectedPolicySource, SelectedPolicyUpdateGuard};
+use crate::v2_declassification_policy::{
+    ActiveDeclassificationRuleSetV2, VerifiedV2DeclassificationSuccessorV2,
+};
 use crate::v2_edge::{V2ActiveGenerationSnapshot, VerifiedServiceEdgeV2};
 use crate::DaemonConfig;
 
@@ -320,16 +323,25 @@ impl RolloverTestHooks {
 /// be able to select policy bytes or trigger a policy transition.
 pub(crate) struct PolicyRolloverCoordinator {
     serialization: Mutex<()>,
-    selected_source: Arc<SelectedPolicySource>,
-    release: VerifiedReleaseIdentity,
-    runtime: Arc<PolicyRuntime>,
-    clock: Arc<dyn Clock + Send + Sync>,
+    target: PolicyRolloverTarget,
     #[cfg(all(feature = "test-support", debug_assertions))]
     test_hooks: RolloverTestHooks,
     #[cfg(test)]
     probe: RolloverProbe,
     #[cfg(test)]
     lock_trace: Arc<Mutex<Vec<LockEvent>>>,
+}
+
+enum PolicyRolloverTarget {
+    V1 {
+        selected_source: Arc<SelectedPolicySource>,
+        release: VerifiedReleaseIdentity,
+        runtime: Arc<PolicyRuntime>,
+        clock: Arc<dyn Clock + Send + Sync>,
+    },
+    V2 {
+        runtime: Arc<V2GenerationRuntime>,
+    },
 }
 
 impl std::fmt::Debug for PolicyRolloverCoordinator {
@@ -349,10 +361,12 @@ impl PolicyRolloverCoordinator {
         let lock_trace = runtime.lock_trace_for_test();
         Self {
             serialization: Mutex::new(()),
-            selected_source,
-            release,
-            runtime,
-            clock,
+            target: PolicyRolloverTarget::V1 {
+                selected_source,
+                release,
+                runtime,
+                clock,
+            },
             #[cfg(all(feature = "test-support", debug_assertions))]
             test_hooks: RolloverTestHooks::default(),
             #[cfg(test)]
@@ -362,6 +376,38 @@ impl PolicyRolloverCoordinator {
         }
     }
 
+    pub(crate) fn new_v2(runtime: Arc<V2GenerationRuntime>) -> Self {
+        #[cfg(test)]
+        let lock_trace = Arc::new(Mutex::new(Vec::new()));
+        Self {
+            serialization: Mutex::new(()),
+            target: PolicyRolloverTarget::V2 { runtime },
+            #[cfg(all(feature = "test-support", debug_assertions))]
+            test_hooks: RolloverTestHooks::default(),
+            #[cfg(test)]
+            probe: RolloverProbe::default(),
+            #[cfg(test)]
+            lock_trace,
+        }
+    }
+
+    pub(crate) fn publish_v2_declassification_successor(
+        &self,
+        successor: VerifiedV2DeclassificationSuccessorV2,
+    ) -> Result<(), StableCode> {
+        let _serialization = self
+            .serialization
+            .lock()
+            .map_err(|_| StableCode::KernelUnavailable)?;
+        let PolicyRolloverTarget::V2 { runtime } = &self.target else {
+            return Err(StableCode::KernelUnavailable);
+        };
+        let closed = runtime.close_and_drain()?;
+        runtime.publish_verified_successor(successor)?;
+        closed.reopen();
+        Ok(())
+    }
+
     pub(crate) fn refresh_selected_policy(&self) -> Result<RefreshOutcome, StableCode> {
         let _serialization = self
             .serialization
@@ -369,12 +415,12 @@ impl PolicyRolloverCoordinator {
             .map_err(|_| StableCode::KernelUnavailable)?;
         #[cfg(test)]
         self.record_lock(LockEvent::RolloverMutex);
+        let (_, _, runtime, _) = self.v1_target()?;
         let candidate = self.preflight_candidate()?;
         #[cfg(test)]
         self.record_lock(LockEvent::SelectedShared);
 
-        let disposition = self
-            .runtime
+        let disposition = runtime
             .engine()
             .rollover_disposition(candidate.expected_identity)
             .map_err(|error| error.code())?;
@@ -398,33 +444,25 @@ impl PolicyRolloverCoordinator {
     }
 
     fn preflight_candidate(&self) -> Result<PreflightPolicyCandidate, StableCode> {
-        let selected_guard = self
-            .selected_source
-            .acquire()
-            .map_err(|error| error.code())?;
+        let (selected_source, release, _, clock) = self.v1_target()?;
+        let selected_guard = selected_source.acquire().map_err(|error| error.code())?;
         let candidate = selected_guard
             .read_candidate()
             .map_err(|error| error.code())?;
-        let now = self
-            .clock
+        let now = clock
             .wall_now()
             .map_err(|_| StableCode::KernelUnavailable)?;
-        let verifier = self
-            .release
-            .policy_verifier()
-            .map_err(|error| error.code())?;
+        let verifier = release.policy_verifier().map_err(|error| error.code())?;
         let verified_policy = verifier
             .verify(&candidate.policy_bytes, &candidate.signature, now)
             .map_err(|error| error.code())?;
-        self.release
+        release
             .verify_selected_policy_binding(&verified_policy, &candidate.signature)
             .map_err(|error| error.code())?;
-        self.release
-            .ensure_valid_at(now)
-            .map_err(|error| error.code())?;
+        release.ensure_valid_at(now).map_err(|error| error.code())?;
         DaemonConfig::verify_candidate(
             &candidate.kernel_lock_bytes,
-            &self.release,
+            release,
             &verified_policy,
             &candidate.signature,
         )
@@ -443,14 +481,15 @@ impl PolicyRolloverCoordinator {
         &self,
         candidate: PreflightPolicyCandidate,
     ) -> Result<RefreshOutcome, StableCode> {
-        let current = self.runtime.snapshot()?;
+        let (_, release, runtime, clock) = self.v1_target()?;
+        let current = runtime.snapshot()?;
         let next_generation = current
             .generation()
             .checked_add(1)
             .ok_or(StableCode::KernelUnavailable)?;
         let candidate_runtime = CandidateRuntimeData::from_verified(
             &candidate.kernel_lock_bytes,
-            &self.release,
+            release,
             &candidate.verified_policy,
             &candidate.signature,
         )?;
@@ -468,10 +507,10 @@ impl PolicyRolloverCoordinator {
         self.probe
             .dispatch_close_attempts
             .fetch_add(1, Ordering::SeqCst);
-        let closed_dispatch = self.runtime.close_and_drain()?;
+        let closed_dispatch = runtime.close_and_drain()?;
         #[cfg(test)]
         self.record_lock(LockEvent::DispatchCloseIntent);
-        let snapshot_write = self.runtime.snapshot_write()?;
+        let snapshot_write = runtime.snapshot_write()?;
         #[cfg(test)]
         {
             self.probe
@@ -481,8 +520,7 @@ impl PolicyRolloverCoordinator {
         }
         #[cfg(test)]
         self.probe.engine_prepares.fetch_add(1, Ordering::SeqCst);
-        let engine_guard = self
-            .runtime
+        let engine_guard = runtime
             .engine()
             .prepare_rollover(candidate.expected_identity)
             .map_err(|error| error.code())?;
@@ -494,8 +532,7 @@ impl PolicyRolloverCoordinator {
             .map_err(|error| error.code())?;
         #[cfg(all(feature = "test-support", debug_assertions))]
         let fault = self.test_hooks.take_fault();
-        let now = self
-            .clock
+        let now = clock
             .wall_now()
             .map_err(|_| StableCode::KernelUnavailable)?;
         let committed = match engine_guard.verify_accept_and_commit(
@@ -521,6 +558,28 @@ impl PolicyRolloverCoordinator {
         let published = publication.complete();
         closed_dispatch.reopen();
         Ok(RefreshOutcome::Published(published))
+    }
+
+    fn v1_target(
+        &self,
+    ) -> Result<
+        (
+            &Arc<SelectedPolicySource>,
+            &VerifiedReleaseIdentity,
+            &Arc<PolicyRuntime>,
+            &Arc<dyn Clock + Send + Sync>,
+        ),
+        StableCode,
+    > {
+        match &self.target {
+            PolicyRolloverTarget::V1 {
+                selected_source,
+                release,
+                runtime,
+                clock,
+            } => Ok((selected_source, release, runtime, clock)),
+            PolicyRolloverTarget::V2 { .. } => Err(StableCode::KernelUnavailable),
+        }
     }
 
     #[cfg(test)]
@@ -651,7 +710,7 @@ impl std::fmt::Debug for PolicyRuntime {
 
 pub(crate) struct V2GenerationRuntime {
     dispatch_gate: Arc<DispatchGate>,
-    active: RwLock<Option<Arc<V2ActiveGenerationSnapshot>>>,
+    active: ActiveDeclassificationRuleSetV2,
 }
 
 impl std::fmt::Debug for V2GenerationRuntime {
@@ -664,14 +723,8 @@ impl V2GenerationRuntime {
     pub(crate) fn new() -> Self {
         Self {
             dispatch_gate: Arc::new(DispatchGate::new()),
-            active: RwLock::new(None),
+            active: ActiveDeclassificationRuleSetV2::empty(),
         }
-    }
-
-    pub(crate) fn activate(&self, startup: &VerifiedDaemonStartupV2) -> Result<(), StableCode> {
-        let active = V2ActiveGenerationSnapshot::from_verified_startup(startup)
-            .map_err(|_| StableCode::IdentityReleaseMismatch)?;
-        self.activate_snapshot(active)
     }
 
     pub(crate) fn acquire(
@@ -685,11 +738,8 @@ impl V2GenerationRuntime {
         let dispatch = self.dispatch_gate.v2_lease()?;
         let active = self
             .active
-            .read()
-            .map_err(|_| StableCode::KernelUnavailable)?
-            .as_ref()
-            .cloned()
-            .ok_or(StableCode::KernelUnavailable)?;
+            .generation_snapshot()
+            .map_err(|_| StableCode::KernelUnavailable)?;
         if !active.matches_edge(edge) {
             return Err(StableCode::IdentityReleaseMismatch);
         }
@@ -704,16 +754,33 @@ impl V2GenerationRuntime {
         self.dispatch_gate.close_and_drain()
     }
 
+    pub(crate) fn active_declassification_rules(&self) -> ActiveDeclassificationRuleSetV2 {
+        self.active.clone()
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn admission_resumed_for_test_support(&self) -> bool {
+        self.dispatch_gate
+            .state
+            .lock()
+            .map(|state| !state.closing && !state.closed_guard_active)
+            .unwrap_or(false)
+    }
+
+    fn publish_verified_successor(
+        &self,
+        successor: VerifiedV2DeclassificationSuccessorV2,
+    ) -> Result<(), StableCode> {
+        self.active
+            .publish_verified_successor(successor)
+            .map_err(|_| StableCode::KernelUnavailable)
+    }
+
+    #[cfg(test)]
     fn activate_snapshot(&self, active: V2ActiveGenerationSnapshot) -> Result<(), StableCode> {
-        let mut current = self
-            .active
-            .write()
-            .map_err(|_| StableCode::KernelUnavailable)?;
-        if current.is_some() {
-            return Err(StableCode::IdentityReleaseMismatch);
-        }
-        *current = Some(Arc::new(active));
-        Ok(())
+        self.active
+            .activate_generation_for_test(active)
+            .map_err(|_| StableCode::IdentityReleaseMismatch)
     }
 
     #[cfg(test)]

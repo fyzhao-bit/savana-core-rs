@@ -297,6 +297,83 @@ pub mod test_support {
     use crate::bootstrap::PreparedRuntime;
     use crate::DaemonError;
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum V2DeclassificationRolloverScenario {
+        ValidSuccessor,
+        RuleSetRollback,
+        WrongManifestPin,
+        BadRuleSetSignature,
+        ExpiredRuleSet,
+        PartialRuntimeGeneration,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct V2DeclassificationRolloverProbe {
+        result: Result<(), savana_kernel_protocol::StableCode>,
+        old_digest: savana_kernel_protocol::v2::Digest32V2,
+        candidate_digest: savana_kernel_protocol::v2::Digest32V2,
+        ingress_digest: savana_kernel_protocol::v2::Digest32V2,
+        agent_digest: savana_kernel_protocol::v2::Digest32V2,
+        active_generation: u64,
+        admission_resumed: bool,
+    }
+
+    impl V2DeclassificationRolloverProbe {
+        pub(crate) const fn new(
+            result: Result<(), savana_kernel_protocol::StableCode>,
+            old_digest: savana_kernel_protocol::v2::Digest32V2,
+            candidate_digest: savana_kernel_protocol::v2::Digest32V2,
+            ingress_digest: savana_kernel_protocol::v2::Digest32V2,
+            agent_digest: savana_kernel_protocol::v2::Digest32V2,
+            active_generation: u64,
+            admission_resumed: bool,
+        ) -> Self {
+            Self {
+                result,
+                old_digest,
+                candidate_digest,
+                ingress_digest,
+                agent_digest,
+                active_generation,
+                admission_resumed,
+            }
+        }
+
+        pub const fn result(self) -> Result<(), savana_kernel_protocol::StableCode> {
+            self.result
+        }
+
+        pub const fn old_digest(self) -> savana_kernel_protocol::v2::Digest32V2 {
+            self.old_digest
+        }
+
+        pub const fn candidate_digest(self) -> savana_kernel_protocol::v2::Digest32V2 {
+            self.candidate_digest
+        }
+
+        pub const fn ingress_digest(self) -> savana_kernel_protocol::v2::Digest32V2 {
+            self.ingress_digest
+        }
+
+        pub const fn agent_digest(self) -> savana_kernel_protocol::v2::Digest32V2 {
+            self.agent_digest
+        }
+
+        pub const fn active_generation(self) -> u64 {
+            self.active_generation
+        }
+
+        pub const fn admission_resumed(self) -> bool {
+            self.admission_resumed
+        }
+    }
+
+    pub fn probe_v2_declassification_rollover(
+        scenario: V2DeclassificationRolloverScenario,
+    ) -> V2DeclassificationRolloverProbe {
+        crate::v2_startup::probe_declassification_rollover(scenario)
+    }
+
     #[cfg(target_os = "macos")]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct MacOsV2StartupProbe {

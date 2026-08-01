@@ -704,6 +704,15 @@ impl OpenedPolicyStore {
     }
 }
 
+/// Builds the single coordinator used to publish verified V2 deployment
+/// successors. Keeping construction here prevents startup paths from growing
+/// an independent rules-only rollover surface.
+pub(crate) fn v2_policy_rollover_coordinator(
+    runtime: Arc<crate::policy_runtime::V2GenerationRuntime>,
+) -> Arc<PolicyRolloverCoordinator> {
+    Arc::new(PolicyRolloverCoordinator::new_v2(runtime))
+}
+
 pub(crate) struct PreparedRuntime {
     context: BootstrapContext,
     daemon_key: DaemonKeyCapability,

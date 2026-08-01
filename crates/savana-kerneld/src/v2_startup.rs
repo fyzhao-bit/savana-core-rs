@@ -23,6 +23,21 @@ pub(crate) fn run(
     }
 }
 
+#[cfg(feature = "test-support")]
+pub(crate) fn probe_declassification_rollover(
+    scenario: crate::test_support::V2DeclassificationRolloverScenario,
+) -> crate::test_support::V2DeclassificationRolloverProbe {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        native::probe_declassification_rollover(scenario)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = scenario;
+        unreachable!("V2 test support requires a native Unix target")
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod native {
     use std::fs;
@@ -33,6 +48,8 @@ mod native {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[cfg(feature = "test-support")]
+    use ed25519_dalek::Signer as _;
     use ed25519_dalek::SigningKey;
     use hmac::{Hmac, Mac as _};
     use savana_kernel_protocol::v2::{
@@ -43,14 +60,13 @@ mod native {
     use savana_kernel_protocol::StableCode;
     use savana_policy_core::v2::{
         activate_internal_validator_registry, ActiveToolRegistryV2, ContextFieldV2,
-        DeclassificationRuleSetV2, DurableG4StateV2, DurableStateNamespaceV2,
-        FilesystemServiceObservationConfigV2, InstallerOrMdmVerifierV2, InternalValidatorBuildV2,
-        InternalValidatorDeclarationV2, InternalValidatorImplementationKindV2, OntologyExprV2,
-        OntologyOperandV2, OntologyScalarV2, OperationalTrustRootSetV2, SignedToolDescriptorV2,
-        VerifiedInternalValidatorRegistryV2, VerifiedManifestToolConstraintSetV2,
-        VerifiedManifestToolConstraintV2, VerifiedPolicyDispositionV2,
-        VerifiedPolicyToolActivationV2, VerifiedPolicyToolSetV2, VerifiedRegistryPublisherV2,
-        VerifiedToolRegistryV2,
+        DurableG4StateV2, DurableStateNamespaceV2, FilesystemServiceObservationConfigV2,
+        InstallerOrMdmVerifierV2, InternalValidatorBuildV2, InternalValidatorDeclarationV2,
+        InternalValidatorImplementationKindV2, OntologyExprV2, OntologyOperandV2, OntologyScalarV2,
+        OperationalTrustRootSetV2, SignedToolDescriptorV2, VerifiedInternalValidatorRegistryV2,
+        VerifiedManifestToolConstraintSetV2, VerifiedManifestToolConstraintV2,
+        VerifiedPolicyDispositionV2, VerifiedPolicyToolActivationV2, VerifiedPolicyToolSetV2,
+        VerifiedRegistryPublisherV2, VerifiedToolRegistryV2,
     };
     use serde::Deserialize;
     use sha2::{Digest as _, Sha256};
@@ -74,7 +90,7 @@ mod native {
     };
     use crate::v2_core_services::CoreKernelRuntimeServicesV2;
     use crate::v2_data_plane::ProductionKernelDataPlaneV2;
-    use crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2;
+    use crate::v2_declassification_policy::VerifiedV2DeclassificationSuccessorV2;
     use crate::v2_dispatch::{KernelServiceDeploymentV2, KernelServiceDispatcherV2};
     use crate::v2_edge::VerifiedServiceEdgeV2;
     use crate::v2_executor_client::SuiteOneKernelExecutorClientV2;
@@ -332,7 +348,7 @@ mod native {
         g4_store_id: Digest32V2,
         policy_allowed_effects: savana_policy_core::v2::EffectSetV2,
         logical_run_ttl_ms: u64,
-        declassification_rule_set: ActiveDeclassificationRuleSetV2,
+        declassification_successor: VerifiedV2DeclassificationSuccessorV2,
         policy: LoadedPolicyRuntimeV2,
         parser_trust: KernelParserTrustV2,
     }
@@ -475,7 +491,10 @@ mod native {
         let (agent_listener, ingress_listener) = inherited.into_parts();
 
         let runtime = Arc::new(V2GenerationRuntime::new());
-        runtime.activate(&startup)?;
+        let rollover = crate::bootstrap::v2_policy_rollover_coordinator(Arc::clone(&runtime));
+        rollover
+            .publish_v2_declassification_successor(runtime_material.declassification_successor)?;
+        let declassification_rule_set = runtime.active_declassification_rules();
         let kernel_identity = startup
             .service_identity(ClosedServiceIdV2::Kerneld)
             .ok_or(StableCode::KernelUnavailable)?;
@@ -597,7 +616,7 @@ mod native {
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
         let mut policy_runtime = KernelG4G5RuntimeV2::from_verified_policy(
-            runtime_material.declassification_rule_set.clone(),
+            declassification_rule_set.clone(),
             runtime_material.policy.active_tools,
             runtime_material.policy.validators,
             g4_durable,
@@ -656,7 +675,7 @@ mod native {
         let data_plane = ProductionKernelDataPlaneV2::new(
             input_runtime,
             vault,
-            runtime_material.declassification_rule_set,
+            declassification_rule_set,
             startup.installation_id(),
             ProducerIdentityV2::new(*ingressd_identity.as_bytes()),
             runtime_material.agentd_boot_id,
@@ -735,7 +754,543 @@ mod native {
             dispatcher,
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
-        run_kerneld_v2_workers(agent, ingress, runtime.as_ref(), readiness, lifecycle)
+        let result = run_kerneld_v2_workers(agent, ingress, runtime.as_ref(), readiness, lifecycle);
+        drop(rollover);
+        result
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(super) fn probe_declassification_rollover(
+        scenario: crate::test_support::V2DeclassificationRolloverScenario,
+    ) -> crate::test_support::V2DeclassificationRolloverProbe {
+        use savana_policy_core::v2::{
+            declassification_implementation_digest_v2, ClosedDeclassificationPurposeV2,
+            DeclassificationRuleSetV2, DeclassificationRuleV2, LeakGateDutyV2,
+            OperationalTrustRootPurposeV2, OperationalTrustRootSetItemV2,
+        };
+
+        let installer = SigningKey::from_bytes(&[0x31; 32]);
+        let authority = SigningKey::from_bytes(&[0x32; 32]);
+        let family = Digest32V2::new([0x33; 32]);
+        let member = OperationalTrustRootSetItemV2::new(
+            OperationalTrustRootPurposeV2::DeclassificationAuthority,
+            authority.verifying_key().to_bytes(),
+            1,
+            5,
+            100,
+        )
+        .expect("declassification rollover authority member");
+        let roots = Arc::new(
+            OperationalTrustRootSetV2::new_declassification_signed_for_test(
+                family,
+                1,
+                None,
+                vec![member],
+                5,
+                100,
+                &installer,
+                1,
+            )
+            .expect("declassification rollover roots"),
+        );
+        let signed_rules = |sequence, predecessor, not_before, not_after, now| {
+            let rule = DeclassificationRuleV2::new_for_test(
+                2,
+                ClosedDeclassificationPurposeV2::PlannerCall,
+                declassification_implementation_digest_v2(2)
+                    .expect("planner implementation digest"),
+                LeakGateDutyV2::BlocklistAndNoResidualPii,
+                None,
+                None,
+                not_before,
+                not_after,
+            )
+            .expect("declassification rollover rule");
+            DeclassificationRuleSetV2::new_signed_for_test(
+                family,
+                sequence,
+                predecessor,
+                vec![rule],
+                not_before,
+                not_after,
+                roots.as_ref(),
+                &authority,
+                1,
+                now,
+            )
+            .expect("declassification rollover rule set")
+        };
+
+        let initial = signed_rules(7, Some(Digest32V2::new([0x34; 32])), 10, 90, 50);
+        let old_digest = initial.signed_digest();
+        let initial_startup = verified_rollover_startup(1, old_digest);
+        let runtime = Arc::new(V2GenerationRuntime::new());
+        let coordinator = crate::bootstrap::v2_policy_rollover_coordinator(Arc::clone(&runtime));
+        let ingress_rules = runtime.active_declassification_rules();
+        let agent_rules = runtime.active_declassification_rules();
+        coordinator
+            .publish_v2_declassification_successor(
+                VerifiedV2DeclassificationSuccessorV2::from_verified_deployment(
+                    &initial_startup,
+                    initial.canonical_bytes().to_vec(),
+                    Arc::clone(&roots),
+                    50,
+                )
+                .expect("verified initial declassification deployment"),
+            )
+            .expect("publish initial declassification deployment");
+
+        let successor = signed_rules(8, Some(old_digest), 20, 90, 50);
+        let candidate_digest = successor.signed_digest();
+        let (generation, manifest_pin, mut bytes, verification_time) = match scenario {
+            crate::test_support::V2DeclassificationRolloverScenario::ValidSuccessor => (
+                2,
+                candidate_digest,
+                successor.canonical_bytes().to_vec(),
+                50,
+            ),
+            crate::test_support::V2DeclassificationRolloverScenario::RuleSetRollback => {
+                (2, old_digest, initial.canonical_bytes().to_vec(), 50)
+            }
+            crate::test_support::V2DeclassificationRolloverScenario::WrongManifestPin => (
+                2,
+                Digest32V2::new([0x7f; 32]),
+                successor.canonical_bytes().to_vec(),
+                50,
+            ),
+            crate::test_support::V2DeclassificationRolloverScenario::BadRuleSetSignature => (
+                2,
+                candidate_digest,
+                successor.canonical_bytes().to_vec(),
+                50,
+            ),
+            crate::test_support::V2DeclassificationRolloverScenario::ExpiredRuleSet => (
+                2,
+                candidate_digest,
+                successor.canonical_bytes().to_vec(),
+                95,
+            ),
+            crate::test_support::V2DeclassificationRolloverScenario::PartialRuntimeGeneration => (
+                3,
+                candidate_digest,
+                successor.canonical_bytes().to_vec(),
+                50,
+            ),
+        };
+        if scenario == crate::test_support::V2DeclassificationRolloverScenario::BadRuleSetSignature
+        {
+            *bytes.last_mut().expect("nonempty successor") ^= 1;
+        }
+        let startup = verified_rollover_startup(generation, manifest_pin);
+        let candidate = VerifiedV2DeclassificationSuccessorV2::from_verified_deployment(
+            &startup,
+            bytes,
+            roots,
+            verification_time,
+        )
+        .expect("verified successor deployment envelope");
+        let result = coordinator.publish_v2_declassification_successor(candidate);
+        let ingress_digest = ingress_rules
+            .snapshot()
+            .expect("ingress active declassification rules")
+            .signed_digest();
+        let agent_digest = agent_rules
+            .snapshot()
+            .expect("agent active declassification rules")
+            .signed_digest();
+        let active_generation = runtime
+            .active_declassification_rules()
+            .generation_snapshot()
+            .expect("active V2 generation")
+            .deployment_generation();
+        crate::test_support::V2DeclassificationRolloverProbe::new(
+            result,
+            old_digest,
+            candidate_digest,
+            ingress_digest,
+            agent_digest,
+            active_generation,
+            runtime.admission_resumed_for_test_support(),
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    fn verified_rollover_startup(
+        deployment_generation: u64,
+        declassification_rule_set_digest: Digest32V2,
+    ) -> VerifiedDaemonStartupV2 {
+        use savana_kernel_protocol::v2::{Ed25519KeyIdV2, EndpointRoleV2, ServiceIdentityV2};
+        use savana_platform_identity::{BoundedIdentityStringV2, ExpectedNativePeerV2};
+        use savana_policy_core::v2::{
+            ClosedServiceEdgeIdV2, ClosedServiceIdV2, DeploymentTrustErrorV2,
+            PlatformDeploymentTrustV2, PlatformServiceObservationV2, ServiceAuthorityHandlesV2,
+            ServiceDeploymentLockV2, ServiceEdgeLockV2, VerifiedDeploymentManifestV2,
+        };
+
+        struct Platform {
+            observations: Vec<PlatformServiceObservationV2>,
+            authorities: Vec<ServiceAuthorityHandlesV2>,
+            projection: Vec<u8>,
+        }
+
+        impl PlatformDeploymentTrustV2 for Platform {
+            fn observe_service(
+                &mut self,
+                service: ClosedServiceIdV2,
+            ) -> Result<PlatformServiceObservationV2, DeploymentTrustErrorV2> {
+                self.observations
+                    .iter()
+                    .copied()
+                    .find(|observed| observed.lock.service == service)
+                    .ok_or(DeploymentTrustErrorV2::PlatformUnavailable)
+            }
+
+            fn acquire_service_authorities(
+                &mut self,
+                service: ClosedServiceIdV2,
+            ) -> Result<ServiceAuthorityHandlesV2, DeploymentTrustErrorV2> {
+                let index = self
+                    .authorities
+                    .iter()
+                    .position(|authority| authority.service == service)
+                    .ok_or(DeploymentTrustErrorV2::PlatformUnavailable)?;
+                Ok(self.authorities.remove(index))
+            }
+
+            fn read_effect_ledger_projection(&mut self) -> Result<Vec<u8>, DeploymentTrustErrorV2> {
+                Ok(self.projection.clone())
+            }
+        }
+
+        let service_lock = |service: ClosedServiceIdV2| {
+            let seed = service.tag() as u8;
+            ServiceDeploymentLockV2 {
+                service,
+                service_identity: ServiceIdentityV2::new([seed + 80; 32]),
+                uid: 500 + u32::from(seed),
+                gid: 600 + u32::from(seed),
+                executable_digest: Digest32V2::new([seed; 32]),
+                config_digest: Digest32V2::new([seed + 10; 32]),
+                config_path_digest: Digest32V2::new([seed + 20; 32]),
+                socket_path_digest: Digest32V2::new([seed + 30; 32]),
+                socket_uid: 500 + u32::from(seed),
+                socket_gid: 600 + u32::from(seed),
+                socket_mode: 0o660,
+                code_identity_digest: Digest32V2::new([seed + 40; 32]),
+                sandbox_profile_digest: Digest32V2::new([seed + 50; 32]),
+                keystore_authority_identity: Digest32V2::new([seed + 60; 32]),
+                rollback_authority_identity: Digest32V2::new([seed + 70; 32]),
+            }
+        };
+        let services: Vec<_> = ClosedServiceIdV2::ALL
+            .iter()
+            .copied()
+            .map(service_lock)
+            .collect();
+        let edges: Vec<_> = ClosedServiceEdgeIdV2::ALL
+            .iter()
+            .copied()
+            .map(|edge_id| {
+                let seed = edge_id.tag() as u8;
+                let client = service_lock(edge_id.client_service());
+                ServiceEdgeLockV2 {
+                    edge_id,
+                    client_service: edge_id.client_service(),
+                    server_service: edge_id.server_service(),
+                    role: match edge_id {
+                        ClosedServiceEdgeIdV2::AgentKernel => EndpointRoleV2::AgentKernel,
+                        ClosedServiceEdgeIdV2::IngressKernel => EndpointRoleV2::IngressKernel,
+                        ClosedServiceEdgeIdV2::KernelExecutor => EndpointRoleV2::KernelExecutor,
+                    },
+                    listener_identity_digest: Digest32V2::new([0xa0 + seed; 32]),
+                    client_handshake_key_id: Ed25519KeyIdV2::new([0xb0 + seed * 2; 32]),
+                    server_handshake_key_id: Ed25519KeyIdV2::new([0xb1 + seed * 2; 32]),
+                    expected_client: ExpectedNativePeerV2::linux(
+                        BoundedIdentityStringV2::new(edge_id.role_identity().to_owned())
+                            .expect("rollover role identity"),
+                        client.uid,
+                        client.gid,
+                        *client.executable_digest.as_bytes(),
+                    )
+                    .expect("rollover expected native peer"),
+                }
+            })
+            .collect();
+        let installation_id = Digest32V2::new([0x91; 32]);
+        let active_manifest = Digest32V2::new([deployment_generation as u8 + 0x40; 32]);
+        let protocol_abi = Digest32V2::new([0x93; 32]);
+        let projection_identity = Digest32V2::new([0x94; 32]);
+        let ledger_head = Digest32V2::new([0x97; 32]);
+        let projection_key = SigningKey::from_bytes(&[0x98; 32]);
+        let projection_key_id = Ed25519KeyIdV2::new([0x99; 32]);
+
+        let payload = encode_rollover_manifest(
+            installation_id,
+            active_manifest,
+            declassification_rule_set_digest,
+            deployment_generation,
+            protocol_abi,
+            projection_identity,
+            ledger_head,
+            projection_key_id,
+            projection_key.verifying_key().to_bytes(),
+            &services,
+            &edges,
+        );
+        let manifest_key = SigningKey::from_bytes(&[0x95; 32]);
+        let manifest_key_id = Ed25519KeyIdV2::new([0x96; 32]);
+        let digest: [u8; 32] = Sha256::digest(&payload).into();
+        let mut signature_input =
+            Vec::from(b"SAVANA_DEPLOYMENT_MANIFEST_SIGNATURE_V2\0".as_slice());
+        signature_input.extend_from_slice(&digest);
+        let signature = manifest_key.sign(&signature_input).to_bytes();
+        let mut signed = minicbor::Encoder::new(Vec::new());
+        signed
+            .array(3)
+            .expect("manifest outer")
+            .bytes(&payload)
+            .expect("manifest payload")
+            .bytes(manifest_key_id.as_bytes())
+            .expect("manifest key")
+            .bytes(&signature)
+            .expect("manifest signature");
+        let manifest = VerifiedDeploymentManifestV2::verify(
+            &signed.into_writer(),
+            manifest_key_id,
+            manifest_key.verifying_key().to_bytes(),
+        )
+        .expect("verified rollover deployment manifest");
+
+        let projection = encode_rollover_projection(
+            installation_id,
+            active_manifest,
+            deployment_generation,
+            deployment_generation,
+            projection_identity,
+            ledger_head,
+            projection_key_id,
+            &projection_key,
+        );
+        let observations = services
+            .iter()
+            .copied()
+            .map(|lock| PlatformServiceObservationV2 {
+                lock,
+                executable_is_regular_single_link: true,
+                config_is_regular_single_link: true,
+                executable_parent_root_owned_not_writable: true,
+                config_parent_root_owned_not_writable: true,
+                endpoint_identity_is_verified: true,
+            })
+            .collect();
+        let authorities = services
+            .iter()
+            .map(|lock| ServiceAuthorityHandlesV2 {
+                service: lock.service,
+                keystore_authority_identity: lock.keystore_authority_identity,
+                rollback_authority_identity: lock.rollback_authority_identity,
+            })
+            .collect();
+        VerifiedDaemonStartupV2::verify(
+            manifest,
+            &mut Platform {
+                observations,
+                authorities,
+                projection,
+            },
+        )
+        .expect("verified rollover daemon startup")
+    }
+
+    #[cfg(feature = "test-support")]
+    #[allow(clippy::too_many_arguments)]
+    fn encode_rollover_manifest(
+        installation_id: Digest32V2,
+        active_manifest: Digest32V2,
+        declassification_rule_set_digest: Digest32V2,
+        deployment_generation: u64,
+        protocol_abi: Digest32V2,
+        projection_identity: Digest32V2,
+        ledger_head: Digest32V2,
+        projection_key_id: Ed25519KeyIdV2,
+        projection_public_key: [u8; 32],
+        services: &[savana_policy_core::v2::ServiceDeploymentLockV2],
+        edges: &[savana_policy_core::v2::ServiceEdgeLockV2],
+    ) -> Vec<u8> {
+        let mut encoder = minicbor::Encoder::new(Vec::new());
+        encoder
+            .array(21)
+            .expect("manifest fields")
+            .u16(2)
+            .expect("manifest version")
+            .bytes(installation_id.as_bytes())
+            .expect("installation")
+            .bytes(active_manifest.as_bytes())
+            .expect("active manifest")
+            .bytes(declassification_rule_set_digest.as_bytes())
+            .expect("rule pin")
+            .u64(deployment_generation)
+            .expect("manifest sequence")
+            .u64(deployment_generation)
+            .expect("deployment generation")
+            .u64(deployment_generation)
+            .expect("fence")
+            .bytes(protocol_abi.as_bytes())
+            .expect("protocol ABI");
+        for digest in [0x81_u8, 0x82, 0x83, 0x84, 0x85, 0x86] {
+            encoder
+                .bytes(&[digest; 32])
+                .expect("manifest identity digest");
+        }
+        encoder
+            .bytes(&[0x87; 32])
+            .expect("envelope key")
+            .bytes(projection_identity.as_bytes())
+            .expect("projection identity")
+            .bytes(ledger_head.as_bytes())
+            .expect("ledger head")
+            .bytes(projection_key_id.as_bytes())
+            .expect("projection key id")
+            .bytes(&projection_public_key)
+            .expect("projection public key")
+            .array(services.len() as u64)
+            .expect("service count");
+        for service in services {
+            encoder
+                .array(15)
+                .expect("service fields")
+                .u16(service.service.tag())
+                .expect("service tag")
+                .bytes(service.service_identity.as_bytes())
+                .expect("service identity")
+                .u32(service.uid)
+                .expect("service uid")
+                .u32(service.gid)
+                .expect("service gid")
+                .bytes(service.executable_digest.as_bytes())
+                .expect("executable")
+                .bytes(service.config_digest.as_bytes())
+                .expect("config")
+                .bytes(service.config_path_digest.as_bytes())
+                .expect("config path")
+                .bytes(service.socket_path_digest.as_bytes())
+                .expect("socket path")
+                .u32(service.socket_uid)
+                .expect("socket uid")
+                .u32(service.socket_gid)
+                .expect("socket gid")
+                .u32(service.socket_mode)
+                .expect("socket mode")
+                .bytes(service.code_identity_digest.as_bytes())
+                .expect("code identity")
+                .bytes(service.sandbox_profile_digest.as_bytes())
+                .expect("sandbox")
+                .bytes(service.keystore_authority_identity.as_bytes())
+                .expect("keystore")
+                .bytes(service.rollback_authority_identity.as_bytes())
+                .expect("rollback");
+        }
+        encoder.array(edges.len() as u64).expect("edge count");
+        for edge in edges {
+            encoder
+                .array(8)
+                .expect("edge fields")
+                .u16(edge.edge_id.tag())
+                .expect("edge id")
+                .u16(edge.client_service.tag())
+                .expect("edge client")
+                .u16(edge.server_service.tag())
+                .expect("edge server")
+                .u16(edge.role.tag())
+                .expect("edge role")
+                .bytes(edge.listener_identity_digest.as_bytes())
+                .expect("listener")
+                .bytes(edge.client_handshake_key_id.as_bytes())
+                .expect("client key")
+                .bytes(edge.server_handshake_key_id.as_bytes())
+                .expect("server key");
+            match &edge.expected_client {
+                savana_platform_identity::ExpectedNativePeerV2::Linux {
+                    role_identity,
+                    uid,
+                    gid,
+                    executable_measurement,
+                } => {
+                    encoder
+                        .array(5)
+                        .expect("peer fields")
+                        .u16(1)
+                        .expect("peer tag")
+                        .str(role_identity.as_str())
+                        .expect("peer role")
+                        .u32(*uid)
+                        .expect("peer uid")
+                        .u32(*gid)
+                        .expect("peer gid")
+                        .bytes(executable_measurement)
+                        .expect("peer executable");
+                }
+                _ => unreachable!("rollover fixture uses Linux identity projection"),
+            }
+        }
+        encoder.into_writer()
+    }
+
+    #[cfg(feature = "test-support")]
+    #[allow(clippy::too_many_arguments)]
+    fn encode_rollover_projection(
+        installation_id: Digest32V2,
+        active_manifest: Digest32V2,
+        deployment_generation: u64,
+        effect_fence_epoch: u64,
+        projection_identity: Digest32V2,
+        ledger_head: Digest32V2,
+        projection_key_id: Ed25519KeyIdV2,
+        projection_key: &SigningKey,
+    ) -> Vec<u8> {
+        let mut payload = minicbor::Encoder::new(Vec::new());
+        payload
+            .array(11)
+            .expect("projection fields")
+            .u16(2)
+            .expect("projection version")
+            .bytes(installation_id.as_bytes())
+            .expect("projection installation")
+            .bytes(active_manifest.as_bytes())
+            .expect("projection manifest")
+            .u64(deployment_generation)
+            .expect("projection generation")
+            .u64(effect_fence_epoch)
+            .expect("projection fence")
+            .bytes(projection_identity.as_bytes())
+            .expect("projection identity")
+            .bytes(ledger_head.as_bytes())
+            .expect("projection head")
+            .bool(false)
+            .expect("effects not fenced")
+            .bool(true)
+            .expect("terminal projection")
+            .bytes(&[0x9a; 32])
+            .expect("selected record")
+            .bytes(&[0; 32])
+            .expect("predecessor");
+        let payload = payload.into_writer();
+        let digest: [u8; 32] = Sha256::digest(&payload).into();
+        let mut signature_input =
+            Vec::from(b"SAVANA_EFFECT_LEDGER_PROJECTION_SIGNATURE_V2\0".as_slice());
+        signature_input.extend_from_slice(&digest);
+        let signature = projection_key.sign(&signature_input).to_bytes();
+        let mut outer = minicbor::Encoder::new(Vec::new());
+        outer
+            .array(3)
+            .expect("projection outer")
+            .bytes(&payload)
+            .expect("projection payload")
+            .bytes(projection_key_id.as_bytes())
+            .expect("projection key")
+            .bytes(&signature)
+            .expect("projection signature");
+        outer.into_writer()
     }
 
     fn load_verified_startup(
@@ -990,8 +1545,7 @@ mod native {
             MAX_ARTIFACT_BYTES_V2,
             None,
         )?;
-        let declassification_rule_set =
-            load_declassification_rule_set(bootstrap, startup.declassification_rule_set_digest())?;
+        let declassification_successor = load_declassification_successor(bootstrap, startup)?;
         let input_runtime_publisher_key_id =
             Ed25519KeyIdV2::new(decode_hex_32(&bootstrap.input_runtime_publisher_key_id)?);
         let input_runtime_publisher_public_key =
@@ -1083,16 +1637,16 @@ mod native {
             .filter(|effects| *effects != savana_policy_core::v2::EffectSetV2::EMPTY)
             .ok_or(StableCode::KernelUnavailable)?,
             logical_run_ttl_ms: bootstrap.logical_run_ttl_ms,
-            declassification_rule_set,
+            declassification_successor,
             policy,
             parser_trust,
         })
     }
 
-    fn load_declassification_rule_set(
+    fn load_declassification_successor(
         bootstrap: &BootstrapDtoV2,
-        expected_signed_digest: Digest32V2,
-    ) -> Result<ActiveDeclassificationRuleSetV2, StableCode> {
+        startup: &VerifiedDaemonStartupV2,
+    ) -> Result<VerifiedV2DeclassificationSuccessorV2, StableCode> {
         if !bootstrap.declassification_installer_root_path.is_absolute()
             || !bootstrap.declassification_trust_root_set_path.is_absolute()
             || !bootstrap.declassification_rule_set_path.is_absolute()
@@ -1124,17 +1678,13 @@ mod native {
             MAX_DECLASSIFICATION_OBJECT_BYTES_V2,
             None,
         )?;
-        let rules = DeclassificationRuleSetV2::from_canonical_bytes(
-            &rule_bytes,
-            &root_set,
+        VerifiedV2DeclassificationSuccessorV2::from_verified_deployment(
+            startup,
+            rule_bytes,
+            Arc::new(root_set),
             current_unix_millis()?.get(),
         )
-        .map_err(|_| StableCode::KernelUnavailable)?;
-        if rules.signed_digest() != expected_signed_digest {
-            return Err(StableCode::KernelUnavailable);
-        }
-        ActiveDeclassificationRuleSetV2::new(rules, Arc::new(root_set))
-            .map_err(|_| StableCode::KernelUnavailable)
+        .map_err(|_| StableCode::KernelUnavailable)
     }
 
     fn load_policy_runtime(
