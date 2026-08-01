@@ -5677,6 +5677,15 @@ mod tests {
                 ActionTemplateIdV2::new(22),
                 ToolClassIdV2::new(32),
             ),
+            verified_planner_descriptor(
+                registry_version,
+                &publisher,
+                &publisher_key,
+                publisher_key_id,
+                "mail.allowed-alternate",
+                ActionTemplateIdV2::new(21),
+                ToolClassIdV2::new(33),
+            ),
         ];
         let registry = VerifiedToolRegistryV2::from_verified_descriptors(
             registry_version,
@@ -6014,10 +6023,55 @@ mod tests {
     }
 
     #[test]
-    fn planner_commit_enforces_retained_signed_policy_action_and_tool_allowlist_atomically() {
+    fn planner_commit_enforces_retained_signed_policy_action_allowlist_atomically() {
         let mut fixture = planner_authority_fixture();
         let (ticket, nonce, slot) = fixture.prepare(PlannerLimitsV2::new(2, 1, 1, 65_536).unwrap());
+        let ticket_policy = &mut fixture
+            .authority
+            .planner_tickets
+            .iter_mut()
+            .find(|record| record.ticket == ticket)
+            .unwrap()
+            .effective_policy;
+        ticket_policy
+            .allowed_tool_classes
+            .push(ToolClassIdV2::new(32));
+        ticket_policy.allowed_tool_classes.sort_unstable();
         let plan = PlannerPlanV2::new(nonce, vec![planner_step(1, 22, 32, slot, vec![])]).unwrap();
+        let values_before = format!("{:?}", fixture.values);
+        let steps_before = fixture.authority.plan_steps.len();
+
+        assert_eq!(
+            fixture.commit(ticket, plan),
+            Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+        );
+        assert_eq!(format!("{:?}", fixture.values), values_before);
+        assert_eq!(fixture.authority.plan_steps.len(), steps_before);
+        assert!(
+            !fixture
+                .authority
+                .planner_tickets
+                .iter()
+                .find(|record| record.ticket == ticket)
+                .unwrap()
+                .consumed
+        );
+    }
+
+    #[test]
+    fn planner_commit_enforces_retained_signed_policy_tool_class_allowlist_atomically() {
+        let mut fixture = planner_authority_fixture();
+        let (ticket, nonce, slot) = fixture.prepare(PlannerLimitsV2::new(2, 1, 1, 65_536).unwrap());
+        fixture
+            .authority
+            .planner_tickets
+            .iter_mut()
+            .find(|record| record.ticket == ticket)
+            .unwrap()
+            .effective_policy
+            .allowed_tool_classes
+            .retain(|class| *class != ToolClassIdV2::new(33));
+        let plan = PlannerPlanV2::new(nonce, vec![planner_step(1, 21, 33, slot, vec![])]).unwrap();
         let values_before = format!("{:?}", fixture.values);
         let steps_before = fixture.authority.plan_steps.len();
 
