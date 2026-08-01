@@ -1,9 +1,12 @@
 # Savana V2 Planner Privacy: Value, Shape, and Intent
 
-Status: design proposal, v1 (2026-08-01). Specifies how the system withholds
+Status: design proposal, v1.1 (2026-08-01). Specifies how the system withholds
 not just data **values** but the **shape** and **intent** of a workflow from
 an untrusted remote planning model, without touching the kernel. Changes no
 code by itself.
+
+v1.1: O2 resolved — the intent trust boundary (§5) is **user-configured,
+within a deployment ceiling, fail-safe to private**.
 
 Companion reading: `docs/connector-registration-v2.md` (*REG*, the connector
 registry this design projects its semantic catalog from), and the current
@@ -186,6 +189,39 @@ the "intent is not the secret" position: you keep kernel-enforced value
 protection and concede shape/intent for simplicity. The knob makes that
 concession explicit rather than accidental.
 
+### 5.1 Who sets it (resolves O2): the end user, within a deployment ceiling
+
+The intent trust boundary is configured by the **end user**, not fixed by the
+deployment — it is the user's intent, and theirs to trade. Three properties
+make this safe and non-leaky:
+
+- **Safe by §8.** The boundary affects only the confidentiality of *that
+  user's* intent to the remote model, never authorization. A user's choice —
+  even the most permissive one — cannot weaken anyone else's security or the
+  system's, because the kernel authorizes every effect regardless of where
+  planning happened. So user control here trades only the user's own intent
+  privacy, which is exactly the thing that should be theirs to decide.
+- **Fail-safe default.** The boundary defaults to **private** (intent stays in
+  the trust domain); a user opts *out* to gain a cheaper/remote mapper, never
+  in to gain privacy. Inertia must not leak — consistent with every
+  fail-closed default in this kernel.
+- **Deployment ceiling.** A deployment may cap the boundary — e.g. a regulated
+  installation forbids a third-party mapperd outright — and the user
+  configures only *within* that ceiling, exactly as connector tiers bound user
+  choice in *REG*. The user can loosen up to the deployment's ceiling, never
+  past it.
+
+The choice is overridable **per task**, so a user can keep a cheap remote
+mapper as a default and pin sensitive tasks (diligence, M&A, anything whose
+intent is itself the secret) to local — the granularity that matters, since
+intent sensitivity is per-task, not per-user.
+
+A note on enforcement, to stay honest: the boundary is a directive to a
+*trusted* agentd. A compromised agentd (A3) could ignore it and leak
+regardless — the same caveat as everywhere else. The user's setting binds an
+honest agentd in the user's trust domain; it is not, and cannot be, a
+kernel-enforced guarantee (§8).
+
 ## 6. Invariants
 
 - **I1 — One-way.** No channel from plannerd back to mapperd. The planner
@@ -333,9 +369,10 @@ as a deployment-shipped one does.
   structural types (branch, join, retry-scope) improve planning enough to
   justify the marginal shape they reveal is open. Recommendation: start
   minimal; add types only when planning quality demands it.
-- **O2 — Where mapperd runs by default.** Recommendation: local / in-trust-
-  domain by default (intent private), with the boundary knob (§5) an explicit
-  opt-out for deployments that do not treat intent as secret.
+- **O2 — Who sets the intent trust boundary: resolved (v1.1), §5.1.** The end
+  user, within a deployment ceiling, fail-safe to private, overridable per
+  task. Safe because the boundary is confidentiality-only (§8): a user's
+  choice trades only their own intent privacy and cannot affect authorization.
 - **O3 — Signed vs local structural_role.** §10 signs the coarse
   `structural_role` into the descriptor for integrity. An alternative keeps
   even that local. Recommendation: sign it — it is not business-revealing and
