@@ -7,9 +7,8 @@ use savana_kernel_protocol::v2::{EndpointRoleV2, UnixMillisV2};
 use crate::deployment_trust::DeploymentTrustErrorV2;
 use crate::policy_runtime::V2GenerationRuntime;
 use crate::v2_connection::serve_one_suite_one_v2_connection;
-use crate::v2_dispatch::{KernelServiceDispatchErrorV2, KernelServiceDispatcherV2};
+use crate::v2_dispatch::KernelServiceDispatchErrorV2;
 use crate::v2_edge::{VerifiedAcceptedPeerV2, VerifiedServiceEdgeV2};
-use crate::v2_transport_owner::KernelV2HandshakeOwner;
 
 pub(crate) trait NativeUnixPeerVerifierV2: Send + Sync {
     fn verify(
@@ -47,18 +46,16 @@ pub(crate) enum V2ListenerError {
 
 pub(crate) struct KerneldV2EndpointListener {
     listener: UnixListener,
-    edge: Arc<VerifiedServiceEdgeV2>,
+    role: EndpointRoleV2,
     runtime: Arc<V2GenerationRuntime>,
     peer_verifier: Arc<dyn NativeUnixPeerVerifierV2>,
-    handshake_owner: Arc<KernelV2HandshakeOwner>,
-    dispatcher: Arc<KernelServiceDispatcherV2>,
 }
 
 impl std::fmt::Debug for KerneldV2EndpointListener {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("KerneldV2EndpointListener")
-            .field("role", &self.edge.role())
+            .field("role", &self.role)
             .finish_non_exhaustive()
     }
 }
@@ -66,67 +63,47 @@ impl std::fmt::Debug for KerneldV2EndpointListener {
 impl KerneldV2EndpointListener {
     pub(crate) fn new_agent(
         listener: UnixListener,
-        edge: Arc<VerifiedServiceEdgeV2>,
         runtime: Arc<V2GenerationRuntime>,
         peer_verifier: Arc<dyn NativeUnixPeerVerifierV2>,
-        handshake_owner: Arc<KernelV2HandshakeOwner>,
-        dispatcher: Arc<KernelServiceDispatcherV2>,
     ) -> Result<Self, V2ListenerError> {
         Self::new_fixed(
             EndpointRoleV2::AgentKernel,
             listener,
-            edge,
             runtime,
             peer_verifier,
-            handshake_owner,
-            dispatcher,
         )
     }
 
     pub(crate) fn new_ingress(
         listener: UnixListener,
-        edge: Arc<VerifiedServiceEdgeV2>,
         runtime: Arc<V2GenerationRuntime>,
         peer_verifier: Arc<dyn NativeUnixPeerVerifierV2>,
-        handshake_owner: Arc<KernelV2HandshakeOwner>,
-        dispatcher: Arc<KernelServiceDispatcherV2>,
     ) -> Result<Self, V2ListenerError> {
         Self::new_fixed(
             EndpointRoleV2::IngressKernel,
             listener,
-            edge,
             runtime,
             peer_verifier,
-            handshake_owner,
-            dispatcher,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn new_fixed(
         required_role: EndpointRoleV2,
         listener: UnixListener,
-        edge: Arc<VerifiedServiceEdgeV2>,
         runtime: Arc<V2GenerationRuntime>,
         peer_verifier: Arc<dyn NativeUnixPeerVerifierV2>,
-        handshake_owner: Arc<KernelV2HandshakeOwner>,
-        dispatcher: Arc<KernelServiceDispatcherV2>,
     ) -> Result<Self, V2ListenerError> {
-        if edge.role() != required_role
-            || !matches!(
-                required_role,
-                EndpointRoleV2::AgentKernel | EndpointRoleV2::IngressKernel
-            )
-        {
+        if !matches!(
+            required_role,
+            EndpointRoleV2::AgentKernel | EndpointRoleV2::IngressKernel
+        ) {
             return Err(V2ListenerError::EndpointRole);
         }
         Ok(Self {
             listener,
-            edge,
+            role: required_role,
             runtime,
             peer_verifier,
-            handshake_owner,
-            dispatcher,
         })
     }
 
@@ -160,11 +137,9 @@ impl KerneldV2EndpointListener {
                 .listener
                 .try_clone()
                 .map_err(|_| V2ListenerError::Accept)?,
-            edge: Arc::clone(&self.edge),
+            role: self.role,
             runtime: Arc::clone(&self.runtime),
             peer_verifier: Arc::clone(&self.peer_verifier),
-            handshake_owner: Arc::clone(&self.handshake_owner),
-            dispatcher: Arc::clone(&self.dispatcher),
         })
     }
 
@@ -174,9 +149,9 @@ impl KerneldV2EndpointListener {
         now: UnixMillisV2,
         deadline: Instant,
     ) -> Result<(), V2ListenerError> {
-        let lease = self
+        let endpoint = self
             .runtime
-            .acquire(&self.edge, deadline)
+            .acquire_endpoint(self.role, deadline)
             .map_err(|error| {
                 if error == savana_kernel_protocol::StableCode::DeadlineExceeded {
                     V2ListenerError::DeadlineExceeded
@@ -184,12 +159,13 @@ impl KerneldV2EndpointListener {
                     V2ListenerError::NativeIdentity
                 }
             })?;
+        let (edge, handshake_owner, dispatcher, lease) = endpoint.into_parts();
         let accepted = self
             .peer_verifier
-            .verify(&stream, &self.edge)
+            .verify(&stream, &edge)
             .map_err(|_| V2ListenerError::NativeIdentity)?;
-        if accepted.role() != self.edge.role()
-            || accepted.client_identity() != self.edge.client_identity()
+        if accepted.role() != edge.role()
+            || accepted.client_identity() != edge.client_identity()
             || accepted.edge_digest() != lease.edge_digest()
         {
             return Err(V2ListenerError::NativeIdentity);
@@ -198,8 +174,8 @@ impl KerneldV2EndpointListener {
             stream,
             accepted.into_peer_binding(),
             lease,
-            self.handshake_owner.as_ref(),
-            self.dispatcher.as_ref(),
+            handshake_owner.as_ref(),
+            dispatcher.as_ref(),
             now,
             deadline,
         )
@@ -341,68 +317,34 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_constructors_accept_only_their_fixed_role() {
+    fn endpoint_constructors_pin_their_fixed_role_without_caller_supplied_edges() {
         let agent = dependencies(ClosedServiceEdgeIdV2::AgentKernel);
         let ingress = dependencies(ClosedServiceEdgeIdV2::IngressKernel);
-        let executor = dependencies(ClosedServiceEdgeIdV2::KernelExecutor);
 
         let (_dir, socket, _) = listener();
         assert!(KerneldV2EndpointListener::new_agent(
             socket,
-            Arc::clone(&agent.edge),
             Arc::clone(&agent.runtime),
             Arc::clone(&agent.verifier),
-            Arc::clone(&agent.handshake),
-            Arc::clone(&agent.dispatcher),
         )
         .is_ok());
-        let (_dir, socket, _) = listener();
-        assert!(matches!(
-            KerneldV2EndpointListener::new_agent(
-                socket,
-                Arc::clone(&ingress.edge),
-                Arc::clone(&ingress.runtime),
-                Arc::clone(&ingress.verifier),
-                Arc::clone(&ingress.handshake),
-                Arc::clone(&ingress.dispatcher),
-            ),
-            Err(V2ListenerError::EndpointRole)
-        ));
         let (_dir, socket, _) = listener();
         assert!(KerneldV2EndpointListener::new_ingress(
             socket,
-            Arc::clone(&ingress.edge),
             Arc::clone(&ingress.runtime),
             Arc::clone(&ingress.verifier),
-            Arc::clone(&ingress.handshake),
-            Arc::clone(&ingress.dispatcher),
         )
         .is_ok());
-        let (_dir, socket, _) = listener();
-        assert!(matches!(
-            KerneldV2EndpointListener::new_ingress(
-                socket,
-                Arc::clone(&executor.edge),
-                Arc::clone(&executor.runtime),
-                Arc::clone(&executor.verifier),
-                Arc::clone(&executor.handshake),
-                Arc::clone(&executor.dispatcher),
-            ),
-            Err(V2ListenerError::EndpointRole)
-        ));
     }
 
     #[test]
-    fn v1_prefix_gets_no_response_and_never_reaches_dispatch() {
+    fn unpublished_runtime_gets_no_response_and_never_reaches_dispatch() {
         let dependencies = dependencies(ClosedServiceEdgeIdV2::AgentKernel);
         let (_directory, socket, path) = listener();
         let endpoint = KerneldV2EndpointListener::new_agent(
             socket,
-            Arc::clone(&dependencies.edge),
             Arc::clone(&dependencies.runtime),
             Arc::clone(&dependencies.verifier),
-            Arc::clone(&dependencies.handshake),
-            Arc::clone(&dependencies.dispatcher),
         )
         .unwrap();
         let server = thread::spawn(move || {
@@ -422,9 +364,7 @@ mod tests {
         assert_eq!(client.read(&mut byte).unwrap(), 0);
         assert!(matches!(
             server.join().unwrap(),
-            Err(V2ListenerError::Connection(
-                crate::v2_dispatch::KernelServiceDispatchErrorV2::Malformed
-            ))
+            Err(V2ListenerError::NativeIdentity)
         ));
         assert_eq!(dependencies.calls.load(Ordering::SeqCst), 0);
     }

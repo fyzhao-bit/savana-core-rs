@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use ed25519_dalek::SigningKey;
@@ -119,7 +120,7 @@ pub(crate) struct KernelServiceDispatcherV2 {
     deployment: KernelServiceDeploymentV2,
     signing_key_id: Ed25519KeyIdV2,
     signing_key: SigningKey,
-    owner: KernelRuntimeOwnerV2,
+    owner: Arc<KernelRuntimeOwnerV2>,
 }
 
 impl std::fmt::Debug for KernelServiceDispatcherV2 {
@@ -139,7 +140,7 @@ impl KernelServiceDispatcherV2 {
         deployment: KernelServiceDeploymentV2,
         signing_key_id: Ed25519KeyIdV2,
         signing_key: SigningKey,
-        owner: KernelRuntimeOwnerV2,
+        owner: impl Into<Arc<KernelRuntimeOwnerV2>>,
     ) -> Result<Self, KernelServiceDispatchErrorV2> {
         if is_zero(signing_key_id.as_bytes()) {
             return Err(KernelServiceDispatchErrorV2::Unavailable);
@@ -148,8 +149,17 @@ impl KernelServiceDispatcherV2 {
             deployment,
             signing_key_id,
             signing_key,
-            owner,
+            owner: owner.into(),
         })
+    }
+
+    pub(crate) fn matches_generation(
+        &self,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+    ) -> bool {
+        self.deployment.active_state_manifest_digest == active_state_manifest_digest
+            && self.deployment.deployment_generation == deployment_generation
     }
 
     pub(crate) fn dispatch_one(

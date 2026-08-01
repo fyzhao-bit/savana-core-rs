@@ -579,6 +579,26 @@ impl VerifiedDaemonStartupV2 {
         self.protocol_abi_digest
     }
 
+    pub const fn release_identity_digest(&self) -> Digest32V2 {
+        self.release_identity_digest
+    }
+
+    pub const fn model_set_identity_digest(&self) -> Digest32V2 {
+        self.model_set_identity_digest
+    }
+
+    pub const fn resource_profile_identity_digest(&self) -> Digest32V2 {
+        self.resource_profile_identity_digest
+    }
+
+    pub const fn approval_lock_identity_digest(&self) -> Digest32V2 {
+        self.approval_lock_identity_digest
+    }
+
+    pub const fn planner_lock_identity_digest(&self) -> Digest32V2 {
+        self.planner_lock_identity_digest
+    }
+
     pub const fn kernel_envelope_signing_key_id(&self) -> Ed25519KeyIdV2 {
         self.kernel_envelope_signing_key_id
     }

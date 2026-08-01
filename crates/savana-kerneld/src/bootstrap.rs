@@ -1182,6 +1182,10 @@ impl ServerLifecycle for StartupGuardLifecycle<'_> {
     fn poll_shutdown(&mut self) -> Result<bool, StableCode> {
         self.inner.poll_shutdown()
     }
+
+    fn take_v2_rollover_request(&mut self) -> Result<bool, StableCode> {
+        self.inner.take_v2_rollover_request()
+    }
 }
 
 const fn unavailable() -> DaemonError {

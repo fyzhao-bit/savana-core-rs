@@ -304,7 +304,9 @@ pub mod test_support {
         WrongManifestPin,
         BadRuleSetSignature,
         ExpiredRuleSet,
-        PartialRuntimeGeneration,
+        ExpiresBeforePublication,
+        IncompleteEndpointRuntime,
+        GenerationGap,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,8 +314,11 @@ pub mod test_support {
         result: Result<(), savana_kernel_protocol::StableCode>,
         old_digest: savana_kernel_protocol::v2::Digest32V2,
         candidate_digest: savana_kernel_protocol::v2::Digest32V2,
-        ingress_digest: savana_kernel_protocol::v2::Digest32V2,
-        agent_digest: savana_kernel_protocol::v2::Digest32V2,
+        verified_successor_constructed: bool,
+        ingress_request_digest: savana_kernel_protocol::v2::Digest32V2,
+        agent_request_digest: savana_kernel_protocol::v2::Digest32V2,
+        ingress_request_generation: u64,
+        agent_request_generation: u64,
         active_generation: u64,
         admission_resumed: bool,
     }
@@ -323,8 +328,11 @@ pub mod test_support {
             result: Result<(), savana_kernel_protocol::StableCode>,
             old_digest: savana_kernel_protocol::v2::Digest32V2,
             candidate_digest: savana_kernel_protocol::v2::Digest32V2,
-            ingress_digest: savana_kernel_protocol::v2::Digest32V2,
-            agent_digest: savana_kernel_protocol::v2::Digest32V2,
+            verified_successor_constructed: bool,
+            ingress_request_digest: savana_kernel_protocol::v2::Digest32V2,
+            agent_request_digest: savana_kernel_protocol::v2::Digest32V2,
+            ingress_request_generation: u64,
+            agent_request_generation: u64,
             active_generation: u64,
             admission_resumed: bool,
         ) -> Self {
@@ -332,8 +340,11 @@ pub mod test_support {
                 result,
                 old_digest,
                 candidate_digest,
-                ingress_digest,
-                agent_digest,
+                verified_successor_constructed,
+                ingress_request_digest,
+                agent_request_digest,
+                ingress_request_generation,
+                agent_request_generation,
                 active_generation,
                 admission_resumed,
             }
@@ -351,12 +362,24 @@ pub mod test_support {
             self.candidate_digest
         }
 
-        pub const fn ingress_digest(self) -> savana_kernel_protocol::v2::Digest32V2 {
-            self.ingress_digest
+        pub const fn verified_successor_constructed(self) -> bool {
+            self.verified_successor_constructed
         }
 
-        pub const fn agent_digest(self) -> savana_kernel_protocol::v2::Digest32V2 {
-            self.agent_digest
+        pub const fn ingress_request_digest(self) -> savana_kernel_protocol::v2::Digest32V2 {
+            self.ingress_request_digest
+        }
+
+        pub const fn agent_request_digest(self) -> savana_kernel_protocol::v2::Digest32V2 {
+            self.agent_request_digest
+        }
+
+        pub const fn ingress_request_generation(self) -> u64 {
+            self.ingress_request_generation
+        }
+
+        pub const fn agent_request_generation(self) -> u64 {
+            self.agent_request_generation
         }
 
         pub const fn active_generation(self) -> u64 {

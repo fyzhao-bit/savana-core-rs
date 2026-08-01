@@ -17,6 +17,20 @@ const WORKERS_PER_ENDPOINT_V2: usize = 2;
 const CONNECTION_DEADLINE_V2: Duration = Duration::from_secs(5);
 const POLL_INTERVAL_V2: Duration = Duration::from_millis(25);
 
+pub(crate) trait V2VerifiedSuccessorPublisher {
+    fn publish_next_verified_successor(&self) -> Result<(), StableCode>;
+}
+
+fn publish_requested_v2_successor(
+    lifecycle: &mut dyn ServerLifecycle,
+    publisher: &dyn V2VerifiedSuccessorPublisher,
+) -> Result<(), StableCode> {
+    if lifecycle.take_v2_rollover_request()? {
+        let _ = publisher.publish_next_verified_successor();
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 const fn production_worker_roles_v2() -> [EndpointRoleV2; 4] {
     [
@@ -33,6 +47,7 @@ pub(crate) fn run_kerneld_v2_workers(
     runtime: &V2GenerationRuntime,
     readiness: KernelReadinessAuthorityV2,
     lifecycle: &mut dyn ServerLifecycle,
+    successor_publisher: &dyn V2VerifiedSuccessorPublisher,
 ) -> Result<(), StableCode> {
     agent
         .set_nonblocking()
@@ -72,7 +87,14 @@ pub(crate) fn run_kerneld_v2_workers(
                 shutdown.store(true, Ordering::Release);
                 break;
             }
-            Ok(false) => thread::sleep(POLL_INTERVAL_V2),
+            Ok(false) => {
+                if publish_requested_v2_successor(lifecycle, successor_publisher).is_err() {
+                    failed.store(true, Ordering::Release);
+                    shutdown.store(true, Ordering::Release);
+                    break;
+                }
+                thread::sleep(POLL_INTERVAL_V2);
+            }
             Err(_) => {
                 failed.store(true, Ordering::Release);
                 shutdown.store(true, Ordering::Release);
@@ -167,9 +189,15 @@ fn join_workers(workers: Vec<JoinHandle<()>>) -> Result<(), StableCode> {
 
 #[cfg(test)]
 mod tests {
-    use savana_kernel_protocol::v2::EndpointRoleV2;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::production_worker_roles_v2;
+    use savana_kernel_protocol::v2::EndpointRoleV2;
+    use savana_kernel_protocol::StableCode;
+
+    use super::{
+        production_worker_roles_v2, publish_requested_v2_successor, V2VerifiedSuccessorPublisher,
+    };
+    use crate::server::ServerLifecycle;
 
     #[test]
     fn production_workers_are_bounded_and_isolated_per_endpoint_role() {
@@ -182,5 +210,47 @@ mod tests {
                 EndpointRoleV2::IngressKernel,
             ],
         );
+    }
+
+    struct RequestedRollover(bool);
+
+    impl ServerLifecycle for RequestedRollover {
+        fn workers_started(&mut self) -> Result<(), StableCode> {
+            Ok(())
+        }
+
+        fn poll_shutdown(&mut self) -> Result<bool, StableCode> {
+            Ok(false)
+        }
+
+        fn take_v2_rollover_request(&mut self) -> Result<bool, StableCode> {
+            Ok(std::mem::take(&mut self.0))
+        }
+    }
+
+    struct RejectingPublisher(AtomicUsize);
+
+    impl V2VerifiedSuccessorPublisher for RejectingPublisher {
+        fn publish_next_verified_successor(&self) -> Result<(), StableCode> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(StableCode::KernelUnavailable)
+        }
+    }
+
+    #[test]
+    fn requested_successor_publication_is_reachable_and_rejection_is_nonfatal() {
+        let publisher = RejectingPublisher(AtomicUsize::new(0));
+        let mut lifecycle = RequestedRollover(true);
+
+        assert_eq!(
+            publish_requested_v2_successor(&mut lifecycle, &publisher),
+            Ok(())
+        );
+        assert_eq!(publisher.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            publish_requested_v2_successor(&mut lifecycle, &publisher),
+            Ok(())
+        );
+        assert_eq!(publisher.0.load(Ordering::SeqCst), 1);
     }
 }

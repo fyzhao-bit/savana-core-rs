@@ -273,8 +273,8 @@ mod tests {
     use crate::policy_runtime::V2GenerationLease;
     use crate::v2_channel::{UnixV2FrameChannel, V2FrameChannel};
     use crate::v2_dispatch::{
-        KernelServiceDeploymentV2, KernelServiceDispatcherV2, KernelServiceResponseBodyV2,
-        VerifiedKernelServicePeerV2,
+        KernelServiceDeploymentV2, KernelServiceDispatchErrorV2, KernelServiceDispatcherV2,
+        KernelServiceResponseBodyV2, VerifiedKernelServicePeerV2,
     };
     use crate::v2_kernel_owner::KernelRuntimeOwnerV2;
     use crate::v2_transport_owner::KernelV2HandshakeOwner;
@@ -511,5 +511,87 @@ mod tests {
         assert_eq!(client.read(&mut eof).unwrap(), 0);
         assert_eq!(server_thread.join().unwrap(), Ok(()));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn v1_prefix_gets_no_response_and_never_reaches_suite_one_dispatch() {
+        let client_key = SigningKey::from_bytes(&[0x41; 32]);
+        let server_key = SigningKey::from_bytes(&[0x42; 32]);
+        let edge = KernelServiceHandshakeEdgeV2::from_verified_deployment(
+            EndpointRoleV2::AgentKernel,
+            Digest32V2::new([1; 32]),
+            ServiceIdentityV2::new([2; 32]),
+            ServiceIdentityV2::new([3; 32]),
+            derive_ed25519_key_id_v2(client_key.verifying_key().to_bytes()),
+            derive_ed25519_key_id_v2(server_key.verifying_key().to_bytes()),
+            BootIdV2::new([4; 32]),
+            5,
+            Digest32V2::new([6; 32]),
+            7,
+            8,
+            Digest32V2::new([9; 32]),
+            Digest32V2::new([10; 32]),
+            Digest32V2::new([11; 32]),
+            Digest32V2::new([12; 32]),
+            Digest32V2::new([13; 32]),
+            Digest32V2::new([14; 32]),
+        )
+        .unwrap();
+        let handshake_owner = Arc::new(
+            KernelV2HandshakeOwner::spawn(
+                edge,
+                client_key.verifying_key().to_bytes(),
+                server_key,
+                4,
+            )
+            .unwrap(),
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handled = Arc::clone(&calls);
+        let owner = KernelRuntimeOwnerV2::spawn_for_test(4, move |_| {
+            handled.fetch_add(1, Ordering::SeqCst);
+            Ok(KernelServiceResponseBodyV2::from_typed_handler(vec![0x80]).unwrap())
+        })
+        .unwrap();
+        let dispatcher = Arc::new(
+            KernelServiceDispatcherV2::spawn(
+                KernelServiceDeploymentV2::from_verified_startup(
+                    BootIdV2::new([4; 32]),
+                    ServiceIdentityV2::new([3; 32]),
+                    Digest32V2::new([6; 32]),
+                    7,
+                )
+                .unwrap(),
+                Ed25519KeyIdV2::new([16; 32]),
+                SigningKey::from_bytes(&[17; 32]),
+                owner,
+            )
+            .unwrap(),
+        );
+        let observed =
+            PeerIdentityBindingV2::linux(501, 502, 503, 504, Digest32V2::new([15; 32])).unwrap();
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let server_thread = thread::spawn(move || {
+            serve_one_suite_one_v2_connection(
+                server,
+                observed,
+                V2GenerationLease::for_dispatch_test(Digest32V2::new([6; 32]), 7),
+                handshake_owner.as_ref(),
+                dispatcher.as_ref(),
+                UnixMillisV2::new(100),
+                Instant::now() + Duration::from_secs(2),
+            )
+        });
+
+        client.write_all(b"SAVANA1\0").unwrap();
+        client.write_all(&[0_u8; 12]).unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut byte = [0_u8; 1];
+        assert_eq!(client.read(&mut byte).unwrap(), 0);
+        assert_eq!(
+            server_thread.join().unwrap(),
+            Err(KernelServiceDispatchErrorV2::Malformed)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

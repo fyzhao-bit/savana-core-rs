@@ -3,6 +3,7 @@ use std::{
     time::Instant,
 };
 
+use savana_kernel_protocol::v2::EndpointRoleV2;
 use savana_kernel_protocol::{Digest32, EffectiveLimits, Signature64, StableCode};
 use savana_policy_core::{
     AuthenticatedContextIssuer, Clock, CommittedPolicyRollover, PolicyEngine, PolicyIdentity,
@@ -15,7 +16,9 @@ use crate::selected_policy::{SelectedPolicySource, SelectedPolicyUpdateGuard};
 use crate::v2_declassification_policy::{
     ActiveDeclassificationRuleSetV2, VerifiedV2DeclassificationSuccessorV2,
 };
+use crate::v2_dispatch::KernelServiceDispatcherV2;
 use crate::v2_edge::{V2ActiveGenerationSnapshot, VerifiedServiceEdgeV2};
+use crate::v2_transport_owner::KernelV2HandshakeOwner;
 use crate::DaemonConfig;
 
 #[cfg(test)]
@@ -341,6 +344,7 @@ enum PolicyRolloverTarget {
     },
     V2 {
         runtime: Arc<V2GenerationRuntime>,
+        clock: Arc<dyn Clock + Send + Sync>,
     },
 }
 
@@ -377,11 +381,18 @@ impl PolicyRolloverCoordinator {
     }
 
     pub(crate) fn new_v2(runtime: Arc<V2GenerationRuntime>) -> Self {
+        Self::new_v2_with_clock(runtime, Arc::new(crate::runtime_deps::SystemClock::new()))
+    }
+
+    fn new_v2_with_clock(
+        runtime: Arc<V2GenerationRuntime>,
+        clock: Arc<dyn Clock + Send + Sync>,
+    ) -> Self {
         #[cfg(test)]
         let lock_trace = Arc::new(Mutex::new(Vec::new()));
         Self {
             serialization: Mutex::new(()),
-            target: PolicyRolloverTarget::V2 { runtime },
+            target: PolicyRolloverTarget::V2 { runtime, clock },
             #[cfg(all(feature = "test-support", debug_assertions))]
             test_hooks: RolloverTestHooks::default(),
             #[cfg(test)]
@@ -389,6 +400,14 @@ impl PolicyRolloverCoordinator {
             #[cfg(test)]
             lock_trace,
         }
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn new_v2_with_clock_for_test_support(
+        runtime: Arc<V2GenerationRuntime>,
+        clock: Arc<dyn Clock + Send + Sync>,
+    ) -> Self {
+        Self::new_v2_with_clock(runtime, clock)
     }
 
     pub(crate) fn publish_v2_declassification_successor(
@@ -399,10 +418,14 @@ impl PolicyRolloverCoordinator {
             .serialization
             .lock()
             .map_err(|_| StableCode::KernelUnavailable)?;
-        let PolicyRolloverTarget::V2 { runtime } = &self.target else {
+        let PolicyRolloverTarget::V2 { runtime, clock } = &self.target else {
             return Err(StableCode::KernelUnavailable);
         };
         let closed = runtime.close_and_drain()?;
+        let now_unix_ms = clock.wall_now()?.get();
+        successor
+            .validate_fresh_at(now_unix_ms)
+            .map_err(|_| StableCode::KernelUnavailable)?;
         runtime.publish_verified_successor(successor)?;
         closed.reopen();
         Ok(())
@@ -750,6 +773,35 @@ impl V2GenerationRuntime {
         })
     }
 
+    pub(crate) fn acquire_endpoint(
+        &self,
+        role: EndpointRoleV2,
+        deadline: Instant,
+    ) -> Result<V2EndpointGenerationLease, StableCode> {
+        if Instant::now() >= deadline {
+            return Err(StableCode::DeadlineExceeded);
+        }
+        let dispatch = self.dispatch_gate.v2_lease()?;
+        let (active, edge, handshake, dispatcher) = self
+            .active
+            .endpoint_snapshot(role)
+            .map_err(|_| StableCode::KernelUnavailable)?;
+        if edge.role() != role || !active.matches_edge(&edge) {
+            return Err(StableCode::IdentityReleaseMismatch);
+        }
+        let lease = V2GenerationLease {
+            dispatch,
+            active,
+            edge_digest: edge.edge_digest(),
+        };
+        Ok(V2EndpointGenerationLease {
+            edge,
+            handshake,
+            dispatcher,
+            lease,
+        })
+    }
+
     pub(crate) fn close_and_drain(&self) -> Result<ClosedDispatchGate<'_>, StableCode> {
         self.dispatch_gate.close_and_drain()
     }
@@ -1062,6 +1114,26 @@ pub(crate) struct V2GenerationLease {
     dispatch: V2DispatchLease,
     active: Arc<V2ActiveGenerationSnapshot>,
     edge_digest: savana_kernel_protocol::v2::Digest32V2,
+}
+
+pub(crate) struct V2EndpointGenerationLease {
+    edge: Arc<VerifiedServiceEdgeV2>,
+    handshake: Arc<KernelV2HandshakeOwner>,
+    dispatcher: Arc<KernelServiceDispatcherV2>,
+    lease: V2GenerationLease,
+}
+
+impl V2EndpointGenerationLease {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Arc<VerifiedServiceEdgeV2>,
+        Arc<KernelV2HandshakeOwner>,
+        Arc<KernelServiceDispatcherV2>,
+        V2GenerationLease,
+    ) {
+        (self.edge, self.handshake, self.dispatcher, self.lease)
+    }
 }
 
 impl V2GenerationLease {

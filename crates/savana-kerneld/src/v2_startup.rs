@@ -44,14 +44,32 @@ mod native {
     use std::io::Write as _;
     use std::os::unix::fs::MetadataExt as _;
     use std::os::unix::fs::OpenOptionsExt as _;
+    #[cfg(feature = "test-support")]
+    use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
+    #[cfg(feature = "test-support")]
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
     use std::sync::Arc;
+    #[cfg(feature = "test-support")]
+    use std::sync::Mutex;
+    #[cfg(feature = "test-support")]
+    use std::thread;
+    #[cfg(feature = "test-support")]
+    use std::time::{Duration, Instant};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[cfg(feature = "test-support")]
     use ed25519_dalek::Signer as _;
     use ed25519_dalek::SigningKey;
     use hmac::{Hmac, Mac as _};
+    #[cfg(feature = "test-support")]
+    use savana_kernel_protocol::v2::{
+        decode_kernel_service_application_response_v2,
+        encode_kernel_service_application_request_v2, EndpointRoleV2, KernelAgentHealthRequestV2,
+        KernelAgentOperationV2, KernelIngressHealthRequestV2, KernelIngressOperationV2,
+        KernelServiceApplicationRequestV2, KernelServiceApplicationResponseBodyV2,
+        KernelServiceOperationV2, Nonce32V2, RequestIdV2, V2ClientHandshake,
+    };
     use savana_kernel_protocol::v2::{
         derive_ed25519_key_id_v2, BootIdV2, ClosedExtensionClassV2, Digest32V2, Ed25519KeyIdV2,
         ExecutorIdentityV2, HpkeX25519KeyIdV2, ImplementationIdV2, PeerIdentityBindingV2,
@@ -68,8 +86,12 @@ mod native {
         VerifiedPolicyDispositionV2, VerifiedPolicyToolActivationV2, VerifiedPolicyToolSetV2,
         VerifiedRegistryPublisherV2, VerifiedToolRegistryV2,
     };
+    #[cfg(feature = "test-support")]
+    use savana_policy_core::Clock;
     use serde::Deserialize;
     use sha2::{Digest as _, Sha256};
+    #[cfg(feature = "test-support")]
+    use x25519_dalek::StaticSecret;
     use zeroize::Zeroizing;
 
     use super::ServerLifecycle;
@@ -88,10 +110,15 @@ mod native {
         KernelAgentAuthorityV2, KernelAgentSecurityConfigV2, KernelG4G5RuntimeV2,
         KernelG7RuntimeV2, KernelToolApprovalConfigV2,
     };
+    #[cfg(feature = "test-support")]
+    use crate::v2_channel::{UnixV2FrameChannel, V2FrameChannel};
     use crate::v2_core_services::CoreKernelRuntimeServicesV2;
     use crate::v2_data_plane::ProductionKernelDataPlaneV2;
-    use crate::v2_declassification_policy::VerifiedV2DeclassificationSuccessorV2;
-    use crate::v2_dispatch::{KernelServiceDeploymentV2, KernelServiceDispatcherV2};
+    use crate::v2_declassification_policy::{
+        V2LiveEndpointRuntimeV2, VerifiedV2DeclassificationSuccessorV2,
+    };
+    #[cfg(feature = "test-support")]
+    use crate::v2_dispatch::KernelServiceResponseBodyV2;
     use crate::v2_edge::VerifiedServiceEdgeV2;
     use crate::v2_executor_client::SuiteOneKernelExecutorClientV2;
     use crate::v2_ingress_authority::{KernelIngressAuthorityV2, KernelIngressSecurityConfigV2};
@@ -100,10 +127,11 @@ mod native {
     use crate::v2_listener::KerneldV2EndpointListener;
     #[cfg(target_os = "linux")]
     use crate::v2_listener::LinuxNativeUnixPeerVerifierV2;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", feature = "test-support"))]
     use crate::v2_listener::NativeUnixPeerVerifierV2;
-    use crate::v2_server::run_kerneld_v2_workers;
-    use crate::v2_transport_owner::KernelV2HandshakeOwner;
+    use crate::v2_server::{run_kerneld_v2_workers, V2VerifiedSuccessorPublisher};
+    #[cfg(feature = "test-support")]
+    use savana_platform_identity::NativePeerMeasurementV2;
 
     #[cfg(target_os = "linux")]
     const NATIVE_BOOTSTRAP_PATH_V2: &str = "/etc/savana/kerneld-bootstrap-v2.json";
@@ -348,9 +376,14 @@ mod native {
         g4_store_id: Digest32V2,
         policy_allowed_effects: savana_policy_core::v2::EffectSetV2,
         logical_run_ttl_ms: u64,
-        declassification_successor: VerifiedV2DeclassificationSuccessorV2,
+        declassification: DeclassificationMaterialV2,
         policy: LoadedPolicyRuntimeV2,
         parser_trust: KernelParserTrustV2,
+    }
+
+    struct DeclassificationMaterialV2 {
+        canonical_rule_set: Vec<u8>,
+        trust_roots: Arc<OperationalTrustRootSetV2>,
     }
 
     struct LoadedPolicyRuntimeV2 {
@@ -370,6 +403,46 @@ mod native {
         executor_connector_registry_digest: Digest32V2,
         executor_receipt_key_id: Ed25519KeyIdV2,
         executor_receipt_public_key: [u8; 32],
+    }
+
+    struct ProductionV2SuccessorPublisher {
+        config_path: PathBuf,
+        kernel_boot_id: BootIdV2,
+        coordinator: Arc<crate::policy_runtime::PolicyRolloverCoordinator>,
+        owner: Arc<KernelRuntimeOwnerV2>,
+    }
+
+    impl V2VerifiedSuccessorPublisher for ProductionV2SuccessorPublisher {
+        fn publish_next_verified_successor(&self) -> Result<(), StableCode> {
+            let (startup, keys, runtime_material) = load_verified_startup(&self.config_path)?;
+            if BootIdV2::new(keys.boot_id) != self.kernel_boot_id {
+                return Err(StableCode::KernelUnavailable);
+            }
+            let live_endpoints = Arc::new(
+                V2LiveEndpointRuntimeV2::from_verified_deployment(
+                    &startup,
+                    self.kernel_boot_id,
+                    keys.agent_client_public_key,
+                    keys.agent_server_signing_key,
+                    keys.ingress_client_public_key,
+                    keys.ingress_server_signing_key,
+                    keys.envelope_signing_key,
+                    Arc::clone(&self.owner),
+                )
+                .map_err(|_| StableCode::KernelUnavailable)?,
+            );
+            let declassification = runtime_material.declassification;
+            let successor = VerifiedV2DeclassificationSuccessorV2::from_verified_deployment(
+                &startup,
+                declassification.canonical_rule_set,
+                declassification.trust_roots,
+                current_unix_millis()?.get(),
+                live_endpoints,
+            )
+            .map_err(|_| StableCode::KernelUnavailable)?;
+            self.coordinator
+                .publish_v2_declassification_successor(successor)
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -492,19 +565,10 @@ mod native {
 
         let runtime = Arc::new(V2GenerationRuntime::new());
         let rollover = crate::bootstrap::v2_policy_rollover_coordinator(Arc::clone(&runtime));
-        rollover
-            .publish_v2_declassification_successor(runtime_material.declassification_successor)?;
         let declassification_rule_set = runtime.active_declassification_rules();
         let kernel_identity = startup
             .service_identity(ClosedServiceIdV2::Kerneld)
             .ok_or(StableCode::KernelUnavailable)?;
-        let deployment = KernelServiceDeploymentV2::from_verified_startup(
-            boot_id,
-            kernel_identity,
-            startup.active_state_manifest_digest(),
-            startup.deployment_generation(),
-        )
-        .map_err(|_| StableCode::KernelUnavailable)?;
         let (mut services, readiness) =
             CoreKernelRuntimeServicesV2::new_production_starting(128, 64 * 1024 * 1024, 256, 4096)?;
         let now = current_unix_millis()?;
@@ -692,71 +756,63 @@ mod native {
         )?;
         services.install_parser_trust(runtime_material.parser_trust)?;
         services.verify_production_complete()?;
-        let owner = KernelRuntimeOwnerV2::spawn(128, services)
-            .map_err(|_| StableCode::KernelUnavailable)?;
-        let envelope_key_id =
-            derive_ed25519_key_id_v2(keys.envelope_signing_key.verifying_key().to_bytes());
-        if envelope_key_id != startup.kernel_envelope_signing_key_id() {
-            return Err(StableCode::KernelUnavailable);
-        }
-        let dispatcher = Arc::new(
-            KernelServiceDispatcherV2::spawn(
-                deployment,
-                envelope_key_id,
-                keys.envelope_signing_key,
-                owner,
-            )
-            .map_err(|_| StableCode::KernelUnavailable)?,
+        let owner = Arc::new(
+            KernelRuntimeOwnerV2::spawn(128, services)
+                .map_err(|_| StableCode::KernelUnavailable)?,
         );
-        let agent_handshake_edge = startup
-            .kernel_service_handshake_edge(ClosedServiceEdgeIdV2::AgentKernel, boot_id)
-            .map_err(|_| StableCode::KernelUnavailable)?;
-        let ingress_handshake_edge = startup
-            .kernel_service_handshake_edge(ClosedServiceEdgeIdV2::IngressKernel, boot_id)
-            .map_err(|_| StableCode::KernelUnavailable)?;
-        let agent_handshake = Arc::new(
-            KernelV2HandshakeOwner::spawn(
-                agent_handshake_edge,
+        let live_endpoints = Arc::new(
+            V2LiveEndpointRuntimeV2::from_verified_deployment(
+                &startup,
+                boot_id,
                 keys.agent_client_public_key,
                 keys.agent_server_signing_key,
-                128,
-            )
-            .map_err(|_| StableCode::KernelUnavailable)?,
-        );
-        let ingress_handshake = Arc::new(
-            KernelV2HandshakeOwner::spawn(
-                ingress_handshake_edge,
                 keys.ingress_client_public_key,
                 keys.ingress_server_signing_key,
-                128,
+                keys.envelope_signing_key,
+                Arc::clone(&owner),
             )
             .map_err(|_| StableCode::KernelUnavailable)?,
         );
+        let declassification = runtime_material.declassification;
+        let successor = VerifiedV2DeclassificationSuccessorV2::from_verified_deployment(
+            &startup,
+            declassification.canonical_rule_set,
+            declassification.trust_roots,
+            current_unix_millis()?.get(),
+            live_endpoints,
+        )
+        .map_err(|_| StableCode::KernelUnavailable)?;
+        rollover.publish_v2_declassification_successor(successor)?;
         #[cfg(target_os = "linux")]
         let peer_verifier = Arc::new(LinuxNativeUnixPeerVerifierV2);
         #[cfg(target_os = "macos")]
         let peer_verifier = Arc::new(MacOsNativeUnixPeerVerifierV2);
         let agent = KerneldV2EndpointListener::new_agent(
             agent_listener,
-            Arc::clone(&agent_edge),
             Arc::clone(&runtime),
             peer_verifier.clone(),
-            agent_handshake,
-            Arc::clone(&dispatcher),
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
         let ingress = KerneldV2EndpointListener::new_ingress(
             ingress_listener,
-            ingress_edge,
             Arc::clone(&runtime),
             peer_verifier,
-            ingress_handshake,
-            dispatcher,
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
-        let result = run_kerneld_v2_workers(agent, ingress, runtime.as_ref(), readiness, lifecycle);
-        drop(rollover);
-        result
+        let successor_publisher = ProductionV2SuccessorPublisher {
+            config_path: config_path.to_path_buf(),
+            kernel_boot_id: boot_id,
+            coordinator: rollover,
+            owner,
+        };
+        run_kerneld_v2_workers(
+            agent,
+            ingress,
+            runtime.as_ref(),
+            readiness,
+            lifecycle,
+            &successor_publisher,
+        )
     }
 
     #[cfg(feature = "test-support")]
@@ -825,9 +881,41 @@ mod native {
         let old_digest = initial.signed_digest();
         let initial_startup = verified_rollover_startup(1, old_digest);
         let runtime = Arc::new(V2GenerationRuntime::new());
-        let coordinator = crate::bootstrap::v2_policy_rollover_coordinator(Arc::clone(&runtime));
-        let ingress_rules = runtime.active_declassification_rules();
-        let agent_rules = runtime.active_declassification_rules();
+        let publication_clock = Arc::new(RolloverPublicationClockV2::new(50));
+        let coordinator = Arc::new(
+            crate::policy_runtime::PolicyRolloverCoordinator::new_v2_with_clock_for_test_support(
+                Arc::clone(&runtime),
+                Arc::clone(&publication_clock) as Arc<dyn Clock + Send + Sync>,
+            ),
+        );
+        let active_rules = runtime.active_declassification_rules();
+        let observations = Arc::new(Mutex::new(Vec::<RolloverDispatchObservationV2>::new()));
+        let handler_observations = Arc::clone(&observations);
+        let handler_rules = active_rules.clone();
+        let owner = Arc::new(
+            KernelRuntimeOwnerV2::spawn_for_test_support(8, move |request| {
+                let (peer, lease, _, _, _, _) = request.into_parts();
+                let rule_digest = handler_rules
+                    .snapshot()
+                    .map_err(|_| StableCode::KernelUnavailable)?
+                    .signed_digest();
+                handler_observations
+                    .lock()
+                    .map_err(|_| StableCode::KernelUnavailable)?
+                    .push(RolloverDispatchObservationV2 {
+                        role: peer.role(),
+                        generation: lease.deployment_generation(),
+                        rule_digest,
+                    });
+                KernelServiceResponseBodyV2::from_typed_handler(vec![0x80])
+                    .map_err(|_| StableCode::KernelUnavailable)
+            })
+            .expect("rollover runtime owner"),
+        );
+        let initial_endpoints = Arc::new(
+            rollover_live_endpoints(&initial_startup, Arc::clone(&owner), false)
+                .expect("complete initial endpoint runtime"),
+        );
         coordinator
             .publish_v2_declassification_successor(
                 VerifiedV2DeclassificationSuccessorV2::from_verified_deployment(
@@ -835,6 +923,7 @@ mod native {
                     initial.canonical_bytes().to_vec(),
                     Arc::clone(&roots),
                     50,
+                    initial_endpoints,
                 )
                 .expect("verified initial declassification deployment"),
             )
@@ -842,39 +931,59 @@ mod native {
 
         let successor = signed_rules(8, Some(old_digest), 20, 90, 50);
         let candidate_digest = successor.signed_digest();
-        let (generation, manifest_pin, mut bytes, verification_time) = match scenario {
+        let (generation, manifest_pin, mut bytes, verification_time, incomplete_endpoints) =
+            match scenario {
             crate::test_support::V2DeclassificationRolloverScenario::ValidSuccessor => (
                 2,
                 candidate_digest,
                 successor.canonical_bytes().to_vec(),
                 50,
+                false,
             ),
             crate::test_support::V2DeclassificationRolloverScenario::RuleSetRollback => {
-                (2, old_digest, initial.canonical_bytes().to_vec(), 50)
+                (2, old_digest, initial.canonical_bytes().to_vec(), 50, false)
             }
             crate::test_support::V2DeclassificationRolloverScenario::WrongManifestPin => (
                 2,
                 Digest32V2::new([0x7f; 32]),
                 successor.canonical_bytes().to_vec(),
                 50,
+                false,
             ),
             crate::test_support::V2DeclassificationRolloverScenario::BadRuleSetSignature => (
                 2,
                 candidate_digest,
                 successor.canonical_bytes().to_vec(),
                 50,
+                false,
             ),
             crate::test_support::V2DeclassificationRolloverScenario::ExpiredRuleSet => (
                 2,
                 candidate_digest,
                 successor.canonical_bytes().to_vec(),
                 95,
+                false,
             ),
-            crate::test_support::V2DeclassificationRolloverScenario::PartialRuntimeGeneration => (
+            crate::test_support::V2DeclassificationRolloverScenario::ExpiresBeforePublication => (
+                2,
+                candidate_digest,
+                successor.canonical_bytes().to_vec(),
+                50,
+                false,
+            ),
+            crate::test_support::V2DeclassificationRolloverScenario::IncompleteEndpointRuntime => (
+                2,
+                candidate_digest,
+                successor.canonical_bytes().to_vec(),
+                50,
+                true,
+            ),
+            crate::test_support::V2DeclassificationRolloverScenario::GenerationGap => (
                 3,
                 candidate_digest,
                 successor.canonical_bytes().to_vec(),
                 50,
+                false,
             ),
         };
         if scenario == crate::test_support::V2DeclassificationRolloverScenario::BadRuleSetSignature
@@ -882,22 +991,42 @@ mod native {
             *bytes.last_mut().expect("nonempty successor") ^= 1;
         }
         let startup = verified_rollover_startup(generation, manifest_pin);
-        let candidate = VerifiedV2DeclassificationSuccessorV2::from_verified_deployment(
-            &startup,
-            bytes,
-            roots,
-            verification_time,
-        )
-        .expect("verified successor deployment envelope");
-        let result = coordinator.publish_v2_declassification_successor(candidate);
-        let ingress_digest = ingress_rules
-            .snapshot()
-            .expect("ingress active declassification rules")
-            .signed_digest();
-        let agent_digest = agent_rules
-            .snapshot()
-            .expect("agent active declassification rules")
-            .signed_digest();
+        let candidate = rollover_live_endpoints(&startup, Arc::clone(&owner), incomplete_endpoints)
+            .and_then(|endpoints| {
+                VerifiedV2DeclassificationSuccessorV2::from_verified_deployment(
+                    &startup,
+                    bytes,
+                    roots,
+                    verification_time,
+                    Arc::new(endpoints),
+                )
+            });
+        let verified_successor_constructed = candidate.is_ok();
+        if scenario
+            == crate::test_support::V2DeclassificationRolloverScenario::ExpiresBeforePublication
+        {
+            publication_clock.set(95);
+        }
+        let result = candidate
+            .map_err(|_| StableCode::KernelUnavailable)
+            .and_then(|candidate| coordinator.publish_v2_declassification_successor(candidate));
+        let serving_startup = if result.is_ok() {
+            &startup
+        } else {
+            &initial_startup
+        };
+        exercise_real_rollover_endpoints(Arc::clone(&runtime), serving_startup);
+        let observations = observations.lock().expect("rollover observations");
+        let ingress = observations
+            .iter()
+            .find(|observation| observation.role == EndpointRoleV2::IngressKernel)
+            .copied()
+            .expect("real ingress dispatch observation");
+        let agent = observations
+            .iter()
+            .find(|observation| observation.role == EndpointRoleV2::AgentKernel)
+            .copied()
+            .expect("real agent dispatch observation");
         let active_generation = runtime
             .active_declassification_rules()
             .generation_snapshot()
@@ -907,11 +1036,300 @@ mod native {
             result,
             old_digest,
             candidate_digest,
-            ingress_digest,
-            agent_digest,
+            verified_successor_constructed,
+            ingress.rule_digest,
+            agent.rule_digest,
+            ingress.generation,
+            agent.generation,
             active_generation,
             runtime.admission_resumed_for_test_support(),
         )
+    }
+
+    #[cfg(feature = "test-support")]
+    #[derive(Clone, Copy)]
+    struct RolloverDispatchObservationV2 {
+        role: EndpointRoleV2,
+        generation: u64,
+        rule_digest: Digest32V2,
+    }
+
+    #[cfg(feature = "test-support")]
+    struct RolloverPublicationClockV2(AtomicU64);
+
+    #[cfg(feature = "test-support")]
+    impl RolloverPublicationClockV2 {
+        const fn new(now_unix_ms: u64) -> Self {
+            Self(AtomicU64::new(now_unix_ms))
+        }
+
+        fn set(&self, now_unix_ms: u64) {
+            self.0.store(now_unix_ms, AtomicOrdering::Release);
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    impl Clock for RolloverPublicationClockV2 {
+        fn wall_now(
+            &self,
+        ) -> Result<savana_kernel_protocol::UnixMillis, savana_kernel_protocol::StableCode>
+        {
+            Ok(savana_kernel_protocol::UnixMillis::new(
+                self.0.load(AtomicOrdering::Acquire),
+            ))
+        }
+
+        fn monotonic_now_millis(&self) -> Result<u64, savana_kernel_protocol::StableCode> {
+            Ok(self.0.load(AtomicOrdering::Acquire))
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    struct RolloverEndpointKeysV2 {
+        agent_client: SigningKey,
+        agent_server: SigningKey,
+        ingress_client: SigningKey,
+        ingress_server: SigningKey,
+        envelope: SigningKey,
+    }
+
+    #[cfg(feature = "test-support")]
+    fn rollover_endpoint_keys() -> RolloverEndpointKeysV2 {
+        RolloverEndpointKeysV2 {
+            agent_client: SigningKey::from_bytes(&[0xa1; 32]),
+            agent_server: SigningKey::from_bytes(&[0xa2; 32]),
+            ingress_client: SigningKey::from_bytes(&[0xa3; 32]),
+            ingress_server: SigningKey::from_bytes(&[0xa4; 32]),
+            envelope: SigningKey::from_bytes(&[0xa5; 32]),
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    fn rollover_live_endpoints(
+        startup: &VerifiedDaemonStartupV2,
+        owner: Arc<KernelRuntimeOwnerV2>,
+        incomplete: bool,
+    ) -> Result<V2LiveEndpointRuntimeV2, savana_policy_core::v2::DeploymentControlErrorV2> {
+        let keys = rollover_endpoint_keys();
+        let envelope = if incomplete {
+            SigningKey::from_bytes(&[0xee; 32])
+        } else {
+            keys.envelope
+        };
+        V2LiveEndpointRuntimeV2::from_verified_deployment(
+            startup,
+            BootIdV2::new([0xc1; 32]),
+            keys.agent_client.verifying_key().to_bytes(),
+            keys.agent_server,
+            keys.ingress_client.verifying_key().to_bytes(),
+            keys.ingress_server,
+            envelope,
+            owner,
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    struct RolloverPeerVerifierV2 {
+        agent: NativePeerMeasurementV2,
+        ingress: NativePeerMeasurementV2,
+    }
+
+    #[cfg(feature = "test-support")]
+    impl NativeUnixPeerVerifierV2 for RolloverPeerVerifierV2 {
+        fn verify(
+            &self,
+            _stream: &UnixStream,
+            edge: &VerifiedServiceEdgeV2,
+        ) -> Result<
+            crate::v2_edge::VerifiedAcceptedPeerV2,
+            crate::deployment_trust::DeploymentTrustErrorV2,
+        > {
+            let measurement = match edge.role() {
+                EndpointRoleV2::AgentKernel => &self.agent,
+                EndpointRoleV2::IngressKernel => &self.ingress,
+                _ => return Err(crate::deployment_trust::DeploymentTrustErrorV2::EdgeLockMismatch),
+            };
+            edge.verify_native_peer(measurement)
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    fn rollover_peer_measurement(
+        startup: &VerifiedDaemonStartupV2,
+        role: EndpointRoleV2,
+    ) -> NativePeerMeasurementV2 {
+        let service = match role {
+            EndpointRoleV2::AgentKernel => ClosedServiceIdV2::Agentd,
+            EndpointRoleV2::IngressKernel => ClosedServiceIdV2::Ingressd,
+            _ => unreachable!("rollover probe has only agent and ingress roles"),
+        };
+        let lock = startup.service_lock(service).expect("rollover client lock");
+        NativePeerMeasurementV2::linux(
+            lock.uid,
+            lock.gid,
+            700 + u32::from(service.tag()),
+            800 + u64::from(service.tag()),
+            *lock.executable_digest.as_bytes(),
+        )
+        .expect("rollover native peer measurement")
+    }
+
+    #[cfg(feature = "test-support")]
+    fn exercise_real_rollover_endpoints(
+        runtime: Arc<V2GenerationRuntime>,
+        startup: &VerifiedDaemonStartupV2,
+    ) {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("rollover directory clock")
+            .as_nanos();
+        let directory = PathBuf::from("/tmp").join(format!("sv2-{}-{nonce:x}", std::process::id()));
+        fs::create_dir(&directory).expect("rollover listener directory");
+        let agent_path = directory.join("agent.sock");
+        let ingress_path = directory.join("ingress.sock");
+        let verifier: Arc<dyn NativeUnixPeerVerifierV2> = Arc::new(RolloverPeerVerifierV2 {
+            agent: rollover_peer_measurement(startup, EndpointRoleV2::AgentKernel),
+            ingress: rollover_peer_measurement(startup, EndpointRoleV2::IngressKernel),
+        });
+        let agent = KerneldV2EndpointListener::new_agent(
+            UnixListener::bind(&agent_path).expect("agent rollover listener"),
+            Arc::clone(&runtime),
+            Arc::clone(&verifier),
+        )
+        .expect("agent rollover endpoint");
+        let ingress = KerneldV2EndpointListener::new_ingress(
+            UnixListener::bind(&ingress_path).expect("ingress rollover listener"),
+            runtime,
+            verifier,
+        )
+        .expect("ingress rollover endpoint");
+        exercise_real_rollover_endpoint(agent, &agent_path, startup, EndpointRoleV2::AgentKernel);
+        exercise_real_rollover_endpoint(
+            ingress,
+            &ingress_path,
+            startup,
+            EndpointRoleV2::IngressKernel,
+        );
+        fs::remove_file(&agent_path).expect("remove agent rollover socket");
+        fs::remove_file(&ingress_path).expect("remove ingress rollover socket");
+        fs::remove_dir(&directory).expect("remove rollover listener directory");
+    }
+
+    #[cfg(feature = "test-support")]
+    fn exercise_real_rollover_endpoint(
+        listener: KerneldV2EndpointListener,
+        path: &Path,
+        startup: &VerifiedDaemonStartupV2,
+        role: EndpointRoleV2,
+    ) {
+        let server = thread::spawn(move || {
+            listener.serve_one(
+                UnixMillisV2::new(50),
+                Instant::now() + Duration::from_secs(3),
+            )
+        });
+        let stream = UnixStream::connect(path).expect("connect rollover endpoint");
+        let mut channel = UnixV2FrameChannel::new(stream);
+        let edge_id = match role {
+            EndpointRoleV2::AgentKernel => ClosedServiceEdgeIdV2::AgentKernel,
+            EndpointRoleV2::IngressKernel => ClosedServiceEdgeIdV2::IngressKernel,
+            _ => unreachable!("rollover probe has only agent and ingress roles"),
+        };
+        let edge = startup
+            .kernel_service_handshake_edge(edge_id, BootIdV2::new([0xc1; 32]))
+            .expect("rollover client edge");
+        let service = edge_id.client_service();
+        let lock = startup.service_lock(service).expect("rollover client lock");
+        let pid = 700 + u32::from(service.tag());
+        let process_start = 800 + u64::from(service.tag());
+        let observed = PeerIdentityBindingV2::linux(
+            lock.uid,
+            lock.gid,
+            pid,
+            process_start,
+            lock.executable_digest,
+        )
+        .expect("rollover peer binding");
+        let keys = rollover_endpoint_keys();
+        let (client_key, server_public_key, seed) = match role {
+            EndpointRoleV2::AgentKernel => (
+                keys.agent_client,
+                keys.agent_server.verifying_key().to_bytes(),
+                0xd1,
+            ),
+            EndpointRoleV2::IngressKernel => (
+                keys.ingress_client,
+                keys.ingress_server.verifying_key().to_bytes(),
+                0xd2,
+            ),
+            _ => unreachable!("rollover probe has only agent and ingress roles"),
+        };
+        let (pending, hello) = V2ClientHandshake::start(
+            edge,
+            BootIdV2::new([seed; 32]),
+            Nonce32V2::new([seed.wrapping_add(1); 32]),
+            observed,
+            StaticSecret::from([seed.wrapping_add(2); 32]),
+            &client_key,
+        )
+        .expect("start rollover handshake");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        channel
+            .write_handshake_frame(&hello, deadline)
+            .expect("write rollover hello");
+        let server_hello = channel
+            .read_handshake_frame(deadline)
+            .expect("read rollover server hello");
+        let (finish, mut session) = pending
+            .accept_server_hello(&server_hello, server_public_key, &client_key)
+            .expect("accept rollover server hello");
+        channel
+            .write_handshake_frame(&finish, deadline)
+            .expect("write rollover finish");
+        let accepted = channel
+            .read_record_frame(deadline)
+            .expect("read rollover confirmation");
+        session
+            .accept_server_confirmation(&accepted)
+            .expect("accept rollover confirmation");
+        let request_id = RequestIdV2::new([seed.wrapping_add(3); 16]);
+        let operation = match role {
+            EndpointRoleV2::AgentKernel => KernelServiceOperationV2::agent(
+                KernelAgentOperationV2::Health(KernelAgentHealthRequestV2),
+            ),
+            EndpointRoleV2::IngressKernel => KernelServiceOperationV2::ingress(
+                KernelIngressOperationV2::Health(KernelIngressHealthRequestV2),
+            ),
+            _ => unreachable!("rollover probe has only agent and ingress roles"),
+        };
+        let request = KernelServiceApplicationRequestV2::new(
+            role,
+            request_id,
+            UnixMillisV2::new(1_000),
+            operation,
+        )
+        .expect("rollover application request");
+        let request_bytes =
+            encode_kernel_service_application_request_v2(&request).expect("encode request");
+        let request_record = session
+            .seal_application_request(request_id, 0, &request_bytes)
+            .expect("seal rollover request");
+        channel
+            .write_record_frame(&request_record, deadline)
+            .expect("write rollover request");
+        let response_record = channel
+            .read_record_frame(deadline)
+            .expect("read rollover response");
+        let opened = session
+            .open_application_response(&response_record)
+            .expect("open rollover response");
+        let response = decode_kernel_service_application_response_v2(opened.plaintext(), role, 0)
+            .expect("decode rollover response");
+        assert!(matches!(
+            response.body(),
+            KernelServiceApplicationResponseBodyV2::Success(body) if body == &[0x80]
+        ));
+        assert_eq!(server.join().expect("rollover listener thread"), Ok(()));
     }
 
     #[cfg(feature = "test-support")]
@@ -987,12 +1405,35 @@ mod native {
             .copied()
             .map(service_lock)
             .collect();
+        let endpoint_keys = rollover_endpoint_keys();
+        let agent_client_key_id =
+            derive_ed25519_key_id_v2(endpoint_keys.agent_client.verifying_key().to_bytes());
+        let agent_server_key_id =
+            derive_ed25519_key_id_v2(endpoint_keys.agent_server.verifying_key().to_bytes());
+        let ingress_client_key_id =
+            derive_ed25519_key_id_v2(endpoint_keys.ingress_client.verifying_key().to_bytes());
+        let ingress_server_key_id =
+            derive_ed25519_key_id_v2(endpoint_keys.ingress_server.verifying_key().to_bytes());
+        let envelope_key_id =
+            derive_ed25519_key_id_v2(endpoint_keys.envelope.verifying_key().to_bytes());
         let edges: Vec<_> = ClosedServiceEdgeIdV2::ALL
             .iter()
             .copied()
             .map(|edge_id| {
                 let seed = edge_id.tag() as u8;
                 let client = service_lock(edge_id.client_service());
+                let (client_handshake_key_id, server_handshake_key_id) = match edge_id {
+                    ClosedServiceEdgeIdV2::AgentKernel => {
+                        (agent_client_key_id, agent_server_key_id)
+                    }
+                    ClosedServiceEdgeIdV2::IngressKernel => {
+                        (ingress_client_key_id, ingress_server_key_id)
+                    }
+                    ClosedServiceEdgeIdV2::KernelExecutor => (
+                        Ed25519KeyIdV2::new([0xb0 + seed * 2; 32]),
+                        Ed25519KeyIdV2::new([0xb1 + seed * 2; 32]),
+                    ),
+                };
                 ServiceEdgeLockV2 {
                     edge_id,
                     client_service: edge_id.client_service(),
@@ -1003,8 +1444,8 @@ mod native {
                         ClosedServiceEdgeIdV2::KernelExecutor => EndpointRoleV2::KernelExecutor,
                     },
                     listener_identity_digest: Digest32V2::new([0xa0 + seed; 32]),
-                    client_handshake_key_id: Ed25519KeyIdV2::new([0xb0 + seed * 2; 32]),
-                    server_handshake_key_id: Ed25519KeyIdV2::new([0xb1 + seed * 2; 32]),
+                    client_handshake_key_id,
+                    server_handshake_key_id,
                     expected_client: ExpectedNativePeerV2::linux(
                         BoundedIdentityStringV2::new(edge_id.role_identity().to_owned())
                             .expect("rollover role identity"),
@@ -1030,6 +1471,7 @@ mod native {
             declassification_rule_set_digest,
             deployment_generation,
             protocol_abi,
+            envelope_key_id,
             projection_identity,
             ledger_head,
             projection_key_id,
@@ -1110,6 +1552,7 @@ mod native {
         declassification_rule_set_digest: Digest32V2,
         deployment_generation: u64,
         protocol_abi: Digest32V2,
+        envelope_key_id: Ed25519KeyIdV2,
         projection_identity: Digest32V2,
         ledger_head: Digest32V2,
         projection_key_id: Ed25519KeyIdV2,
@@ -1143,7 +1586,7 @@ mod native {
                 .expect("manifest identity digest");
         }
         encoder
-            .bytes(&[0x87; 32])
+            .bytes(envelope_key_id.as_bytes())
             .expect("envelope key")
             .bytes(projection_identity.as_bytes())
             .expect("projection identity")
@@ -1318,7 +1761,7 @@ mod native {
             .verify_loaded_service_config_v2(ClosedServiceIdV2::Kerneld, &bootstrap_bytes)
             .map_err(|_| StableCode::KernelUnavailable)?;
         let keys = load_key_material(&startup)?;
-        let runtime = load_runtime_material(&bootstrap, &startup)?;
+        let runtime = load_runtime_material(&bootstrap)?;
         Ok((startup, keys, runtime))
     }
 
@@ -1526,10 +1969,7 @@ mod native {
         })
     }
 
-    fn load_runtime_material(
-        bootstrap: &BootstrapDtoV2,
-        startup: &VerifiedDaemonStartupV2,
-    ) -> Result<RuntimeMaterialV2, StableCode> {
+    fn load_runtime_material(bootstrap: &BootstrapDtoV2) -> Result<RuntimeMaterialV2, StableCode> {
         if !bootstrap.vault_state_path.is_absolute()
             || !bootstrap.vault_rollback_anchor_path.is_absolute()
             || !bootstrap.agent_authority_state_path.is_absolute()
@@ -1545,7 +1985,7 @@ mod native {
             MAX_ARTIFACT_BYTES_V2,
             None,
         )?;
-        let declassification_successor = load_declassification_successor(bootstrap, startup)?;
+        let declassification = load_declassification_material(bootstrap)?;
         let input_runtime_publisher_key_id =
             Ed25519KeyIdV2::new(decode_hex_32(&bootstrap.input_runtime_publisher_key_id)?);
         let input_runtime_publisher_public_key =
@@ -1637,16 +2077,15 @@ mod native {
             .filter(|effects| *effects != savana_policy_core::v2::EffectSetV2::EMPTY)
             .ok_or(StableCode::KernelUnavailable)?,
             logical_run_ttl_ms: bootstrap.logical_run_ttl_ms,
-            declassification_successor,
+            declassification,
             policy,
             parser_trust,
         })
     }
 
-    fn load_declassification_successor(
+    fn load_declassification_material(
         bootstrap: &BootstrapDtoV2,
-        startup: &VerifiedDaemonStartupV2,
-    ) -> Result<VerifiedV2DeclassificationSuccessorV2, StableCode> {
+    ) -> Result<DeclassificationMaterialV2, StableCode> {
         if !bootstrap.declassification_installer_root_path.is_absolute()
             || !bootstrap.declassification_trust_root_set_path.is_absolute()
             || !bootstrap.declassification_rule_set_path.is_absolute()
@@ -1678,13 +2117,10 @@ mod native {
             MAX_DECLASSIFICATION_OBJECT_BYTES_V2,
             None,
         )?;
-        VerifiedV2DeclassificationSuccessorV2::from_verified_deployment(
-            startup,
-            rule_bytes,
-            Arc::new(root_set),
-            current_unix_millis()?.get(),
-        )
-        .map_err(|_| StableCode::KernelUnavailable)
+        Ok(DeclassificationMaterialV2 {
+            canonical_rule_set: rule_bytes,
+            trust_roots: Arc::new(root_set),
+        })
     }
 
     fn load_policy_runtime(

@@ -399,6 +399,32 @@ impl KernelRuntimeOwnerV2 {
         Self::spawn(capacity, TestServicesV2(handler))
     }
 
+    #[cfg(feature = "test-support")]
+    pub(crate) fn spawn_for_test_support(
+        capacity: usize,
+        handler: impl FnMut(KernelRuntimeRequestV2) -> Result<KernelServiceResponseBodyV2, StableCode>
+            + Send
+            + 'static,
+    ) -> Result<Self, KernelRuntimeOwnerErrorV2> {
+        struct TestSupportServicesV2<Handler>(Handler);
+
+        impl<Handler> KernelRuntimeServicesV2 for TestSupportServicesV2<Handler>
+        where
+            Handler: FnMut(KernelRuntimeRequestV2) -> Result<KernelServiceResponseBodyV2, StableCode>
+                + Send
+                + 'static,
+        {
+            fn execute(
+                &mut self,
+                request: KernelRuntimeRequestV2,
+            ) -> Result<KernelServiceResponseBodyV2, StableCode> {
+                (self.0)(request)
+            }
+        }
+
+        Self::spawn(capacity, TestSupportServicesV2(handler))
+    }
+
     pub(crate) fn dispatch(
         &self,
         peer: VerifiedKernelServicePeerV2,
