@@ -1968,6 +1968,7 @@ mod tests {
         let envelope = SignedSealedExecutionEnvelopeV2::sign(
             SealedExecutionEnvelopePayloadV2::new(
                 core,
+                Digest32V2::new([0x4f; 32]),
                 FixedBytes32V2::new([0x50; 32]),
                 BoundedCiphertextV2::new(vec![0x51; 64]).unwrap(),
             )
@@ -2420,6 +2421,7 @@ mod tests {
         .unwrap();
         let payload = SealedExecutionEnvelopePayloadV2::new(
             core,
+            Digest32V2::new([0x89; 32]),
             FixedBytes32V2::new([0x8a; 32]),
             BoundedCiphertextV2::new(vec![0x8b; 64]).unwrap(),
         )

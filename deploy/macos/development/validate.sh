@@ -99,6 +99,9 @@ artifact_files="
 effect-ledger-projection-v2.cbor
 input-runtime-assets-v2.cbor
 development-draft-report-tool-v2.cbor
+declassification-installer-root-v2.json
+declassification-trust-root-set-v2.cbor
+declassification-rule-set-v2.cbor
 "
 for leaf in $artifact_files; do
   path="$build_directory/artifacts/$leaf"

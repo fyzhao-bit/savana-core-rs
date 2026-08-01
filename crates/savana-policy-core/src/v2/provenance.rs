@@ -7,8 +7,9 @@ use unicode_normalization::UnicodeNormalization as _;
 
 use super::leak_gate::{enforce_for_declassification, LeakGateDutyV2};
 use super::{
-    value_digest_v2, ArgumentNameV2, ConfidentialityV2, EffectSetV2, G3Error, IntegrityV2,
-    KernelValueV2, ReaderSetV2, SecurityLabelV2,
+    declassification::compiled_implementation_digest, value_digest_v2, ArgumentNameV2,
+    ConfidentialityV2, DeclassificationRuleSetV2, EffectSetV2, G3Error, IntegrityV2, KernelValueV2,
+    ReaderSetV2, SecurityLabelV2, VerifiedFinalReleaseSettlementV2,
 };
 
 const MAX_ROOT_EVIDENCE: usize = 64;
@@ -282,6 +283,13 @@ pub enum DeclassificationTransitionV2 {
     BuildFinalRelease {
         sink_identity_digest: Digest32V2,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandoffJudgmentV2 {
+    Admits,
+    Refuses,
+    Unproven,
 }
 
 impl DeclassificationTransitionV2 {
@@ -892,6 +900,7 @@ impl ProvenanceRecordV2 {
         implementation_digest: Digest32V2,
         token_set_digest: Digest32V2,
         purpose_digest: Digest32V2,
+        duty_floor: LeakGateDutyV2,
         parents: &[&Self],
         policy_allowed_effects: EffectSetV2,
     ) -> Result<Self, G3Error> {
@@ -916,7 +925,8 @@ impl ProvenanceRecordV2 {
         {
             return Err(G3Error::BindingMismatch);
         }
-        let leak_gate_digest = enforce_for_declassification(value, transition.leak_gate_duty())?;
+        let leak_gate_digest =
+            enforce_for_declassification(value, transition.leak_gate_duty().strictest(duty_floor))?;
         let mut evidence = vec![
             rule_digest,
             implementation_digest,
@@ -950,6 +960,73 @@ impl ProvenanceRecordV2 {
             parents,
             evidence,
             label,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn declassify(
+        value: &KernelValueV2,
+        context: ProvenanceContextV2,
+        transition: DeclassificationTransitionV2,
+        rule_set: &DeclassificationRuleSetV2,
+        purpose_digest: Digest32V2,
+        token_set_digest: Digest32V2,
+        consent: Option<&VerifiedFinalReleaseSettlementV2>,
+        parents: &[&Self],
+        policy_allowed_effects: EffectSetV2,
+        at_unix_ms: u64,
+    ) -> Result<Self, G3Error> {
+        if transition.tag() == 5
+            && token_set_digest
+                == super::token_set_digest_v2(&[]).map_err(|_| G3Error::BindingMismatch)?
+        {
+            return Err(G3Error::BindingMismatch);
+        }
+        if at_unix_ms < rule_set.not_before_unix_ms() || at_unix_ms > rule_set.not_after_unix_ms() {
+            return Err(G3Error::RuleSetExpired);
+        }
+        let rule = rule_set
+            .authorizing_rule(transition.tag(), purpose_digest)
+            .ok_or(G3Error::NoAuthorizingRule)?;
+        if at_unix_ms < rule.not_before_unix_ms() || at_unix_ms > rule.not_after_unix_ms() {
+            return Err(G3Error::RuleExpired);
+        }
+        if rule.implementation_digest() != compiled_implementation_digest(transition) {
+            return Err(G3Error::ImplementationMismatch);
+        }
+        if let Some(identity) = transition.exact_reader_identity() {
+            if rule
+                .reader_identities()
+                .binary_search_by(|candidate| candidate.as_bytes().cmp(identity.as_bytes()))
+                .is_err()
+            {
+                return Err(G3Error::ReaderNotAuthorized);
+            }
+        }
+        if let Some(max_age_ms) = rule.consent_max_age_ms() {
+            let consent = consent.ok_or(G3Error::ConsentMissing)?;
+            let destination = transition
+                .exact_reader_identity()
+                .ok_or(G3Error::ConsentScopeMismatch)?;
+            consent.validate_declassification(
+                destination,
+                token_set_digest,
+                context.active_state_manifest_digest,
+                at_unix_ms,
+                max_age_ms,
+            )?;
+        }
+        Self::kernel_declassification(
+            value,
+            context,
+            transition,
+            rule.rule_digest(),
+            rule.implementation_digest(),
+            token_set_digest,
+            purpose_digest,
+            rule.duty_floor(),
+            parents,
+            policy_allowed_effects,
         )
     }
 
@@ -1070,6 +1147,41 @@ impl ProvenanceRecordV2 {
 
     pub const fn expires_at(&self) -> UnixMillisV2 {
         self.expires_at
+    }
+
+    pub fn judge_handoff(
+        &self,
+        transition: DeclassificationTransitionV2,
+        rule_set: &DeclassificationRuleSetV2,
+    ) -> HandoffJudgmentV2 {
+        let SourceKindV2::KernelDeclassification { rule_digest } = &self.source_kind else {
+            return HandoffJudgmentV2::Unproven;
+        };
+        let Some(rule) = rule_set.rule_by_digest(*rule_digest) else {
+            return HandoffJudgmentV2::Unproven;
+        };
+        let (confidentiality, readers) = transition.target();
+        if rule.transition_tag() != transition.tag()
+            || self.label.confidentiality() != confidentiality
+            || !self.label.readers().contains(readers)
+        {
+            return HandoffJudgmentV2::Refuses;
+        }
+        if let Some(identity) = transition.exact_reader_identity() {
+            if rule
+                .reader_identities()
+                .binary_search_by(|candidate| candidate.as_bytes().cmp(identity.as_bytes()))
+                .is_err()
+                || self
+                    .root_evidence
+                    .as_slice()
+                    .binary_search_by(|candidate| candidate.as_bytes().cmp(identity.as_bytes()))
+                    .is_err()
+            {
+                return HandoffJudgmentV2::Refuses;
+            }
+        }
+        HandoffJudgmentV2::Admits
     }
 }
 

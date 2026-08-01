@@ -248,6 +248,7 @@ impl DurableDeploymentTransactionCoreV2 {
         verifier: &DeploymentActivationVerifierV2,
         deployment_trust_root_set: &OperationalTrustRootSetV2,
         activation_trust_root_set: &OperationalTrustRootSetV2,
+        declassification_trust_root_set: &OperationalTrustRootSetV2,
         release_trust_root_set: &ReleaseTrustRootSetV2,
     ) -> Result<Self, DeploymentControlErrorV2> {
         validate_operational_trust_binding(
@@ -255,6 +256,7 @@ impl DurableDeploymentTransactionCoreV2 {
             verifier,
             deployment_trust_root_set,
             activation_trust_root_set,
+            declassification_trust_root_set,
         )?;
         Self::new_signed_internal(material, authority, verifier, release_trust_root_set)
     }
@@ -315,6 +317,7 @@ impl DurableDeploymentTransactionCoreV2 {
         transaction_authorization_verifier: &DeploymentAuthorizationVerifierV2,
         deployment_trust_root_set: &OperationalTrustRootSetV2,
         activation_trust_root_set: &OperationalTrustRootSetV2,
+        declassification_trust_root_set: &OperationalTrustRootSetV2,
         release_trust_root_set: &ReleaseTrustRootSetV2,
     ) -> Result<Self, DeploymentControlErrorV2> {
         let value = Self::from_canonical_bytes_internal(
@@ -329,6 +332,7 @@ impl DurableDeploymentTransactionCoreV2 {
             activation_verifier,
             deployment_trust_root_set,
             activation_trust_root_set,
+            declassification_trust_root_set,
         )?;
         Ok(value)
     }
@@ -429,6 +433,7 @@ fn validate_operational_trust_binding(
     activation_verifier: &DeploymentActivationVerifierV2,
     deployment_trust_root_set: &OperationalTrustRootSetV2,
     activation_trust_root_set: &OperationalTrustRootSetV2,
+    declassification_trust_root_set: &OperationalTrustRootSetV2,
 ) -> Result<(), DeploymentControlErrorV2> {
     let expected = material.signed_transaction.intent().expected_pre_state();
     let bootstrap = &material.desired_manifest.material().bootstrap_tcb_lock;
@@ -438,17 +443,29 @@ fn validate_operational_trust_binding(
     ) || !matches!(
         activation_trust_root_set.binding(),
         OperationalTrustRootSetBindingV2::Activation { .. }
+    ) || !matches!(
+        declassification_trust_root_set.binding(),
+        OperationalTrustRootSetBindingV2::Declassification { .. }
     ) || deployment_trust_root_set.product_family_digest()
         != activation_trust_root_set.product_family_digest()
+        || deployment_trust_root_set.product_family_digest()
+            != declassification_trust_root_set.product_family_digest()
         || deployment_trust_root_set.binding().member_set_digest()
             != expected.deployment_trust_root_set_digest()
         || activation_trust_root_set.binding().member_set_digest()
             != expected.activation_trust_root_set_digest()
+        || declassification_trust_root_set
+            .binding()
+            .member_set_digest()
+            != expected.declassification_trust_root_set_digest()
         || deployment_trust_root_set
             .matches_versioned_identity(bootstrap.deployment_trust_root_set())
             .is_err()
         || activation_trust_root_set
             .matches_versioned_identity(bootstrap.activation_trust_root_set())
+            .is_err()
+        || declassification_trust_root_set
+            .matches_versioned_identity(bootstrap.declassification_trust_root_set())
             .is_err()
         || !deployment_trust_root_set.authorizes(
             OperationalTrustRootPurposeV2::DeploymentAuthorization,

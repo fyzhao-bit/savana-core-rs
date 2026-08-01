@@ -60,7 +60,7 @@ pub struct UiAuthenticationChallengeProjectionV2 {
     expires_at: UnixMillisV2,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalChallengeProjectionV2 {
     purpose: ProtocolApprovalPurposeV2,
     envelope_digest: Digest32V2,
@@ -68,35 +68,45 @@ pub struct ApprovalChallengeProjectionV2 {
     challenge: savana_kernel_protocol::v2::Nonce32V2,
     display_projection_digest: Digest32V2,
     display_digest: Digest32V2,
+    display_bytes: Vec<u8>,
+    display_declassification_provenance_digest: Option<Digest32V2>,
     expires_at: UnixMillisV2,
 }
 
 impl ApprovalChallengeProjectionV2 {
-    pub const fn purpose(self) -> ProtocolApprovalPurposeV2 {
+    pub const fn purpose(&self) -> ProtocolApprovalPurposeV2 {
         self.purpose
     }
 
-    pub const fn envelope_digest(self) -> Digest32V2 {
+    pub const fn envelope_digest(&self) -> Digest32V2 {
         self.envelope_digest
     }
 
-    pub const fn expected_principal(self) -> PrincipalIdV2 {
+    pub const fn expected_principal(&self) -> PrincipalIdV2 {
         self.expected_principal
     }
 
-    pub const fn challenge(self) -> savana_kernel_protocol::v2::Nonce32V2 {
+    pub const fn challenge(&self) -> savana_kernel_protocol::v2::Nonce32V2 {
         self.challenge
     }
 
-    pub const fn display_projection_digest(self) -> Digest32V2 {
+    pub const fn display_projection_digest(&self) -> Digest32V2 {
         self.display_projection_digest
     }
 
-    pub const fn display_digest(self) -> Digest32V2 {
+    pub const fn display_digest(&self) -> Digest32V2 {
         self.display_digest
     }
 
-    pub const fn expires_at(self) -> UnixMillisV2 {
+    pub fn display_bytes(&self) -> &[u8] {
+        &self.display_bytes
+    }
+
+    pub const fn display_declassification_provenance_digest(&self) -> Option<Digest32V2> {
+        self.display_declassification_provenance_digest
+    }
+
+    pub const fn expires_at(&self) -> UnixMillisV2 {
         self.expires_at
     }
 }
@@ -561,7 +571,7 @@ impl ProtocolApprovalServiceV2 {
         if self.approval_envelopes[record_index].settlement.is_some() {
             return Err(ApprovalErrorV2::AlreadyConsumed);
         }
-        let unsigned = self.approval_envelopes[record_index].unsigned;
+        let unsigned = &self.approval_envelopes[record_index].unsigned;
         let credential_index = self.credential_index(assertion)?;
         let legacy_purpose = match unsigned.purpose() {
             savana_kernel_protocol::v2::ApprovalPurposeV2::Ingress => ApprovalPurposeV2::Ingress,
@@ -643,6 +653,10 @@ impl ProtocolApprovalServiceV2 {
             challenge: record.unsigned.decision_challenge(),
             display_projection_digest: record.unsigned.display_projection_digest(),
             display_digest: record.unsigned.display_digest(),
+            display_bytes: record.unsigned.display_bytes().to_vec(),
+            display_declassification_provenance_digest: record
+                .unsigned
+                .display_declassification_provenance_digest(),
             expires_at: record.unsigned.expires_at(),
         })
     }
@@ -1759,7 +1773,7 @@ mod tests {
     use sha2::{Digest as _, Sha256};
 
     use super::ProtocolApprovalServiceV2;
-    use crate::WebAuthnAssertionV2;
+    use crate::{ApprovalErrorV2, WebAuthnAssertionV2};
 
     fn assertion(
         signing_key: &P256SigningKey,
@@ -1942,7 +1956,9 @@ mod tests {
                 },
                 principal,
                 Digest32V2::new([0x26; 32]),
-                Digest32V2::new([0x27; 32]),
+                savana_kernel_protocol::v2::approval_display_digest_v2(&[0x81, 0x01]),
+                vec![0x81, 0x01],
+                None,
                 approvald_identity,
                 UnixMillisV2::new(100),
                 UnixMillisV2::new(10_000),
@@ -1951,9 +1967,36 @@ mod tests {
             &kernel_key,
         )
         .unwrap();
+        let mut tampered_payload = approval.canonical_payload().to_vec();
+        let display_offset = tampered_payload
+            .windows(2)
+            .rposition(|window| window == [0x81, 0x01])
+            .unwrap();
+        tampered_payload[display_offset + 1] ^= 1;
+        let tampered = SignedApprovalEnvelopeV2::from_canonical_parts(
+            tampered_payload,
+            approval.key_id(),
+            approval.signature(),
+        )
+        .unwrap();
+        assert_eq!(
+            service
+                .register_approval_envelope(&tampered, UnixMillisV2::new(200))
+                .unwrap_err(),
+            ApprovalErrorV2::InvalidEnvelopeSignature
+        );
         let approval_digest = service
             .register_approval_envelope(&approval, UnixMillisV2::new(200))
             .unwrap();
+        let projected = service
+            .approval_challenge(approval_digest, UnixMillisV2::new(200))
+            .unwrap();
+        assert_eq!(projected.display_bytes(), [0x81, 0x01]);
+        assert_eq!(
+            projected.display_digest(),
+            savana_kernel_protocol::v2::approval_display_digest_v2(projected.display_bytes())
+        );
+        assert_eq!(projected.display_declassification_provenance_digest(), None);
         let approval_settlement = service
             .settle_approval(
                 approval_digest,

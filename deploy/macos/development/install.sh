@@ -717,6 +717,15 @@ done
 /usr/bin/install -o root -g wheel -m 0444 \
   "$build_directory/artifacts/development-draft-report-tool-v2.cbor" \
   "$install_root/config/policy/development-draft-report-tool-v2.cbor"
+/usr/bin/install -o root -g wheel -m 0444 \
+  "$build_directory/artifacts/declassification-installer-root-v2.json" \
+  "$install_root/config/trust/declassification-installer-root-v2.json"
+/usr/bin/install -o root -g wheel -m 0444 \
+  "$build_directory/artifacts/declassification-trust-root-set-v2.cbor" \
+  "$install_root/config/trust/declassification-trust-root-set-v2.cbor"
+/usr/bin/install -o root -g wheel -m 0444 \
+  "$build_directory/artifacts/declassification-rule-set-v2.cbor" \
+  "$install_root/config/policy/declassification-rule-set-v2.cbor"
 /usr/bin/install -o root -g _savana_runtime_dev -m 0444 /dev/null \
   "$install_root/config/effect-gate-v2"
 
@@ -789,6 +798,9 @@ done
 harden_generated_trust_file "$install_root/config/jarvis-python-v2.json"
 harden_generated_trust_file "$install_root/config/development-manifest-template-v2.json"
 harden_generated_trust_file "$install_root/config/trust/deployment-manifest-root-v2.json"
+harden_generated_trust_file "$install_root/config/trust/declassification-installer-root-v2.json"
+harden_generated_trust_file "$install_root/config/trust/declassification-trust-root-set-v2.cbor"
+harden_generated_trust_file "$install_root/config/policy/declassification-rule-set-v2.cbor"
 harden_generated_trust_file "$install_root/config/deployment-manifest-v2.cbor"
 
 plist_directory=$(CDPATH= cd -- "$script_directory/../../launchd/development" && pwd -P)

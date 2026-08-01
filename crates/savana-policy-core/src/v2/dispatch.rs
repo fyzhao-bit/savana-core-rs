@@ -318,6 +318,10 @@ impl VerifiedFinalReleaseApprovalBindingV2 {
         })
     }
 
+    pub(crate) const fn active_state_manifest_digest(self) -> Digest32V2 {
+        self.active_state_manifest_digest
+    }
+
     #[cfg(test)]
     pub(crate) fn new_for_test(record: &VerifiedFinalReleaseDispatchV2, seed: u8) -> Self {
         Self::from_verified_settlement(
@@ -767,7 +771,14 @@ impl KernelDispatchJournalV2 {
         if let Some(existing) = self.entries.iter().find(|entry| {
             entry.core.subject.durable_release_id() == Some(record.durable_release_id)
         }) {
-            if existing.consumed_ticket_digest != ticket.ticket_digest
+            if !matches!(
+                existing.core.subject,
+                DispatchSubjectV2::FinalRelease {
+                    binding,
+                    approval_settlement_digest,
+                } if binding == record.binding
+                    && approval_settlement_digest == approval.settlement_digest
+            ) || existing.consumed_ticket_digest != ticket.ticket_digest
                 || existing.sealed_envelope_digest != sealed_envelope_digest
                 || existing.core.installation_id != authority.installation_id
                 || existing.core.active_state_manifest_digest
@@ -798,6 +809,15 @@ impl KernelDispatchJournalV2 {
                 .entries
                 .iter()
                 .any(|entry| entry.consumed_ticket_digest == ticket.ticket_digest)
+            || self.entries.iter().any(|entry| {
+                matches!(
+                    entry.core.subject,
+                    DispatchSubjectV2::FinalRelease {
+                        approval_settlement_digest,
+                        ..
+                    } if approval_settlement_digest == approval.settlement_digest
+                )
+            })
         {
             return Err(G4Error::StateConflict);
         }

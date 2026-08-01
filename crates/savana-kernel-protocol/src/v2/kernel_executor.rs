@@ -398,6 +398,7 @@ impl DispatchCoreV2 {
 pub struct SealedExecutionEnvelopePayloadV2 {
     core: DispatchCoreV2,
     dispatch_core_digest: Digest32V2,
+    declassification_provenance_digest: Digest32V2,
     hpke_enc: FixedBytes32V2,
     hpke_ciphertext: BoundedCiphertextV2,
 }
@@ -405,16 +406,18 @@ pub struct SealedExecutionEnvelopePayloadV2 {
 impl SealedExecutionEnvelopePayloadV2 {
     pub fn new(
         core: DispatchCoreV2,
+        declassification_provenance_digest: Digest32V2,
         hpke_enc: FixedBytes32V2,
         hpke_ciphertext: BoundedCiphertextV2,
     ) -> Result<Self, ProtocolError> {
-        if is_zero(hpke_enc.as_bytes()) {
+        if is_zero(declassification_provenance_digest.as_bytes()) || is_zero(hpke_enc.as_bytes()) {
             return Err(malformed());
         }
         let dispatch_core_digest = core.semantic_digest()?;
         Ok(Self {
             core,
             dispatch_core_digest,
+            declassification_provenance_digest,
             hpke_enc,
             hpke_ciphertext,
         })
@@ -426,6 +429,10 @@ impl SealedExecutionEnvelopePayloadV2 {
 
     pub const fn dispatch_core_digest(&self) -> Digest32V2 {
         self.dispatch_core_digest
+    }
+
+    pub const fn declassification_provenance_digest(&self) -> Digest32V2 {
+        self.declassification_provenance_digest
     }
 
     pub const fn hpke_enc(&self) -> FixedBytes32V2 {
@@ -1110,11 +1117,12 @@ fn encode_sealed_execution_envelope_payload(
 ) -> Result<Vec<u8>, ProtocolError> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
     encoder
-        .array(5)
+        .array(6)
         .and_then(|encoder| encoder.u16(2))
         .map_err(ProtocolError::malformed)?;
     encode_dispatch_core(&mut encoder, value.core)?;
     encode_fixed(&mut encoder, &value.dispatch_core_digest)?;
+    encode_fixed(&mut encoder, &value.declassification_provenance_digest)?;
     encode_fixed(&mut encoder, &value.hpke_enc)?;
     encode_fixed(&mut encoder, &value.hpke_ciphertext)?;
     Ok(encoder.into_writer())
@@ -1125,16 +1133,22 @@ fn decode_sealed_execution_envelope_payload(
 ) -> Result<SealedExecutionEnvelopePayloadV2, ProtocolError> {
     scan_single(bytes)?;
     let mut decoder = minicbor::Decoder::new(bytes);
-    expect_array(&mut decoder, 5)?;
+    expect_array(&mut decoder, 6)?;
     if decoder.u16().map_err(ProtocolError::malformed)? != 2 {
         return Err(malformed());
     }
     let mut context = V2DecodeContext;
     let core = decode_dispatch_core(&mut decoder, &mut context)?;
     let claimed_core_digest: Digest32V2 = decode_fixed(&mut decoder, &mut context)?;
+    let declassification_provenance_digest = decode_fixed(&mut decoder, &mut context)?;
     let hpke_enc = decode_fixed(&mut decoder, &mut context)?;
     let hpke_ciphertext = decode_fixed(&mut decoder, &mut context)?;
-    let value = SealedExecutionEnvelopePayloadV2::new(core, hpke_enc, hpke_ciphertext)?;
+    let value = SealedExecutionEnvelopePayloadV2::new(
+        core,
+        declassification_provenance_digest,
+        hpke_enc,
+        hpke_ciphertext,
+    )?;
     if claimed_core_digest != value.dispatch_core_digest
         || decoder.position() != bytes.len()
         || encode_sealed_execution_envelope_payload(&value)? != bytes

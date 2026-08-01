@@ -169,6 +169,7 @@ impl ExecdCrashFixture {
         .unwrap();
         let payload = SealedExecutionEnvelopePayloadV2::new(
             core,
+            Digest32V2::new([0x4e; 32]),
             FixedBytes32V2::new([0x4f; 32]),
             BoundedCiphertextV2::new(vec![0x50; 64]).unwrap(),
         )

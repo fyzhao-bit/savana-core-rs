@@ -13,7 +13,7 @@ use super::{
     OperationalTrustRootSetV2, ReleaseTrustRootSetV2,
 };
 
-/// Three complete installer-authenticated trust-root chains. Keeping every
+/// Four complete installer-authenticated trust-root chains. Keeping every
 /// predecessor alive here prevents a current root object from being accepted
 /// without proving its exact genesis-to-current ancestry.
 #[derive(Debug, Clone)]
@@ -21,6 +21,7 @@ pub struct AuthenticatedNativeDeploymentTrustV2 {
     installer_verifier: InstallerOrMdmVerifierV2,
     deployment_chain: Vec<OperationalTrustRootSetV2>,
     activation_chain: Vec<OperationalTrustRootSetV2>,
+    declassification_chain: Vec<OperationalTrustRootSetV2>,
     release_chain: Vec<ReleaseTrustRootSetV2>,
 }
 
@@ -43,6 +44,11 @@ impl AuthenticatedNativeDeploymentTrustV2 {
             &installer_verifier,
             2,
         )?;
+        let declassification_chain = decode_operational_chain(
+            material.declassification_trust_root_chain(),
+            &installer_verifier,
+            3,
+        )?;
         let release_chain =
             decode_release_chain(material.release_trust_root_chain(), &installer_verifier)?;
         let deployment = deployment_chain
@@ -51,10 +57,14 @@ impl AuthenticatedNativeDeploymentTrustV2 {
         let activation = activation_chain
             .last()
             .ok_or(DeploymentControlErrorV2::InvalidOperationalTrustRootSet)?;
+        let declassification = declassification_chain
+            .last()
+            .ok_or(DeploymentControlErrorV2::InvalidOperationalTrustRootSet)?;
         let release = release_chain
             .last()
             .ok_or(DeploymentControlErrorV2::InvalidSecurityStateManifest)?;
         if deployment.product_family_digest() != activation.product_family_digest()
+            || deployment.product_family_digest() != declassification.product_family_digest()
             || deployment.product_family_digest() != release.product_family_digest()
         {
             return Err(DeploymentControlErrorV2::InvalidOperationalTrustRootSet);
@@ -63,6 +73,7 @@ impl AuthenticatedNativeDeploymentTrustV2 {
             installer_verifier,
             deployment_chain,
             activation_chain,
+            declassification_chain,
             release_chain,
         })
     }
@@ -87,6 +98,12 @@ impl AuthenticatedNativeDeploymentTrustV2 {
         self.release_chain
             .last()
             .expect("authenticated release chain is nonempty")
+    }
+
+    pub fn declassification_trust_root_set(&self) -> &OperationalTrustRootSetV2 {
+        self.declassification_chain
+            .last()
+            .expect("authenticated declassification chain is nonempty")
     }
 
     pub fn transaction_authorization_verifiers(

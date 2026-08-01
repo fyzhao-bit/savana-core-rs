@@ -16,8 +16,11 @@ use savana_kernel_protocol::v2::{
     VersionV2,
 };
 use savana_policy_core::v2::{
-    descriptor_digest_v2, AttemptKindV2, BoundedConnectorRetryPolicyV2, EffectSetV2,
-    ExecutorIdempotencyContractV2, IdentifierV2, UnsignedToolDescriptorV2,
+    declassification_implementation_digest_v2, descriptor_digest_v2, AttemptKindV2,
+    BoundedConnectorRetryPolicyV2, ClosedDeclassificationPurposeV2, DeclassificationRuleSetV2,
+    DeclassificationRuleV2, EffectSetV2, ExecutorIdempotencyContractV2, IdentifierV2,
+    LeakGateDutyV2, OperationalTrustRootPurposeV2, OperationalTrustRootSetItemV2,
+    OperationalTrustRootSetV2, UnsignedToolDescriptorV2,
 };
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
@@ -125,11 +128,73 @@ fn run() -> Result<(), String> {
         0o644,
     )?;
 
+    let declassification_product_family = random_unique(&mut issued)?;
+    let declassification_installer_key = signing_key(&mut issued)?;
+    let declassification_authority_key = signing_key(&mut issued)?;
+    let declassification_member = OperationalTrustRootSetItemV2::new(
+        OperationalTrustRootPurposeV2::DeclassificationAuthority,
+        declassification_authority_key.verifying_key().to_bytes(),
+        1,
+        ACTIVE_NOT_BEFORE,
+        ACTIVE_EXPIRES_AT,
+    )
+    .map_err(|_| "could not create development declassification authority".to_owned())?;
+    let declassification_roots = OperationalTrustRootSetV2::new_declassification_signed_for_test(
+        Digest32V2::new(declassification_product_family),
+        1,
+        None,
+        vec![declassification_member],
+        ACTIVE_NOT_BEFORE,
+        ACTIVE_EXPIRES_AT,
+        &declassification_installer_key,
+        1,
+    )
+    .map_err(|_| "could not sign development declassification trust root".to_owned())?;
+    let destination_reader = final_release_destination_digest(executor_identity);
+    let declassification_rules = development_declassification_rules(
+        Digest32V2::new(executor_identity),
+        Digest32V2::new(destination_reader),
+    )?;
+    let declassification_rule_set = DeclassificationRuleSetV2::new_signed_for_test(
+        Digest32V2::new(declassification_product_family),
+        1,
+        None,
+        declassification_rules,
+        ACTIVE_NOT_BEFORE,
+        ACTIVE_EXPIRES_AT,
+        &declassification_roots,
+        &declassification_authority_key,
+        1,
+        ACTIVE_NOT_BEFORE,
+    )
+    .map_err(|_| "could not sign development declassification rules".to_owned())?;
+    let installer_key_id =
+        derive_ed25519_key_id_v2(declassification_installer_key.verifying_key().to_bytes());
+    write_json(
+        &output.join("artifacts/declassification-installer-root-v2.json"),
+        &json!({
+            "key_id": hex(*installer_key_id.as_bytes()),
+            "key_epoch": 1,
+            "public_key": hex(declassification_installer_key.verifying_key().to_bytes())
+        }),
+    )?;
+    write_new(
+        &output.join("artifacts/declassification-trust-root-set-v2.cbor"),
+        declassification_roots.canonical_bytes(),
+        0o644,
+    )?;
+    write_new(
+        &output.join("artifacts/declassification-rule-set-v2.cbor"),
+        declassification_rule_set.canonical_bytes(),
+        0o644,
+    )?;
+
     let services = ServiceIdentities::new(&mut issued)?;
     let manifest_template = manifest_template(
         &mut issued,
         installation_id,
         active_state_manifest_digest,
+        *declassification_rule_set.signed_digest().as_bytes(),
         protocol_abi_digest,
         release_identity_digest,
         model_set_identity_digest,
@@ -218,6 +283,9 @@ fn run() -> Result<(), String> {
     let kerneld = json!({
         "signed_manifest_path": format!("{INSTALL_ROOT}/config/deployment-manifest-v2.cbor"),
         "effect_ledger_projection_path": format!("{INSTALL_ROOT}/config/effect-ledger-projection-v2.cbor"),
+        "declassification_installer_root_path": format!("{INSTALL_ROOT}/config/trust/declassification-installer-root-v2.json"),
+        "declassification_trust_root_set_path": format!("{INSTALL_ROOT}/config/trust/declassification-trust-root-set-v2.cbor"),
+        "declassification_rule_set_path": format!("{INSTALL_ROOT}/config/policy/declassification-rule-set-v2.cbor"),
         "input_runtime_assets_path": format!("{INSTALL_ROOT}/config/input-runtime-assets-v2.cbor"),
         "input_runtime_publisher_key_id": hex(*input_key_id.as_bytes()),
         "input_runtime_publisher_public_key": hex(input_key.verifying_key().to_bytes()),
@@ -261,6 +329,12 @@ fn run() -> Result<(), String> {
         "planner_port": 9443,
         "planner_server_spki_sha256": placeholder_hex,
         "planner_route_id": PLANNER_ROUTE,
+        "planner_template_id": 1,
+        "planner_intent_tag": 3,
+        "planner_maximum_steps": 256,
+        "planner_maximum_dependencies_per_step": 256,
+        "planner_maximum_arguments_per_step": 256,
+        "planner_maximum_encoded_plan_bytes": 8 * 1024 * 1024,
         "release_executor_identity": hex(executor_identity),
         "release_destination_projection": DESTINATION_PROJECTION,
         "release_display_projection": DISPLAY_PROJECTION,
@@ -451,6 +525,7 @@ fn manifest_template(
     issued: &mut HashSet<[u8; 32]>,
     installation_id: [u8; 32],
     active_state_manifest_digest: [u8; 32],
+    declassification_rule_set_digest: [u8; 32],
     protocol_abi_digest: [u8; 32],
     release_identity_digest: [u8; 32],
     model_set_identity_digest: [u8; 32],
@@ -470,6 +545,7 @@ fn manifest_template(
     Ok(json!({
         "installation_id": hex(installation_id),
         "active_state_manifest_digest": hex(active_state_manifest_digest),
+        "declassification_rule_set_digest": hex(declassification_rule_set_digest),
         "active_state_manifest_sequence": 1,
         "deployment_generation": deployment_generation,
         "effect_fence_epoch": effect_fence_epoch,
@@ -785,6 +861,74 @@ fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
 
 fn signing_key(issued: &mut HashSet<[u8; 32]>) -> Result<SigningKey, String> {
     Ok(SigningKey::from_bytes(&random_unique(issued)?))
+}
+
+fn development_declassification_rules(
+    executor_reader: Digest32V2,
+    destination_reader: Digest32V2,
+) -> Result<Vec<DeclassificationRuleV2>, String> {
+    let specs = [
+        (
+            1,
+            ClosedDeclassificationPurposeV2::AgentIngressMasking,
+            LeakGateDutyV2::BlocklistAndNoResidualPii,
+            None,
+            None,
+        ),
+        (
+            2,
+            ClosedDeclassificationPurposeV2::PlannerCall,
+            LeakGateDutyV2::BlocklistAndNoResidualPii,
+            None,
+            None,
+        ),
+        (
+            3,
+            ClosedDeclassificationPurposeV2::ApprovalDisplay,
+            LeakGateDutyV2::BlocklistOnly,
+            None,
+            None,
+        ),
+        (
+            4,
+            ClosedDeclassificationPurposeV2::ExecutionHandoff,
+            LeakGateDutyV2::BlocklistOnly,
+            Some(vec![executor_reader]),
+            None,
+        ),
+        (
+            5,
+            ClosedDeclassificationPurposeV2::FinalRelease,
+            LeakGateDutyV2::BlocklistOnly,
+            Some(vec![destination_reader]),
+            Some(300_000),
+        ),
+    ];
+    specs
+        .into_iter()
+        .map(|(tag, purpose, duty, readers, consent_age)| {
+            DeclassificationRuleV2::new_for_test(
+                tag,
+                purpose,
+                declassification_implementation_digest_v2(tag)
+                    .ok_or_else(|| "unknown declassification transition".to_owned())?,
+                duty,
+                readers,
+                consent_age,
+                ACTIVE_NOT_BEFORE,
+                ACTIVE_EXPIRES_AT,
+            )
+            .map_err(|_| "could not create development declassification rule".to_owned())
+        })
+        .collect()
+}
+
+fn final_release_destination_digest(executor_identity: [u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"SAVANA_FINAL_RELEASE_DESTINATION_V2\0");
+    hasher.update(DESTINATION_PROJECTION.to_be_bytes());
+    hasher.update(executor_identity);
+    hasher.finalize().into()
 }
 
 fn random_unique(issued: &mut HashSet<[u8; 32]>) -> Result<[u8; 32], String> {

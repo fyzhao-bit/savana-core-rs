@@ -58,6 +58,7 @@ fn fixture_material() -> DeploymentTransactionIntentMaterialV2 {
         digest(0x36),
         digest(0x37),
         digest(0x38),
+        digest(0x39),
         17,
         19,
     )
@@ -161,6 +162,9 @@ fn transaction_intent_rejects_wrong_recovery_branch_time_and_bootstrap_artifact_
                 .expected_pre_state
                 .activation_trust_root_set_digest(),
             material.expected_pre_state.release_trust_root_set_digest(),
+            material
+                .expected_pre_state
+                .declassification_trust_root_set_digest(),
             material.expected_pre_state.bootstrap_slot_closure_digest(),
             material.expected_pre_state.installation_epoch(),
             material.expected_pre_state.effect_fence_epoch(),

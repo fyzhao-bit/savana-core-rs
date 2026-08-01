@@ -1,7 +1,8 @@
 use savana_kernel_protocol::v2::{
-    Digest32V2, DurableRunIdV2, DurableTaskIdV2, ExecutorIdentityV2, ImplementationIdV2,
-    InternalSlotDigestV2, InternalStepIdV2, Nonce32V2, PlanRevisionDigestV2, PrincipalIdV2,
-    RequestIdV2, RoleIdV2, ToolClassIdV2, ValueInternalIdV2, VersionV2,
+    Digest32V2, DurableReleaseIdV2, DurableRunIdV2, DurableTaskIdV2, ExecutorIdentityV2,
+    FinalReleaseSemanticBindingV2, ImplementationIdV2, InternalSlotDigestV2, InternalStepIdV2,
+    Nonce32V2, PlanRevisionDigestV2, PrincipalIdV2, RequestIdV2, RoleIdV2, ToolClassIdV2,
+    ValueInternalIdV2, VersionV2,
 };
 
 use super::dispatch::{
@@ -629,6 +630,64 @@ fn g7_final_release_wal_and_quota_survive_restart_without_aliasing_tool_attempts
         )
         .unwrap();
     assert_eq!(replay.execution_nonce(), preparation.execution_nonce());
+
+    assert_eq!(
+        reopened
+            .prepare_final_release_dispatch(
+                &release,
+                VerifiedQuotaLimitV2::new_for_test(1, 0x95, subject),
+                // Replay is exact only when it carries the same consumed
+                // settlement. A second settlement cannot alias the durable
+                // release identifier and inherit the first preparation.
+                VerifiedFinalReleaseApprovalBindingV2::new_for_test(&release, 0x9c),
+                VerifiedFinalReleaseTicketV2::new_for_test(&release, 0x97),
+                authority(),
+                Digest32V2::new([0x98; 32]),
+            )
+            .unwrap_err(),
+        G4Error::StateConflict
+    );
+
+    let other_binding = FinalReleaseSemanticBindingV2::from_nonzero_components(
+        DurableReleaseIdV2::new([7; 32]),
+        Digest32V2::new([0xa0; 32]),
+        Digest32V2::new([0xa1; 32]),
+        Digest32V2::new([0xa2; 32]),
+        Digest32V2::new([0xa3; 32]),
+        Digest32V2::new([0xa4; 32]),
+        Digest32V2::new([0xa5; 32]),
+        Digest32V2::new([0xa6; 32]),
+        Digest32V2::new([0xa7; 32]),
+        Digest32V2::new([13; 32]),
+        Digest32V2::new([0xa8; 32]),
+    )
+    .unwrap();
+    let other_release = VerifiedFinalReleaseDispatchV2::from_verified_release(
+        Digest32V2::new([2; 32]),
+        Digest32V2::new([3; 32]),
+        DurableTaskIdV2::new([4; 32]),
+        DurableRunIdV2::new([5; 32]),
+        DurableReleaseIdV2::new([7; 32]),
+        other_binding,
+    )
+    .unwrap();
+    let other_subject =
+        DispatchQuotaSubjectV2::final_release(other_binding.release_quota_subject_digest());
+    assert_eq!(
+        reopened
+            .prepare_final_release_dispatch(
+                &other_release,
+                VerifiedQuotaLimitV2::new_for_test(1, 0x95, other_subject),
+                // Reusing the same approval settlement digest for a different
+                // exact release must be rejected even after a restart.
+                VerifiedFinalReleaseApprovalBindingV2::new_for_test(&other_release, 0x96),
+                VerifiedFinalReleaseTicketV2::new_for_test(&other_release, 0x9a),
+                authority(),
+                Digest32V2::new([0x9b; 32]),
+            )
+            .unwrap_err(),
+        G4Error::StateConflict
+    );
     reopened
         .reconcile_final_release_dispatch(
             VerifiedExecutorDispositionV2::effect_started_from_preparation_for_test(

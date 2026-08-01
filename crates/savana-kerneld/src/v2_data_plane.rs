@@ -4,11 +4,12 @@ use savana_kernel_protocol::v2::{
     ReadAgentViewResponseV2, ServiceIdentityV2, UnixMillisV2, VaultPublicStateV2,
 };
 use savana_kernel_protocol::StableCode;
-use savana_policy_core::v2::{EffectSetV2, KernelValueV2};
+use savana_policy_core::v2::EffectSetV2;
 use sha2::{Digest as _, Sha256};
 
-use crate::v2_agent_authority::PreparedAgentClaimMaterialV2;
+use crate::v2_agent_authority::{PreparedAgentClaimMaterialV2, SignedPlannerPolicyV2};
 use crate::v2_core_services::KernelIngressCommitSinkV2;
+use crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2;
 use crate::v2_input_owner::FinalizedKernelInputV2;
 use crate::v2_runtime::accept_finalized_input_into_kernel;
 
@@ -18,6 +19,7 @@ const MASKED_AGENT_VIEW_RECORD_TAG_V2: u16 = 0;
 pub(crate) struct ProductionKernelDataPlaneV2 {
     input_runtime: savana_input_runtime::InputRuntimeV2,
     vault: savana_vault::DurableVaultServiceV2,
+    declassification_rules: ActiveDeclassificationRuleSetV2,
     installation_id: Digest32V2,
     producer_identity: ProducerIdentityV2,
     agentd_boot_id: BootIdV2,
@@ -38,6 +40,7 @@ impl ProductionKernelDataPlaneV2 {
     pub(crate) fn new(
         input_runtime: savana_input_runtime::InputRuntimeV2,
         vault: savana_vault::DurableVaultServiceV2,
+        declassification_rules: ActiveDeclassificationRuleSetV2,
         installation_id: Digest32V2,
         producer_identity: ProducerIdentityV2,
         agentd_boot_id: BootIdV2,
@@ -62,6 +65,7 @@ impl ProductionKernelDataPlaneV2 {
         Ok(Self {
             input_runtime,
             vault,
+            declassification_rules,
             installation_id,
             producer_identity,
             agentd_boot_id,
@@ -102,9 +106,14 @@ impl KernelIngressCommitSinkV2 for ProductionKernelDataPlaneV2 {
         if expires_at.get() <= now.get() {
             return Err(StableCode::PolicyExpired);
         }
+        let declassification_rules = self
+            .declassification_rules
+            .snapshot()
+            .map_err(|_| StableCode::PolicyDenied)?;
         let accepted = accept_finalized_input_into_kernel(
             &self.input_runtime,
             &mut self.vault,
+            &declassification_rules,
             finalized,
             self.installation_id,
             active_state_manifest_digest,
@@ -117,7 +126,10 @@ impl KernelIngressCommitSinkV2 for ProductionKernelDataPlaneV2 {
             expires_at,
         )
         .map_err(|_| StableCode::PolicyDenied)?;
-        let (gated, provenance, live) = accepted.into_parts();
+        let (gated, initial_value, provenance, live) = accepted.into_parts();
+        let signed_planner_policy =
+            SignedPlannerPolicyV2::from_verified_input(gated.planner_envelope())
+                .map_err(|_| StableCode::PolicyDenied)?;
         let context = savana_vault::VaultAccessContextV2::from_authenticated_agent(
             self.agentd_boot_id,
             self.agentd_identity,
@@ -130,8 +142,6 @@ impl KernelIngressCommitSinkV2 for ProductionKernelDataPlaneV2 {
             .vault
             .issue_masked_document(&live, context, now)
             .map_err(|_| StableCode::KernelUnavailable)?;
-        let initial_value =
-            KernelValueV2::text(gated.normalized_input()).map_err(|_| StableCode::PolicyDenied)?;
         PreparedAgentClaimMaterialV2::from_verified_ingress(
             durable_run_id,
             self.producer_identity,
@@ -139,6 +149,7 @@ impl KernelIngressCommitSinkV2 for ProductionKernelDataPlaneV2 {
             provenance,
             document,
             self.policy_allowed_effects,
+            signed_planner_policy,
             expires_at,
         )
         .map_err(|_| StableCode::KernelUnavailable)

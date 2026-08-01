@@ -11,6 +11,9 @@ use super::{
 };
 
 const MAX_SIGNED_PAYLOAD_BYTES_V2: usize = 8 * 1024;
+const MAX_APPROVAL_SIGNED_PAYLOAD_BYTES_V2: usize = 1024 * 1024 + 8 * 1024;
+const MAX_APPROVAL_DISPLAY_BYTES_V2: usize = 1024 * 1024;
+const APPROVAL_DISPLAY_DIGEST_DOMAIN_V2: &[u8] = b"SAVANA_APPROVAL_DISPLAY_BYTES_V2\0";
 const INGRESS_APPROVAL_ENVELOPE_DOMAIN_V2: &[u8] = b"SAVANA_INGRESS_APPROVAL_ENVELOPE_V2\0";
 const TOOL_APPROVAL_ENVELOPE_DOMAIN_V2: &[u8] = b"SAVANA_TOOL_APPROVAL_ENVELOPE_V2\0";
 const RELEASE_APPROVAL_ENVELOPE_DOMAIN_V2: &[u8] = b"SAVANA_RELEASE_APPROVAL_ENVELOPE_V2\0";
@@ -35,7 +38,7 @@ const AGENT_AUTHENTICATION_ATTEMPT_CLOSURE_PROOF_DOMAIN_V2: &[u8] =
     b"SAVANA_AGENT_AUTH_ATTEMPT_CLOSURE_PROOF_V2\0";
 
 macro_rules! signed_kernel_envelope_v2 {
-    ($name:ident) => {
+    ($name:ident, $maximum_payload_bytes:expr) => {
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub struct $name {
             canonical_payload: Vec<u8>,
@@ -50,7 +53,7 @@ macro_rules! signed_kernel_envelope_v2 {
                 signature: Ed25519SignatureV2,
             ) -> Result<Self, ProtocolError> {
                 if canonical_payload.is_empty()
-                    || canonical_payload.len() > MAX_SIGNED_PAYLOAD_BYTES_V2
+                    || canonical_payload.len() > $maximum_payload_bytes
                     || is_zero(key_id.as_bytes())
                     || is_zero(signature.as_bytes())
                 {
@@ -102,7 +105,7 @@ macro_rules! signed_kernel_envelope_v2 {
                     return Err(decode_error(position));
                 }
                 let payload = decoder.bytes()?;
-                if payload.is_empty() || payload.len() > MAX_SIGNED_PAYLOAD_BYTES_V2 {
+                if payload.is_empty() || payload.len() > $maximum_payload_bytes {
                     return Err(decode_error(position));
                 }
                 let canonical_payload = payload.to_vec();
@@ -125,8 +128,18 @@ macro_rules! signed_kernel_envelope_v2 {
     };
 }
 
-signed_kernel_envelope_v2!(SignedApprovalEnvelopeV2);
-signed_kernel_envelope_v2!(SignedUiAuthenticationEnvelopeV2);
+signed_kernel_envelope_v2!(
+    SignedApprovalEnvelopeV2,
+    MAX_APPROVAL_SIGNED_PAYLOAD_BYTES_V2
+);
+signed_kernel_envelope_v2!(
+    SignedUiAuthenticationEnvelopeV2,
+    MAX_SIGNED_PAYLOAD_BYTES_V2
+);
+
+pub fn approval_display_digest_v2(display_bytes: &[u8]) -> Digest32V2 {
+    domain_hash(APPROVAL_DISPLAY_DIGEST_DOMAIN_V2, display_bytes)
+}
 
 macro_rules! closed_unit_enum_v2 {
     (
@@ -987,7 +1000,7 @@ impl ApprovalBindingV2 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnsignedApprovalEnvelopeV2 {
     installation_id: Digest32V2,
     active_state_manifest_digest: Digest32V2,
@@ -999,6 +1012,8 @@ pub struct UnsignedApprovalEnvelopeV2 {
     expected_principal: PrincipalIdV2,
     display_projection_digest: Digest32V2,
     display_digest: Digest32V2,
+    display_bytes: Vec<u8>,
+    display_declassification_provenance_digest: Option<Digest32V2>,
     approvald_endpoint_identity: ServiceIdentityV2,
     issued_at: UnixMillisV2,
     expires_at: UnixMillisV2,
@@ -1017,6 +1032,8 @@ impl UnsignedApprovalEnvelopeV2 {
         expected_principal: PrincipalIdV2,
         display_projection_digest: Digest32V2,
         display_digest: Digest32V2,
+        display_bytes: Vec<u8>,
+        display_declassification_provenance_digest: Option<Digest32V2>,
         approvald_endpoint_identity: ServiceIdentityV2,
         issued_at: UnixMillisV2,
         expires_at: UnixMillisV2,
@@ -1030,6 +1047,13 @@ impl UnsignedApprovalEnvelopeV2 {
             || is_zero(expected_principal.as_bytes())
             || is_zero(display_projection_digest.as_bytes())
             || is_zero(display_digest.as_bytes())
+            || display_bytes.is_empty()
+            || display_bytes.len() > MAX_APPROVAL_DISPLAY_BYTES_V2
+            || approval_display_digest_v2(&display_bytes) != display_digest
+            || display_declassification_provenance_digest
+                .is_some_and(|digest| is_zero(digest.as_bytes()))
+            || (purpose != ApprovalPurposeV2::Ingress
+                && display_declassification_provenance_digest.is_none())
             || is_zero(approvald_endpoint_identity.as_bytes())
             || issued_at.get() == 0
             || issued_at.get() >= expires_at.get()
@@ -1048,61 +1072,71 @@ impl UnsignedApprovalEnvelopeV2 {
             expected_principal,
             display_projection_digest,
             display_digest,
+            display_bytes,
+            display_declassification_provenance_digest,
             approvald_endpoint_identity,
             issued_at,
             expires_at,
         })
     }
 
-    pub const fn purpose(self) -> ApprovalPurposeV2 {
+    pub const fn purpose(&self) -> ApprovalPurposeV2 {
         self.purpose
     }
 
-    pub const fn installation_id(self) -> Digest32V2 {
+    pub const fn installation_id(&self) -> Digest32V2 {
         self.installation_id
     }
 
-    pub const fn active_state_manifest_digest(self) -> Digest32V2 {
+    pub const fn active_state_manifest_digest(&self) -> Digest32V2 {
         self.active_state_manifest_digest
     }
 
-    pub const fn deployment_generation(self) -> u64 {
+    pub const fn deployment_generation(&self) -> u64 {
         self.deployment_generation
     }
 
-    pub const fn envelope_nonce(self) -> Nonce32V2 {
+    pub const fn envelope_nonce(&self) -> Nonce32V2 {
         self.envelope_nonce
     }
 
-    pub const fn binding(self) -> ApprovalBindingV2 {
+    pub const fn binding(&self) -> ApprovalBindingV2 {
         self.binding
     }
 
-    pub const fn expected_principal(self) -> PrincipalIdV2 {
+    pub const fn expected_principal(&self) -> PrincipalIdV2 {
         self.expected_principal
     }
 
-    pub const fn decision_challenge(self) -> Nonce32V2 {
+    pub const fn decision_challenge(&self) -> Nonce32V2 {
         self.decision_challenge
     }
 
-    pub const fn display_projection_digest(self) -> Digest32V2 {
+    pub const fn display_projection_digest(&self) -> Digest32V2 {
         self.display_projection_digest
     }
 
-    pub const fn display_digest(self) -> Digest32V2 {
+    pub const fn display_digest(&self) -> Digest32V2 {
         self.display_digest
     }
 
-    pub const fn approvald_endpoint_identity(self) -> ServiceIdentityV2 {
+    pub fn display_bytes(&self) -> &[u8] {
+        &self.display_bytes
+    }
+
+    pub const fn display_declassification_provenance_digest(&self) -> Option<Digest32V2> {
+        self.display_declassification_provenance_digest
+    }
+
+    pub const fn approvald_endpoint_identity(&self) -> ServiceIdentityV2 {
         self.approvald_endpoint_identity
     }
 
-    pub const fn issued_at(self) -> UnixMillisV2 {
+    pub const fn issued_at(&self) -> UnixMillisV2 {
         self.issued_at
     }
 
-    pub const fn expires_at(self) -> UnixMillisV2 {
+    pub const fn expires_at(&self) -> UnixMillisV2 {
         self.expires_at
     }
 }
@@ -2413,7 +2447,7 @@ fn encode_unsigned_approval_envelope_v2(
 ) -> Result<Vec<u8>, ProtocolError> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
     encoder
-        .array(14)
+        .array(16)
         .and_then(|encoder| encoder.u16(2))
         .map_err(ProtocolError::malformed)?;
     encode_fixed(&mut encoder, &value.installation_id)?;
@@ -2428,6 +2462,13 @@ fn encode_unsigned_approval_envelope_v2(
     encode_fixed(&mut encoder, &value.expected_principal)?;
     encode_fixed(&mut encoder, &value.display_projection_digest)?;
     encode_fixed(&mut encoder, &value.display_digest)?;
+    encoder
+        .bytes(&value.display_bytes)
+        .map_err(ProtocolError::malformed)?;
+    encode_optional_fixed(
+        &mut encoder,
+        value.display_declassification_provenance_digest,
+    )?;
     encode_fixed(&mut encoder, &value.approvald_endpoint_identity)?;
     encode_fixed(&mut encoder, &value.issued_at)?;
     encode_fixed(&mut encoder, &value.expires_at)?;
@@ -2439,7 +2480,7 @@ fn decode_unsigned_approval_envelope_v2(
 ) -> Result<UnsignedApprovalEnvelopeV2, ProtocolError> {
     scan_single(bytes)?;
     let mut decoder = minicbor::Decoder::new(bytes);
-    expect_array(&mut decoder, 14)?;
+    expect_array(&mut decoder, 16)?;
     expect_schema_two(&mut decoder)?;
     let mut context = V2DecodeContext;
     let value = UnsignedApprovalEnvelopeV2::new(
@@ -2453,6 +2494,8 @@ fn decode_unsigned_approval_envelope_v2(
         decode_fixed(&mut decoder, &mut context)?,
         decode_fixed(&mut decoder, &mut context)?,
         decode_fixed(&mut decoder, &mut context)?,
+        decoder.bytes().map_err(ProtocolError::malformed)?.to_vec(),
+        decode_optional_fixed(&mut decoder, &mut context)?,
         decode_fixed(&mut decoder, &mut context)?,
         decode_fixed(&mut decoder, &mut context)?,
         decode_fixed(&mut decoder, &mut context)?,

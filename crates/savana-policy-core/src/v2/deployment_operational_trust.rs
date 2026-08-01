@@ -1,4 +1,8 @@
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(
+    test,
+    feature = "test-support",
+    feature = "macos-development-authority"
+))]
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::VerifyingKey;
 use savana_kernel_protocol::v2::{derive_ed25519_key_id_v2, Digest32V2, Ed25519KeyIdV2};
@@ -28,6 +32,7 @@ const OPERATIONAL_ROOT_SIGNATURE_DOMAIN_V2: &[u8] =
     b"savana.operational-trust-root-set.v2.signature\0";
 const DEPLOYMENT_ROOT_SET_DOMAIN_V2: &[u8] = b"savana.set.deployment-trust-root.v2\0";
 const ACTIVATION_ROOT_SET_DOMAIN_V2: &[u8] = b"savana.set.activation-trust-root.v2\0";
+const DECLASSIFICATION_ROOT_SET_DOMAIN_V2: &[u8] = b"savana.set.declassification-trust-root.v2\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u16)]
@@ -36,6 +41,7 @@ pub enum OperationalTrustRootPurposeV2 {
     RollbackAuthorization = 2,
     InstallationActivation = 3,
     InstallerOrMdm = 4,
+    DeclassificationAuthority = 5,
 }
 
 impl OperationalTrustRootPurposeV2 {
@@ -45,6 +51,7 @@ impl OperationalTrustRootPurposeV2 {
             2 => Some(Self::RollbackAuthorization),
             3 => Some(Self::InstallationActivation),
             4 => Some(Self::InstallerOrMdm),
+            5 => Some(Self::DeclassificationAuthority),
             _ => None,
         }
     }
@@ -126,6 +133,9 @@ pub enum OperationalTrustRootSetBindingV2 {
     Activation {
         activation_trust_root_set_digest: Digest32V2,
     },
+    Declassification {
+        declassification_trust_root_set_digest: Digest32V2,
+    },
 }
 
 impl OperationalTrustRootSetBindingV2 {
@@ -133,6 +143,7 @@ impl OperationalTrustRootSetBindingV2 {
         match self {
             Self::Deployment { .. } => 1,
             Self::Activation { .. } => 2,
+            Self::Declassification { .. } => 3,
         }
     }
 
@@ -144,6 +155,9 @@ impl OperationalTrustRootSetBindingV2 {
             Self::Activation {
                 activation_trust_root_set_digest,
             } => activation_trust_root_set_digest,
+            Self::Declassification {
+                declassification_trust_root_set_digest,
+            } => declassification_trust_root_set_digest,
         }
     }
 
@@ -154,6 +168,9 @@ impl OperationalTrustRootSetBindingV2 {
             }),
             2 => Some(Self::Activation {
                 activation_trust_root_set_digest: digest,
+            }),
+            3 => Some(Self::Declassification {
+                declassification_trust_root_set_digest: digest,
             }),
             _ => None,
         }
@@ -213,7 +230,11 @@ impl OperationalTrustRootSetV2 {
         })
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(
+        test,
+        feature = "test-support",
+        feature = "macos-development-authority"
+    ))]
     #[allow(clippy::too_many_arguments)]
     pub fn new_deployment_signed_for_test(
         product_family_digest: Digest32V2,
@@ -238,7 +259,11 @@ impl OperationalTrustRootSetV2 {
         )
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(
+        test,
+        feature = "test-support",
+        feature = "macos-development-authority"
+    ))]
     #[allow(clippy::too_many_arguments)]
     pub fn new_activation_signed_for_test(
         product_family_digest: Digest32V2,
@@ -263,7 +288,40 @@ impl OperationalTrustRootSetV2 {
         )
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(
+        test,
+        feature = "test-support",
+        feature = "macos-development-authority"
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_declassification_signed_for_test(
+        product_family_digest: Digest32V2,
+        root_set_sequence: u64,
+        previous_signed_digest: Option<Digest32V2>,
+        members: Vec<OperationalTrustRootSetItemV2>,
+        not_before_unix_ms: u64,
+        not_after_unix_ms: u64,
+        installer_signing_key: &SigningKey,
+        installer_key_epoch: u64,
+    ) -> Result<Self, DeploymentControlErrorV2> {
+        Self::new_signed_for_test(
+            3,
+            product_family_digest,
+            root_set_sequence,
+            previous_signed_digest,
+            members,
+            not_before_unix_ms,
+            not_after_unix_ms,
+            installer_signing_key,
+            installer_key_epoch,
+        )
+    }
+
+    #[cfg(any(
+        test,
+        feature = "test-support",
+        feature = "macos-development-authority"
+    ))]
     #[allow(clippy::too_many_arguments)]
     fn new_signed_for_test(
         binding_tag: u16,
@@ -350,6 +408,9 @@ impl OperationalTrustRootSetV2 {
             }
             OperationalTrustRootSetBindingV2::Activation { .. } => {
                 ClosedSecurityDomainV2::ActivationTrustRootSet
+            }
+            OperationalTrustRootSetBindingV2::Declassification { .. } => {
+                ClosedSecurityDomainV2::DeclassificationTrustRootSet
             }
         };
         if identity.domain() != expected_domain
@@ -543,6 +604,11 @@ fn validate_payload(
             .members
             .iter()
             .all(|member| member.purpose == OperationalTrustRootPurposeV2::InstallationActivation),
+        OperationalTrustRootSetBindingV2::Declassification { .. } => {
+            value.members.iter().all(|member| {
+                member.purpose == OperationalTrustRootPurposeV2::DeclassificationAuthority
+            })
+        }
     };
     if !permitted
         || compute_member_set_digest(value.binding.tag(), &value.members)?
@@ -560,6 +626,7 @@ fn compute_member_set_digest(
     let domain = match binding_tag {
         1 => DEPLOYMENT_ROOT_SET_DOMAIN_V2,
         2 => ACTIVATION_ROOT_SET_DOMAIN_V2,
+        3 => DECLASSIFICATION_ROOT_SET_DOMAIN_V2,
         _ => return Err(DeploymentControlErrorV2::InvalidOperationalTrustRootSet),
     };
     let count = u64::try_from(members.len())

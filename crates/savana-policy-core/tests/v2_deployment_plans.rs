@@ -267,11 +267,13 @@ fn deployment_hard_limits_are_one_canonical_protocol_lock() {
             4_096,
             16_777_216,
             255,
+            64,
+            16,
         ]
     );
     assert_eq!(
         limits.digest().as_bytes(),
-        &decode_hex_32("8518c18736a469cf07432c4f7921ae08c5c684f1052ce87fff5b4deec9a7d79c")
+        &decode_hex_32("b2154f432837f68edfce91a3eb33051dc34ae8ecb8d16eb1518e78a3314093c4")
     );
 }
 

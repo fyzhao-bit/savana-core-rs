@@ -97,6 +97,7 @@ fn dispatch_is_a_typed_signed_core_and_hpke_envelope() {
     .unwrap();
     let payload = SealedExecutionEnvelopePayloadV2::new(
         core,
+        Digest32V2::new([32; 32]),
         FixedBytes32V2::new([33; 32]),
         BoundedCiphertextV2::new(vec![34; 64]).unwrap(),
     )

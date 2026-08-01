@@ -43,13 +43,14 @@ mod native {
     use savana_kernel_protocol::StableCode;
     use savana_policy_core::v2::{
         activate_internal_validator_registry, ActiveToolRegistryV2, ContextFieldV2,
-        DurableG4StateV2, DurableStateNamespaceV2, FilesystemServiceObservationConfigV2,
-        InternalValidatorBuildV2, InternalValidatorDeclarationV2,
-        InternalValidatorImplementationKindV2, OntologyExprV2, OntologyOperandV2, OntologyScalarV2,
-        SignedToolDescriptorV2, VerifiedInternalValidatorRegistryV2,
-        VerifiedManifestToolConstraintSetV2, VerifiedManifestToolConstraintV2,
-        VerifiedPolicyDispositionV2, VerifiedPolicyToolActivationV2, VerifiedPolicyToolSetV2,
-        VerifiedRegistryPublisherV2, VerifiedToolRegistryV2,
+        DeclassificationRuleSetV2, DurableG4StateV2, DurableStateNamespaceV2,
+        FilesystemServiceObservationConfigV2, InstallerOrMdmVerifierV2, InternalValidatorBuildV2,
+        InternalValidatorDeclarationV2, InternalValidatorImplementationKindV2, OntologyExprV2,
+        OntologyOperandV2, OntologyScalarV2, OperationalTrustRootSetV2, SignedToolDescriptorV2,
+        VerifiedInternalValidatorRegistryV2, VerifiedManifestToolConstraintSetV2,
+        VerifiedManifestToolConstraintV2, VerifiedPolicyDispositionV2,
+        VerifiedPolicyToolActivationV2, VerifiedPolicyToolSetV2, VerifiedRegistryPublisherV2,
+        VerifiedToolRegistryV2,
     };
     use serde::Deserialize;
     use sha2::{Digest as _, Sha256};
@@ -73,6 +74,7 @@ mod native {
     };
     use crate::v2_core_services::CoreKernelRuntimeServicesV2;
     use crate::v2_data_plane::ProductionKernelDataPlaneV2;
+    use crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2;
     use crate::v2_dispatch::{KernelServiceDeploymentV2, KernelServiceDispatcherV2};
     use crate::v2_edge::VerifiedServiceEdgeV2;
     use crate::v2_executor_client::SuiteOneKernelExecutorClientV2;
@@ -144,6 +146,7 @@ mod native {
     const EXECUTOR_CLIENT_SEED_CREDENTIAL_V2: &str = "executor-kernel-v2.seed";
     const MAX_BOOTSTRAP_BYTES_V2: usize = 128 * 1024;
     const MAX_ARTIFACT_BYTES_V2: usize = 256 * 1024 * 1024;
+    const MAX_DECLASSIFICATION_OBJECT_BYTES_V2: usize = 1024 * 1024;
     const MAX_SERVICE_COUNT_V2: usize = 5;
     const VAULT_ANCHOR_MAC_DOMAIN_V2: &[u8] = b"SAVANA_VAULT_ANCHOR_MAC_V2\0";
     const AGENT_ANCHOR_MAC_DOMAIN_V2: &[u8] = b"SAVANA_AGENT_AUTHORITY_ANCHOR_MAC_V2\0";
@@ -170,6 +173,9 @@ mod native {
             allow(dead_code)
         )]
         effect_ledger_projection_path: PathBuf,
+        declassification_installer_root_path: PathBuf,
+        declassification_trust_root_set_path: PathBuf,
+        declassification_rule_set_path: PathBuf,
         input_runtime_assets_path: PathBuf,
         input_runtime_publisher_key_id: String,
         input_runtime_publisher_public_key: String,
@@ -195,6 +201,14 @@ mod native {
         policy_runtime: PolicyRuntimeDtoV2,
         parser_trust: ParserTrustDtoV2,
         services: Vec<FilesystemServiceObservationConfigV2>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DeclassificationInstallerRootDtoV2 {
+        key_id: String,
+        key_epoch: u64,
+        public_key: String,
     }
 
     #[derive(Deserialize)]
@@ -318,6 +332,7 @@ mod native {
         g4_store_id: Digest32V2,
         policy_allowed_effects: savana_policy_core::v2::EffectSetV2,
         logical_run_ttl_ms: u64,
+        declassification_rule_set: ActiveDeclassificationRuleSetV2,
         policy: LoadedPolicyRuntimeV2,
         parser_trust: KernelParserTrustV2,
     }
@@ -582,6 +597,7 @@ mod native {
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
         let mut policy_runtime = KernelG4G5RuntimeV2::from_verified_policy(
+            runtime_material.declassification_rule_set.clone(),
             runtime_material.policy.active_tools,
             runtime_material.policy.validators,
             g4_durable,
@@ -640,6 +656,7 @@ mod native {
         let data_plane = ProductionKernelDataPlaneV2::new(
             input_runtime,
             vault,
+            runtime_material.declassification_rule_set,
             startup.installation_id(),
             ProducerIdentityV2::new(*ingressd_identity.as_bytes()),
             runtime_material.agentd_boot_id,
@@ -746,7 +763,7 @@ mod native {
             .verify_loaded_service_config_v2(ClosedServiceIdV2::Kerneld, &bootstrap_bytes)
             .map_err(|_| StableCode::KernelUnavailable)?;
         let keys = load_key_material(&startup)?;
-        let runtime = load_runtime_material(&bootstrap)?;
+        let runtime = load_runtime_material(&bootstrap, &startup)?;
         Ok((startup, keys, runtime))
     }
 
@@ -792,6 +809,9 @@ mod native {
             &bootstrap.signed_manifest_path,
             &bootstrap.effect_ledger_projection_path,
             &bootstrap.input_runtime_assets_path,
+            &bootstrap.declassification_installer_root_path,
+            &bootstrap.declassification_trust_root_set_path,
+            &bootstrap.declassification_rule_set_path,
             &bootstrap.vault_state_path,
             &bootstrap.vault_rollback_anchor_path,
             &bootstrap.agent_authority_state_path,
@@ -951,7 +971,10 @@ mod native {
         })
     }
 
-    fn load_runtime_material(bootstrap: &BootstrapDtoV2) -> Result<RuntimeMaterialV2, StableCode> {
+    fn load_runtime_material(
+        bootstrap: &BootstrapDtoV2,
+        startup: &VerifiedDaemonStartupV2,
+    ) -> Result<RuntimeMaterialV2, StableCode> {
         if !bootstrap.vault_state_path.is_absolute()
             || !bootstrap.vault_rollback_anchor_path.is_absolute()
             || !bootstrap.agent_authority_state_path.is_absolute()
@@ -967,6 +990,8 @@ mod native {
             MAX_ARTIFACT_BYTES_V2,
             None,
         )?;
+        let declassification_rule_set =
+            load_declassification_rule_set(bootstrap, startup.declassification_rule_set_digest())?;
         let input_runtime_publisher_key_id =
             Ed25519KeyIdV2::new(decode_hex_32(&bootstrap.input_runtime_publisher_key_id)?);
         let input_runtime_publisher_public_key =
@@ -1058,9 +1083,58 @@ mod native {
             .filter(|effects| *effects != savana_policy_core::v2::EffectSetV2::EMPTY)
             .ok_or(StableCode::KernelUnavailable)?,
             logical_run_ttl_ms: bootstrap.logical_run_ttl_ms,
+            declassification_rule_set,
             policy,
             parser_trust,
         })
+    }
+
+    fn load_declassification_rule_set(
+        bootstrap: &BootstrapDtoV2,
+        expected_signed_digest: Digest32V2,
+    ) -> Result<ActiveDeclassificationRuleSetV2, StableCode> {
+        if !bootstrap.declassification_installer_root_path.is_absolute()
+            || !bootstrap.declassification_trust_root_set_path.is_absolute()
+            || !bootstrap.declassification_rule_set_path.is_absolute()
+        {
+            return Err(StableCode::KernelUnavailable);
+        }
+        let root_material = read_regular_file(
+            &bootstrap.declassification_installer_root_path,
+            4096,
+            Some((0, 0, 0o444)),
+        )?;
+        let root_material: DeclassificationInstallerRootDtoV2 =
+            serde_json::from_slice(&root_material).map_err(|_| StableCode::KernelUnavailable)?;
+        let verifier = InstallerOrMdmVerifierV2::new(
+            Ed25519KeyIdV2::new(decode_hex_32(&root_material.key_id)?),
+            root_material.key_epoch,
+            decode_hex_32(&root_material.public_key)?,
+        )
+        .map_err(|_| StableCode::KernelUnavailable)?;
+        let root_bytes = read_regular_file(
+            &bootstrap.declassification_trust_root_set_path,
+            MAX_DECLASSIFICATION_OBJECT_BYTES_V2,
+            None,
+        )?;
+        let root_set = OperationalTrustRootSetV2::from_canonical_bytes(&root_bytes, &verifier)
+            .map_err(|_| StableCode::KernelUnavailable)?;
+        let rule_bytes = read_regular_file(
+            &bootstrap.declassification_rule_set_path,
+            MAX_DECLASSIFICATION_OBJECT_BYTES_V2,
+            None,
+        )?;
+        let rules = DeclassificationRuleSetV2::from_canonical_bytes(
+            &rule_bytes,
+            &root_set,
+            current_unix_millis()?.get(),
+        )
+        .map_err(|_| StableCode::KernelUnavailable)?;
+        if rules.signed_digest() != expected_signed_digest {
+            return Err(StableCode::KernelUnavailable);
+        }
+        ActiveDeclassificationRuleSetV2::new(rules, Arc::new(root_set))
+            .map_err(|_| StableCode::KernelUnavailable)
     }
 
     fn load_policy_runtime(

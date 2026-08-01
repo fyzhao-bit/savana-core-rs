@@ -178,11 +178,11 @@ pub use kernel_agent_success::{
     CommitPlannerValueResponseV2, DispatchExecutionResponseV2, DispatchReleaseResponseV2,
     EvaluateToolCallResponseV2, GetExecutionStatusResponseV2, GetReleaseStatusResponseV2,
     PlaceholderViewV2, PlannerAbstractRelationV2, PlannerAbstractSlotV2, PlannerEnvelopeV2,
-    PlannerIntentKindV2, PlannerLimitsV2, PlannerSlotCardinalityV2, PlannerSlotConfidentialityV2,
-    PreparePlannerCallResponseV2, PrepareReleaseResponseV2, ProposeToolCallResponseV2,
-    PublicDecisionTraceV2, PublicDispatchAcceptedStateV2, PublicDispatchCompletionV2,
-    PublicExecutionStatusV2, ReadAgentViewResponseV2, ResumeCommittedAgentAuthenticationResponseV2,
-    RevokeVaultResponseV2, VaultPublicStateV2,
+    PlannerIntentKindV2, PlannerLimitsV2, PlannerPurposeV2, PlannerSlotCardinalityV2,
+    PlannerSlotConfidentialityV2, PreparePlannerCallResponseV2, PrepareReleaseResponseV2,
+    ProposeToolCallResponseV2, PublicDecisionTraceV2, PublicDispatchAcceptedStateV2,
+    PublicDispatchCompletionV2, PublicExecutionStatusV2, ReadAgentViewResponseV2,
+    ResumeCommittedAgentAuthenticationResponseV2, RevokeVaultResponseV2, VaultPublicStateV2,
 };
 pub use kernel_executor::{
     decode_kernel_executor_operation_v2, decode_signed_sealed_execution_envelope_v2,
@@ -288,7 +288,7 @@ pub use service::{
     AgentControlRequestEnvelopeV2, AgentControlResponseEnvelopeV2, AgentControlResponseV2,
 };
 pub use signed::{
-    decode_signed_agent_authentication_attempt_closure_proof_v2,
+    approval_display_digest_v2, decode_signed_agent_authentication_attempt_closure_proof_v2,
     decode_signed_agent_authentication_closure_descriptor_v2, decode_signed_approval_envelope_v2,
     decode_signed_approval_settlement_v2, decode_signed_ui_authentication_envelope_v2,
     decode_signed_ui_authentication_settlement_v2,

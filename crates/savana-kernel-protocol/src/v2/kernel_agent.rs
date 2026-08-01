@@ -9,12 +9,13 @@ use super::{
     ArgumentNameV2, BootIdV2, Digest32V2, DisplayProjectionIdV2, DurableTaskIdV2, Ed25519KeyIdV2,
     Ed25519SignatureV2, ExecutionHandleV2, ExecutionTicketHandleV2, ExecutorIdentityV2,
     KernelAgentViewCursorV2, MaskedDocumentHandleV2, NewTaskPreparationHandleV2, Nonce32V2,
-    PendingReleaseHandleV2, PendingToolCallHandleV2, PlanStepHandleV2, PlannerRouteIdV2,
-    PlannerSlotRefV2, PlannerTicketHandleV2, PolicyConstantIdV2, ProjectionIdV2, ReleaseHandleV2,
-    ReleaseKernelApprovalHandleV2, ReleaseTicketHandleV2, RunHandleV2, ServiceIdentityV2,
+    PendingReleaseHandleV2, PendingToolCallHandleV2, PlanStepHandleV2, PlannerIntentKindV2,
+    PlannerLimitsV2, PlannerPurposeV2, PlannerRouteIdV2, PlannerSlotRefV2, PlannerTicketHandleV2,
+    PolicyConstantIdV2, ProjectionIdV2, ReleaseHandleV2, ReleaseKernelApprovalHandleV2,
+    ReleaseTicketHandleV2, RunHandleV2, ServiceIdentityV2,
     SignedAgentAuthenticationAttemptClosureProofV2, SignedApprovalSettlementV2,
-    SignedUiAuthenticationSettlementV2, ToolClassIdV2, ToolHandleV2, ToolKernelApprovalHandleV2,
-    UiAuthenticationPurposeV2, UnixMillisV2, ValueHandleV2,
+    SignedUiAuthenticationSettlementV2, StaticTemplateIdV2, ToolClassIdV2, ToolHandleV2,
+    ToolKernelApprovalHandleV2, UiAuthenticationPurposeV2, UnixMillisV2, ValueHandleV2,
 };
 
 const MAX_AGENT_VIEW_RESPONSE_BYTES_V2: u32 = 8 * 1024 * 1024;
@@ -899,6 +900,10 @@ impl GetAgentSessionStatusRequestV2 {
 pub struct PreparePlannerCallRequestV2 {
     run: RunHandleV2,
     planner_route: PlannerRouteIdV2,
+    task_template: StaticTemplateIdV2,
+    intent: PlannerIntentKindV2,
+    purpose: PlannerPurposeV2,
+    limits: PlannerLimitsV2,
     prompt_values: Vec<ValueHandleV2>,
 }
 
@@ -906,14 +911,25 @@ impl PreparePlannerCallRequestV2 {
     pub fn new(
         run: RunHandleV2,
         planner_route: PlannerRouteIdV2,
+        task_template: StaticTemplateIdV2,
+        intent: PlannerIntentKindV2,
+        purpose: PlannerPurposeV2,
+        limits: PlannerLimitsV2,
         prompt_values: Vec<ValueHandleV2>,
     ) -> Result<Self, ProtocolError> {
-        if planner_route.get() == 0 || prompt_values.len() > MAX_PROMPT_VALUES_V2 {
+        if planner_route.get() == 0
+            || task_template.get() == 0
+            || prompt_values.len() > MAX_PROMPT_VALUES_V2
+        {
             return Err(malformed());
         }
         Ok(Self {
             run,
             planner_route,
+            task_template,
+            intent,
+            purpose,
+            limits,
             prompt_values,
         })
     }
@@ -924,6 +940,22 @@ impl PreparePlannerCallRequestV2 {
 
     pub const fn planner_route(&self) -> PlannerRouteIdV2 {
         self.planner_route
+    }
+
+    pub const fn task_template(&self) -> StaticTemplateIdV2 {
+        self.task_template
+    }
+
+    pub const fn intent(&self) -> PlannerIntentKindV2 {
+        self.intent
+    }
+
+    pub const fn purpose(&self) -> PlannerPurposeV2 {
+        self.purpose
+    }
+
+    pub const fn limits(&self) -> PlannerLimitsV2 {
+        self.limits
     }
 
     pub fn prompt_values(&self) -> &[ValueHandleV2] {
@@ -1241,11 +1273,19 @@ pub fn encode_kernel_agent_operation_v2(
             encoder
                 .array(2)
                 .and_then(|encoder| encoder.u16(23))
-                .and_then(|encoder| encoder.array(3))
+                .and_then(|encoder| encoder.array(7))
                 .map_err(ProtocolError::malformed)?;
             minicbor::Encode::encode(&request.run, &mut encoder, &mut ())
                 .map_err(ProtocolError::malformed)?;
             minicbor::Encode::encode(&request.planner_route, &mut encoder, &mut ())
+                .map_err(ProtocolError::malformed)?;
+            minicbor::Encode::encode(&request.task_template, &mut encoder, &mut ())
+                .map_err(ProtocolError::malformed)?;
+            minicbor::Encode::encode(&request.intent, &mut encoder, &mut ())
+                .map_err(ProtocolError::malformed)?;
+            minicbor::Encode::encode(&request.purpose, &mut encoder, &mut ())
+                .map_err(ProtocolError::malformed)?;
+            minicbor::Encode::encode(&request.limits, &mut encoder, &mut ())
                 .map_err(ProtocolError::malformed)?;
             encoder
                 .array(u64::try_from(request.prompt_values.len()).map_err(|_| malformed())?)
@@ -1487,15 +1527,27 @@ pub fn decode_kernel_agent_operation_v2(
             ))
         }
         23 => {
-            expect_array(&mut decoder, 3)?;
+            expect_array(&mut decoder, 7)?;
             let run = minicbor::Decode::decode(&mut decoder, &mut context)
                 .map_err(ProtocolError::from_typed_decode)?;
             let planner_route = minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?;
+            let task_template = minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?;
+            let intent = minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?;
+            let purpose = minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?;
+            let limits = minicbor::Decode::decode(&mut decoder, &mut context)
                 .map_err(ProtocolError::from_typed_decode)?;
             let prompt_values = decode_value_handles(&mut decoder, &mut context)?;
             KernelAgentOperationV2::PreparePlannerCall(PreparePlannerCallRequestV2::new(
                 run,
                 planner_route,
+                task_template,
+                intent,
+                purpose,
+                limits,
                 prompt_values,
             )?)
         }

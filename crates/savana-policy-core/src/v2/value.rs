@@ -203,12 +203,15 @@ impl KernelValueV2 {
     /// visitor rejects. Used by the G2 leak gate, which must see every string a
     /// declassification would hand onward, not just a top-level one — text
     /// nested inside a list or an object field is exactly as readable to the
-    /// recipient. `Bytes` leaves are deliberately not visited: the gate's
-    /// patterns are defined over CPython `str`, and treating arbitrary bytes as
-    /// text would mean guessing an encoding inside a security check.
+    /// recipient. Byte leaves are scanned through a lossless-for-ASCII UTF-8
+    /// projection. Canonical CBOR and pre-seal envelopes are byte values, and
+    /// ignoring them would make their declassification checks ceremonial;
+    /// replacement characters preserve every ASCII blocklist/PII sequence
+    /// while keeping malformed binary fail-safe and deterministic.
     pub(crate) fn every_text_leaf(&self, visit: &mut impl FnMut(&str) -> bool) -> bool {
         match &self.0 {
             KernelValueKindV2::Text(text) => visit(text.as_str()),
+            KernelValueKindV2::Bytes(bytes) => visit(String::from_utf8_lossy(bytes).as_ref()),
             KernelValueKindV2::List(values) => {
                 values.iter().all(|value| value.every_text_leaf(visit))
             }
@@ -218,7 +221,6 @@ impl KernelValueV2 {
             KernelValueKindV2::Null
             | KernelValueKindV2::Bool(_)
             | KernelValueKindV2::I64(_)
-            | KernelValueKindV2::Bytes(_)
             | KernelValueKindV2::InternalSlot(_) => true,
         }
     }

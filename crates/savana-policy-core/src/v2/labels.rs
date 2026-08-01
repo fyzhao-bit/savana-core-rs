@@ -202,6 +202,24 @@ closed_bit_set_v2!(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum G3Error {
+    #[error("G3 declassification rule set is outside its validity window")]
+    RuleSetExpired,
+    #[error("G3 declassification has no authorizing rule")]
+    NoAuthorizingRule,
+    #[error("G3 declassification rule is outside its validity window")]
+    RuleExpired,
+    #[error("G3 declassification implementation identity does not match")]
+    ImplementationMismatch,
+    #[error("G3 declassification reader is not authorized")]
+    ReaderNotAuthorized,
+    #[error("G3 final-release consent is missing")]
+    ConsentMissing,
+    #[error("G3 final-release consent is stale")]
+    ConsentExpired,
+    #[error("G3 final-release consent scope does not match")]
+    ConsentScopeMismatch,
+    #[error("G3 final-release consent was already consumed")]
+    ConsentConsumed,
     #[error("G3 declassification blocked: value carries blocklisted content")]
     LeakGateBlockedContent,
     #[error("G3 declassification blocked: value still carries unmasked personal data")]

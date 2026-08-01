@@ -212,6 +212,7 @@ pub struct DurableDeploymentTransactionCoreStoreV2 {
     transaction_authorization_verifier: DeploymentAuthorizationVerifierV2,
     deployment_trust_root_set: Option<OperationalTrustRootSetV2>,
     activation_trust_root_set: Option<OperationalTrustRootSetV2>,
+    declassification_trust_root_set: Option<OperationalTrustRootSetV2>,
     release_trust_root_set: ReleaseTrustRootSetV2,
 }
 
@@ -237,6 +238,7 @@ impl DurableDeploymentTransactionCoreStoreV2 {
         transaction_authorization_verifier: DeploymentAuthorizationVerifierV2,
         deployment_trust_root_set: OperationalTrustRootSetV2,
         activation_trust_root_set: OperationalTrustRootSetV2,
+        declassification_trust_root_set: OperationalTrustRootSetV2,
         release_trust_root_set: ReleaseTrustRootSetV2,
     ) -> Result<Self, DeploymentControlErrorV2> {
         Self::open_anchored(
@@ -248,6 +250,7 @@ impl DurableDeploymentTransactionCoreStoreV2 {
             transaction_authorization_verifier,
             Some(deployment_trust_root_set),
             Some(activation_trust_root_set),
+            Some(declassification_trust_root_set),
             release_trust_root_set,
         )
     }
@@ -272,6 +275,7 @@ impl DurableDeploymentTransactionCoreStoreV2 {
             transaction_authorization_verifier,
             None,
             None,
+            None,
             release_trust_root_set,
         )
     }
@@ -285,6 +289,7 @@ impl DurableDeploymentTransactionCoreStoreV2 {
         transaction_authorization_verifier: DeploymentAuthorizationVerifierV2,
         deployment_trust_root_set: OperationalTrustRootSetV2,
         activation_trust_root_set: OperationalTrustRootSetV2,
+        declassification_trust_root_set: OperationalTrustRootSetV2,
         release_trust_root_set: ReleaseTrustRootSetV2,
     ) -> Result<Self, DeploymentControlErrorV2> {
         let metadata = fs::symlink_metadata(directory)
@@ -298,6 +303,7 @@ impl DurableDeploymentTransactionCoreStoreV2 {
             transaction_authorization_verifier,
             Some(deployment_trust_root_set),
             Some(activation_trust_root_set),
+            Some(declassification_trust_root_set),
             release_trust_root_set,
         )
     }
@@ -312,6 +318,7 @@ impl DurableDeploymentTransactionCoreStoreV2 {
         transaction_authorization_verifier: DeploymentAuthorizationVerifierV2,
         deployment_trust_root_set: Option<OperationalTrustRootSetV2>,
         activation_trust_root_set: Option<OperationalTrustRootSetV2>,
+        declassification_trust_root_set: Option<OperationalTrustRootSetV2>,
         release_trust_root_set: ReleaseTrustRootSetV2,
     ) -> Result<Self, DeploymentControlErrorV2> {
         if !directory.is_absolute() {
@@ -358,6 +365,7 @@ impl DurableDeploymentTransactionCoreStoreV2 {
             transaction_authorization_verifier,
             deployment_trust_root_set,
             activation_trust_root_set,
+            declassification_trust_root_set,
             release_trust_root_set,
         })
     }
@@ -438,8 +446,9 @@ impl DurableDeploymentTransactionCoreStoreV2 {
         match (
             self.deployment_trust_root_set.as_ref(),
             self.activation_trust_root_set.as_ref(),
+            self.declassification_trust_root_set.as_ref(),
         ) {
-            (Some(deployment), Some(activation)) => {
+            (Some(deployment), Some(activation), Some(declassification)) => {
                 DurableDeploymentTransactionCoreV2::from_canonical_bytes_with_complete_trust(
                     bytes,
                     &self.activation_verifier,
@@ -447,11 +456,12 @@ impl DurableDeploymentTransactionCoreStoreV2 {
                     &self.transaction_authorization_verifier,
                     deployment,
                     activation,
+                    declassification,
                     &self.release_trust_root_set,
                 )
             }
             #[cfg(any(test, feature = "test-support"))]
-            (None, None) => DurableDeploymentTransactionCoreV2::from_canonical_bytes(
+            (None, None, None) => DurableDeploymentTransactionCoreV2::from_canonical_bytes(
                 bytes,
                 &self.activation_verifier,
                 &self.rollback_grant_verifier,

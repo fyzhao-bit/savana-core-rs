@@ -38,8 +38,8 @@ mod implementation {
         AgentUiAuthenticationSettlementTransferCapabilityV2, BootIdV2, BootstrapKindV2, Digest32V2,
         DisplayProjectionIdV2, Ed25519KeyIdV2, EndpointRoleV2, ExecutorIdentityV2,
         FixedHttpErrorV2, FixedHttpRouteV2, FixedHttpServiceV2, PeerIdentityBindingV2,
-        PlannerRouteIdV2, ProjectionIdV2, ServiceIdentityV2, UnixMillisV2,
-        SAVANA_BROWSER_SCRIPT_V2,
+        PlannerIntentKindV2, PlannerLimitsV2, PlannerRouteIdV2, ProjectionIdV2, ServiceIdentityV2,
+        StaticTemplateIdV2, UnixMillisV2, SAVANA_BROWSER_SCRIPT_V2,
     };
     #[cfg(target_os = "linux")]
     use savana_platform_identity::{
@@ -152,6 +152,12 @@ mod implementation {
         planner_port: u16,
         planner_server_spki_sha256: String,
         planner_route_id: u32,
+        planner_template_id: u32,
+        planner_intent_tag: u16,
+        planner_maximum_steps: u16,
+        planner_maximum_dependencies_per_step: u16,
+        planner_maximum_arguments_per_step: u16,
+        planner_maximum_encoded_plan_bytes: u32,
         release_executor_identity: String,
         release_destination_projection: u32,
         release_display_projection: u32,
@@ -415,6 +421,7 @@ mod implementation {
         )
         .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
         if bootstrap.planner_route_id == 0
+            || bootstrap.planner_template_id == 0
             || bootstrap.release_destination_projection == 0
             || bootstrap.release_display_projection == 0
         {
@@ -426,6 +433,21 @@ mod implementation {
             approval_client,
             planner,
             PlannerRouteIdV2::new(bootstrap.planner_route_id),
+            StaticTemplateIdV2::new(bootstrap.planner_template_id),
+            match bootstrap.planner_intent_tag {
+                1 => PlannerIntentKindV2::SendMessage,
+                2 => PlannerIntentKindV2::Search,
+                3 => PlannerIntentKindV2::SummarizeDocument,
+                4 => PlannerIntentKindV2::StoreRecord,
+                _ => return Err(AgentdDaemonErrorV2::DeploymentUnavailable),
+            },
+            PlannerLimitsV2::new(
+                bootstrap.planner_maximum_steps,
+                bootstrap.planner_maximum_dependencies_per_step,
+                bootstrap.planner_maximum_arguments_per_step,
+                bootstrap.planner_maximum_encoded_plan_bytes,
+            )
+            .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?,
             ExecutorIdentityV2::new(
                 decode_hex_32_v2(&bootstrap.release_executor_identity)
                     .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?,

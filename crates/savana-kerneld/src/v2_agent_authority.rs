@@ -4,25 +4,26 @@ use ed25519_dalek::SigningKey;
 use getrandom::getrandom;
 use hkdf::Hkdf;
 use savana_kernel_protocol::v2::{
-    derive_ed25519_key_id_v2, ActionIntentCurrentStateV2, ActionIntentHandleV2, ActionIntentIdV2,
-    ActiveToolViewV2, AgentAuthenticationClosureEvidenceV2, AgentSessionHandleV2,
-    AgentSessionStatusV2, AgentUiAuthenticationPreparationHandleV2, AgentUiAuthorizationHandleV2,
-    ApprovalBindingV2, ApprovalDecisionV2, ApprovalPurposeV2, AuthorityHandleKeyV2,
-    AuthorizeToolCallResponseV2, BootIdV2, BoundedCiphertextV2, CancelKernelTaskRequestV2,
-    CancelKernelTaskResponseV2, ClaimAgentSessionRequestV2, ClaimAgentSessionResponseV2,
-    CommitPlannerValueRequestV2, CommitPlannerValueResponseV2, Digest32V2,
-    DispatchCoreV2 as ProtocolDispatchCoreV2, DispatchExecutionResponseV2, DispatchRequestV2,
-    DispatchSubjectV2 as ProtocolDispatchSubjectV2, DurableRunIdV2, DurableTaskIdV2,
-    Ed25519KeyIdV2, EvaluateToolCallRequestV2, EvaluateToolCallResponseV2, ExecutionHandleV2,
-    ExecutionStatusTargetV2, ExecutionTicketHandleV2, ExecutorIdentityV2, ExecutorStatusV2,
-    FixedBytes32V2, FixedOriginV2, GetAgentSessionStatusRequestV2, GetAgentSessionStatusResponseV2,
-    GetExecutionStatusRequestV2, GetExecutionStatusResponseV2, GetKernelTaskStatusRequestV2,
-    GetKernelTaskStatusResponseV2, GetReleaseStatusRequestV2, GetReleaseStatusResponseV2,
-    HpkeX25519KeyIdV2, KernelIngressBootstrapTransferCapabilityV2, MaskedDocumentHandleV2,
-    NewTaskPreparationHandleV2, Nonce32V2, PendingReleaseHandleV2, PendingToolCallHandleV2,
-    PlanRevisionDigestV2, PlanStepHandleV2, PlannerAbstractSlotV2, PlannerEnvelopeV2,
-    PlannerIntentKindV2, PlannerLimitsV2, PlannerSlotCardinalityV2, PlannerSlotConfidentialityV2,
-    PlannerSlotRefV2, PlannerTicketHandleV2, PrepareAgentUiAuthenticationRequestV2,
+    approval_display_digest_v2, derive_ed25519_key_id_v2, ActionIntentCurrentStateV2,
+    ActionIntentHandleV2, ActionIntentIdV2, ActiveToolViewV2, AgentAuthenticationClosureEvidenceV2,
+    AgentSessionHandleV2, AgentSessionStatusV2, AgentUiAuthenticationPreparationHandleV2,
+    AgentUiAuthorizationHandleV2, ApprovalBindingV2, ApprovalDecisionV2, ApprovalPurposeV2,
+    AuthorityHandleKeyV2, AuthorizeToolCallResponseV2, BootIdV2, BoundedCiphertextV2,
+    CancelKernelTaskRequestV2, CancelKernelTaskResponseV2, ClaimAgentSessionRequestV2,
+    ClaimAgentSessionResponseV2, CommitPlannerValueRequestV2, CommitPlannerValueResponseV2,
+    Digest32V2, DispatchCoreV2 as ProtocolDispatchCoreV2, DispatchExecutionResponseV2,
+    DispatchRequestV2, DispatchSubjectV2 as ProtocolDispatchSubjectV2, DurableRunIdV2,
+    DurableTaskIdV2, Ed25519KeyIdV2, EvaluateToolCallRequestV2, EvaluateToolCallResponseV2,
+    ExecutionHandleV2, ExecutionStatusTargetV2, ExecutionTicketHandleV2, ExecutorIdentityV2,
+    ExecutorStatusV2, FixedBytes32V2, FixedOriginV2, GetAgentSessionStatusRequestV2,
+    GetAgentSessionStatusResponseV2, GetExecutionStatusRequestV2, GetExecutionStatusResponseV2,
+    GetKernelTaskStatusRequestV2, GetKernelTaskStatusResponseV2, GetReleaseStatusRequestV2,
+    GetReleaseStatusResponseV2, HpkeX25519KeyIdV2, KernelIngressBootstrapTransferCapabilityV2,
+    MaskedDocumentHandleV2, NewTaskPreparationHandleV2, Nonce32V2, PendingReleaseHandleV2,
+    PendingToolCallHandleV2, PlanRevisionDigestV2, PlanStepHandleV2, PlannerAbstractSlotV2,
+    PlannerEnvelopeV2, PlannerIntentKindV2, PlannerLimitsV2, PlannerPurposeV2, PlannerRouteIdV2,
+    PlannerSlotCardinalityV2, PlannerSlotConfidentialityV2, PlannerSlotRefV2,
+    PlannerTicketHandleV2, PrepareAgentUiAuthenticationRequestV2,
     PrepareAgentUiAuthenticationResponseV2, PrepareFollowupIngressRequestV2,
     PrepareFollowupIngressResponseV2, PrepareNewIngressRequestV2, PrepareNewIngressResponseV2,
     PreparePlannerCallRequestV2, PreparePlannerCallResponseV2, PrepareReleaseRequestV2,
@@ -44,14 +45,15 @@ use savana_kernel_protocol::v2::{
 };
 use savana_policy_core::v2::{
     decode_provenance_record_v2, encode_provenance_record_v2, provenance_digest_v2,
-    value_digest_v2, ActiveToolRegistryV2, ClosedCardinalityV2, DispatchQuotaSubjectV2,
-    DurableG4StateV2, EffectSetV2, G5DecisionBranchV2, KernelPreparedDispatchV2, KernelValueV2,
+    value_digest_v2, ActiveToolRegistryV2, ClosedCardinalityV2, ClosedDeclassificationPurposeV2,
+    DeclassificationTransitionV2, DispatchQuotaSubjectV2, DurableG4StateV2, EffectSetV2,
+    G5DecisionBranchV2, HandoffJudgmentV2, IdentifierV2, KernelPreparedDispatchV2, KernelValueV2,
     OntologyExprV2, PlannerSlotConfidentialityV2 as PolicySlotConfidentialityV2,
-    ProvenanceRecordV2, ResolvedExecutionTicketV2, StoredBindingResolverV2, StoredValueRecordV2,
-    VerifiedActionIntentMaterialV2, VerifiedEffectGateLeaseV2, VerifiedInternalSlotMaterialV2,
-    VerifiedInternalValidatorRegistryV2, VerifiedOntologyEvaluationV2, VerifiedPlanArgumentV2,
-    VerifiedPolicyDispositionV2, VerifiedProjectionOutputsV2, VerifiedQuotaLimitV2,
-    VerifiedResolvedRelationSetV2,
+    ProvenanceContextV2, ProvenanceRecordV2, ResolvedExecutionTicketV2, StoredBindingResolverV2,
+    StoredValueRecordV2, TokenSetDigestEntryV2, VerifiedActionIntentMaterialV2,
+    VerifiedEffectGateLeaseV2, VerifiedInternalSlotMaterialV2, VerifiedInternalValidatorRegistryV2,
+    VerifiedOntologyEvaluationV2, VerifiedPlanArgumentV2, VerifiedPolicyDispositionV2,
+    VerifiedProjectionOutputsV2, VerifiedQuotaLimitV2, VerifiedResolvedRelationSetV2,
 };
 use sha2::{Digest as _, Sha256};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
@@ -60,6 +62,7 @@ use crate::v2_agent_durable::{
     DurableKernelAgentAuthorityStateV2, KernelAgentAuthorityRollbackAnchorV2,
 };
 use crate::v2_core_services::KernelIngressCommitSinkV2;
+use crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2;
 use crate::v2_executor_client::{KernelExecutorClientErrorV2, SuiteOneKernelExecutorClientV2};
 use crate::v2_ingress_authority::KernelIngressAuthorityV2;
 use crate::v2_value_owner::{KernelValueErrorV2, KernelValueOwnerV2};
@@ -70,7 +73,6 @@ const AGENT_UI_AUTH_TTL_MS: u64 = 5 * 60 * 1_000;
 const CLAIM_DIGEST_DOMAIN: &[u8] = b"SAVANA_AGENT_INGRESS_CLAIM_V2\0";
 const RUN_REVISION_DOMAIN: &[u8] = b"SAVANA_RUN_REVISION_V2\0";
 const PLANNER_ROUTE_DOMAIN: &[u8] = b"SAVANA_PLANNER_ROUTE_V2\0";
-const PLANNER_ENVELOPE_DOMAIN: &[u8] = b"SAVANA_PLANNER_ENVELOPE_V2\0";
 const PLANNER_OUTPUT_DOMAIN: &[u8] = b"SAVANA_PLANNER_OUTPUT_V2\0";
 const PLAN_REVISION_DOMAIN: &[u8] = b"SAVANA_PLAN_REVISION_V2\0";
 const INTERNAL_STEP_DOMAIN: &[u8] = b"SAVANA_INTERNAL_PLAN_STEP_V2\0";
@@ -90,6 +92,114 @@ pub(crate) enum KernelAgentAuthorityErrorV2 {
     Unavailable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SignedPlannerPolicyV2 {
+    planner_route: PlannerRouteIdV2,
+    task_template: StaticTemplateIdV2,
+    intent: PlannerIntentKindV2,
+    purpose: PlannerPurposeV2,
+    limits: PlannerLimitsV2,
+}
+
+impl SignedPlannerPolicyV2 {
+    pub(crate) fn from_verified_input(
+        envelope: &savana_input_runtime::PlannerEnvelopeV2,
+    ) -> Result<Self, KernelAgentAuthorityErrorV2> {
+        let intent = match envelope.intent() {
+            savana_input_runtime::IntentKindV2::SendMessage => PlannerIntentKindV2::SendMessage,
+            savana_input_runtime::IntentKindV2::Search => PlannerIntentKindV2::Search,
+            savana_input_runtime::IntentKindV2::SummarizeDocument => {
+                PlannerIntentKindV2::SummarizeDocument
+            }
+            savana_input_runtime::IntentKindV2::StoreRecord => PlannerIntentKindV2::StoreRecord,
+        };
+        let signed_limits = envelope.effective_limits();
+        let limits = PlannerLimitsV2::new(
+            signed_limits.maximum_steps(),
+            signed_limits.maximum_dependencies_per_step(),
+            signed_limits.maximum_arguments_per_step(),
+            signed_limits.maximum_encoded_plan_bytes(),
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let task_template = StaticTemplateIdV2::new(envelope.task_template());
+        if envelope.planner_route().get() == 0 || task_template.get() == 0 {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        Ok(Self {
+            planner_route: envelope.planner_route(),
+            task_template,
+            intent,
+            purpose: PlannerPurposeV2::PlannerCall,
+            limits,
+        })
+    }
+}
+
+fn intersect_planner_request(
+    policy: SignedPlannerPolicyV2,
+    planner_route: PlannerRouteIdV2,
+    task_template: StaticTemplateIdV2,
+    intent: PlannerIntentKindV2,
+    purpose: PlannerPurposeV2,
+    requested: PlannerLimitsV2,
+) -> Result<PlannerLimitsV2, KernelAgentAuthorityErrorV2> {
+    if planner_route != policy.planner_route
+        || task_template != policy.task_template
+        || intent != policy.intent
+        || purpose != policy.purpose
+    {
+        return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+    }
+    PlannerLimitsV2::new(
+        requested.maximum_steps().min(policy.limits.maximum_steps()),
+        requested
+            .maximum_dependencies_per_step()
+            .min(policy.limits.maximum_dependencies_per_step()),
+        requested
+            .maximum_arguments_per_step()
+            .min(policy.limits.maximum_arguments_per_step()),
+        requested
+            .maximum_encoded_plan_bytes()
+            .min(policy.limits.maximum_encoded_plan_bytes()),
+    )
+    .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)
+}
+
+fn presealed_execution_payload_digest(
+    exact_plaintext: &[u8],
+    declassification_node_digest: Digest32V2,
+) -> Digest32V2 {
+    domain_digest(
+        b"SAVANA_PRESEALED_EXECUTOR_PAYLOAD_V2\0",
+        &[exact_plaintext, declassification_node_digest.as_bytes()],
+    )
+}
+
+fn presealed_final_release_payload_digest(
+    exact_plaintext: &[u8],
+    declassification_node_digest: Digest32V2,
+) -> Digest32V2 {
+    domain_digest(
+        b"SAVANA_PRESEALED_FINAL_RELEASE_PAYLOAD_V2\0",
+        &[exact_plaintext, declassification_node_digest.as_bytes()],
+    )
+}
+
+fn gate_execution_before_durable_prepare<T>(
+    exact_plaintext: &[u8],
+    declassify_and_authorize_handoff: impl FnOnce() -> Result<
+        ProvenanceRecordV2,
+        KernelAgentAuthorityErrorV2,
+    >,
+    prepare_durable_dispatch: impl FnOnce(Digest32V2) -> Result<T, KernelAgentAuthorityErrorV2>,
+) -> Result<(T, ProvenanceRecordV2), KernelAgentAuthorityErrorV2> {
+    let declassification = declassify_and_authorize_handoff()?;
+    let sealed_payload_digest =
+        presealed_execution_payload_digest(exact_plaintext, declassification.provenance_digest());
+    let prepared = prepare_durable_dispatch(sealed_payload_digest)?;
+    Ok((prepared, declassification))
+}
+
 pub(crate) struct PreparedAgentClaimMaterialV2 {
     durable_run_id: DurableRunIdV2,
     producer_identity: ProducerIdentityV2,
@@ -97,6 +207,7 @@ pub(crate) struct PreparedAgentClaimMaterialV2 {
     provenance: ProvenanceRecordV2,
     initial_document: MaskedDocumentHandleV2,
     policy_allowed_effects: EffectSetV2,
+    signed_planner_policy: SignedPlannerPolicyV2,
     expires_at: UnixMillisV2,
 }
 
@@ -120,6 +231,7 @@ impl PreparedAgentClaimMaterialV2 {
         provenance: ProvenanceRecordV2,
         initial_document: MaskedDocumentHandleV2,
         policy_allowed_effects: EffectSetV2,
+        signed_planner_policy: SignedPlannerPolicyV2,
         expires_at: UnixMillisV2,
     ) -> Result<Self, KernelAgentAuthorityErrorV2> {
         if is_zero(durable_run_id.as_bytes())
@@ -135,6 +247,7 @@ impl PreparedAgentClaimMaterialV2 {
             provenance,
             initial_document,
             policy_allowed_effects,
+            signed_planner_policy,
             expires_at,
         })
     }
@@ -255,6 +368,7 @@ struct SessionRecordV2 {
     producer_identity: ProducerIdentityV2,
     role: RoleIdV2,
     policy_allowed_effects: EffectSetV2,
+    signed_planner_policy: SignedPlannerPolicyV2,
     expires_at: UnixMillisV2,
     revision: RunRevisionObservationV2,
     initial_document: MaskedDocumentHandleV2,
@@ -275,6 +389,7 @@ struct PlannerTicketRecordV2 {
     slot_bindings: Vec<PlannerSlotBindingRecordV2>,
     envelope_nonce: Nonce32V2,
     envelope_digest: Digest32V2,
+    declassification_provenance_digest: Digest32V2,
     expires_at: UnixMillisV2,
     consumed: bool,
 }
@@ -327,6 +442,9 @@ struct IntentRecordV2 {
     policy_binding: savana_policy_core::v2::ToolExecutionSemanticBindingV2,
     semantic_binding: savana_kernel_protocol::v2::ToolExecutionSemanticBindingV2,
     dispatch_plaintext: Vec<u8>,
+    display_plaintext: Vec<u8>,
+    provenance_parents: Vec<ProvenanceRecordV2>,
+    policy_allowed_effects: EffectSetV2,
     arguments: Vec<PlanArgumentRecordV2>,
     state: IntentRecordStateV2,
     decision_trace: Option<Digest32V2>,
@@ -399,6 +517,8 @@ struct PendingReleaseRecordV2 {
     durable_run_id: DurableRunIdV2,
     durable_task_id: DurableTaskIdV2,
     principal: PrincipalIdV2,
+    provenance_parents: Vec<ProvenanceRecordV2>,
+    policy_allowed_effects: EffectSetV2,
     vault_pending: savana_vault::PendingVaultReleaseV2,
     envelope_digest: Digest32V2,
     binding_digest: Digest32V2,
@@ -458,6 +578,7 @@ impl KernelToolApprovalConfigV2 {
 }
 
 pub(crate) struct KernelG4G5RuntimeV2 {
+    declassification_rules: ActiveDeclassificationRuleSetV2,
     active_tools: ActiveToolRegistryV2,
     validators: VerifiedInternalValidatorRegistryV2,
     durable: DurableG4StateV2,
@@ -532,6 +653,7 @@ impl KernelG7RuntimeV2 {
 impl KernelG4G5RuntimeV2 {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_verified_policy(
+        declassification_rules: ActiveDeclassificationRuleSetV2,
         active_tools: ActiveToolRegistryV2,
         validators: VerifiedInternalValidatorRegistryV2,
         durable: DurableG4StateV2,
@@ -544,6 +666,7 @@ impl KernelG4G5RuntimeV2 {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
         Ok(Self {
+            declassification_rules,
             active_tools,
             validators,
             durable,
@@ -1592,6 +1715,7 @@ impl KernelAgentAuthorityV2 {
             producer_identity: material.producer_identity,
             role,
             policy_allowed_effects: material.policy_allowed_effects,
+            signed_planner_policy: material.signed_planner_policy,
             expires_at: material.expires_at,
             revision,
             initial_document: material.initial_document,
@@ -1736,18 +1860,32 @@ impl KernelAgentAuthorityV2 {
         if self.planner_tickets.len() >= self.maximum_records {
             return Err(KernelAgentAuthorityErrorV2::LimitExceeded);
         }
-        if !self.sessions.iter().any(|session| {
-            session.run == request.run()
-                && matches!(
-                    session.status,
-                    AgentSessionStatusV2::Ready | AgentSessionStatusV2::Running
-                )
-        }) {
-            return Err(KernelAgentAuthorityErrorV2::InvalidReference);
-        }
+        let signed_planner_policy = self
+            .sessions
+            .iter()
+            .find(|session| {
+                session.run == request.run()
+                    && matches!(
+                        session.status,
+                        AgentSessionStatusV2::Ready | AgentSessionStatusV2::Running
+                    )
+            })
+            .map(|session| session.signed_planner_policy)
+            .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        let effective_limits = intersect_planner_request(
+            signed_planner_policy,
+            request.planner_route(),
+            request.task_template(),
+            request.intent(),
+            request.purpose(),
+            request.limits(),
+        )?;
         values
             .validate_run_values(request.run(), request.prompt_values(), now)
             .map_err(map_value_error)?;
+        if request.prompt_values().is_empty() {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
 
         let expires_at = checked_deadline(now, 60_000)?;
         let mut slots = Vec::new();
@@ -1794,24 +1932,87 @@ impl KernelAgentAuthorityV2 {
         let envelope_nonce = Nonce32V2::new(random_bytes()?);
         let envelope = PlannerEnvelopeV2::new(
             request.planner_route(),
-            StaticTemplateIdV2::new(1),
-            PlannerIntentKindV2::SummarizeDocument,
+            request.task_template(),
+            request.intent(),
             Vec::new(),
             slots,
             Vec::new(),
-            PlannerLimitsV2::new(256, 256, 256, 8 * 1024 * 1024)
-                .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?,
+            effective_limits,
             envelope_nonce,
             expires_at,
         )
         .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
         let canonical =
             minicbor::to_vec(&envelope).map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
-        let envelope_digest = domain_digest(PLANNER_ENVELOPE_DOMAIN, &[canonical.as_slice()]);
+        let envelope_digest = Digest32V2::new(Sha256::digest(&canonical).into());
+        let slot_binding_digest = planner_slot_binding_digest(&slot_bindings)?;
+        let resolved = request
+            .prompt_values()
+            .iter()
+            .map(|value| {
+                values
+                    .resolve_g4_value(request.run(), *value, now)
+                    .map_err(map_value_error)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let first = resolved
+            .first()
+            .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let parents = resolved
+            .iter()
+            .map(|value| value.provenance())
+            .collect::<Vec<_>>();
+        let policy_allowed_effects = parents.iter().fold(EffectSetV2::ALL, |effects, parent| {
+            effects.intersection(parent.label().effects())
+        });
+        let context = ProvenanceContextV2::from_authenticated_runtime(
+            first.provenance().producer_identity(),
+            first.durable_run_id(),
+            first.active_state_manifest_digest(),
+            now,
+            first.provenance().expires_at(),
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let envelope_value = KernelValueV2::bytes(canonical)
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let policy = self
+            .policy
+            .as_ref()
+            .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
+        let declassification_rules = policy
+            .declassification_rules
+            .snapshot()
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        let declassification = ProvenanceRecordV2::declassify(
+            &envelope_value,
+            context,
+            DeclassificationTransitionV2::BuildPlannerEnvelope,
+            &declassification_rules,
+            ClosedDeclassificationPurposeV2::PlannerCall.purpose_digest(),
+            slot_binding_digest,
+            None,
+            &parents,
+            policy_allowed_effects,
+            now.get(),
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        if declassification.judge_handoff(
+            DeclassificationTransitionV2::BuildPlannerEnvelope,
+            &declassification_rules,
+        ) != HandoffJudgmentV2::Admits
+        {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        let declassification_provenance_digest = declassification.provenance_digest();
         let ticket = mint_handle(PlannerTicketHandleV2::from_authority_entropy)?;
-        let response =
-            PreparePlannerCallResponseV2::new(ticket, envelope, envelope_digest, expires_at)
-                .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        let response = PreparePlannerCallResponseV2::new(
+            ticket,
+            envelope,
+            envelope_digest,
+            declassification_provenance_digest,
+            expires_at,
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
         self.planner_tickets
             .try_reserve(1)
             .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
@@ -1823,6 +2024,7 @@ impl KernelAgentAuthorityV2 {
             slot_bindings,
             envelope_nonce,
             envelope_digest,
+            declassification_provenance_digest,
             expires_at,
             consumed: false,
         });
@@ -1956,6 +2158,7 @@ impl KernelAgentAuthorityV2 {
                 PLAN_REVISION_DOMAIN,
                 &[
                     record.envelope_digest.as_bytes(),
+                    record.declassification_provenance_digest.as_bytes(),
                     planner_output_digest.as_bytes(),
                     committed.value_digest().as_bytes(),
                 ],
@@ -2170,6 +2373,17 @@ impl KernelAgentAuthorityV2 {
         let display = projected_display(&stored)?;
         let dispatch_plaintext =
             minicbor::to_vec(&destination).map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        let display_plaintext =
+            minicbor::to_vec(&display).map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        let provenance_parents = resolved_values
+            .iter()
+            .map(|resolved| resolved.provenance().clone())
+            .collect::<Vec<_>>();
+        let policy_allowed_effects = provenance_parents
+            .iter()
+            .fold(EffectSetV2::ALL, |effects, parent| {
+                effects.intersection(parent.label().effects())
+            });
         let projections =
             VerifiedProjectionOutputsV2::from_verified_projection(active, &destination, &display)
                 .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
@@ -2238,6 +2452,9 @@ impl KernelAgentAuthorityV2 {
             policy_binding,
             semantic_binding,
             dispatch_plaintext,
+            display_plaintext,
+            provenance_parents,
+            policy_allowed_effects,
             arguments: step.arguments.clone(),
             state: IntentRecordStateV2::Proposed,
             decision_trace: None,
@@ -2461,6 +2678,45 @@ impl KernelAgentAuthorityV2 {
                     action_intent_id: intent.action_intent_id,
                     binding: intent.semantic_binding,
                 };
+                let display_value = KernelValueV2::bytes(intent.display_plaintext.clone())
+                    .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+                let first_parent = intent
+                    .provenance_parents
+                    .first()
+                    .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
+                let display_context = ProvenanceContextV2::from_authenticated_runtime(
+                    first_parent.producer_identity(),
+                    intent.durable_run_id,
+                    active_state_manifest_digest,
+                    now,
+                    first_parent.expires_at(),
+                )
+                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+                let display_parents = intent.provenance_parents.iter().collect::<Vec<_>>();
+                let declassification_rules = policy
+                    .declassification_rules
+                    .snapshot()
+                    .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+                let display_declassification = ProvenanceRecordV2::declassify(
+                    &display_value,
+                    display_context,
+                    DeclassificationTransitionV2::BuildApprovalDisplay,
+                    &declassification_rules,
+                    ClosedDeclassificationPurposeV2::ApprovalDisplay.purpose_digest(),
+                    intent.policy_binding.token_set_digest(),
+                    None,
+                    &display_parents,
+                    intent.policy_allowed_effects,
+                    now.get(),
+                )
+                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+                if display_declassification.judge_handoff(
+                    DeclassificationTransitionV2::BuildApprovalDisplay,
+                    &declassification_rules,
+                ) != HandoffJudgmentV2::Admits
+                {
+                    return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+                }
                 let unsigned = UnsignedApprovalEnvelopeV2::new(
                     self.config.installation_id,
                     active_state_manifest_digest,
@@ -2471,7 +2727,9 @@ impl KernelAgentAuthorityV2 {
                     binding,
                     intent.principal,
                     intent.semantic_binding.display_projection_digest(),
-                    intent.semantic_binding.display_digest(),
+                    approval_display_digest_v2(&intent.display_plaintext),
+                    intent.display_plaintext.clone(),
+                    Some(display_declassification.provenance_digest()),
                     policy.approval.approvald_identity,
                     now,
                     expires_at,
@@ -2492,7 +2750,7 @@ impl KernelAgentAuthorityV2 {
                         durable_task_id: intent.durable_task_id,
                         approval_envelope_digest: envelope_digest,
                         approval_purpose: ApprovalPurposeV2::ToolExecution,
-                        display_digest: intent.semantic_binding.display_digest(),
+                        display_digest: approval_display_digest_v2(&intent.display_plaintext),
                     },
                     Some(intent.principal),
                     FixedOriginV2::Approval8766,
@@ -2745,21 +3003,65 @@ impl KernelAgentAuthorityV2 {
             ticket.semantic_binding_digest,
         )
         .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
-        let sealed_payload_digest = domain_digest(
-            b"SAVANA_PRESEALED_EXECUTOR_PAYLOAD_V2\0",
-            &[&intent.dispatch_plaintext],
-        );
-        let prepared = policy
-            .durable
-            .prepare_verified_tool_dispatch(
-                intent.action_intent_id,
-                quota,
-                intent.approval_settlement,
-                resolved_ticket,
-                effect_lease,
-                sealed_payload_digest,
-            )
-            .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+        let execution_value = KernelValueV2::bytes(intent.dispatch_plaintext.clone())
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let first_parent = intent
+            .provenance_parents
+            .first()
+            .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let execution_context = ProvenanceContextV2::from_authenticated_runtime(
+            first_parent.producer_identity(),
+            intent.durable_run_id,
+            active_state_manifest_digest,
+            now,
+            first_parent.expires_at(),
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let execution_parents = intent.provenance_parents.iter().collect::<Vec<_>>();
+        let execution_transition = DeclassificationTransitionV2::BuildExecutionEnvelope {
+            executor_identity_digest: Digest32V2::new(*g7.executor_identity.as_bytes()),
+        };
+        let declassification_rules = policy
+            .declassification_rules
+            .snapshot()
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        let (prepared, execution_declassification) = gate_execution_before_durable_prepare(
+            &intent.dispatch_plaintext,
+            || {
+                let declassification = ProvenanceRecordV2::declassify(
+                    &execution_value,
+                    execution_context,
+                    execution_transition,
+                    &declassification_rules,
+                    ClosedDeclassificationPurposeV2::ExecutionHandoff.purpose_digest(),
+                    intent.policy_binding.token_set_digest(),
+                    None,
+                    &execution_parents,
+                    intent.policy_allowed_effects,
+                    now.get(),
+                )
+                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+                if declassification.judge_handoff(execution_transition, &declassification_rules)
+                    != HandoffJudgmentV2::Admits
+                {
+                    return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+                }
+                Ok(declassification)
+            },
+            |sealed_payload_digest| {
+                policy
+                    .durable
+                    .prepare_verified_tool_dispatch(
+                        intent.action_intent_id,
+                        quota,
+                        intent.approval_settlement,
+                        resolved_ticket,
+                        effect_lease,
+                        sealed_payload_digest,
+                    )
+                    .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)
+            },
+        )?;
         let protocol_core = protocol_dispatch_core(&prepared)?;
         if protocol_core
             .semantic_digest()
@@ -2780,6 +3082,7 @@ impl KernelAgentAuthorityV2 {
         let envelope = SignedSealedExecutionEnvelopeV2::sign(
             SealedExecutionEnvelopePayloadV2::new(
                 protocol_core,
+                execution_declassification.provenance_digest(),
                 FixedBytes32V2::new(hpke_enc),
                 BoundedCiphertextV2::new(hpke_ciphertext)
                     .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?,
@@ -3196,13 +3499,21 @@ impl KernelAgentAuthorityV2 {
         if request.executor() != g7.executor_identity {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
-        let mut evidence = request
+        if request.evidence().is_empty() {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        let resolved_evidence = request
             .evidence()
             .iter()
             .map(|handle| {
-                let resolved = values
+                values
                     .resolve_g4_value(session.run, *handle, now)
-                    .map_err(map_value_error)?;
+                    .map_err(map_value_error)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut evidence = resolved_evidence
+            .iter()
+            .map(|resolved| {
                 Ok(savana_policy_core::v2::EvidenceDigestEntryV2::new(
                     resolved.value_digest(),
                     provenance_digest_v2(resolved.provenance())
@@ -3213,8 +3524,31 @@ impl KernelAgentAuthorityV2 {
         evidence.sort_unstable_by_key(|entry| minicbor::to_vec(entry).unwrap_or_default());
         let evidence_digest = savana_policy_core::v2::evidence_digest_v2(&evidence)
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
-        let token_set_digest = savana_policy_core::v2::token_set_digest_v2(&[])
+        let token_entries = resolved_evidence
+            .iter()
+            .enumerate()
+            .map(|(ordinal, resolved)| {
+                Ok(TokenSetDigestEntryV2::new(
+                    IdentifierV2::new(format!("release_value_{ordinal:04}"))
+                        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?,
+                    Digest32V2::new(*resolved.value_internal_id().as_bytes()),
+                    provenance_digest_v2(resolved.provenance())
+                        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?,
+                    request.executor(),
+                ))
+            })
+            .collect::<Result<Vec<_>, KernelAgentAuthorityErrorV2>>()?;
+        let token_set_digest = savana_policy_core::v2::token_set_digest_v2(&token_entries)
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let provenance_parents = resolved_evidence
+            .iter()
+            .map(|resolved| resolved.provenance().clone())
+            .collect::<Vec<_>>();
+        let policy_allowed_effects = provenance_parents
+            .iter()
+            .fold(EffectSetV2::ALL, |effects, parent| {
+                effects.intersection(parent.label().effects())
+            });
         let plaintext = vault
             .read_release_payload(request.document(), session.durable_run_id, now)
             .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
@@ -3232,14 +3566,45 @@ impl KernelAgentAuthorityV2 {
             b"SAVANA_FINAL_RELEASE_DISPLAY_PROJECTION_V2\0",
             &[&display_id, &destination_id],
         );
-        let display_digest = domain_digest(
-            b"SAVANA_FINAL_RELEASE_DISPLAY_V2\0",
-            &[
-                release_payload_digest.as_bytes(),
-                evidence_digest.as_bytes(),
-                destination_digest.as_bytes(),
-            ],
-        );
+        let display_digest = approval_display_digest_v2(plaintext.as_slice());
+        let display_value = KernelValueV2::bytes(plaintext.as_slice().to_vec())
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let first_parent = provenance_parents
+            .first()
+            .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let display_context = ProvenanceContextV2::from_authenticated_runtime(
+            first_parent.producer_identity(),
+            session.durable_run_id,
+            active_state_manifest_digest,
+            now,
+            first_parent.expires_at(),
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let display_parents = provenance_parents.iter().collect::<Vec<_>>();
+        let declassification_rules = policy
+            .declassification_rules
+            .snapshot()
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        let display_declassification = ProvenanceRecordV2::declassify(
+            &display_value,
+            display_context,
+            DeclassificationTransitionV2::BuildApprovalDisplay,
+            &declassification_rules,
+            ClosedDeclassificationPurposeV2::ApprovalDisplay.purpose_digest(),
+            token_set_digest,
+            None,
+            &display_parents,
+            policy_allowed_effects,
+            now.get(),
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        if display_declassification.judge_handoff(
+            DeclassificationTransitionV2::BuildApprovalDisplay,
+            &declassification_rules,
+        ) != HandoffJudgmentV2::Admits
+        {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
         let release_quota_subject_digest = domain_digest(
             b"SAVANA_FINAL_RELEASE_QUOTA_SUBJECT_V2\0",
             &[
@@ -3277,6 +3642,8 @@ impl KernelAgentAuthorityV2 {
             session.principal,
             binding.display_projection_digest(),
             binding.display_digest(),
+            plaintext.as_slice().to_vec(),
+            Some(display_declassification.provenance_digest()),
             policy.approval.approvald_identity,
             now,
             expires_at,
@@ -3325,6 +3692,8 @@ impl KernelAgentAuthorityV2 {
             durable_run_id: session.durable_run_id,
             durable_task_id: session.durable_task_id,
             principal: session.principal,
+            provenance_parents,
+            policy_allowed_effects,
             vault_pending,
             envelope_digest,
             binding_digest,
@@ -3424,7 +3793,11 @@ impl KernelAgentAuthorityV2 {
                 verified.settlement_digest(),
                 binding.durable_release_id(),
                 record.binding_digest,
+                binding.destination_digest(),
+                binding.token_set_digest(),
                 active_state_manifest_digest,
+                verified.issued_at(),
+                verified.expires_at(),
             )
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
         let ticket = mint_handle(ReleaseTicketHandleV2::from_authority_entropy)?;
@@ -3486,6 +3859,7 @@ impl KernelAgentAuthorityV2 {
             .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
         let settlement = pending
             .settlement
+            .as_ref()
             .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
         let binding = authorized.binding();
         if ticket.durable_release_id != binding.durable_release_id()
@@ -3512,6 +3886,46 @@ impl KernelAgentAuthorityV2 {
             .g7
             .as_ref()
             .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?;
+        let release_value = KernelValueV2::bytes(plaintext.as_slice().to_vec())
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let first_parent = pending
+            .provenance_parents
+            .first()
+            .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let release_context = ProvenanceContextV2::from_authenticated_runtime(
+            first_parent.producer_identity(),
+            pending.durable_run_id,
+            active_state_manifest_digest,
+            now,
+            first_parent.expires_at(),
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let release_parents = pending.provenance_parents.iter().collect::<Vec<_>>();
+        let release_transition = DeclassificationTransitionV2::BuildFinalRelease {
+            sink_identity_digest: binding.destination_digest(),
+        };
+        let declassification_rules = policy
+            .declassification_rules
+            .snapshot()
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        let release_declassification = ProvenanceRecordV2::declassify(
+            &release_value,
+            release_context,
+            release_transition,
+            &declassification_rules,
+            ClosedDeclassificationPurposeV2::FinalRelease.purpose_digest(),
+            binding.token_set_digest(),
+            Some(settlement),
+            &release_parents,
+            pending.policy_allowed_effects,
+            now.get(),
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        if release_declassification.judge_handoff(release_transition, &declassification_rules)
+            != HandoffJudgmentV2::Admits
+        {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
         let release =
             savana_policy_core::v2::VerifiedFinalReleaseRecordV2::from_authorized_vault_release(
                 self.config.installation_id,
@@ -3547,9 +3961,9 @@ impl KernelAgentAuthorityV2 {
                 pending.binding_digest,
             )
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
-        let sealed_payload_digest = domain_digest(
-            b"SAVANA_PRESEALED_FINAL_RELEASE_PAYLOAD_V2\0",
-            &[plaintext.as_slice()],
+        let sealed_payload_digest = presealed_final_release_payload_digest(
+            plaintext.as_slice(),
+            release_declassification.provenance_digest(),
         );
         let prepared = policy
             .durable
@@ -3585,6 +3999,7 @@ impl KernelAgentAuthorityV2 {
         let envelope = SignedSealedExecutionEnvelopeV2::sign(
             SealedExecutionEnvelopePayloadV2::new(
                 protocol_core,
+                release_declassification.provenance_digest(),
                 FixedBytes32V2::new(hpke_enc),
                 BoundedCiphertextV2::new(hpke_ciphertext)
                     .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?,
@@ -4171,6 +4586,27 @@ fn domain_digest(domain: &[u8], values: &[&[u8]]) -> Digest32V2 {
     Digest32V2::new(hasher.finalize().into())
 }
 
+fn planner_slot_binding_digest(
+    bindings: &[PlannerSlotBindingRecordV2],
+) -> Result<Digest32V2, KernelAgentAuthorityErrorV2> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder
+        .array(bindings.len() as u64)
+        .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    for binding in bindings {
+        encoder
+            .array(2)
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        minicbor::Encode::encode(&binding.slot, &mut encoder, &mut ())
+            .and_then(|_| minicbor::Encode::encode(&binding.value, &mut encoder, &mut ()))
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    }
+    Ok(domain_digest(
+        b"SAVANA_PLANNER_SLOT_BINDING_SET_V2\0",
+        &[&encoder.into_writer()],
+    ))
+}
+
 const fn map_cardinality(value: PlannerSlotCardinalityV2) -> ClosedCardinalityV2 {
     match value {
         PlannerSlotCardinalityV2::ExactlyOne => ClosedCardinalityV2::ExactlyOne,
@@ -4468,7 +4904,7 @@ fn encode_prepared_claim_material(
     let provenance = encode_provenance_record_v2(&material.provenance)
         .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
     encoder
-        .array(7)
+        .array(8)
         .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
     encode_recovery_value(encoder, &material.durable_run_id)?;
     encode_recovery_value(encoder, &material.producer_identity)?;
@@ -4480,6 +4916,14 @@ fn encode_prepared_claim_material(
     encoder
         .u16(material.policy_allowed_effects.bits())
         .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    encoder
+        .array(5)
+        .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    encode_recovery_value(encoder, &material.signed_planner_policy.planner_route)?;
+    encode_recovery_value(encoder, &material.signed_planner_policy.task_template)?;
+    encode_recovery_value(encoder, &material.signed_planner_policy.intent)?;
+    encode_recovery_value(encoder, &material.signed_planner_policy.purpose)?;
+    encode_recovery_value(encoder, &material.signed_planner_policy.limits)?;
     encode_recovery_value(encoder, &material.expires_at)
 }
 
@@ -4578,7 +5022,7 @@ fn decode_prepared_claim_material(
     decoder: &mut minicbor::Decoder<'_>,
     context: &mut V2DecodeContext,
 ) -> Result<PreparedAgentClaimMaterialV2, KernelAgentAuthorityErrorV2> {
-    require_recovery_array(decoder, 7)?;
+    require_recovery_array(decoder, 8)?;
     let durable_run_id = decode_recovery_value(decoder, context)?;
     let producer_identity = decode_recovery_value(decoder, context)?;
     let initial_value = decode_recovery_value(decoder, context)?;
@@ -4597,6 +5041,14 @@ fn decode_prepared_claim_material(
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?,
     )
     .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
+    require_recovery_array(decoder, 5)?;
+    let signed_planner_policy = SignedPlannerPolicyV2 {
+        planner_route: decode_recovery_value(decoder, context)?,
+        task_template: decode_recovery_value(decoder, context)?,
+        intent: decode_recovery_value(decoder, context)?,
+        purpose: decode_recovery_value(decoder, context)?,
+        limits: decode_recovery_value(decoder, context)?,
+    };
     let expires_at = decode_recovery_value(decoder, context)?;
     PreparedAgentClaimMaterialV2::from_verified_ingress(
         durable_run_id,
@@ -4605,6 +5057,7 @@ fn decode_prepared_claim_material(
         provenance,
         initial_document,
         policy_allowed_effects,
+        signed_planner_policy,
         expires_at,
     )
 }
@@ -4618,14 +5071,20 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use savana_kernel_protocol::v2::{
         derive_ed25519_key_id_v2, BootIdV2, CancelKernelTaskRequestV2, Digest32V2, DurableRunIdV2,
-        GetKernelTaskStatusRequestV2, Nonce32V2, PrepareNewIngressRequestV2,
+        GetKernelTaskStatusRequestV2, Nonce32V2, PlannerIntentKindV2, PlannerLimitsV2,
+        PlannerPurposeV2, PlannerRouteIdV2, PrepareNewIngressRequestV2,
         PrepareNewIngressResponseV2, PrincipalIdV2, PublicTaskStatusV2,
         ResumeCommittedAgentAuthenticationRequestV2, ResumeCommittedAgentAuthenticationResponseV2,
-        ServiceIdentityV2, UnixMillisV2,
+        ServiceIdentityV2, StaticTemplateIdV2, UnixMillisV2,
     };
     use sha2::{Digest as _, Sha256};
 
-    use super::{hpke_x25519_key_id, KernelAgentAuthorityV2, KernelAgentSecurityConfigV2};
+    use super::{
+        gate_execution_before_durable_prepare, hpke_x25519_key_id, intersect_planner_request,
+        presealed_execution_payload_digest, presealed_final_release_payload_digest,
+        KernelAgentAuthorityErrorV2, KernelAgentAuthorityV2, KernelAgentSecurityConfigV2,
+        SignedPlannerPolicyV2,
+    };
     use crate::v2_agent_durable::{
         KernelAgentAuthorityRollbackAnchorV2, KernelAgentAuthorityStateHeadV2,
     };
@@ -4665,6 +5124,108 @@ mod tests {
             hpke_x25519_key_id(public_key).as_bytes(),
             &<[u8; 32]>::from(hasher.finalize())
         );
+    }
+
+    #[test]
+    fn planner_request_is_closed_to_signed_policy_and_limits_are_intersected() {
+        let policy = SignedPlannerPolicyV2 {
+            planner_route: PlannerRouteIdV2::new(7),
+            task_template: StaticTemplateIdV2::new(11),
+            intent: PlannerIntentKindV2::SummarizeDocument,
+            purpose: PlannerPurposeV2::PlannerCall,
+            limits: PlannerLimitsV2::new(8, 8, 8, 65_536).unwrap(),
+        };
+        let effective = intersect_planner_request(
+            policy,
+            PlannerRouteIdV2::new(7),
+            StaticTemplateIdV2::new(11),
+            PlannerIntentKindV2::SummarizeDocument,
+            PlannerPurposeV2::PlannerCall,
+            PlannerLimitsV2::new(4, 16, 2, 32_768).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(effective.maximum_steps(), 4);
+        assert_eq!(effective.maximum_dependencies_per_step(), 8);
+        assert_eq!(effective.maximum_arguments_per_step(), 2);
+        assert_eq!(effective.maximum_encoded_plan_bytes(), 32_768);
+
+        for mismatch in [
+            intersect_planner_request(
+                policy,
+                PlannerRouteIdV2::new(9),
+                StaticTemplateIdV2::new(11),
+                PlannerIntentKindV2::SummarizeDocument,
+                PlannerPurposeV2::PlannerCall,
+                policy.limits,
+            ),
+            intersect_planner_request(
+                policy,
+                PlannerRouteIdV2::new(7),
+                StaticTemplateIdV2::new(12),
+                PlannerIntentKindV2::SummarizeDocument,
+                PlannerPurposeV2::PlannerCall,
+                policy.limits,
+            ),
+            intersect_planner_request(
+                policy,
+                PlannerRouteIdV2::new(7),
+                StaticTemplateIdV2::new(11),
+                PlannerIntentKindV2::Search,
+                PlannerPurposeV2::PlannerCall,
+                policy.limits,
+            ),
+        ] {
+            assert_eq!(mismatch, Err(KernelAgentAuthorityErrorV2::BindingMismatch));
+        }
+    }
+
+    #[test]
+    fn durable_preseal_binding_covers_exact_plaintext_and_declassification_node() {
+        let node = Digest32V2::new([0x71; 32]);
+        let digest = presealed_execution_payload_digest(b"exact plaintext", node);
+        assert_ne!(
+            digest,
+            presealed_execution_payload_digest(b"other plaintext", node)
+        );
+        assert_ne!(
+            digest,
+            presealed_execution_payload_digest(b"exact plaintext", Digest32V2::new([0x72; 32]))
+        );
+
+        let release_digest = presealed_final_release_payload_digest(b"exact plaintext", node);
+        assert_ne!(
+            release_digest,
+            presealed_final_release_payload_digest(b"other plaintext", node)
+        );
+        assert_ne!(
+            release_digest,
+            presealed_final_release_payload_digest(b"exact plaintext", Digest32V2::new([0x72; 32]))
+        );
+    }
+
+    #[test]
+    fn rejected_execution_gate_leaves_dispatch_and_quota_unmodified() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum ProbeDispatchState {
+            Authorized,
+            DispatchPrepared,
+        }
+
+        let mut state = ProbeDispatchState::Authorized;
+        let mut reserved_quota = 0_u64;
+        let result = gate_execution_before_durable_prepare(
+            b"content blocked before durable prepare",
+            || Err(KernelAgentAuthorityErrorV2::BindingMismatch),
+            |_| {
+                state = ProbeDispatchState::DispatchPrepared;
+                reserved_quota += 1;
+                Ok(())
+            },
+        );
+
+        assert_eq!(result, Err(KernelAgentAuthorityErrorV2::BindingMismatch));
+        assert_eq!(state, ProbeDispatchState::Authorized);
+        assert_eq!(reserved_quota, 0);
     }
 
     #[test]

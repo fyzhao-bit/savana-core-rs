@@ -32,14 +32,14 @@ use super::{value_digest_v2, G3Error, KernelValueV2};
 /// The duty is not uniform across transitions, and making it uniform would
 /// break the system in one of two directions. Requiring PII to be absent from
 /// the approval display would render the human's decision meaningless — nobody
-/// can meaningfully approve "send [电话号码] to [邮箱]?" — and the human-in-the-
+/// can meaningfully approve "send `[电话号码]` to `[邮箱]`?" — and the human-in-the-
 /// loop control is what the whole design rests on. Requiring it of the
 /// execution envelope would leave the executor with nothing real to act on.
 /// Conversely, letting the planner envelope through unredacted would hand raw
 /// personal data to an external model, which is the leak the gate exists to
 /// stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LeakGateDutyV2 {
+pub enum LeakGateDutyV2 {
     /// The recipient is entitled to see real values, so only the content
     /// blocklist applies. Injected instructions are not "data the recipient is
     /// entitled to" under any transition, so this is never empty.
@@ -47,6 +47,31 @@ pub(crate) enum LeakGateDutyV2 {
     /// The recipient is a language model, so the value must additionally carry
     /// no residual PII.
     BlocklistAndNoResidualPii,
+}
+
+impl LeakGateDutyV2 {
+    pub const fn tag(self) -> u16 {
+        match self {
+            Self::BlocklistOnly => 1,
+            Self::BlocklistAndNoResidualPii => 2,
+        }
+    }
+
+    pub const fn from_tag(tag: u16) -> Option<Self> {
+        match tag {
+            1 => Some(Self::BlocklistOnly),
+            2 => Some(Self::BlocklistAndNoResidualPii),
+            _ => None,
+        }
+    }
+
+    pub const fn strictest(self, other: Self) -> Self {
+        if self.tag() >= other.tag() {
+            self
+        } else {
+            other
+        }
+    }
 }
 
 /// Run the gate over every text leaf of `value` and return the evidence digest,

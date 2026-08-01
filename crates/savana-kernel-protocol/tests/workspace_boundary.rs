@@ -31,7 +31,7 @@ fn rust_sources_below(directory: &Path, output: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn production_workspace_contains_exactly_the_ten_frozen_crates() {
+fn production_workspace_contains_exactly_the_eleven_frozen_crates() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -66,6 +66,7 @@ fn production_workspace_contains_exactly_the_ten_frozen_crates() {
             "savana-input-runtime",
             "savana-kernel-protocol",
             "savana-kerneld",
+            "savana-leak-gate",
             "savana-platform-identity",
             "savana-policy-core",
             "savana-vault",

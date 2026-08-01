@@ -186,6 +186,18 @@ impl PlannerLimitsV2 {
     pub const fn maximum_steps(self) -> u16 {
         self.maximum_steps
     }
+
+    pub const fn maximum_dependencies_per_step(self) -> u16 {
+        self.maximum_dependencies_per_step
+    }
+
+    pub const fn maximum_arguments_per_step(self) -> u16 {
+        self.maximum_arguments_per_step
+    }
+
+    pub const fn maximum_encoded_plan_bytes(self) -> u32 {
+        self.maximum_encoded_plan_bytes
+    }
 }
 
 impl<C> minicbor::Encode<C> for PlannerLimitsV2 {
@@ -278,8 +290,20 @@ pub struct PlannerEnvelopeV2 {
 }
 
 impl PlannerEnvelopeV2 {
+    pub const fn planner_route(&self) -> PlannerRouteIdV2 {
+        self.planner_route
+    }
+
+    pub const fn task_template(&self) -> u32 {
+        self.task_template
+    }
+
     pub const fn intent(&self) -> IntentKindV2 {
         self.intent
+    }
+
+    pub const fn effective_limits(&self) -> PlannerLimitsV2 {
+        self.effective_limits
     }
 
     pub fn slots(&self) -> &[AbstractSlotV2] {
@@ -829,17 +853,21 @@ fn placeholder_token(
     ordinal: usize,
     reference: PlannerSlotRefV2,
 ) -> Result<String, InputRuntimeError> {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
+    const ALPHA_HEX: &[u8; 16] = b"abcdefghijklmnop";
+    let ordinal = u32::try_from(ordinal).map_err(|_| InputRuntimeError::InputLimitExceeded)?;
     let mut token = String::new();
     token
-        .try_reserve_exact(29 + reference.as_bytes().len() * 2)
+        .try_reserve_exact(59)
         .map_err(|_| InputRuntimeError::AllocationFailure)?;
     token.push_str("[SAVANA_REDACTED_");
-    use std::fmt::Write as _;
-    write!(&mut token, "{ordinal:08x}_").map_err(|_| InputRuntimeError::AllocationFailure)?;
+    for byte in ordinal.to_be_bytes() {
+        token.push(char::from(ALPHA_HEX[usize::from(byte >> 4)]));
+        token.push(char::from(ALPHA_HEX[usize::from(byte & 0x0f)]));
+    }
+    token.push('_');
     for byte in reference.as_bytes() {
-        token.push(char::from(HEX[usize::from(byte >> 4)]));
-        token.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        token.push(char::from(ALPHA_HEX[usize::from(byte >> 4)]));
+        token.push(char::from(ALPHA_HEX[usize::from(byte & 0x0f)]));
     }
     token.push(']');
     Ok(token)
@@ -1304,9 +1332,16 @@ mod tests {
         assert_eq!(masked.placeholders().len(), 2);
         for (ordinal, placeholder) in masked.placeholders().iter().enumerate() {
             assert!(masked.text().contains(placeholder.token()));
+            let ordinal = u32::try_from(ordinal).unwrap();
+            let encoded_ordinal = ordinal
+                .to_be_bytes()
+                .into_iter()
+                .flat_map(|byte| [byte >> 4, byte & 0x0f])
+                .map(|nibble| char::from(b'a' + nibble))
+                .collect::<String>();
             assert!(placeholder
                 .token()
-                .starts_with(&format!("[SAVANA_REDACTED_{ordinal:08x}_")));
+                .starts_with(&format!("[SAVANA_REDACTED_{encoded_ordinal}_")));
         }
         assert_eq!(
             runtime
@@ -1331,6 +1366,14 @@ mod tests {
     }
 
     #[test]
+    fn masked_placeholder_tokens_are_not_residual_pii() {
+        let reference = PlannerSlotRefV2([0x08; 16]);
+        let token = placeholder_token(0, reference).unwrap();
+
+        assert_eq!(savana_leak_gate::redact_pii(&token), token);
+    }
+
+    #[test]
     fn g2_is_closed_ambiguous_fail_closed_and_planner_bytes_contain_no_input() {
         let runtime = runtime();
         let gated = runtime
@@ -1341,6 +1384,36 @@ mod tests {
             )
             .unwrap();
         assert_eq!(gated.planner_envelope().intent(), IntentKindV2::SendMessage);
+        assert_eq!(
+            gated.planner_envelope().planner_route(),
+            PlannerRouteIdV2::new(7)
+        );
+        assert_eq!(gated.planner_envelope().task_template(), 11);
+        assert_eq!(
+            gated.planner_envelope().effective_limits().maximum_steps(),
+            8
+        );
+        assert_eq!(
+            gated
+                .planner_envelope()
+                .effective_limits()
+                .maximum_dependencies_per_step(),
+            8
+        );
+        assert_eq!(
+            gated
+                .planner_envelope()
+                .effective_limits()
+                .maximum_arguments_per_step(),
+            8
+        );
+        assert_eq!(
+            gated
+                .planner_envelope()
+                .effective_limits()
+                .maximum_encoded_plan_bytes(),
+            65_536
+        );
         assert_eq!(gated.planner_envelope().slots().len(), 2);
         let wire = gated.planner_envelope().to_canonical_bytes().unwrap();
         for forbidden in [b"alice@example.test".as_slice(), b"hunter2", b"password"] {

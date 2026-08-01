@@ -580,6 +580,7 @@ impl ApprovalServiceV2 {
             settlement_digest,
             binding_digest: envelope.payload.binding_digest,
             authenticated_principal: payload.authenticated_principal,
+            issued_at: payload.issued_at,
             expires_at: payload.expires_at,
         })
     }
@@ -592,6 +593,7 @@ pub struct ConsumedApprovalSettlementV2 {
     settlement_digest: Digest32V2,
     binding_digest: Digest32V2,
     authenticated_principal: PrincipalIdV2,
+    issued_at: UnixMillisV2,
     expires_at: UnixMillisV2,
 }
 
@@ -614,6 +616,10 @@ impl ConsumedApprovalSettlementV2 {
 
     pub const fn authenticated_principal(self) -> PrincipalIdV2 {
         self.authenticated_principal
+    }
+
+    pub const fn issued_at(self) -> UnixMillisV2 {
+        self.issued_at
     }
 
     pub const fn expires_at(self) -> UnixMillisV2 {

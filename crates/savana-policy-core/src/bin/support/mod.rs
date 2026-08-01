@@ -96,6 +96,7 @@ pub fn run_apply(
         transaction_verifier,
         trust.deployment_trust_root_set().clone(),
         trust.activation_trust_root_set().clone(),
+        trust.declassification_trust_root_set().clone(),
         trust.release_trust_root_set().clone(),
     )
     .map_err(map_deployment_control_error)?;
@@ -176,6 +177,7 @@ pub fn run_watchdog(
                 transaction_verifier,
                 trust.deployment_trust_root_set().clone(),
                 trust.activation_trust_root_set().clone(),
+                trust.declassification_trust_root_set().clone(),
                 trust.release_trust_root_set().clone(),
             )
             .map_err(map_deployment_control_error)?;

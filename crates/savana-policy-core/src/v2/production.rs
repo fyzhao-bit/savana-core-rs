@@ -13,7 +13,7 @@ use super::dispatch::{
 };
 use super::ontology::{OntologyEvaluationContextV2, OntologyEvaluationV2};
 use super::{
-    ArgumentNameV2, AttemptKindV2, G4Error, G5Error, G5PolicyDispositionV2, KernelValueV2,
+    ArgumentNameV2, AttemptKindV2, G3Error, G4Error, G5Error, G5PolicyDispositionV2, KernelValueV2,
     OntologyExprV2, ValidatorBuildManifestIdentityV2, VerifiedInternalValidatorImplementationV2,
     VerifiedInternalValidatorRegistryV2, VerifiedOntologySetV2, VerifiedQuotaLimitV2,
 };
@@ -305,18 +305,34 @@ impl ResolvedFinalReleaseTicketV2 {
 
 /// A final-release approval after the purpose-specific approval settlement has
 /// been consumed and bound to the exact vault release.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct VerifiedFinalReleaseSettlementV2 {
     pub(super) inner: VerifiedFinalReleaseApprovalBindingV2,
+    destination_digest: Digest32V2,
+    token_set_digest: Digest32V2,
+    issued_at: UnixMillisV2,
+    expires_at: UnixMillisV2,
 }
 
 impl VerifiedFinalReleaseSettlementV2 {
+    #[allow(clippy::too_many_arguments)]
     pub fn from_consumed_exact_settlement(
         settlement_digest: Digest32V2,
         durable_release_id: DurableReleaseIdV2,
         binding_digest: Digest32V2,
+        destination_digest: Digest32V2,
+        token_set_digest: Digest32V2,
         active_state_manifest_digest: Digest32V2,
+        issued_at: UnixMillisV2,
+        expires_at: UnixMillisV2,
     ) -> Result<Self, G4Error> {
+        if destination_digest.as_bytes().iter().all(|byte| *byte == 0)
+            || token_set_digest.as_bytes().iter().all(|byte| *byte == 0)
+            || issued_at.get() == 0
+            || issued_at.get() >= expires_at.get()
+        {
+            return Err(G4Error::StateConflict);
+        }
         Ok(Self {
             inner: VerifiedFinalReleaseApprovalBindingV2::from_verified_settlement(
                 settlement_digest,
@@ -324,7 +340,34 @@ impl VerifiedFinalReleaseSettlementV2 {
                 binding_digest,
                 active_state_manifest_digest,
             )?,
+            destination_digest,
+            token_set_digest,
+            issued_at,
+            expires_at,
         })
+    }
+
+    pub(crate) fn validate_declassification(
+        &self,
+        destination_digest: Digest32V2,
+        token_set_digest: Digest32V2,
+        active_state_manifest_digest: Digest32V2,
+        at_unix_ms: u64,
+        max_age_ms: u64,
+    ) -> Result<(), G3Error> {
+        if self.destination_digest != destination_digest
+            || self.token_set_digest != token_set_digest
+            || self.inner.active_state_manifest_digest() != active_state_manifest_digest
+        {
+            return Err(G3Error::ConsentScopeMismatch);
+        }
+        if at_unix_ms < self.issued_at.get()
+            || at_unix_ms >= self.expires_at.get()
+            || at_unix_ms.saturating_sub(self.issued_at.get()) > max_age_ms
+        {
+            return Err(G3Error::ConsentExpired);
+        }
+        Ok(())
     }
 }
 

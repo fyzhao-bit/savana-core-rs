@@ -22,7 +22,7 @@
 //! These are security patterns, so a miss is a bypass. Python `re` and the
 //! `regex` crate disagree on `\b`, `\s`, and `\d`, and the `\w` divergence is
 //! in the bypass direction. Every class is therefore rewritten over the
-//! vendored CPython 15.0.0 tables in [`tables`] rather than taken from the
+//! vendored CPython 15.0.0 `tables` module rather than taken from the
 //! engine, and Python's `\b` is rewritten as its literal two-sided definition.
 //! That rewrite needs lookaround, which is why this uses `fancy-regex` rather
 //! than the linear engine.

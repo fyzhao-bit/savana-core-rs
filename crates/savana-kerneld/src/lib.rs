@@ -251,6 +251,8 @@ mod v2_connection;
 mod v2_core_services;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod v2_data_plane;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod v2_declassification_policy;
 #[allow(dead_code)] // Activated by the V2 authenticated dispatch routes.
 mod v2_dispatch;
 #[allow(dead_code)] // Activated by the verified V2 listener startup path.

@@ -2,6 +2,7 @@ mod authenticated_anchor;
 #[allow(dead_code)] // Stored binding resolution is consumed by the G4 intent adapter.
 mod binding;
 mod commit_attestation;
+mod declassification;
 mod deployment_authorization;
 mod deployment_control;
 mod deployment_failure;
@@ -73,6 +74,10 @@ pub use binding::{
     VerifiedRequiredTokenV2, VerifiedResolvedRelationSetV2, VerifiedStoredBindingsV2,
 };
 pub use commit_attestation::{ClosedCommitDigestFieldV2, CommitAttestationV2};
+pub use declassification::{
+    declassification_implementation_digest_v2, ClosedDeclassificationPurposeV2,
+    DeclassificationRuleSetV2, DeclassificationRuleV2,
+};
 pub use deployment_authorization::{
     DeploymentAuthorizationKeyRefsV2, DeploymentAuthorizationVerifierV2, DeploymentTransactionV2,
     RecoveryPhaseHighWaterV2, RollbackGrantV2,
@@ -214,6 +219,7 @@ pub use labels::{
     ConfidentialityV2, EffectSetV2, G3Error, IntegrityV2, ReaderSetV2, SecurityLabelV2,
     UNTRUSTED_EFFECT_CEILING_V2,
 };
+pub use leak_gate::LeakGateDutyV2;
 pub use ontology::{
     AttemptKindV2, ContextFieldV2, FieldPathV2, G4Error, OntologyExprV2, OntologyOperandV2,
     OntologyScalarV2, VerifiedOntologySetV2,
@@ -226,8 +232,9 @@ pub use production::{
 };
 pub use provenance::{
     decode_provenance_record_v2, encode_provenance_record_v2, provenance_digest_v2,
-    DeclassificationTransitionV2, DeriveOperationV2, PolicyConstantIdV2, ProvenanceContextV2,
-    ProvenanceRecordV2, RootEvidenceV2, SourceKindV2, VerifiedIngressProvenanceEvidenceSourceV2,
+    DeclassificationTransitionV2, DeriveOperationV2, HandoffJudgmentV2, PolicyConstantIdV2,
+    ProvenanceContextV2, ProvenanceRecordV2, RootEvidenceV2, SourceKindV2,
+    VerifiedIngressProvenanceEvidenceSourceV2,
 };
 pub use quota::{
     AuthenticatedEffectDispositionV2, DispatchQuotaCounterV2, DispatchQuotaMutationKindV2,

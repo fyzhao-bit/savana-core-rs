@@ -12,7 +12,7 @@ use super::{
 const BINARY_CLOSURE_FIELDS_V2: u64 = 10;
 const SECURITY_STATE_CLOSURE_FIELDS_V2: u64 = 18;
 const PLATFORM_CLOSURE_FIELDS_V2: u64 = 6;
-const BOOTSTRAP_TCB_LOCK_FIELDS_V2: u64 = 12;
+const BOOTSTRAP_TCB_LOCK_FIELDS_V2: u64 = 13;
 const BINARY_CLOSURE_DOMAIN_V2: &[u8] = b"savana.binary-closure.v2\0";
 const SECURITY_STATE_CLOSURE_DOMAIN_V2: &[u8] = b"savana.security-state-closure.v2\0";
 const PLATFORM_CLOSURE_DOMAIN_V2: &[u8] = b"savana.platform-closure.v2\0";
@@ -361,6 +361,7 @@ pub struct BootstrapTcbLockV2 {
     deployment_trust_root_set: VersionedIdentityV2,
     activation_trust_root_set: VersionedIdentityV2,
     release_trust_root_set: VersionedIdentityV2,
+    declassification_trust_root_set: VersionedIdentityV2,
     installation_epoch: u64,
     digest: Digest32V2,
 }
@@ -379,6 +380,7 @@ impl BootstrapTcbLockV2 {
         deployment_trust_root_set: VersionedIdentityV2,
         activation_trust_root_set: VersionedIdentityV2,
         release_trust_root_set: VersionedIdentityV2,
+        declassification_trust_root_set: VersionedIdentityV2,
         installation_epoch: u64,
     ) -> Result<Self, DeploymentControlErrorV2> {
         let platform = (
@@ -413,6 +415,8 @@ impl BootstrapTcbLockV2 {
             || deployment_trust_root_set.domain() != ClosedSecurityDomainV2::DeploymentTrustRootSet
             || activation_trust_root_set.domain() != ClosedSecurityDomainV2::ActivationTrustRootSet
             || release_trust_root_set.domain() != ClosedSecurityDomainV2::ReleaseTrustRootSet
+            || declassification_trust_root_set.domain()
+                != ClosedSecurityDomainV2::DeclassificationTrustRootSet
         {
             return Err(DeploymentControlErrorV2::InvalidSecurityStateManifest);
         }
@@ -440,6 +444,7 @@ impl BootstrapTcbLockV2 {
             &deployment_trust_root_set,
             &activation_trust_root_set,
             &release_trust_root_set,
+            &declassification_trust_root_set,
         ] {
             encoder
                 .writer_mut()
@@ -463,6 +468,7 @@ impl BootstrapTcbLockV2 {
             deployment_trust_root_set,
             activation_trust_root_set,
             release_trust_root_set,
+            declassification_trust_root_set,
             installation_epoch,
         })
     }
@@ -480,6 +486,7 @@ impl BootstrapTcbLockV2 {
             super::deployment_manifest_primitives::decode_digest(&mut decoder)?,
             super::deployment_manifest_primitives::decode_digest(&mut decoder)?,
             super::deployment_manifest_primitives::decode_digest(&mut decoder)?,
+            decode_nested(&mut decoder, VersionedIdentityV2::from_canonical_bytes)?,
             decode_nested(&mut decoder, VersionedIdentityV2::from_canonical_bytes)?,
             decode_nested(&mut decoder, VersionedIdentityV2::from_canonical_bytes)?,
             decode_nested(&mut decoder, VersionedIdentityV2::from_canonical_bytes)?,
@@ -540,6 +547,10 @@ impl BootstrapTcbLockV2 {
 
     pub const fn release_trust_root_set(&self) -> &VersionedIdentityV2 {
         &self.release_trust_root_set
+    }
+
+    pub const fn declassification_trust_root_set(&self) -> &VersionedIdentityV2 {
+        &self.declassification_trust_root_set
     }
 
     pub const fn installation_epoch(&self) -> u64 {

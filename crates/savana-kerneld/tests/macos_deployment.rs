@@ -10,7 +10,9 @@ use savana_kernel_protocol::v2::{
     UnixMillisV2, VersionV2,
 };
 use savana_policy_core::v2::{
-    AttemptKindV2, EffectSetV2, SignedToolDescriptorV2, VerifiedRegistryPublisherV2,
+    AttemptKindV2, ClosedDeclassificationPurposeV2, DeclassificationRuleSetV2, EffectSetV2,
+    InstallerOrMdmVerifierV2, OperationalTrustRootSetV2, SignedToolDescriptorV2,
+    VerifiedRegistryPublisherV2,
 };
 
 const ROOT: &str = "/Library/Application Support/Savana/Development";
@@ -951,6 +953,9 @@ fn validator_accepts_only_a_complete_nonmutating_build_fixture() {
         fs::write(fixture.path().join("config").join(leaf), b"{}").unwrap();
     }
     for leaf in [
+        "declassification-installer-root-v2.json",
+        "declassification-rule-set-v2.cbor",
+        "declassification-trust-root-set-v2.cbor",
         "development-draft-report-tool-v2.cbor",
         "effect-ledger-projection-v2.cbor",
         "input-runtime-assets-v2.cbor",
@@ -1126,6 +1131,53 @@ fn build_input_generator_emits_cryptographically_bound_runtime_inputs() {
         UnixMillisV2::new(current_unix_millis()),
     )
     .unwrap();
+
+    let declassification_installer: serde_json::Value = serde_json::from_slice(
+        &fs::read(artifacts.join("declassification-installer-root-v2.json")).unwrap(),
+    )
+    .unwrap();
+    let declassification_verifier = InstallerOrMdmVerifierV2::new(
+        Ed25519KeyIdV2::new(hex_32(
+            declassification_installer["key_id"].as_str().unwrap(),
+        )),
+        declassification_installer["key_epoch"].as_u64().unwrap(),
+        hex_32(declassification_installer["public_key"].as_str().unwrap()),
+    )
+    .unwrap();
+    let declassification_roots = OperationalTrustRootSetV2::from_canonical_bytes(
+        &fs::read(artifacts.join("declassification-trust-root-set-v2.cbor")).unwrap(),
+        &declassification_verifier,
+    )
+    .unwrap();
+    let declassification_rules = DeclassificationRuleSetV2::from_canonical_bytes(
+        &fs::read(artifacts.join("declassification-rule-set-v2.cbor")).unwrap(),
+        &declassification_roots,
+        current_unix_millis(),
+    )
+    .unwrap();
+    assert_eq!(declassification_rules.rules().len(), 5);
+    assert_eq!(
+        declassification_rules
+            .rules()
+            .iter()
+            .map(|rule| rule.purpose())
+            .collect::<Vec<_>>(),
+        ClosedDeclassificationPurposeV2::ALL
+    );
+    assert_eq!(
+        declassification_rules.signed_digest().as_bytes(),
+        &hex_32(
+            template["declassification_rule_set_digest"]
+                .as_str()
+                .unwrap()
+        )
+    );
+    assert_eq!(
+        kerneld["declassification_rule_set_path"].as_str(),
+        Some(
+            "/Library/Application Support/Savana/Development/config/policy/declassification-rule-set-v2.cbor"
+        )
+    );
 
     let policy = &kerneld["policy_runtime"];
     let registry_key = hex_32(policy["registry_publisher_public_key"].as_str().unwrap());

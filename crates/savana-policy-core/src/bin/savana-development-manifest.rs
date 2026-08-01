@@ -44,6 +44,7 @@ mod macos {
     struct Template {
         installation_id: String,
         active_state_manifest_digest: String,
+        declassification_rule_set_digest: String,
         active_state_manifest_sequence: u64,
         deployment_generation: u64,
         effect_fence_epoch: u64,
@@ -629,6 +630,8 @@ mod macos {
     ) -> Result<Vec<u8>, String> {
         let installation_id = decode_hex(&template.installation_id)?;
         let active_state_manifest_digest = decode_hex(&template.active_state_manifest_digest)?;
+        let declassification_rule_set_digest =
+            decode_hex(&template.declassification_rule_set_digest)?;
         let protocol_abi_digest = decode_hex(&template.protocol_abi_digest)?;
         let release_identity_digest = decode_hex(&template.release_identity_digest)?;
         let model_set_identity_digest = decode_hex(&template.model_set_identity_digest)?;
@@ -648,10 +651,11 @@ mod macos {
 
         let mut encoder = minicbor::Encoder::new(Vec::new());
         encoder
-            .array(20)
+            .array(21)
             .and_then(|encoder| encoder.u16(2))
             .and_then(|encoder| encoder.bytes(&installation_id))
             .and_then(|encoder| encoder.bytes(&active_state_manifest_digest))
+            .and_then(|encoder| encoder.bytes(&declassification_rule_set_digest))
             .and_then(|encoder| encoder.u64(template.active_state_manifest_sequence))
             .and_then(|encoder| encoder.u64(template.deployment_generation))
             .and_then(|encoder| encoder.u64(template.effect_fence_epoch))

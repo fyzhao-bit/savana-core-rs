@@ -596,6 +596,7 @@ pub struct NativeDeploymentBootstrapTrustMaterialV2 {
     installer_public_key: [u8; 32],
     deployment_trust_root_chain: Vec<Vec<u8>>,
     activation_trust_root_chain: Vec<Vec<u8>>,
+    declassification_trust_root_chain: Vec<Vec<u8>>,
     release_trust_root_chain: Vec<Vec<u8>>,
 }
 
@@ -613,6 +614,10 @@ impl std::fmt::Debug for NativeDeploymentBootstrapTrustMaterialV2 {
                 "activation_chain_length",
                 &self.activation_trust_root_chain.len(),
             )
+            .field(
+                "declassification_chain_length",
+                &self.declassification_trust_root_chain.len(),
+            )
             .field("release_chain_length", &self.release_trust_root_chain.len())
             .finish_non_exhaustive()
     }
@@ -627,6 +632,7 @@ impl NativeDeploymentBootstrapTrustMaterialV2 {
         installer_public_key: [u8; 32],
         deployment_trust_root_chain: Vec<Vec<u8>>,
         activation_trust_root_chain: Vec<Vec<u8>>,
+        declassification_trust_root_chain: Vec<Vec<u8>>,
         release_trust_root_chain: Vec<Vec<u8>>,
     ) -> Result<Self, NativeIdentityErrorV2> {
         Self::new(
@@ -635,6 +641,7 @@ impl NativeDeploymentBootstrapTrustMaterialV2 {
             installer_public_key,
             deployment_trust_root_chain,
             activation_trust_root_chain,
+            declassification_trust_root_chain,
             release_trust_root_chain,
         )
     }
@@ -647,6 +654,7 @@ impl NativeDeploymentBootstrapTrustMaterialV2 {
         installer_public_key: [u8; 32],
         deployment_trust_root_chain: Vec<Vec<u8>>,
         activation_trust_root_chain: Vec<Vec<u8>>,
+        declassification_trust_root_chain: Vec<Vec<u8>>,
         release_trust_root_chain: Vec<Vec<u8>>,
     ) -> Result<Self, NativeIdentityErrorV2> {
         let mut hash = sha2::Sha256::new();
@@ -664,6 +672,7 @@ impl NativeDeploymentBootstrapTrustMaterialV2 {
         let chains = [
             &deployment_trust_root_chain,
             &activation_trust_root_chain,
+            &declassification_trust_root_chain,
             &release_trust_root_chain,
         ];
         let mut total = 0_usize;
@@ -689,6 +698,7 @@ impl NativeDeploymentBootstrapTrustMaterialV2 {
             installer_public_key,
             deployment_trust_root_chain,
             activation_trust_root_chain,
+            declassification_trust_root_chain,
             release_trust_root_chain,
         })
     }
@@ -711,6 +721,10 @@ impl NativeDeploymentBootstrapTrustMaterialV2 {
 
     pub fn activation_trust_root_chain(&self) -> &[Vec<u8>] {
         &self.activation_trust_root_chain
+    }
+
+    pub fn declassification_trust_root_chain(&self) -> &[Vec<u8>] {
+        &self.declassification_trust_root_chain
     }
 
     pub fn release_trust_root_chain(&self) -> &[Vec<u8>] {
@@ -941,6 +955,7 @@ mod native_deployment_authority_handle_tests {
             Vec::new(),
             vec![vec![1]],
             vec![vec![1]],
+            vec![vec![1]],
         )
         .is_err());
         assert!(NativeDeploymentBootstrapTrustMaterialV2::new_for_test(
@@ -948,6 +963,7 @@ mod native_deployment_authority_handle_tests {
             3,
             public_key,
             vec![vec![1; MAX_BOOTSTRAP_TRUST_OBJECT_BYTES_V2 + 1]],
+            vec![vec![1]],
             vec![vec![1]],
             vec![vec![1]],
         )

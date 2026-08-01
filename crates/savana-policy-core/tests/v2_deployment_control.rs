@@ -8,9 +8,10 @@ use savana_policy_core::v2::{
     select_authenticated_ledger_slot_v2, ClosedDeploymentFailureClassV2,
     ClosedDurableDeploymentStepV2, ClosedSecurityDomainV2, DeploymentActivationVerifierV2,
     DeploymentBranchV2, DeploymentControlErrorV2, DeploymentFailureEvidenceV2,
-    DeploymentLedgerProjectionV2, DeploymentLedgerRecordV2, DeploymentLedgerStoreV2,
-    DeploymentOwnerClaimV2, DeploymentOwnerIdentityV2, DeploymentOwnerRoleV2, DeploymentPhaseV2,
-    DeploymentTransitionV2, DurableDeploymentEvidenceRefV2, DurableDeploymentTransactionRecordV2,
+    DeploymentHardLimitsV2, DeploymentLedgerProjectionV2, DeploymentLedgerRecordV2,
+    DeploymentLedgerStoreV2, DeploymentOwnerClaimV2, DeploymentOwnerIdentityV2,
+    DeploymentOwnerRoleV2, DeploymentPhaseV2, DeploymentTransitionV2,
+    DurableDeploymentEvidenceRefV2, DurableDeploymentTransactionRecordV2,
     DurableDeploymentTransactionStoreV2, DurableDeploymentTransitionStoreV2,
     DurableInstallationEvidenceStoreV2, HighWaterEntryV2, HighestEverV2,
     InstallationEvidenceEnvelopeV2, LedgerSlotIdV2, RollbackGrantStateV2, RollbackOriginPhaseV2,
@@ -49,8 +50,8 @@ fn projection(
 }
 
 #[test]
-fn highest_ever_uses_the_exact_closed_28_domain_order() {
-    assert_eq!(ClosedSecurityDomainV2::ALL.len(), 28);
+fn highest_ever_uses_the_exact_closed_29_domain_order() {
+    assert_eq!(ClosedSecurityDomainV2::ALL.len(), 29);
     for (index, domain) in ClosedSecurityDomainV2::ALL.iter().copied().enumerate() {
         assert_eq!(domain.tag(), u16::try_from(index).unwrap() + 1);
         assert_eq!(domain.index(), index);
@@ -65,8 +66,8 @@ fn highest_ever_uses_the_exact_closed_28_domain_order() {
     }))
     .unwrap();
     let mut encoder = minicbor::Encoder::new(Vec::new());
-    encoder.array(28).unwrap();
-    for index in 0_u8..28 {
+    encoder.array(29).unwrap();
+    for index in 0_u8..29 {
         encoder.array(3).unwrap();
         encoder.u64(u64::from(index) + 1).unwrap();
         encoder.bytes(&[index + 1; 32]).unwrap();
@@ -105,6 +106,21 @@ fn highest_ever_uses_the_exact_closed_28_domain_order() {
             .unwrap_err(),
         DeploymentControlErrorV2::HighestEverMismatch
     );
+    assert_eq!(
+        ClosedSecurityDomainV2::DeclassificationTrustRootSet.tag(),
+        29
+    );
+    assert_eq!(
+        ClosedSecurityDomainV2::from_tag(29),
+        Some(ClosedSecurityDomainV2::DeclassificationTrustRootSet)
+    );
+}
+
+#[test]
+fn declassification_hard_limits_are_frozen_at_64_rules_and_16_readers() {
+    let limits = DeploymentHardLimitsV2::compiled();
+    assert_eq!(limits.max_declassification_rules(), 64);
+    assert_eq!(limits.max_declassification_readers(), 16);
 }
 
 #[test]
@@ -525,7 +541,7 @@ fn complete_ledger_record_rejects_noncanonical_bytes_and_signature_substitution(
         reopened.signed_record_digest(),
         record.signed_record_digest()
     );
-    assert_eq!(reopened.highest_ever().entries().len(), 28);
+    assert_eq!(reopened.highest_ever().entries().len(), 29);
 
     let mut noncanonical = record.canonical_bytes().to_vec();
     // schema_version=2 is the first member after the one-byte 21-element

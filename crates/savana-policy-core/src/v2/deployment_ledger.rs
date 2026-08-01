@@ -20,7 +20,7 @@ const LEDGER_SCHEMA_VERSION_V2: u16 = 2;
 const LEDGER_RECORD_FIELDS_V2: u64 = 21;
 const LEDGER_PAYLOAD_FIELDS_V2: u64 = 19;
 const LEDGER_SLOT_FIELDS_V2: u64 = 10;
-const HIGHEST_EVER_DOMAIN_COUNT_V2: usize = 28;
+const HIGHEST_EVER_DOMAIN_COUNT_V2: usize = 29;
 const MAX_LEDGER_RECORD_BYTES_V2: usize = 4 * 1024 * 1024;
 const MAX_LEDGER_SLOT_BYTES_V2: usize = MAX_LEDGER_RECORD_BYTES_V2 + 1024;
 const LEDGER_RECORD_DIGEST_DOMAIN_V2: &[u8] = b"savana.deployment-ledger.v2.record\0";
@@ -64,6 +64,7 @@ pub enum ClosedSecurityDomainV2 {
     DeploymentTrustRootSet = 26,
     ActivationTrustRootSet = 27,
     ReleaseTrustRootSet = 28,
+    DeclassificationTrustRootSet = 29,
 }
 
 impl ClosedSecurityDomainV2 {
@@ -96,6 +97,7 @@ impl ClosedSecurityDomainV2 {
         Self::DeploymentTrustRootSet,
         Self::ActivationTrustRootSet,
         Self::ReleaseTrustRootSet,
+        Self::DeclassificationTrustRootSet,
     ];
 
     pub const fn tag(self) -> u16 {
@@ -132,6 +134,7 @@ impl ClosedSecurityDomainV2 {
             26 => Some(Self::DeploymentTrustRootSet),
             27 => Some(Self::ActivationTrustRootSet),
             28 => Some(Self::ReleaseTrustRootSet),
+            29 => Some(Self::DeclassificationTrustRootSet),
             _ => None,
         }
     }

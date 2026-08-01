@@ -630,7 +630,7 @@ impl DurableG4StateV2 {
         &mut self,
         release: &super::VerifiedFinalReleaseRecordV2,
         verified_limit: VerifiedQuotaLimitV2,
-        approval: super::VerifiedFinalReleaseSettlementV2,
+        approval: &super::VerifiedFinalReleaseSettlementV2,
         ticket: super::ResolvedFinalReleaseTicketV2,
         authority: super::VerifiedEffectGateLeaseV2,
         sealed_envelope_digest: Digest32V2,

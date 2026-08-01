@@ -846,6 +846,8 @@ impl ApprovalUiAuthorityV2 {
             challenge.purpose(),
             challenge.display_projection_digest(),
             challenge.display_digest(),
+            challenge.display_bytes().to_vec(),
+            challenge.display_declassification_provenance_digest(),
         )
         .map_err(|_| ApprovalUiAuthorityErrorV2::Unavailable)
     }

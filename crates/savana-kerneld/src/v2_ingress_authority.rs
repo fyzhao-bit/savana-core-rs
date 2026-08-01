@@ -1,8 +1,8 @@
 use ed25519_dalek::SigningKey;
 use getrandom::getrandom;
 use savana_kernel_protocol::v2::{
-    derive_ed25519_key_id_v2, ApprovalBindingV2, ApprovalDecisionV2, ApprovalPurposeV2,
-    AuthorityHandleKeyV2, Digest32V2, DurableTaskIdV2, Ed25519KeyIdV2,
+    approval_display_digest_v2, derive_ed25519_key_id_v2, ApprovalBindingV2, ApprovalDecisionV2,
+    ApprovalPurposeV2, AuthorityHandleKeyV2, Digest32V2, DurableTaskIdV2, Ed25519KeyIdV2,
     IngressKernelApprovalHandleV2, IngressUiAuthenticationPreparationHandleV2,
     IngressUiAuthorizationHandleV2, KernelIngressBootstrapTransferCapabilityV2, Nonce32V2,
     PendingIngressHandleV2, PrincipalIdV2, ServiceIdentityV2, SignedApprovalEnvelopeV2,
@@ -22,7 +22,6 @@ const PENDING_TASK_DOMAIN: &[u8] = b"SAVANA_PENDING_TASK_DIGEST_V2\0";
 const INGRESS_SUBJECT_DOMAIN: &[u8] = b"SAVANA_INGRESS_SUBJECT_V2\0";
 const CHANNEL_COMMITMENTS_DOMAIN: &[u8] = b"SAVANA_INPUT_CHANNEL_COMMITMENTS_V2\0";
 const DISPLAY_PROJECTION_DOMAIN: &[u8] = b"SAVANA_INGRESS_DISPLAY_PROJECTION_V2\0";
-const DISPLAY_DOMAIN: &[u8] = b"SAVANA_INGRESS_DISPLAY_V2\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KernelIngressAuthorityErrorV2 {
@@ -435,14 +434,15 @@ impl KernelIngressAuthorityV2 {
                 finalized.source_provenance_digest().as_bytes(),
             ],
         );
-        let display_digest = hash_many(
-            DISPLAY_DOMAIN,
-            &[
-                display_projection_digest.as_bytes(),
-                principal.as_bytes(),
-                durable_task_id.as_bytes(),
-            ],
-        );
+        let mut display_encoder = minicbor::Encoder::new(Vec::new());
+        display_encoder
+            .array(3)
+            .and_then(|encoder| encoder.bytes(display_projection_digest.as_bytes()))
+            .and_then(|encoder| encoder.bytes(principal.as_bytes()))
+            .and_then(|encoder| encoder.bytes(durable_task_id.as_bytes()))
+            .map_err(|_| KernelIngressAuthorityErrorV2::Unavailable)?;
+        let display_bytes = display_encoder.into_writer();
+        let display_digest = approval_display_digest_v2(&display_bytes);
         let decision_challenge = Nonce32V2::new(random_bytes()?);
         let expires_at = bounded_expiry(now, APPROVAL_TTL_MS, authorization.expires_at())?;
         let approval_unsigned = UnsignedApprovalEnvelopeV2::new(
@@ -456,6 +456,8 @@ impl KernelIngressAuthorityV2 {
             principal,
             display_projection_digest,
             display_digest,
+            display_bytes,
+            None,
             self.config.approvald_identity,
             now,
             expires_at,
