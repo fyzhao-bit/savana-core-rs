@@ -1,8 +1,10 @@
 # Savana V2 Declassification: Signed Rules and the Gated Pipeline
 
-Status: design proposal. This document specifies the signed declassification
-rule surface and the wiring that routes every confidentiality widening through
-`kernel_declassification`. It changes no code by itself.
+Status: accepted design, v1 (2026-08-01). This document specifies the signed
+declassification rule surface and the wiring that routes every confidentiality
+widening through `kernel_declassification`. It changes no code by itself.
+Decisions O1 (manifest delivery) and O2 (closed purpose vocabulary) are
+resolved; see §17.
 
 Companion reading: `docs/protocol-v1.md` for the V1 byte-level conventions this
 design mirrors (domain separation, canonical CBOR, fail-closed dispatch).
@@ -105,6 +107,7 @@ Non-goals:
 flowchart TD
     A[Rule authoring, offline] -->|canonical CBOR| B[DeclassificationRuleSetV2\nsigned by DeclassificationAuthority key]
     R[OperationalTrustRootSetV2\nbinding: Declassification] -->|authorizes signer key| V
+    MF[Deployment manifest\npins signed_digest] -->|pin must match| V
     B --> V{kerneld verify at\nstartup / rollover}
     V -->|active set in runtime deps| E[declassify entry\npolicy-core, pub]
     subgraph kernel [savana-kerneld runtime]
@@ -163,12 +166,27 @@ via `validate_predecessor`, canonical re-encode check — is inherited
 unchanged. The `authorizes(purpose, key_id, key_epoch, at)` predicate
 (`deployment_operational_trust.rs:368`) works as-is for the new purpose.
 
-Delivery: the Declassification trust root set and the rule set ride the same
-vehicle as the existing trust root sets (deployment manifest / activation
-flow — see open question O1). A deployment that ships neither gets a kernel
-in which **no declassification is possible**: ingress masking fails closed
-and no agent view is ever produced. That is the intended default for a
-security kernel, not an error state to paper over.
+Delivery (**decided — O1**): the two objects travel on the two channels that
+match their lifecycles.
+
+- The Declassification-bound **operational trust root set** rides the same
+  installer/MDM channel as the existing Deployment and Activation root sets —
+  root keys change with installations.
+- The **rule set** is a deployment-manifest item: the manifest claim gains a
+  pinned entry carrying the rule set's `signed_digest` (additive schema
+  change to `deployment_manifest_claim`, same discipline as the existing
+  projection pins at `deployment_manifest_claim.rs:98-126`, whose
+  `projection_rule_digest` is zero-refused at construction). Rules change
+  with releases, not with installations. At load, kerneld verifies the rule
+  set's signature chain **and** that its `signed_digest` equals the manifest
+  pin; a set that verifies but does not match the pinned digest is refused
+  (F12) — a valid-but-unpinned rule set is exactly the substitution the pin
+  exists to stop.
+
+A deployment that ships neither object gets a kernel in which **no
+declassification is possible**: ingress masking fails closed and no agent
+view is ever produced. That is the intended default for a security kernel,
+not an error state to paper over.
 
 ## 5. Wire object: `DeclassificationRuleSetV2`
 
@@ -239,7 +257,7 @@ further signature logic.
 ```text
 rule = array(8) [
     transition_tag:         u16          (1..=5, the DeclassificationTransitionV2 tags),
-    purpose_digest:         bytes32      (hash_domain(purpose-domain, canonical purpose string)),
+    purpose_digest:         bytes32      (digest of a closed-vocabulary purpose; §6.5),
     implementation_digest:  bytes32      (§6.3),
     duty_floor:             u16          (LeakGateDutyV2 tag; §6.2),
     reader_constraint:      option       (§6.1),
@@ -331,6 +349,44 @@ Present ⇒ the entry demands a matching, unconsumed `ConsentRecordV2` (§10)
 no older than `max_age_unix_ms` (proposed default: 300 000 = 5 minutes).
 MUST be absent for tags 1–4: consent is an egress concept; demanding it
 mid-pipeline would train users to click through.
+
+### 6.5 Purpose vocabulary (**decided — O2**)
+
+Purposes are a closed `u16` enum in code, `DeclassificationPurposeV2`. The
+wire carries the digest, not the tag — the digest of the canonical name is
+what the rule digest and the node evidence already bind, it stays stable as
+the enum grows, and the canonical string is the human-auditable form:
+
+```text
+purpose_digest = hash_domain("savana.declassification-purpose.v2\0", canonical name)
+```
+
+Initial vocabulary, one purpose per transition:
+
+| Tag | Variant | Canonical name | Owning transition |
+|---|---|---|---|
+| 1 | `AgentIngressMasking` | `agent-ingress-masking` | 1 `MaskTokenizeAndLeakCheck` |
+| 2 | `PlannerCall` | `planner-call` | 2 `BuildPlannerEnvelope` |
+| 3 | `ApprovalDisplay` | `approval-display` | 3 `BuildApprovalDisplay` |
+| 4 | `ExecutionHandoff` | `execution-handoff` | 4 `BuildExecutionEnvelope` |
+| 5 | `FinalRelease` | `final-release` | 5 `BuildFinalRelease` |
+
+Closure is enforced at the object boundary, not at lookup time:
+
+- A rule whose `purpose_digest` matches no enum member is a **decode-time
+  error** (`InvalidDeclassificationRuleSet`) — an unknown purpose cannot ride
+  inside a valid set and then merely fail lookups.
+- Each purpose names its owning transition; a rule whose `transition_tag`
+  differs from its purpose's owner is likewise a decode-time error. The
+  transition tag stays on the wire regardless — encoded-then-recomputed, the
+  same discipline as `decode_member`'s `key_id` cross-check
+  (`deployment_operational_trust.rs:707`).
+- The composite lookup key `(transition_tag, purpose_digest)` already
+  supports several purposes per transition; when a deployment needs
+  differentiated rules (say, two release purposes with different consent
+  freshness), the vocabulary grows by adding an enum variant — a kernel
+  release plus a new rule-set generation, i.e. a signed, visible change,
+  never a silent one (§12's versioning philosophy).
 
 ## 7. The rule-checked kernel entry
 
@@ -601,6 +657,12 @@ to this design are needed to accommodate it later.
   and purpose). New `ClosedSecurityDomainV2` variant. New signature tag.
   New hard limits: `max_declassification_rules` (64),
   `max_rule_readers` (16). All additive.
+- Deployment manifest claim gains a pinned rule-set item carrying the set's
+  `signed_digest` (§4) — additive, versioned by the manifest schema, zero
+  digest refused at construction like the existing projection pin.
+- `DeclassificationPurposeV2` is a closed enum (§6.5); growing it is a code
+  change plus a new rule-set generation, never a wire-compatible free-form
+  extension.
 - `kernel_declassification` signature gains `duty_floor` (private fn —
   no API break).
 - New `G3Error` variants (§7) — additive to a `#[non_exhaustive]`-style
@@ -653,13 +715,17 @@ Failure-mode table (each row a distinct error and at least one test):
 | F9 | consent absent / stale / scope mismatch / already consumed | `Consent*` | refuse; user re-approves |
 | F10 | recipient outside reader set at handoff | validator `Refuses` | handoff denied |
 | F11 | value without matching declassification node offered to an envelope | lineage check fails | envelope construction denied |
+| F12 | rule set verifies but `signed_digest` ≠ deployment-manifest pin | refused at load | kernel starts with no active set (I8) |
+| F13 | unknown purpose digest, or transition/purpose owner mismatch | `InvalidDeclassificationRuleSet` (decode-time) | set never constructed |
 
 ## 15. Test plan
 
 - **policy-core, rule objects**: CBOR round-trip; canonicality (single-byte
   mutation ⇒ F2); chain suite (genesis, happy succession, gap, fork, replay
   of an older set as successor — F3); window nesting; sort/dedup violations;
-  reader-constraint presence rules per tag; limits.
+  reader-constraint presence rules per tag; limits; closed vocabulary —
+  unknown purpose digest and transition/purpose owner mismatch both refuse
+  at decode (F13).
 - **policy-core, entry**: pairwise authorize matrix over
   {right/wrong transition} × {right/wrong purpose} × {valid/expired} ×
   {matching/mismatched implementation} × {member/non-member reader} —
@@ -672,7 +738,8 @@ Failure-mode table (each row a distinct error and at least one test):
 - **kerneld integration**: masked view read-back carries a node digest whose
   transition is tag 1 (§8.3); gate refusal ⇒ ingress error and *no* vault
   record; planner ticket records the node digest (§9); rule set absent ⇒ I8
-  behavior (agent view request fails closed).
+  behavior (agent view request fails closed); a signature-valid rule set
+  whose digest differs from the manifest pin is refused at load (F12).
 - **attack rows** (extend `policy_attack_matrix`): forged rule-set signature;
   rule set signed by a Deployment-purpose key; stale predecessor replay;
   consent replay across two releases; consent for sink A presented for
@@ -686,8 +753,8 @@ Five stages, each independently shippable, tests green at every boundary:
 
 | Stage | Content | Behavior change |
 |---|---|---|
-| S1 | Trust-root extension + `DeclassificationRuleSetV2`/`RuleV2` + `declassify` entry + all §15 policy-core tests | none (no callers) |
-| S2 | kerneld loads/verifies the set at startup+rollover; masking routed (§8); vault record binding | ingress fails closed without a valid rule set |
+| S1 | Trust-root extension + `DeclassificationRuleSetV2`/`RuleV2` + purpose enum + manifest pin schema + `declassify` entry + all §15 policy-core tests | none (no callers) |
+| S2 | kerneld loads the manifest-pinned set, verifies chain + pin at startup+rollover; masking routed (§8); vault record binding | ingress fails closed without a valid, pinned rule set |
 | S3 | planner envelope routed (§9) | planner calls fail closed without their rule |
 | S4 | reader-dimension facts + envelope lineage checks (§11) | mislabeled/unlabeled handoffs refuse |
 | S5 | approval display routed + `ConsentRecordV2` + final release (§10) | egress demands consent |
@@ -696,23 +763,28 @@ S1 is pure addition and can merge immediately after review. S2 is the first
 stage with operational impact and needs a rule set authored for the dev
 deployment before it lands.
 
-## 17. Open questions
+## 17. Decisions and remaining open items
 
-- **O1 — Delivery vehicle**: rule set as a deployment-manifest item (rides
-  `deployment_manifest_claim` like projections) vs. an activation-time
-  object (rides the activation flow like the activation trust roots).
-  Recommendation: manifest item — rules change with releases, not with
-  installations. Decide before S2.
-- **O2 — Purpose vocabulary**: closed enum in code (digest derived from the
-  canonical name) vs. open strings. Recommendation: closed enum initially —
-  three purposes suffice for S2–S3 (`agent-ingress-masking`,
-  `planner-call`, `approval-display`); open strings invite unreviewable
-  proliferation.
+Resolved (numbering kept stable for traceability):
+
+- **O1 — Delivery vehicle: decided — deployment-manifest item.** The
+  manifest claim pins the rule set's `signed_digest`; kerneld refuses a
+  verifying-but-unpinned set (§4, F12). The Declassification trust root set
+  stays on the installer/MDM channel with its siblings. Rationale: rules
+  change with releases, root keys with installations.
+- **O2 — Purpose vocabulary: decided — closed enum.**
+  `DeclassificationPurposeV2` (§6.5), digests on the wire, unknown digests
+  and owner mismatches refused at decode (F13). Growth is a kernel release
+  plus a new rule-set generation — signed and visible, never silent.
+
+Remaining open items (proposed defaults apply until revisited):
+
 - **O3 — Consent signature**: §10.3 keeps consent kernel-internal (vault +
   settlement digest). Alternative: a fully signed consent object under its
   own domain, verifiable outside the kernel. Recommendation: internal for
   S5; revisit if an external auditor needs standalone consent proofs.
-- **O4 — Consent freshness default**: proposed 300 s. Product decision.
+- **O4 — Consent freshness default**: proposed 300 s. Product decision;
+  encodable per rule (§6.4), so the default only matters for rule authoring.
 - **O5 — Registry assignments**: signature tag (presumptively 29), binding
   tag 3, purpose 5, `ClosedSecurityDomainV2` variant value, hard-limit
   numbers (64 rules / 16 readers). Assign against the authoritative
