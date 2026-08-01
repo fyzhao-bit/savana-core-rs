@@ -15,7 +15,10 @@ v1.2: O1, O3, and O4 resolved (§13). Every question this document raised is
 now decided; nothing remains open.
 
 Companion reading: `docs/declassification-v2.md` (the release-rule surface
-this design composes with, cited below as *DECL*), `docs/protocol-v1.md`.
+this design composes with, cited below as *DECL*), `docs/protocol-v1.md`, and
+`docs/planner-privacy-v2.md` (which projects its planner semantic catalog and
+decode table from the connector registration specified here — register once,
+both the kernel authorization table and the planner-side catalog fall out).
 
 ---
 
