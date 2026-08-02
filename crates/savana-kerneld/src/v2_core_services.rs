@@ -30,9 +30,10 @@ use savana_kernel_protocol::v2::{
     FinalizeInputResponseV2, GetInputStatusResponseV2, InputNextSequenceV2, InputPublicStateV2,
     InputStatusTargetV2, KernelAgentHealthResponseV2, KernelAgentOperationV2,
     KernelIngressHealthResponseV2, KernelIngressOperationV2, KernelServiceOperationV2,
-    MaskedDocumentHandleV2, PrepareIngressUiAuthenticationResponseV2, PrincipalIdV2,
-    PublicServiceStateV2, ReadAgentViewResponseV2, RegisterParserWorkerJobResponseV2, RequestIdV2,
-    ServiceIdentityV2, UnixMillisV2, VaultPublicStateV2,
+    MaskedDocumentHandleV2, PeerIdentityBindingV2, PrepareIngressUiAuthenticationResponseV2,
+    PrincipalIdV2, PublicServiceStateV2, ReadAgentViewResponseV2,
+    RegisterParserWorkerJobResponseV2, RequestIdV2, ServiceIdentityV2, UnixMillisV2,
+    VaultPublicStateV2,
 };
 use savana_kernel_protocol::StableCode;
 use sha2::{Digest as _, Sha256};
@@ -342,6 +343,7 @@ impl CoreKernelRuntimeServicesV2 {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     fn execute_operation(
         &mut self,
         request_id: RequestIdV2,
@@ -362,6 +364,8 @@ impl CoreKernelRuntimeServicesV2 {
             effect_fence_epoch,
             BootIdV2::new(*caller_identity.as_bytes()),
             caller_identity,
+            PeerIdentityBindingV2::linux(501, 502, 503, 504, Digest32V2::new([0xf3; 32]))
+                .expect("fixed test peer binding"),
             KernelRuntimeResponseBuilderV2::Body,
             None,
         ) {
@@ -388,6 +392,7 @@ impl CoreKernelRuntimeServicesV2 {
         effect_fence_epoch: u64,
         caller_boot_id: BootIdV2,
         caller_identity: ServiceIdentityV2,
+        caller_observed_peer: PeerIdentityBindingV2,
         response_builder: KernelRuntimeResponseBuilderV2,
         commit: Option<&StateOwnerCommitV2>,
     ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2> {
@@ -404,6 +409,7 @@ impl CoreKernelRuntimeServicesV2 {
                 effect_fence_epoch,
                 caller_boot_id,
                 caller_identity,
+                caller_observed_peer,
                 response_builder,
                 commit,
             );
@@ -462,6 +468,7 @@ impl CoreKernelRuntimeServicesV2 {
         effect_fence_epoch: u64,
         caller_boot_id: BootIdV2,
         caller_identity: ServiceIdentityV2,
+        caller_observed_peer: PeerIdentityBindingV2,
         response_builder: KernelRuntimeResponseBuilderV2,
         commit: Option<&StateOwnerCommitV2>,
     ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2> {
@@ -511,6 +518,7 @@ impl CoreKernelRuntimeServicesV2 {
                 savana_kernel_protocol::v2::EndpointRoleV2::IngressKernel,
                 caller_boot_id,
                 caller_identity,
+                caller_observed_peer.clone(),
                 request_id,
                 logical_deadline,
                 operation_digest,
@@ -525,7 +533,8 @@ impl CoreKernelRuntimeServicesV2 {
                 .map_err(|error| match error {
                     KernelIngressAuthorityErrorV2::BindingMismatch
                     | KernelIngressAuthorityErrorV2::AlreadyConsumed
-                    | KernelIngressAuthorityErrorV2::InvalidReference => StableCode::PolicyDenied,
+                    | KernelIngressAuthorityErrorV2::InvalidReference
+                    | KernelIngressAuthorityErrorV2::RequestConflict => StableCode::PolicyDenied,
                     other => map_ingress_authority_error(other),
                 });
             return match recovered {
@@ -568,12 +577,20 @@ impl CoreKernelRuntimeServicesV2 {
                 }
             };
         }
+        if now.get() == 0 || now.get() >= logical_deadline.get() {
+            return prepare_finalize_terminal_response(
+                response_builder,
+                Err(StableCode::DeadlineExceeded),
+                commit,
+            );
+        }
         let mut response_builder = Some(response_builder);
         let transaction = self.input.finalize_with(request, |finalized| {
             let recovery_identity = FinalizeRecoveryIdentityV2::new(
                 savana_kernel_protocol::v2::EndpointRoleV2::IngressKernel,
                 caller_boot_id,
                 caller_identity,
+                caller_observed_peer,
                 request_id,
                 logical_deadline,
                 operation_digest,
@@ -1308,6 +1325,7 @@ impl KernelRuntimeServicesV2 for CoreKernelRuntimeServicesV2 {
             lease.effect_fence_epoch(),
             peer.caller_boot_id(),
             peer.caller_identity(),
+            peer.observed_peer().clone(),
             response_builder,
             commit.as_ref(),
         )
@@ -1385,6 +1403,7 @@ const fn map_ingress_authority_error(error: KernelIngressAuthorityErrorV2) -> St
         KernelIngressAuthorityErrorV2::InvalidReference => StableCode::HandleUnknown,
         KernelIngressAuthorityErrorV2::AlreadyConsumed => StableCode::HandleAlreadyConsumed,
         KernelIngressAuthorityErrorV2::BindingMismatch => StableCode::ApprovalBindingMismatch,
+        KernelIngressAuthorityErrorV2::RequestConflict => StableCode::PolicyDenied,
         KernelIngressAuthorityErrorV2::Expired => StableCode::PolicyExpired,
         KernelIngressAuthorityErrorV2::LimitExceeded => StableCode::PolicyLimitExceeded,
         KernelIngressAuthorityErrorV2::Unavailable => StableCode::KernelUnavailable,
@@ -1706,6 +1725,91 @@ mod tests {
         finalize_recovery_fixture_with_hook(None)
     }
 
+    fn add_receiving_finalize_session(
+        services: &mut CoreKernelRuntimeServicesV2,
+        manifest: Digest32V2,
+        caller: ServiceIdentityV2,
+        seed: u8,
+    ) -> (InputSessionHandleV2, FinalizeInputRequestV2) {
+        let authorization =
+            IngressUiAuthorizationHandleV2::from_authority_entropy([seed; 32]).unwrap();
+        services
+            .input
+            .register_verified_ui_authorization(
+                authorization,
+                KernelVerifiedUiAuthorizationV2::for_test_with_expiry(UnixMillisV2::new(10_000)),
+            )
+            .unwrap();
+        let bytes = b"a distinct valid receiving session for request-id collision";
+        let begin = services
+            .execute_operation(
+                RequestIdV2::new([seed.wrapping_add(1); 16]),
+                KernelServiceOperationV2::ingress(KernelIngressOperationV2::BeginInput(
+                    BeginInputRequestV2::new(
+                        authorization,
+                        ContentKindV2::ChatText,
+                        bytes.len() as u64,
+                        Some(Digest32V2::new(Sha256::digest(bytes).into())),
+                    )
+                    .unwrap(),
+                )),
+                UnixMillisV2::new(130),
+                manifest,
+                7,
+                9,
+                caller,
+            )
+            .unwrap();
+        let begun = decode_begin_input_response_v2(begin.as_bytes()).unwrap();
+        let initial = input_channel_begin_digest_v2(begun.session(), InputChannelV2::ChatText);
+        let chunk =
+            input_chunk_digest_v2(begun.session(), InputChannelV2::ChatText, 0, bytes).unwrap();
+        let cumulative = input_channel_step_digest_v2(initial, 0, chunk).unwrap();
+        let append = services
+            .execute_operation(
+                RequestIdV2::new([seed.wrapping_add(2); 16]),
+                KernelServiceOperationV2::ingress(KernelIngressOperationV2::AppendInputChunk(
+                    AppendInputChunkRequestV2::new(
+                        begun.writer(),
+                        DirectInputChannelV2::ChatText,
+                        0,
+                        initial,
+                        ZeroizingBytesV2::new(bytes.to_vec()).unwrap(),
+                        chunk,
+                        cumulative,
+                    )
+                    .unwrap(),
+                )),
+                UnixMillisV2::new(131),
+                manifest,
+                7,
+                9,
+                caller,
+            )
+            .unwrap();
+        let accepted = decode_append_input_chunk_response_v2(append.as_bytes()).unwrap();
+        let finalize = FinalizeInputRequestV2::new(
+            begun.session(),
+            vec![InputChannelCommitmentV2::new(
+                InputChannelV2::ChatText,
+                1,
+                0,
+                bytes.len() as u64,
+                accepted.cumulative_digest(),
+            )
+            .unwrap()],
+            InputSourceProvenanceV2::direct(
+                InputSourceKindV2::Chat,
+                bytes.len() as u64,
+                Digest32V2::new(Sha256::digest(bytes).into()),
+                VersionV2::new(1, 0, 0),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        (begun.session(), finalize)
+    }
+
     fn finalize_panic_hook(
         panic_before_commit: bool,
         panic_after_claim: bool,
@@ -1742,7 +1846,7 @@ mod tests {
             .input
             .register_verified_ui_authorization(
                 authorization,
-                KernelVerifiedUiAuthorizationV2::for_test(),
+                KernelVerifiedUiAuthorizationV2::for_test_with_expiry(UnixMillisV2::new(10_000)),
             )
             .unwrap();
         let manifest = Digest32V2::new([0x35; 32]);
@@ -1831,10 +1935,11 @@ mod tests {
             owner,
         )
         .unwrap();
-        let peer = VerifiedKernelServicePeerV2::from_mutual_authentication(
+        let peer = VerifiedKernelServicePeerV2::from_test_mutual_authentication(
             EndpointRoleV2::IngressKernel,
             BootIdV2::new([0xe8; 32]),
             caller,
+            PeerIdentityBindingV2::linux(501, 502, 503, 504, Digest32V2::new([0xf3; 32])).unwrap(),
         )
         .unwrap();
         FinalizeRecoveryFixtureV2 {
@@ -2365,10 +2470,12 @@ mod tests {
                 owner,
             )
             .unwrap();
-            let peer = VerifiedKernelServicePeerV2::from_mutual_authentication(
+            let peer = VerifiedKernelServicePeerV2::from_test_mutual_authentication(
                 EndpointRoleV2::IngressKernel,
                 BootIdV2::new([0xe8; 32]),
                 caller,
+                PeerIdentityBindingV2::linux(501, 502, 503, 504, Digest32V2::new([0xf3; 32]))
+                    .unwrap(),
             )
             .unwrap();
             let application_request = |request_id| {
@@ -2404,7 +2511,7 @@ mod tests {
                 .unwrap();
                 dispatcher
                     .dispatch_one_signed_with_failure_for_test(
-                        peer,
+                        peer.clone(),
                         V2GenerationLease::for_dispatch_test(manifest, 7),
                         &canonical,
                         UnixMillisV2::new(120),
@@ -2417,7 +2524,7 @@ mod tests {
                 let (response_session, mut client_session) = suite_one_response_session(&request);
                 let result = dispatcher
                     .dispatch_one_suite_one_with_failure_for_test(
-                        peer,
+                        peer.clone(),
                         V2GenerationLease::for_dispatch_test(manifest, 7),
                         request,
                         response_session.clone(),
@@ -2441,7 +2548,7 @@ mod tests {
             } else {
                 dispatcher
                     .dispatch_one_application_with_failure_for_test(
-                        peer,
+                        peer.clone(),
                         V2GenerationLease::for_dispatch_test(manifest, 7),
                         application_request(RequestIdV2::new([0xe9; 16])),
                         UnixMillisV2::new(120),
@@ -2489,7 +2596,7 @@ mod tests {
 
             let success = dispatcher
                 .dispatch_one_application(
-                    peer,
+                    peer.clone(),
                     V2GenerationLease::for_dispatch_test(manifest, 7),
                     application_request(RequestIdV2::new([0xeb; 16])),
                     UnixMillisV2::new(130),
@@ -2502,7 +2609,7 @@ mod tests {
             decode_finalize_input_response_v2(body).unwrap();
             let duplicate = dispatcher
                 .dispatch_one_application(
-                    peer,
+                    peer.clone(),
                     V2GenerationLease::for_dispatch_test(manifest, 7),
                     application_request(RequestIdV2::new([0xec; 16])),
                     UnixMillisV2::new(131),
@@ -2537,7 +2644,7 @@ mod tests {
 
         assert_eq!(
             fixture.dispatcher.dispatch_one_suite_one(
-                fixture.peer,
+                fixture.peer.clone(),
                 V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
                 request,
                 response_session,
@@ -2548,7 +2655,7 @@ mod tests {
         );
         assert_eq!(
             fixture.dispatcher.dispatch_one_application(
-                fixture.peer,
+                fixture.peer.clone(),
                 V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
                 fixture.request(request_id, fixture.finalize.clone()),
                 UnixMillisV2::new(121),
@@ -2587,7 +2694,7 @@ mod tests {
 
         assert_eq!(
             fixture.dispatcher.dispatch_one_suite_one(
-                fixture.peer,
+                fixture.peer.clone(),
                 V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
                 request,
                 response_session,
@@ -2598,7 +2705,7 @@ mod tests {
         );
         assert_eq!(
             fixture.dispatcher.dispatch_one_application(
-                fixture.peer,
+                fixture.peer.clone(),
                 V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
                 fixture.request(request_id, fixture.finalize.clone()),
                 UnixMillisV2::new(121),
@@ -2637,7 +2744,7 @@ mod tests {
 
         assert_eq!(
             fixture.dispatcher.dispatch_one_suite_one(
-                fixture.peer,
+                fixture.peer.clone(),
                 V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
                 request,
                 response_session,
@@ -2656,7 +2763,7 @@ mod tests {
         let recovered_record = fixture
             .dispatcher
             .dispatch_one_suite_one(
-                fixture.peer,
+                fixture.peer.clone(),
                 V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
                 retry,
                 retry_session,
@@ -2726,7 +2833,7 @@ mod tests {
             let response_session = response_session.clone();
             thread::spawn(move || {
                 dispatcher.dispatch_one_suite_one(
-                    fixture.peer,
+                    fixture.peer.clone(),
                     V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
                     request,
                     response_session,
@@ -2809,7 +2916,7 @@ mod tests {
             let dispatcher = Arc::clone(&dispatcher);
             thread::spawn(move || {
                 let result = dispatcher.dispatch_one_suite_one(
-                    fixture.peer,
+                    fixture.peer.clone(),
                     V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
                     request,
                     response_session,
@@ -3029,10 +3136,11 @@ mod tests {
             )
             .unwrap(),
         );
-        let peer = VerifiedKernelServicePeerV2::from_mutual_authentication(
+        let peer = VerifiedKernelServicePeerV2::from_test_mutual_authentication(
             EndpointRoleV2::IngressKernel,
             BootIdV2::new([0xe8; 32]),
             ServiceIdentityV2::new([0xe2; 32]),
+            PeerIdentityBindingV2::linux(501, 502, 503, 504, Digest32V2::new([0xf3; 32])).unwrap(),
         )
         .unwrap();
         let request = |id: u8| {
@@ -3051,9 +3159,10 @@ mod tests {
         };
 
         let first_dispatcher = Arc::clone(&dispatcher);
+        let first_peer = peer.clone();
         let first = thread::spawn(move || {
             first_dispatcher.dispatch_one_application(
-                peer,
+                first_peer,
                 V2GenerationLease::for_dispatch_test(Digest32V2::new([0x35; 32]), 7),
                 request(0xc1),
                 UnixMillisV2::new(100),
@@ -3062,9 +3171,10 @@ mod tests {
         });
         entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         let second_dispatcher = Arc::clone(&dispatcher);
+        let second_peer = peer.clone();
         let second = thread::spawn(move || {
             second_dispatcher.dispatch_one_application(
-                peer,
+                second_peer,
                 V2GenerationLease::for_dispatch_test(Digest32V2::new([0x35; 32]), 7),
                 request(0xc2),
                 UnixMillisV2::new(100),
@@ -3083,7 +3193,7 @@ mod tests {
             suite_one_response_session_with_seed(&busy_request, 0xe5);
         assert_eq!(
             dispatcher.dispatch_one_suite_one(
-                peer,
+                peer.clone(),
                 V2GenerationLease::for_dispatch_test(Digest32V2::new([0x35; 32]), 7),
                 busy_request,
                 response_session.clone(),
@@ -3128,7 +3238,7 @@ mod tests {
         fixture
             .dispatcher
             .dispatch_one_suite_one(
-                fixture.peer,
+                fixture.peer.clone(),
                 V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
                 initial_request,
                 initial_session,
@@ -3161,7 +3271,7 @@ mod tests {
             let response_session = response_session.clone();
             thread::spawn(move || {
                 dispatcher.dispatch_one_suite_one(
-                    fixture.peer,
+                    fixture.peer.clone(),
                     V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
                     retry,
                     response_session,
@@ -3218,6 +3328,256 @@ mod tests {
     }
 
     #[test]
+    fn exact_committed_finalize_recovers_after_original_logical_deadline() {
+        let fixture = finalize_recovery_fixture();
+        let request_id = RequestIdV2::new([0xc4; 16]);
+        let original_request = fixture.request(request_id, fixture.finalize.clone());
+        let (initial_slot, mut initial_client) =
+            suite_one_response_session_with_seed(&original_request, 0xd7);
+        let initial_record = fixture
+            .dispatcher
+            .dispatch_one_suite_one(
+                fixture.peer.clone(),
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                original_request,
+                initial_slot,
+                UnixMillisV2::new(120),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+        let initial_opened = initial_client
+            .open_application_response(&initial_record)
+            .unwrap();
+        let initial_response =
+            savana_kernel_protocol::v2::decode_kernel_service_application_response_v2(
+                initial_opened.plaintext(),
+                EndpointRoleV2::IngressKernel,
+                42,
+            )
+            .unwrap();
+        let KernelServiceApplicationResponseBodyV2::Success(initial_body) = initial_response.body()
+        else {
+            panic!("initial finalize must commit")
+        };
+        let initial_body = initial_body.to_vec();
+
+        let retry_request = fixture.request(request_id, fixture.finalize.clone());
+        let (retry_slot, mut retry_client) =
+            suite_one_response_session_with_seed(&retry_request, 0xd8);
+        let recovered_record = fixture
+            .dispatcher
+            .dispatch_one_suite_one(
+                fixture.peer.clone(),
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                retry_request,
+                retry_slot,
+                UnixMillisV2::new(1_001),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .expect("fresh delivery deadline must carry exact committed recovery");
+        let recovered_opened = retry_client
+            .open_application_response(&recovered_record)
+            .unwrap();
+        let recovered_response =
+            savana_kernel_protocol::v2::decode_kernel_service_application_response_v2(
+                recovered_opened.plaintext(),
+                EndpointRoleV2::IngressKernel,
+                42,
+            )
+            .unwrap();
+        let KernelServiceApplicationResponseBodyV2::Success(recovered_body) =
+            recovered_response.body()
+        else {
+            panic!(
+                "exact committed retry must remain recoverable after logical expiry: {:?}",
+                recovered_response.body()
+            )
+        };
+        assert_eq!(recovered_body.as_slice(), initial_body.as_slice());
+        let services = fixture.shared.lock().unwrap();
+        assert_eq!(
+            services
+                .ingress_authority
+                .as_ref()
+                .unwrap()
+                .pending_record_count(),
+            1,
+        );
+    }
+
+    #[test]
+    fn expired_uncommitted_finalize_refuses_before_input_or_pending_mutation() {
+        let fixture = finalize_recovery_fixture();
+        let request_id = RequestIdV2::new([0xc8; 16]);
+        let response = fixture
+            .dispatcher
+            .dispatch_one_application(
+                fixture.peer.clone(),
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                fixture.request(request_id, fixture.finalize.clone()),
+                UnixMillisV2::new(1_001),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(
+            response.body(),
+            &KernelServiceApplicationResponseBodyV2::Error(
+                savana_kernel_protocol::v2::PublicStableCodeV2::DeadlineExceeded,
+            ),
+        );
+        let services = fixture.shared.lock().unwrap();
+        assert_eq!(
+            services
+                .input
+                .status(InputStatusTargetV2::Session(fixture.session))
+                .unwrap(),
+            KernelInputPublicStateV2::Receiving,
+        );
+        assert_eq!(
+            services
+                .ingress_authority
+                .as_ref()
+                .unwrap()
+                .pending_record_count(),
+            0,
+        );
+    }
+
+    #[test]
+    fn same_authenticated_principal_request_id_cannot_finalize_a_different_receiving_session() {
+        let fixture = finalize_recovery_fixture();
+        let request_id = RequestIdV2::new([0xc5; 16]);
+        let conflicting_caller = ServiceIdentityV2::new([0xe2; 32]);
+        let (conflicting_session, conflicting_finalize) = {
+            let mut services = fixture.shared.lock().unwrap();
+            add_receiving_finalize_session(
+                &mut services,
+                fixture.lease_manifest,
+                conflicting_caller,
+                0xc6,
+            )
+        };
+
+        let original = fixture
+            .dispatcher
+            .dispatch_one_application(
+                fixture.peer.clone(),
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                fixture.request(request_id, fixture.finalize.clone()),
+                UnixMillisV2::new(140),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+        let KernelServiceApplicationResponseBodyV2::Success(original_body) = original.body() else {
+            panic!("original finalize must commit")
+        };
+        let original_body = original_body.to_vec();
+
+        let conflict = fixture
+            .dispatcher
+            .dispatch_one_application(
+                fixture.peer.clone(),
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                fixture.request(request_id, conflicting_finalize),
+                UnixMillisV2::new(141),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(
+            conflict.body(),
+            &KernelServiceApplicationResponseBodyV2::Error(
+                savana_kernel_protocol::v2::PublicStableCodeV2::PolicyDenied,
+            ),
+        );
+
+        let exact_recovery = fixture
+            .dispatcher
+            .dispatch_one_application(
+                fixture.peer.clone(),
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                fixture.request(request_id, fixture.finalize.clone()),
+                UnixMillisV2::new(142),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+        let KernelServiceApplicationResponseBodyV2::Success(recovered_body) = exact_recovery.body()
+        else {
+            panic!("exact same request must recover")
+        };
+        assert_eq!(recovered_body.as_slice(), original_body.as_slice());
+
+        let services = fixture.shared.lock().unwrap();
+        assert_eq!(
+            services
+                .input
+                .status(InputStatusTargetV2::Session(conflicting_session))
+                .unwrap(),
+            KernelInputPublicStateV2::Receiving,
+        );
+        assert_eq!(
+            services
+                .ingress_authority
+                .as_ref()
+                .unwrap()
+                .pending_record_count(),
+            1,
+        );
+    }
+
+    #[test]
+    fn finalize_recovery_identity_binds_the_verified_observed_os_peer() {
+        let fixture = finalize_recovery_fixture();
+        let request_id = RequestIdV2::new([0xc7; 16]);
+        let original = fixture
+            .dispatcher
+            .dispatch_one_application(
+                fixture.peer.clone(),
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                fixture.request(request_id, fixture.finalize.clone()),
+                UnixMillisV2::new(150),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert!(matches!(
+            original.body(),
+            KernelServiceApplicationResponseBodyV2::Success(_)
+        ));
+
+        let changed_observed_peer = VerifiedKernelServicePeerV2::from_test_mutual_authentication(
+            EndpointRoleV2::IngressKernel,
+            BootIdV2::new([0xe8; 32]),
+            ServiceIdentityV2::new([0xe2; 32]),
+            PeerIdentityBindingV2::linux(501, 502, 999, 504, Digest32V2::new([0xee; 32])).unwrap(),
+        )
+        .unwrap();
+        let rejected = fixture
+            .dispatcher
+            .dispatch_one_application(
+                changed_observed_peer,
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                fixture.request(request_id, fixture.finalize.clone()),
+                UnixMillisV2::new(151),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(
+            rejected.body(),
+            &KernelServiceApplicationResponseBodyV2::Error(
+                savana_kernel_protocol::v2::PublicStableCodeV2::PolicyDenied,
+            ),
+        );
+        let services = fixture.shared.lock().unwrap();
+        assert_eq!(
+            services
+                .ingress_authority
+                .as_ref()
+                .unwrap()
+                .pending_record_count(),
+            1,
+        );
+    }
+
+    #[test]
     fn committed_finalize_is_recovered_only_for_identical_fresh_suite_one_retry() {
         let fixture = finalize_recovery_fixture();
         let request_id = RequestIdV2::new([0xb5; 16]);
@@ -3227,7 +3587,7 @@ mod tests {
         let first_record = fixture
             .dispatcher
             .dispatch_one_suite_one(
-                fixture.peer,
+                fixture.peer.clone(),
                 V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
                 original_request,
                 first_slot,
@@ -3267,7 +3627,7 @@ mod tests {
         let retry_record = fixture
             .dispatcher
             .dispatch_one_suite_one(
-                fixture.peer,
+                fixture.peer.clone(),
                 V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
                 retry_request,
                 retry_slot,
@@ -3309,7 +3669,7 @@ mod tests {
         let different_request_id = fixture
             .dispatcher
             .dispatch_one_application(
-                fixture.peer,
+                fixture.peer.clone(),
                 V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
                 fixture.request(RequestIdV2::new([0xb6; 16]), fixture.finalize.clone()),
                 UnixMillisV2::new(122),
@@ -3340,7 +3700,7 @@ mod tests {
         let different_commitment = fixture
             .dispatcher
             .dispatch_one_application(
-                fixture.peer,
+                fixture.peer.clone(),
                 V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
                 fixture.request(request_id, mismatched_finalize),
                 UnixMillisV2::new(123),
@@ -3363,7 +3723,7 @@ mod tests {
         let different_session = fixture
             .dispatcher
             .dispatch_one_application(
-                fixture.peer,
+                fixture.peer.clone(),
                 V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
                 fixture.request(request_id, mismatched_session_finalize),
                 UnixMillisV2::new(124),
@@ -3377,10 +3737,11 @@ mod tests {
             ),
         );
 
-        let different_peer = VerifiedKernelServicePeerV2::from_mutual_authentication(
+        let different_peer = VerifiedKernelServicePeerV2::from_test_mutual_authentication(
             EndpointRoleV2::IngressKernel,
             BootIdV2::new([0xb8; 32]),
             ServiceIdentityV2::new([0xb9; 32]),
+            PeerIdentityBindingV2::linux(501, 502, 503, 504, Digest32V2::new([0xf3; 32])).unwrap(),
         )
         .unwrap();
         let different_identity = fixture
@@ -3403,7 +3764,7 @@ mod tests {
         let different_logical_deadline = fixture
             .dispatcher
             .dispatch_one_application(
-                fixture.peer,
+                fixture.peer.clone(),
                 V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
                 fixture.request_with_logical_deadline(
                     request_id,
@@ -3424,7 +3785,7 @@ mod tests {
         let different_effect_fence = fixture
             .dispatcher
             .dispatch_one_application(
-                fixture.peer,
+                fixture.peer.clone(),
                 V2GenerationLease::for_dispatch_test_with_fence(fixture.lease_manifest, 7, 2),
                 fixture.request(request_id, fixture.finalize.clone()),
                 UnixMillisV2::new(127),
@@ -3500,10 +3861,12 @@ mod tests {
         .unwrap();
         let response = dispatcher
             .dispatch_one_application(
-                VerifiedKernelServicePeerV2::from_mutual_authentication(
+                VerifiedKernelServicePeerV2::from_test_mutual_authentication(
                     EndpointRoleV2::IngressKernel,
                     BootIdV2::new([0x57; 32]),
                     ServiceIdentityV2::new([0x58; 32]),
+                    PeerIdentityBindingV2::linux(501, 502, 503, 504, Digest32V2::new([0xf3; 32]))
+                        .unwrap(),
                 )
                 .unwrap(),
                 V2GenerationLease::for_dispatch_test(Digest32V2::new([0x35; 32]), 7),

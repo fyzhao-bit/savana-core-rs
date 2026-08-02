@@ -49,6 +49,7 @@ const CLIENT_CONFIRM_LABEL: &[u8] = b"SAVANA_CLIENT_CONFIRM_V2\0";
 const SERVER_CONFIRM_LABEL: &[u8] = b"SAVANA_SERVER_CONFIRM_V2\0";
 const CLIENT_CONFIRM_MAC_DOMAIN: &[u8] = b"SAVANA_CLIENT_CONFIRM_MAC_V2\0";
 const SERVER_CONFIRM_MAC_DOMAIN: &[u8] = b"SAVANA_SERVER_CONFIRM_MAC_V2\0";
+const PEER_IDENTITY_BINDING_DIGEST_DOMAIN: &[u8] = b"SAVANA_PEER_IDENTITY_BINDING_V2\0";
 const RECORD_AAD_DOMAIN: &[u8] = b"SAVANA_RECORD_AAD_V2\0";
 const ED25519_KEY_ID_DOMAIN: &[u8] = b"savana.ed25519-key-id.v2\0";
 
@@ -328,28 +329,46 @@ impl PeerIdentityBindingV2 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub fn peer_identity_binding_digest_v2(
+    peer: &PeerIdentityBindingV2,
+) -> Result<Digest32V2, ProtocolError> {
+    peer.validate()?;
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encode_peer_binding(&mut encoder, peer)?;
+    let canonical = encoder.into_writer();
+    let mut hash = Sha256::new();
+    hash.update(PEER_IDENTITY_BINDING_DIGEST_DOMAIN);
+    hash.update(canonical);
+    Ok(Digest32V2::new(hash.finalize().into()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedV2HandshakePeer {
     role: EndpointRoleV2,
     client_identity: ServiceIdentityV2,
     client_boot_id: BootIdV2,
+    observed_client_peer: PeerIdentityBindingV2,
     transcript_digest: Digest32V2,
 }
 
 impl VerifiedV2HandshakePeer {
-    pub const fn role(self) -> EndpointRoleV2 {
+    pub const fn role(&self) -> EndpointRoleV2 {
         self.role
     }
 
-    pub const fn client_identity(self) -> ServiceIdentityV2 {
+    pub const fn client_identity(&self) -> ServiceIdentityV2 {
         self.client_identity
     }
 
-    pub const fn client_boot_id(self) -> BootIdV2 {
+    pub const fn client_boot_id(&self) -> BootIdV2 {
         self.client_boot_id
     }
 
-    pub const fn transcript_digest(self) -> Digest32V2 {
+    pub const fn observed_client_peer(&self) -> &PeerIdentityBindingV2 {
+        &self.observed_client_peer
+    }
+
+    pub const fn transcript_digest(&self) -> Digest32V2 {
         self.transcript_digest
     }
 }
@@ -592,7 +611,7 @@ impl V2ServerHandshake {
             server_nonce,
             client_ephemeral_x25519: hello.client_ephemeral_x25519,
             server_ephemeral_x25519,
-            observed_client_peer,
+            observed_client_peer: observed_client_peer.clone(),
         };
         let transcript_bytes = encode_transcript(&transcript)?;
         let transcript_digest = transcript_digest_for(&transcript_bytes);
@@ -621,6 +640,7 @@ impl V2ServerHandshake {
                 edge,
                 client_boot_id: hello.client_boot_id,
                 client_nonce: hello.client_nonce,
+                observed_client_peer,
                 transcript_digest,
                 server_signature,
                 client_public_key,
@@ -635,6 +655,7 @@ pub struct V2PendingServerHandshake {
     edge: KernelServiceHandshakeEdgeV2,
     client_boot_id: BootIdV2,
     client_nonce: Nonce32V2,
+    observed_client_peer: PeerIdentityBindingV2,
     transcript_digest: Digest32V2,
     server_signature: [u8; 64],
     client_public_key: [u8; 32],
@@ -724,6 +745,7 @@ impl V2PendingServerHandshake {
                 role: self.edge.role,
                 client_identity: self.edge.client_identity,
                 client_boot_id: self.client_boot_id,
+                observed_client_peer: self.observed_client_peer,
                 transcript_digest,
             },
         ))

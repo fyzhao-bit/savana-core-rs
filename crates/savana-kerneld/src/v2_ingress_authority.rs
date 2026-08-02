@@ -1,15 +1,16 @@
 use ed25519_dalek::SigningKey;
 use getrandom::getrandom;
 use savana_kernel_protocol::v2::{
-    approval_display_digest_v2, derive_ed25519_key_id_v2, ApprovalBindingV2, ApprovalDecisionV2,
-    ApprovalPurposeV2, AuthorityHandleKeyV2, BootIdV2, BoundedApprovalDisplayTextV2, Digest32V2,
-    DurableTaskIdV2, Ed25519KeyIdV2, EndpointRoleV2, IngressKernelApprovalHandleV2,
-    IngressUiAuthenticationPreparationHandleV2, IngressUiAuthorizationHandleV2,
-    KernelIngressBootstrapTransferCapabilityV2, Nonce32V2, PendingIngressHandleV2, PrincipalIdV2,
-    ProducerIdentityV2, RequestIdV2, ServiceIdentityV2, SignedApprovalEnvelopeV2,
-    SignedApprovalSettlementV2, SignedUiAuthenticationEnvelopeV2,
-    SignedUiAuthenticationSettlementV2, UiAuthenticationBindingV2, UiAuthenticationPurposeV2,
-    UnixMillisV2, UnsignedApprovalEnvelopeV2, UnsignedUiAuthenticationEnvelopeV2,
+    approval_display_digest_v2, derive_ed25519_key_id_v2, peer_identity_binding_digest_v2,
+    ApprovalBindingV2, ApprovalDecisionV2, ApprovalPurposeV2, AuthorityHandleKeyV2, BootIdV2,
+    BoundedApprovalDisplayTextV2, Digest32V2, DurableTaskIdV2, Ed25519KeyIdV2, EndpointRoleV2,
+    IngressKernelApprovalHandleV2, IngressUiAuthenticationPreparationHandleV2,
+    IngressUiAuthorizationHandleV2, KernelIngressBootstrapTransferCapabilityV2, Nonce32V2,
+    PeerIdentityBindingV2, PendingIngressHandleV2, PrincipalIdV2, ProducerIdentityV2, RequestIdV2,
+    ServiceIdentityV2, SignedApprovalEnvelopeV2, SignedApprovalSettlementV2,
+    SignedUiAuthenticationEnvelopeV2, SignedUiAuthenticationSettlementV2,
+    UiAuthenticationBindingV2, UiAuthenticationPurposeV2, UnixMillisV2, UnsignedApprovalEnvelopeV2,
+    UnsignedUiAuthenticationEnvelopeV2,
 };
 use savana_policy_core::v2::{
     token_set_digest_v2, ClosedDeclassificationPurposeV2, DeclassificationTransitionV2,
@@ -36,6 +37,7 @@ pub(crate) enum KernelIngressAuthorityErrorV2 {
     InvalidReference,
     AlreadyConsumed,
     BindingMismatch,
+    RequestConflict,
     Expired,
     LimitExceeded,
     Unavailable,
@@ -137,11 +139,13 @@ struct PendingIngressRecordV2 {
     finalize_recovery: Option<FinalizeRecoveryRecordV2>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FinalizeRecoveryIdentityV2 {
     role: EndpointRoleV2,
     caller_boot_id: BootIdV2,
     caller_identity: ServiceIdentityV2,
+    observed_peer: PeerIdentityBindingV2,
+    observed_peer_digest: Digest32V2,
     request_id: RequestIdV2,
     logical_deadline: UnixMillisV2,
     operation_digest: Digest32V2,
@@ -157,6 +161,7 @@ impl FinalizeRecoveryIdentityV2 {
         role: EndpointRoleV2,
         caller_boot_id: BootIdV2,
         caller_identity: ServiceIdentityV2,
+        observed_peer: PeerIdentityBindingV2,
         request_id: RequestIdV2,
         logical_deadline: UnixMillisV2,
         operation_digest: Digest32V2,
@@ -165,6 +170,8 @@ impl FinalizeRecoveryIdentityV2 {
         deployment_generation: u64,
         effect_fence_epoch: u64,
     ) -> Result<Self, KernelIngressAuthorityErrorV2> {
+        let observed_peer_digest = peer_identity_binding_digest_v2(&observed_peer)
+            .map_err(|_| KernelIngressAuthorityErrorV2::BindingMismatch)?;
         if role != EndpointRoleV2::IngressKernel
             || caller_boot_id.as_bytes().iter().all(|byte| *byte == 0)
             || caller_identity.as_bytes().iter().all(|byte| *byte == 0)
@@ -185,6 +192,8 @@ impl FinalizeRecoveryIdentityV2 {
             role,
             caller_boot_id,
             caller_identity,
+            observed_peer,
+            observed_peer_digest,
             request_id,
             logical_deadline,
             operation_digest,
@@ -195,7 +204,7 @@ impl FinalizeRecoveryIdentityV2 {
         })
     }
 
-    fn commitment(self) -> Digest32V2 {
+    fn commitment(&self) -> Digest32V2 {
         let role = self.role.tag().to_be_bytes();
         let logical_deadline = self.logical_deadline.get().to_be_bytes();
         let deployment_generation = self.deployment_generation.to_be_bytes();
@@ -206,6 +215,7 @@ impl FinalizeRecoveryIdentityV2 {
                 &role,
                 self.caller_boot_id.as_bytes(),
                 self.caller_identity.as_bytes(),
+                self.observed_peer_digest.as_bytes(),
                 self.request_id.as_bytes(),
                 &logical_deadline,
                 self.operation_digest.as_bytes(),
@@ -215,6 +225,14 @@ impl FinalizeRecoveryIdentityV2 {
                 &effect_fence_epoch,
             ],
         )
+    }
+
+    fn same_authenticated_request_id(&self, other: &Self) -> bool {
+        self.role == other.role
+            && self.caller_boot_id == other.caller_boot_id
+            && self.caller_identity == other.caller_identity
+            && self.observed_peer == other.observed_peer
+            && self.request_id == other.request_id
     }
 }
 
@@ -514,6 +532,15 @@ impl KernelIngressAuthorityV2 {
         {
             return Err(KernelIngressAuthorityErrorV2::BindingMismatch);
         }
+        if self.pending.iter().any(|record| {
+            record.finalize_recovery.as_ref().is_some_and(|recovery| {
+                recovery
+                    .identity
+                    .same_authenticated_request_id(&recovery_identity)
+            })
+        }) {
+            return Err(KernelIngressAuthorityErrorV2::RequestConflict);
+        }
         if self.pending.len() >= self.maximum_records {
             return Err(KernelIngressAuthorityErrorV2::LimitExceeded);
         }
@@ -688,6 +715,7 @@ impl KernelIngressAuthorityV2 {
             envelope,
             display_authentication,
         };
+        let recovery_identity_commitment = recovery_identity.commitment();
         Ok(PreparedPendingIngressPublicationV2 {
             record: PendingIngressRecordV2 {
                 pending_commitment,
@@ -705,7 +733,7 @@ impl KernelIngressAuthorityV2 {
                 }),
             },
             response,
-            recovery_identity_commitment: recovery_identity.commitment(),
+            recovery_identity_commitment,
         })
     }
 
@@ -1030,10 +1058,11 @@ mod tests {
         BeginInputRequestV2, BootIdV2, ContentKindV2, Digest32V2, DirectInputChannelV2,
         Ed25519SignatureV2, EndpointRoleV2, FinalizeInputRequestV2, FixedOriginV2,
         InputChannelCommitmentV2, InputChannelV2, InputSourceKindV2, InputSourceProvenanceV2,
-        InputStatusTargetV2, KernelIngressOperationV2, Nonce32V2, PrincipalIdV2, RequestIdV2,
-        ServiceIdentityV2, SignedApprovalSettlementV2, SignedUiAuthenticationSettlementV2,
-        UiAuthenticationPurposeV2, UnixMillisV2, UnsignedApprovalSettlementV2,
-        UnsignedUiAuthenticationSettlementV2, VersionV2, ZeroizingBytesV2,
+        InputStatusTargetV2, KernelIngressOperationV2, Nonce32V2, PeerIdentityBindingV2,
+        PrincipalIdV2, RequestIdV2, ServiceIdentityV2, SignedApprovalSettlementV2,
+        SignedUiAuthenticationSettlementV2, UiAuthenticationPurposeV2, UnixMillisV2,
+        UnsignedApprovalSettlementV2, UnsignedUiAuthenticationSettlementV2, VersionV2,
+        ZeroizingBytesV2,
     };
     use savana_policy_core::v2::{
         declassification_implementation_digest_v2, ClosedDeclassificationPurposeV2,
@@ -1069,6 +1098,7 @@ mod tests {
             EndpointRoleV2::IngressKernel,
             BootIdV2::new([0xe1; 32]),
             ServiceIdentityV2::new([0xe2; 32]),
+            PeerIdentityBindingV2::linux(501, 502, 503, 504, Digest32V2::new([0xe4; 32])).unwrap(),
             RequestIdV2::new([0xe3; 16]),
             UnixMillisV2::new(1_000),
             Digest32V2::new(Sha256::digest(canonical).into()),
@@ -1232,7 +1262,7 @@ mod tests {
         let (finalized, prepared) = input
             .finalize_with(finalize.clone(), |finalized| {
                 let identity = recovery_identity(finalized, &finalize, manifest);
-                exact_identity = Some(identity);
+                exact_identity = Some(identity.clone());
                 authority.prepare_pending_approval(
                     finalized,
                     identity,

@@ -281,7 +281,7 @@ fn wait_timeout_unpoisoned<'a, T>(
 }
 
 pub(crate) struct StateOwnerV2<Command, Response> {
-    sender: SyncSender<OwnerMessageV2<Command, Response>>,
+    admission: Arc<Mutex<Option<SyncSender<OwnerMessageV2<Command, Response>>>>>,
     lifecycle: Arc<AtomicU8>,
     queued: Arc<AtomicUsize>,
     owner: Option<JoinHandle<()>>,
@@ -317,20 +317,57 @@ where
             + Send
             + 'static,
     ) -> Result<Self, StateOwnerErrorV2> {
+        Self::spawn_transactional_inner(name, capacity, handler, None)
+    }
+
+    #[cfg(test)]
+    fn spawn_with_fatal_publication_hook(
+        name: &str,
+        capacity: usize,
+        mut handler: impl FnMut(Command) -> Result<Response, StateOwnerErrorV2> + Send + 'static,
+        fatal_publication_hook: impl Fn() + Send + 'static,
+    ) -> Result<Self, StateOwnerErrorV2> {
+        Self::spawn_transactional_inner(
+            name,
+            capacity,
+            move |command, _commit| handler(command),
+            Some(Box::new(fatal_publication_hook)),
+        )
+    }
+
+    fn spawn_transactional_inner(
+        name: &str,
+        capacity: usize,
+        handler: impl FnMut(Command, StateOwnerCommitV2) -> Result<Response, StateOwnerErrorV2>
+            + Send
+            + 'static,
+        fatal_publication_hook: Option<Box<dyn Fn() + Send + 'static>>,
+    ) -> Result<Self, StateOwnerErrorV2> {
         if name.is_empty() || capacity == 0 {
             return Err(StateOwnerErrorV2::RuntimeUnavailable);
         }
         let (sender, receiver) = mpsc::sync_channel(capacity);
+        let admission = Arc::new(Mutex::new(Some(sender)));
         let lifecycle = Arc::new(AtomicU8::new(OWNER_RUNNING));
         let queued = Arc::new(AtomicUsize::new(0));
+        let owner_admission = Arc::clone(&admission);
         let owner_lifecycle = Arc::clone(&lifecycle);
         let owner_queued = Arc::clone(&queued);
         let owner = thread::Builder::new()
             .name(name.to_owned())
-            .spawn(move || owner_loop(receiver, owner_lifecycle, owner_queued, handler))
+            .spawn(move || {
+                owner_loop(
+                    receiver,
+                    owner_admission,
+                    owner_lifecycle,
+                    owner_queued,
+                    handler,
+                    fatal_publication_hook,
+                )
+            })
             .map_err(|_| StateOwnerErrorV2::RuntimeUnavailable)?;
         Ok(Self {
-            sender,
+            admission,
             lifecycle,
             queued,
             owner: Some(owner),
@@ -345,16 +382,24 @@ where
         if Instant::now() >= deadline {
             return Err(StateOwnerErrorV2::DeadlineExceeded);
         }
-        if self.lifecycle.load(Ordering::Acquire) != OWNER_RUNNING {
+        let mut admission = lock_unpoisoned(&self.admission);
+        if self.lifecycle.load(Ordering::Acquire) != OWNER_RUNNING || admission.as_ref().is_none() {
             return Err(StateOwnerErrorV2::RuntimeUnavailable);
+        }
+        if Instant::now() >= deadline {
+            return Err(StateOwnerErrorV2::DeadlineExceeded);
         }
         let completion = Arc::new(RequestCompletionV2::new(deadline));
         self.queued.fetch_add(1, Ordering::AcqRel);
-        match self.sender.try_send(OwnerMessageV2::Execute {
-            command,
-            deadline,
-            completion: Arc::clone(&completion),
-        }) {
+        let send_result = admission
+            .as_ref()
+            .expect("running admission owns its sender")
+            .try_send(OwnerMessageV2::Execute {
+                command,
+                deadline,
+                completion: Arc::clone(&completion),
+            });
+        match send_result {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
                 self.queued.fetch_sub(1, Ordering::AcqRel);
@@ -363,9 +408,11 @@ where
             Err(TrySendError::Disconnected(_)) => {
                 self.queued.fetch_sub(1, Ordering::AcqRel);
                 self.lifecycle.store(OWNER_FAILED, Ordering::Release);
+                *admission = None;
                 return Err(StateOwnerErrorV2::RuntimeUnavailable);
             }
         }
+        drop(admission);
         completion.wait()
     }
 
@@ -377,17 +424,25 @@ where
 
 impl<Command, Response> Drop for StateOwnerV2<Command, Response> {
     fn drop(&mut self) {
-        if self
-            .lifecycle
-            .compare_exchange(
-                OWNER_RUNNING,
-                OWNER_CLOSING,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-        {
-            let _ = self.sender.send(OwnerMessageV2::Shutdown);
+        let sender = {
+            let mut admission = lock_unpoisoned(&self.admission);
+            if self
+                .lifecycle
+                .compare_exchange(
+                    OWNER_RUNNING,
+                    OWNER_CLOSING,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                admission.take()
+            } else {
+                None
+            }
+        };
+        if let Some(sender) = sender {
+            let _ = sender.send(OwnerMessageV2::Shutdown);
         }
         if let Some(owner) = self.owner.take() {
             if owner.join().is_err() {
@@ -399,9 +454,11 @@ impl<Command, Response> Drop for StateOwnerV2<Command, Response> {
 
 fn owner_loop<Command, Response>(
     receiver: Receiver<OwnerMessageV2<Command, Response>>,
+    admission: Arc<Mutex<Option<SyncSender<OwnerMessageV2<Command, Response>>>>>,
     lifecycle: Arc<AtomicU8>,
     queued: Arc<AtomicUsize>,
     mut handler: impl FnMut(Command, StateOwnerCommitV2) -> Result<Response, StateOwnerErrorV2>,
+    fatal_publication_hook: Option<Box<dyn Fn() + Send + 'static>>,
 ) {
     while let Ok(message) = receiver.recv() {
         match message {
@@ -424,11 +481,16 @@ fn owner_loop<Command, Response>(
                     .unwrap_or(Err(StateOwnerErrorV2::RuntimeUnavailable));
                 let fatal = matches!(result, Err(StateOwnerErrorV2::RuntimeUnavailable))
                     && !completion.has_durable_recovery();
-                completion.complete(result);
                 if fatal {
-                    lifecycle.store(OWNER_FAILED, Ordering::Release);
+                    close_failed_owner_admission(&admission, &lifecycle);
+                    completion.complete(result);
+                    if let Some(hook) = fatal_publication_hook.as_ref() {
+                        hook();
+                    }
+                    drain_failed_owner_queue(&receiver, &queued);
                     return;
                 }
+                completion.complete(result);
             }
             OwnerMessageV2::Shutdown => {
                 lifecycle.store(OWNER_STOPPED, Ordering::Release);
@@ -437,7 +499,32 @@ fn owner_loop<Command, Response>(
         }
     }
     if lifecycle.load(Ordering::Acquire) != OWNER_CLOSING {
-        lifecycle.store(OWNER_FAILED, Ordering::Release);
+        close_failed_owner_admission(&admission, &lifecycle);
+        drain_failed_owner_queue(&receiver, &queued);
+    }
+}
+
+fn close_failed_owner_admission<Command, Response>(
+    admission: &Mutex<Option<SyncSender<OwnerMessageV2<Command, Response>>>>,
+    lifecycle: &AtomicU8,
+) {
+    let mut sender = lock_unpoisoned(admission);
+    lifecycle.store(OWNER_FAILED, Ordering::Release);
+    *sender = None;
+}
+
+fn drain_failed_owner_queue<Command, Response>(
+    receiver: &Receiver<OwnerMessageV2<Command, Response>>,
+    queued: &AtomicUsize,
+) {
+    while let Ok(message) = receiver.try_recv() {
+        match message {
+            OwnerMessageV2::Execute { completion, .. } => {
+                queued.fetch_sub(1, Ordering::AcqRel);
+                completion.complete(Err(StateOwnerErrorV2::RuntimeUnavailable));
+            }
+            OwnerMessageV2::Shutdown => {}
+        }
     }
 }
 
@@ -651,6 +738,104 @@ mod tests {
                 .unwrap_err(),
             StateOwnerErrorV2::RuntimeUnavailable
         );
+    }
+
+    #[test]
+    fn fatal_handler_drains_every_already_enqueued_caller_as_runtime_unavailable() {
+        let (active_entered_tx, active_entered_rx) = mpsc::channel();
+        let (release_active_tx, release_active_rx) = mpsc::channel();
+        let owner: Arc<StateOwnerV2<u8, u8>> = Arc::new(
+            StateOwnerV2::spawn("v2-owner-fatal-drain", 3, move |value: u8| {
+                assert_eq!(
+                    value, 1,
+                    "queued commands must never execute after fatal exit"
+                );
+                active_entered_tx.send(()).unwrap();
+                release_active_rx.recv().unwrap();
+                Err(StateOwnerErrorV2::RuntimeUnavailable)
+            })
+            .unwrap(),
+        );
+
+        let active = {
+            let owner = Arc::clone(&owner);
+            thread::spawn(move || owner.request(1, Instant::now() + Duration::from_secs(2)))
+        };
+        active_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        let queued_deadline = Instant::now() + Duration::from_millis(400);
+        let first_queued = {
+            let owner = Arc::clone(&owner);
+            thread::spawn(move || owner.request(2, queued_deadline))
+        };
+        let second_queued = {
+            let owner = Arc::clone(&owner);
+            thread::spawn(move || owner.request(3, queued_deadline))
+        };
+        let enqueue_deadline = Instant::now() + Duration::from_secs(1);
+        while owner.queued_for_test() != 2 && Instant::now() < enqueue_deadline {
+            thread::yield_now();
+        }
+        assert_eq!(owner.queued_for_test(), 2);
+
+        release_active_tx.send(()).unwrap();
+        let active_result = active.join().unwrap();
+        let first_result = first_queued.join().unwrap();
+        let second_result = second_queued.join().unwrap();
+
+        assert_eq!(active_result, Err(StateOwnerErrorV2::RuntimeUnavailable));
+        assert_eq!(first_result, Err(StateOwnerErrorV2::RuntimeUnavailable));
+        assert_eq!(second_result, Err(StateOwnerErrorV2::RuntimeUnavailable));
+        assert_eq!(owner.lifecycle.load(Ordering::Acquire), super::OWNER_FAILED);
+        assert_eq!(owner.queued_for_test(), 0);
+        assert_eq!(
+            owner.request(4, Instant::now() + Duration::from_secs(1)),
+            Err(StateOwnerErrorV2::RuntimeUnavailable),
+        );
+        assert_eq!(owner.queued_for_test(), 0);
+    }
+
+    #[test]
+    fn fatal_completion_is_not_observable_before_admission_closes() {
+        let (hook_entered_tx, hook_entered_rx) = mpsc::channel();
+        let (release_hook_tx, release_hook_rx) = mpsc::channel();
+        let owner: Arc<StateOwnerV2<u8, u8>> = Arc::new(
+            StateOwnerV2::spawn_with_fatal_publication_hook(
+                "v2-owner-fatal-publication-order",
+                1,
+                |_| Err(StateOwnerErrorV2::RuntimeUnavailable),
+                move || {
+                    hook_entered_tx.send(()).unwrap();
+                    release_hook_rx.recv().unwrap();
+                },
+            )
+            .unwrap(),
+        );
+
+        let active = {
+            let owner = Arc::clone(&owner);
+            thread::spawn(move || owner.request(1, Instant::now() + Duration::from_secs(1)))
+        };
+        hook_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(
+            active.join().unwrap(),
+            Err(StateOwnerErrorV2::RuntimeUnavailable),
+        );
+
+        let late_result = owner.request(2, Instant::now() + Duration::from_millis(50));
+        release_hook_tx.send(()).unwrap();
+        let drain_deadline = Instant::now() + Duration::from_secs(1);
+        while owner.queued_for_test() != 0 && Instant::now() < drain_deadline {
+            thread::yield_now();
+        }
+
+        assert_eq!(late_result, Err(StateOwnerErrorV2::RuntimeUnavailable));
+        assert_eq!(owner.lifecycle.load(Ordering::Acquire), super::OWNER_FAILED);
+        assert_eq!(owner.queued_for_test(), 0);
     }
 
     #[test]

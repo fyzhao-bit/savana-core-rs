@@ -278,6 +278,13 @@ impl KernelVerifiedUiAuthorizationV2 {
             expires_at: UnixMillisV2::new(500),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_with_expiry(expires_at: UnixMillisV2) -> Self {
+        let mut authorization = Self::for_test();
+        authorization.expires_at = expires_at;
+        authorization
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

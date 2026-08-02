@@ -68,7 +68,7 @@ fn exact_suite_one_handshake_confirms_both_sides_and_encrypts_one_request_respon
     .unwrap();
     let (server_pending, server_hello) = V2ServerHandshake::accept_client_hello(
         edge,
-        observed,
+        observed.clone(),
         &client_hello,
         Nonce32V2::new([0x28; 32]),
         StaticSecret::from([0x29; 32]),
@@ -87,6 +87,7 @@ fn exact_suite_one_handshake_confirms_both_sides_and_encrypts_one_request_respon
         server_pending.accept_client_finish(&client_finish).unwrap();
     assert_eq!(peer.role(), EndpointRoleV2::AgentKernel);
     assert_eq!(peer.client_boot_id(), BootIdV2::new([0x23; 32]));
+    assert_eq!(peer.observed_client_peer(), &observed);
     let mut changed_accepted = accepted.clone();
     *changed_accepted.last_mut().unwrap() ^= 1;
     assert!(client_session

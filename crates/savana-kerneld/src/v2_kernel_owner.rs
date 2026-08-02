@@ -308,8 +308,8 @@ impl KernelRuntimeRequestV2 {
 
 impl KernelRuntimeRequestContextV2 {
     #[cfg(test)]
-    pub(crate) const fn peer(&self) -> VerifiedKernelServicePeerV2 {
-        self.peer
+    pub(crate) const fn peer(&self) -> &VerifiedKernelServicePeerV2 {
+        &self.peer
     }
 
     #[cfg(test)]

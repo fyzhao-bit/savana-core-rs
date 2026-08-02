@@ -311,12 +311,13 @@ pub use signed::{
     VerifiedUiAuthenticationSettlementV2, MAX_APPROVAL_DISPLAY_BYTES_V2,
 };
 pub use transport::{
-    derive_ed25519_key_id_v2, KernelServiceHandshakeEdgeV2, OpenedV2Record, PeerIdentityBindingV2,
-    PreparedV2ServerApplicationResponse, V2ClientHandshake, V2ClientTransportSession,
-    V2PendingServerHandshake, V2ServerApplicationResponsePreparationError, V2ServerHandshake,
-    V2ServerHelloAcceptanceErrorV2, V2ServerTransportSession, VerifiedV2HandshakePeer,
-    HANDSHAKE_FRAME_HEADER_BYTES_V2, MAX_HANDSHAKE_BODY_BYTES_V2, MAX_RECORD_CIPHERTEXT_BYTES_V2,
-    MAX_RECORD_HEADER_BYTES_V2, RECORD_FRAME_HEADER_BYTES_V2,
+    derive_ed25519_key_id_v2, peer_identity_binding_digest_v2, KernelServiceHandshakeEdgeV2,
+    OpenedV2Record, PeerIdentityBindingV2, PreparedV2ServerApplicationResponse, V2ClientHandshake,
+    V2ClientTransportSession, V2PendingServerHandshake,
+    V2ServerApplicationResponsePreparationError, V2ServerHandshake, V2ServerHelloAcceptanceErrorV2,
+    V2ServerTransportSession, VerifiedV2HandshakePeer, HANDSHAKE_FRAME_HEADER_BYTES_V2,
+    MAX_HANDSHAKE_BODY_BYTES_V2, MAX_RECORD_CIPHERTEXT_BYTES_V2, MAX_RECORD_HEADER_BYTES_V2,
+    RECORD_FRAME_HEADER_BYTES_V2,
 };
 
 pub const PROTOCOL_MAJOR: u16 = 2;

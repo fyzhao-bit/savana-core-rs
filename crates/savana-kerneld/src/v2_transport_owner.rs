@@ -75,8 +75,8 @@ impl CompletedKernelV2Handshake {
         &self.accepted_record
     }
 
-    pub(crate) const fn peer(&self) -> VerifiedV2HandshakePeer {
-        self.peer
+    pub(crate) const fn peer(&self) -> &VerifiedV2HandshakePeer {
+        &self.peer
     }
 
     pub(crate) fn into_parts(self) -> (Vec<u8>, V2ServerTransportSession, VerifiedV2HandshakePeer) {

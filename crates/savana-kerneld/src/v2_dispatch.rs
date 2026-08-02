@@ -4,11 +4,12 @@ use std::time::Instant;
 use ed25519_dalek::SigningKey;
 use savana_kernel_protocol::v2::{
     decode_kernel_service_request_envelope_v2, encode_kernel_service_application_response_v2,
-    sign_kernel_service_response_envelope_v2, BootIdV2, Digest32V2, Ed25519KeyIdV2, EndpointRoleV2,
-    KernelServiceApplicationRequestV2, KernelServiceApplicationResponseV2,
-    KernelServiceRequestEnvelopeV2, KernelServiceResponseEnvelopeV2, KernelServiceResponseV2,
+    peer_identity_binding_digest_v2, sign_kernel_service_response_envelope_v2, BootIdV2,
+    Digest32V2, Ed25519KeyIdV2, EndpointRoleV2, KernelServiceApplicationRequestV2,
+    KernelServiceApplicationResponseV2, KernelServiceOperationV2, KernelServiceRequestEnvelopeV2,
+    KernelServiceResponseEnvelopeV2, KernelServiceResponseV2, PeerIdentityBindingV2,
     PreparedV2ServerApplicationResponse, PublicStableCodeV2, RequestIdV2, ServiceIdentityV2,
-    UnixMillisV2, V2ServerTransportSession,
+    UnixMillisV2, V2ServerTransportSession, VerifiedV2HandshakePeer,
 };
 use savana_kernel_protocol::StableCode;
 
@@ -53,18 +54,41 @@ impl KernelServiceDeploymentV2 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedKernelServicePeerV2 {
     role: EndpointRoleV2,
     caller_boot_id: BootIdV2,
     caller_identity: ServiceIdentityV2,
+    observed_peer: PeerIdentityBindingV2,
 }
 
 impl VerifiedKernelServicePeerV2 {
     pub(crate) fn from_mutual_authentication(
+        peer: VerifiedV2HandshakePeer,
+    ) -> Result<Self, KernelServiceDispatchErrorV2> {
+        Self::from_verified_parts(
+            peer.role(),
+            peer.client_boot_id(),
+            peer.client_identity(),
+            peer.observed_client_peer().clone(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_mutual_authentication(
         role: EndpointRoleV2,
         caller_boot_id: BootIdV2,
         caller_identity: ServiceIdentityV2,
+        observed_peer: PeerIdentityBindingV2,
+    ) -> Result<Self, KernelServiceDispatchErrorV2> {
+        Self::from_verified_parts(role, caller_boot_id, caller_identity, observed_peer)
+    }
+
+    fn from_verified_parts(
+        role: EndpointRoleV2,
+        caller_boot_id: BootIdV2,
+        caller_identity: ServiceIdentityV2,
+        observed_peer: PeerIdentityBindingV2,
     ) -> Result<Self, KernelServiceDispatchErrorV2> {
         if !matches!(
             role,
@@ -73,6 +97,7 @@ impl VerifiedKernelServicePeerV2 {
                 | EndpointRoleV2::KernelExecutor
         ) || is_zero(caller_boot_id.as_bytes())
             || is_zero(caller_identity.as_bytes())
+            || peer_identity_binding_digest_v2(&observed_peer).is_err()
         {
             return Err(KernelServiceDispatchErrorV2::IdentityRejected);
         }
@@ -80,19 +105,24 @@ impl VerifiedKernelServicePeerV2 {
             role,
             caller_boot_id,
             caller_identity,
+            observed_peer,
         })
     }
 
-    pub(crate) const fn role(self) -> EndpointRoleV2 {
+    pub(crate) const fn role(&self) -> EndpointRoleV2 {
         self.role
     }
 
-    pub(crate) const fn caller_identity(self) -> ServiceIdentityV2 {
+    pub(crate) const fn caller_identity(&self) -> ServiceIdentityV2 {
         self.caller_identity
     }
 
-    pub(crate) const fn caller_boot_id(self) -> BootIdV2 {
+    pub(crate) const fn caller_boot_id(&self) -> BootIdV2 {
         self.caller_boot_id
+    }
+
+    pub(crate) const fn observed_peer(&self) -> &PeerIdentityBindingV2 {
+        &self.observed_peer
     }
 }
 
@@ -543,7 +573,7 @@ impl KernelServiceDispatcherV2 {
         }
         let request = decode_kernel_service_request_envelope_v2(canonical_request)
             .map_err(|_| KernelServiceDispatchErrorV2::Malformed)?;
-        self.validate_connection_binding(peer, &request, now)?;
+        self.validate_connection_binding(&peer, &request, now)?;
         self.validate_generation_lease(&lease)?;
         let request_id = request.request_id();
         let logical_deadline = request.deadline();
@@ -603,7 +633,11 @@ impl KernelServiceDispatcherV2 {
     ) -> Result<KernelServiceApplicationResponseV2, KernelServiceDispatchErrorV2> {
         #[cfg(not(test))]
         let _ = failure;
-        if Instant::now() >= deadline || now.get() == 0 || now.get() >= request.deadline().get() {
+        if Instant::now() >= deadline
+            || now.get() == 0
+            || (!operation_allows_expired_finalize_recovery(request.operation())
+                && now.get() >= request.deadline().get())
+        {
             return Err(KernelServiceDispatchErrorV2::DeadlineExceeded);
         }
         if request.role() != peer.role {
@@ -684,7 +718,11 @@ impl KernelServiceDispatcherV2 {
     ) -> Result<Vec<u8>, KernelServiceDispatchErrorV2> {
         #[cfg(not(test))]
         let _ = failure;
-        if Instant::now() >= deadline || now.get() == 0 || now.get() >= request.deadline().get() {
+        if Instant::now() >= deadline
+            || now.get() == 0
+            || (!operation_allows_expired_finalize_recovery(request.operation())
+                && now.get() >= request.deadline().get())
+        {
             return Err(KernelServiceDispatchErrorV2::DeadlineExceeded);
         }
         if request.role() != peer.role {
@@ -764,7 +802,7 @@ impl KernelServiceDispatcherV2 {
         }
         let request = decode_kernel_service_request_envelope_v2(canonical_request)
             .map_err(|_| KernelServiceDispatchErrorV2::Malformed)?;
-        self.validate_connection_binding(peer, &request, now)?;
+        self.validate_connection_binding(&peer, &request, now)?;
         self.validate_generation_lease(&lease)?;
         self.dispatch_verified_request(peer, lease, request, now, deadline, failure)
     }
@@ -833,11 +871,14 @@ impl KernelServiceDispatcherV2 {
 
     fn validate_connection_binding(
         &self,
-        peer: VerifiedKernelServicePeerV2,
+        peer: &VerifiedKernelServicePeerV2,
         request: &KernelServiceRequestEnvelopeV2,
         now: UnixMillisV2,
     ) -> Result<(), KernelServiceDispatchErrorV2> {
-        if now.get() == 0 || now.get() >= request.deadline().get() {
+        if now.get() == 0
+            || (!operation_allows_expired_finalize_recovery(request.operation())
+                && now.get() >= request.deadline().get())
+        {
             return Err(KernelServiceDispatchErrorV2::DeadlineExceeded);
         }
         if request.role() != peer.role
@@ -896,6 +937,15 @@ fn is_zero(bytes: &[u8]) -> bool {
     bytes.iter().all(|byte| *byte == 0)
 }
 
+fn operation_allows_expired_finalize_recovery(operation: &KernelServiceOperationV2) -> bool {
+    matches!(
+        operation,
+        KernelServiceOperationV2::Ingress(
+            savana_kernel_protocol::v2::KernelIngressOperationV2::FinalizeInput(_)
+        )
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -908,7 +958,7 @@ mod tests {
         BootIdV2, Digest32V2, DispatchExecutionRequestV2, Ed25519KeyIdV2, EndpointRoleV2,
         ExecutionTicketHandleV2, KernelAgentOperationV2, KernelExecutorOperationV2,
         KernelServiceApplicationRequestV2, KernelServiceApplicationResponseBodyV2,
-        KernelServiceOperationV2, KernelServiceRequestEnvelopeV2, Nonce32V2,
+        KernelServiceOperationV2, KernelServiceRequestEnvelopeV2, Nonce32V2, PeerIdentityBindingV2,
         QueryByExecutionNonceRequestV2, RequestIdV2, ServiceIdentityV2, UnixMillisV2,
     };
 
@@ -930,10 +980,11 @@ mod tests {
     }
 
     fn peer(role: EndpointRoleV2) -> VerifiedKernelServicePeerV2 {
-        VerifiedKernelServicePeerV2::from_mutual_authentication(
+        VerifiedKernelServicePeerV2::from_test_mutual_authentication(
             role,
             BootIdV2::new([5; 32]),
             ServiceIdentityV2::new([6; 32]),
+            PeerIdentityBindingV2::linux(501, 502, 503, 504, Digest32V2::new([15; 32])).unwrap(),
         )
         .unwrap()
     }

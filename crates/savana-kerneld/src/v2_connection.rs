@@ -101,11 +101,7 @@ pub(crate) fn serve_one_suite_one_v2_channel(
             .finish(started, client_finish, deadline)
             .map_err(map_handshake_error)?;
         let (accepted_record, mut session, handshake_peer) = completed.into_parts();
-        let peer = VerifiedKernelServicePeerV2::from_mutual_authentication(
-            handshake_peer.role(),
-            handshake_peer.client_boot_id(),
-            handshake_peer.client_identity(),
-        )?;
+        let peer = VerifiedKernelServicePeerV2::from_mutual_authentication(handshake_peer.clone())?;
 
         channel
             .write_record_frame(&accepted_record, deadline)
@@ -305,10 +301,11 @@ mod tests {
             )
             .unwrap(),
         );
-        let peer = VerifiedKernelServicePeerV2::from_mutual_authentication(
+        let peer = VerifiedKernelServicePeerV2::from_test_mutual_authentication(
             EndpointRoleV2::AgentKernel,
             BootIdV2::new([5; 32]),
             ServiceIdentityV2::new([6; 32]),
+            PeerIdentityBindingV2::linux(501, 502, 503, 504, Digest32V2::new([15; 32])).unwrap(),
         )
         .unwrap();
         let request = encode_kernel_service_request_envelope_v2(
