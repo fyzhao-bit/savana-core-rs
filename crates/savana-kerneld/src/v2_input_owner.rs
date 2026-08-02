@@ -20,6 +20,7 @@ use zeroize::Zeroizing;
 const MAX_INPUT_CHUNK_BYTES: usize = 1024 * 1024;
 const MAX_INPUT_SESSION_BYTES: usize = 64 * 1024 * 1024;
 const INPUT_COMMITMENT_DOMAIN: &[u8] = b"SAVANA_FINALIZED_INPUT_COMMITMENT_V2\0";
+const CHANNEL_COMMITMENTS_DOMAIN: &[u8] = b"SAVANA_INPUT_CHANNEL_COMMITMENTS_V2\0";
 const PARSER_JOB_BINDING_DOMAIN: &[u8] = b"SAVANA_PARSER_JOB_SESSION_BINDING_V2\0";
 const PARSER_EXTRACTION_HANDLE_DOMAIN: &[u8] = b"SAVANA_PARSER_EXTRACTION_HANDLE_MINT_V2\0";
 
@@ -33,6 +34,12 @@ pub(crate) enum KernelInputErrorV2 {
     LimitExceeded,
     ProvenanceMismatch,
     Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KernelInputFinalizeTransactionErrorV2<E> {
+    Input(KernelInputErrorV2),
+    Preparation(E),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -399,6 +406,32 @@ impl FinalizedKernelInputV2 {
 
     pub(crate) fn channels(&self) -> &[FinalizedKernelInputChannelV2] {
         &self.channels
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PreparedKernelInputFinalizationV2 {
+    input_commitment: Digest32V2,
+    source_provenance_digest: Digest32V2,
+    authorization: KernelVerifiedUiAuthorizationV2,
+    channel_commitments_digest: Digest32V2,
+}
+
+impl PreparedKernelInputFinalizationV2 {
+    pub(crate) const fn input_commitment(self) -> Digest32V2 {
+        self.input_commitment
+    }
+
+    pub(crate) const fn source_provenance_digest(self) -> Digest32V2 {
+        self.source_provenance_digest
+    }
+
+    pub(crate) const fn authorization(self) -> KernelVerifiedUiAuthorizationV2 {
+        self.authorization
+    }
+
+    pub(crate) const fn channel_commitments_digest(self) -> Digest32V2 {
+        self.channel_commitments_digest
     }
 }
 
@@ -1104,30 +1137,39 @@ impl KernelInputOwnerV2 {
         Ok(result)
     }
 
-    pub(crate) fn finalize(
+    pub(crate) fn finalize_with<T, E>(
         &mut self,
         request: FinalizeInputRequestV2,
-    ) -> Result<FinalizedKernelInputV2, KernelInputErrorV2> {
+        prepare: impl FnOnce(&PreparedKernelInputFinalizationV2) -> Result<T, E>,
+    ) -> Result<(FinalizedKernelInputV2, T), KernelInputFinalizeTransactionErrorV2<E>> {
         let canonical_request = encode_kernel_ingress_operation_v2(
             &KernelIngressOperationV2::FinalizeInput(request.clone()),
         )
-        .map_err(|_| KernelInputErrorV2::Unavailable)?;
+        .map_err(|_| {
+            KernelInputFinalizeTransactionErrorV2::Input(KernelInputErrorV2::Unavailable)
+        })?;
         let source_provenance_digest = Digest32V2::new(Sha256::digest(&canonical_request).into());
         let session_commitment = request.session().authority_commitment(&self.handle_key);
         let session_index = self
             .sessions
             .iter()
             .position(|session| session.session_commitment == session_commitment)
-            .ok_or(KernelInputErrorV2::InvalidReference)?;
-        let session = &mut self.sessions[session_index];
+            .ok_or(KernelInputFinalizeTransactionErrorV2::Input(
+                KernelInputErrorV2::InvalidReference,
+            ))?;
+        let session = &self.sessions[session_index];
         if session.state != KernelInputPublicStateV2::Receiving {
-            return Err(KernelInputErrorV2::StateConflict);
+            return Err(KernelInputFinalizeTransactionErrorV2::Input(
+                KernelInputErrorV2::StateConflict,
+            ));
         }
         if !commitments_match(session, request.channels())
             || !provenance_matches(session, request.source_provenance())
         {
-            fail_closed(session);
-            return Err(KernelInputErrorV2::ProvenanceMismatch);
+            fail_closed(&mut self.sessions[session_index]);
+            return Err(KernelInputFinalizeTransactionErrorV2::Input(
+                KernelInputErrorV2::ProvenanceMismatch,
+            ));
         }
 
         let mut hasher = Sha256::new();
@@ -1139,10 +1181,28 @@ impl KernelInputOwnerV2 {
             hasher.update((channel.bytes.len() as u64).to_be_bytes());
         }
         let input_commitment = Digest32V2::new(hasher.finalize().into());
+        let mut channel_hasher = Sha256::new();
+        channel_hasher.update(CHANNEL_COMMITMENTS_DOMAIN);
+        for channel in &session.channels {
+            channel_hasher.update(channel.channel.tag().to_be_bytes());
+            channel_hasher.update((channel.bytes.len() as u64).to_be_bytes());
+            channel_hasher.update(Sha256::digest(&channel.bytes));
+        }
+        let prepared = PreparedKernelInputFinalizationV2 {
+            input_commitment,
+            source_provenance_digest,
+            authorization: session.authorization,
+            channel_commitments_digest: Digest32V2::new(channel_hasher.finalize().into()),
+        };
         let mut finalized_channels = Vec::new();
         finalized_channels
             .try_reserve_exact(session.channels.len())
-            .map_err(|_| KernelInputErrorV2::Unavailable)?;
+            .map_err(|_| {
+                KernelInputFinalizeTransactionErrorV2::Input(KernelInputErrorV2::Unavailable)
+            })?;
+        let prepared_result =
+            prepare(&prepared).map_err(KernelInputFinalizeTransactionErrorV2::Preparation)?;
+        let session = &mut self.sessions[session_index];
         for channel in &mut session.channels {
             finalized_channels.push(FinalizedKernelInputChannelV2 {
                 channel: channel.channel,
@@ -1151,12 +1211,15 @@ impl KernelInputOwnerV2 {
             channel.chunks.clear();
         }
         session.state = KernelInputPublicStateV2::Finalized;
-        Ok(FinalizedKernelInputV2 {
-            input_commitment,
-            source_provenance_digest,
-            authorization: session.authorization,
-            channels: finalized_channels,
-        })
+        Ok((
+            FinalizedKernelInputV2 {
+                input_commitment,
+                source_provenance_digest,
+                authorization: session.authorization,
+                channels: finalized_channels,
+            },
+            prepared_result,
+        ))
     }
 
     pub(crate) fn abort(
@@ -1617,7 +1680,8 @@ mod tests {
     use sha2::{Digest as _, Sha256};
 
     use super::{
-        KernelInputErrorV2, KernelInputOwnerV2, KernelInputPublicStateV2, KernelParserTrustV2,
+        KernelInputErrorV2, KernelInputFinalizeTransactionErrorV2, KernelInputOwnerV2,
+        KernelInputPublicStateV2, KernelParserTrustV2,
     };
 
     fn begin_chat(owner: &mut KernelInputOwnerV2, bytes: &[u8]) -> super::KernelInputBeginV2 {
@@ -1767,8 +1831,8 @@ mod tests {
             ack.cumulative_digest(),
         )
         .unwrap();
-        let finalized = owner
-            .finalize(
+        let (finalized, ()) = owner
+            .finalize_with(
                 savana_kernel_protocol::v2::FinalizeInputRequestV2::new(
                     begun.session(),
                     vec![commitment],
@@ -1781,10 +1845,69 @@ mod tests {
                     .unwrap(),
                 )
                 .unwrap(),
+                |_| Ok::<(), std::convert::Infallible>(()),
             )
             .unwrap();
 
         assert_ne!(finalized.input_commitment().as_bytes(), &[0; 32]);
+        assert_eq!(finalized.channels()[0].bytes(), b"abc");
+        assert_eq!(owner.retained_plaintext_bytes(), 0);
+    }
+
+    #[test]
+    fn refused_finalize_preparation_preserves_session_bytes_for_exact_retry() {
+        let mut owner = KernelInputOwnerV2::new(4, 4096).unwrap();
+        let begun = begin_chat(&mut owner, b"abc");
+        let append = append_request(&begun, 0, b"abc".to_vec());
+        let ack = owner.append(append).unwrap();
+        let finalize = savana_kernel_protocol::v2::FinalizeInputRequestV2::new(
+            begun.session(),
+            vec![InputChannelCommitmentV2::new(
+                InputChannelV2::ChatText,
+                1,
+                0,
+                3,
+                ack.cumulative_digest(),
+            )
+            .unwrap()],
+            InputSourceProvenanceV2::direct(
+                InputSourceKindV2::Chat,
+                3,
+                Digest32V2::new(Sha256::digest(b"abc").into()),
+                VersionV2::new(1, 0, 0),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            owner.finalize_with(finalize.clone(), |_| Err::<(), _>(0x71_u8)),
+            Err(KernelInputFinalizeTransactionErrorV2::Preparation(0x71)),
+        ));
+        assert_eq!(owner.retained_plaintext_bytes(), 3);
+        assert_eq!(
+            owner
+                .status(savana_kernel_protocol::v2::InputStatusTargetV2::Session(
+                    begun.session(),
+                ))
+                .unwrap(),
+            KernelInputPublicStateV2::Receiving,
+        );
+        assert_eq!(
+            owner
+                .append(append_request(&begun, 0, b"abc".to_vec()))
+                .unwrap(),
+            ack,
+        );
+
+        let (finalized, prepared) = owner
+            .finalize_with(finalize, |view| {
+                assert_ne!(view.input_commitment().as_bytes(), &[0; 32]);
+                assert_ne!(view.channel_commitments_digest().as_bytes(), &[0; 32]);
+                Ok::<_, u8>(view.input_commitment())
+            })
+            .unwrap();
+        assert_eq!(prepared, finalized.input_commitment());
         assert_eq!(finalized.channels()[0].bytes(), b"abc");
         assert_eq!(owner.retained_plaintext_bytes(), 0);
     }
@@ -2005,8 +2128,8 @@ mod tests {
             original_ack.cumulative_digest(),
         )
         .unwrap();
-        let finalized = owner
-            .finalize(
+        let (finalized, ()) = owner
+            .finalize_with(
                 savana_kernel_protocol::v2::FinalizeInputRequestV2::new(
                     begun.session(),
                     vec![
@@ -2016,6 +2139,7 @@ mod tests {
                     committed.parsed_source_provenance().clone(),
                 )
                 .unwrap(),
+                |_| Ok::<(), std::convert::Infallible>(()),
             )
             .unwrap();
         assert_eq!(finalized.channels().len(), 2);

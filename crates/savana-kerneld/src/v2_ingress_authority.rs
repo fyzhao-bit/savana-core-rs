@@ -21,13 +21,13 @@ use crate::v2_data_plane::durable_run_id;
 use crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2;
 use crate::v2_input_owner::{
     FinalizedKernelInputV2, KernelInputErrorV2, KernelVerifiedUiAuthorizationV2,
+    PreparedKernelInputFinalizationV2,
 };
 
 const UI_AUTH_TTL_MS: u64 = 5 * 60 * 1_000;
 const APPROVAL_TTL_MS: u64 = 5 * 60 * 1_000;
 const PENDING_TASK_DOMAIN: &[u8] = b"SAVANA_PENDING_TASK_DIGEST_V2\0";
 const INGRESS_SUBJECT_DOMAIN: &[u8] = b"SAVANA_INGRESS_SUBJECT_V2\0";
-const CHANNEL_COMMITMENTS_DOMAIN: &[u8] = b"SAVANA_INPUT_CHANNEL_COMMITMENTS_V2\0";
 const DISPLAY_PROJECTION_DOMAIN: &[u8] = b"SAVANA_INGRESS_DISPLAY_PROJECTION_V2\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +150,11 @@ pub(crate) struct PreparedPendingIngressV2 {
     pub(crate) approval: IngressKernelApprovalHandleV2,
     pub(crate) envelope: SignedApprovalEnvelopeV2,
     pub(crate) display_authentication: SignedUiAuthenticationEnvelopeV2,
+}
+
+pub(crate) struct PreparedPendingIngressPublicationV2 {
+    response: PreparedPendingIngressV2,
+    record: PendingIngressRecordV2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,14 +395,17 @@ impl KernelIngressAuthorityV2 {
 
     pub(crate) fn prepare_pending_approval(
         &mut self,
-        finalized: FinalizedKernelInputV2,
+        finalized: &PreparedKernelInputFinalizationV2,
         active_state_manifest_digest: Digest32V2,
         deployment_generation: u64,
         now: UnixMillisV2,
-    ) -> Result<PreparedPendingIngressV2, KernelIngressAuthorityErrorV2> {
+    ) -> Result<PreparedPendingIngressPublicationV2, KernelIngressAuthorityErrorV2> {
         if self.pending.len() >= self.maximum_records {
             return Err(KernelIngressAuthorityErrorV2::LimitExceeded);
         }
+        self.pending
+            .try_reserve(1)
+            .map_err(|_| KernelIngressAuthorityErrorV2::Unavailable)?;
         let authorization = finalized.authorization();
         let durable_task_id = authorization
             .durable_task_id()
@@ -432,7 +440,7 @@ impl KernelIngressAuthorityV2 {
                 principal.as_bytes(),
             ],
         );
-        let channel_commitments_digest = finalized_channel_commitments_digest(&finalized);
+        let channel_commitments_digest = finalized.channel_commitments_digest();
         let binding = ApprovalBindingV2::Ingress {
             pending_ingress_id: pending_commitment,
             ingress_subject_digest,
@@ -560,26 +568,39 @@ impl KernelIngressAuthorityV2 {
             &self.config.envelope_signing_key,
         )
         .map_err(|_| KernelIngressAuthorityErrorV2::Unavailable)?;
-        self.pending
-            .try_reserve(1)
-            .map_err(|_| KernelIngressAuthorityErrorV2::Unavailable)?;
-        self.pending.push(PendingIngressRecordV2 {
-            pending_commitment,
-            approval_commitment,
-            durable_task_id,
-            expected_principal: principal,
-            approval_envelope_digest,
-            decision_challenge,
-            expires_at,
-            state: KernelPendingIngressStateV2::AwaitingApproval,
-            finalized: Some(finalized),
-        });
-        Ok(PreparedPendingIngressV2 {
-            pending,
-            approval,
-            envelope,
-            display_authentication,
+        Ok(PreparedPendingIngressPublicationV2 {
+            response: PreparedPendingIngressV2 {
+                pending,
+                approval,
+                envelope,
+                display_authentication,
+            },
+            record: PendingIngressRecordV2 {
+                pending_commitment,
+                approval_commitment,
+                durable_task_id,
+                expected_principal: principal,
+                approval_envelope_digest,
+                decision_challenge,
+                expires_at,
+                state: KernelPendingIngressStateV2::AwaitingApproval,
+                finalized: None,
+            },
         })
+    }
+
+    pub(crate) fn publish_pending_approval(
+        &mut self,
+        prepared: PreparedPendingIngressPublicationV2,
+        finalized: FinalizedKernelInputV2,
+    ) -> PreparedPendingIngressV2 {
+        let PreparedPendingIngressPublicationV2 {
+            response,
+            mut record,
+        } = prepared;
+        record.finalized = Some(finalized);
+        self.pending.push(record);
+        response
     }
 
     pub(crate) fn verify_settlement(
@@ -712,17 +733,11 @@ impl KernelIngressAuthorityV2 {
             .map(|record| record.state)
             .ok_or(KernelIngressAuthorityErrorV2::InvalidReference)
     }
-}
 
-fn finalized_channel_commitments_digest(finalized: &FinalizedKernelInputV2) -> Digest32V2 {
-    let mut hasher = Sha256::new();
-    hasher.update(CHANNEL_COMMITMENTS_DOMAIN);
-    for channel in finalized.channels() {
-        hasher.update(channel.channel().tag().to_be_bytes());
-        hasher.update((channel.bytes().len() as u64).to_be_bytes());
-        hasher.update(Sha256::digest(channel.bytes()));
+    #[cfg(test)]
+    pub(crate) fn pending_record_count(&self) -> usize {
+        self.pending.len()
     }
-    Digest32V2::new(hasher.finalize().into())
 }
 
 fn bounded_expiry(
@@ -840,10 +855,10 @@ mod tests {
         ApprovalDecisionV2, ApprovalDisplayViewV2, ApprovalPurposeV2, BeginInputRequestV2,
         ContentKindV2, Digest32V2, DirectInputChannelV2, Ed25519SignatureV2,
         FinalizeInputRequestV2, FixedOriginV2, InputChannelCommitmentV2, InputChannelV2,
-        InputSourceKindV2, InputSourceProvenanceV2, Nonce32V2, PrincipalIdV2, ServiceIdentityV2,
-        SignedApprovalSettlementV2, SignedUiAuthenticationSettlementV2, UiAuthenticationPurposeV2,
-        UnixMillisV2, UnsignedApprovalSettlementV2, UnsignedUiAuthenticationSettlementV2,
-        VersionV2, ZeroizingBytesV2,
+        InputSourceKindV2, InputSourceProvenanceV2, InputStatusTargetV2, Nonce32V2, PrincipalIdV2,
+        ServiceIdentityV2, SignedApprovalSettlementV2, SignedUiAuthenticationSettlementV2,
+        UiAuthenticationPurposeV2, UnixMillisV2, UnsignedApprovalSettlementV2,
+        UnsignedUiAuthenticationSettlementV2, VersionV2, ZeroizingBytesV2,
     };
     use savana_policy_core::v2::{
         declassification_implementation_digest_v2, ClosedDeclassificationPurposeV2,
@@ -857,7 +872,9 @@ mod tests {
         KernelPendingIngressStateV2, VerifiedIngressSettlementDecisionV2,
     };
     use crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2;
-    use crate::v2_input_owner::KernelInputOwnerV2;
+    use crate::v2_input_owner::{
+        KernelInputFinalizeTransactionErrorV2, KernelInputOwnerV2, KernelInputPublicStateV2,
+    };
 
     const UI_SETTLEMENT_DOMAIN: &[u8] = b"SAVANA_UI_AUTH_INGRESS_SETTLEMENT_V2\0";
     const APPROVAL_SETTLEMENT_DOMAIN: &[u8] = b"SAVANA_INGRESS_APPROVAL_SETTLEMENT_V2\0";
@@ -866,16 +883,22 @@ mod tests {
     fn ingress_authority_consumes_each_capability_and_binds_both_settlements() {
         let FinalizedIngressFixtureV2 {
             mut authority,
-            finalized,
+            mut input,
+            finalize,
             installation,
             manifest,
             principal,
             envelope_key,
             approval_key,
         } = finalized_ingress_for_rule(ApprovalRuleModeV2::Admit);
-        let pending = authority
-            .prepare_pending_approval(finalized, manifest, 7, UnixMillisV2::new(150))
+        let (finalized, prepared) = input
+            .finalize_with(finalize, |finalized| {
+                authority.prepare_pending_approval(finalized, manifest, 7, UnixMillisV2::new(150))
+            })
             .unwrap();
+        assert!(authority.pending.is_empty());
+        let pending = authority.publish_pending_approval(prepared, finalized);
+        assert_eq!(authority.pending.len(), 1);
         let approval_unsigned = pending
             .envelope
             .verify(
@@ -996,7 +1019,8 @@ mod tests {
 
     struct FinalizedIngressFixtureV2 {
         authority: KernelIngressAuthorityV2,
-        finalized: crate::v2_input_owner::FinalizedKernelInputV2,
+        input: KernelInputOwnerV2,
+        finalize: FinalizeInputRequestV2,
         installation: Digest32V2,
         manifest: Digest32V2,
         principal: PrincipalIdV2,
@@ -1077,32 +1101,54 @@ mod tests {
     fn ingress_approval_missing_tag_three_rule_mints_no_pending_record() {
         let FinalizedIngressFixtureV2 {
             mut authority,
-            finalized,
+            mut input,
+            finalize,
             manifest,
             ..
         } = finalized_ingress_for_rule(ApprovalRuleModeV2::NoRule);
 
         assert!(matches!(
-            authority.prepare_pending_approval(finalized, manifest, 7, UnixMillisV2::new(150)),
-            Err(KernelIngressAuthorityErrorV2::BindingMismatch)
+            input.finalize_with(finalize.clone(), |finalized| {
+                authority.prepare_pending_approval(finalized, manifest, 7, UnixMillisV2::new(150))
+            }),
+            Err(KernelInputFinalizeTransactionErrorV2::Preparation(
+                KernelIngressAuthorityErrorV2::BindingMismatch
+            ))
         ));
         assert!(authority.pending.is_empty());
+        assert_eq!(
+            input
+                .status(InputStatusTargetV2::Session(finalize.session()))
+                .unwrap(),
+            KernelInputPublicStateV2::Receiving,
+        );
     }
 
     #[test]
     fn ingress_approval_mismatched_tag_three_implementation_mints_no_pending_record() {
         let FinalizedIngressFixtureV2 {
             mut authority,
-            finalized,
+            mut input,
+            finalize,
             manifest,
             ..
         } = finalized_ingress_for_rule(ApprovalRuleModeV2::WrongImplementation);
 
         assert!(matches!(
-            authority.prepare_pending_approval(finalized, manifest, 7, UnixMillisV2::new(150)),
-            Err(KernelIngressAuthorityErrorV2::BindingMismatch)
+            input.finalize_with(finalize.clone(), |finalized| {
+                authority.prepare_pending_approval(finalized, manifest, 7, UnixMillisV2::new(150))
+            }),
+            Err(KernelInputFinalizeTransactionErrorV2::Preparation(
+                KernelIngressAuthorityErrorV2::BindingMismatch
+            ))
         ));
         assert!(authority.pending.is_empty());
+        assert_eq!(
+            input
+                .status(InputStatusTargetV2::Session(finalize.session()))
+                .unwrap(),
+            KernelInputPublicStateV2::Receiving,
+        );
     }
 
     fn finalized_ingress_for_rule(mode: ApprovalRuleModeV2) -> FinalizedIngressFixtureV2 {
@@ -1240,32 +1286,29 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        let finalized = input
-            .finalize(
-                FinalizeInputRequestV2::new(
-                    begun.session(),
-                    vec![InputChannelCommitmentV2::new(
-                        InputChannelV2::ChatText,
-                        1,
-                        0,
-                        content.len() as u64,
-                        ack.cumulative_digest(),
-                    )
-                    .unwrap()],
-                    InputSourceProvenanceV2::direct(
-                        InputSourceKindV2::Chat,
-                        content.len() as u64,
-                        Digest32V2::new(Sha256::digest(content).into()),
-                        VersionV2::new(1, 0, 0),
-                    )
-                    .unwrap(),
-                )
-                .unwrap(),
+        let finalize = FinalizeInputRequestV2::new(
+            begun.session(),
+            vec![InputChannelCommitmentV2::new(
+                InputChannelV2::ChatText,
+                1,
+                0,
+                content.len() as u64,
+                ack.cumulative_digest(),
             )
-            .unwrap();
+            .unwrap()],
+            InputSourceProvenanceV2::direct(
+                InputSourceKindV2::Chat,
+                content.len() as u64,
+                Digest32V2::new(Sha256::digest(content).into()),
+                VersionV2::new(1, 0, 0),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         FinalizedIngressFixtureV2 {
             authority,
-            finalized,
+            input,
+            finalize,
             installation,
             manifest,
             principal,

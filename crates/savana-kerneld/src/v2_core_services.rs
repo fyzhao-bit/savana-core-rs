@@ -44,8 +44,8 @@ use crate::v2_ingress_authority::{
     VerifiedIngressSettlementDecisionV2,
 };
 use crate::v2_input_owner::{
-    FinalizedKernelInputV2, KernelInputErrorV2, KernelInputOwnerV2, KernelInputPublicStateV2,
-    KernelParserTrustV2,
+    FinalizedKernelInputV2, KernelInputErrorV2, KernelInputFinalizeTransactionErrorV2,
+    KernelInputOwnerV2, KernelInputPublicStateV2, KernelParserTrustV2,
 };
 use crate::v2_kernel_owner::{KernelRuntimeRequestV2, KernelRuntimeServicesV2};
 use crate::v2_value_owner::{KernelValueErrorV2, KernelValueOwnerV2};
@@ -798,18 +798,29 @@ impl CoreKernelRuntimeServicesV2 {
                 )
             }
             KernelIngressOperationV2::FinalizeInput(request) => {
-                let finalized = self.input.finalize(request).map_err(map_input_error)?;
-                let prepared = self
+                let authority = self
                     .ingress_authority
                     .as_mut()
-                    .ok_or(StableCode::KernelUnavailable)?
-                    .prepare_pending_approval(
-                        finalized,
-                        active_state_manifest_digest,
-                        deployment_generation,
-                        now,
-                    )
-                    .map_err(map_ingress_authority_error)?;
+                    .ok_or(StableCode::KernelUnavailable)?;
+                let (finalized, prepared) = self
+                    .input
+                    .finalize_with(request, |finalized| {
+                        authority.prepare_pending_approval(
+                            finalized,
+                            active_state_manifest_digest,
+                            deployment_generation,
+                            now,
+                        )
+                    })
+                    .map_err(|error| match error {
+                        KernelInputFinalizeTransactionErrorV2::Input(error) => {
+                            map_input_error(error)
+                        }
+                        KernelInputFinalizeTransactionErrorV2::Preparation(error) => {
+                            map_ingress_authority_error(error)
+                        }
+                    })?;
+                let prepared = authority.publish_pending_approval(prepared, finalized);
                 encode_finalize_input_response_v2(&FinalizeInputResponseV2::new(
                     prepared.pending,
                     prepared.approval,
@@ -1051,27 +1062,134 @@ const fn map_agent_authority_error(error: KernelAgentAuthorityErrorV2) -> Stable
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use ed25519_dalek::SigningKey;
     use savana_kernel_protocol::v2::{
-        decode_begin_input_response_v2, decode_kernel_agent_health_response_v2,
+        decode_append_input_chunk_response_v2, decode_begin_input_response_v2,
+        decode_finalize_input_response_v2, decode_kernel_agent_health_response_v2,
         decode_kernel_ingress_health_response_v2, derive_ed25519_key_id_v2,
-        encode_kernel_ingress_operation_v2, BeginInputRequestV2, BootIdV2, ContentKindV2,
-        Digest32V2, EndpointRoleV2, IngressUiAuthorizationHandleV2, KernelAgentHealthRequestV2,
-        KernelAgentOperationV2, KernelIngressHealthRequestV2, KernelIngressOperationV2,
-        KernelServiceApplicationRequestV2, KernelServiceApplicationResponseBodyV2,
-        KernelServiceOperationV2, PublicServiceStateV2, RequestIdV2, ServiceIdentityV2,
-        UnixMillisV2,
+        encode_kernel_ingress_operation_v2, input_channel_begin_digest_v2,
+        input_channel_step_digest_v2, input_chunk_digest_v2, AppendInputChunkRequestV2,
+        BeginInputRequestV2, BootIdV2, ContentKindV2, Digest32V2, DirectInputChannelV2,
+        EndpointRoleV2, FinalizeInputRequestV2, IngressUiAuthorizationHandleV2,
+        InputChannelCommitmentV2, InputChannelV2, InputSourceKindV2, InputSourceProvenanceV2,
+        InputStatusTargetV2, KernelAgentHealthRequestV2, KernelAgentOperationV2,
+        KernelIngressHealthRequestV2, KernelIngressOperationV2, KernelServiceApplicationRequestV2,
+        KernelServiceApplicationResponseBodyV2, KernelServiceOperationV2, PublicServiceStateV2,
+        RequestIdV2, ServiceIdentityV2, UnixMillisV2, VersionV2, ZeroizingBytesV2,
     };
+    use savana_policy_core::v2::{
+        declassification_implementation_digest_v2, ClosedDeclassificationPurposeV2,
+        DeclassificationRuleSetV2, DeclassificationRuleV2, EffectSetV2, LeakGateDutyV2,
+        OperationalTrustRootPurposeV2, OperationalTrustRootSetItemV2, OperationalTrustRootSetV2,
+    };
+    use sha2::{Digest as _, Sha256};
 
     use super::CoreKernelRuntimeServicesV2;
     use crate::policy_runtime::V2GenerationLease;
+    use crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2;
     use crate::v2_dispatch::{
         KernelServiceDeploymentV2, KernelServiceDispatcherV2, VerifiedKernelServicePeerV2,
     };
-    use crate::v2_input_owner::KernelVerifiedUiAuthorizationV2;
+    use crate::v2_ingress_authority::{KernelIngressAuthorityV2, KernelIngressSecurityConfigV2};
+    use crate::v2_input_owner::{KernelInputPublicStateV2, KernelVerifiedUiAuthorizationV2};
     use crate::v2_kernel_owner::KernelRuntimeOwnerV2;
+
+    #[derive(Clone, Copy)]
+    enum ApprovalRuleModeV2 {
+        Admit,
+        NoRule,
+        WrongImplementation,
+    }
+
+    fn approval_authority(mode: ApprovalRuleModeV2) -> KernelIngressAuthorityV2 {
+        let installer = SigningKey::from_bytes(&[0xc1; 32]);
+        let declassification_authority = SigningKey::from_bytes(&[0xc2; 32]);
+        let product = Digest32V2::new([0xc3; 32]);
+        let roots = OperationalTrustRootSetV2::new_declassification_signed_for_test(
+            product,
+            1,
+            None,
+            vec![OperationalTrustRootSetItemV2::new(
+                OperationalTrustRootPurposeV2::DeclassificationAuthority,
+                declassification_authority.verifying_key().to_bytes(),
+                1,
+                1,
+                10_000,
+            )
+            .unwrap()],
+            1,
+            10_000,
+            &installer,
+            1,
+        )
+        .unwrap();
+        let (tag, purpose, implementation, duty) = match mode {
+            ApprovalRuleModeV2::Admit => (
+                3,
+                ClosedDeclassificationPurposeV2::ApprovalDisplay,
+                declassification_implementation_digest_v2(3).unwrap(),
+                LeakGateDutyV2::BlocklistOnly,
+            ),
+            ApprovalRuleModeV2::NoRule => (
+                1,
+                ClosedDeclassificationPurposeV2::AgentIngressMasking,
+                declassification_implementation_digest_v2(1).unwrap(),
+                LeakGateDutyV2::BlocklistAndNoResidualPii,
+            ),
+            ApprovalRuleModeV2::WrongImplementation => (
+                3,
+                ClosedDeclassificationPurposeV2::ApprovalDisplay,
+                Digest32V2::new([0xc4; 32]),
+                LeakGateDutyV2::BlocklistOnly,
+            ),
+        };
+        let rules = DeclassificationRuleSetV2::new_signed_for_test(
+            product,
+            1,
+            None,
+            vec![DeclassificationRuleV2::new_for_test(
+                tag,
+                purpose,
+                implementation,
+                duty,
+                None,
+                None,
+                1,
+                10_000,
+            )
+            .unwrap()],
+            1,
+            10_000,
+            &roots,
+            &declassification_authority,
+            1,
+            100,
+        )
+        .unwrap();
+        let envelope_key = SigningKey::from_bytes(&[0xc5; 32]);
+        let ui_key = SigningKey::from_bytes(&[0xc6; 32]);
+        let settlement_key = SigningKey::from_bytes(&[0xc7; 32]);
+        KernelIngressAuthorityV2::new(
+            KernelIngressSecurityConfigV2::new(
+                Digest32V2::new([0x30; 32]),
+                ServiceIdentityV2::new([0xc8; 32]),
+                ServiceIdentityV2::new([0xc9; 32]),
+                envelope_key,
+                derive_ed25519_key_id_v2(ui_key.verifying_key().to_bytes()),
+                ui_key.verifying_key().to_bytes(),
+                derive_ed25519_key_id_v2(settlement_key.verifying_key().to_bytes()),
+                settlement_key.verifying_key().to_bytes(),
+                ActiveDeclassificationRuleSetV2::new(rules, Arc::new(roots)).unwrap(),
+                EffectSetV2::SEND,
+            )
+            .unwrap(),
+            8,
+        )
+        .unwrap()
+    }
 
     #[test]
     fn production_runtime_requires_all_security_adapters_before_readiness() {
@@ -1211,6 +1329,181 @@ mod tests {
         let decoded = decode_begin_input_response_v2(response.as_bytes()).unwrap();
         assert_eq!(decoded.next_sequences().len(), 1);
         assert_eq!(decoded.next_sequences()[0].next_sequence(), 0);
+    }
+
+    #[test]
+    fn finalize_gate_refusal_preserves_retryable_session_and_exact_bytes() {
+        for refused_mode in [
+            ApprovalRuleModeV2::NoRule,
+            ApprovalRuleModeV2::WrongImplementation,
+        ] {
+            let mut services = CoreKernelRuntimeServicesV2::new(4, 4096, 4, 32).unwrap();
+            services.ingress_authority = Some(approval_authority(refused_mode));
+            let authorization =
+                IngressUiAuthorizationHandleV2::from_authority_entropy([0xd1; 32]).unwrap();
+            services
+                .input
+                .register_verified_ui_authorization(
+                    authorization,
+                    KernelVerifiedUiAuthorizationV2::for_test(),
+                )
+                .unwrap();
+            let manifest = Digest32V2::new([0x35; 32]);
+            let caller = ServiceIdentityV2::new([0xd2; 32]);
+            let bytes = b"atomic ingress bytes";
+            let begin = services
+                .execute_operation(
+                    RequestIdV2::new([0xd3; 16]),
+                    KernelServiceOperationV2::ingress(KernelIngressOperationV2::BeginInput(
+                        BeginInputRequestV2::new(
+                            authorization,
+                            ContentKindV2::ChatText,
+                            bytes.len() as u64,
+                            Some(Digest32V2::new(Sha256::digest(bytes).into())),
+                        )
+                        .unwrap(),
+                    )),
+                    UnixMillisV2::new(100),
+                    manifest,
+                    7,
+                    9,
+                    caller,
+                )
+                .unwrap();
+            let begun = decode_begin_input_response_v2(begin.as_bytes()).unwrap();
+            let initial_cumulative_digest =
+                input_channel_begin_digest_v2(begun.session(), InputChannelV2::ChatText);
+            let chunk_digest =
+                input_chunk_digest_v2(begun.session(), InputChannelV2::ChatText, 0, bytes).unwrap();
+            let cumulative_digest =
+                input_channel_step_digest_v2(initial_cumulative_digest, 0, chunk_digest).unwrap();
+            let append_request = || {
+                AppendInputChunkRequestV2::new(
+                    begun.writer(),
+                    DirectInputChannelV2::ChatText,
+                    0,
+                    initial_cumulative_digest,
+                    ZeroizingBytesV2::new(bytes.to_vec()).unwrap(),
+                    chunk_digest,
+                    cumulative_digest,
+                )
+                .unwrap()
+            };
+            let append = services
+                .execute_operation(
+                    RequestIdV2::new([0xd4; 16]),
+                    KernelServiceOperationV2::ingress(KernelIngressOperationV2::AppendInputChunk(
+                        append_request(),
+                    )),
+                    UnixMillisV2::new(110),
+                    manifest,
+                    7,
+                    9,
+                    caller,
+                )
+                .unwrap();
+            let accepted = decode_append_input_chunk_response_v2(append.as_bytes()).unwrap();
+            let finalize_request = FinalizeInputRequestV2::new(
+                begun.session(),
+                vec![InputChannelCommitmentV2::new(
+                    InputChannelV2::ChatText,
+                    1,
+                    0,
+                    bytes.len() as u64,
+                    accepted.cumulative_digest(),
+                )
+                .unwrap()],
+                InputSourceProvenanceV2::direct(
+                    InputSourceKindV2::Chat,
+                    bytes.len() as u64,
+                    Digest32V2::new(Sha256::digest(bytes).into()),
+                    VersionV2::new(1, 0, 0),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+            assert_eq!(
+                services.execute_operation(
+                    RequestIdV2::new([0xd5; 16]),
+                    KernelServiceOperationV2::ingress(KernelIngressOperationV2::FinalizeInput(
+                        finalize_request.clone(),
+                    )),
+                    UnixMillisV2::new(120),
+                    manifest,
+                    7,
+                    9,
+                    caller,
+                ),
+                Err(savana_kernel_protocol::StableCode::ApprovalBindingMismatch),
+            );
+            assert_eq!(
+                services
+                    .input
+                    .status(InputStatusTargetV2::Session(begun.session()))
+                    .unwrap(),
+                KernelInputPublicStateV2::Receiving,
+            );
+            let replay = services
+                .execute_operation(
+                    RequestIdV2::new([0xd6; 16]),
+                    KernelServiceOperationV2::ingress(KernelIngressOperationV2::AppendInputChunk(
+                        append_request(),
+                    )),
+                    UnixMillisV2::new(121),
+                    manifest,
+                    7,
+                    9,
+                    caller,
+                )
+                .unwrap();
+            assert_eq!(replay.as_bytes(), append.as_bytes());
+
+            let refused_authority = services
+                .ingress_authority
+                .replace(approval_authority(ApprovalRuleModeV2::Admit))
+                .unwrap();
+            assert_eq!(refused_authority.pending_record_count(), 0);
+            let finalized = services
+                .execute_operation(
+                    RequestIdV2::new([0xd7; 16]),
+                    KernelServiceOperationV2::ingress(KernelIngressOperationV2::FinalizeInput(
+                        finalize_request.clone(),
+                    )),
+                    UnixMillisV2::new(130),
+                    manifest,
+                    7,
+                    9,
+                    caller,
+                )
+                .unwrap();
+            let finalized = decode_finalize_input_response_v2(finalized.as_bytes()).unwrap();
+            assert_ne!(
+                finalized.envelope().envelope_digest().unwrap().as_bytes(),
+                &[0; 32],
+            );
+            assert_eq!(
+                services
+                    .input
+                    .status(InputStatusTargetV2::Session(begun.session()))
+                    .unwrap(),
+                KernelInputPublicStateV2::Finalized,
+            );
+            assert_eq!(
+                services.execute_operation(
+                    RequestIdV2::new([0xd8; 16]),
+                    KernelServiceOperationV2::ingress(KernelIngressOperationV2::FinalizeInput(
+                        finalize_request,
+                    )),
+                    UnixMillisV2::new(131),
+                    manifest,
+                    7,
+                    9,
+                    caller,
+                ),
+                Err(savana_kernel_protocol::StableCode::PolicyDenied),
+            );
+        }
     }
 
     #[test]

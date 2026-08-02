@@ -1111,8 +1111,8 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        let finalized = input_owner
-            .finalize(
+        let (finalized, ()) = input_owner
+            .finalize_with(
                 savana_kernel_protocol::v2::FinalizeInputRequestV2::new(
                     begun.session(),
                     vec![InputChannelCommitmentV2::new(
@@ -1132,6 +1132,7 @@ mod tests {
                     .unwrap(),
                 )
                 .unwrap(),
+                |_| Ok::<(), std::convert::Infallible>(()),
             )
             .unwrap();
 
