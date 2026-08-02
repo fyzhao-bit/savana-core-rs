@@ -7,7 +7,8 @@ use savana_kernel_protocol::v2::{
     sign_kernel_service_response_envelope_v2, BootIdV2, Digest32V2, Ed25519KeyIdV2, EndpointRoleV2,
     KernelServiceApplicationRequestV2, KernelServiceApplicationResponseV2,
     KernelServiceRequestEnvelopeV2, KernelServiceResponseEnvelopeV2, KernelServiceResponseV2,
-    PublicStableCodeV2, RequestIdV2, ServiceIdentityV2, UnixMillisV2, V2ServerTransportSession,
+    PreparedV2ServerApplicationResponse, PublicStableCodeV2, RequestIdV2, ServiceIdentityV2,
+    UnixMillisV2, V2ServerTransportSession,
 };
 use savana_kernel_protocol::StableCode;
 
@@ -89,6 +90,10 @@ impl VerifiedKernelServicePeerV2 {
     pub(crate) const fn caller_identity(self) -> ServiceIdentityV2 {
         self.caller_identity
     }
+
+    pub(crate) const fn caller_boot_id(self) -> BootIdV2 {
+        self.caller_boot_id
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +121,18 @@ pub(crate) enum PreparedKernelServiceResponseV2 {
     Application(KernelServiceApplicationResponseV2),
     Signed(Vec<u8>),
     SuiteOne(Vec<u8>),
+    StagedSuiteOne(StagedSuiteOneResponseV2),
+}
+
+impl PreparedKernelServiceResponseV2 {
+    pub(crate) fn commit_staged_suite_one(
+        self,
+    ) -> Result<Self, KernelRuntimeResponsePreparationErrorV2> {
+        match self {
+            Self::StagedSuiteOne(staged) => staged.commit().map(Self::SuiteOne),
+            response => Ok(response),
+        }
+    }
 }
 
 pub(crate) enum KernelRuntimeResponseBuilderV2 {
@@ -163,12 +180,27 @@ impl KernelRuntimeResponseBuilderV2 {
         }
         let body = KernelServiceResponseBodyV2::from_typed_handler(canonical_body)
             .map_err(|_| KernelRuntimeResponsePreparationErrorV2::Unavailable)?;
-        self.prepare(Ok(body))
+        self.prepare_inner(Ok(body), true)
     }
 
     pub(crate) fn prepare(
         self,
         outcome: Result<KernelServiceResponseBodyV2, StableCode>,
+    ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2> {
+        self.prepare_inner(outcome, false)
+    }
+
+    pub(crate) fn prepare_transactional(
+        self,
+        outcome: Result<KernelServiceResponseBodyV2, StableCode>,
+    ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2> {
+        self.prepare_inner(outcome, true)
+    }
+
+    fn prepare_inner(
+        self,
+        outcome: Result<KernelServiceResponseBodyV2, StableCode>,
+        stage_suite_one: bool,
     ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2> {
         match self {
             #[cfg(test)]
@@ -188,7 +220,7 @@ impl KernelRuntimeResponseBuilderV2 {
                     KernelResponseFailurePointV2::SuiteOneSeal,
                     KernelRuntimeResponseBuilderV2::SuiteOne { .. },
                 ) => Err(KernelRuntimeResponsePreparationErrorV2::Unavailable),
-                (_, inner) => inner.prepare(outcome),
+                (_, inner) => inner.prepare_inner(outcome, stage_suite_one),
             },
             Self::Body => Ok(PreparedKernelServiceResponseV2::Body(outcome)),
             Self::Application {
@@ -239,9 +271,15 @@ impl KernelRuntimeResponseBuilderV2 {
                     build_application_response(role, request_id, operation_tag, outcome)?;
                 let plaintext = encode_kernel_service_application_response_v2(&response)
                     .map_err(|_| KernelRuntimeResponsePreparationErrorV2::Unavailable)?;
-                session
-                    .seal(request_id, operation_tag, &plaintext)
-                    .map(PreparedKernelServiceResponseV2::SuiteOne)
+                if stage_suite_one {
+                    session
+                        .stage(request_id, operation_tag, &plaintext)
+                        .map(PreparedKernelServiceResponseV2::StagedSuiteOne)
+                } else {
+                    session
+                        .seal(request_id, operation_tag, &plaintext)
+                        .map(PreparedKernelServiceResponseV2::SuiteOne)
+                }
             }
         }
     }
@@ -258,19 +296,57 @@ pub(crate) enum KernelResponseFailurePointV2 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KernelRuntimeResponsePreparationErrorV2 {
+    DeadlineExceeded,
     Unavailable,
 }
 
 #[derive(Clone)]
 pub(crate) struct SuiteOneResponseSessionSlotV2 {
-    session: Arc<Mutex<Option<V2ServerTransportSession>>>,
+    session: Arc<Mutex<SuiteOneResponseSessionStateV2>>,
+}
+
+enum SuiteOneResponseSessionStateV2 {
+    Available(V2ServerTransportSession),
+    Staged {
+        prepared: PreparedV2ServerApplicationResponse,
+    },
+    Consumed,
+}
+
+pub(crate) struct StagedSuiteOneResponseV2 {
+    session: SuiteOneResponseSessionSlotV2,
+    active: bool,
+}
+
+impl StagedSuiteOneResponseV2 {
+    fn commit(mut self) -> Result<Vec<u8>, KernelRuntimeResponsePreparationErrorV2> {
+        let record = self.session.commit_staged()?;
+        self.active = false;
+        Ok(record)
+    }
+}
+
+impl Drop for StagedSuiteOneResponseV2 {
+    fn drop(&mut self) {
+        if self.active {
+            self.session.rollback_staged();
+        }
+    }
 }
 
 impl SuiteOneResponseSessionSlotV2 {
     pub(crate) fn new(session: V2ServerTransportSession) -> Self {
         Self {
-            session: Arc::new(Mutex::new(Some(session))),
+            session: Arc::new(Mutex::new(SuiteOneResponseSessionStateV2::Available(
+                session,
+            ))),
         }
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, SuiteOneResponseSessionStateV2> {
+        self.session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn seal(
@@ -279,20 +355,70 @@ impl SuiteOneResponseSessionSlotV2 {
         operation_tag: u16,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, KernelRuntimeResponsePreparationErrorV2> {
-        let mut guard = self
-            .session
-            .lock()
-            .map_err(|_| KernelRuntimeResponsePreparationErrorV2::Unavailable)?;
-        let mut session = guard
-            .take()
-            .ok_or(KernelRuntimeResponsePreparationErrorV2::Unavailable)?;
+        let mut guard = self.lock_state();
+        let state = std::mem::replace(&mut *guard, SuiteOneResponseSessionStateV2::Consumed);
+        let SuiteOneResponseSessionStateV2::Available(mut session) = state else {
+            *guard = state;
+            return Err(KernelRuntimeResponsePreparationErrorV2::Unavailable);
+        };
         match session.seal_application_response(request_id, operation_tag, plaintext) {
             Ok(record) => Ok(record),
             Err(_) => {
-                *guard = Some(session);
+                *guard = SuiteOneResponseSessionStateV2::Available(session);
                 Err(KernelRuntimeResponsePreparationErrorV2::Unavailable)
             }
         }
+    }
+
+    fn stage(
+        &self,
+        request_id: RequestIdV2,
+        operation_tag: u16,
+        plaintext: &[u8],
+    ) -> Result<StagedSuiteOneResponseV2, KernelRuntimeResponsePreparationErrorV2> {
+        let mut guard = self.lock_state();
+        let state = std::mem::replace(&mut *guard, SuiteOneResponseSessionStateV2::Consumed);
+        let SuiteOneResponseSessionStateV2::Available(session) = state else {
+            *guard = state;
+            return Err(KernelRuntimeResponsePreparationErrorV2::Unavailable);
+        };
+        match session.prepare_application_response(request_id, operation_tag, plaintext) {
+            Ok(prepared) => {
+                *guard = SuiteOneResponseSessionStateV2::Staged { prepared };
+                Ok(StagedSuiteOneResponseV2 {
+                    session: self.clone(),
+                    active: true,
+                })
+            }
+            Err(error) => {
+                let (session, _) = error.into_parts();
+                *guard = SuiteOneResponseSessionStateV2::Available(session);
+                Err(KernelRuntimeResponsePreparationErrorV2::Unavailable)
+            }
+        }
+    }
+
+    fn commit_staged(&self) -> Result<Vec<u8>, KernelRuntimeResponsePreparationErrorV2> {
+        let mut guard = self.lock_state();
+        let state = std::mem::replace(&mut *guard, SuiteOneResponseSessionStateV2::Consumed);
+        match state {
+            SuiteOneResponseSessionStateV2::Staged { prepared } => Ok(prepared.commit()),
+            other => {
+                *guard = other;
+                Err(KernelRuntimeResponsePreparationErrorV2::Unavailable)
+            }
+        }
+    }
+
+    fn rollback_staged(&self) {
+        let mut guard = self.lock_state();
+        let state = std::mem::replace(&mut *guard, SuiteOneResponseSessionStateV2::Consumed);
+        *guard = match state {
+            SuiteOneResponseSessionStateV2::Staged { prepared } => {
+                SuiteOneResponseSessionStateV2::Available(prepared.rollback())
+            }
+            other => other,
+        };
     }
 
     pub(crate) fn seal_public_error(
@@ -309,6 +435,17 @@ impl SuiteOneResponseSessionSlotV2 {
             .map_err(|_| KernelServiceDispatchErrorV2::Unavailable)?;
         self.seal(request_id, operation_tag, &plaintext)
             .map_err(|_| KernelServiceDispatchErrorV2::Unavailable)
+    }
+
+    pub(crate) fn cancel_staged_and_seal_public_error(
+        &self,
+        role: EndpointRoleV2,
+        request_id: RequestIdV2,
+        operation_tag: u16,
+        error: PublicStableCodeV2,
+    ) -> Result<Vec<u8>, KernelServiceDispatchErrorV2> {
+        self.rollback_staged();
+        self.seal_public_error(role, request_id, operation_tag, error)
     }
 }
 
@@ -388,6 +525,11 @@ impl KernelServiceDispatcherV2 {
             && self.deployment.deployment_generation == deployment_generation
     }
 
+    #[cfg(test)]
+    pub(crate) fn queued_for_test(&self) -> usize {
+        self.owner.queued_for_test()
+    }
+
     pub(crate) fn dispatch_one(
         &self,
         peer: VerifiedKernelServicePeerV2,
@@ -404,6 +546,7 @@ impl KernelServiceDispatcherV2 {
         self.validate_connection_binding(peer, &request, now)?;
         self.validate_generation_lease(&lease)?;
         let request_id = request.request_id();
+        let logical_deadline = request.deadline();
         match self
             .owner
             .dispatch(
@@ -411,6 +554,7 @@ impl KernelServiceDispatcherV2 {
                 lease,
                 request_id,
                 request.into_operation(),
+                logical_deadline,
                 now,
                 deadline,
                 KernelRuntimeResponseBuilderV2::Body,
@@ -420,7 +564,7 @@ impl KernelServiceDispatcherV2 {
             PreparedKernelServiceResponseV2::Body(outcome) => {
                 outcome.map_err(KernelServiceDispatchErrorV2::Operation)
             }
-            _ => unreachable!("closed body response builder returned another variant"),
+            _ => Err(KernelServiceDispatchErrorV2::Unavailable),
         }
     }
 
@@ -466,7 +610,7 @@ impl KernelServiceDispatcherV2 {
             return Err(KernelServiceDispatchErrorV2::IdentityRejected);
         }
         self.validate_generation_lease(&lease)?;
-        let (role, request_id, _, operation) = request.into_parts();
+        let (role, request_id, logical_deadline, operation) = request.into_parts();
         let operation_tag = operation.tag();
         let builder = KernelRuntimeResponseBuilderV2::Application {
             role,
@@ -483,11 +627,20 @@ impl KernelServiceDispatcherV2 {
         };
         let prepared = self
             .owner
-            .dispatch(peer, lease, request_id, operation, now, deadline, builder)
+            .dispatch(
+                peer,
+                lease,
+                request_id,
+                operation,
+                logical_deadline,
+                now,
+                deadline,
+                builder,
+            )
             .map_err(map_runtime_owner_error)?;
         match prepared {
             PreparedKernelServiceResponseV2::Application(response) => Ok(response),
-            _ => unreachable!("closed application response builder returned another variant"),
+            _ => Err(KernelServiceDispatchErrorV2::Unavailable),
         }
     }
 
@@ -538,7 +691,7 @@ impl KernelServiceDispatcherV2 {
             return Err(KernelServiceDispatchErrorV2::IdentityRejected);
         }
         self.validate_generation_lease(&lease)?;
-        let (role, request_id, _, operation) = request.into_parts();
+        let (role, request_id, logical_deadline, operation) = request.into_parts();
         let operation_tag = operation.tag();
         let builder = KernelRuntimeResponseBuilderV2::SuiteOne {
             role,
@@ -556,11 +709,20 @@ impl KernelServiceDispatcherV2 {
         };
         let prepared = self
             .owner
-            .dispatch(peer, lease, request_id, operation, now, deadline, builder)
+            .dispatch(
+                peer,
+                lease,
+                request_id,
+                operation,
+                logical_deadline,
+                now,
+                deadline,
+                builder,
+            )
             .map_err(map_runtime_owner_error)?;
         match prepared {
             PreparedKernelServiceResponseV2::SuiteOne(record) => Ok(record),
-            _ => unreachable!("closed Suite-1 response builder returned another variant"),
+            _ => Err(KernelServiceDispatchErrorV2::Unavailable),
         }
     }
 
@@ -620,6 +782,7 @@ impl KernelServiceDispatcherV2 {
         let _ = failure;
         let role = request.role();
         let request_id = request.request_id();
+        let logical_deadline = request.deadline();
         let operation_tag = request.operation().tag();
         let builder = KernelRuntimeResponseBuilderV2::Signed {
             role,
@@ -644,6 +807,7 @@ impl KernelServiceDispatcherV2 {
                 lease,
                 request_id,
                 request.into_operation(),
+                logical_deadline,
                 now,
                 deadline,
                 builder,
@@ -651,7 +815,7 @@ impl KernelServiceDispatcherV2 {
             .map_err(map_runtime_owner_error)?;
         match prepared {
             PreparedKernelServiceResponseV2::Signed(response) => Ok(response),
-            _ => unreachable!("closed signed response builder returned another variant"),
+            _ => Err(KernelServiceDispatchErrorV2::Unavailable),
         }
     }
 

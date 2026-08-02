@@ -468,6 +468,8 @@ struct InputSessionRecordV2 {
     parser_job_session_binding_digest: Digest32V2,
     authorization: KernelVerifiedUiAuthorizationV2,
     state: KernelInputPublicStateV2,
+    finalize_request_digest: Option<Digest32V2>,
+    finalized_input_commitment: Option<Digest32V2>,
     channels: Vec<InputChannelRecordV2>,
     parsed_source_provenance: Option<(InputSourceProvenanceV2, Digest32V2)>,
 }
@@ -655,6 +657,8 @@ impl KernelInputOwnerV2 {
             parser_job_session_binding_digest,
             authorization: authorization_evidence,
             state: KernelInputPublicStateV2::Receiving,
+            finalize_request_digest: None,
+            finalized_input_commitment: None,
             channels,
             parsed_source_provenance: None,
         });
@@ -1211,6 +1215,8 @@ impl KernelInputOwnerV2 {
             channel.chunks.clear();
         }
         session.state = KernelInputPublicStateV2::Finalized;
+        session.finalize_request_digest = Some(source_provenance_digest);
+        session.finalized_input_commitment = Some(input_commitment);
         Ok((
             FinalizedKernelInputV2 {
                 input_commitment,
@@ -1220,6 +1226,36 @@ impl KernelInputOwnerV2 {
             },
             prepared_result,
         ))
+    }
+
+    pub(crate) fn exact_finalized_input_commitment(
+        &self,
+        request: &FinalizeInputRequestV2,
+    ) -> Result<Option<Digest32V2>, KernelInputErrorV2> {
+        let session_commitment = request.session().authority_commitment(&self.handle_key);
+        let session = self
+            .sessions
+            .iter()
+            .find(|session| session.session_commitment == session_commitment)
+            .ok_or(KernelInputErrorV2::InvalidReference)?;
+        if session.state == KernelInputPublicStateV2::Receiving {
+            return Ok(None);
+        }
+        if session.state != KernelInputPublicStateV2::Finalized {
+            return Err(KernelInputErrorV2::StateConflict);
+        }
+        let canonical_request = encode_kernel_ingress_operation_v2(
+            &KernelIngressOperationV2::FinalizeInput(request.clone()),
+        )
+        .map_err(|_| KernelInputErrorV2::Unavailable)?;
+        let request_digest = Digest32V2::new(Sha256::digest(canonical_request).into());
+        if session.finalize_request_digest != Some(request_digest) {
+            return Err(KernelInputErrorV2::StateConflict);
+        }
+        session
+            .finalized_input_commitment
+            .map(Some)
+            .ok_or(KernelInputErrorV2::StateConflict)
     }
 
     pub(crate) fn abort(

@@ -1170,15 +1170,26 @@ impl V2GenerationLease {
         active_state_manifest_digest: savana_kernel_protocol::v2::Digest32V2,
         deployment_generation: u64,
     ) -> Self {
+        Self::for_dispatch_test_with_fence(active_state_manifest_digest, deployment_generation, 1)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_dispatch_test_with_fence(
+        active_state_manifest_digest: savana_kernel_protocol::v2::Digest32V2,
+        deployment_generation: u64,
+        effect_fence_epoch: u64,
+    ) -> Self {
         let dispatch = Arc::new(DispatchGate::new())
             .v2_lease()
             .expect("synthetic V2 dispatch lease");
+        let active = V2ActiveGenerationSnapshot::for_dispatch_test(
+            active_state_manifest_digest,
+            deployment_generation,
+        )
+        .with_fence_for_test(effect_fence_epoch);
         Self {
             dispatch,
-            active: Arc::new(V2ActiveGenerationSnapshot::for_dispatch_test(
-                active_state_manifest_digest,
-                deployment_generation,
-            )),
+            active: Arc::new(active),
             edge_digest: savana_kernel_protocol::v2::Digest32V2::new([0xd6; 32]),
         }
     }

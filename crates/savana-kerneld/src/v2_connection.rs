@@ -144,7 +144,7 @@ pub(crate) fn serve_one_suite_one_v2_channel(
                 PublicStableCodeV2::Overloaded,
             )?,
             Err(KernelServiceDispatchErrorV2::DeadlineExceeded) => response_session
-                .seal_public_error(
+                .cancel_staged_and_seal_public_error(
                     routing.role(),
                     routing.request_id(),
                     routing.operation_tag(),

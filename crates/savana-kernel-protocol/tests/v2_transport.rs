@@ -116,12 +116,18 @@ fn exact_suite_one_handshake_confirms_both_sides_and_encrypts_one_request_respon
     assert_eq!(opened.plaintext(), request_plaintext);
     assert!(server_session.open_application_request(&request).is_err());
 
-    assert!(server_session
-        .seal_application_response(RequestIdV2::new([0x2b; 16]), 29, &[0x81, 0x01])
-        .is_err());
-    let response = server_session
-        .seal_application_response(request_id, 29, &[0x81, 0x01])
+    let failed = server_session
+        .prepare_application_response(RequestIdV2::new([0x2b; 16]), 29, &[0x81, 0x01])
+        .unwrap_err();
+    let (server_session, _) = failed.into_parts();
+    let staged = server_session
+        .prepare_application_response(request_id, 29, &[0x81, 0x01])
         .unwrap();
+    let server_session = staged.rollback();
+    let response = server_session
+        .prepare_application_response(request_id, 29, &[0x81, 0x01])
+        .unwrap()
+        .commit();
     let mut changed_response = response.clone();
     *changed_response.last_mut().unwrap() ^= 1;
     assert!(client_session

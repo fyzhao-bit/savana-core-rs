@@ -1,14 +1,22 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const OWNER_RUNNING: u8 = 1;
 const OWNER_CLOSING: u8 = 2;
 const OWNER_FAILED: u8 = 3;
 const OWNER_STOPPED: u8 = 4;
+
+const REQUEST_OPEN: u8 = 1;
+const REQUEST_CANCELLED: u8 = 2;
+const REQUEST_COMMIT_OWNED: u8 = 3;
+const REQUEST_DURABLE_COMPLETE: u8 = 4;
+const REQUEST_COMPLETE: u8 = 5;
+const REQUEST_ABANDONED: u8 = 6;
+const POST_COMMIT_COMPLETION_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StateOwnerErrorV2 {
@@ -21,9 +29,255 @@ enum OwnerMessageV2<Command, Response> {
     Execute {
         command: Command,
         deadline: Instant,
-        response: SyncSender<Result<Response, StateOwnerErrorV2>>,
+        completion: Arc<RequestCompletionV2<Response>>,
     },
     Shutdown,
+}
+
+struct RequestDecisionV2 {
+    state: AtomicU8,
+    deadline: Instant,
+    durable_recovery_identity: Mutex<Option<[u8; 32]>>,
+}
+
+struct RequestCompletionV2<Response> {
+    decision: Arc<RequestDecisionV2>,
+    result: Mutex<Option<Result<Response, StateOwnerErrorV2>>>,
+    wake: Condvar,
+}
+
+impl<Response> RequestCompletionV2<Response> {
+    fn new(deadline: Instant) -> Self {
+        Self {
+            decision: Arc::new(RequestDecisionV2 {
+                state: AtomicU8::new(REQUEST_OPEN),
+                deadline,
+                durable_recovery_identity: Mutex::new(None),
+            }),
+            result: Mutex::new(None),
+            wake: Condvar::new(),
+        }
+    }
+
+    fn commit_handle(&self) -> StateOwnerCommitV2 {
+        StateOwnerCommitV2 {
+            decision: Arc::clone(&self.decision),
+        }
+    }
+
+    fn cancel(&self) {
+        let _ = self.decision.state.compare_exchange(
+            REQUEST_OPEN,
+            REQUEST_CANCELLED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        self.wake.notify_all();
+    }
+
+    fn complete(&self, result: Result<Response, StateOwnerErrorV2>) {
+        let mut stored = lock_unpoisoned(&self.result);
+        match self.decision.state.load(Ordering::Acquire) {
+            REQUEST_OPEN => {
+                if self
+                    .decision
+                    .state
+                    .compare_exchange(
+                        REQUEST_OPEN,
+                        REQUEST_COMPLETE,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    *stored = Some(result);
+                }
+            }
+            REQUEST_COMMIT_OWNED | REQUEST_DURABLE_COMPLETE | REQUEST_ABANDONED => {
+                *stored = Some(result);
+                self.decision
+                    .state
+                    .store(REQUEST_COMPLETE, Ordering::Release);
+            }
+            REQUEST_CANCELLED | REQUEST_COMPLETE => {}
+            _ => {
+                self.decision
+                    .state
+                    .store(REQUEST_COMPLETE, Ordering::Release);
+                *stored = Some(Err(StateOwnerErrorV2::RuntimeUnavailable));
+            }
+        }
+        self.wake.notify_all();
+    }
+
+    fn has_durable_recovery(&self) -> bool {
+        lock_unpoisoned(&self.decision.durable_recovery_identity).is_some()
+    }
+
+    fn wait(&self) -> Result<Response, StateOwnerErrorV2> {
+        let mut stored = lock_unpoisoned(&self.result);
+        loop {
+            if let Some(result) = stored.take() {
+                return result;
+            }
+            match self.decision.state.load(Ordering::Acquire) {
+                REQUEST_CANCELLED => return Err(StateOwnerErrorV2::DeadlineExceeded),
+                REQUEST_ABANDONED => return Err(StateOwnerErrorV2::RuntimeUnavailable),
+                REQUEST_COMPLETE => return Err(StateOwnerErrorV2::RuntimeUnavailable),
+                REQUEST_OPEN => {
+                    let remaining = self
+                        .decision
+                        .deadline
+                        .saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        match self.decision.state.compare_exchange(
+                            REQUEST_OPEN,
+                            REQUEST_CANCELLED,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        ) {
+                            Ok(_) => {
+                                self.wake.notify_all();
+                                return Err(StateOwnerErrorV2::DeadlineExceeded);
+                            }
+                            Err(_) => continue,
+                        }
+                    }
+                    stored = wait_timeout_unpoisoned(&self.wake, stored, remaining);
+                }
+                REQUEST_COMMIT_OWNED | REQUEST_DURABLE_COMPLETE => {
+                    let grace_deadline = self
+                        .decision
+                        .deadline
+                        .checked_add(POST_COMMIT_COMPLETION_GRACE)
+                        .unwrap_or_else(|| Instant::now() + POST_COMMIT_COMPLETION_GRACE);
+                    loop {
+                        if let Some(result) = stored.take() {
+                            return result;
+                        }
+                        if self.decision.state.load(Ordering::Acquire) == REQUEST_COMPLETE {
+                            continue;
+                        }
+                        let remaining = grace_deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            let state = self.decision.state.load(Ordering::Acquire);
+                            match state {
+                                REQUEST_COMMIT_OWNED | REQUEST_DURABLE_COMPLETE => {
+                                    if self
+                                        .decision
+                                        .state
+                                        .compare_exchange(
+                                            state,
+                                            REQUEST_ABANDONED,
+                                            Ordering::AcqRel,
+                                            Ordering::Acquire,
+                                        )
+                                        .is_ok()
+                                    {
+                                        return Err(StateOwnerErrorV2::RuntimeUnavailable);
+                                    }
+                                }
+                                REQUEST_COMPLETE => continue,
+                                REQUEST_ABANDONED => {
+                                    return Err(StateOwnerErrorV2::RuntimeUnavailable)
+                                }
+                                _ => break,
+                            }
+                        }
+                        stored = wait_timeout_unpoisoned(&self.wake, stored, remaining);
+                    }
+                }
+                _ => return Err(StateOwnerErrorV2::RuntimeUnavailable),
+            }
+        }
+    }
+}
+
+pub(crate) struct StateOwnerCommitV2 {
+    decision: Arc<RequestDecisionV2>,
+}
+
+impl StateOwnerCommitV2 {
+    pub(crate) fn claim(&self) -> Result<(), StateOwnerErrorV2> {
+        if Instant::now() >= self.decision.deadline {
+            let _ = self.decision.state.compare_exchange(
+                REQUEST_OPEN,
+                REQUEST_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            return Err(match self.decision.state.load(Ordering::Acquire) {
+                REQUEST_COMMIT_OWNED
+                | REQUEST_DURABLE_COMPLETE
+                | REQUEST_COMPLETE
+                | REQUEST_ABANDONED => StateOwnerErrorV2::RuntimeUnavailable,
+                _ => StateOwnerErrorV2::DeadlineExceeded,
+            });
+        }
+        match self.decision.state.compare_exchange(
+            REQUEST_OPEN,
+            REQUEST_COMMIT_OWNED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => Ok(()),
+            Err(REQUEST_CANCELLED) => Err(StateOwnerErrorV2::DeadlineExceeded),
+            Err(_) => Err(StateOwnerErrorV2::RuntimeUnavailable),
+        }
+    }
+
+    pub(crate) fn mark_durable_complete(
+        &self,
+        proof: &crate::v2_ingress_authority::PublishedFinalizeRecoveryProofV2,
+    ) -> Result<(), StateOwnerErrorV2> {
+        let identity_commitment = proof.identity_commitment();
+        if identity_commitment.iter().all(|byte| *byte == 0) {
+            return Err(StateOwnerErrorV2::RuntimeUnavailable);
+        }
+        *lock_unpoisoned(&self.decision.durable_recovery_identity) = Some(identity_commitment);
+        loop {
+            let state = self.decision.state.load(Ordering::Acquire);
+            match state {
+                REQUEST_COMMIT_OWNED | REQUEST_ABANDONED => {
+                    if self
+                        .decision
+                        .state
+                        .compare_exchange(
+                            state,
+                            REQUEST_DURABLE_COMPLETE,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        return Ok(());
+                    }
+                }
+                REQUEST_DURABLE_COMPLETE | REQUEST_COMPLETE => return Ok(()),
+                REQUEST_OPEN | REQUEST_CANCELLED => {
+                    *lock_unpoisoned(&self.decision.durable_recovery_identity) = None;
+                    return Err(StateOwnerErrorV2::RuntimeUnavailable);
+                }
+                _ => return Err(StateOwnerErrorV2::RuntimeUnavailable),
+            }
+        }
+    }
+}
+
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn wait_timeout_unpoisoned<'a, T>(
+    wake: &Condvar,
+    guard: MutexGuard<'a, T>,
+    timeout: Duration,
+) -> MutexGuard<'a, T> {
+    wake.wait_timeout(guard, timeout)
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .0
 }
 
 pub(crate) struct StateOwnerV2<Command, Response> {
@@ -51,7 +305,17 @@ where
     pub(crate) fn spawn(
         name: &str,
         capacity: usize,
-        handler: impl FnMut(Command) -> Result<Response, StateOwnerErrorV2> + Send + 'static,
+        mut handler: impl FnMut(Command) -> Result<Response, StateOwnerErrorV2> + Send + 'static,
+    ) -> Result<Self, StateOwnerErrorV2> {
+        Self::spawn_transactional(name, capacity, move |command, _commit| handler(command))
+    }
+
+    pub(crate) fn spawn_transactional(
+        name: &str,
+        capacity: usize,
+        handler: impl FnMut(Command, StateOwnerCommitV2) -> Result<Response, StateOwnerErrorV2>
+            + Send
+            + 'static,
     ) -> Result<Self, StateOwnerErrorV2> {
         if name.is_empty() || capacity == 0 {
             return Err(StateOwnerErrorV2::RuntimeUnavailable);
@@ -84,12 +348,12 @@ where
         if self.lifecycle.load(Ordering::Acquire) != OWNER_RUNNING {
             return Err(StateOwnerErrorV2::RuntimeUnavailable);
         }
-        let (response, received) = mpsc::sync_channel(1);
+        let completion = Arc::new(RequestCompletionV2::new(deadline));
         self.queued.fetch_add(1, Ordering::AcqRel);
         match self.sender.try_send(OwnerMessageV2::Execute {
             command,
             deadline,
-            response,
+            completion: Arc::clone(&completion),
         }) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
@@ -102,22 +366,11 @@ where
                 return Err(StateOwnerErrorV2::RuntimeUnavailable);
             }
         }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(StateOwnerErrorV2::DeadlineExceeded);
-        }
-        match received.recv_timeout(remaining) {
-            Ok(result) => result,
-            Err(RecvTimeoutError::Timeout) => Err(StateOwnerErrorV2::DeadlineExceeded),
-            Err(RecvTimeoutError::Disconnected) => {
-                self.lifecycle.store(OWNER_FAILED, Ordering::Release);
-                Err(StateOwnerErrorV2::RuntimeUnavailable)
-            }
-        }
+        completion.wait()
     }
 
     #[cfg(test)]
-    fn queued_for_test(&self) -> usize {
+    pub(crate) fn queued_for_test(&self) -> usize {
         self.queued.load(Ordering::Acquire)
     }
 }
@@ -148,28 +401,30 @@ fn owner_loop<Command, Response>(
     receiver: Receiver<OwnerMessageV2<Command, Response>>,
     lifecycle: Arc<AtomicU8>,
     queued: Arc<AtomicUsize>,
-    mut handler: impl FnMut(Command) -> Result<Response, StateOwnerErrorV2>,
+    mut handler: impl FnMut(Command, StateOwnerCommitV2) -> Result<Response, StateOwnerErrorV2>,
 ) {
     while let Ok(message) = receiver.recv() {
         match message {
             OwnerMessageV2::Execute {
                 command,
                 deadline,
-                response,
+                completion,
             } => {
                 queued.fetch_sub(1, Ordering::AcqRel);
                 if lifecycle.load(Ordering::Acquire) != OWNER_RUNNING {
-                    let _ = response.send(Err(StateOwnerErrorV2::RuntimeUnavailable));
+                    completion.complete(Err(StateOwnerErrorV2::RuntimeUnavailable));
                     continue;
                 }
                 if Instant::now() >= deadline {
-                    let _ = response.send(Err(StateOwnerErrorV2::DeadlineExceeded));
+                    completion.cancel();
                     continue;
                 }
-                let result = catch_unwind(AssertUnwindSafe(|| handler(command)))
+                let commit = completion.commit_handle();
+                let result = catch_unwind(AssertUnwindSafe(|| handler(command, commit)))
                     .unwrap_or(Err(StateOwnerErrorV2::RuntimeUnavailable));
-                let fatal = matches!(result, Err(StateOwnerErrorV2::RuntimeUnavailable));
-                let _ = response.send(result);
+                let fatal = matches!(result, Err(StateOwnerErrorV2::RuntimeUnavailable))
+                    && !completion.has_durable_recovery();
+                completion.complete(result);
                 if fatal {
                     lifecycle.store(OWNER_FAILED, Ordering::Release);
                     return;
@@ -295,6 +550,89 @@ mod tests {
     }
 
     #[test]
+    fn deadline_cancellation_wins_before_commit_and_lost_receiver_cannot_mutate() {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let mutations = Arc::new(AtomicUsize::new(0));
+        let mutations_for_handler = Arc::clone(&mutations);
+        let owner = Arc::new(
+            StateOwnerV2::spawn_transactional(
+                "v2-owner-cancel-linearization",
+                1,
+                move |value, commit| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    let claim = commit.claim();
+                    if claim.is_ok() {
+                        mutations_for_handler.fetch_add(1, Ordering::AcqRel);
+                    }
+                    finished_tx.send(claim).unwrap();
+                    Ok(value)
+                },
+            )
+            .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let requesting = {
+            let owner = Arc::clone(&owner);
+            thread::spawn(move || owner.request(7_u8, deadline))
+        };
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            requesting.join().unwrap(),
+            Err(StateOwnerErrorV2::DeadlineExceeded),
+        );
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            finished_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Err(StateOwnerErrorV2::DeadlineExceeded),
+        );
+        assert_eq!(mutations.load(Ordering::Acquire), 0);
+        assert_eq!(owner.queued_for_test(), 0);
+    }
+
+    #[test]
+    fn commit_ownership_wins_before_deadline_and_caller_receives_result_after_deadline() {
+        let (release_commit_tx, release_commit_rx) = mpsc::channel();
+        let (committed_tx, committed_rx) = mpsc::channel();
+        let (release_completion_tx, release_completion_rx) = mpsc::channel();
+        let mutations = Arc::new(AtomicUsize::new(0));
+        let mutations_for_handler = Arc::clone(&mutations);
+        let owner = Arc::new(
+            StateOwnerV2::spawn_transactional(
+                "v2-owner-commit-linearization",
+                1,
+                move |value, commit| {
+                    release_commit_rx.recv().unwrap();
+                    commit.claim()?;
+                    mutations_for_handler.fetch_add(1, Ordering::AcqRel);
+                    committed_tx.send(()).unwrap();
+                    release_completion_rx.recv().unwrap();
+                    Ok(value)
+                },
+            )
+            .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let requesting = {
+            let owner = Arc::clone(&owner);
+            thread::spawn(move || owner.request(9_u8, deadline))
+        };
+        release_commit_tx.send(()).unwrap();
+        committed_rx
+            .recv_timeout(Duration::from_millis(50))
+            .unwrap();
+        while Instant::now() < deadline + Duration::from_millis(20) {
+            thread::yield_now();
+        }
+        release_completion_tx.send(()).unwrap();
+        assert_eq!(requesting.join().unwrap(), Ok(9));
+        assert_eq!(mutations.load(Ordering::Acquire), 1);
+        assert_eq!(owner.queued_for_test(), 0);
+    }
+
+    #[test]
     fn a_fatal_handler_result_permanently_fails_the_owner() {
         let owner: StateOwnerV2<u8, u8> = StateOwnerV2::spawn("v2-owner-fatal", 1, |_: u8| {
             Err(StateOwnerErrorV2::RuntimeUnavailable)
@@ -312,6 +650,43 @@ mod tests {
                 .request(2, Instant::now() + Duration::from_secs(1))
                 .unwrap_err(),
             StateOwnerErrorV2::RuntimeUnavailable
+        );
+    }
+
+    #[test]
+    fn panic_before_commit_claim_fails_closed_and_permanently_stops_the_owner() {
+        let owner: StateOwnerV2<u8, u8> =
+            StateOwnerV2::spawn_transactional("v2-owner-panic-before-claim", 1, |_, _| {
+                panic!("injected preclaim panic")
+            })
+            .unwrap();
+
+        assert_eq!(
+            owner.request(1, Instant::now() + Duration::from_secs(1)),
+            Err(StateOwnerErrorV2::RuntimeUnavailable),
+        );
+        assert_eq!(
+            owner.request(2, Instant::now() + Duration::from_secs(1)),
+            Err(StateOwnerErrorV2::RuntimeUnavailable),
+        );
+    }
+
+    #[test]
+    fn panic_after_claim_without_durable_completion_remains_fail_stop() {
+        let owner: StateOwnerV2<u8, u8> =
+            StateOwnerV2::spawn_transactional("v2-owner-panic-after-claim", 1, |_, commit| {
+                commit.claim()?;
+                panic!("injected panic before durable completion")
+            })
+            .unwrap();
+
+        assert_eq!(
+            owner.request(1, Instant::now() + Duration::from_secs(1)),
+            Err(StateOwnerErrorV2::RuntimeUnavailable),
+        );
+        assert_eq!(
+            owner.request(2, Instant::now() + Duration::from_secs(1)),
+            Err(StateOwnerErrorV2::RuntimeUnavailable),
         );
     }
 }

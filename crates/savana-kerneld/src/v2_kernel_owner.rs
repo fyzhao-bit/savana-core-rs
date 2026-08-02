@@ -13,7 +13,7 @@ use crate::v2_dispatch::{
     KernelRuntimeResponseBuilderV2, KernelRuntimeResponsePreparationErrorV2,
     PreparedKernelServiceResponseV2, VerifiedKernelServicePeerV2,
 };
-use crate::v2_state_owner::{StateOwnerErrorV2, StateOwnerV2};
+use crate::v2_state_owner::{StateOwnerCommitV2, StateOwnerErrorV2, StateOwnerV2};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KernelRuntimeHandlerV2 {
@@ -278,6 +278,7 @@ pub(crate) struct KernelRuntimeRequestContextV2 {
     peer: VerifiedKernelServicePeerV2,
     lease: V2GenerationLease,
     request_id: RequestIdV2,
+    logical_deadline: UnixMillisV2,
     now: UnixMillisV2,
     handler: KernelRuntimeHandlerV2,
     operation: KernelServiceOperationV2,
@@ -296,6 +297,13 @@ impl KernelRuntimeRequestV2 {
     fn validate(&self) -> Result<(), StableCode> {
         self.context.validate()
     }
+
+    fn prepares_finalize_before_commit(&self) -> bool {
+        matches!(
+            self.context.operation,
+            KernelServiceOperationV2::Ingress(KernelIngressOperationV2::FinalizeInput(_))
+        )
+    }
 }
 
 impl KernelRuntimeRequestContextV2 {
@@ -309,7 +317,7 @@ impl KernelRuntimeRequestContextV2 {
         self.handler
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) const fn operation(&self) -> &KernelServiceOperationV2 {
         &self.operation
     }
@@ -321,6 +329,7 @@ impl KernelRuntimeRequestContextV2 {
         V2GenerationLease,
         RequestIdV2,
         UnixMillisV2,
+        UnixMillisV2,
         KernelRuntimeHandlerV2,
         KernelServiceOperationV2,
     ) {
@@ -328,6 +337,7 @@ impl KernelRuntimeRequestContextV2 {
             self.peer,
             self.lease,
             self.request_id,
+            self.logical_deadline,
             self.now,
             self.handler,
             self.operation,
@@ -336,6 +346,7 @@ impl KernelRuntimeRequestContextV2 {
 
     fn validate(&self) -> Result<(), StableCode> {
         if self.request_id.as_bytes().iter().all(|byte| *byte == 0)
+            || self.logical_deadline.get() == 0
             || self.now.get() == 0
             || self.lease.deployment_generation() == 0
             || self.lease.effect_fence_epoch() == 0
@@ -358,6 +369,7 @@ pub(crate) trait KernelRuntimeServicesV2: Send + 'static {
     fn execute(
         &mut self,
         request: KernelRuntimeRequestV2,
+        commit: Option<StateOwnerCommitV2>,
     ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2>;
 }
 
@@ -387,12 +399,15 @@ impl KernelRuntimeOwnerV2 {
         capacity: usize,
         mut services: impl KernelRuntimeServicesV2,
     ) -> Result<Self, KernelRuntimeOwnerErrorV2> {
-        let owner = StateOwnerV2::spawn(
+        let owner = StateOwnerV2::spawn_transactional(
             "savana-kerneld-runtime-v2",
             capacity,
-            move |request: KernelRuntimeRequestV2| {
+            move |request: KernelRuntimeRequestV2, commit| {
                 Ok(match request.validate() {
-                    Ok(()) => services.execute(request),
+                    Ok(()) => {
+                        let commit = request.prepares_finalize_before_commit().then_some(commit);
+                        services.execute(request, commit)
+                    }
                     Err(error) => {
                         let (_, builder) = request.into_parts();
                         builder.prepare(Err(error))
@@ -424,9 +439,19 @@ impl KernelRuntimeOwnerV2 {
             fn execute(
                 &mut self,
                 request: KernelRuntimeRequestV2,
+                commit: Option<StateOwnerCommitV2>,
             ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2>
             {
                 let (context, builder) = request.into_parts();
+                if matches!(
+                    context.operation(),
+                    KernelServiceOperationV2::Ingress(KernelIngressOperationV2::FinalizeInput(_))
+                ) {
+                    commit
+                        .ok_or(KernelRuntimeResponsePreparationErrorV2::Unavailable)?
+                        .claim()
+                        .map_err(map_commit_preparation_error)?;
+                }
                 builder.prepare((self.0)(context))
             }
         }
@@ -454,9 +479,19 @@ impl KernelRuntimeOwnerV2 {
             fn execute(
                 &mut self,
                 request: KernelRuntimeRequestV2,
+                commit: Option<StateOwnerCommitV2>,
             ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2>
             {
                 let (context, builder) = request.into_parts();
+                if matches!(
+                    context.operation(),
+                    KernelServiceOperationV2::Ingress(KernelIngressOperationV2::FinalizeInput(_))
+                ) {
+                    commit
+                        .ok_or(KernelRuntimeResponsePreparationErrorV2::Unavailable)?
+                        .claim()
+                        .map_err(map_commit_preparation_error)?;
+                }
                 builder.prepare((self.0)(context))
             }
         }
@@ -471,6 +506,7 @@ impl KernelRuntimeOwnerV2 {
         lease: V2GenerationLease,
         request_id: RequestIdV2,
         operation: KernelServiceOperationV2,
+        logical_deadline: UnixMillisV2,
         now: UnixMillisV2,
         deadline: Instant,
         response_builder: KernelRuntimeResponseBuilderV2,
@@ -500,6 +536,7 @@ impl KernelRuntimeOwnerV2 {
                         peer,
                         lease,
                         request_id,
+                        logical_deadline,
                         now,
                         handler,
                         operation,
@@ -509,9 +546,32 @@ impl KernelRuntimeOwnerV2 {
                 deadline,
             )
             .map_err(map_owner_error)?
-            .map_err(|KernelRuntimeResponsePreparationErrorV2::Unavailable| {
-                KernelRuntimeOwnerErrorV2::Unavailable
+            .map_err(|error| match error {
+                KernelRuntimeResponsePreparationErrorV2::DeadlineExceeded => {
+                    KernelRuntimeOwnerErrorV2::DeadlineExceeded
+                }
+                KernelRuntimeResponsePreparationErrorV2::Unavailable => {
+                    KernelRuntimeOwnerErrorV2::Unavailable
+                }
             })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queued_for_test(&self) -> usize {
+        self.owner.queued_for_test()
+    }
+}
+
+const fn map_commit_preparation_error(
+    error: StateOwnerErrorV2,
+) -> KernelRuntimeResponsePreparationErrorV2 {
+    match error {
+        StateOwnerErrorV2::DeadlineExceeded => {
+            KernelRuntimeResponsePreparationErrorV2::DeadlineExceeded
+        }
+        StateOwnerErrorV2::RuntimeBusy | StateOwnerErrorV2::RuntimeUnavailable => {
+            KernelRuntimeResponsePreparationErrorV2::Unavailable
+        }
     }
 }
 

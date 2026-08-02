@@ -15,7 +15,8 @@ use savana_kernel_protocol::v2::{
     encode_get_execution_status_response_v2, encode_get_input_status_response_v2,
     encode_get_kernel_task_status_response_v2, encode_get_release_status_response_v2,
     encode_kernel_agent_health_response_v2, encode_kernel_agent_operation_v2,
-    encode_kernel_ingress_health_response_v2, encode_prepare_agent_ui_authentication_response_v2,
+    encode_kernel_ingress_health_response_v2, encode_kernel_ingress_operation_v2,
+    encode_prepare_agent_ui_authentication_response_v2,
     encode_prepare_followup_ingress_response_v2,
     encode_prepare_ingress_ui_authentication_response_v2, encode_prepare_new_ingress_response_v2,
     encode_prepare_planner_call_response_v2, encode_prepare_release_response_v2,
@@ -23,7 +24,7 @@ use savana_kernel_protocol::v2::{
     encode_register_parser_worker_job_response_v2,
     encode_resume_committed_agent_authentication_response_v2, encode_revoke_vault_response_v2,
     AbortInputResponseV2, AppendInputChunkResponseV2, AppendParserWorkerPageFrameResponseV2,
-    AuthenticateAgentUiResponseV2, AuthenticateIngressUiResponseV2, BeginInputResponseV2,
+    AuthenticateAgentUiResponseV2, AuthenticateIngressUiResponseV2, BeginInputResponseV2, BootIdV2,
     CloseAgentSessionResponseV2, CommitInputSettlementResponseV2,
     CommitParserWorkerResultResponseV2, DeriveValueResponseV2, Digest32V2, DurableTaskIdV2,
     FinalizeInputResponseV2, GetInputStatusResponseV2, InputNextSequenceV2, InputPublicStateV2,
@@ -34,6 +35,7 @@ use savana_kernel_protocol::v2::{
     ServiceIdentityV2, UnixMillisV2, VaultPublicStateV2,
 };
 use savana_kernel_protocol::StableCode;
+use sha2::{Digest as _, Sha256};
 
 use crate::v2_agent_authority::{
     KernelAgentAuthorityErrorV2, KernelAgentAuthorityV2, PreparedAgentClaimMaterialV2,
@@ -43,14 +45,15 @@ use crate::v2_dispatch::{
     KernelServiceResponseBodyV2, PreparedKernelServiceResponseV2,
 };
 use crate::v2_ingress_authority::{
-    KernelIngressAuthorityErrorV2, KernelIngressAuthorityV2, KernelPendingIngressStateV2,
-    VerifiedIngressSettlementDecisionV2,
+    FinalizeRecoveryIdentityV2, KernelIngressAuthorityErrorV2, KernelIngressAuthorityV2,
+    KernelPendingIngressStateV2, VerifiedIngressSettlementDecisionV2,
 };
 use crate::v2_input_owner::{
     FinalizedKernelInputV2, KernelInputErrorV2, KernelInputFinalizeTransactionErrorV2,
     KernelInputOwnerV2, KernelInputPublicStateV2, KernelParserTrustV2,
 };
 use crate::v2_kernel_owner::{KernelRuntimeRequestV2, KernelRuntimeServicesV2};
+use crate::v2_state_owner::{StateOwnerCommitV2, StateOwnerErrorV2};
 use crate::v2_value_owner::{KernelValueErrorV2, KernelValueOwnerV2};
 
 const REQUIRED_AGENT_KERNEL_ROUTES_V2: usize = 25;
@@ -163,6 +166,41 @@ pub(crate) struct CoreKernelRuntimeServicesV2 {
     ingress_commit_sink: Option<Box<dyn KernelIngressCommitSinkV2>>,
     parser_trust: Option<KernelParserTrustV2>,
     readiness: Arc<AtomicBool>,
+    #[cfg(test)]
+    finalize_linearization_hook: Option<FinalizeLinearizationHookV2>,
+}
+
+#[cfg(test)]
+struct FinalizeLinearizationHookV2 {
+    before_commit_reached: std::sync::mpsc::SyncSender<()>,
+    release_before_commit: std::sync::mpsc::Receiver<()>,
+    after_publish_reached: std::sync::mpsc::SyncSender<()>,
+    release_after_publish: std::sync::mpsc::Receiver<()>,
+    panic_before_commit: bool,
+    panic_after_claim: bool,
+    panic_after_publish: bool,
+}
+
+#[cfg(test)]
+impl FinalizeLinearizationHookV2 {
+    fn before_commit(&self) {
+        let _ = self.before_commit_reached.send(());
+        self.release_before_commit.recv().unwrap();
+        assert!(!self.panic_before_commit, "test panic before commit claim");
+    }
+
+    fn after_claim(&self) {
+        assert!(!self.panic_after_claim, "test panic after commit claim");
+    }
+
+    fn after_publish(&self) {
+        let _ = self.after_publish_reached.send(());
+        self.release_after_publish.recv().unwrap();
+        assert!(
+            !self.panic_after_publish,
+            "test panic after durable publication"
+        );
+    }
 }
 
 #[derive(Clone)]
@@ -248,6 +286,8 @@ impl CoreKernelRuntimeServicesV2 {
                 ingress_commit_sink: None,
                 parser_trust: None,
                 readiness,
+                #[cfg(test)]
+                finalize_linearization_hook: None,
             },
             authority,
         ))
@@ -314,16 +354,22 @@ impl CoreKernelRuntimeServicesV2 {
     ) -> Result<KernelServiceResponseBodyV2, StableCode> {
         match self.execute_operation_prepared(
             request_id,
+            UnixMillisV2::new(u64::MAX),
             operation,
             now,
             active_state_manifest_digest,
             deployment_generation,
             effect_fence_epoch,
+            BootIdV2::new(*caller_identity.as_bytes()),
             caller_identity,
             KernelRuntimeResponseBuilderV2::Body,
+            None,
         ) {
             Ok(PreparedKernelServiceResponseV2::Body(outcome)) => outcome,
-            Ok(_) => unreachable!("closed body response builder returned another variant"),
+            Ok(_) => Err(StableCode::KernelUnavailable),
+            Err(KernelRuntimeResponsePreparationErrorV2::DeadlineExceeded) => {
+                Err(StableCode::DeadlineExceeded)
+            }
             Err(KernelRuntimeResponsePreparationErrorV2::Unavailable) => {
                 Err(StableCode::KernelUnavailable)
             }
@@ -334,23 +380,32 @@ impl CoreKernelRuntimeServicesV2 {
     fn execute_operation_prepared(
         &mut self,
         request_id: RequestIdV2,
+        logical_deadline: UnixMillisV2,
         operation: KernelServiceOperationV2,
         now: UnixMillisV2,
         active_state_manifest_digest: Digest32V2,
         deployment_generation: u64,
         effect_fence_epoch: u64,
+        caller_boot_id: BootIdV2,
         caller_identity: ServiceIdentityV2,
         response_builder: KernelRuntimeResponseBuilderV2,
+        commit: Option<&StateOwnerCommitV2>,
     ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2> {
         if let KernelServiceOperationV2::Ingress(KernelIngressOperationV2::FinalizeInput(request)) =
             operation
         {
             return self.execute_finalize_input_prepared(
                 request,
+                request_id,
+                logical_deadline,
                 now,
                 active_state_manifest_digest,
                 deployment_generation,
+                effect_fence_epoch,
+                caller_boot_id,
+                caller_identity,
                 response_builder,
+                commit,
             );
         }
         response_builder.prepare(self.execute_operation_body(
@@ -399,27 +454,139 @@ impl CoreKernelRuntimeServicesV2 {
     fn execute_finalize_input_prepared(
         &mut self,
         request: savana_kernel_protocol::v2::FinalizeInputRequestV2,
+        request_id: RequestIdV2,
+        logical_deadline: UnixMillisV2,
         now: UnixMillisV2,
         active_state_manifest_digest: Digest32V2,
         deployment_generation: u64,
+        effect_fence_epoch: u64,
+        caller_boot_id: BootIdV2,
+        caller_identity: ServiceIdentityV2,
         response_builder: KernelRuntimeResponseBuilderV2,
+        commit: Option<&StateOwnerCommitV2>,
     ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2> {
         enum PreparationErrorV2 {
             Authority(KernelIngressAuthorityErrorV2),
+            Commit(StateOwnerErrorV2),
             Response,
         }
 
+        let operation_digest = match encode_kernel_ingress_operation_v2(
+            &KernelIngressOperationV2::FinalizeInput(request.clone()),
+        ) {
+            Ok(canonical) => Digest32V2::new(Sha256::digest(canonical).into()),
+            Err(_) => {
+                return prepare_finalize_terminal_response(
+                    response_builder,
+                    Err(StableCode::KernelUnavailable),
+                    commit,
+                )
+            }
+        };
+        let finalized_input_commitment = match self.input.exact_finalized_input_commitment(&request)
+        {
+            Ok(commitment) => commitment,
+            Err(error) => {
+                return prepare_finalize_terminal_response(
+                    response_builder,
+                    Err(map_input_error(error)),
+                    commit,
+                )
+            }
+        };
         let authority = match self.ingress_authority.as_mut() {
             Some(authority) => authority,
             None => {
-                return response_builder.prepare(Err(StableCode::KernelUnavailable));
+                return prepare_finalize_terminal_response(
+                    response_builder,
+                    Err(StableCode::KernelUnavailable),
+                    commit,
+                );
             }
         };
+        #[cfg(test)]
+        let linearization_hook = self.finalize_linearization_hook.as_ref();
+        if let Some(input_commitment) = finalized_input_commitment {
+            let identity = FinalizeRecoveryIdentityV2::new(
+                savana_kernel_protocol::v2::EndpointRoleV2::IngressKernel,
+                caller_boot_id,
+                caller_identity,
+                request_id,
+                logical_deadline,
+                operation_digest,
+                input_commitment,
+                active_state_manifest_digest,
+                deployment_generation,
+                effect_fence_epoch,
+            )
+            .map_err(|_| KernelRuntimeResponsePreparationErrorV2::Unavailable)?;
+            let recovered = authority
+                .recover_pending_approval(identity, now)
+                .map_err(|error| match error {
+                    KernelIngressAuthorityErrorV2::BindingMismatch
+                    | KernelIngressAuthorityErrorV2::AlreadyConsumed
+                    | KernelIngressAuthorityErrorV2::InvalidReference => StableCode::PolicyDenied,
+                    other => map_ingress_authority_error(other),
+                });
+            return match recovered {
+                Ok((material, recovery_proof)) => {
+                    let canonical =
+                        encode_finalize_input_response_v2(&FinalizeInputResponseV2::new(
+                            material.pending,
+                            material.approval,
+                            material.envelope,
+                            material.display_authentication,
+                        ))
+                        .map_err(|_| KernelRuntimeResponsePreparationErrorV2::Unavailable)?;
+                    let response = response_builder.prepare_canonical_success(canonical)?;
+                    #[cfg(test)]
+                    if let Some(hook) = linearization_hook {
+                        hook.before_commit();
+                    }
+                    if let Some(commit) = commit {
+                        commit.claim().map_err(|error| match error {
+                            StateOwnerErrorV2::DeadlineExceeded => {
+                                KernelRuntimeResponsePreparationErrorV2::DeadlineExceeded
+                            }
+                            StateOwnerErrorV2::RuntimeBusy
+                            | StateOwnerErrorV2::RuntimeUnavailable => {
+                                KernelRuntimeResponsePreparationErrorV2::Unavailable
+                            }
+                        })?;
+                        commit
+                            .mark_durable_complete(&recovery_proof)
+                            .map_err(|_| KernelRuntimeResponsePreparationErrorV2::Unavailable)?;
+                    }
+                    #[cfg(test)]
+                    if let Some(hook) = linearization_hook {
+                        hook.after_claim();
+                    }
+                    response.commit_staged_suite_one()
+                }
+                Err(error) => {
+                    prepare_finalize_terminal_response(response_builder, Err(error), commit)
+                }
+            };
+        }
         let mut response_builder = Some(response_builder);
         let transaction = self.input.finalize_with(request, |finalized| {
+            let recovery_identity = FinalizeRecoveryIdentityV2::new(
+                savana_kernel_protocol::v2::EndpointRoleV2::IngressKernel,
+                caller_boot_id,
+                caller_identity,
+                request_id,
+                logical_deadline,
+                operation_digest,
+                finalized.input_commitment(),
+                active_state_manifest_digest,
+                deployment_generation,
+                effect_fence_epoch,
+            )
+            .map_err(PreparationErrorV2::Authority)?;
             let candidate = authority
                 .prepare_pending_approval(
                     finalized,
+                    recovery_identity,
                     active_state_manifest_digest,
                     deployment_generation,
                     now,
@@ -438,29 +605,74 @@ impl CoreKernelRuntimeServicesV2 {
                 .ok_or(PreparationErrorV2::Response)?
                 .prepare_canonical_success(canonical)
                 .map_err(|_| PreparationErrorV2::Response)?;
+            #[cfg(test)]
+            if let Some(hook) = linearization_hook {
+                hook.before_commit();
+            }
+            if let Some(commit) = commit {
+                commit.claim().map_err(PreparationErrorV2::Commit)?;
+            }
+            #[cfg(test)]
+            if let Some(hook) = linearization_hook {
+                hook.after_claim();
+            }
+            let response = response
+                .commit_staged_suite_one()
+                .map_err(|_| PreparationErrorV2::Response)?;
             Ok((candidate, response))
         });
         match transaction {
             Ok((finalized, (candidate, response))) => {
-                let _ = authority.publish_pending_approval(candidate, finalized);
+                let (_, recovery_proof) = authority.publish_pending_approval(candidate, finalized);
+                if let Some(commit) = commit {
+                    commit
+                        .mark_durable_complete(&recovery_proof)
+                        .map_err(|_| KernelRuntimeResponsePreparationErrorV2::Unavailable)?;
+                }
+                #[cfg(test)]
+                if let Some(hook) = linearization_hook {
+                    hook.after_publish();
+                }
                 Ok(response)
             }
-            Err(KernelInputFinalizeTransactionErrorV2::Input(error)) => response_builder
-                .take()
-                .ok_or(KernelRuntimeResponsePreparationErrorV2::Unavailable)?
-                .prepare(Err(map_input_error(error))),
+            Err(KernelInputFinalizeTransactionErrorV2::Input(error)) => {
+                prepare_finalize_terminal_response(
+                    response_builder
+                        .take()
+                        .ok_or(KernelRuntimeResponsePreparationErrorV2::Unavailable)?,
+                    Err(map_input_error(error)),
+                    commit,
+                )
+            }
             Err(KernelInputFinalizeTransactionErrorV2::Preparation(
                 PreparationErrorV2::Authority(error),
-            )) => response_builder
-                .take()
-                .ok_or(KernelRuntimeResponsePreparationErrorV2::Unavailable)?
-                .prepare(Err(map_ingress_authority_error(error))),
+            )) => prepare_finalize_terminal_response(
+                response_builder
+                    .take()
+                    .ok_or(KernelRuntimeResponsePreparationErrorV2::Unavailable)?,
+                Err(map_ingress_authority_error(error)),
+                commit,
+            ),
             Err(KernelInputFinalizeTransactionErrorV2::Preparation(
                 PreparationErrorV2::Response,
             )) => match response_builder.take() {
-                Some(builder) => builder.prepare(Err(StableCode::KernelUnavailable)),
+                Some(builder) => prepare_finalize_terminal_response(
+                    builder,
+                    Err(StableCode::KernelUnavailable),
+                    commit,
+                ),
                 None => Err(KernelRuntimeResponsePreparationErrorV2::Unavailable),
             },
+            Err(KernelInputFinalizeTransactionErrorV2::Preparation(
+                PreparationErrorV2::Commit(error),
+            )) => Err(match error {
+                StateOwnerErrorV2::DeadlineExceeded => {
+                    KernelRuntimeResponsePreparationErrorV2::DeadlineExceeded
+                }
+                StateOwnerErrorV2::RuntimeBusy | StateOwnerErrorV2::RuntimeUnavailable => {
+                    KernelRuntimeResponsePreparationErrorV2::Unavailable
+                }
+            }),
         }
     }
 
@@ -932,7 +1144,7 @@ impl CoreKernelRuntimeServicesV2 {
                 )
             }
             KernelIngressOperationV2::FinalizeInput(_) => {
-                unreachable!("FinalizeInput must use the prepared-response transaction")
+                return Err(StableCode::KernelUnavailable)
             }
             KernelIngressOperationV2::CommitInputSettlement(request) => {
                 let decision = self
@@ -1082,18 +1294,22 @@ impl KernelRuntimeServicesV2 for CoreKernelRuntimeServicesV2 {
     fn execute(
         &mut self,
         request: KernelRuntimeRequestV2,
+        commit: Option<StateOwnerCommitV2>,
     ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2> {
         let (context, response_builder) = request.into_parts();
-        let (peer, lease, request_id, now, _, operation) = context.into_parts();
+        let (peer, lease, request_id, logical_deadline, now, _, operation) = context.into_parts();
         self.execute_operation_prepared(
             request_id,
+            logical_deadline,
             operation,
             now,
             lease.active_state_manifest_digest(),
             lease.deployment_generation(),
             lease.effect_fence_epoch(),
+            peer.caller_boot_id(),
             peer.caller_identity(),
             response_builder,
+            commit.as_ref(),
         )
     }
 }
@@ -1118,6 +1334,25 @@ const fn public_pending_state(state: KernelPendingIngressStateV2) -> InputPublic
         KernelPendingIngressStateV2::Approved => InputPublicStateV2::CommittedUnclaimed,
         KernelPendingIngressStateV2::Denied => InputPublicStateV2::Denied,
     }
+}
+
+fn prepare_finalize_terminal_response(
+    response_builder: KernelRuntimeResponseBuilderV2,
+    outcome: Result<KernelServiceResponseBodyV2, StableCode>,
+    commit: Option<&StateOwnerCommitV2>,
+) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2> {
+    let response = response_builder.prepare_transactional(outcome)?;
+    if let Some(commit) = commit {
+        commit.claim().map_err(|error| match error {
+            StateOwnerErrorV2::DeadlineExceeded => {
+                KernelRuntimeResponsePreparationErrorV2::DeadlineExceeded
+            }
+            StateOwnerErrorV2::RuntimeBusy | StateOwnerErrorV2::RuntimeUnavailable => {
+                KernelRuntimeResponsePreparationErrorV2::Unavailable
+            }
+        })?;
+    }
+    response.commit_staged_suite_one()
 }
 
 const fn map_input_error(error: KernelInputErrorV2) -> StableCode {
@@ -1170,7 +1405,10 @@ const fn map_agent_authority_error(error: KernelAgentAuthorityErrorV2) -> Stable
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::os::unix::net::UnixStream;
+    use std::sync::atomic::Ordering;
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::thread;
     use std::time::{Duration, Instant};
 
     use ed25519_dalek::SigningKey;
@@ -1180,12 +1418,13 @@ mod tests {
         decode_kernel_ingress_health_response_v2, derive_ed25519_key_id_v2,
         encode_kernel_ingress_operation_v2, encode_kernel_service_application_request_v2,
         encode_kernel_service_request_envelope_v2, input_channel_begin_digest_v2,
-        input_channel_step_digest_v2, input_chunk_digest_v2, AppendInputChunkRequestV2,
-        BeginInputRequestV2, BootIdV2, ContentKindV2, Digest32V2, DirectInputChannelV2,
-        EndpointRoleV2, FinalizeInputRequestV2, IngressUiAuthorizationHandleV2,
-        InputChannelCommitmentV2, InputChannelV2, InputSourceKindV2, InputSourceProvenanceV2,
-        InputStatusTargetV2, KernelAgentHealthRequestV2, KernelAgentOperationV2,
-        KernelIngressHealthRequestV2, KernelIngressOperationV2, KernelServiceApplicationRequestV2,
+        input_channel_step_digest_v2, input_chunk_digest_v2, AbortInputRequestV2,
+        AppendInputChunkRequestV2, BeginInputRequestV2, BootIdV2, ContentKindV2, Digest32V2,
+        DirectInputChannelV2, EndpointRoleV2, FinalizeInputRequestV2,
+        IngressUiAuthorizationHandleV2, InputChannelCommitmentV2, InputChannelV2,
+        InputSessionHandleV2, InputSourceKindV2, InputSourceProvenanceV2, InputStatusTargetV2,
+        KernelAgentHealthRequestV2, KernelAgentOperationV2, KernelIngressHealthRequestV2,
+        KernelIngressOperationV2, KernelServiceApplicationRequestV2,
         KernelServiceApplicationResponseBodyV2, KernelServiceHandshakeEdgeV2,
         KernelServiceOperationV2, KernelServiceRequestEnvelopeV2, Nonce32V2, PeerIdentityBindingV2,
         PublicServiceStateV2, RequestIdV2, ServiceIdentityV2, UnixMillisV2, V2ClientHandshake,
@@ -1201,17 +1440,22 @@ mod tests {
 
     use super::CoreKernelRuntimeServicesV2;
     use crate::policy_runtime::V2GenerationLease;
+    use crate::v2_channel::{ChannelErrorV2, UnixV2FrameChannel, V2FrameChannel};
+    use crate::v2_connection::serve_one_suite_one_v2_channel;
     use crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2;
     use crate::v2_dispatch::{
         KernelResponseFailurePointV2, KernelRuntimeResponsePreparationErrorV2,
-        KernelServiceDeploymentV2, KernelServiceDispatcherV2, PreparedKernelServiceResponseV2,
-        SuiteOneResponseSessionSlotV2, VerifiedKernelServicePeerV2,
+        KernelServiceDeploymentV2, KernelServiceDispatcherV2, KernelServiceResponseBodyV2,
+        PreparedKernelServiceResponseV2, SuiteOneResponseSessionSlotV2,
+        VerifiedKernelServicePeerV2,
     };
     use crate::v2_ingress_authority::{KernelIngressAuthorityV2, KernelIngressSecurityConfigV2};
     use crate::v2_input_owner::{KernelInputPublicStateV2, KernelVerifiedUiAuthorizationV2};
     use crate::v2_kernel_owner::{
         KernelRuntimeOwnerV2, KernelRuntimeRequestV2, KernelRuntimeServicesV2,
     };
+    use crate::v2_state_owner::StateOwnerCommitV2;
+    use crate::v2_transport_owner::KernelV2HandshakeOwner;
 
     struct SharedCoreServicesV2(Arc<Mutex<CoreKernelRuntimeServicesV2>>);
 
@@ -1219,14 +1463,142 @@ mod tests {
         fn execute(
             &mut self,
             request: KernelRuntimeRequestV2,
+            commit: Option<StateOwnerCommitV2>,
         ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2>
         {
-            self.0.lock().unwrap().execute(request)
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .execute(request, commit)
         }
     }
 
     fn suite_one_response_session(
         request: &KernelServiceApplicationRequestV2,
+    ) -> (SuiteOneResponseSessionSlotV2, V2ClientTransportSession) {
+        suite_one_response_session_with_seed(request, 0xfb)
+    }
+
+    struct FailFinalRecordWriteChannelV2 {
+        inner: UnixV2FrameChannel,
+        record_writes: usize,
+    }
+
+    impl FailFinalRecordWriteChannelV2 {
+        fn new(stream: UnixStream) -> Self {
+            Self {
+                inner: UnixV2FrameChannel::new(stream),
+                record_writes: 0,
+            }
+        }
+    }
+
+    impl V2FrameChannel for FailFinalRecordWriteChannelV2 {
+        fn read_handshake_frame(&mut self, deadline: Instant) -> Result<Vec<u8>, ChannelErrorV2> {
+            self.inner.read_handshake_frame(deadline)
+        }
+
+        fn write_handshake_frame(
+            &mut self,
+            frame: &[u8],
+            deadline: Instant,
+        ) -> Result<(), ChannelErrorV2> {
+            self.inner.write_handshake_frame(frame, deadline)
+        }
+
+        fn read_record_frame(&mut self, deadline: Instant) -> Result<Vec<u8>, ChannelErrorV2> {
+            self.inner.read_record_frame(deadline)
+        }
+
+        fn write_record_frame(
+            &mut self,
+            frame: &[u8],
+            deadline: Instant,
+        ) -> Result<(), ChannelErrorV2> {
+            self.record_writes += 1;
+            if self.record_writes == 2 {
+                return Err(ChannelErrorV2::Unavailable);
+            }
+            self.inner.write_record_frame(frame, deadline)
+        }
+
+        fn close(&mut self) {
+            self.inner.close();
+        }
+    }
+
+    fn finalize_handshake_material() -> (
+        KernelServiceHandshakeEdgeV2,
+        PeerIdentityBindingV2,
+        SigningKey,
+        SigningKey,
+    ) {
+        let client_key = SigningKey::from_bytes(&[0xf1; 32]);
+        let server_key = SigningKey::from_bytes(&[0xf2; 32]);
+        let observed =
+            PeerIdentityBindingV2::linux(501, 502, 503, 504, Digest32V2::new([0xf3; 32])).unwrap();
+        let edge = KernelServiceHandshakeEdgeV2::from_verified_deployment(
+            EndpointRoleV2::IngressKernel,
+            Digest32V2::new([0xf4; 32]),
+            ServiceIdentityV2::new([0xe2; 32]),
+            ServiceIdentityV2::new([0xe7; 32]),
+            derive_ed25519_key_id_v2(client_key.verifying_key().to_bytes()),
+            derive_ed25519_key_id_v2(server_key.verifying_key().to_bytes()),
+            BootIdV2::new([0xe6; 32]),
+            5,
+            Digest32V2::new([0x35; 32]),
+            7,
+            8,
+            Digest32V2::new([0xf5; 32]),
+            Digest32V2::new([0xf6; 32]),
+            Digest32V2::new([0xf7; 32]),
+            Digest32V2::new([0xf8; 32]),
+            Digest32V2::new([0xf9; 32]),
+            Digest32V2::new([0xfa; 32]),
+        )
+        .unwrap();
+        (edge, observed, client_key, server_key)
+    }
+
+    fn send_finalize_request_over_suite_one(
+        stream: UnixStream,
+        edge: KernelServiceHandshakeEdgeV2,
+        observed: PeerIdentityBindingV2,
+        client_key: &SigningKey,
+        server_public_key: [u8; 32],
+        seed: u8,
+        request: &KernelServiceApplicationRequestV2,
+    ) -> (UnixV2FrameChannel, V2ClientTransportSession) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut channel = UnixV2FrameChannel::new(stream);
+        let (pending, hello) = V2ClientHandshake::start(
+            edge,
+            BootIdV2::new([0xe8; 32]),
+            Nonce32V2::new([seed; 32]),
+            observed,
+            StaticSecret::from([seed.wrapping_add(1); 32]),
+            client_key,
+        )
+        .unwrap();
+        channel.write_handshake_frame(&hello, deadline).unwrap();
+        let server_hello = channel.read_handshake_frame(deadline).unwrap();
+        let (finish, mut session) = pending
+            .accept_server_hello(&server_hello, server_public_key, client_key)
+            .unwrap();
+        channel.write_handshake_frame(&finish, deadline).unwrap();
+        let accepted = channel.read_record_frame(deadline).unwrap();
+        session.accept_server_confirmation(&accepted).unwrap();
+        let canonical = encode_kernel_service_application_request_v2(request).unwrap();
+        let record = session
+            .seal_application_request(request.request_id(), request.operation().tag(), &canonical)
+            .unwrap();
+        channel.write_record_frame(&record, deadline).unwrap();
+        (channel, session)
+    }
+
+    fn suite_one_response_session_with_seed(
+        request: &KernelServiceApplicationRequestV2,
+        seed: u8,
     ) -> (SuiteOneResponseSessionSlotV2, V2ClientTransportSession) {
         let client_key = SigningKey::from_bytes(&[0xf1; 32]);
         let server_key = SigningKey::from_bytes(&[0xf2; 32]);
@@ -1255,9 +1627,9 @@ mod tests {
         let (client, hello) = V2ClientHandshake::start(
             edge,
             BootIdV2::new([0xe8; 32]),
-            Nonce32V2::new([0xfb; 32]),
+            Nonce32V2::new([seed; 32]),
             observed.clone(),
-            StaticSecret::from([0xfc; 32]),
+            StaticSecret::from([seed.wrapping_add(1); 32]),
             &client_key,
         )
         .unwrap();
@@ -1265,8 +1637,8 @@ mod tests {
             edge,
             observed,
             &hello,
-            Nonce32V2::new([0xfd; 32]),
-            StaticSecret::from([0xfe; 32]),
+            Nonce32V2::new([seed.wrapping_add(2); 32]),
+            StaticSecret::from([seed.wrapping_add(3); 32]),
             client_key.verifying_key().to_bytes(),
             &server_key,
         )
@@ -1292,6 +1664,187 @@ mod tests {
             SuiteOneResponseSessionSlotV2::new(server_session),
             client_session,
         )
+    }
+
+    struct FinalizeRecoveryFixtureV2 {
+        shared: Arc<Mutex<CoreKernelRuntimeServicesV2>>,
+        dispatcher: KernelServiceDispatcherV2,
+        peer: VerifiedKernelServicePeerV2,
+        lease_manifest: Digest32V2,
+        session: savana_kernel_protocol::v2::InputSessionHandleV2,
+        finalize: FinalizeInputRequestV2,
+    }
+
+    impl FinalizeRecoveryFixtureV2 {
+        fn request(
+            &self,
+            request_id: RequestIdV2,
+            finalize: FinalizeInputRequestV2,
+        ) -> KernelServiceApplicationRequestV2 {
+            self.request_with_logical_deadline(request_id, finalize, UnixMillisV2::new(1_000))
+        }
+
+        fn request_with_logical_deadline(
+            &self,
+            request_id: RequestIdV2,
+            finalize: FinalizeInputRequestV2,
+            logical_deadline: UnixMillisV2,
+        ) -> KernelServiceApplicationRequestV2 {
+            KernelServiceApplicationRequestV2::new(
+                EndpointRoleV2::IngressKernel,
+                request_id,
+                logical_deadline,
+                KernelServiceOperationV2::ingress(KernelIngressOperationV2::FinalizeInput(
+                    finalize,
+                )),
+            )
+            .unwrap()
+        }
+    }
+
+    fn finalize_recovery_fixture() -> FinalizeRecoveryFixtureV2 {
+        finalize_recovery_fixture_with_hook(None)
+    }
+
+    fn finalize_panic_hook(
+        panic_before_commit: bool,
+        panic_after_claim: bool,
+        panic_after_publish: bool,
+    ) -> super::FinalizeLinearizationHookV2 {
+        let (before_commit_reached, before_commit_observed) = mpsc::sync_channel(1);
+        let (release_before_commit, release_before_commit_rx) = mpsc::channel();
+        let (after_publish_reached, after_publish_observed) = mpsc::sync_channel(1);
+        let (release_after_publish, release_after_publish_rx) = mpsc::channel();
+        release_before_commit.send(()).unwrap();
+        release_after_publish.send(()).unwrap();
+        drop(before_commit_observed);
+        drop(after_publish_observed);
+        super::FinalizeLinearizationHookV2 {
+            before_commit_reached,
+            release_before_commit: release_before_commit_rx,
+            after_publish_reached,
+            release_after_publish: release_after_publish_rx,
+            panic_before_commit,
+            panic_after_claim,
+            panic_after_publish,
+        }
+    }
+
+    fn finalize_recovery_fixture_with_hook(
+        linearization_hook: Option<super::FinalizeLinearizationHookV2>,
+    ) -> FinalizeRecoveryFixtureV2 {
+        let mut services = CoreKernelRuntimeServicesV2::new(4, 4096, 4, 32).unwrap();
+        services.finalize_linearization_hook = linearization_hook;
+        services.ingress_authority = Some(approval_authority(ApprovalRuleModeV2::Admit));
+        let authorization =
+            IngressUiAuthorizationHandleV2::from_authority_entropy([0xb1; 32]).unwrap();
+        services
+            .input
+            .register_verified_ui_authorization(
+                authorization,
+                KernelVerifiedUiAuthorizationV2::for_test(),
+            )
+            .unwrap();
+        let manifest = Digest32V2::new([0x35; 32]);
+        let caller = ServiceIdentityV2::new([0xe2; 32]);
+        let bytes = b"recover the exact committed finalize result";
+        let begin = services
+            .execute_operation(
+                RequestIdV2::new([0xb2; 16]),
+                KernelServiceOperationV2::ingress(KernelIngressOperationV2::BeginInput(
+                    BeginInputRequestV2::new(
+                        authorization,
+                        ContentKindV2::ChatText,
+                        bytes.len() as u64,
+                        Some(Digest32V2::new(Sha256::digest(bytes).into())),
+                    )
+                    .unwrap(),
+                )),
+                UnixMillisV2::new(100),
+                manifest,
+                7,
+                9,
+                caller,
+            )
+            .unwrap();
+        let begun = decode_begin_input_response_v2(begin.as_bytes()).unwrap();
+        let initial = input_channel_begin_digest_v2(begun.session(), InputChannelV2::ChatText);
+        let chunk =
+            input_chunk_digest_v2(begun.session(), InputChannelV2::ChatText, 0, bytes).unwrap();
+        let cumulative = input_channel_step_digest_v2(initial, 0, chunk).unwrap();
+        let append = services
+            .execute_operation(
+                RequestIdV2::new([0xb3; 16]),
+                KernelServiceOperationV2::ingress(KernelIngressOperationV2::AppendInputChunk(
+                    AppendInputChunkRequestV2::new(
+                        begun.writer(),
+                        DirectInputChannelV2::ChatText,
+                        0,
+                        initial,
+                        ZeroizingBytesV2::new(bytes.to_vec()).unwrap(),
+                        chunk,
+                        cumulative,
+                    )
+                    .unwrap(),
+                )),
+                UnixMillisV2::new(110),
+                manifest,
+                7,
+                9,
+                caller,
+            )
+            .unwrap();
+        let accepted = decode_append_input_chunk_response_v2(append.as_bytes()).unwrap();
+        let finalize = FinalizeInputRequestV2::new(
+            begun.session(),
+            vec![InputChannelCommitmentV2::new(
+                InputChannelV2::ChatText,
+                1,
+                0,
+                bytes.len() as u64,
+                accepted.cumulative_digest(),
+            )
+            .unwrap()],
+            InputSourceProvenanceV2::direct(
+                InputSourceKindV2::Chat,
+                bytes.len() as u64,
+                Digest32V2::new(Sha256::digest(bytes).into()),
+                VersionV2::new(1, 0, 0),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let shared = Arc::new(Mutex::new(services));
+        let owner =
+            KernelRuntimeOwnerV2::spawn(4, SharedCoreServicesV2(Arc::clone(&shared))).unwrap();
+        let signing_key = SigningKey::from_bytes(&[0xb4; 32]);
+        let dispatcher = KernelServiceDispatcherV2::spawn(
+            KernelServiceDeploymentV2::from_verified_startup(
+                BootIdV2::new([0xe6; 32]),
+                ServiceIdentityV2::new([0xe7; 32]),
+                manifest,
+                7,
+            )
+            .unwrap(),
+            derive_ed25519_key_id_v2(signing_key.verifying_key().to_bytes()),
+            signing_key,
+            owner,
+        )
+        .unwrap();
+        let peer = VerifiedKernelServicePeerV2::from_mutual_authentication(
+            EndpointRoleV2::IngressKernel,
+            BootIdV2::new([0xe8; 32]),
+            caller,
+        )
+        .unwrap();
+        FinalizeRecoveryFixtureV2 {
+            shared,
+            dispatcher,
+            peer,
+            lease_manifest: manifest,
+            session: begun.session(),
+            finalize,
+        }
     }
 
     #[derive(Clone, Copy)]
@@ -1972,6 +2525,935 @@ mod tests {
                 1,
             );
         }
+    }
+
+    #[test]
+    fn finalize_panic_before_claim_is_fail_stop_without_input_or_pending_mutation() {
+        let fixture =
+            finalize_recovery_fixture_with_hook(Some(finalize_panic_hook(true, false, false)));
+        let request_id = RequestIdV2::new([0xbc; 16]);
+        let request = fixture.request(request_id, fixture.finalize.clone());
+        let (response_session, _) = suite_one_response_session_with_seed(&request, 0xe1);
+
+        assert_eq!(
+            fixture.dispatcher.dispatch_one_suite_one(
+                fixture.peer,
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                request,
+                response_session,
+                UnixMillisV2::new(120),
+                Instant::now() + Duration::from_secs(1),
+            ),
+            Err(crate::v2_dispatch::KernelServiceDispatchErrorV2::Unavailable),
+        );
+        assert_eq!(
+            fixture.dispatcher.dispatch_one_application(
+                fixture.peer,
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                fixture.request(request_id, fixture.finalize.clone()),
+                UnixMillisV2::new(121),
+                Instant::now() + Duration::from_secs(1),
+            ),
+            Err(crate::v2_dispatch::KernelServiceDispatchErrorV2::Unavailable),
+        );
+        let services = fixture
+            .shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            services
+                .input
+                .status(InputStatusTargetV2::Session(fixture.session))
+                .unwrap(),
+            KernelInputPublicStateV2::Receiving,
+        );
+        assert_eq!(
+            services
+                .ingress_authority
+                .as_ref()
+                .unwrap()
+                .pending_record_count(),
+            0,
+        );
+    }
+
+    #[test]
+    fn finalize_panic_after_claim_before_durable_publication_remains_fail_stop() {
+        let fixture =
+            finalize_recovery_fixture_with_hook(Some(finalize_panic_hook(false, true, false)));
+        let request_id = RequestIdV2::new([0xbd; 16]);
+        let request = fixture.request(request_id, fixture.finalize.clone());
+        let (response_session, _) = suite_one_response_session_with_seed(&request, 0xe2);
+
+        assert_eq!(
+            fixture.dispatcher.dispatch_one_suite_one(
+                fixture.peer,
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                request,
+                response_session,
+                UnixMillisV2::new(120),
+                Instant::now() + Duration::from_secs(1),
+            ),
+            Err(crate::v2_dispatch::KernelServiceDispatchErrorV2::Unavailable),
+        );
+        assert_eq!(
+            fixture.dispatcher.dispatch_one_application(
+                fixture.peer,
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                fixture.request(request_id, fixture.finalize.clone()),
+                UnixMillisV2::new(121),
+                Instant::now() + Duration::from_secs(1),
+            ),
+            Err(crate::v2_dispatch::KernelServiceDispatchErrorV2::Unavailable),
+        );
+        let services = fixture
+            .shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            services
+                .input
+                .status(InputStatusTargetV2::Session(fixture.session))
+                .unwrap(),
+            KernelInputPublicStateV2::Receiving,
+        );
+        assert_eq!(
+            services
+                .ingress_authority
+                .as_ref()
+                .unwrap()
+                .pending_record_count(),
+            0,
+        );
+    }
+
+    #[test]
+    fn finalize_panic_after_durable_publication_keeps_exact_retry_recoverable() {
+        let fixture =
+            finalize_recovery_fixture_with_hook(Some(finalize_panic_hook(false, false, true)));
+        let request_id = RequestIdV2::new([0xbe; 16]);
+        let request = fixture.request(request_id, fixture.finalize.clone());
+        let (response_session, _) = suite_one_response_session_with_seed(&request, 0xe3);
+
+        assert_eq!(
+            fixture.dispatcher.dispatch_one_suite_one(
+                fixture.peer,
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                request,
+                response_session,
+                UnixMillisV2::new(120),
+                Instant::now() + Duration::from_secs(1),
+            ),
+            Err(crate::v2_dispatch::KernelServiceDispatchErrorV2::Unavailable),
+        );
+        fixture
+            .shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .finalize_linearization_hook = None;
+        let retry = fixture.request(request_id, fixture.finalize.clone());
+        let (retry_session, mut retry_client) = suite_one_response_session_with_seed(&retry, 0xe4);
+        let recovered_record = fixture
+            .dispatcher
+            .dispatch_one_suite_one(
+                fixture.peer,
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                retry,
+                retry_session,
+                UnixMillisV2::new(121),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+        let recovered = retry_client
+            .open_application_response(&recovered_record)
+            .unwrap();
+        let recovered = savana_kernel_protocol::v2::decode_kernel_service_application_response_v2(
+            recovered.plaintext(),
+            EndpointRoleV2::IngressKernel,
+            42,
+        )
+        .unwrap();
+        assert!(matches!(
+            recovered.body(),
+            KernelServiceApplicationResponseBodyV2::Success(body)
+                if decode_finalize_input_response_v2(body).is_ok()
+        ));
+        let services = fixture
+            .shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            services
+                .input
+                .status(InputStatusTargetV2::Session(fixture.session))
+                .unwrap(),
+            KernelInputPublicStateV2::Finalized,
+        );
+        assert_eq!(
+            services
+                .ingress_authority
+                .as_ref()
+                .unwrap()
+                .pending_record_count(),
+            1,
+        );
+    }
+
+    #[test]
+    fn finalize_deadline_cancellation_wins_at_real_precommit_and_preserves_closed_error() {
+        let (before_tx, before_rx) = mpsc::sync_channel(1);
+        let (release_before_tx, release_before_rx) = mpsc::channel();
+        let (after_tx, _after_rx) = mpsc::sync_channel(1);
+        let (_release_after_tx, release_after_rx) = mpsc::channel();
+        let fixture =
+            finalize_recovery_fixture_with_hook(Some(super::FinalizeLinearizationHookV2 {
+                before_commit_reached: before_tx,
+                release_before_commit: release_before_rx,
+                after_publish_reached: after_tx,
+                release_after_publish: release_after_rx,
+                panic_before_commit: false,
+                panic_after_claim: false,
+                panic_after_publish: false,
+            }));
+        let request_id = RequestIdV2::new([0xba; 16]);
+        let request = fixture.request(request_id, fixture.finalize.clone());
+        let (response_session, mut client_session) =
+            suite_one_response_session_with_seed(&request, 0xc1);
+        let dispatcher = Arc::new(fixture.dispatcher);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let requesting = {
+            let dispatcher = Arc::clone(&dispatcher);
+            let response_session = response_session.clone();
+            thread::spawn(move || {
+                dispatcher.dispatch_one_suite_one(
+                    fixture.peer,
+                    V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                    request,
+                    response_session,
+                    UnixMillisV2::new(120),
+                    deadline,
+                )
+            })
+        };
+        before_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            requesting.join().unwrap(),
+            Err(crate::v2_dispatch::KernelServiceDispatchErrorV2::DeadlineExceeded),
+        );
+        let closed_error = response_session
+            .cancel_staged_and_seal_public_error(
+                EndpointRoleV2::IngressKernel,
+                request_id,
+                42,
+                savana_kernel_protocol::v2::PublicStableCodeV2::DeadlineExceeded,
+            )
+            .unwrap();
+        let opened = client_session
+            .open_application_response(&closed_error)
+            .unwrap();
+        let response = savana_kernel_protocol::v2::decode_kernel_service_application_response_v2(
+            opened.plaintext(),
+            EndpointRoleV2::IngressKernel,
+            42,
+        )
+        .unwrap();
+        assert_eq!(
+            response.body(),
+            &KernelServiceApplicationResponseBodyV2::Error(
+                savana_kernel_protocol::v2::PublicStableCodeV2::DeadlineExceeded,
+            ),
+        );
+        release_before_tx.send(()).unwrap();
+        let services = fixture.shared.lock().unwrap();
+        assert_eq!(
+            services
+                .input
+                .status(InputStatusTargetV2::Session(fixture.session))
+                .unwrap(),
+            KernelInputPublicStateV2::Receiving,
+        );
+        assert_eq!(
+            services
+                .ingress_authority
+                .as_ref()
+                .unwrap()
+                .pending_record_count(),
+            0,
+        );
+    }
+
+    #[test]
+    fn finalize_commit_wins_at_real_precommit_and_returns_success_after_deadline() {
+        let (before_tx, before_rx) = mpsc::sync_channel(1);
+        let (release_before_tx, release_before_rx) = mpsc::channel();
+        let (after_tx, after_rx) = mpsc::sync_channel(1);
+        let (release_after_tx, release_after_rx) = mpsc::channel();
+        let fixture =
+            finalize_recovery_fixture_with_hook(Some(super::FinalizeLinearizationHookV2 {
+                before_commit_reached: before_tx,
+                release_before_commit: release_before_rx,
+                after_publish_reached: after_tx,
+                release_after_publish: release_after_rx,
+                panic_before_commit: false,
+                panic_after_claim: false,
+                panic_after_publish: false,
+            }));
+        let request_id = RequestIdV2::new([0xbb; 16]);
+        let request = fixture.request(request_id, fixture.finalize.clone());
+        let (response_session, mut client_session) =
+            suite_one_response_session_with_seed(&request, 0xd1);
+        let dispatcher = Arc::new(fixture.dispatcher);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (result_tx, result_rx) = mpsc::channel();
+        let requesting = {
+            let dispatcher = Arc::clone(&dispatcher);
+            thread::spawn(move || {
+                let result = dispatcher.dispatch_one_suite_one(
+                    fixture.peer,
+                    V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                    request,
+                    response_session,
+                    UnixMillisV2::new(120),
+                    deadline,
+                );
+                result_tx.send(result).unwrap();
+            })
+        };
+        before_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        release_before_tx.send(()).unwrap();
+        after_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        while Instant::now() < deadline + Duration::from_millis(20) {
+            thread::yield_now();
+        }
+        assert!(result_rx.try_recv().is_err());
+        release_after_tx.send(()).unwrap();
+        let response_record = result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        requesting.join().unwrap();
+        let opened = client_session
+            .open_application_response(&response_record)
+            .unwrap();
+        let response = savana_kernel_protocol::v2::decode_kernel_service_application_response_v2(
+            opened.plaintext(),
+            EndpointRoleV2::IngressKernel,
+            42,
+        )
+        .unwrap();
+        assert!(matches!(
+            response.body(),
+            KernelServiceApplicationResponseBodyV2::Success(body)
+                if decode_finalize_input_response_v2(body).is_ok()
+        ));
+        let services = fixture.shared.lock().unwrap();
+        assert_eq!(
+            services
+                .input
+                .status(InputStatusTargetV2::Session(fixture.session))
+                .unwrap(),
+            KernelInputPublicStateV2::Finalized,
+        );
+        assert_eq!(
+            services
+                .ingress_authority
+                .as_ref()
+                .unwrap()
+                .pending_record_count(),
+            1,
+        );
+    }
+
+    #[test]
+    fn final_channel_write_loss_is_recovered_on_a_fresh_authenticated_connection() {
+        let fixture = finalize_recovery_fixture();
+        let request_id = RequestIdV2::new([0xbf; 16]);
+        let request = fixture.request(request_id, fixture.finalize.clone());
+        let shared = Arc::clone(&fixture.shared);
+        let lease_manifest = fixture.lease_manifest;
+        let input_session = fixture.session;
+        let dispatcher = Arc::new(fixture.dispatcher);
+        let (edge, observed, client_key, server_key) = finalize_handshake_material();
+        let server_public_key = server_key.verifying_key().to_bytes();
+        let handshake_owner = Arc::new(
+            KernelV2HandshakeOwner::spawn(
+                edge,
+                client_key.verifying_key().to_bytes(),
+                server_key,
+                4,
+            )
+            .unwrap(),
+        );
+
+        let (first_client_stream, first_server_stream) = UnixStream::pair().unwrap();
+        let first_owner = Arc::clone(&handshake_owner);
+        let first_dispatcher = Arc::clone(&dispatcher);
+        let first_observed = observed.clone();
+        let first_server = thread::spawn(move || {
+            let mut channel = FailFinalRecordWriteChannelV2::new(first_server_stream);
+            let result = serve_one_suite_one_v2_channel(
+                &mut channel,
+                first_observed,
+                V2GenerationLease::for_dispatch_test(lease_manifest, 7),
+                first_owner.as_ref(),
+                first_dispatcher.as_ref(),
+                UnixMillisV2::new(120),
+                Instant::now() + Duration::from_secs(3),
+            );
+            let record_writes = channel.record_writes;
+            channel.close();
+            (result, record_writes)
+        });
+        let (mut first_channel, _first_session) = send_finalize_request_over_suite_one(
+            first_client_stream,
+            edge,
+            observed.clone(),
+            &client_key,
+            server_public_key,
+            0xf0,
+            &request,
+        );
+        let (first_result, record_writes) = first_server.join().unwrap();
+        assert_eq!(
+            first_result,
+            Err(crate::v2_dispatch::KernelServiceDispatchErrorV2::Unavailable),
+        );
+        assert_eq!(record_writes, 2, "failure must be the final record write");
+        assert!(first_channel
+            .read_record_frame(Instant::now() + Duration::from_millis(100))
+            .is_err());
+
+        {
+            let services = shared.lock().unwrap();
+            assert_eq!(
+                services
+                    .input
+                    .status(InputStatusTargetV2::Session(input_session))
+                    .unwrap(),
+                KernelInputPublicStateV2::Finalized,
+            );
+            assert_eq!(
+                services
+                    .ingress_authority
+                    .as_ref()
+                    .unwrap()
+                    .pending_record_count(),
+                1,
+            );
+        }
+
+        let (retry_client_stream, retry_server_stream) = UnixStream::pair().unwrap();
+        let retry_owner = Arc::clone(&handshake_owner);
+        let retry_dispatcher = Arc::clone(&dispatcher);
+        let retry_observed = observed.clone();
+        let retry_server = thread::spawn(move || {
+            let mut channel = UnixV2FrameChannel::new(retry_server_stream);
+            let result = serve_one_suite_one_v2_channel(
+                &mut channel,
+                retry_observed,
+                V2GenerationLease::for_dispatch_test(lease_manifest, 7),
+                retry_owner.as_ref(),
+                retry_dispatcher.as_ref(),
+                UnixMillisV2::new(121),
+                Instant::now() + Duration::from_secs(3),
+            );
+            channel.close();
+            result
+        });
+        let (mut retry_channel, mut retry_session) = send_finalize_request_over_suite_one(
+            retry_client_stream,
+            edge,
+            observed,
+            &client_key,
+            server_public_key,
+            0xf4,
+            &request,
+        );
+        let recovered_record = retry_channel
+            .read_record_frame(Instant::now() + Duration::from_secs(3))
+            .unwrap();
+        assert_eq!(retry_server.join().unwrap(), Ok(()));
+        let recovered = retry_session
+            .open_application_response(&recovered_record)
+            .unwrap();
+        let recovered = savana_kernel_protocol::v2::decode_kernel_service_application_response_v2(
+            recovered.plaintext(),
+            EndpointRoleV2::IngressKernel,
+            42,
+        )
+        .unwrap();
+        assert!(matches!(
+            recovered.body(),
+            KernelServiceApplicationResponseBodyV2::Success(body)
+                if decode_finalize_input_response_v2(body).is_ok()
+        ));
+        let services = shared.lock().unwrap();
+        assert_eq!(
+            services
+                .ingress_authority
+                .as_ref()
+                .unwrap()
+                .pending_record_count(),
+            1,
+            "recovery must not create a duplicate pending ingress",
+        );
+    }
+
+    #[test]
+    fn runtime_queue_busy_leaves_suite_one_session_available_for_closed_overload() {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let executions_for_handler = Arc::clone(&executions);
+        let owner = KernelRuntimeOwnerV2::spawn_for_test(1, move |_| {
+            if executions_for_handler.fetch_add(1, Ordering::AcqRel) == 0 {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }
+            Ok(KernelServiceResponseBodyV2::from_typed_handler(vec![0x80]).unwrap())
+        })
+        .unwrap();
+        let signing_key = SigningKey::from_bytes(&[0xb4; 32]);
+        let dispatcher = Arc::new(
+            KernelServiceDispatcherV2::spawn(
+                KernelServiceDeploymentV2::from_verified_startup(
+                    BootIdV2::new([0xe6; 32]),
+                    ServiceIdentityV2::new([0xe7; 32]),
+                    Digest32V2::new([0x35; 32]),
+                    7,
+                )
+                .unwrap(),
+                derive_ed25519_key_id_v2(signing_key.verifying_key().to_bytes()),
+                signing_key,
+                owner,
+            )
+            .unwrap(),
+        );
+        let peer = VerifiedKernelServicePeerV2::from_mutual_authentication(
+            EndpointRoleV2::IngressKernel,
+            BootIdV2::new([0xe8; 32]),
+            ServiceIdentityV2::new([0xe2; 32]),
+        )
+        .unwrap();
+        let request = |id: u8| {
+            KernelServiceApplicationRequestV2::new(
+                EndpointRoleV2::IngressKernel,
+                RequestIdV2::new([id; 16]),
+                UnixMillisV2::new(1_000),
+                KernelServiceOperationV2::ingress(KernelIngressOperationV2::AbortInput(
+                    AbortInputRequestV2::new(
+                        InputSessionHandleV2::from_authority_entropy([id.wrapping_add(1); 32])
+                            .unwrap(),
+                    ),
+                )),
+            )
+            .unwrap()
+        };
+
+        let first_dispatcher = Arc::clone(&dispatcher);
+        let first = thread::spawn(move || {
+            first_dispatcher.dispatch_one_application(
+                peer,
+                V2GenerationLease::for_dispatch_test(Digest32V2::new([0x35; 32]), 7),
+                request(0xc1),
+                UnixMillisV2::new(100),
+                Instant::now() + Duration::from_secs(3),
+            )
+        });
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let second_dispatcher = Arc::clone(&dispatcher);
+        let second = thread::spawn(move || {
+            second_dispatcher.dispatch_one_application(
+                peer,
+                V2GenerationLease::for_dispatch_test(Digest32V2::new([0x35; 32]), 7),
+                request(0xc2),
+                UnixMillisV2::new(100),
+                Instant::now() + Duration::from_secs(3),
+            )
+        });
+        let queued_deadline = Instant::now() + Duration::from_secs(1);
+        while dispatcher.queued_for_test() == 0 && Instant::now() < queued_deadline {
+            thread::yield_now();
+        }
+        assert_eq!(dispatcher.queued_for_test(), 1);
+
+        let busy_request = request(0xc3);
+        let operation_tag = busy_request.operation().tag();
+        let (response_session, mut client_session) =
+            suite_one_response_session_with_seed(&busy_request, 0xe5);
+        assert_eq!(
+            dispatcher.dispatch_one_suite_one(
+                peer,
+                V2GenerationLease::for_dispatch_test(Digest32V2::new([0x35; 32]), 7),
+                busy_request,
+                response_session.clone(),
+                UnixMillisV2::new(100),
+                Instant::now() + Duration::from_secs(1),
+            ),
+            Err(crate::v2_dispatch::KernelServiceDispatchErrorV2::Busy),
+        );
+        let overload = response_session
+            .seal_public_error(
+                EndpointRoleV2::IngressKernel,
+                RequestIdV2::new([0xc3; 16]),
+                operation_tag,
+                savana_kernel_protocol::v2::PublicStableCodeV2::Overloaded,
+            )
+            .unwrap();
+        let opened = client_session.open_application_response(&overload).unwrap();
+        let response = savana_kernel_protocol::v2::decode_kernel_service_application_response_v2(
+            opened.plaintext(),
+            EndpointRoleV2::IngressKernel,
+            operation_tag,
+        )
+        .unwrap();
+        assert_eq!(
+            response.body(),
+            &KernelServiceApplicationResponseBodyV2::Error(
+                savana_kernel_protocol::v2::PublicStableCodeV2::Overloaded,
+            ),
+        );
+        release_tx.send(()).unwrap();
+        assert!(first.join().unwrap().is_ok());
+        assert!(second.join().unwrap().is_ok());
+        assert_eq!(executions.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn recovered_finalize_delivery_obeys_the_fresh_connection_absolute_deadline() {
+        let fixture = finalize_recovery_fixture();
+        let request_id = RequestIdV2::new([0xc0; 16]);
+        let initial_request = fixture.request(request_id, fixture.finalize.clone());
+        let (initial_session, _) = suite_one_response_session_with_seed(&initial_request, 0xd5);
+        fixture
+            .dispatcher
+            .dispatch_one_suite_one(
+                fixture.peer,
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                initial_request,
+                initial_session,
+                UnixMillisV2::new(120),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+
+        let (before_tx, before_rx) = mpsc::sync_channel(1);
+        let (release_before_tx, release_before_rx) = mpsc::channel();
+        let (after_tx, _after_rx) = mpsc::sync_channel(1);
+        let (_release_after_tx, release_after_rx) = mpsc::channel();
+        fixture.shared.lock().unwrap().finalize_linearization_hook =
+            Some(super::FinalizeLinearizationHookV2 {
+                before_commit_reached: before_tx,
+                release_before_commit: release_before_rx,
+                after_publish_reached: after_tx,
+                release_after_publish: release_after_rx,
+                panic_before_commit: false,
+                panic_after_claim: false,
+                panic_after_publish: false,
+            });
+        let retry = fixture.request(request_id, fixture.finalize.clone());
+        let (response_session, mut retry_client) =
+            suite_one_response_session_with_seed(&retry, 0xd6);
+        let dispatcher = Arc::new(fixture.dispatcher);
+        let deadline = Instant::now() + Duration::from_millis(300);
+        let requesting = {
+            let dispatcher = Arc::clone(&dispatcher);
+            let response_session = response_session.clone();
+            thread::spawn(move || {
+                dispatcher.dispatch_one_suite_one(
+                    fixture.peer,
+                    V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                    retry,
+                    response_session,
+                    UnixMillisV2::new(121),
+                    deadline,
+                )
+            })
+        };
+        before_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            requesting.join().unwrap(),
+            Err(crate::v2_dispatch::KernelServiceDispatchErrorV2::DeadlineExceeded),
+        );
+        let closed_error = response_session
+            .cancel_staged_and_seal_public_error(
+                EndpointRoleV2::IngressKernel,
+                request_id,
+                42,
+                savana_kernel_protocol::v2::PublicStableCodeV2::DeadlineExceeded,
+            )
+            .unwrap();
+        let opened = retry_client
+            .open_application_response(&closed_error)
+            .unwrap();
+        let response = savana_kernel_protocol::v2::decode_kernel_service_application_response_v2(
+            opened.plaintext(),
+            EndpointRoleV2::IngressKernel,
+            42,
+        )
+        .unwrap();
+        assert_eq!(
+            response.body(),
+            &KernelServiceApplicationResponseBodyV2::Error(
+                savana_kernel_protocol::v2::PublicStableCodeV2::DeadlineExceeded,
+            ),
+        );
+        release_before_tx.send(()).unwrap();
+        let services = fixture.shared.lock().unwrap();
+        assert_eq!(
+            services
+                .input
+                .status(InputStatusTargetV2::Session(fixture.session))
+                .unwrap(),
+            KernelInputPublicStateV2::Finalized,
+        );
+        assert_eq!(
+            services
+                .ingress_authority
+                .as_ref()
+                .unwrap()
+                .pending_record_count(),
+            1,
+        );
+    }
+
+    #[test]
+    fn committed_finalize_is_recovered_only_for_identical_fresh_suite_one_retry() {
+        let fixture = finalize_recovery_fixture();
+        let request_id = RequestIdV2::new([0xb5; 16]);
+        let original_request = fixture.request(request_id, fixture.finalize.clone());
+        let (first_slot, mut first_client) =
+            suite_one_response_session_with_seed(&original_request, 0xa1);
+        let first_record = fixture
+            .dispatcher
+            .dispatch_one_suite_one(
+                fixture.peer,
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                original_request,
+                first_slot,
+                UnixMillisV2::new(120),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+        let first_opened = first_client
+            .open_application_response(&first_record)
+            .unwrap();
+        let first_response =
+            savana_kernel_protocol::v2::decode_kernel_service_application_response_v2(
+                first_opened.plaintext(),
+                EndpointRoleV2::IngressKernel,
+                42,
+            )
+            .unwrap();
+        let KernelServiceApplicationResponseBodyV2::Success(first_body) = first_response.body()
+        else {
+            panic!("initial finalize must commit successfully")
+        };
+        let first_body = first_body.to_vec();
+        let first_logical = decode_finalize_input_response_v2(&first_body).unwrap();
+        let first_pending = first_logical.pending();
+        let first_approval = first_logical.approval();
+        let first_envelope_digest = first_logical.envelope().envelope_digest().unwrap();
+        let first_display_digest = first_logical
+            .display_authentication()
+            .envelope_digest()
+            .unwrap();
+
+        // The server committed the logical result, but this first sealed record
+        // is treated as lost at the final channel-write boundary.
+        let retry_request = fixture.request(request_id, fixture.finalize.clone());
+        let (retry_slot, mut retry_client) =
+            suite_one_response_session_with_seed(&retry_request, 0xb1);
+        let retry_record = fixture
+            .dispatcher
+            .dispatch_one_suite_one(
+                fixture.peer,
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                retry_request,
+                retry_slot,
+                UnixMillisV2::new(121),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_ne!(retry_record, first_record, "fresh Suite-1 keys must reseal");
+        let retry_opened = retry_client
+            .open_application_response(&retry_record)
+            .unwrap();
+        let retry_response =
+            savana_kernel_protocol::v2::decode_kernel_service_application_response_v2(
+                retry_opened.plaintext(),
+                EndpointRoleV2::IngressKernel,
+                42,
+            )
+            .unwrap();
+        let KernelServiceApplicationResponseBodyV2::Success(retry_body) = retry_response.body()
+        else {
+            panic!("identical retry must recover committed success")
+        };
+        assert_eq!(retry_body.as_slice(), first_body.as_slice());
+        let retry_logical = decode_finalize_input_response_v2(retry_body).unwrap();
+        assert_eq!(retry_logical.pending(), first_pending);
+        assert_eq!(retry_logical.approval(), first_approval);
+        assert_eq!(
+            retry_logical.envelope().envelope_digest().unwrap(),
+            first_envelope_digest,
+        );
+        assert_eq!(
+            retry_logical
+                .display_authentication()
+                .envelope_digest()
+                .unwrap(),
+            first_display_digest,
+        );
+
+        let different_request_id = fixture
+            .dispatcher
+            .dispatch_one_application(
+                fixture.peer,
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                fixture.request(RequestIdV2::new([0xb6; 16]), fixture.finalize.clone()),
+                UnixMillisV2::new(122),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(
+            different_request_id.body(),
+            &KernelServiceApplicationResponseBodyV2::Error(
+                savana_kernel_protocol::v2::PublicStableCodeV2::PolicyDenied,
+            ),
+        );
+
+        let original_commitment = fixture.finalize.channels()[0];
+        let mismatched_finalize = FinalizeInputRequestV2::new(
+            fixture.finalize.session(),
+            vec![InputChannelCommitmentV2::new(
+                original_commitment.channel(),
+                original_commitment.chunk_count(),
+                original_commitment.final_sequence(),
+                original_commitment.total_length(),
+                Digest32V2::new([0xb7; 32]),
+            )
+            .unwrap()],
+            fixture.finalize.source_provenance().clone(),
+        )
+        .unwrap();
+        let different_commitment = fixture
+            .dispatcher
+            .dispatch_one_application(
+                fixture.peer,
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                fixture.request(request_id, mismatched_finalize),
+                UnixMillisV2::new(123),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(
+            different_commitment.body(),
+            &KernelServiceApplicationResponseBodyV2::Error(
+                savana_kernel_protocol::v2::PublicStableCodeV2::PolicyDenied,
+            ),
+        );
+
+        let mismatched_session_finalize = FinalizeInputRequestV2::new(
+            InputSessionHandleV2::from_authority_entropy([0xba; 32]).unwrap(),
+            fixture.finalize.channels().to_vec(),
+            fixture.finalize.source_provenance().clone(),
+        )
+        .unwrap();
+        let different_session = fixture
+            .dispatcher
+            .dispatch_one_application(
+                fixture.peer,
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                fixture.request(request_id, mismatched_session_finalize),
+                UnixMillisV2::new(124),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(
+            different_session.body(),
+            &KernelServiceApplicationResponseBodyV2::Error(
+                savana_kernel_protocol::v2::PublicStableCodeV2::InvalidReference,
+            ),
+        );
+
+        let different_peer = VerifiedKernelServicePeerV2::from_mutual_authentication(
+            EndpointRoleV2::IngressKernel,
+            BootIdV2::new([0xb8; 32]),
+            ServiceIdentityV2::new([0xb9; 32]),
+        )
+        .unwrap();
+        let different_identity = fixture
+            .dispatcher
+            .dispatch_one_application(
+                different_peer,
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                fixture.request(request_id, fixture.finalize.clone()),
+                UnixMillisV2::new(125),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(
+            different_identity.body(),
+            &KernelServiceApplicationResponseBodyV2::Error(
+                savana_kernel_protocol::v2::PublicStableCodeV2::PolicyDenied,
+            ),
+        );
+
+        let different_logical_deadline = fixture
+            .dispatcher
+            .dispatch_one_application(
+                fixture.peer,
+                V2GenerationLease::for_dispatch_test(fixture.lease_manifest, 7),
+                fixture.request_with_logical_deadline(
+                    request_id,
+                    fixture.finalize.clone(),
+                    UnixMillisV2::new(1_001),
+                ),
+                UnixMillisV2::new(126),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(
+            different_logical_deadline.body(),
+            &KernelServiceApplicationResponseBodyV2::Error(
+                savana_kernel_protocol::v2::PublicStableCodeV2::PolicyDenied,
+            ),
+        );
+
+        let different_effect_fence = fixture
+            .dispatcher
+            .dispatch_one_application(
+                fixture.peer,
+                V2GenerationLease::for_dispatch_test_with_fence(fixture.lease_manifest, 7, 2),
+                fixture.request(request_id, fixture.finalize.clone()),
+                UnixMillisV2::new(127),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(
+            different_effect_fence.body(),
+            &KernelServiceApplicationResponseBodyV2::Error(
+                savana_kernel_protocol::v2::PublicStableCodeV2::PolicyDenied,
+            ),
+        );
+
+        let services = fixture.shared.lock().unwrap();
+        assert_eq!(
+            services
+                .input
+                .status(InputStatusTargetV2::Session(fixture.session))
+                .unwrap(),
+            KernelInputPublicStateV2::Finalized,
+        );
+        assert_eq!(
+            services
+                .ingress_authority
+                .as_ref()
+                .unwrap()
+                .pending_record_count(),
+            1,
+        );
     }
 
     #[test]

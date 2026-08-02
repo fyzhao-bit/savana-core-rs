@@ -907,7 +907,7 @@ mod native {
             .expect("rollover agentd identity");
         let owner = Arc::new(
             KernelRuntimeOwnerV2::spawn_for_test_support(8, move |request| {
-                let (peer, lease, _, _, _, operation) = request.into_parts();
+                let (peer, lease, _, _, _, _, operation) = request.into_parts();
                 let rule_digest = handler_rules
                     .snapshot()
                     .map_err(|_| StableCode::KernelUnavailable)?

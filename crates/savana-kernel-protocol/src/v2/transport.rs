@@ -844,6 +844,44 @@ pub struct V2ServerTransportSession {
     response_sent: bool,
 }
 
+pub struct PreparedV2ServerApplicationResponse {
+    session: V2ServerTransportSession,
+    record: Vec<u8>,
+}
+
+impl std::fmt::Debug for PreparedV2ServerApplicationResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PreparedV2ServerApplicationResponse(<traffic-keys-redacted>)")
+    }
+}
+
+impl PreparedV2ServerApplicationResponse {
+    pub fn commit(self) -> Vec<u8> {
+        self.record
+    }
+
+    pub fn rollback(self) -> V2ServerTransportSession {
+        self.session
+    }
+}
+
+pub struct V2ServerApplicationResponsePreparationError {
+    session: V2ServerTransportSession,
+    error: ProtocolError,
+}
+
+impl std::fmt::Debug for V2ServerApplicationResponsePreparationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("V2ServerApplicationResponsePreparationError(<closed>)")
+    }
+}
+
+impl V2ServerApplicationResponsePreparationError {
+    pub fn into_parts(self) -> (V2ServerTransportSession, ProtocolError) {
+        (self.session, self.error)
+    }
+}
+
 impl std::fmt::Debug for V2ServerTransportSession {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("V2ServerTransportSession(<traffic-keys-redacted>)")
@@ -886,13 +924,46 @@ impl V2ServerTransportSession {
         operation_tag: u16,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, ProtocolError> {
+        let record = self.build_application_response(request_id, operation_tag, plaintext)?;
+        self.response_sent = true;
+        Ok(record)
+    }
+
+    /// Stages the endpoint-fixed response while consuming the live session.
+    /// The resulting capability can be committed once or rolled back to the
+    /// session; callers cannot prepare multiple records under the same nonce.
+    pub fn prepare_application_response(
+        self,
+        request_id: RequestIdV2,
+        operation_tag: u16,
+        plaintext: &[u8],
+    ) -> Result<PreparedV2ServerApplicationResponse, V2ServerApplicationResponsePreparationError>
+    {
+        match self.build_application_response(request_id, operation_tag, plaintext) {
+            Ok(record) => Ok(PreparedV2ServerApplicationResponse {
+                session: self,
+                record,
+            }),
+            Err(error) => Err(V2ServerApplicationResponsePreparationError {
+                session: self,
+                error,
+            }),
+        }
+    }
+
+    fn build_application_response(
+        &self,
+        request_id: RequestIdV2,
+        operation_tag: u16,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, ProtocolError> {
         if self.response_sent
             || is_zero(request_id.as_bytes())
             || self.request_binding != Some((request_id, operation_tag))
         {
             return Err(identity_replay());
         }
-        let record = seal_record(
+        seal_record(
             &self.s2c_key,
             &self.s2c_iv,
             self.transcript_digest,
@@ -906,9 +977,7 @@ impl V2ServerTransportSession {
                 plaintext_length: checked_plaintext_length(plaintext)?,
             },
             plaintext,
-        )?;
-        self.response_sent = true;
-        Ok(record)
+        )
     }
 }
 
