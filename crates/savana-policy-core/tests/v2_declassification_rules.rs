@@ -55,6 +55,106 @@ fn rule(
     .unwrap()
 }
 
+fn replace_rule_array_with_distinct_overflow(set: &DeclassificationRuleSetV2) -> Vec<u8> {
+    // The current closed vocabulary has only five valid sort keys. The decoder
+    // checks the declared cardinality before decoding any rule, so this raw
+    // fixture uses 65 distinct, canonically encoded, key-sorted nested rules;
+    // their future-vocabulary purpose digests are deliberately never reached.
+    let encoded_rules = (1_u8..=65)
+        .map(|ordinal| {
+            let purpose_digest = digest(ordinal);
+            let mut encoder = minicbor::Encoder::new(Vec::new());
+            encoder
+                .array(8)
+                .unwrap()
+                .u16(1)
+                .unwrap()
+                .bytes(purpose_digest.as_bytes())
+                .unwrap()
+                .bytes(digest(0x80_u8.wrapping_add(ordinal)).as_bytes())
+                .unwrap()
+                .u16(LeakGateDutyV2::BlocklistOnly.tag())
+                .unwrap()
+                .array(1)
+                .unwrap()
+                .u16(0)
+                .unwrap()
+                .array(1)
+                .unwrap()
+                .u16(0)
+                .unwrap()
+                .u64(20)
+                .unwrap()
+                .u64(80)
+                .unwrap();
+            (purpose_digest, encoder.into_writer())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(encoded_rules.len(), 65);
+    assert!(encoded_rules
+        .windows(2)
+        .all(|pair| { pair[0].0.as_bytes() < pair[1].0.as_bytes() && pair[0].1 < pair[1].1 }));
+
+    let mut decoder = minicbor::Decoder::new(set.canonical_bytes());
+    assert_eq!(decoder.array().unwrap(), Some(3));
+    assert_eq!(decoder.array().unwrap(), Some(8));
+    decoder.u16().unwrap();
+    decoder.bytes().unwrap();
+    decoder.u64().unwrap();
+    decoder.skip().unwrap();
+    let rules_start = decoder.position();
+    let original_count = decoder.array().unwrap().unwrap();
+    for _ in 0..original_count {
+        decoder.skip().unwrap();
+    }
+    let rules_end = decoder.position();
+
+    let mut replacement = minicbor::Encoder::new(Vec::new());
+    replacement.array(65).unwrap();
+    for (_, rule) in encoded_rules {
+        replacement.writer_mut().extend_from_slice(&rule);
+    }
+    let mut bytes = set.canonical_bytes().to_vec();
+    bytes.splice(rules_start..rules_end, replacement.into_writer());
+    bytes
+}
+
+fn nested_noncanonical_rule_mutations(set: &DeclassificationRuleSetV2) -> [Vec<u8>; 3] {
+    let mut decoder = minicbor::Decoder::new(set.canonical_bytes());
+    assert_eq!(decoder.array().unwrap(), Some(3));
+    assert_eq!(decoder.array().unwrap(), Some(8));
+    decoder.u16().unwrap();
+    decoder.bytes().unwrap();
+    decoder.u64().unwrap();
+    decoder.skip().unwrap();
+    assert_eq!(decoder.array().unwrap(), Some(1));
+    assert_eq!(decoder.array().unwrap(), Some(8));
+    let transition_tag = decoder.position();
+    assert_eq!(decoder.u16().unwrap(), 1);
+    decoder.bytes().unwrap();
+    decoder.bytes().unwrap();
+    decoder.u16().unwrap();
+    assert_eq!(decoder.array().unwrap(), Some(1));
+    let reader_option_tag = decoder.position();
+    assert_eq!(decoder.u16().unwrap(), 0);
+    assert_eq!(decoder.array().unwrap(), Some(1));
+    let consent_option_tag = decoder.position();
+    assert_eq!(decoder.u16().unwrap(), 0);
+
+    [
+        nonminimal_u8(set.canonical_bytes(), transition_tag, 1),
+        nonminimal_u8(set.canonical_bytes(), reader_option_tag, 0),
+        nonminimal_u8(set.canonical_bytes(), consent_option_tag, 0),
+    ]
+}
+
+fn nonminimal_u8(canonical: &[u8], offset: usize, value: u8) -> Vec<u8> {
+    assert_eq!(canonical[offset], value);
+    let mut mutated = canonical.to_vec();
+    mutated.splice(offset..=offset, [0x18, value]);
+    mutated
+}
+
 #[test]
 fn signed_rule_set_round_trips_and_binds_closed_rules_to_root_generation() {
     let (roots, authority) = root_and_authority();
@@ -124,50 +224,53 @@ fn rules_reject_owner_reader_consent_and_window_violations() {
         .unwrap_err(),
         DeploymentControlErrorV2::InvalidDeclassificationRuleSet
     );
-    assert!(DeclassificationRuleV2::new_for_test(
-        1,
-        ClosedDeclassificationPurposeV2::AgentIngressMasking,
-        digest(1),
-        LeakGateDutyV2::BlocklistOnly,
-        Some(vec![digest(2)]),
-        None,
-        20,
-        80,
-    )
-    .is_err());
-    assert!(DeclassificationRuleV2::new_for_test(
-        5,
-        ClosedDeclassificationPurposeV2::FinalRelease,
-        digest(1),
-        LeakGateDutyV2::BlocklistOnly,
-        Some(Vec::new()),
-        Some(300_000),
-        20,
-        80,
-    )
-    .is_err());
-    assert!(DeclassificationRuleV2::new_for_test(
-        4,
-        ClosedDeclassificationPurposeV2::ExecutionHandoff,
-        digest(1),
-        LeakGateDutyV2::BlocklistOnly,
-        Some(vec![digest(2)]),
-        Some(1),
-        20,
-        80,
-    )
-    .is_err());
-    assert!(DeclassificationRuleV2::new_for_test(
-        5,
-        ClosedDeclassificationPurposeV2::FinalRelease,
-        digest(1),
-        LeakGateDutyV2::BlocklistOnly,
-        Some(vec![digest(2)]),
-        Some(300_001),
-        20,
-        80,
-    )
-    .is_err());
+    for invalid_rule in [
+        DeclassificationRuleV2::new_for_test(
+            1,
+            ClosedDeclassificationPurposeV2::AgentIngressMasking,
+            digest(1),
+            LeakGateDutyV2::BlocklistOnly,
+            Some(vec![digest(2)]),
+            None,
+            20,
+            80,
+        ),
+        DeclassificationRuleV2::new_for_test(
+            5,
+            ClosedDeclassificationPurposeV2::FinalRelease,
+            digest(1),
+            LeakGateDutyV2::BlocklistOnly,
+            Some(Vec::new()),
+            Some(300_000),
+            20,
+            80,
+        ),
+        DeclassificationRuleV2::new_for_test(
+            4,
+            ClosedDeclassificationPurposeV2::ExecutionHandoff,
+            digest(1),
+            LeakGateDutyV2::BlocklistOnly,
+            Some(vec![digest(2)]),
+            Some(1),
+            20,
+            80,
+        ),
+        DeclassificationRuleV2::new_for_test(
+            5,
+            ClosedDeclassificationPurposeV2::FinalRelease,
+            digest(1),
+            LeakGateDutyV2::BlocklistOnly,
+            Some(vec![digest(2)]),
+            Some(300_001),
+            20,
+            80,
+        ),
+    ] {
+        assert_eq!(
+            invalid_rule.unwrap_err(),
+            DeploymentControlErrorV2::InvalidDeclassificationRuleSet
+        );
+    }
 }
 
 #[test]
@@ -211,7 +314,10 @@ fn rule_set_rejects_wrong_root_time_order_and_predecessor() {
     )
     .unwrap();
     second.validate_predecessor(Some(&first)).unwrap();
-    assert!(second.validate_predecessor(None).is_err());
+    assert_eq!(
+        second.validate_predecessor(None).unwrap_err(),
+        DeploymentControlErrorV2::InvalidDeclassificationRuleSet
+    );
 
     let transition = DeclassificationTransitionV2::BuildFinalRelease {
         sink_identity_digest: digest(0x41),
@@ -259,10 +365,16 @@ fn canonical_shape_payload_signed_digest_and_signature_domain_are_exact() {
 
     let mut wrong_shape = canonical.to_vec();
     wrong_shape[0] = 0x82;
-    assert!(DeclassificationRuleSetV2::from_canonical_bytes(&wrong_shape, &roots, 50).is_err());
+    assert_eq!(
+        DeclassificationRuleSetV2::from_canonical_bytes(&wrong_shape, &roots, 50).unwrap_err(),
+        DeploymentControlErrorV2::InvalidDeclassificationRuleSet
+    );
     let mut trailing = canonical.to_vec();
     trailing.push(0);
-    assert!(DeclassificationRuleSetV2::from_canonical_bytes(&trailing, &roots, 50).is_err());
+    assert_eq!(
+        DeclassificationRuleSetV2::from_canonical_bytes(&trailing, &roots, 50).unwrap_err(),
+        DeploymentControlErrorV2::InvalidDeclassificationRuleSet
+    );
 
     let mut wrong_payload_digest = canonical.to_vec();
     let offset = wrong_payload_digest
@@ -270,8 +382,10 @@ fn canonical_shape_payload_signed_digest_and_signature_domain_are_exact() {
         .position(|window| window == set.payload_digest().as_bytes())
         .unwrap();
     wrong_payload_digest[offset] ^= 1;
-    assert!(
-        DeclassificationRuleSetV2::from_canonical_bytes(&wrong_payload_digest, &roots, 50).is_err()
+    assert_eq!(
+        DeclassificationRuleSetV2::from_canonical_bytes(&wrong_payload_digest, &roots, 50)
+            .unwrap_err(),
+        DeploymentControlErrorV2::InvalidDeclassificationRuleSet
     );
 
     let mut wrong_signature_domain = canonical.to_vec();
@@ -280,73 +394,94 @@ fn canonical_shape_payload_signed_digest_and_signature_domain_are_exact() {
         .rposition(|window| window == [0x18, 0x1d])
         .unwrap();
     wrong_signature_domain[domain_offset + 1] = 0x1e;
-    assert!(
+    assert_eq!(
         DeclassificationRuleSetV2::from_canonical_bytes(&wrong_signature_domain, &roots, 50)
-            .is_err()
+            .unwrap_err(),
+        DeploymentControlErrorV2::InvalidDeclassificationRuleSet
     );
 
+    for nested_noncanonical in nested_noncanonical_rule_mutations(&set) {
+        assert_eq!(
+            DeclassificationRuleSetV2::from_canonical_bytes(&nested_noncanonical, &roots, 50)
+                .unwrap_err(),
+            DeploymentControlErrorV2::InvalidDeclassificationRuleSet
+        );
+    }
+
     let unauthorized = SigningKey::from_bytes(&[0x44; 32]);
-    assert!(DeclassificationRuleSetV2::new_signed_for_test(
-        digest(0x13),
-        1,
-        None,
-        vec![rule(
+    assert_eq!(
+        DeclassificationRuleSetV2::new_signed_for_test(
+            digest(0x13),
             1,
-            ClosedDeclassificationPurposeV2::AgentIngressMasking,
             None,
-            None,
-        )],
-        15,
-        85,
-        &roots,
-        &unauthorized,
-        7,
-        50,
-    )
-    .is_err());
+            vec![rule(
+                1,
+                ClosedDeclassificationPurposeV2::AgentIngressMasking,
+                None,
+                None,
+            )],
+            15,
+            85,
+            &roots,
+            &unauthorized,
+            7,
+            50,
+        )
+        .unwrap_err(),
+        DeploymentControlErrorV2::InvalidDeclassificationRuleSet
+    );
 }
 
 #[test]
 fn zero_duplicate_unsorted_and_closed_shape_inputs_are_refused() {
-    assert!(DeclassificationRuleV2::new_for_test(
-        1,
-        ClosedDeclassificationPurposeV2::AgentIngressMasking,
-        Digest32V2::new([0; 32]),
-        LeakGateDutyV2::BlocklistOnly,
-        None,
-        None,
-        20,
-        80,
-    )
-    .is_err());
+    assert_eq!(
+        DeclassificationRuleV2::new_for_test(
+            1,
+            ClosedDeclassificationPurposeV2::AgentIngressMasking,
+            Digest32V2::new([0; 32]),
+            LeakGateDutyV2::BlocklistOnly,
+            None,
+            None,
+            20,
+            80,
+        )
+        .unwrap_err(),
+        DeploymentControlErrorV2::InvalidDeclassificationRuleSet
+    );
     for readers in [
         vec![digest(0x42), digest(0x41)],
         vec![digest(0x41), digest(0x41)],
         vec![Digest32V2::new([0; 32])],
     ] {
-        assert!(DeclassificationRuleV2::new_for_test(
-            5,
+        assert_eq!(
+            DeclassificationRuleV2::new_for_test(
+                5,
+                ClosedDeclassificationPurposeV2::FinalRelease,
+                digest(1),
+                LeakGateDutyV2::BlocklistOnly,
+                Some(readers),
+                Some(1),
+                20,
+                80,
+            )
+            .unwrap_err(),
+            DeploymentControlErrorV2::InvalidDeclassificationRuleSet
+        );
+    }
+    assert_eq!(
+        DeclassificationRuleV2::new_for_test(
+            1,
             ClosedDeclassificationPurposeV2::FinalRelease,
             digest(1),
             LeakGateDutyV2::BlocklistOnly,
-            Some(readers),
+            Some(vec![digest(2)]),
             Some(1),
             20,
             80,
         )
-        .is_err());
-    }
-    assert!(DeclassificationRuleV2::new_for_test(
-        1,
-        ClosedDeclassificationPurposeV2::FinalRelease,
-        digest(1),
-        LeakGateDutyV2::BlocklistOnly,
-        Some(vec![digest(2)]),
-        Some(1),
-        20,
-        80,
-    )
-    .is_err());
+        .unwrap_err(),
+        DeploymentControlErrorV2::InvalidDeclassificationRuleSet
+    );
 
     let (roots, authority) = root_and_authority();
     let first = rule(
@@ -365,11 +500,29 @@ fn zero_duplicate_unsorted_and_closed_shape_inputs_are_refused() {
         vec![first.clone(), first.clone()],
         vec![last, first.clone()],
     ] {
-        assert!(DeclassificationRuleSetV2::new_signed_for_test(
+        assert_eq!(
+            DeclassificationRuleSetV2::new_signed_for_test(
+                digest(0x13),
+                1,
+                None,
+                invalid_rules,
+                15,
+                85,
+                &roots,
+                &authority,
+                7,
+                50,
+            )
+            .unwrap_err(),
+            DeploymentControlErrorV2::InvalidDeclassificationRuleSet
+        );
+    }
+    assert_eq!(
+        DeclassificationRuleSetV2::new_signed_for_test(
             digest(0x13),
-            1,
+            0,
             None,
-            invalid_rules,
+            vec![first.clone()],
             15,
             85,
             &roots,
@@ -377,34 +530,25 @@ fn zero_duplicate_unsorted_and_closed_shape_inputs_are_refused() {
             7,
             50,
         )
-        .is_err());
-    }
-    assert!(DeclassificationRuleSetV2::new_signed_for_test(
-        digest(0x13),
-        0,
-        None,
-        vec![first.clone()],
-        15,
-        85,
-        &roots,
-        &authority,
-        7,
-        50,
-    )
-    .is_err());
-    assert!(DeclassificationRuleSetV2::new_signed_for_test(
-        digest(0x13),
-        2,
-        Some(Digest32V2::new([0; 32])),
-        vec![first],
-        15,
-        85,
-        &roots,
-        &authority,
-        7,
-        50,
-    )
-    .is_err());
+        .unwrap_err(),
+        DeploymentControlErrorV2::InvalidDeclassificationRuleSet
+    );
+    assert_eq!(
+        DeclassificationRuleSetV2::new_signed_for_test(
+            digest(0x13),
+            2,
+            Some(Digest32V2::new([0; 32])),
+            vec![first],
+            15,
+            85,
+            &roots,
+            &authority,
+            7,
+            50,
+        )
+        .unwrap_err(),
+        DeploymentControlErrorV2::InvalidDeclassificationRuleSet
+    );
 }
 
 #[test]
@@ -416,55 +560,86 @@ fn set_rule_windows_and_compiled_rule_reader_limits_are_enforced() {
         None,
         None,
     );
-    assert!(DeclassificationRuleSetV2::new_signed_for_test(
-        digest(0x13),
-        1,
-        None,
-        vec![base.clone()],
-        85,
-        85,
-        &roots,
-        &authority,
-        7,
-        50,
-    )
-    .is_err());
-    assert!(DeclassificationRuleSetV2::new_signed_for_test(
-        digest(0x13),
-        1,
-        None,
-        vec![base.clone()],
-        25,
-        75,
-        &roots,
-        &authority,
-        7,
-        50,
-    )
-    .is_err());
-    assert!(DeclassificationRuleV2::new_for_test(
-        1,
-        ClosedDeclassificationPurposeV2::AgentIngressMasking,
-        digest(1),
-        LeakGateDutyV2::BlocklistOnly,
-        None,
-        None,
-        20,
-        20,
-    )
-    .is_err());
+    assert_eq!(
+        DeclassificationRuleSetV2::new_signed_for_test(
+            digest(0x13),
+            1,
+            None,
+            vec![base.clone()],
+            85,
+            85,
+            &roots,
+            &authority,
+            7,
+            50,
+        )
+        .unwrap_err(),
+        DeploymentControlErrorV2::InvalidDeclassificationRuleSet
+    );
+    assert_eq!(
+        DeclassificationRuleSetV2::new_signed_for_test(
+            digest(0x13),
+            1,
+            None,
+            vec![base.clone()],
+            25,
+            75,
+            &roots,
+            &authority,
+            7,
+            50,
+        )
+        .unwrap_err(),
+        DeploymentControlErrorV2::InvalidDeclassificationRuleSet
+    );
+    assert_eq!(
+        DeclassificationRuleV2::new_for_test(
+            1,
+            ClosedDeclassificationPurposeV2::AgentIngressMasking,
+            digest(1),
+            LeakGateDutyV2::BlocklistOnly,
+            None,
+            None,
+            20,
+            20,
+        )
+        .unwrap_err(),
+        DeploymentControlErrorV2::InvalidDeclassificationRuleSet
+    );
 
-    let too_many_rules =
-        vec![
-            base;
-            usize::try_from(DeploymentHardLimitsV2::compiled().max_declassification_rules() + 1)
-                .unwrap()
-        ];
-    assert!(DeclassificationRuleSetV2::new_signed_for_test(
+    let too_many_readers = (1..=DeploymentHardLimitsV2::compiled().max_declassification_readers()
+        + 1)
+        .map(|value| digest(u8::try_from(value).unwrap()))
+        .collect();
+    assert_eq!(
+        DeclassificationRuleV2::new_for_test(
+            5,
+            ClosedDeclassificationPurposeV2::FinalRelease,
+            digest(1),
+            LeakGateDutyV2::BlocklistOnly,
+            Some(too_many_readers),
+            Some(1),
+            20,
+            80,
+        )
+        .unwrap_err(),
+        DeploymentControlErrorV2::InvalidDeclassificationRuleSet
+    );
+}
+
+#[test]
+fn rule_count_overflow_uses_sixty_five_distinct_sorted_nested_rules() {
+    let (roots, authority) = root_and_authority();
+    let valid = DeclassificationRuleSetV2::new_signed_for_test(
         digest(0x13),
         1,
         None,
-        too_many_rules,
+        vec![rule(
+            1,
+            ClosedDeclassificationPurposeV2::AgentIngressMasking,
+            None,
+            None,
+        )],
         15,
         85,
         &roots,
@@ -472,22 +647,17 @@ fn set_rule_windows_and_compiled_rule_reader_limits_are_enforced() {
         7,
         50,
     )
-    .is_err());
-    let too_many_readers = (1..=DeploymentHardLimitsV2::compiled().max_declassification_readers()
-        + 1)
-        .map(|value| digest(u8::try_from(value).unwrap()))
-        .collect();
-    assert!(DeclassificationRuleV2::new_for_test(
-        5,
-        ClosedDeclassificationPurposeV2::FinalRelease,
-        digest(1),
-        LeakGateDutyV2::BlocklistOnly,
-        Some(too_many_readers),
-        Some(1),
-        20,
-        80,
-    )
-    .is_err());
+    .unwrap();
+    let too_many_distinct_sorted_rules = replace_rule_array_with_distinct_overflow(&valid);
+    assert_eq!(
+        DeclassificationRuleSetV2::from_canonical_bytes(
+            &too_many_distinct_sorted_rules,
+            &roots,
+            50
+        )
+        .unwrap_err(),
+        DeploymentControlErrorV2::InvalidDeclassificationRuleSet
+    );
 }
 
 #[test]
@@ -525,7 +695,10 @@ fn predecessor_chain_and_wrong_trust_root_purpose_are_refused() {
         50,
     )
     .unwrap();
-    assert!(fork.validate_predecessor(Some(&first)).is_err());
+    assert_eq!(
+        fork.validate_predecessor(Some(&first)).unwrap_err(),
+        DeploymentControlErrorV2::InvalidDeclassificationRuleSet
+    );
 
     let installer = SigningKey::from_bytes(&[0x70; 32]);
     let deployment_authority = SigningKey::from_bytes(&[0x71; 32]);
@@ -558,12 +731,81 @@ fn predecessor_chain_and_wrong_trust_root_purpose_are_refused() {
         3,
     )
     .unwrap();
-    assert!(DeclassificationRuleSetV2::from_canonical_bytes(
-        first.canonical_bytes(),
-        &wrong_purpose_root,
-        50
+    assert_eq!(
+        DeclassificationRuleSetV2::from_canonical_bytes(
+            first.canonical_bytes(),
+            &wrong_purpose_root,
+            50
+        )
+        .unwrap_err(),
+        DeploymentControlErrorV2::InvalidDeclassificationRuleSet
+    );
+}
+
+#[test]
+fn explicit_lower_sequence_rule_set_is_rejected_as_rollback() {
+    let (roots, authority) = root_and_authority();
+    let first = DeclassificationRuleSetV2::new_signed_for_test(
+        digest(0x13),
+        1,
+        None,
+        vec![rule(
+            1,
+            ClosedDeclassificationPurposeV2::AgentIngressMasking,
+            None,
+            None,
+        )],
+        15,
+        85,
+        &roots,
+        &authority,
+        7,
+        50,
     )
-    .is_err());
+    .unwrap();
+    let lower_sequence = DeclassificationRuleSetV2::new_signed_for_test(
+        digest(0x13),
+        2,
+        Some(first.signed_digest()),
+        vec![rule(
+            1,
+            ClosedDeclassificationPurposeV2::AgentIngressMasking,
+            None,
+            None,
+        )],
+        15,
+        85,
+        &roots,
+        &authority,
+        7,
+        50,
+    )
+    .unwrap();
+    let active_higher_sequence = DeclassificationRuleSetV2::new_signed_for_test(
+        digest(0x13),
+        3,
+        Some(lower_sequence.signed_digest()),
+        vec![rule(
+            1,
+            ClosedDeclassificationPurposeV2::AgentIngressMasking,
+            None,
+            None,
+        )],
+        15,
+        85,
+        &roots,
+        &authority,
+        7,
+        50,
+    )
+    .unwrap();
+    assert_eq!(
+        lower_sequence
+            .validate_predecessor(Some(&active_higher_sequence))
+            .unwrap_err(),
+        DeploymentControlErrorV2::InvalidDeclassificationRuleSet,
+        "an explicit lower-sequence set must not roll back a newer predecessor"
+    );
 }
 
 fn domain_hash(domain: &[u8], bytes: &[u8]) -> Digest32V2 {

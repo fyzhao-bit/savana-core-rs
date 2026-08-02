@@ -5209,43 +5209,51 @@ mod tests {
         InputChannelV2, InputRuntimeV2, SignedInputRuntimeAssetsV2, VerifiedInputRuntimeAssetsV2,
     };
     use savana_kernel_protocol::v2::{
-        derive_ed25519_key_id_v2, encode_planner_plan_v2, ActionTemplateIdV2, AgentSessionHandleV2,
-        AgentSessionStatusV2, ArgumentNameV2, BootIdV2, CancelKernelTaskRequestV2,
-        CommitPlannerValueRequestV2, Digest32V2, DurableRunIdV2, DurableTaskIdV2, Ed25519KeyIdV2,
-        ExecutorIdentityV2, GetKernelTaskStatusRequestV2, MaskedDocumentHandleV2, Nonce32V2,
-        PlannerIntentKindV2, PlannerLimitsV2, PlannerPlanV2, PlannerPurposeV2, PlannerRouteIdV2,
-        PlannerSlotRefV2, PlannerStepV2, PrepareNewIngressRequestV2, PrepareNewIngressResponseV2,
-        PreparePlannerCallRequestV2, PrincipalIdV2, ProducerIdentityV2, ProjectionIdV2,
-        PublicTaskStatusV2, ResumeCommittedAgentAuthenticationRequestV2,
+        derive_ed25519_key_id_v2, encode_planner_plan_v2, verify_effect_ledger_projection_v2,
+        ActionIntentCurrentStateV2, ActionTemplateIdV2, AgentSessionHandleV2, AgentSessionStatusV2,
+        ArgumentNameV2, BootIdV2, CancelKernelTaskRequestV2, CommitPlannerValueRequestV2,
+        Digest32V2, DispatchExecutionRequestV2, DurableRunIdV2, DurableTaskIdV2, Ed25519KeyIdV2,
+        EffectLedgerProjectionBindingV2, EndpointRoleV2, EvaluateToolCallRequestV2,
+        EvaluateToolCallResponseV2, ExecutorIdentityV2, GetKernelTaskStatusRequestV2,
+        KernelServiceHandshakeEdgeV2, MaskedDocumentHandleV2, NamedArgumentValueBindingV2,
+        Nonce32V2, PeerIdentityBindingV2, PlannerIntentKindV2, PlannerLimitsV2, PlannerPlanV2,
+        PlannerPurposeV2, PlannerRouteIdV2, PlannerSlotRefV2, PlannerStepV2,
+        PrepareNewIngressRequestV2, PrepareNewIngressResponseV2, PreparePlannerCallRequestV2,
+        PrincipalIdV2, ProducerIdentityV2, ProjectionIdV2, ProposeToolCallRequestV2,
+        PublicTaskStatusV2, RequestIdV2, ResumeCommittedAgentAuthenticationRequestV2,
         ResumeCommittedAgentAuthenticationResponseV2, RoleIdV2, RunRevisionDigestV2,
         RunRevisionObservationV2, ServiceIdentityV2, StaticTemplateIdV2, ToolClassIdV2,
-        UnixMillisV2, VersionV2,
+        ToolHandleV2, UnixMillisV2, VersionV2,
     };
     use savana_policy_core::v2::{
         activate_internal_validator_registry, declassification_implementation_digest_v2,
         descriptor_digest_v2, ActiveToolRegistryV2, AttemptKindV2, BoundedConnectorRetryPolicyV2,
         ClosedDeclassificationPurposeV2, ContextFieldV2, DeclassificationRuleSetV2,
-        DeclassificationRuleV2, DurableG4StateV2, DurableStateNamespaceV2, EffectSetV2,
-        ExecutorIdempotencyContractV2, IdentifierV2, InternalValidatorDeclarationV2, KernelValueV2,
-        LeakGateDutyV2, OntologyExprV2, OntologyOperandV2, OntologyScalarV2,
-        OperationalTrustRootPurposeV2, OperationalTrustRootSetItemV2, OperationalTrustRootSetV2,
-        ProvenanceContextV2, ProvenanceRecordV2, RollbackProtectedStateAnchorV2,
-        RollbackProtectedStateHeadV2, SignedToolDescriptorV2, UnsignedToolDescriptorV2,
-        VerifiedManifestToolConstraintSetV2, VerifiedManifestToolConstraintV2,
-        VerifiedPolicyDispositionV2, VerifiedPolicyToolActivationV2, VerifiedPolicyToolSetV2,
-        VerifiedRegistryPublisherV2, VerifiedToolRegistryV2,
+        DeclassificationRuleV2, DispatchQuotaSubjectV2, DurableG4StateV2, DurableStateNamespaceV2,
+        EffectSetV2, ExecutorIdempotencyContractV2, G4Error, IdentifierV2,
+        InternalValidatorDeclarationV2, KernelValueV2, LeakGateDutyV2, OntologyExprV2,
+        OntologyOperandV2, OntologyScalarV2, OperationalTrustRootPurposeV2,
+        OperationalTrustRootSetItemV2, OperationalTrustRootSetV2, ProvenanceContextV2,
+        ProvenanceRecordV2, RollbackProtectedStateAnchorV2, RollbackProtectedStateHeadV2,
+        SignedToolDescriptorV2, UnsignedToolDescriptorV2, VerifiedManifestToolConstraintSetV2,
+        VerifiedManifestToolConstraintV2, VerifiedPolicyDispositionV2,
+        VerifiedPolicyToolActivationV2, VerifiedPolicyToolSetV2, VerifiedRegistryPublisherV2,
+        VerifiedToolRegistryV2,
     };
     use sha2::{Digest as _, Sha256};
 
     use super::{
-        gate_execution_before_durable_prepare, hpke_x25519_key_id, intersect_planner_request,
+        compiled_projection_digest, hpke_x25519_key_id, intersect_planner_request,
         presealed_execution_payload_digest, presealed_final_release_payload_digest,
-        KernelAgentAuthorityErrorV2, KernelAgentAuthorityV2, KernelAgentSecurityConfigV2,
-        KernelG4G5RuntimeV2, KernelToolApprovalConfigV2, SessionRecordV2, SignedPlannerPolicyV2,
+        IntentRecordStateV2, KernelAgentAuthorityErrorV2, KernelAgentAuthorityV2,
+        KernelAgentSecurityConfigV2, KernelG4G5RuntimeV2, KernelG7RuntimeV2,
+        KernelToolApprovalConfigV2, SessionRecordV2, SignedPlannerPolicyV2, ToolRecordV2,
+        PROJECTION_DESTINATION_DOMAIN, PROJECTION_DISPLAY_DOMAIN,
     };
     use crate::v2_agent_durable::{
         KernelAgentAuthorityRollbackAnchorV2, KernelAgentAuthorityStateHeadV2,
     };
+    use crate::v2_executor_client::SuiteOneKernelExecutorClientV2;
     use crate::v2_ingress_authority::{KernelIngressAuthorityV2, KernelIngressSecurityConfigV2};
     use crate::v2_value_owner::KernelValueOwnerV2;
 
@@ -5598,6 +5606,130 @@ mod tests {
         .unwrap()
     }
 
+    fn verified_effect_ledger_projection(
+        installation_id: Digest32V2,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        effect_fence_epoch: u64,
+    ) -> savana_kernel_protocol::v2::VerifiedEffectLedgerProjectionV2 {
+        const SIGNATURE_DOMAIN: &[u8] = b"SAVANA_EFFECT_LEDGER_PROJECTION_SIGNATURE_V2\0";
+        let signing_key = SigningKey::from_bytes(&[0xaa; 32]);
+        let signing_key_id = derive_ed25519_key_id_v2(signing_key.verifying_key().to_bytes());
+        let binding = EffectLedgerProjectionBindingV2::from_verified_deployment(
+            installation_id,
+            active_state_manifest_digest,
+            deployment_generation,
+            effect_fence_epoch,
+            Digest32V2::new([0xab; 32]),
+            Digest32V2::new([0xac; 32]),
+            signing_key_id,
+            signing_key.verifying_key().to_bytes(),
+        )
+        .unwrap();
+        let mut payload = minicbor::Encoder::new(Vec::new());
+        payload
+            .array(11)
+            .unwrap()
+            .u16(2)
+            .unwrap()
+            .bytes(installation_id.as_bytes())
+            .unwrap()
+            .bytes(active_state_manifest_digest.as_bytes())
+            .unwrap()
+            .u64(deployment_generation)
+            .unwrap()
+            .u64(effect_fence_epoch)
+            .unwrap()
+            .bytes(binding.projection_identity().as_bytes())
+            .unwrap()
+            .bytes(binding.authenticated_head_digest().as_bytes())
+            .unwrap()
+            .bool(false)
+            .unwrap()
+            .bool(true)
+            .unwrap()
+            .bytes(&[0xad; 32])
+            .unwrap()
+            .bytes(&[0xae; 32])
+            .unwrap();
+        let payload = payload.into_writer();
+        let payload_digest: [u8; 32] = Sha256::digest(&payload).into();
+        let mut signature_input = Vec::from(SIGNATURE_DOMAIN);
+        signature_input.extend_from_slice(&payload_digest);
+        let signature = signing_key.sign(&signature_input).to_bytes();
+        let mut signed = minicbor::Encoder::new(Vec::new());
+        signed
+            .array(3)
+            .unwrap()
+            .bytes(&payload)
+            .unwrap()
+            .bytes(signing_key_id.as_bytes())
+            .unwrap()
+            .bytes(&signature)
+            .unwrap();
+        verify_effect_ledger_projection_v2(&signed.into_writer(), binding).unwrap()
+    }
+
+    fn test_g7_runtime(
+        installation_id: Digest32V2,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        effect_fence_epoch: u64,
+    ) -> KernelG7RuntimeV2 {
+        let client_key = SigningKey::from_bytes(&[0xaf; 32]);
+        let server_key = SigningKey::from_bytes(&[0xb0; 32]);
+        let edge = KernelServiceHandshakeEdgeV2::from_verified_deployment(
+            EndpointRoleV2::KernelExecutor,
+            installation_id,
+            ServiceIdentityV2::new([0xb1; 32]),
+            ServiceIdentityV2::new([0xb2; 32]),
+            derive_ed25519_key_id_v2(client_key.verifying_key().to_bytes()),
+            derive_ed25519_key_id_v2(server_key.verifying_key().to_bytes()),
+            BootIdV2::new([0xb3; 32]),
+            1,
+            active_state_manifest_digest,
+            deployment_generation,
+            effect_fence_epoch,
+            Digest32V2::new([0xb4; 32]),
+            Digest32V2::new([0xb5; 32]),
+            Digest32V2::new([0xb6; 32]),
+            Digest32V2::new([0xb7; 32]),
+            Digest32V2::new([0xb8; 32]),
+            Digest32V2::new([0xb9; 32]),
+        )
+        .unwrap();
+        let executor = SuiteOneKernelExecutorClientV2::from_verified_deployment(
+            edge,
+            BootIdV2::new([0xba; 32]),
+            PeerIdentityBindingV2::linux(501, 502, 503, 504, Digest32V2::new([0xbb; 32])).unwrap(),
+            client_key,
+            server_key.verifying_key().to_bytes(),
+        )
+        .unwrap();
+        let executor_secret = x25519_dalek::StaticSecret::from([0xbc; 32]);
+        let executor_seal_public_key = x25519_dalek::PublicKey::from(&executor_secret).to_bytes();
+        let receipt_key = SigningKey::from_bytes(&[0xbd; 32]);
+        KernelG7RuntimeV2::from_verified_deployment(
+            2,
+            Digest32V2::new([0xbe; 32]),
+            ExecutorIdentityV2::new([0xa7; 32]),
+            hpke_x25519_key_id(executor_seal_public_key),
+            executor_seal_public_key,
+            Digest32V2::new([0xbf; 32]),
+            verified_effect_ledger_projection(
+                installation_id,
+                active_state_manifest_digest,
+                deployment_generation,
+                effect_fence_epoch,
+            ),
+            SigningKey::from_bytes(&[0xc0; 32]),
+            derive_ed25519_key_id_v2(receipt_key.verifying_key().to_bytes()),
+            receipt_key.verifying_key().to_bytes(),
+            executor,
+        )
+        .unwrap()
+    }
+
     fn planner_declassification_rules(
     ) -> crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2 {
         let installer = SigningKey::from_bytes(&[0x9e; 32]);
@@ -5773,9 +5905,9 @@ mod tests {
             Vec::<InternalValidatorDeclarationV2>::new(),
             ExecutorIdentityV2::new([0xa7; 32]),
             ProjectionIdV2::new(3),
-            Digest32V2::new([0xa8; 32]),
+            compiled_projection_digest(PROJECTION_DESTINATION_DOMAIN, 3),
             savana_kernel_protocol::v2::DisplayProjectionIdV2::new(4),
-            Digest32V2::new([0xa9; 32]),
+            compiled_projection_digest(PROJECTION_DISPLAY_DOMAIN, 4),
             ExecutorIdempotencyContractV2::ConnectorIdempotentByExecutionNonce,
             UnixMillisV2::new(1),
             UnixMillisV2::new(10_000),
@@ -6165,28 +6297,130 @@ mod tests {
     }
 
     #[test]
-    fn rejected_execution_gate_leaves_dispatch_and_quota_unmodified() {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        enum ProbeDispatchState {
-            Authorized,
-            DispatchPrepared,
-        }
+    fn rejected_execution_gate_leaves_real_durable_dispatch_and_quota_unmodified() {
+        let installation_id = Digest32V2::new([0x89; 32]);
+        let active_state_manifest_digest = Digest32V2::new([0x85; 32]);
+        let deployment_generation = 7;
+        let effect_fence_epoch = 8;
+        let durable_run_id = DurableRunIdV2::new([0x83; 32]);
+        let quota_subject = DispatchQuotaSubjectV2::tool_attempt(AttemptKindV2::ToolWrite);
+        let mut fixture = planner_authority_fixture();
+        fixture
+            .authority
+            .policy
+            .as_mut()
+            .unwrap()
+            .install_g7(test_g7_runtime(
+                installation_id,
+                active_state_manifest_digest,
+                deployment_generation,
+                effect_fence_epoch,
+            ))
+            .unwrap();
 
-        let mut state = ProbeDispatchState::Authorized;
-        let mut reserved_quota = 0_u64;
-        let result = gate_execution_before_durable_prepare(
-            b"content blocked before durable prepare",
-            || Err(KernelAgentAuthorityErrorV2::BindingMismatch),
-            |_| {
-                state = ProbeDispatchState::DispatchPrepared;
-                reserved_quota += 1;
-                Ok(())
-            },
+        let (planner_ticket, envelope_nonce, slot) =
+            fixture.prepare(PlannerLimitsV2::new(1, 1, 1, 65_536).unwrap());
+        let plan = PlannerPlanV2::new(
+            envelope_nonce,
+            vec![planner_step(1, 21, 31, slot, Vec::new())],
+        )
+        .unwrap();
+        let committed = fixture.commit(planner_ticket, plan).unwrap();
+        let step = committed.steps()[0];
+        let descriptor_digest = fixture.authority.plan_steps[0].descriptor_digest;
+        let tool = ToolHandleV2::from_authority_entropy([0xc1; 32]).unwrap();
+        fixture.authority.tools.push(ToolRecordV2 {
+            commitment: tool.authority_commitment(&fixture.authority.handle_key),
+            run: fixture.run,
+            descriptor_digest,
+        });
+        let proposal = ProposeToolCallRequestV2::new(
+            step,
+            tool,
+            vec![NamedArgumentValueBindingV2::new(
+                ArgumentNameV2::new("input".to_owned()).unwrap(),
+                fixture.prompt,
+            )],
+        )
+        .unwrap();
+        let proposed = fixture
+            .authority
+            .propose_tool_call(
+                RequestIdV2::new([0xc2; 16]),
+                b"authenticated canonical tool proposal",
+                &proposal,
+                &fixture.values,
+                fixture.caller_identity,
+                active_state_manifest_digest,
+                UnixMillisV2::new(202),
+            )
+            .unwrap();
+        let ActionIntentCurrentStateV2::Proposed { pending } = proposed.current() else {
+            panic!("real authority must create a proposed durable intent");
+        };
+        let evaluated = fixture
+            .authority
+            .evaluate_tool_call(
+                EvaluateToolCallRequestV2::new(pending),
+                &fixture.values,
+                fixture.caller_identity,
+                active_state_manifest_digest,
+                deployment_generation,
+                UnixMillisV2::new(203),
+            )
+            .unwrap();
+        let EvaluateToolCallResponseV2::Allowed { ticket, .. } = evaluated else {
+            panic!("verified permit policy must authorize the real intent");
+        };
+
+        let durable_path = fixture._directory.path().join("kernel-g4-state-v2.cbor");
+        let (head_before, journal_before, quota_before) = {
+            let durable = &fixture.authority.policy.as_ref().unwrap().durable;
+            (
+                durable.authenticated_state_head().unwrap(),
+                durable.recovery_projection().unwrap(),
+                durable.quota_counter(durable_run_id, quota_subject),
+            )
+        };
+        let durable_bytes_before = fs::read(&durable_path).unwrap();
+        let executions_before = fixture.authority.executions.len();
+        assert!(matches!(
+            fixture.authority.intents[0].state,
+            IntentRecordStateV2::Authorized
+        ));
+        assert!(journal_before.is_empty());
+        assert_eq!(quota_before, Err(G4Error::QuotaCounterNotFound));
+
+        assert_eq!(
+            fixture.authority.dispatch_execution(
+                RequestIdV2::new([0xc3; 16]),
+                DispatchExecutionRequestV2::new(ticket),
+                fixture.caller_identity,
+                active_state_manifest_digest,
+                deployment_generation,
+                effect_fence_epoch,
+                UnixMillisV2::new(204),
+            ),
+            Err(KernelAgentAuthorityErrorV2::BindingMismatch)
         );
 
-        assert_eq!(result, Err(KernelAgentAuthorityErrorV2::BindingMismatch));
-        assert_eq!(state, ProbeDispatchState::Authorized);
-        assert_eq!(reserved_quota, 0);
+        let (head_after, journal_after, quota_after) = {
+            let durable = &fixture.authority.policy.as_ref().unwrap().durable;
+            (
+                durable.authenticated_state_head().unwrap(),
+                durable.recovery_projection().unwrap(),
+                durable.quota_counter(durable_run_id, quota_subject),
+            )
+        };
+        assert_eq!(head_after, head_before);
+        assert_eq!(journal_after, journal_before);
+        assert_eq!(quota_after, quota_before);
+        assert_eq!(fs::read(&durable_path).unwrap(), durable_bytes_before);
+        assert_eq!(fixture.authority.executions.len(), executions_before);
+        assert!(matches!(
+            fixture.authority.intents[0].state,
+            IntentRecordStateV2::Authorized
+        ));
     }
 
     #[test]
