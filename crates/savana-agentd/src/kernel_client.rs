@@ -2,6 +2,7 @@ use std::io::{Read as _, Write as _};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
@@ -45,6 +46,10 @@ use savana_kernel_protocol::v2::{
     HANDSHAKE_FRAME_HEADER_BYTES_V2, MAX_HANDSHAKE_BODY_BYTES_V2, MAX_RECORD_CIPHERTEXT_BYTES_V2,
     MAX_RECORD_HEADER_BYTES_V2, RECORD_FRAME_HEADER_BYTES_V2,
 };
+use savana_policy_core::v2::{
+    ClosedServiceEdgeIdV2, ClosedServiceIdV2, ServiceDeploymentLockV2, ServiceEdgeLockV2,
+    VerifiedDaemonStartupV2,
+};
 use sha2::{Digest as _, Sha256};
 use x25519_dalek::StaticSecret;
 
@@ -66,15 +71,118 @@ const KERNEL_CANCELLATION_COMMIT_DOMAIN_V2: &[u8] =
 const KERNEL_OPERATION_REQUEST_ID_DOMAIN_V2: &[u8] =
     b"SAVANA_AGENTD_KERNEL_OPERATION_REQUEST_ID_V2\0";
 
+#[derive(Clone)]
 pub struct SuiteOneAgentKernelClientV2 {
-    edge: KernelServiceHandshakeEdgeV2,
+    shared: Arc<AgentKernelClientSharedV2>,
+}
+
+struct AgentKernelClientSharedV2 {
+    authority: RwLock<Arc<AgentKernelGenerationAuthorityV2>>,
+    reload_lock: Mutex<()>,
     client_boot_id: BootIdV2,
+    server_boot_id: Option<BootIdV2>,
     expected_observed_peer: PeerIdentityBindingV2,
     client_signing_key: SigningKey,
     server_public_key: [u8; 32],
+    socket_path: PathBuf,
+    startup_loader: Option<Arc<VerifiedAgentKernelStartupLoaderV2>>,
+    #[cfg(test)]
+    successor_edge_for_test: Option<KernelServiceHandshakeEdgeV2>,
+}
+
+type VerifiedAgentKernelStartupLoaderV2 =
+    dyn Fn() -> Result<VerifiedDaemonStartupV2, ()> + Send + Sync;
+
+struct AgentKernelGenerationAuthorityV2 {
+    edge: KernelServiceHandshakeEdgeV2,
     task_authority_key_id: Ed25519KeyIdV2,
     task_authority_public_key: [u8; 32],
-    socket_path: PathBuf,
+    continuity: Option<AgentKernelContinuityV2>,
+}
+
+struct AgentKernelOperationResultV2 {
+    body: Vec<u8>,
+    authority: Arc<AgentKernelGenerationAuthorityV2>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct AgentKernelContinuityV2 {
+    installation_id: Digest32V2,
+    active_state_manifest_sequence: u64,
+    active_state_manifest_digest: Digest32V2,
+    deployment_generation: u64,
+    effect_fence_epoch: u64,
+    protocol_abi_digest: Digest32V2,
+    release_identity_digest: Digest32V2,
+    model_set_identity_digest: Digest32V2,
+    resource_profile_identity_digest: Digest32V2,
+    approval_lock_identity_digest: Digest32V2,
+    planner_lock_identity_digest: Digest32V2,
+    executor_key_lock_identity_digest: Digest32V2,
+    kernel_envelope_signing_key_id: Ed25519KeyIdV2,
+    client_lock: ServiceDeploymentLockV2,
+    server_lock: ServiceDeploymentLockV2,
+    edge_lock: ServiceEdgeLockV2,
+}
+
+impl AgentKernelContinuityV2 {
+    fn from_startup(
+        startup: &VerifiedDaemonStartupV2,
+    ) -> Result<Self, AgentControlKernelClientErrorV2> {
+        Ok(Self {
+            installation_id: startup.installation_id(),
+            active_state_manifest_sequence: startup.active_state_manifest_sequence(),
+            active_state_manifest_digest: startup.active_state_manifest_digest(),
+            deployment_generation: startup.deployment_generation(),
+            effect_fence_epoch: startup.effect_fence_epoch(),
+            protocol_abi_digest: startup.protocol_abi_digest(),
+            release_identity_digest: startup.release_identity_digest(),
+            model_set_identity_digest: startup.model_set_identity_digest(),
+            resource_profile_identity_digest: startup.resource_profile_identity_digest(),
+            approval_lock_identity_digest: startup.approval_lock_identity_digest(),
+            planner_lock_identity_digest: startup.planner_lock_identity_digest(),
+            executor_key_lock_identity_digest: startup.executor_key_lock_identity_digest(),
+            kernel_envelope_signing_key_id: startup.kernel_envelope_signing_key_id(),
+            client_lock: *startup
+                .service_lock(ClosedServiceIdV2::Agentd)
+                .ok_or(AgentControlKernelClientErrorV2::Unavailable)?,
+            server_lock: *startup
+                .service_lock(ClosedServiceIdV2::Kerneld)
+                .ok_or(AgentControlKernelClientErrorV2::Unavailable)?,
+            edge_lock: startup
+                .edge_lock(ClosedServiceEdgeIdV2::AgentKernel)
+                .cloned()
+                .ok_or(AgentControlKernelClientErrorV2::Unavailable)?,
+        })
+    }
+
+    fn is_exact_successor_of(&self, predecessor: &Self) -> bool {
+        predecessor
+            .active_state_manifest_sequence
+            .checked_add(1)
+            .is_some_and(|value| value == self.active_state_manifest_sequence)
+            && predecessor
+                .deployment_generation
+                .checked_add(1)
+                .is_some_and(|value| value == self.deployment_generation)
+            && predecessor
+                .effect_fence_epoch
+                .checked_add(1)
+                .is_some_and(|value| value == self.effect_fence_epoch)
+            && self.installation_id == predecessor.installation_id
+            && self.protocol_abi_digest == predecessor.protocol_abi_digest
+            && self.release_identity_digest == predecessor.release_identity_digest
+            && self.model_set_identity_digest == predecessor.model_set_identity_digest
+            && self.resource_profile_identity_digest == predecessor.resource_profile_identity_digest
+            && self.approval_lock_identity_digest == predecessor.approval_lock_identity_digest
+            && self.planner_lock_identity_digest == predecessor.planner_lock_identity_digest
+            && self.executor_key_lock_identity_digest
+                == predecessor.executor_key_lock_identity_digest
+            && self.kernel_envelope_signing_key_id == predecessor.kernel_envelope_signing_key_id
+            && self.client_lock == predecessor.client_lock
+            && self.server_lock == predecessor.server_lock
+            && self.edge_lock == predecessor.edge_lock
+    }
 }
 
 impl std::fmt::Debug for SuiteOneAgentKernelClientV2 {
@@ -102,6 +210,56 @@ impl SuiteOneAgentKernelClientV2 {
             return Err(AgentControlKernelClientErrorV2::Unavailable);
         }
         Ok(Self {
+            shared: Arc::new(AgentKernelClientSharedV2 {
+                authority: RwLock::new(Arc::new(AgentKernelGenerationAuthorityV2 {
+                    edge,
+                    task_authority_key_id,
+                    task_authority_public_key,
+                    continuity: None,
+                })),
+                reload_lock: Mutex::new(()),
+                client_boot_id,
+                server_boot_id: None,
+                expected_observed_peer,
+                client_signing_key,
+                server_public_key,
+                socket_path: PathBuf::from(AGENT_KERNEL_SOCKET_PATH_V2),
+                startup_loader: None,
+                #[cfg(test)]
+                successor_edge_for_test: None,
+            }),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_verified_startup<F>(
+        startup: &VerifiedDaemonStartupV2,
+        client_boot_id: BootIdV2,
+        server_boot_id: BootIdV2,
+        expected_observed_peer: PeerIdentityBindingV2,
+        client_signing_key: SigningKey,
+        server_public_key: [u8; 32],
+        task_authority_key_id: Ed25519KeyIdV2,
+        task_authority_public_key: [u8; 32],
+        startup_loader: F,
+    ) -> Result<Self, AgentControlKernelClientErrorV2>
+    where
+        F: Fn() -> Result<VerifiedDaemonStartupV2, ()> + Send + Sync + 'static,
+    {
+        let edge = startup
+            .kernel_service_handshake_edge(ClosedServiceEdgeIdV2::AgentKernel, server_boot_id)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        let continuity = AgentKernelContinuityV2::from_startup(startup)?;
+        if continuity.edge_lock.client_handshake_key_id
+            != savana_kernel_protocol::v2::derive_ed25519_key_id_v2(
+                client_signing_key.verifying_key().to_bytes(),
+            )
+            || continuity.edge_lock.server_handshake_key_id
+                != savana_kernel_protocol::v2::derive_ed25519_key_id_v2(server_public_key)
+        {
+            return Err(AgentControlKernelClientErrorV2::Unavailable);
+        }
+        let mut client = Self::from_verified_deployment(
             edge,
             client_boot_id,
             expected_observed_peer,
@@ -109,14 +267,200 @@ impl SuiteOneAgentKernelClientV2 {
             server_public_key,
             task_authority_key_id,
             task_authority_public_key,
-            socket_path: PathBuf::from(AGENT_KERNEL_SOCKET_PATH_V2),
-        })
+        )?;
+        let shared =
+            Arc::get_mut(&mut client.shared).ok_or(AgentControlKernelClientErrorV2::Unavailable)?;
+        shared.server_boot_id = Some(server_boot_id);
+        shared.startup_loader = Some(Arc::new(startup_loader));
+        shared.authority = RwLock::new(Arc::new(AgentKernelGenerationAuthorityV2 {
+            edge,
+            task_authority_key_id,
+            task_authority_public_key,
+            continuity: Some(continuity),
+        }));
+        Ok(client)
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_verified_startup_for_test_support<F>(
+        startup: &VerifiedDaemonStartupV2,
+        client_boot_id: BootIdV2,
+        server_boot_id: BootIdV2,
+        expected_observed_peer: PeerIdentityBindingV2,
+        client_signing_key: SigningKey,
+        server_public_key: [u8; 32],
+        task_authority_key_id: Ed25519KeyIdV2,
+        task_authority_public_key: [u8; 32],
+        socket_path: PathBuf,
+        startup_loader: F,
+    ) -> Result<Self, AgentControlKernelClientErrorV2>
+    where
+        F: Fn() -> Result<VerifiedDaemonStartupV2, ()> + Send + Sync + 'static,
+    {
+        let mut client = Self::from_verified_startup(
+            startup,
+            client_boot_id,
+            server_boot_id,
+            expected_observed_peer,
+            client_signing_key,
+            server_public_key,
+            task_authority_key_id,
+            task_authority_public_key,
+            startup_loader,
+        )?;
+        Arc::get_mut(&mut client.shared)
+            .ok_or(AgentControlKernelClientErrorV2::Unavailable)?
+            .socket_path = socket_path;
+        Ok(client)
     }
 
     #[cfg(test)]
     fn with_socket_path_for_test(mut self, socket_path: PathBuf) -> Self {
-        self.socket_path = socket_path;
+        Arc::get_mut(&mut self.shared).unwrap().socket_path = socket_path;
         self
+    }
+
+    #[cfg(test)]
+    fn with_successor_edge_for_test(
+        mut self,
+        successor_edge: KernelServiceHandshakeEdgeV2,
+    ) -> Self {
+        Arc::get_mut(&mut self.shared)
+            .unwrap()
+            .successor_edge_for_test = Some(successor_edge);
+        self
+    }
+
+    fn authority(
+        &self,
+    ) -> Result<Arc<AgentKernelGenerationAuthorityV2>, AgentControlKernelClientErrorV2> {
+        self.shared
+            .authority
+            .read()
+            .map(|authority| Arc::clone(&authority))
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    pub(crate) fn reload_verified_authority(&self) -> Result<(), AgentControlKernelClientErrorV2> {
+        let current = self.authority()?;
+        self.reload_after_handshake_rejection(&current)
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn reload_verified_authority_for_test_support(
+        &self,
+    ) -> Result<(), AgentControlKernelClientErrorV2> {
+        self.reload_verified_authority()
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn active_generation_for_test_support(&self) -> Option<u64> {
+        self.authority().ok().and_then(|authority| {
+            authority
+                .continuity
+                .as_ref()
+                .map(|value| value.deployment_generation)
+        })
+    }
+
+    fn reload_after_handshake_rejection(
+        &self,
+        failed: &Arc<AgentKernelGenerationAuthorityV2>,
+    ) -> Result<(), AgentControlKernelClientErrorV2> {
+        let _reload = self
+            .shared
+            .reload_lock
+            .lock()
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        let current = self.authority()?;
+        if !Arc::ptr_eq(&current, failed) {
+            return Ok(());
+        }
+        #[cfg(test)]
+        if let Some(edge) = self.shared.successor_edge_for_test {
+            let mut active = self
+                .shared
+                .authority
+                .write()
+                .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+            if Arc::ptr_eq(&active, failed) {
+                *active = Arc::new(AgentKernelGenerationAuthorityV2 {
+                    edge,
+                    task_authority_key_id: current.task_authority_key_id,
+                    task_authority_public_key: current.task_authority_public_key,
+                    continuity: None,
+                });
+            }
+            return Ok(());
+        }
+        let loader = self
+            .shared
+            .startup_loader
+            .as_ref()
+            .ok_or(AgentControlKernelClientErrorV2::Unavailable)?;
+        let startup = loader().map_err(|()| AgentControlKernelClientErrorV2::Unavailable)?;
+        let candidate = self.authority_from_startup(&startup, &current)?;
+        let mut active = self
+            .shared
+            .authority
+            .write()
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        if !Arc::ptr_eq(&active, failed) {
+            return Ok(());
+        }
+        let current_continuity = active
+            .continuity
+            .as_ref()
+            .ok_or(AgentControlKernelClientErrorV2::Unavailable)?;
+        let candidate_continuity = candidate
+            .continuity
+            .as_ref()
+            .ok_or(AgentControlKernelClientErrorV2::Unavailable)?;
+        if candidate_continuity == current_continuity {
+            return Ok(());
+        }
+        if !candidate_continuity.is_exact_successor_of(current_continuity) {
+            return Err(AgentControlKernelClientErrorV2::Unavailable);
+        }
+        *active = Arc::new(candidate);
+        Ok(())
+    }
+
+    fn authority_from_startup(
+        &self,
+        startup: &VerifiedDaemonStartupV2,
+        current: &AgentKernelGenerationAuthorityV2,
+    ) -> Result<AgentKernelGenerationAuthorityV2, AgentControlKernelClientErrorV2> {
+        let continuity = AgentKernelContinuityV2::from_startup(startup)?;
+        if continuity.edge_lock.client_handshake_key_id
+            != savana_kernel_protocol::v2::derive_ed25519_key_id_v2(
+                self.shared.client_signing_key.verifying_key().to_bytes(),
+            )
+            || continuity.edge_lock.server_handshake_key_id
+                != savana_kernel_protocol::v2::derive_ed25519_key_id_v2(
+                    self.shared.server_public_key,
+                )
+        {
+            return Err(AgentControlKernelClientErrorV2::Unavailable);
+        }
+        let edge = startup
+            .kernel_service_handshake_edge(
+                ClosedServiceEdgeIdV2::AgentKernel,
+                self.shared
+                    .server_boot_id
+                    .ok_or(AgentControlKernelClientErrorV2::Unavailable)?,
+            )
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        Ok(AgentKernelGenerationAuthorityV2 {
+            edge,
+            task_authority_key_id: current.task_authority_key_id,
+            task_authority_public_key: current.task_authority_public_key,
+            continuity: Some(continuity),
+        })
     }
 
     fn health_exchange(
@@ -125,7 +469,7 @@ impl SuiteOneAgentKernelClientV2 {
         deadline: UnixMillisV2,
     ) -> Result<PublicServiceStateV2, AgentControlKernelClientErrorV2> {
         let io_deadline = io_deadline(deadline)?;
-        let stream = UnixStream::connect(&self.socket_path)
+        let stream = UnixStream::connect(&self.shared.socket_path)
             .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
         self.health_over_stream(stream, request_id, deadline, io_deadline)
     }
@@ -137,15 +481,17 @@ impl SuiteOneAgentKernelClientV2 {
         deadline: UnixMillisV2,
         io_deadline: Instant,
     ) -> Result<PublicServiceStateV2, AgentControlKernelClientErrorV2> {
-        let body = self.operation_over_stream(
-            stream,
-            request_id,
-            deadline,
-            io_deadline,
-            KernelServiceOperationV2::agent(KernelAgentOperationV2::Health(
-                KernelAgentHealthRequestV2,
-            )),
-        )?;
+        let body = self
+            .operation_over_stream(
+                stream,
+                request_id,
+                deadline,
+                io_deadline,
+                KernelServiceOperationV2::agent(KernelAgentOperationV2::Health(
+                    KernelAgentHealthRequestV2,
+                )),
+            )?
+            .body;
         let health = decode_kernel_agent_health_response_v2(&body)
             .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
         Ok(health.state())
@@ -157,8 +503,18 @@ impl SuiteOneAgentKernelClientV2 {
         deadline: UnixMillisV2,
         operation: KernelServiceOperationV2,
     ) -> Result<Vec<u8>, AgentControlKernelClientErrorV2> {
+        self.operation_exchange_with_authority(request_id, deadline, operation)
+            .map(|result| result.body)
+    }
+
+    fn operation_exchange_with_authority(
+        &self,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+        operation: KernelServiceOperationV2,
+    ) -> Result<AgentKernelOperationResultV2, AgentControlKernelClientErrorV2> {
         let io_deadline = io_deadline(deadline)?;
-        let stream = UnixStream::connect(&self.socket_path)
+        let stream = UnixStream::connect(&self.shared.socket_path)
             .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
         self.operation_over_stream(stream, request_id, deadline, io_deadline, operation)
     }
@@ -498,33 +854,88 @@ impl SuiteOneAgentKernelClientV2 {
 
     fn operation_over_stream(
         &self,
+        stream: UnixStream,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+        io_deadline: Instant,
+        operation: KernelServiceOperationV2,
+    ) -> Result<AgentKernelOperationResultV2, AgentControlKernelClientErrorV2> {
+        self.operation_over_stream_attempt(
+            stream,
+            request_id,
+            deadline,
+            io_deadline,
+            operation,
+            true,
+        )
+    }
+
+    fn operation_over_stream_attempt(
+        &self,
         mut stream: UnixStream,
         request_id: RequestIdV2,
         deadline: UnixMillisV2,
         io_deadline: Instant,
         operation: KernelServiceOperationV2,
-    ) -> Result<Vec<u8>, AgentControlKernelClientErrorV2> {
+        allow_reload: bool,
+    ) -> Result<AgentKernelOperationResultV2, AgentControlKernelClientErrorV2> {
+        let authority = self.authority()?;
         let result = (|| {
             let client_nonce = Nonce32V2::new(random_nonzero_32()?);
             let ephemeral_secret = StaticSecret::from(random_nonzero_32()?);
             let (pending, hello) = V2ClientHandshake::start(
-                self.edge,
-                self.client_boot_id,
+                authority.edge,
+                self.shared.client_boot_id,
                 client_nonce,
-                self.expected_observed_peer.clone(),
+                self.shared.expected_observed_peer.clone(),
                 ephemeral_secret,
-                &self.client_signing_key,
+                &self.shared.client_signing_key,
             )
             .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
             write_handshake_frame(&mut stream, &hello, io_deadline)?;
-            let server_hello = read_handshake_frame(&mut stream, io_deadline)?;
-            let (finish, mut session) = pending
-                .accept_server_hello(
-                    &server_hello,
-                    self.server_public_key,
-                    &self.client_signing_key,
-                )
-                .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+            let server_hello = match read_handshake_frame(&mut stream, io_deadline) {
+                Ok(server_hello) => server_hello,
+                Err(AgentControlKernelClientErrorV2::DeadlineExceeded) => {
+                    return Err(AgentControlKernelClientErrorV2::DeadlineExceeded);
+                }
+                Err(_error) if allow_reload => {
+                    let _ = stream.shutdown(Shutdown::Both);
+                    self.reload_after_handshake_rejection(&authority)?;
+                    let retry = UnixStream::connect(&self.shared.socket_path)
+                        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+                    return self.operation_over_stream_attempt(
+                        retry,
+                        request_id,
+                        deadline,
+                        io_deadline,
+                        operation,
+                        false,
+                    );
+                }
+                Err(error) => return Err(error),
+            };
+            let (finish, mut session) = match pending.accept_server_hello(
+                &server_hello,
+                self.shared.server_public_key,
+                &self.shared.client_signing_key,
+            ) {
+                Ok(accepted) => accepted,
+                Err(_) if allow_reload => {
+                    let _ = stream.shutdown(Shutdown::Both);
+                    self.reload_after_handshake_rejection(&authority)?;
+                    let retry = UnixStream::connect(&self.shared.socket_path)
+                        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+                    return self.operation_over_stream_attempt(
+                        retry,
+                        request_id,
+                        deadline,
+                        io_deadline,
+                        operation,
+                        false,
+                    );
+                }
+                Err(_) => return Err(AgentControlKernelClientErrorV2::Unavailable),
+            };
             write_handshake_frame(&mut stream, &finish, io_deadline)?;
             let confirmation = read_record_frame(&mut stream, io_deadline)?;
             session
@@ -559,7 +970,12 @@ impl SuiteOneAgentKernelClientV2 {
                 return Err(AgentControlKernelClientErrorV2::Unavailable);
             }
             match response.body() {
-                KernelServiceApplicationResponseBodyV2::Success(body) => Ok(body.to_vec()),
+                KernelServiceApplicationResponseBodyV2::Success(body) => {
+                    Ok(AgentKernelOperationResultV2 {
+                        body: body.to_vec(),
+                        authority: Arc::clone(&authority),
+                    })
+                }
                 KernelServiceApplicationResponseBodyV2::Error(
                     PublicStableCodeV2::DeadlineExceeded,
                 ) => Err(AgentControlKernelClientErrorV2::DeadlineExceeded),
@@ -577,6 +993,7 @@ impl SuiteOneAgentKernelClientV2 {
         request: KernelTaskPreparationRequestV2,
         response: PrepareNewIngressResponseV2,
         now: UnixMillisV2,
+        authority: &AgentKernelGenerationAuthorityV2,
     ) -> Result<VerifiedKernelTaskPreparationV2, AgentControlKernelClientErrorV2> {
         let (preparation, correlation, ingress_transfer) = match response {
             PrepareNewIngressResponseV2::Prepared {
@@ -593,8 +1010,8 @@ impl SuiteOneAgentKernelClientV2 {
         };
         let unsigned = correlation
             .verify(
-                self.task_authority_key_id,
-                self.task_authority_public_key,
+                authority.task_authority_key_id,
+                authority.task_authority_public_key,
                 request.installation_id(),
                 request.active_state_manifest_digest(),
                 request.agentd_identity(),
@@ -631,8 +1048,8 @@ impl SuiteOneAgentKernelClientV2 {
             unsigned.task_logical_expires_at(),
             unsigned.status_retain_until(),
             task_authority_binding_digest(
-                self.task_authority_key_id,
-                self.task_authority_public_key,
+                authority.task_authority_key_id,
+                authority.task_authority_public_key,
             ),
             preparation,
             correlation,
@@ -662,11 +1079,15 @@ impl AgentControlKernelClientV2 for SuiteOneAgentKernelClientV2 {
             )
             .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?,
         ));
-        let body = self.operation_exchange(request.request_id(), request.deadline(), operation)?;
-        let response = decode_prepare_new_ingress_response_v2(&body)
+        let result = self.operation_exchange_with_authority(
+            request.request_id(),
+            request.deadline(),
+            operation,
+        )?;
+        let response = decode_prepare_new_ingress_response_v2(&result.body)
             .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
         let now = current_unix_millis()?;
-        self.verify_preparation_response(request, response, now)
+        self.verify_preparation_response(request, response, now, &result.authority)
     }
 
     fn cancel_task(
@@ -682,7 +1103,12 @@ impl AgentControlKernelClientV2 for SuiteOneAgentKernelClientV2 {
         let operation = KernelServiceOperationV2::agent(KernelAgentOperationV2::CancelKernelTask(
             CancelKernelTaskRequestV2::new(preparation, correlation),
         ));
-        let body = self.operation_exchange(request.request_id(), request.deadline(), operation)?;
+        let result = self.operation_exchange_with_authority(
+            request.request_id(),
+            request.deadline(),
+            operation,
+        )?;
+        let body = result.body;
         let response = decode_cancel_kernel_task_response_v2(&body)
             .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
         if response.status() != PublicTaskStatusV2::Cancelled {
@@ -702,8 +1128,8 @@ impl AgentControlKernelClientV2 for SuiteOneAgentKernelClientV2 {
             request.correlation_digest(),
             Digest32V2::new(hasher.finalize().into()),
             task_authority_binding_digest(
-                self.task_authority_key_id,
-                self.task_authority_public_key,
+                result.authority.task_authority_key_id,
+                result.authority.task_authority_public_key,
             ),
         )
         .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
@@ -717,8 +1143,12 @@ impl AgentControlKernelClientV2 for SuiteOneAgentKernelClientV2 {
             KernelServiceOperationV2::agent(KernelAgentOperationV2::GetKernelTaskStatus(
                 GetKernelTaskStatusRequestV2::new(request.kernel_correlation().clone()),
             ));
-        let body = self.operation_exchange(request.request_id(), request.deadline(), operation)?;
-        let response = decode_get_kernel_task_status_response_v2(&body)
+        let result = self.operation_exchange_with_authority(
+            request.request_id(),
+            request.deadline(),
+            operation,
+        )?;
+        let response = decode_get_kernel_task_status_response_v2(&result.body)
             .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
         let next_revision = request
             .status_revision()
@@ -730,8 +1160,8 @@ impl AgentControlKernelClientV2 for SuiteOneAgentKernelClientV2 {
             response.status(),
             next_revision,
             task_authority_binding_digest(
-                self.task_authority_key_id,
-                self.task_authority_public_key,
+                result.authority.task_authority_key_id,
+                result.authority.task_authority_public_key,
             ),
         )
         .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
@@ -805,15 +1235,22 @@ fn set_deadline(
         .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
 }
 
+fn map_io_error(error: std::io::Error) -> AgentControlKernelClientErrorV2 {
+    match error.kind() {
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+            AgentControlKernelClientErrorV2::DeadlineExceeded
+        }
+        _ => AgentControlKernelClientErrorV2::Unavailable,
+    }
+}
+
 fn read_handshake_frame(
     stream: &mut UnixStream,
     deadline: Instant,
 ) -> Result<Vec<u8>, AgentControlKernelClientErrorV2> {
     set_deadline(stream, deadline)?;
     let mut header = [0_u8; HANDSHAKE_FRAME_HEADER_BYTES_V2];
-    stream
-        .read_exact(&mut header)
-        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+    stream.read_exact(&mut header).map_err(map_io_error)?;
     if &header[..8] != HANDSHAKE_MAGIC_V2 {
         return Err(AgentControlKernelClientErrorV2::Unavailable);
     }
@@ -836,7 +1273,7 @@ fn read_handshake_frame(
     frame.resize(total, 0);
     stream
         .read_exact(&mut frame[HANDSHAKE_FRAME_HEADER_BYTES_V2..])
-        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        .map_err(map_io_error)?;
     Ok(frame)
 }
 
@@ -863,7 +1300,7 @@ fn write_handshake_frame(
     stream
         .write_all(frame)
         .and_then(|_| stream.flush())
-        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+        .map_err(map_io_error)
 }
 
 fn read_record_frame(
@@ -872,9 +1309,7 @@ fn read_record_frame(
 ) -> Result<Vec<u8>, AgentControlKernelClientErrorV2> {
     set_deadline(stream, deadline)?;
     let mut header = [0_u8; RECORD_FRAME_HEADER_BYTES_V2];
-    stream
-        .read_exact(&mut header)
-        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+    stream.read_exact(&mut header).map_err(map_io_error)?;
     let (header_length, ciphertext_length) = record_lengths(&header)?;
     let total = RECORD_FRAME_HEADER_BYTES_V2
         .checked_add(header_length)
@@ -888,7 +1323,7 @@ fn read_record_frame(
     frame.resize(total, 0);
     stream
         .read_exact(&mut frame[RECORD_FRAME_HEADER_BYTES_V2..])
-        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        .map_err(map_io_error)?;
     Ok(frame)
 }
 
@@ -909,7 +1344,7 @@ fn write_record_frame(
     stream
         .write_all(frame)
         .and_then(|_| stream.flush())
-        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+        .map_err(map_io_error)
 }
 
 fn record_lengths(header: &[u8]) -> Result<(usize, usize), AgentControlKernelClientErrorV2> {
@@ -938,6 +1373,7 @@ fn record_lengths(header: &[u8]) -> Result<(usize, usize), AgentControlKernelCli
 #[cfg(test)]
 mod tests {
     use std::os::unix::net::UnixListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
 
     use savana_kernel_protocol::v2::{
@@ -951,6 +1387,291 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn preexisting_client_adopts_verified_successor() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("agent-kernel-rollover.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let client_key = SigningKey::from_bytes(&[0x61; 32]);
+        let server_key = SigningKey::from_bytes(&[0x62; 32]);
+        let server_public_key = server_key.verifying_key().to_bytes();
+        let task_authority_key = SigningKey::from_bytes(&[0x63; 32]);
+        let task_authority_public_key = task_authority_key.verifying_key().to_bytes();
+        let initial_edge = edge_at(&client_key, &server_key, 5, [6; 32], 7, 8);
+        let successor_edge = edge_at(&client_key, &server_key, 6, [0x64; 32], 8, 9);
+        let observed_peer =
+            PeerIdentityBindingV2::linux(501, 20, 42, 99, Digest32V2::new([0x23; 32])).unwrap();
+        let server_observed_peer = observed_peer.clone();
+        let client_public_key = client_key.verifying_key().to_bytes();
+        let server = thread::spawn(move || {
+            let (mut stale, _) = listener.accept().unwrap();
+            let io_deadline = Instant::now() + Duration::from_secs(2);
+            let hello = read_handshake_frame(&mut stale, io_deadline).unwrap();
+            let (_, stale_server_hello) = V2ServerHandshake::accept_client_hello(
+                successor_edge,
+                server_observed_peer.clone(),
+                &hello,
+                Nonce32V2::new([0x65; 32]),
+                StaticSecret::from([0x66; 32]),
+                client_public_key,
+                &server_key,
+            )
+            .unwrap();
+            write_handshake_frame(&mut stale, &stale_server_hello, io_deadline).unwrap();
+            drop(stale);
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let hello = read_handshake_frame(&mut stream, io_deadline).unwrap();
+            let (pending, server_hello) = V2ServerHandshake::accept_client_hello(
+                successor_edge,
+                server_observed_peer,
+                &hello,
+                Nonce32V2::new([0x67; 32]),
+                StaticSecret::from([0x68; 32]),
+                client_public_key,
+                &server_key,
+            )
+            .unwrap();
+            write_handshake_frame(&mut stream, &server_hello, io_deadline).unwrap();
+            let finish = read_handshake_frame(&mut stream, io_deadline).unwrap();
+            let (accepted, mut session, _) = pending.accept_client_finish(&finish).unwrap();
+            write_record_frame(&mut stream, &accepted, io_deadline).unwrap();
+            let request_record = read_record_frame(&mut stream, io_deadline).unwrap();
+            let opened = session.open_application_request(&request_record).unwrap();
+            let health = encode_kernel_agent_health_response_v2(&KernelAgentHealthResponseV2::new(
+                true,
+                PublicServiceStateV2::Ready,
+            ))
+            .unwrap();
+            let response = KernelServiceApplicationResponseV2::success(
+                EndpointRoleV2::AgentKernel,
+                opened.request_id(),
+                opened.operation_tag(),
+                health,
+            )
+            .unwrap();
+            let plaintext = encode_kernel_service_application_response_v2(&response).unwrap();
+            let response_record = session
+                .seal_application_response(opened.request_id(), opened.operation_tag(), &plaintext)
+                .unwrap();
+            write_record_frame(&mut stream, &response_record, io_deadline).unwrap();
+        });
+        let client = SuiteOneAgentKernelClientV2::from_verified_deployment(
+            initial_edge,
+            BootIdV2::new([0x69; 32]),
+            observed_peer,
+            client_key,
+            server_public_key,
+            derive_ed25519_key_id_v2(task_authority_public_key),
+            task_authority_public_key,
+        )
+        .unwrap()
+        .with_socket_path_for_test(socket_path)
+        .with_successor_edge_for_test(successor_edge);
+        let mut request_client = client.clone();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        assert_eq!(
+            request_client
+                .health(RequestIdV2::new([0x6a; 16]), UnixMillisV2::new(now + 2_000),)
+                .unwrap(),
+            PublicServiceStateV2::Ready,
+        );
+        assert_eq!(client.authority().unwrap().edge, successor_edge);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn server_hello_deadline_never_reloads_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("agent-kernel-deadline.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let client_key = SigningKey::from_bytes(&[0x81; 32]);
+        let server_key = SigningKey::from_bytes(&[0x82; 32]);
+        let server_public_key = server_key.verifying_key().to_bytes();
+        let task_authority_key = SigningKey::from_bytes(&[0x83; 32]);
+        let task_authority_public_key = task_authority_key.verifying_key().to_bytes();
+        let initial_edge = edge_at(&client_key, &server_key, 5, [6; 32], 7, 8);
+        let successor_edge = edge_at(&client_key, &server_key, 6, [0x84; 32], 8, 9);
+        let observed_peer =
+            PeerIdentityBindingV2::linux(501, 20, 42, 99, Digest32V2::new([0x85; 32])).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_handshake_frame(&mut stream, Instant::now() + Duration::from_secs(1)).unwrap();
+            thread::sleep(Duration::from_millis(150));
+        });
+        let mut client = SuiteOneAgentKernelClientV2::from_verified_deployment(
+            initial_edge,
+            BootIdV2::new([0x86; 32]),
+            observed_peer,
+            client_key,
+            server_public_key,
+            derive_ed25519_key_id_v2(task_authority_public_key),
+            task_authority_public_key,
+        )
+        .unwrap()
+        .with_socket_path_for_test(socket_path)
+        .with_successor_edge_for_test(successor_edge);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        assert_eq!(
+            client.health(RequestIdV2::new([0x87; 16]), UnixMillisV2::new(now + 75),),
+            Err(AgentControlKernelClientErrorV2::DeadlineExceeded),
+        );
+        assert_eq!(client.authority().unwrap().edge, initial_edge);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_second_handshake_rejection_never_gets_a_third_attempt() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("agent-kernel-retry-bound.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let client_key = SigningKey::from_bytes(&[0x91; 32]);
+        let server_key = SigningKey::from_bytes(&[0x92; 32]);
+        let server_public_key = server_key.verifying_key().to_bytes();
+        let task_authority_key = SigningKey::from_bytes(&[0x93; 32]);
+        let task_authority_public_key = task_authority_key.verifying_key().to_bytes();
+        let initial_edge = edge_at(&client_key, &server_key, 5, [6; 32], 7, 8);
+        let successor_edge = edge_at(&client_key, &server_key, 6, [0x94; 32], 8, 9);
+        let unexpected_edge = edge_at(&client_key, &server_key, 7, [0x95; 32], 9, 10);
+        let observed_peer =
+            PeerIdentityBindingV2::linux(501, 20, 42, 99, Digest32V2::new([0x96; 32])).unwrap();
+        let server_observed_peer = observed_peer.clone();
+        let client_public_key = client_key.verifying_key().to_bytes();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let server_attempts = Arc::clone(&attempts);
+        let server = thread::spawn(move || {
+            let io_deadline = Instant::now() + Duration::from_secs(2);
+            for (index, edge) in [successor_edge, unexpected_edge].into_iter().enumerate() {
+                let (mut stream, _) = listener.accept().unwrap();
+                server_attempts.fetch_add(1, Ordering::SeqCst);
+                let hello = read_handshake_frame(&mut stream, io_deadline).unwrap();
+                let (_, server_hello) = V2ServerHandshake::accept_client_hello(
+                    edge,
+                    server_observed_peer.clone(),
+                    &hello,
+                    Nonce32V2::new([0x97 + index as u8; 32]),
+                    StaticSecret::from([0x99 + index as u8; 32]),
+                    client_public_key,
+                    &server_key,
+                )
+                .unwrap();
+                write_handshake_frame(&mut stream, &server_hello, io_deadline).unwrap();
+            }
+            thread::sleep(Duration::from_millis(100));
+            listener.set_nonblocking(true).unwrap();
+            assert!(matches!(
+                listener.accept(),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+            ));
+        });
+        let mut client = SuiteOneAgentKernelClientV2::from_verified_deployment(
+            initial_edge,
+            BootIdV2::new([0x9b; 32]),
+            observed_peer,
+            client_key,
+            server_public_key,
+            derive_ed25519_key_id_v2(task_authority_public_key),
+            task_authority_public_key,
+        )
+        .unwrap()
+        .with_socket_path_for_test(socket_path)
+        .with_successor_edge_for_test(successor_edge);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        assert_eq!(
+            client.health(RequestIdV2::new([0x9c; 16]), UnixMillisV2::new(now + 2_000),),
+            Err(AgentControlKernelClientErrorV2::Unavailable),
+        );
+        server.join().unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(client.authority().unwrap().edge, successor_edge);
+    }
+
+    #[test]
+    fn application_error_never_reloads_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("agent-kernel-application-error.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let client_key = SigningKey::from_bytes(&[0xa1; 32]);
+        let server_key = SigningKey::from_bytes(&[0xa2; 32]);
+        let server_public_key = server_key.verifying_key().to_bytes();
+        let task_authority_key = SigningKey::from_bytes(&[0xa3; 32]);
+        let task_authority_public_key = task_authority_key.verifying_key().to_bytes();
+        let initial_edge = edge_at(&client_key, &server_key, 5, [6; 32], 7, 8);
+        let successor_edge = edge_at(&client_key, &server_key, 6, [0xa4; 32], 8, 9);
+        let observed_peer =
+            PeerIdentityBindingV2::linux(501, 20, 42, 99, Digest32V2::new([0xa5; 32])).unwrap();
+        let server_observed_peer = observed_peer.clone();
+        let client_public_key = client_key.verifying_key().to_bytes();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let io_deadline = Instant::now() + Duration::from_secs(2);
+            let hello = read_handshake_frame(&mut stream, io_deadline).unwrap();
+            let (pending, server_hello) = V2ServerHandshake::accept_client_hello(
+                initial_edge,
+                server_observed_peer,
+                &hello,
+                Nonce32V2::new([0xa6; 32]),
+                StaticSecret::from([0xa7; 32]),
+                client_public_key,
+                &server_key,
+            )
+            .unwrap();
+            write_handshake_frame(&mut stream, &server_hello, io_deadline).unwrap();
+            let finish = read_handshake_frame(&mut stream, io_deadline).unwrap();
+            let (accepted, mut session, _) = pending.accept_client_finish(&finish).unwrap();
+            write_record_frame(&mut stream, &accepted, io_deadline).unwrap();
+            let request_record = read_record_frame(&mut stream, io_deadline).unwrap();
+            let opened = session.open_application_request(&request_record).unwrap();
+            let response = KernelServiceApplicationResponseV2::error(
+                EndpointRoleV2::AgentKernel,
+                opened.request_id(),
+                opened.operation_tag(),
+                PublicStableCodeV2::ServiceUnavailable,
+            )
+            .unwrap();
+            let plaintext = encode_kernel_service_application_response_v2(&response).unwrap();
+            let record = session
+                .seal_application_response(opened.request_id(), opened.operation_tag(), &plaintext)
+                .unwrap();
+            write_record_frame(&mut stream, &record, io_deadline).unwrap();
+        });
+        let mut client = SuiteOneAgentKernelClientV2::from_verified_deployment(
+            initial_edge,
+            BootIdV2::new([0xa8; 32]),
+            observed_peer,
+            client_key,
+            server_public_key,
+            derive_ed25519_key_id_v2(task_authority_public_key),
+            task_authority_public_key,
+        )
+        .unwrap()
+        .with_socket_path_for_test(socket_path)
+        .with_successor_edge_for_test(successor_edge);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        assert_eq!(
+            client.health(RequestIdV2::new([0xa9; 16]), UnixMillisV2::new(now + 2_000),),
+            Err(AgentControlKernelClientErrorV2::Unavailable),
+        );
+        assert_eq!(client.authority().unwrap().edge, initial_edge);
+        server.join().unwrap();
+    }
 
     #[test]
     fn suite_one_health_uses_mutual_authentication_and_encrypted_records() {
@@ -1203,13 +1924,37 @@ mod tests {
             PrepareNewIngressResponseV2::Prepared { correlation, .. }
             | PrepareNewIngressResponseV2::Reconciled { correlation, .. } => correlation.clone(),
         };
+        let authority = client.authority().unwrap();
+        let replacement_task_authority = SigningKey::from_bytes(&[0x44; 32]);
+        let replacement_task_authority_public_key =
+            replacement_task_authority.verifying_key().to_bytes();
+        *client.shared.authority.write().unwrap() = Arc::new(AgentKernelGenerationAuthorityV2 {
+            edge: authority.edge,
+            task_authority_key_id: derive_ed25519_key_id_v2(replacement_task_authority_public_key),
+            task_authority_public_key: replacement_task_authority_public_key,
+            continuity: None,
+        });
         assert!(client
-            .verify_preparation_response(request, response.clone(), UnixMillisV2::new(100))
+            .verify_preparation_response(
+                request,
+                response.clone(),
+                UnixMillisV2::new(100),
+                &authority,
+            )
             .is_ok_and(|verified| {
                 verified.kernel_preparation()
                     == NewTaskPreparationHandleV2::from_authority_entropy([0x41; 32])
                     && verified.kernel_correlation() == Some(&expected_correlation)
             }));
+        assert_eq!(
+            client.verify_preparation_response(
+                request,
+                response,
+                UnixMillisV2::new(100),
+                &client.authority().unwrap(),
+            ),
+            Err(AgentControlKernelClientErrorV2::Unavailable),
+        );
 
         let wrong_boot_unsigned = UnsignedDurableTaskCorrelationV2::new(
             request.installation_id(),
@@ -1238,12 +1983,23 @@ mod tests {
             .unwrap(),
         };
         assert_eq!(
-            client.verify_preparation_response(request, wrong, UnixMillisV2::new(100)),
+            client.verify_preparation_response(request, wrong, UnixMillisV2::new(100), &authority,),
             Err(AgentControlKernelClientErrorV2::Unavailable)
         );
     }
 
     fn edge(client_key: &SigningKey, server_key: &SigningKey) -> KernelServiceHandshakeEdgeV2 {
+        edge_at(client_key, server_key, 5, [6; 32], 7, 8)
+    }
+
+    fn edge_at(
+        client_key: &SigningKey,
+        server_key: &SigningKey,
+        manifest_sequence: u64,
+        manifest_digest: [u8; 32],
+        deployment_generation: u64,
+        effect_fence: u64,
+    ) -> KernelServiceHandshakeEdgeV2 {
         KernelServiceHandshakeEdgeV2::from_verified_deployment(
             EndpointRoleV2::AgentKernel,
             Digest32V2::new([1; 32]),
@@ -1252,10 +2008,10 @@ mod tests {
             derive_ed25519_key_id_v2(client_key.verifying_key().to_bytes()),
             derive_ed25519_key_id_v2(server_key.verifying_key().to_bytes()),
             BootIdV2::new([4; 32]),
-            5,
-            Digest32V2::new([6; 32]),
-            7,
-            8,
+            manifest_sequence,
+            Digest32V2::new(manifest_digest),
+            deployment_generation,
+            effect_fence,
             Digest32V2::new([9; 32]),
             Digest32V2::new([10; 32]),
             Digest32V2::new([11; 32]),

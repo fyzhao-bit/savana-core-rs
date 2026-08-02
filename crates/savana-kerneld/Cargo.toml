@@ -11,7 +11,11 @@ workspace = true
 
 [features]
 default = []
-test-support = ["savana-policy-core/test-support"]
+test-support = [
+    "savana-agentd/test-support",
+    "savana-ingressd/test-support",
+    "savana-policy-core/test-support",
+]
 macos-development-authority = [
     "savana-agentd/macos-development-authority",
     "savana-approvald/macos-development-authority",

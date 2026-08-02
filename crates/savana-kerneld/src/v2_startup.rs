@@ -62,18 +62,16 @@ mod native {
     use ed25519_dalek::Signer as _;
     use ed25519_dalek::SigningKey;
     use hmac::{Hmac, Mac as _};
-    #[cfg(feature = "test-support")]
-    use savana_kernel_protocol::v2::{
-        decode_kernel_service_application_response_v2,
-        encode_kernel_service_application_request_v2, EndpointRoleV2, KernelAgentHealthRequestV2,
-        KernelAgentOperationV2, KernelIngressHealthRequestV2, KernelIngressOperationV2,
-        KernelServiceApplicationRequestV2, KernelServiceApplicationResponseBodyV2,
-        KernelServiceOperationV2, Nonce32V2, RequestIdV2, V2ClientHandshake,
-    };
     use savana_kernel_protocol::v2::{
         derive_ed25519_key_id_v2, BootIdV2, ClosedExtensionClassV2, Digest32V2, Ed25519KeyIdV2,
         ExecutorIdentityV2, HpkeX25519KeyIdV2, ImplementationIdV2, PeerIdentityBindingV2,
         ProducerIdentityV2, RoleIdV2, UnixMillisV2, VersionV2,
+    };
+    #[cfg(feature = "test-support")]
+    use savana_kernel_protocol::v2::{
+        encode_kernel_agent_health_response_v2, encode_kernel_ingress_health_response_v2,
+        EndpointRoleV2, KernelAgentHealthResponseV2, KernelIngressHealthResponseV2,
+        PublicServiceStateV2, RequestIdV2,
     };
     use savana_kernel_protocol::StableCode;
     use savana_policy_core::v2::{
@@ -90,9 +88,12 @@ mod native {
     use savana_policy_core::Clock;
     use serde::Deserialize;
     use sha2::{Digest as _, Sha256};
-    #[cfg(feature = "test-support")]
-    use x25519_dalek::StaticSecret;
     use zeroize::Zeroizing;
+
+    #[cfg(feature = "test-support")]
+    use savana_agentd::{AgentControlKernelClientV2, SuiteOneAgentKernelClientV2};
+    #[cfg(feature = "test-support")]
+    use savana_ingressd::SuiteOneIngressKernelClientV2;
 
     use super::ServerLifecycle;
     use crate::deployment_trust::{
@@ -110,8 +111,6 @@ mod native {
         KernelAgentAuthorityV2, KernelAgentSecurityConfigV2, KernelG4G5RuntimeV2,
         KernelG7RuntimeV2, KernelToolApprovalConfigV2,
     };
-    #[cfg(feature = "test-support")]
-    use crate::v2_channel::{UnixV2FrameChannel, V2FrameChannel};
     use crate::v2_core_services::CoreKernelRuntimeServicesV2;
     use crate::v2_data_plane::ProductionKernelDataPlaneV2;
     use crate::v2_declassification_policy::{
@@ -907,7 +906,17 @@ mod native {
                         generation: lease.deployment_generation(),
                         rule_digest,
                     });
-                KernelServiceResponseBodyV2::from_typed_handler(vec![0x80])
+                let body = match peer.role() {
+                    EndpointRoleV2::AgentKernel => encode_kernel_agent_health_response_v2(
+                        &KernelAgentHealthResponseV2::new(true, PublicServiceStateV2::Ready),
+                    ),
+                    EndpointRoleV2::IngressKernel => encode_kernel_ingress_health_response_v2(
+                        &KernelIngressHealthResponseV2::new(true, PublicServiceStateV2::Ready),
+                    ),
+                    _ => return Err(StableCode::KernelUnavailable),
+                }
+                .map_err(|_| StableCode::KernelUnavailable)?;
+                KernelServiceResponseBodyV2::from_typed_handler(body)
                     .map_err(|_| StableCode::KernelUnavailable)
             })
             .expect("rollover runtime owner"),
@@ -928,6 +937,10 @@ mod native {
                 .expect("verified initial declassification deployment"),
             )
             .expect("publish initial declassification deployment");
+        let client_source = Arc::new(Mutex::new(Some((1_u64, old_digest))));
+        let mut live_clients =
+            RolloverLiveClientsV2::new(&initial_startup, Arc::clone(&client_source));
+        live_clients.exercise(Arc::clone(&runtime), &initial_startup);
 
         let successor = signed_rules(8, Some(old_digest), 20, 90, 50);
         let candidate_digest = successor.signed_digest();
@@ -1011,19 +1024,25 @@ mod native {
             .map_err(|_| StableCode::KernelUnavailable)
             .and_then(|candidate| coordinator.publish_v2_declassification_successor(candidate));
         let serving_startup = if result.is_ok() {
+            *client_source.lock().expect("rollover client source") =
+                Some((generation, manifest_pin));
             &startup
         } else {
+            *client_source.lock().expect("rollover client source") = None;
+            live_clients.assert_rejected_reload_retains_generation(1);
             &initial_startup
         };
-        exercise_real_rollover_endpoints(Arc::clone(&runtime), serving_startup);
+        live_clients.exercise(Arc::clone(&runtime), serving_startup);
         let observations = observations.lock().expect("rollover observations");
         let ingress = observations
             .iter()
+            .rev()
             .find(|observation| observation.role == EndpointRoleV2::IngressKernel)
             .copied()
             .expect("real ingress dispatch observation");
         let agent = observations
             .iter()
+            .rev()
             .find(|observation| observation.role == EndpointRoleV2::AgentKernel)
             .copied()
             .expect("real agent dispatch observation");
@@ -1175,167 +1194,510 @@ mod native {
     }
 
     #[cfg(feature = "test-support")]
-    fn exercise_real_rollover_endpoints(
-        runtime: Arc<V2GenerationRuntime>,
-        startup: &VerifiedDaemonStartupV2,
-    ) {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("rollover directory clock")
-            .as_nanos();
-        let directory = PathBuf::from("/tmp").join(format!("sv2-{}-{nonce:x}", std::process::id()));
-        fs::create_dir(&directory).expect("rollover listener directory");
-        let agent_path = directory.join("agent.sock");
-        let ingress_path = directory.join("ingress.sock");
-        let verifier: Arc<dyn NativeUnixPeerVerifierV2> = Arc::new(RolloverPeerVerifierV2 {
-            agent: rollover_peer_measurement(startup, EndpointRoleV2::AgentKernel),
-            ingress: rollover_peer_measurement(startup, EndpointRoleV2::IngressKernel),
-        });
-        let agent = KerneldV2EndpointListener::new_agent(
-            UnixListener::bind(&agent_path).expect("agent rollover listener"),
-            Arc::clone(&runtime),
-            Arc::clone(&verifier),
-        )
-        .expect("agent rollover endpoint");
-        let ingress = KerneldV2EndpointListener::new_ingress(
-            UnixListener::bind(&ingress_path).expect("ingress rollover listener"),
-            runtime,
-            verifier,
-        )
-        .expect("ingress rollover endpoint");
-        exercise_real_rollover_endpoint(agent, &agent_path, startup, EndpointRoleV2::AgentKernel);
-        exercise_real_rollover_endpoint(
-            ingress,
-            &ingress_path,
-            startup,
-            EndpointRoleV2::IngressKernel,
-        );
-        fs::remove_file(&agent_path).expect("remove agent rollover socket");
-        fs::remove_file(&ingress_path).expect("remove ingress rollover socket");
-        fs::remove_dir(&directory).expect("remove rollover listener directory");
+    struct RolloverLiveClientsV2 {
+        directory: PathBuf,
+        agent_path: PathBuf,
+        ingress_path: PathBuf,
+        agent: SuiteOneAgentKernelClientV2,
+        ingress: SuiteOneIngressKernelClientV2,
     }
 
     #[cfg(feature = "test-support")]
-    fn exercise_real_rollover_endpoint(
-        listener: KerneldV2EndpointListener,
-        path: &Path,
-        startup: &VerifiedDaemonStartupV2,
-        role: EndpointRoleV2,
-    ) {
-        let server = thread::spawn(move || {
-            listener.serve_one(
-                UnixMillisV2::new(50),
-                Instant::now() + Duration::from_secs(3),
-            )
-        });
-        let stream = UnixStream::connect(path).expect("connect rollover endpoint");
-        let mut channel = UnixV2FrameChannel::new(stream);
-        let edge_id = match role {
-            EndpointRoleV2::AgentKernel => ClosedServiceEdgeIdV2::AgentKernel,
-            EndpointRoleV2::IngressKernel => ClosedServiceEdgeIdV2::IngressKernel,
-            _ => unreachable!("rollover probe has only agent and ingress roles"),
-        };
-        let edge = startup
-            .kernel_service_handshake_edge(edge_id, BootIdV2::new([0xc1; 32]))
-            .expect("rollover client edge");
-        let service = edge_id.client_service();
-        let lock = startup.service_lock(service).expect("rollover client lock");
-        let pid = 700 + u32::from(service.tag());
-        let process_start = 800 + u64::from(service.tag());
-        let observed = PeerIdentityBindingV2::linux(
-            lock.uid,
-            lock.gid,
-            pid,
-            process_start,
-            lock.executable_digest,
-        )
-        .expect("rollover peer binding");
-        let keys = rollover_endpoint_keys();
-        let (client_key, server_public_key, seed) = match role {
-            EndpointRoleV2::AgentKernel => (
+    impl RolloverLiveClientsV2 {
+        fn new(
+            startup: &VerifiedDaemonStartupV2,
+            source: Arc<Mutex<Option<(u64, Digest32V2)>>>,
+        ) -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("rollover directory clock")
+                .as_nanos();
+            let directory =
+                PathBuf::from("/tmp").join(format!("sv2-clients-{}-{nonce:x}", std::process::id()));
+            fs::create_dir(&directory).expect("rollover listener directory");
+            let agent_path = directory.join("agent.sock");
+            let ingress_path = directory.join("ingress.sock");
+            let keys = rollover_endpoint_keys();
+            let task_authority = SigningKey::from_bytes(&[0xa6; 32]);
+            let task_authority_public_key = task_authority.verifying_key().to_bytes();
+            let agent_source = Arc::clone(&source);
+            let agent = SuiteOneAgentKernelClientV2::from_verified_startup_for_test_support(
+                startup,
+                BootIdV2::new([0xd1; 32]),
+                BootIdV2::new([0xc1; 32]),
+                rollover_peer_binding(startup, EndpointRoleV2::AgentKernel),
                 keys.agent_client,
                 keys.agent_server.verifying_key().to_bytes(),
-                0xd1,
-            ),
-            EndpointRoleV2::IngressKernel => (
+                derive_ed25519_key_id_v2(task_authority_public_key),
+                task_authority_public_key,
+                agent_path.clone(),
+                move || {
+                    let (generation, digest) = (*agent_source.lock().map_err(|_| ())?).ok_or(())?;
+                    Ok(verified_rollover_startup(generation, digest))
+                },
+            )
+            .expect("verified agent rollover client");
+            let ingress_source = source;
+            let ingress = SuiteOneIngressKernelClientV2::from_verified_startup_for_test_support(
+                startup,
+                BootIdV2::new([0xd2; 32]),
+                BootIdV2::new([0xc1; 32]),
+                rollover_peer_binding(startup, EndpointRoleV2::IngressKernel),
                 keys.ingress_client,
                 keys.ingress_server.verifying_key().to_bytes(),
-                0xd2,
-            ),
+                ingress_path.clone(),
+                move || {
+                    let (generation, digest) =
+                        (*ingress_source.lock().map_err(|_| ())?).ok_or(())?;
+                    Ok(verified_rollover_startup(generation, digest))
+                },
+            )
+            .expect("verified ingress rollover client");
+            Self {
+                directory,
+                agent_path,
+                ingress_path,
+                agent,
+                ingress,
+            }
+        }
+
+        fn assert_rejected_reload_retains_generation(&self, generation: u64) {
+            assert!(self
+                .agent
+                .reload_verified_authority_for_test_support()
+                .is_err());
+            assert!(self
+                .ingress
+                .reload_verified_authority_for_test_support()
+                .is_err());
+            assert_eq!(
+                self.agent.active_generation_for_test_support(),
+                Some(generation)
+            );
+            assert_eq!(
+                self.ingress.active_generation_for_test_support(),
+                Some(generation)
+            );
+        }
+
+        fn exercise(
+            &mut self,
+            runtime: Arc<V2GenerationRuntime>,
+            startup: &VerifiedDaemonStartupV2,
+        ) {
+            let verifier: Arc<dyn NativeUnixPeerVerifierV2> = Arc::new(RolloverPeerVerifierV2 {
+                agent: rollover_peer_measurement(startup, EndpointRoleV2::AgentKernel),
+                ingress: rollover_peer_measurement(startup, EndpointRoleV2::IngressKernel),
+            });
+            let agent_listener = KerneldV2EndpointListener::new_agent(
+                UnixListener::bind(&self.agent_path).expect("agent rollover listener"),
+                Arc::clone(&runtime),
+                Arc::clone(&verifier),
+            )
+            .expect("agent rollover endpoint");
+            let connection_count = if startup.deployment_generation() == 1 {
+                1
+            } else {
+                2
+            };
+            let agent_server =
+                thread::spawn(move || serve_rollover_connections(agent_listener, connection_count));
+            let deadline = rollover_request_deadline();
+            let agent_result = self.agent.health(RequestIdV2::new([0xd4; 16]), deadline);
+            let agent_server_result = agent_server.join().expect("agent rollover listener thread");
+            assert_eq!(
+                agent_result,
+                Ok(PublicServiceStateV2::Ready),
+                "server result: {agent_server_result:?}",
+            );
+            assert_eq!(agent_server_result, Ok(()));
+            fs::remove_file(&self.agent_path).expect("remove agent rollover socket");
+
+            let ingress_listener = KerneldV2EndpointListener::new_ingress(
+                UnixListener::bind(&self.ingress_path).expect("ingress rollover listener"),
+                runtime,
+                verifier,
+            )
+            .expect("ingress rollover endpoint");
+            let ingress_server = thread::spawn(move || {
+                serve_rollover_connections(ingress_listener, connection_count)
+            });
+            let health = self
+                .ingress
+                .health(deadline)
+                .expect("ingress rollover client health");
+            assert!(health.ready());
+            assert_eq!(health.state(), PublicServiceStateV2::Ready);
+            assert_eq!(
+                ingress_server
+                    .join()
+                    .expect("ingress rollover listener thread"),
+                Ok(())
+            );
+            fs::remove_file(&self.ingress_path).expect("remove ingress rollover socket");
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    fn serve_rollover_connections(
+        listener: KerneldV2EndpointListener,
+        connection_count: usize,
+    ) -> Result<(), crate::v2_listener::V2ListenerError> {
+        for index in 0..connection_count {
+            let result = listener.serve_one(
+                UnixMillisV2::new(50),
+                Instant::now() + Duration::from_secs(3),
+            );
+            if index + 1 == connection_count {
+                return result;
+            }
+            assert!(matches!(
+                result,
+                Err(crate::v2_listener::V2ListenerError::Connection(
+                    crate::v2_dispatch::KernelServiceDispatchErrorV2::Malformed
+                ))
+            ));
+        }
+        unreachable!("rollover clients always require a connection")
+    }
+
+    #[cfg(feature = "test-support")]
+    impl Drop for RolloverLiveClientsV2 {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.agent_path);
+            let _ = fs::remove_file(&self.ingress_path);
+            let _ = fs::remove_dir(&self.directory);
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    fn rollover_peer_binding(
+        startup: &VerifiedDaemonStartupV2,
+        role: EndpointRoleV2,
+    ) -> PeerIdentityBindingV2 {
+        let service = match role {
+            EndpointRoleV2::AgentKernel => ClosedServiceIdV2::Agentd,
+            EndpointRoleV2::IngressKernel => ClosedServiceIdV2::Ingressd,
             _ => unreachable!("rollover probe has only agent and ingress roles"),
         };
-        let (pending, hello) = V2ClientHandshake::start(
-            edge,
-            BootIdV2::new([seed; 32]),
-            Nonce32V2::new([seed.wrapping_add(1); 32]),
-            observed,
-            StaticSecret::from([seed.wrapping_add(2); 32]),
-            &client_key,
+        let lock = startup.service_lock(service).expect("rollover client lock");
+        PeerIdentityBindingV2::linux(
+            lock.uid,
+            lock.gid,
+            700 + u32::from(service.tag()),
+            800 + u64::from(service.tag()),
+            lock.executable_digest,
         )
-        .expect("start rollover handshake");
-        let deadline = Instant::now() + Duration::from_secs(3);
-        channel
-            .write_handshake_frame(&hello, deadline)
-            .expect("write rollover hello");
-        let server_hello = channel
-            .read_handshake_frame(deadline)
-            .expect("read rollover server hello");
-        let (finish, mut session) = pending
-            .accept_server_hello(&server_hello, server_public_key, &client_key)
-            .expect("accept rollover server hello");
-        channel
-            .write_handshake_frame(&finish, deadline)
-            .expect("write rollover finish");
-        let accepted = channel
-            .read_record_frame(deadline)
-            .expect("read rollover confirmation");
-        session
-            .accept_server_confirmation(&accepted)
-            .expect("accept rollover confirmation");
-        let request_id = RequestIdV2::new([seed.wrapping_add(3); 16]);
-        let operation = match role {
-            EndpointRoleV2::AgentKernel => KernelServiceOperationV2::agent(
-                KernelAgentOperationV2::Health(KernelAgentHealthRequestV2),
-            ),
-            EndpointRoleV2::IngressKernel => KernelServiceOperationV2::ingress(
-                KernelIngressOperationV2::Health(KernelIngressHealthRequestV2),
-            ),
-            _ => unreachable!("rollover probe has only agent and ingress roles"),
-        };
-        let request = KernelServiceApplicationRequestV2::new(
-            role,
-            request_id,
-            UnixMillisV2::new(1_000),
-            operation,
+        .expect("rollover peer binding")
+    }
+
+    #[cfg(feature = "test-support")]
+    fn rollover_request_deadline() -> UnixMillisV2 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("rollover request clock")
+            .as_millis() as u64;
+        UnixMillisV2::new(now + 2_000)
+    }
+
+    #[cfg(all(test, feature = "test-support"))]
+    fn rollover_authority_test_clients<FA, FI>(
+        startup: &VerifiedDaemonStartupV2,
+        agent_loader: FA,
+        ingress_loader: FI,
+    ) -> (SuiteOneAgentKernelClientV2, SuiteOneIngressKernelClientV2)
+    where
+        FA: Fn() -> Result<VerifiedDaemonStartupV2, ()> + Send + Sync + 'static,
+        FI: Fn() -> Result<VerifiedDaemonStartupV2, ()> + Send + Sync + 'static,
+    {
+        let keys = rollover_endpoint_keys();
+        let task_authority = SigningKey::from_bytes(&[0xa6; 32]);
+        let task_authority_public_key = task_authority.verifying_key().to_bytes();
+        let agent = SuiteOneAgentKernelClientV2::from_verified_startup_for_test_support(
+            startup,
+            BootIdV2::new([0xd1; 32]),
+            BootIdV2::new([0xc1; 32]),
+            rollover_peer_binding(startup, EndpointRoleV2::AgentKernel),
+            keys.agent_client,
+            keys.agent_server.verifying_key().to_bytes(),
+            derive_ed25519_key_id_v2(task_authority_public_key),
+            task_authority_public_key,
+            PathBuf::from("/tmp/savana-agent-rollover-unused.sock"),
+            agent_loader,
         )
-        .expect("rollover application request");
-        let request_bytes =
-            encode_kernel_service_application_request_v2(&request).expect("encode request");
-        let request_record = session
-            .seal_application_request(request_id, 0, &request_bytes)
-            .expect("seal rollover request");
-        channel
-            .write_record_frame(&request_record, deadline)
-            .expect("write rollover request");
-        let response_record = channel
-            .read_record_frame(deadline)
-            .expect("read rollover response");
-        let opened = session
-            .open_application_response(&response_record)
-            .expect("open rollover response");
-        let response = decode_kernel_service_application_response_v2(opened.plaintext(), role, 0)
-            .expect("decode rollover response");
-        assert!(matches!(
-            response.body(),
-            KernelServiceApplicationResponseBodyV2::Success(body) if body == &[0x80]
-        ));
-        assert_eq!(server.join().expect("rollover listener thread"), Ok(()));
+        .expect("verified agent rollover authority test client");
+        let ingress = SuiteOneIngressKernelClientV2::from_verified_startup_for_test_support(
+            startup,
+            BootIdV2::new([0xd2; 32]),
+            BootIdV2::new([0xc1; 32]),
+            rollover_peer_binding(startup, EndpointRoleV2::IngressKernel),
+            keys.ingress_client,
+            keys.ingress_server.verifying_key().to_bytes(),
+            PathBuf::from("/tmp/savana-ingress-rollover-unused.sock"),
+            ingress_loader,
+        )
+        .expect("verified ingress rollover authority test client");
+        (agent, ingress)
+    }
+
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn client_rollover_loader_failure_keeps_old_authority() {
+        let startup = verified_rollover_startup(1, Digest32V2::new([0x41; 32]));
+        let (agent, ingress) = rollover_authority_test_clients(&startup, || Err(()), || Err(()));
+
+        assert!(agent.reload_verified_authority_for_test_support().is_err());
+        assert!(ingress
+            .reload_verified_authority_for_test_support()
+            .is_err());
+        assert_eq!(agent.active_generation_for_test_support(), Some(1));
+        assert_eq!(ingress.active_generation_for_test_support(), Some(1));
+    }
+
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn client_rollover_generation_gap_keeps_old_authority() {
+        let startup = verified_rollover_startup(1, Digest32V2::new([0x42; 32]));
+        let (agent, ingress) = rollover_authority_test_clients(
+            &startup,
+            || Ok(verified_rollover_startup(3, Digest32V2::new([0x43; 32]))),
+            || Ok(verified_rollover_startup(3, Digest32V2::new([0x43; 32]))),
+        );
+
+        assert!(agent.reload_verified_authority_for_test_support().is_err());
+        assert!(ingress
+            .reload_verified_authority_for_test_support()
+            .is_err());
+        assert_eq!(agent.active_generation_for_test_support(), Some(1));
+        assert_eq!(ingress.active_generation_for_test_support(), Some(1));
+    }
+
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn client_rollover_identity_change_keeps_old_authority() {
+        let startup = verified_rollover_startup(1, Digest32V2::new([0x44; 32]));
+        let (agent, ingress) = rollover_authority_test_clients(
+            &startup,
+            || {
+                Ok(verified_rollover_startup_with_identity_change(
+                    2,
+                    Digest32V2::new([0x45; 32]),
+                    true,
+                ))
+            },
+            || {
+                Ok(verified_rollover_startup_with_identity_change(
+                    2,
+                    Digest32V2::new([0x45; 32]),
+                    true,
+                ))
+            },
+        );
+
+        assert!(agent.reload_verified_authority_for_test_support().is_err());
+        assert!(ingress
+            .reload_verified_authority_for_test_support()
+            .is_err());
+        assert_eq!(agent.active_generation_for_test_support(), Some(1));
+        assert_eq!(ingress.active_generation_for_test_support(), Some(1));
+    }
+
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn client_rollover_listener_change_keeps_old_authority() {
+        let startup = verified_rollover_startup(1, Digest32V2::new([0x4a; 32]));
+        let (agent, ingress) = rollover_authority_test_clients(
+            &startup,
+            || {
+                Ok(verified_rollover_startup_with_mutation(
+                    2,
+                    Digest32V2::new([0x4b; 32]),
+                    RolloverStartupMutationV2::ListenerIdentity,
+                ))
+            },
+            || {
+                Ok(verified_rollover_startup_with_mutation(
+                    2,
+                    Digest32V2::new([0x4b; 32]),
+                    RolloverStartupMutationV2::ListenerIdentity,
+                ))
+            },
+        );
+
+        assert!(agent.reload_verified_authority_for_test_support().is_err());
+        assert!(ingress
+            .reload_verified_authority_for_test_support()
+            .is_err());
+        assert_eq!(agent.active_generation_for_test_support(), Some(1));
+        assert_eq!(ingress.active_generation_for_test_support(), Some(1));
+    }
+
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn client_rollover_handshake_key_change_keeps_old_authority() {
+        let startup = verified_rollover_startup(1, Digest32V2::new([0x4c; 32]));
+        let (agent, ingress) = rollover_authority_test_clients(
+            &startup,
+            || {
+                Ok(verified_rollover_startup_with_mutation(
+                    2,
+                    Digest32V2::new([0x4d; 32]),
+                    RolloverStartupMutationV2::HandshakeKeys,
+                ))
+            },
+            || {
+                Ok(verified_rollover_startup_with_mutation(
+                    2,
+                    Digest32V2::new([0x4d; 32]),
+                    RolloverStartupMutationV2::HandshakeKeys,
+                ))
+            },
+        );
+
+        assert!(agent.reload_verified_authority_for_test_support().is_err());
+        assert!(ingress
+            .reload_verified_authority_for_test_support()
+            .is_err());
+        assert_eq!(agent.active_generation_for_test_support(), Some(1));
+        assert_eq!(ingress.active_generation_for_test_support(), Some(1));
+    }
+
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn client_rollover_same_generation_manifest_change_keeps_old_authority() {
+        let startup = verified_rollover_startup(1, Digest32V2::new([0x4e; 32]));
+        let (agent, ingress) = rollover_authority_test_clients(
+            &startup,
+            || {
+                Ok(verified_rollover_startup_with_mutation(
+                    1,
+                    Digest32V2::new([0x4f; 32]),
+                    RolloverStartupMutationV2::ActiveManifest,
+                ))
+            },
+            || {
+                Ok(verified_rollover_startup_with_mutation(
+                    1,
+                    Digest32V2::new([0x4f; 32]),
+                    RolloverStartupMutationV2::ActiveManifest,
+                ))
+            },
+        );
+
+        assert!(agent.reload_verified_authority_for_test_support().is_err());
+        assert!(ingress
+            .reload_verified_authority_for_test_support()
+            .is_err());
+        assert_eq!(agent.active_generation_for_test_support(), Some(1));
+        assert_eq!(ingress.active_generation_for_test_support(), Some(1));
+    }
+
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn client_rollover_rollback_keeps_current_authority() {
+        let startup = verified_rollover_startup(2, Digest32V2::new([0x46; 32]));
+        let (agent, ingress) = rollover_authority_test_clients(
+            &startup,
+            || Ok(verified_rollover_startup(1, Digest32V2::new([0x47; 32]))),
+            || Ok(verified_rollover_startup(1, Digest32V2::new([0x47; 32]))),
+        );
+
+        assert!(agent.reload_verified_authority_for_test_support().is_err());
+        assert!(ingress
+            .reload_verified_authority_for_test_support()
+            .is_err());
+        assert_eq!(agent.active_generation_for_test_support(), Some(2));
+        assert_eq!(ingress.active_generation_for_test_support(), Some(2));
+    }
+
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn concurrent_client_clones_share_one_successor_publication() {
+        let startup = verified_rollover_startup(1, Digest32V2::new([0x48; 32]));
+        let (agent, ingress) = rollover_authority_test_clients(
+            &startup,
+            || Ok(verified_rollover_startup(2, Digest32V2::new([0x49; 32]))),
+            || Ok(verified_rollover_startup(2, Digest32V2::new([0x49; 32]))),
+        );
+        let agent_first = agent.clone();
+        let agent_second = agent.clone();
+        let ingress_first = ingress.clone();
+        let ingress_second = ingress.clone();
+
+        let agent_first_reload =
+            thread::spawn(move || agent_first.reload_verified_authority_for_test_support());
+        let agent_second_reload =
+            thread::spawn(move || agent_second.reload_verified_authority_for_test_support());
+        let ingress_first_reload =
+            thread::spawn(move || ingress_first.reload_verified_authority_for_test_support());
+        let ingress_second_reload =
+            thread::spawn(move || ingress_second.reload_verified_authority_for_test_support());
+
+        assert!(agent_first_reload
+            .join()
+            .expect("first agent reload")
+            .is_ok());
+        assert!(agent_second_reload
+            .join()
+            .expect("second agent reload")
+            .is_ok());
+        assert!(ingress_first_reload
+            .join()
+            .expect("first ingress reload")
+            .is_ok());
+        assert!(ingress_second_reload
+            .join()
+            .expect("second ingress reload")
+            .is_ok());
+        assert_eq!(agent.active_generation_for_test_support(), Some(2));
+        assert_eq!(ingress.active_generation_for_test_support(), Some(2));
     }
 
     #[cfg(feature = "test-support")]
     fn verified_rollover_startup(
         deployment_generation: u64,
         declassification_rule_set_digest: Digest32V2,
+    ) -> VerifiedDaemonStartupV2 {
+        verified_rollover_startup_with_identity_change(
+            deployment_generation,
+            declassification_rule_set_digest,
+            false,
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    fn verified_rollover_startup_with_identity_change(
+        deployment_generation: u64,
+        declassification_rule_set_digest: Digest32V2,
+        identity_change: bool,
+    ) -> VerifiedDaemonStartupV2 {
+        verified_rollover_startup_with_mutation(
+            deployment_generation,
+            declassification_rule_set_digest,
+            if identity_change {
+                RolloverStartupMutationV2::ServiceIdentity
+            } else {
+                RolloverStartupMutationV2::None
+            },
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum RolloverStartupMutationV2 {
+        None,
+        ServiceIdentity,
+        ListenerIdentity,
+        HandshakeKeys,
+        ActiveManifest,
+    }
+
+    #[cfg(feature = "test-support")]
+    fn verified_rollover_startup_with_mutation(
+        deployment_generation: u64,
+        declassification_rule_set_digest: Digest32V2,
+        mutation: RolloverStartupMutationV2,
     ) -> VerifiedDaemonStartupV2 {
         use savana_kernel_protocol::v2::{Ed25519KeyIdV2, EndpointRoleV2, ServiceIdentityV2};
         use savana_platform_identity::{BoundedIdentityStringV2, ExpectedNativePeerV2};
@@ -1384,7 +1746,10 @@ mod native {
             let seed = service.tag() as u8;
             ServiceDeploymentLockV2 {
                 service,
-                service_identity: ServiceIdentityV2::new([seed + 80; 32]),
+                service_identity: ServiceIdentityV2::new(
+                    [seed + 80 + u8::from(mutation == RolloverStartupMutationV2::ServiceIdentity);
+                        32],
+                ),
                 uid: 500 + u32::from(seed),
                 gid: 600 + u32::from(seed),
                 executable_digest: Digest32V2::new([seed; 32]),
@@ -1414,6 +1779,26 @@ mod native {
             derive_ed25519_key_id_v2(endpoint_keys.ingress_client.verifying_key().to_bytes());
         let ingress_server_key_id =
             derive_ed25519_key_id_v2(endpoint_keys.ingress_server.verifying_key().to_bytes());
+        let changed_agent_client_key_id = derive_ed25519_key_id_v2(
+            SigningKey::from_bytes(&[0xb6; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let changed_agent_server_key_id = derive_ed25519_key_id_v2(
+            SigningKey::from_bytes(&[0xb7; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let changed_ingress_client_key_id = derive_ed25519_key_id_v2(
+            SigningKey::from_bytes(&[0xb8; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let changed_ingress_server_key_id = derive_ed25519_key_id_v2(
+            SigningKey::from_bytes(&[0xb9; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
         let envelope_key_id =
             derive_ed25519_key_id_v2(endpoint_keys.envelope.verifying_key().to_bytes());
         let edges: Vec<_> = ClosedServiceEdgeIdV2::ALL
@@ -1423,8 +1808,18 @@ mod native {
                 let seed = edge_id.tag() as u8;
                 let client = service_lock(edge_id.client_service());
                 let (client_handshake_key_id, server_handshake_key_id) = match edge_id {
+                    ClosedServiceEdgeIdV2::AgentKernel
+                        if mutation == RolloverStartupMutationV2::HandshakeKeys =>
+                    {
+                        (changed_agent_client_key_id, changed_agent_server_key_id)
+                    }
                     ClosedServiceEdgeIdV2::AgentKernel => {
                         (agent_client_key_id, agent_server_key_id)
+                    }
+                    ClosedServiceEdgeIdV2::IngressKernel
+                        if mutation == RolloverStartupMutationV2::HandshakeKeys =>
+                    {
+                        (changed_ingress_client_key_id, changed_ingress_server_key_id)
                     }
                     ClosedServiceEdgeIdV2::IngressKernel => {
                         (ingress_client_key_id, ingress_server_key_id)
@@ -1443,7 +1838,11 @@ mod native {
                         ClosedServiceEdgeIdV2::IngressKernel => EndpointRoleV2::IngressKernel,
                         ClosedServiceEdgeIdV2::KernelExecutor => EndpointRoleV2::KernelExecutor,
                     },
-                    listener_identity_digest: Digest32V2::new([0xa0 + seed; 32]),
+                    listener_identity_digest: Digest32V2::new(
+                        [0xa0 + seed
+                            + u8::from(mutation == RolloverStartupMutationV2::ListenerIdentity);
+                            32],
+                    ),
                     client_handshake_key_id,
                     server_handshake_key_id,
                     expected_client: ExpectedNativePeerV2::linux(
@@ -1458,7 +1857,11 @@ mod native {
             })
             .collect();
         let installation_id = Digest32V2::new([0x91; 32]);
-        let active_manifest = Digest32V2::new([deployment_generation as u8 + 0x40; 32]);
+        let active_manifest = Digest32V2::new(
+            [deployment_generation as u8
+                + 0x40
+                + u8::from(mutation == RolloverStartupMutationV2::ActiveManifest); 32],
+        );
         let protocol_abi = Digest32V2::new([0x93; 32]);
         let projection_identity = Digest32V2::new([0x94; 32]);
         let ledger_head = Digest32V2::new([0x97; 32]);

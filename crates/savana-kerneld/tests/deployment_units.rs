@@ -173,6 +173,23 @@ fn deployment_recovery_gate_and_private_store_layout_are_fixed() {
 }
 
 #[test]
+fn live_kernel_clients_expose_only_sighup_reload_to_systemd() {
+    for unit in ["savana-agentd.service", "savana-ingressd.service"] {
+        let body = fs::read_to_string(Path::new(UNIT_DIRECTORY).join(unit)).unwrap();
+        assert!(body
+            .lines()
+            .any(|line| line == "ExecReload=/bin/kill -HUP $MAINPID"));
+        assert_eq!(
+            body.lines()
+                .filter(|line| line.starts_with("ExecReload="))
+                .count(),
+            1,
+            "{unit} must have one closed reload action"
+        );
+    }
+}
+
+#[test]
 fn role_socket_groups_and_bootstrap_observation_shape_are_exact() {
     let unit = |name: &str| {
         fs::read_to_string(Path::new(UNIT_DIRECTORY).join(name))

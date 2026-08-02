@@ -11,6 +11,7 @@ workspace = true
 
 [features]
 default = []
+test-support = []
 macos-development-authority = [
     "savana-approvald/macos-development-authority",
     "savana-policy-core/macos-development-authority",
@@ -34,6 +35,7 @@ serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true
 rustix.workspace = true
+signal-hook.workspace = true
 
 [dev-dependencies]
 tempfile = "=3.23.0"

@@ -8,6 +8,7 @@ Type=simple
 User=savana-ingress
 Group=savana-ingress
 ExecStart=/usr/libexec/savana/savana-ingressd --config /etc/savana/ingressd-bootstrap-v2.json
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=1s
 TimeoutStopSec=15s
