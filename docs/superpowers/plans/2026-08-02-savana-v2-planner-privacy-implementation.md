@@ -75,7 +75,7 @@
 
 - [ ] **Step 4: Add nonce-free mapper input and validated mapped workflow**
 
-  Add read-only accessors for task template, intent, action allowlist, slots, relations, and effective limits to `PlannerEnvelopeV2` without changing its encoder/decoder. Define mapper request fields from those accessors but deliberately omit route, nonce, and expiry. Define mapped nodes by local ordinal plus concrete `tool_class`, `action_template`, sorted slot bindings, signed structural role/effect, and bounded predecessor ordinals. Validation must prove every action is envelope-allowed, every tool pair is active and catalog-backed, every slot reference belongs to the envelope, predecessor edges point backward only after topological validation, and all effective limits hold.
+  Add read-only accessors for task template, intent, action allowlist, slots, relations, and effective limits to `PlannerEnvelopeV2` without changing its encoder/decoder. Define mapper request fields from those accessors but deliberately omit route, nonce, and expiry. Define mapped nodes by local ordinal plus concrete `tool_class`, `action_template`, sorted slot bindings, signed structural role/effect, and bounded edges between local ordinals. Validation must prove every action is envelope-allowed, every tool pair is active and catalog-backed, every slot reference belongs to the envelope, every edge endpoint exists, the graph is acyclic, and all effective limits hold. Mapper-local ordinals do not impose an order; only the later planner permutation does, and decode converts incoming edges into lower dependency ordinals after validating that permutation topologically.
 
 - [ ] **Step 5: Write RED deterministic-decode tests**
 
@@ -374,4 +374,3 @@
 - [ ] **Step 6: Commit**
 
   Commit: `docs(v2): finalize planner privacy deployment`
-
