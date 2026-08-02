@@ -6206,6 +6206,8 @@ mod tests {
                 ui_key.verifying_key().to_bytes(),
                 derive_ed25519_key_id_v2(ingress_settlement_key.verifying_key().to_bytes()),
                 ingress_settlement_key.verifying_key().to_bytes(),
+                planner_declassification_rules(),
+                EffectSetV2::SEND,
             )
             .unwrap(),
             8,
@@ -6346,6 +6348,8 @@ mod tests {
                 settlement_key.verifying_key().to_bytes(),
                 derive_ed25519_key_id_v2(ingress_settlement_key.verifying_key().to_bytes()),
                 ingress_settlement_key.verifying_key().to_bytes(),
+                planner_declassification_rules(),
+                EffectSetV2::SEND,
             )
             .unwrap(),
             8,
@@ -6449,6 +6453,8 @@ mod tests {
                 settlement_key.verifying_key().to_bytes(),
                 derive_ed25519_key_id_v2(ingress_settlement_key.verifying_key().to_bytes()),
                 ingress_settlement_key.verifying_key().to_bytes(),
+                planner_declassification_rules(),
+                EffectSetV2::SEND,
             )
             .unwrap(),
             8,

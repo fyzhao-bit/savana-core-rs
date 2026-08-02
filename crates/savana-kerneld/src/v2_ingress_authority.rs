@@ -6,13 +6,19 @@ use savana_kernel_protocol::v2::{
     DurableTaskIdV2, Ed25519KeyIdV2, IngressKernelApprovalHandleV2,
     IngressUiAuthenticationPreparationHandleV2, IngressUiAuthorizationHandleV2,
     KernelIngressBootstrapTransferCapabilityV2, Nonce32V2, PendingIngressHandleV2, PrincipalIdV2,
-    ServiceIdentityV2, SignedApprovalEnvelopeV2, SignedApprovalSettlementV2,
+    ProducerIdentityV2, ServiceIdentityV2, SignedApprovalEnvelopeV2, SignedApprovalSettlementV2,
     SignedUiAuthenticationEnvelopeV2, SignedUiAuthenticationSettlementV2,
     UiAuthenticationBindingV2, UiAuthenticationPurposeV2, UnixMillisV2, UnsignedApprovalEnvelopeV2,
     UnsignedUiAuthenticationEnvelopeV2,
 };
+use savana_policy_core::v2::{
+    token_set_digest_v2, ClosedDeclassificationPurposeV2, DeclassificationTransitionV2,
+    EffectSetV2, HandoffJudgmentV2, KernelValueV2, ProvenanceContextV2, ProvenanceRecordV2,
+};
 use sha2::{Digest as _, Sha256};
 
+use crate::v2_data_plane::durable_run_id;
+use crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2;
 use crate::v2_input_owner::{
     FinalizedKernelInputV2, KernelInputErrorV2, KernelVerifiedUiAuthorizationV2,
 };
@@ -50,6 +56,8 @@ pub(crate) struct KernelIngressSecurityConfigV2 {
     ui_settlement_public_key: [u8; 32],
     ingress_settlement_key_id: Ed25519KeyIdV2,
     ingress_settlement_public_key: [u8; 32],
+    declassification_rules: ActiveDeclassificationRuleSetV2,
+    policy_allowed_effects: EffectSetV2,
 }
 
 impl std::fmt::Debug for KernelIngressSecurityConfigV2 {
@@ -69,6 +77,8 @@ impl KernelIngressSecurityConfigV2 {
         ui_settlement_public_key: [u8; 32],
         ingress_settlement_key_id: Ed25519KeyIdV2,
         ingress_settlement_public_key: [u8; 32],
+        declassification_rules: ActiveDeclassificationRuleSetV2,
+        policy_allowed_effects: EffectSetV2,
     ) -> Result<Self, KernelIngressAuthorityErrorV2> {
         if is_zero(installation_id.as_bytes())
             || is_zero(ingressd_identity.as_bytes())
@@ -87,6 +97,8 @@ impl KernelIngressSecurityConfigV2 {
             ui_settlement_public_key,
             ingress_settlement_key_id,
             ingress_settlement_public_key,
+            declassification_rules,
+            policy_allowed_effects,
         })
     }
 }
@@ -446,8 +458,60 @@ impl KernelIngressAuthorityV2 {
             BoundedApprovalDisplayTextV2::from_binary(&display_encoder.into_writer())
                 .map_err(|_| KernelIngressAuthorityErrorV2::BindingMismatch)?;
         let display_digest = approval_display_digest_v2(display_text.as_bytes());
-        let decision_challenge = Nonce32V2::new(random_bytes()?);
         let expires_at = bounded_expiry(now, APPROVAL_TTL_MS, authorization.expires_at())?;
+        let display_value = KernelValueV2::text(display_text.as_str())
+            .map_err(|_| KernelIngressAuthorityErrorV2::BindingMismatch)?;
+        let provenance_context = ProvenanceContextV2::from_authenticated_runtime(
+            ProducerIdentityV2::new(*self.config.ingressd_identity.as_bytes()),
+            durable_run_id(
+                self.config.installation_id,
+                active_state_manifest_digest,
+                durable_task_id,
+                principal,
+                finalized.input_commitment(),
+            )
+            .map_err(|_| KernelIngressAuthorityErrorV2::Unavailable)?,
+            active_state_manifest_digest,
+            now,
+            expires_at,
+        )
+        .map_err(|_| KernelIngressAuthorityErrorV2::BindingMismatch)?;
+        let display_parent = ProvenanceRecordV2::from_verified_kernel_input(
+            &display_value,
+            provenance_context,
+            authorization.settlement_digest(),
+            finalized.source_provenance_digest(),
+            authorization.authentication_context_digest(),
+            authorization.binding_digest(),
+            self.config.policy_allowed_effects,
+        )
+        .map_err(|_| KernelIngressAuthorityErrorV2::BindingMismatch)?;
+        let declassification_rules = self
+            .config
+            .declassification_rules
+            .snapshot()
+            .map_err(|_| KernelIngressAuthorityErrorV2::Unavailable)?;
+        let display_declassification = ProvenanceRecordV2::declassify(
+            &display_value,
+            provenance_context,
+            DeclassificationTransitionV2::BuildApprovalDisplay,
+            &declassification_rules,
+            ClosedDeclassificationPurposeV2::ApprovalDisplay.purpose_digest(),
+            token_set_digest_v2(&[]).map_err(|_| KernelIngressAuthorityErrorV2::BindingMismatch)?,
+            None,
+            &[&display_parent],
+            self.config.policy_allowed_effects,
+            now.get(),
+        )
+        .map_err(|_| KernelIngressAuthorityErrorV2::BindingMismatch)?;
+        if display_declassification.judge_handoff(
+            DeclassificationTransitionV2::BuildApprovalDisplay,
+            &declassification_rules,
+        ) != HandoffJudgmentV2::Admits
+        {
+            return Err(KernelIngressAuthorityErrorV2::BindingMismatch);
+        }
+        let decision_challenge = Nonce32V2::new(random_bytes()?);
         let approval_unsigned = UnsignedApprovalEnvelopeV2::new(
             self.config.installation_id,
             active_state_manifest_digest,
@@ -460,7 +524,7 @@ impl KernelIngressAuthorityV2 {
             display_projection_digest,
             display_digest,
             display_text,
-            None,
+            Some(display_declassification.provenance_digest()),
             self.config.approvald_identity,
             now,
             expires_at,
@@ -768,16 +832,23 @@ fn is_zero(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use ed25519_dalek::{Signer as _, SigningKey};
     use savana_kernel_protocol::v2::{
         derive_ed25519_key_id_v2, input_channel_step_digest_v2, input_chunk_digest_v2,
-        ApprovalDecisionV2, ApprovalPurposeV2, BeginInputRequestV2, ContentKindV2, Digest32V2,
-        DirectInputChannelV2, Ed25519SignatureV2, FinalizeInputRequestV2, FixedOriginV2,
-        InputChannelCommitmentV2, InputChannelV2, InputSourceKindV2, InputSourceProvenanceV2,
-        Nonce32V2, PrincipalIdV2, ServiceIdentityV2, SignedApprovalSettlementV2,
-        SignedUiAuthenticationSettlementV2, UiAuthenticationPurposeV2, UnixMillisV2,
-        UnsignedApprovalSettlementV2, UnsignedUiAuthenticationSettlementV2, VersionV2,
-        ZeroizingBytesV2,
+        ApprovalDecisionV2, ApprovalDisplayViewV2, ApprovalPurposeV2, BeginInputRequestV2,
+        ContentKindV2, Digest32V2, DirectInputChannelV2, Ed25519SignatureV2,
+        FinalizeInputRequestV2, FixedOriginV2, InputChannelCommitmentV2, InputChannelV2,
+        InputSourceKindV2, InputSourceProvenanceV2, Nonce32V2, PrincipalIdV2, ServiceIdentityV2,
+        SignedApprovalSettlementV2, SignedUiAuthenticationSettlementV2, UiAuthenticationPurposeV2,
+        UnixMillisV2, UnsignedApprovalSettlementV2, UnsignedUiAuthenticationSettlementV2,
+        VersionV2, ZeroizingBytesV2,
+    };
+    use savana_policy_core::v2::{
+        declassification_implementation_digest_v2, ClosedDeclassificationPurposeV2,
+        DeclassificationRuleSetV2, DeclassificationRuleV2, EffectSetV2, LeakGateDutyV2,
+        OperationalTrustRootPurposeV2, OperationalTrustRootSetItemV2, OperationalTrustRootSetV2,
     };
     use sha2::{Digest as _, Sha256};
 
@@ -785,6 +856,7 @@ mod tests {
         KernelIngressAuthorityErrorV2, KernelIngressAuthorityV2, KernelIngressSecurityConfigV2,
         KernelPendingIngressStateV2, VerifiedIngressSettlementDecisionV2,
     };
+    use crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2;
     use crate::v2_input_owner::KernelInputOwnerV2;
 
     const UI_SETTLEMENT_DOMAIN: &[u8] = b"SAVANA_UI_AUTH_INGRESS_SETTLEMENT_V2\0";
@@ -792,13 +864,255 @@ mod tests {
 
     #[test]
     fn ingress_authority_consumes_each_capability_and_binds_both_settlements() {
-        let installation = Digest32V2::new([0x11; 32]);
-        let manifest = Digest32V2::new([0x12; 32]);
-        let ingress_identity = ServiceIdentityV2::new([0x13; 32]);
-        let approval_identity = ServiceIdentityV2::new([0x14; 32]);
-        let envelope_key = SigningKey::from_bytes(&[0x15; 32]);
-        let ui_key = SigningKey::from_bytes(&[0x16; 32]);
-        let approval_key = SigningKey::from_bytes(&[0x17; 32]);
+        let FinalizedIngressFixtureV2 {
+            mut authority,
+            finalized,
+            installation,
+            manifest,
+            principal,
+            envelope_key,
+            approval_key,
+        } = finalized_ingress_for_rule(ApprovalRuleModeV2::Admit);
+        let pending = authority
+            .prepare_pending_approval(finalized, manifest, 7, UnixMillisV2::new(150))
+            .unwrap();
+        let approval_unsigned = pending
+            .envelope
+            .verify(
+                derive_ed25519_key_id_v2(envelope_key.verifying_key().to_bytes()),
+                envelope_key.verifying_key().to_bytes(),
+                installation,
+                manifest,
+                7,
+                ApprovalPurposeV2::Ingress,
+                principal,
+                UnixMillisV2::new(160),
+            )
+            .unwrap();
+        let display_declassification_node = approval_unsigned
+            .display_declassification_provenance_digest()
+            .expect("real ingress approval must carry its tag-3 node");
+        let display_view = ApprovalDisplayViewV2::new(
+            ApprovalPurposeV2::Ingress,
+            approval_unsigned.display_projection_digest(),
+            approval_unsigned.display_digest(),
+            approval_unsigned.display_text().clone(),
+            display_declassification_node,
+        )
+        .unwrap();
+        assert_eq!(
+            display_view.display_text().as_bytes(),
+            approval_unsigned.display_text().as_bytes(),
+        );
+        let approval_settlement_unsigned = UnsignedApprovalSettlementV2::new(
+            installation,
+            manifest,
+            7,
+            ApprovalPurposeV2::Ingress,
+            pending.envelope.envelope_digest().unwrap(),
+            ApprovalDecisionV2::Approve,
+            principal,
+            Digest32V2::new([0x23; 32]),
+            Digest32V2::new([0x24; 32]),
+            true,
+            true,
+            false,
+            false,
+            1,
+            approval_unsigned.decision_challenge(),
+            Nonce32V2::new([0x25; 32]),
+            UnixMillisV2::new(160),
+            UnixMillisV2::new(250),
+        )
+        .unwrap();
+        let tampered_settlement = SignedApprovalSettlementV2::from_parts(
+            approval_settlement_unsigned.clone(),
+            derive_ed25519_key_id_v2(approval_key.verifying_key().to_bytes()),
+            Ed25519SignatureV2::new([0x7a; 64]),
+        )
+        .unwrap();
+        assert_eq!(
+            authority.verify_settlement(
+                pending.pending,
+                pending.approval,
+                &tampered_settlement,
+                manifest,
+                7,
+                UnixMillisV2::new(165),
+            ),
+            Err(KernelIngressAuthorityErrorV2::BindingMismatch),
+        );
+        assert_eq!(
+            authority.pending_status(pending.pending).unwrap(),
+            KernelPendingIngressStateV2::AwaitingApproval,
+        );
+        let approval_settlement =
+            sign_approval_settlement(approval_settlement_unsigned, &approval_key);
+        let decision = authority
+            .verify_settlement(
+                pending.pending,
+                pending.approval,
+                &approval_settlement,
+                manifest,
+                7,
+                UnixMillisV2::new(170),
+            )
+            .unwrap();
+        assert!(matches!(
+            decision,
+            VerifiedIngressSettlementDecisionV2::Approved { principal: p, .. } if p == principal
+        ));
+        let record_index = match decision {
+            VerifiedIngressSettlementDecisionV2::Approved { record_index, .. } => record_index,
+            VerifiedIngressSettlementDecisionV2::Denied => unreachable!(),
+        };
+        assert!(authority
+            .finalized_for_verified_approval(record_index)
+            .is_ok());
+        authority.finish_verified_settlement(decision).unwrap();
+        assert_eq!(
+            authority.pending_status(pending.pending).unwrap(),
+            KernelPendingIngressStateV2::Approved,
+        );
+        assert!(matches!(
+            authority.verify_settlement(
+                pending.pending,
+                pending.approval,
+                &approval_settlement,
+                manifest,
+                7,
+                UnixMillisV2::new(171),
+            ),
+            Err(KernelIngressAuthorityErrorV2::AlreadyConsumed)
+        ));
+    }
+
+    #[derive(Clone, Copy)]
+    enum ApprovalRuleModeV2 {
+        Admit,
+        NoRule,
+        WrongImplementation,
+    }
+
+    struct FinalizedIngressFixtureV2 {
+        authority: KernelIngressAuthorityV2,
+        finalized: crate::v2_input_owner::FinalizedKernelInputV2,
+        installation: Digest32V2,
+        manifest: Digest32V2,
+        principal: PrincipalIdV2,
+        envelope_key: SigningKey,
+        approval_key: SigningKey,
+    }
+
+    fn approval_display_rules(mode: ApprovalRuleModeV2) -> ActiveDeclassificationRuleSetV2 {
+        let installer = SigningKey::from_bytes(&[0xa1; 32]);
+        let authority = SigningKey::from_bytes(&[0xa2; 32]);
+        let product = Digest32V2::new([0xa3; 32]);
+        let roots = OperationalTrustRootSetV2::new_declassification_signed_for_test(
+            product,
+            1,
+            None,
+            vec![OperationalTrustRootSetItemV2::new(
+                OperationalTrustRootPurposeV2::DeclassificationAuthority,
+                authority.verifying_key().to_bytes(),
+                1,
+                1,
+                10_000,
+            )
+            .unwrap()],
+            1,
+            10_000,
+            &installer,
+            1,
+        )
+        .unwrap();
+        let (tag, purpose, implementation, duty) = match mode {
+            ApprovalRuleModeV2::Admit => (
+                3,
+                ClosedDeclassificationPurposeV2::ApprovalDisplay,
+                declassification_implementation_digest_v2(3).unwrap(),
+                LeakGateDutyV2::BlocklistOnly,
+            ),
+            ApprovalRuleModeV2::NoRule => (
+                1,
+                ClosedDeclassificationPurposeV2::AgentIngressMasking,
+                declassification_implementation_digest_v2(1).unwrap(),
+                LeakGateDutyV2::BlocklistAndNoResidualPii,
+            ),
+            ApprovalRuleModeV2::WrongImplementation => (
+                3,
+                ClosedDeclassificationPurposeV2::ApprovalDisplay,
+                Digest32V2::new([0xf1; 32]),
+                LeakGateDutyV2::BlocklistOnly,
+            ),
+        };
+        let rule = DeclassificationRuleV2::new_for_test(
+            tag,
+            purpose,
+            implementation,
+            duty,
+            None,
+            None,
+            1,
+            10_000,
+        )
+        .unwrap();
+        let rules = DeclassificationRuleSetV2::new_signed_for_test(
+            product,
+            1,
+            None,
+            vec![rule],
+            1,
+            10_000,
+            &roots,
+            &authority,
+            1,
+            100,
+        )
+        .unwrap();
+        ActiveDeclassificationRuleSetV2::new(rules, Arc::new(roots)).unwrap()
+    }
+
+    #[test]
+    fn ingress_approval_missing_tag_three_rule_mints_no_pending_record() {
+        let FinalizedIngressFixtureV2 {
+            mut authority,
+            finalized,
+            manifest,
+            ..
+        } = finalized_ingress_for_rule(ApprovalRuleModeV2::NoRule);
+
+        assert!(matches!(
+            authority.prepare_pending_approval(finalized, manifest, 7, UnixMillisV2::new(150)),
+            Err(KernelIngressAuthorityErrorV2::BindingMismatch)
+        ));
+        assert!(authority.pending.is_empty());
+    }
+
+    #[test]
+    fn ingress_approval_mismatched_tag_three_implementation_mints_no_pending_record() {
+        let FinalizedIngressFixtureV2 {
+            mut authority,
+            finalized,
+            manifest,
+            ..
+        } = finalized_ingress_for_rule(ApprovalRuleModeV2::WrongImplementation);
+
+        assert!(matches!(
+            authority.prepare_pending_approval(finalized, manifest, 7, UnixMillisV2::new(150)),
+            Err(KernelIngressAuthorityErrorV2::BindingMismatch)
+        ));
+        assert!(authority.pending.is_empty());
+    }
+
+    fn finalized_ingress_for_rule(mode: ApprovalRuleModeV2) -> FinalizedIngressFixtureV2 {
+        let installation = Digest32V2::new([0xb1; 32]);
+        let manifest = Digest32V2::new([0xb2; 32]);
+        let ingress_identity = ServiceIdentityV2::new([0xb3; 32]);
+        let approval_identity = ServiceIdentityV2::new([0xb4; 32]);
+        let envelope_key = SigningKey::from_bytes(&[0xb5; 32]);
+        let ui_key = SigningKey::from_bytes(&[0xb6; 32]);
+        let approval_key = SigningKey::from_bytes(&[0xb7; 32]);
         let config = KernelIngressSecurityConfigV2::new(
             installation,
             ingress_identity,
@@ -808,12 +1122,14 @@ mod tests {
             ui_key.verifying_key().to_bytes(),
             derive_ed25519_key_id_v2(approval_key.verifying_key().to_bytes()),
             approval_key.verifying_key().to_bytes(),
+            approval_display_rules(mode),
+            EffectSetV2::SEND,
         )
         .unwrap();
         let mut authority = KernelIngressAuthorityV2::new(config, 8).unwrap();
         let (_, transfer) = authority
             .mint_new_task_bootstrap(
-                Nonce32V2::new([0x18; 32]),
+                Nonce32V2::new([0xb8; 32]),
                 None,
                 UnixMillisV2::new(100),
                 UnixMillisV2::new(1_000),
@@ -849,31 +1165,33 @@ mod tests {
                 UnixMillisV2::new(120),
             )
             .unwrap();
-        let principal = PrincipalIdV2::new([0x19; 32]);
-        let ui_settlement_unsigned = UnsignedUiAuthenticationSettlementV2::new(
-            installation,
-            manifest,
-            7,
-            UiAuthenticationPurposeV2::IngressInput,
-            prepared.envelope.envelope_digest().unwrap(),
-            ui_unsigned.binding_digest().unwrap(),
-            FixedOriginV2::Approval8766,
-            FixedOriginV2::Ingress8767,
-            principal,
-            Digest32V2::new([0x20; 32]),
-            Digest32V2::new([0x21; 32]),
-            true,
-            true,
-            false,
-            false,
-            1,
-            ui_unsigned.envelope_nonce(),
-            Nonce32V2::new([0x22; 32]),
-            UnixMillisV2::new(120),
-            UnixMillisV2::new(300),
-        )
-        .unwrap();
-        let ui_settlement = sign_ui_settlement(ui_settlement_unsigned, &ui_key);
+        let principal = PrincipalIdV2::new([0xb9; 32]);
+        let ui_settlement = sign_ui_settlement(
+            UnsignedUiAuthenticationSettlementV2::new(
+                installation,
+                manifest,
+                7,
+                UiAuthenticationPurposeV2::IngressInput,
+                prepared.envelope.envelope_digest().unwrap(),
+                ui_unsigned.binding_digest().unwrap(),
+                FixedOriginV2::Approval8766,
+                FixedOriginV2::Ingress8767,
+                principal,
+                Digest32V2::new([0xba; 32]),
+                Digest32V2::new([0xbb; 32]),
+                true,
+                true,
+                false,
+                false,
+                1,
+                ui_unsigned.envelope_nonce(),
+                Nonce32V2::new([0xbc; 32]),
+                UnixMillisV2::new(120),
+                UnixMillisV2::new(300),
+            )
+            .unwrap(),
+            &ui_key,
+        );
         let authenticated = authority
             .authenticate_ui(
                 prepared.preparation,
@@ -885,7 +1203,7 @@ mod tests {
             )
             .unwrap();
 
-        let content = b"send a short note";
+        let content = b"strict ingress approval gate";
         let mut input = KernelInputOwnerV2::new(4, 4096).unwrap();
         input
             .register_verified_ui_authorization(authenticated.authorization, authenticated.evidence)
@@ -945,82 +1263,15 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        let pending = authority
-            .prepare_pending_approval(finalized, manifest, 7, UnixMillisV2::new(150))
-            .unwrap();
-        let approval_unsigned = pending
-            .envelope
-            .verify(
-                derive_ed25519_key_id_v2(envelope_key.verifying_key().to_bytes()),
-                envelope_key.verifying_key().to_bytes(),
-                installation,
-                manifest,
-                7,
-                ApprovalPurposeV2::Ingress,
-                principal,
-                UnixMillisV2::new(160),
-            )
-            .unwrap();
-        let approval_settlement_unsigned = UnsignedApprovalSettlementV2::new(
+        FinalizedIngressFixtureV2 {
+            authority,
+            finalized,
             installation,
             manifest,
-            7,
-            ApprovalPurposeV2::Ingress,
-            pending.envelope.envelope_digest().unwrap(),
-            ApprovalDecisionV2::Approve,
             principal,
-            Digest32V2::new([0x23; 32]),
-            Digest32V2::new([0x24; 32]),
-            true,
-            true,
-            false,
-            false,
-            1,
-            approval_unsigned.decision_challenge(),
-            Nonce32V2::new([0x25; 32]),
-            UnixMillisV2::new(160),
-            UnixMillisV2::new(250),
-        )
-        .unwrap();
-        let approval_settlement =
-            sign_approval_settlement(approval_settlement_unsigned, &approval_key);
-        let decision = authority
-            .verify_settlement(
-                pending.pending,
-                pending.approval,
-                &approval_settlement,
-                manifest,
-                7,
-                UnixMillisV2::new(170),
-            )
-            .unwrap();
-        assert!(matches!(
-            decision,
-            VerifiedIngressSettlementDecisionV2::Approved { principal: p, .. } if p == principal
-        ));
-        let record_index = match decision {
-            VerifiedIngressSettlementDecisionV2::Approved { record_index, .. } => record_index,
-            VerifiedIngressSettlementDecisionV2::Denied => unreachable!(),
-        };
-        assert!(authority
-            .finalized_for_verified_approval(record_index)
-            .is_ok());
-        authority.finish_verified_settlement(decision).unwrap();
-        assert_eq!(
-            authority.pending_status(pending.pending).unwrap(),
-            KernelPendingIngressStateV2::Approved,
-        );
-        assert!(matches!(
-            authority.verify_settlement(
-                pending.pending,
-                pending.approval,
-                &approval_settlement,
-                manifest,
-                7,
-                UnixMillisV2::new(171),
-            ),
-            Err(KernelIngressAuthorityErrorV2::AlreadyConsumed)
-        ));
+            envelope_key,
+            approval_key,
+        }
     }
 
     fn sign_ui_settlement(

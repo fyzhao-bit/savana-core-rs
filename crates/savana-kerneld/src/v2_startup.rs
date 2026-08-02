@@ -740,6 +740,8 @@ mod native {
             runtime_material.ui_settlement_public_key,
             runtime_material.ingress_settlement_key_id,
             runtime_material.ingress_settlement_public_key,
+            declassification_rule_set.clone(),
+            runtime_material.policy_allowed_effects,
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
         let data_plane = ProductionKernelDataPlaneV2::new(

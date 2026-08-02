@@ -431,7 +431,7 @@ fn map_vault_error(error: savana_vault::VaultErrorV2) -> StableCode {
     }
 }
 
-fn durable_run_id(
+pub(crate) fn durable_run_id(
     installation_id: Digest32V2,
     active_state_manifest_digest: Digest32V2,
     durable_task_id: DurableTaskIdV2,
