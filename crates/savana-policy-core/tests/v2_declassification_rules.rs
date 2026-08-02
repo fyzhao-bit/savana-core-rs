@@ -630,6 +630,11 @@ fn set_rule_windows_and_compiled_rule_reader_limits_are_enforced() {
 #[test]
 fn rule_count_overflow_uses_sixty_five_distinct_sorted_nested_rules() {
     let (roots, authority) = root_and_authority();
+    assert_eq!(
+        DeploymentHardLimitsV2::compiled().max_declassification_rules(),
+        64,
+        "this vector isolates the first out-of-bounds cardinality at 65"
+    );
     let valid = DeclassificationRuleSetV2::new_signed_for_test(
         digest(0x13),
         1,

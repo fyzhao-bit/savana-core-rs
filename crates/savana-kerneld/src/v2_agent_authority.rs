@@ -94,6 +94,13 @@ pub(crate) enum KernelAgentAuthorityErrorV2 {
     Unavailable,
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionDeclassificationGateTestObservationV2 {
+    ProvenanceDeclassificationRefused,
+    HandoffJudgmentRefused,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SignedPlannerPolicyV2 {
     planner_route: PlannerRouteIdV2,
@@ -770,6 +777,9 @@ pub(crate) struct KernelAgentAuthorityV2 {
     policy: Option<KernelG4G5RuntimeV2>,
     durable_state: Option<DurableKernelAgentAuthorityStateV2>,
     durable_poisoned: bool,
+    #[cfg(test)]
+    execution_declassification_gate_test_observation:
+        Option<ExecutionDeclassificationGateTestObservationV2>,
 }
 
 impl std::fmt::Debug for KernelAgentAuthorityV2 {
@@ -828,6 +838,8 @@ impl KernelAgentAuthorityV2 {
             policy: None,
             durable_state: None,
             durable_poisoned: false,
+            #[cfg(test)]
+            execution_declassification_gate_test_observation: None,
         })
     }
 
@@ -3023,6 +3035,10 @@ impl KernelAgentAuthorityV2 {
         now: UnixMillisV2,
     ) -> Result<savana_kernel_protocol::v2::DispatchExecutionResponseV2, KernelAgentAuthorityErrorV2>
     {
+        #[cfg(test)]
+        {
+            self.execution_declassification_gate_test_observation = None;
+        }
         self.verify_agent_caller(caller_identity)?;
         let ticket_commitment = request.ticket().authority_commitment(&self.handle_key);
         if let Some(existing) = self
@@ -3123,10 +3139,12 @@ impl KernelAgentAuthorityV2 {
             .declassification_rules
             .snapshot()
             .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
-        let (prepared, execution_declassification) = gate_execution_before_durable_prepare(
+        #[cfg(test)]
+        let mut execution_declassification_gate_test_observation = None;
+        let execution_gate_result = gate_execution_before_durable_prepare(
             &intent.dispatch_plaintext,
             || {
-                let declassification = ProvenanceRecordV2::declassify(
+                let declassification_result = ProvenanceRecordV2::declassify(
                     &execution_value,
                     execution_context,
                     execution_transition,
@@ -3137,11 +3155,24 @@ impl KernelAgentAuthorityV2 {
                     &execution_parents,
                     intent.policy_allowed_effects,
                     now.get(),
-                )
-                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+                );
+                #[cfg(test)]
+                if declassification_result.is_err() {
+                    execution_declassification_gate_test_observation = Some(
+                        ExecutionDeclassificationGateTestObservationV2::ProvenanceDeclassificationRefused,
+                    );
+                }
+                let declassification = declassification_result
+                    .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
                 if declassification.judge_handoff(execution_transition, &declassification_rules)
                     != HandoffJudgmentV2::Admits
                 {
+                    #[cfg(test)]
+                    {
+                        execution_declassification_gate_test_observation = Some(
+                            ExecutionDeclassificationGateTestObservationV2::HandoffJudgmentRefused,
+                        );
+                    }
                     return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
                 }
                 Ok(declassification)
@@ -3159,7 +3190,13 @@ impl KernelAgentAuthorityV2 {
                     )
                     .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)
             },
-        )?;
+        );
+        #[cfg(test)]
+        {
+            self.execution_declassification_gate_test_observation =
+                execution_declassification_gate_test_observation;
+        }
+        let (prepared, execution_declassification) = execution_gate_result?;
         let protocol_core = protocol_dispatch_core(&prepared)?;
         if protocol_core
             .semantic_digest()
@@ -5243,12 +5280,11 @@ mod tests {
     use sha2::{Digest as _, Sha256};
 
     use super::{
-        compiled_projection_digest, hpke_x25519_key_id, intersect_planner_request,
-        presealed_execution_payload_digest, presealed_final_release_payload_digest,
+        hpke_x25519_key_id, intersect_planner_request, presealed_execution_payload_digest,
+        presealed_final_release_payload_digest, ExecutionDeclassificationGateTestObservationV2,
         IntentRecordStateV2, KernelAgentAuthorityErrorV2, KernelAgentAuthorityV2,
         KernelAgentSecurityConfigV2, KernelG4G5RuntimeV2, KernelG7RuntimeV2,
         KernelToolApprovalConfigV2, SessionRecordV2, SignedPlannerPolicyV2, ToolRecordV2,
-        PROJECTION_DESTINATION_DOMAIN, PROJECTION_DISPLAY_DOMAIN,
     };
     use crate::v2_agent_durable::{
         KernelAgentAuthorityRollbackAnchorV2, KernelAgentAuthorityStateHeadV2,
@@ -5905,9 +5941,19 @@ mod tests {
             Vec::<InternalValidatorDeclarationV2>::new(),
             ExecutorIdentityV2::new([0xa7; 32]),
             ProjectionIdV2::new(3),
-            compiled_projection_digest(PROJECTION_DESTINATION_DOMAIN, 3),
+            // Independently pinned SHA-256 vector for destination projection 3.
+            Digest32V2::new([
+                0x59, 0xe6, 0xe3, 0xf1, 0x21, 0x72, 0x54, 0x67, 0xb5, 0x4a, 0xb5, 0x70, 0x0e, 0x1c,
+                0xbf, 0x9f, 0xde, 0x2a, 0xec, 0xb6, 0x81, 0xf3, 0x99, 0x31, 0x46, 0x9d, 0x60, 0x14,
+                0xfc, 0xa0, 0x8d, 0xfe,
+            ]),
             savana_kernel_protocol::v2::DisplayProjectionIdV2::new(4),
-            compiled_projection_digest(PROJECTION_DISPLAY_DOMAIN, 4),
+            // Independently pinned SHA-256 vector for display projection 4.
+            Digest32V2::new([
+                0xc8, 0x73, 0x8f, 0x91, 0x81, 0x6b, 0x49, 0xcb, 0x41, 0x2e, 0x99, 0xfc, 0xb3, 0xc5,
+                0xf8, 0x00, 0x3e, 0x0b, 0x1c, 0x3d, 0x6a, 0x5f, 0xc3, 0x1d, 0x8c, 0x63, 0x10, 0xdb,
+                0x12, 0xc4, 0xca, 0x78,
+            ]),
             ExecutorIdempotencyContractV2::ConnectorIdempotentByExecutionNonce,
             UnixMillisV2::new(1),
             UnixMillisV2::new(10_000),
@@ -6396,12 +6442,41 @@ mod tests {
                 RequestIdV2::new([0xc3; 16]),
                 DispatchExecutionRequestV2::new(ticket),
                 fixture.caller_identity,
-                active_state_manifest_digest,
+                Digest32V2::new([0x86; 32]),
                 deployment_generation,
                 effect_fence_epoch,
                 UnixMillisV2::new(204),
             ),
             Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+        );
+        assert_eq!(
+            fixture
+                .authority
+                .execution_declassification_gate_test_observation,
+            None,
+            "an earlier binding refusal must not impersonate the declassification gate"
+        );
+
+        assert_eq!(
+            fixture.authority.dispatch_execution(
+                RequestIdV2::new([0xc4; 16]),
+                DispatchExecutionRequestV2::new(ticket),
+                fixture.caller_identity,
+                active_state_manifest_digest,
+                deployment_generation,
+                effect_fence_epoch,
+                UnixMillisV2::new(205),
+            ),
+            Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+        );
+        assert_eq!(
+            fixture
+                .authority
+                .execution_declassification_gate_test_observation,
+            Some(
+                ExecutionDeclassificationGateTestObservationV2::ProvenanceDeclassificationRefused
+            ),
+            "the generic public refusal must come from the real execution-handoff declassification gate"
         );
 
         let (head_after, journal_after, quota_after) = {
