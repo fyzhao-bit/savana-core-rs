@@ -577,6 +577,30 @@ impl PlannerEnvelopeV2 {
         self.envelope_nonce
     }
 
+    pub const fn task_template(&self) -> StaticTemplateIdV2 {
+        self.task_template
+    }
+
+    pub const fn intent(&self) -> PlannerIntentKindV2 {
+        self.intent
+    }
+
+    pub fn allowed_action_templates(&self) -> &[ActionTemplateIdV2] {
+        &self.allowed_action_templates
+    }
+
+    pub fn slots(&self) -> &[PlannerAbstractSlotV2] {
+        &self.slots
+    }
+
+    pub fn relations(&self) -> &[PlannerAbstractRelationV2] {
+        &self.relations
+    }
+
+    pub const fn effective_limits(&self) -> PlannerLimitsV2 {
+        self.effective_limits
+    }
+
     pub const fn expires_at(&self) -> UnixMillisV2 {
         self.expires_at
     }

@@ -15,6 +15,7 @@ mod durable;
 mod kernel_authority;
 mod kernel_client;
 mod planner_client;
+pub mod planner_privacy;
 mod state_owner;
 
 use std::collections::HashSet;
