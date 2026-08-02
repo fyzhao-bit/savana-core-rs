@@ -10,8 +10,9 @@ use super::{
     encode_signed_approval_settlement_v2, encode_signed_ui_authentication_envelope_v2,
     encode_signed_ui_authentication_settlement_v2,
     AgentUiAuthenticationSettlementTransferCapabilityV2, AgentUiAuthenticationTransferCapabilityV2,
-    ApprovalDisplayAuthenticationTransferCapabilityV2, ApprovalUiRecordHandleV2, Digest32V2,
-    EndpointRoleV2, EnrollmentHandleV2, EnrollmentProfileIdV2, IngressApprovalRecordHandleV2,
+    ApprovalDisplayAuthenticationTransferCapabilityV2, ApprovalUiRecordHandleV2,
+    ConnectorApprovalRecordHandleV2, Digest32V2, EndpointRoleV2, EnrollmentHandleV2,
+    EnrollmentProfileIdV2, IngressApprovalRecordHandleV2,
     IngressUiAuthenticationSettlementTransferCapabilityV2,
     IngressUiAuthenticationTransferCapabilityV2, Nonce32V2, PublicServiceStateV2,
     ReleaseApprovalRecordHandleV2, RequestIdV2, SignedAgentAuthenticationClosureDescriptorV2,
@@ -258,6 +259,7 @@ impl RevokeCredentialResponseV2 {
 pub enum AgentApprovalRecordTargetV2 {
     Tool(ToolApprovalRecordHandleV2),
     Release(ReleaseApprovalRecordHandleV2),
+    Connector(ConnectorApprovalRecordHandleV2),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,6 +274,10 @@ pub enum RegisteredApprovalV2 {
     },
     Release {
         approval: ReleaseApprovalRecordHandleV2,
+        display_authentication: ApprovalDisplayAuthenticationTransferCapabilityV2,
+    },
+    Connector {
+        approval: ConnectorApprovalRecordHandleV2,
         display_authentication: ApprovalDisplayAuthenticationTransferCapabilityV2,
     },
 }
@@ -506,6 +512,16 @@ pub fn encode_registered_approval_v2(
                 .and_then(|()| display_authentication.encode(&mut encoder, &mut ()))
                 .map_err(ProtocolError::malformed)?;
         }
+        RegisteredApprovalV2::Connector {
+            approval,
+            display_authentication,
+        } => {
+            encoder.u16(4).map_err(ProtocolError::malformed)?;
+            approval
+                .encode(&mut encoder, &mut ())
+                .and_then(|()| display_authentication.encode(&mut encoder, &mut ()))
+                .map_err(ProtocolError::malformed)?;
+        }
     }
     Ok(encoder.into_writer())
 }
@@ -533,6 +549,12 @@ pub fn decode_registered_approval_v2(
                 .map_err(ProtocolError::from_typed_decode)?,
         },
         (EndpointRoleV2::AgentApproval, 3) => RegisteredApprovalV2::Release {
+            approval: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+            display_authentication: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        },
+        (EndpointRoleV2::AgentApproval, 4) => RegisteredApprovalV2::Connector {
             approval: minicbor::Decode::decode(&mut decoder, &mut context)
                 .map_err(ProtocolError::from_typed_decode)?,
             display_authentication: minicbor::Decode::decode(&mut decoder, &mut context)
@@ -1009,6 +1031,12 @@ fn encode_agent_approval_target<W: minicbor::encode::Write>(
                 .encode(encoder, &mut ())
                 .map_err(ProtocolError::malformed)?;
         }
+        AgentApprovalRecordTargetV2::Connector(handle) => {
+            encoder.u16(3).map_err(ProtocolError::malformed)?;
+            handle
+                .encode(encoder, &mut ())
+                .map_err(ProtocolError::malformed)?;
+        }
     }
     Ok(())
 }
@@ -1025,6 +1053,10 @@ fn decode_agent_approval_target(
                 .map_err(ProtocolError::from_typed_decode)?,
         )),
         2 => Ok(AgentApprovalRecordTargetV2::Release(
+            minicbor::Decode::decode(decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        )),
+        3 => Ok(AgentApprovalRecordTargetV2::Connector(
             minicbor::Decode::decode(decoder, &mut context)
                 .map_err(ProtocolError::from_typed_decode)?,
         )),

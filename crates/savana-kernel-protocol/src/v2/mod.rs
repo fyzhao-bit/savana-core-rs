@@ -14,6 +14,7 @@ mod http;
 mod jarvis;
 mod kernel_agent;
 mod kernel_agent_success;
+mod kernel_connector;
 mod kernel_executor;
 mod kernel_executor_success;
 mod kernel_ingress;
@@ -112,8 +113,9 @@ pub use handles::{
     ApprovalDisplayAuthenticationTransferCapabilityV2,
     ApprovalDisplayUiAuthenticationBrowserCeremonyCapabilityV2,
     ApprovalDisplayUiPreAuthenticationTabCapabilityV2, ApprovalTabSessionCapabilityV2,
-    ApprovalUiRecordHandleV2, AuthorityHandleKeyV2, EnrollmentCeremonyCapabilityV2,
-    EnrollmentHandleV2, ExecutionHandleV2, ExecutionTicketHandleV2, IngressApprovalRecordHandleV2,
+    ApprovalUiRecordHandleV2, AuthorityHandleKeyV2, ConnectorApprovalRecordHandleV2,
+    ConnectorUiAuthorizationHandleV2, EnrollmentCeremonyCapabilityV2, EnrollmentHandleV2,
+    ExecutionHandleV2, ExecutionTicketHandleV2, IngressApprovalRecordHandleV2,
     IngressKernelApprovalHandleV2, IngressTabSessionCapabilityV2,
     IngressUiAuthenticationBrowserCeremonyCapabilityV2, IngressUiAuthenticationPreparationHandleV2,
     IngressUiAuthenticationSettlementTransferCapabilityV2,
@@ -183,6 +185,17 @@ pub use kernel_agent_success::{
     ProposeToolCallResponseV2, PublicDecisionTraceV2, PublicDispatchAcceptedStateV2,
     PublicDispatchCompletionV2, PublicExecutionStatusV2, ReadAgentViewResponseV2,
     ResumeCommittedAgentAuthenticationResponseV2, RevokeVaultResponseV2, VaultPublicStateV2,
+};
+pub use kernel_connector::{
+    connector_registration_descriptor_digest_v2, decode_kernel_connector_control_operation_v2,
+    decode_prepare_connector_registration_response_v2,
+    decode_propose_connector_registration_response_v2,
+    encode_kernel_connector_control_operation_v2,
+    encode_prepare_connector_registration_response_v2,
+    encode_propose_connector_registration_response_v2, kernel_connector_control_operation_tags_v2,
+    KernelConnectorControlOperationV2, PrepareConnectorRegistrationRequestV2,
+    PrepareConnectorRegistrationResponseV2, ProposeConnectorRegistrationRequestV2,
+    ProposeConnectorRegistrationResponseV2,
 };
 pub use kernel_executor::{
     decode_kernel_executor_operation_v2, decode_signed_sealed_execution_envelope_v2,

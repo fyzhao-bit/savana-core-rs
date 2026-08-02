@@ -21,6 +21,7 @@ crates/savana-kernel-protocol/src/v2/http.rs
 crates/savana-kernel-protocol/src/v2/jarvis.rs
 crates/savana-kernel-protocol/src/v2/kernel_agent.rs
 crates/savana-kernel-protocol/src/v2/kernel_agent_success.rs
+crates/savana-kernel-protocol/src/v2/kernel_connector.rs
 crates/savana-kernel-protocol/src/v2/kernel_executor.rs
 crates/savana-kernel-protocol/src/v2/kernel_executor_success.rs
 crates/savana-kernel-protocol/src/v2/kernel_ingress.rs

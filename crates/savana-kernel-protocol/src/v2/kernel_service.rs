@@ -7,12 +7,13 @@ use crate::{ProtocolError, StableCode};
 
 use super::{
     cbor::{scan_single, V2DecodeContext},
-    decode_kernel_agent_operation_v2, decode_kernel_executor_operation_v2,
-    decode_kernel_ingress_operation_v2, encode_kernel_agent_operation_v2,
+    decode_kernel_agent_operation_v2, decode_kernel_connector_control_operation_v2,
+    decode_kernel_executor_operation_v2, decode_kernel_ingress_operation_v2,
+    encode_kernel_agent_operation_v2, encode_kernel_connector_control_operation_v2,
     encode_kernel_executor_operation_v2, encode_kernel_ingress_operation_v2, BootIdV2, Digest32V2,
-    Ed25519KeyIdV2, EndpointRoleV2, KernelAgentOperationV2, KernelExecutorOperationV2,
-    KernelIngressOperationV2, RequestIdV2, ServiceIdentityV2, UnixMillisV2, PROTOCOL_MAJOR,
-    PROTOCOL_MINOR,
+    Ed25519KeyIdV2, EndpointRoleV2, KernelAgentOperationV2, KernelConnectorControlOperationV2,
+    KernelExecutorOperationV2, KernelIngressOperationV2, RequestIdV2, ServiceIdentityV2,
+    UnixMillisV2, PROTOCOL_MAJOR, PROTOCOL_MINOR,
 };
 
 const REQUEST_FIELDS: u64 = 12;
@@ -27,6 +28,7 @@ const MAX_BODY_ITEMS: u64 = 65_536;
 #[allow(clippy::large_enum_variant)]
 pub enum KernelServiceOperationV2 {
     Agent(KernelAgentOperationV2),
+    Connector(KernelConnectorControlOperationV2),
     Ingress(KernelIngressOperationV2),
     Executor(KernelExecutorOperationV2),
 }
@@ -38,6 +40,10 @@ impl KernelServiceOperationV2 {
 
     pub const fn ingress(operation: KernelIngressOperationV2) -> Self {
         Self::Ingress(operation)
+    }
+
+    pub const fn connector(operation: KernelConnectorControlOperationV2) -> Self {
+        Self::Connector(operation)
     }
 
     pub const fn executor(operation: KernelExecutorOperationV2) -> Self {
@@ -52,6 +58,11 @@ impl KernelServiceOperationV2 {
         validate_canonical_body(&canonical_body)?;
         let full = operation_with_tag(tag, &canonical_body)?;
         let value = match role {
+            EndpointRoleV2::AgentKernel
+                if super::kernel_connector_control_operation_tags_v2().contains(&tag) =>
+            {
+                Self::Connector(decode_kernel_connector_control_operation_v2(&full)?)
+            }
             EndpointRoleV2::AgentKernel => Self::Agent(decode_kernel_agent_operation_v2(&full)?),
             EndpointRoleV2::IngressKernel => {
                 Self::Ingress(decode_kernel_ingress_operation_v2(&full)?)
@@ -70,6 +81,7 @@ impl KernelServiceOperationV2 {
     pub const fn role(&self) -> EndpointRoleV2 {
         match self {
             Self::Agent(_) => EndpointRoleV2::AgentKernel,
+            Self::Connector(_) => EndpointRoleV2::AgentKernel,
             Self::Ingress(_) => EndpointRoleV2::IngressKernel,
             Self::Executor(_) => EndpointRoleV2::KernelExecutor,
         }
@@ -78,6 +90,7 @@ impl KernelServiceOperationV2 {
     pub const fn tag(&self) -> u16 {
         match self {
             Self::Agent(operation) => operation.tag(),
+            Self::Connector(operation) => operation.tag(),
             Self::Ingress(operation) => operation.tag(),
             Self::Executor(operation) => operation.tag(),
         }
@@ -86,6 +99,7 @@ impl KernelServiceOperationV2 {
     pub fn encode_canonical_body(&self) -> Result<Vec<u8>, ProtocolError> {
         let full = match self {
             Self::Agent(operation) => encode_kernel_agent_operation_v2(operation)?,
+            Self::Connector(operation) => encode_kernel_connector_control_operation_v2(operation)?,
             Self::Ingress(operation) => encode_kernel_ingress_operation_v2(operation)?,
             Self::Executor(operation) => encode_kernel_executor_operation_v2(operation)?,
         };
@@ -606,7 +620,9 @@ fn operation_body(full: &[u8], expected_tag: u16) -> Result<Vec<u8>, ProtocolErr
 
 const fn tag_allowed(role: EndpointRoleV2, tag: u16) -> bool {
     match role {
-        EndpointRoleV2::AgentKernel => tag == 0 || (tag >= 20 && tag <= 43),
+        EndpointRoleV2::AgentKernel => {
+            tag == 0 || (tag >= 20 && tag <= 43) || tag == 70 || tag == 71
+        }
         EndpointRoleV2::IngressKernel => tag == 0 || (tag >= 40 && tag <= 50),
         EndpointRoleV2::KernelExecutor => tag == 0 || (tag >= 60 && tag <= 63),
         _ => false,
@@ -620,7 +636,10 @@ pub const fn kernel_service_operation_tags_for_role_v2(
     role: EndpointRoleV2,
 ) -> Option<&'static [u16]> {
     match role {
-        EndpointRoleV2::AgentKernel => Some(super::kernel_agent_operation_tags_v2()),
+        EndpointRoleV2::AgentKernel => Some(&[
+            0, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+            41, 42, 43, 70, 71,
+        ]),
         EndpointRoleV2::IngressKernel => Some(super::kernel_ingress_operation_tags_v2()),
         EndpointRoleV2::KernelExecutor => Some(super::kernel_executor_operation_tags_v2()),
         _ => None,

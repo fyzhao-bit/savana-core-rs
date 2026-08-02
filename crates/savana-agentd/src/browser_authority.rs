@@ -16,15 +16,16 @@ use savana_kernel_protocol::v2::{
     CommitPlannerValueRequestV2, Digest32V2, DispatchExecutionRequestV2, DispatchReleaseRequestV2,
     DisplayProjectionIdV2, EvaluateToolCallRequestV2, EvaluateToolCallResponseV2,
     ExecutionHandleV2, ExecutionStatusTargetV2, ExecutionTicketHandleV2, ExecutorIdentityV2,
-    FixedBrowserFormPostCarrierV2, GetExecutionStatusRequestV2, GetReleaseStatusRequestV2,
-    KernelAgentOperationV2, KernelAgentViewCursorV2, MaskedDocumentHandleV2,
-    NamedArgumentValueBindingV2, Nonce32V2, PendingReleaseHandleV2, PendingToolCallHandleV2,
-    PlanStepHandleV2, PlannerIntentKindV2, PlannerLimitsV2, PlannerPurposeV2, PlannerRouteIdV2,
+    FixedBrowserFormPostCarrierV2, FixedOriginV2, GetExecutionStatusRequestV2,
+    GetReleaseStatusRequestV2, KernelAgentOperationV2, KernelAgentViewCursorV2,
+    MaskedDocumentHandleV2, NamedArgumentValueBindingV2, Nonce32V2, PendingReleaseHandleV2,
+    PendingToolCallHandleV2, PlanStepHandleV2, PlannerIntentKindV2, PlannerLimitsV2,
+    PlannerPurposeV2, PlannerRouteIdV2, PrepareConnectorRegistrationRequestV2,
     PrepareFollowupIngressRequestV2, PreparePlannerCallRequestV2, PrepareReleaseRequestV2,
-    ProjectionIdV2, ProposeToolCallRequestV2, PublicDispatchCompletionV2, PublicExecutionStatusV2,
-    PublicStableCodeV2, RegisteredApprovalV2, RegisteredUiAuthenticationV2,
-    ReleaseApprovalRecordHandleV2, ReleaseHandleV2, ReleaseKernelApprovalHandleV2,
-    ReleaseStatusTargetV2, ReleaseTicketHandleV2, RequestIdV2,
+    ProjectionIdV2, ProposeConnectorRegistrationRequestV2, ProposeToolCallRequestV2,
+    PublicDispatchCompletionV2, PublicExecutionStatusV2, PublicStableCodeV2, RegisteredApprovalV2,
+    RegisteredUiAuthenticationV2, ReleaseApprovalRecordHandleV2, ReleaseHandleV2,
+    ReleaseKernelApprovalHandleV2, ReleaseStatusTargetV2, ReleaseTicketHandleV2, RequestIdV2,
     ResumeCommittedAgentAuthenticationResponseV2, RunHandleV2, SignedDurableTaskCorrelationV2,
     SignedUiAuthenticationSettlementV2, StaticTemplateIdV2, ToolApprovalRecordHandleV2,
     ToolHandleV2, ToolKernelApprovalHandleV2, UnixMillisV2, ValueHandleV2,
@@ -156,6 +157,7 @@ struct AgentTabV2 {
     reference_key: Zeroizing<[u8; 32]>,
     tab_internal_id: Digest32V2,
     agentd_boot_id: BootIdV2,
+    origin: FixedOriginV2,
     next_reference_revision: u64,
     objects: Vec<BrowserObjectBindingV2>,
     pending_releases: Vec<PendingReleaseApprovalV2>,
@@ -389,6 +391,7 @@ impl AgentBrowserAuthorityV2 {
             reference_key,
             tab_internal_id,
             agentd_boot_id: self.agentd_boot_id,
+            origin: FixedOriginV2::Agent8768,
             next_reference_revision: 1,
             objects: Vec::new(),
             pending_releases: Vec::new(),
@@ -430,11 +433,7 @@ impl AgentBrowserAuthorityV2 {
             .state
             .lock()
             .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)?;
-        let tab = state
-            .tabs
-            .iter_mut()
-            .find(|candidate| candidate.tab == tab)
-            .ok_or(AgentBrowserAuthorityErrorV2::InvalidReference)?;
+        let tab = find_action_tab(&mut state, tab)?;
         if let Some(existing) = tab
             .replays
             .iter()
@@ -522,18 +521,19 @@ impl AgentBrowserAuthorityV2 {
         else {
             return Err(AgentBrowserAuthorityErrorV2::InvalidReference);
         };
-        let request_digest = browser_action_request_digest(tab, action)?;
-        let request_id = browser_kernel_request_id(tab, client_request_nonce, action)?;
-        let effect_operation_id = browser_effect_operation_id(tab, client_request_nonce, action)?;
+        let request_digest = browser_action_request_digest(tab, action.clone())?;
+        let request_id = browser_kernel_request_id(tab, client_request_nonce, action.clone())?;
+        let effect_operation_id =
+            browser_effect_operation_id(tab, client_request_nonce, action.clone())?;
         let mut state = self
             .state
             .lock()
             .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)?;
-        let tab = state
-            .tabs
-            .iter_mut()
-            .find(|candidate| candidate.tab == tab)
-            .ok_or(AgentBrowserAuthorityErrorV2::InvalidReference)?;
+        let tab = if matches!(&action, AgentBrowserActionV2::RegisterConnector(_)) {
+            authenticated_connector_tab(&mut state, tab, self.agentd_boot_id)?
+        } else {
+            find_action_tab(&mut state, tab)?
+        };
         if let Some(existing) = tab
             .action_replays
             .iter()
@@ -827,6 +827,50 @@ impl AgentBrowserAuthorityV2 {
             }
             AgentBrowserActionV2::RefreshRelease(reference) => {
                 self.refresh_release(tab, reference, request_id, deadline)?
+            }
+            AgentBrowserActionV2::RegisterConnector(canonical_descriptor) => {
+                let prepared = self
+                    .kernel
+                    .prepare_connector_registration(
+                        PrepareConnectorRegistrationRequestV2::new(
+                            required(tab.session)?,
+                            canonical_descriptor.clone(),
+                        )
+                        .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
+                        deadline,
+                    )
+                    .map_err(map_kernel)?;
+                let proposed = self
+                    .kernel
+                    .propose_connector_registration(
+                        ProposeConnectorRegistrationRequestV2::new(
+                            prepared.authorization(),
+                            canonical_descriptor,
+                        )
+                        .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
+                        deadline,
+                    )
+                    .map_err(map_kernel)?;
+                let registered = self
+                    .approval
+                    .register_approval(
+                        proposed.envelope().clone(),
+                        proposed.display_authentication().clone(),
+                        deadline,
+                    )
+                    .map_err(map_approval)?;
+                let RegisteredApprovalV2::Connector {
+                    display_authentication,
+                    ..
+                } = registered
+                else {
+                    return Err(AgentBrowserAuthorityErrorV2::StateConflict);
+                };
+                AgentBrowserMutationResponseV2::ConnectorOpenApproval {
+                    post: FixedBrowserFormPostCarrierV2::AgentApprovalDisplay(
+                        display_authentication,
+                    ),
+                }
             }
         };
         tab.action_replays.push(ActionReplayV2 {
@@ -1465,6 +1509,42 @@ fn browser_read_request_digest(
     Ok(Digest32V2::new(hasher.finalize().into()))
 }
 
+fn find_action_tab(
+    state: &mut AuthorityStateV2,
+    requested: AgentTabSessionCapabilityV2,
+) -> Result<&mut AgentTabV2, AgentBrowserAuthorityErrorV2> {
+    state
+        .tabs
+        .iter_mut()
+        .find(|candidate| candidate.tab == requested)
+        .ok_or(AgentBrowserAuthorityErrorV2::InvalidReference)
+}
+
+fn authenticated_connector_tab(
+    state: &mut AuthorityStateV2,
+    requested: AgentTabSessionCapabilityV2,
+    current_agentd_boot_id: BootIdV2,
+) -> Result<&mut AgentTabV2, AgentBrowserAuthorityErrorV2> {
+    let tab = find_action_tab(state, requested)?;
+    let freshly_authenticated = tab.authorization.is_some()
+        && tab.kernel_document.is_none()
+        && tab.session.is_none()
+        && tab.run.is_none()
+        && tab.initial_value.is_none();
+    let claimed_authenticated = tab.authorization.is_none()
+        && tab.kernel_document.is_some()
+        && tab.session.is_some()
+        && tab.run.is_some()
+        && tab.initial_value.is_some();
+    if tab.agentd_boot_id != current_agentd_boot_id
+        || tab.origin != FixedOriginV2::Agent8768
+        || !(freshly_authenticated || claimed_authenticated)
+    {
+        return Err(AgentBrowserAuthorityErrorV2::InvalidReference);
+    }
+    Ok(tab)
+}
+
 fn draw_nonce() -> Result<Nonce32V2, AgentBrowserAuthorityErrorV2> {
     Ok(Nonce32V2::new(draw_nonzero()?))
 }
@@ -1506,5 +1586,102 @@ fn map_approval(error: ApprovalSuiteOneClientErrorV2) -> AgentBrowserAuthorityEr
         }
         ApprovalSuiteOneClientErrorV2::DeadlineExceeded
         | ApprovalSuiteOneClientErrorV2::Unavailable => AgentBrowserAuthorityErrorV2::Unavailable,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tab_record(
+        tab: AgentTabSessionCapabilityV2,
+        agentd_boot_id: BootIdV2,
+        origin: FixedOriginV2,
+        authorization: Option<AgentUiAuthorizationHandleV2>,
+    ) -> AgentTabV2 {
+        AgentTabV2 {
+            tab,
+            authorization,
+            initial_document: AgentMaskedDocumentRefV2::from_authority_entropy([0x11; 16]).unwrap(),
+            kernel_document: None,
+            session: None,
+            run: None,
+            initial_value: None,
+            active_tools: Vec::new(),
+            reference_key: Zeroizing::new([0x12; 32]),
+            tab_internal_id: Digest32V2::new([0x13; 32]),
+            agentd_boot_id,
+            origin,
+            next_reference_revision: 1,
+            objects: Vec::new(),
+            pending_releases: Vec::new(),
+            cursors: Vec::new(),
+            replays: Vec::new(),
+            action_replays: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn connector_dispatch_requires_an_exact_authenticated_agent_origin_tab() {
+        let current_boot = BootIdV2::new([0x21; 32]);
+        let valid_tab = AgentTabSessionCapabilityV2::from_authority_entropy([0x22; 32]).unwrap();
+        let forged_tab = AgentTabSessionCapabilityV2::from_authority_entropy([0x23; 32]).unwrap();
+        let absent_tab = AgentTabSessionCapabilityV2::from_authority_entropy([0x2b; 32]).unwrap();
+        let unauthenticated_tab =
+            AgentTabSessionCapabilityV2::from_authority_entropy([0x24; 32]).unwrap();
+        let stale_tab = AgentTabSessionCapabilityV2::from_authority_entropy([0x25; 32]).unwrap();
+        let wrong_origin_tab =
+            AgentTabSessionCapabilityV2::from_authority_entropy([0x26; 32]).unwrap();
+        let authorization =
+            AgentUiAuthorizationHandleV2::from_authority_entropy([0x27; 32]).unwrap();
+        let mut state = AuthorityStateV2::default();
+        state.tabs.push(tab_record(
+            valid_tab,
+            current_boot,
+            FixedOriginV2::Agent8768,
+            Some(authorization),
+        ));
+        state.tabs.push(tab_record(
+            unauthenticated_tab,
+            current_boot,
+            FixedOriginV2::Agent8768,
+            None,
+        ));
+        state.tabs.push(tab_record(
+            stale_tab,
+            BootIdV2::new([0x28; 32]),
+            FixedOriginV2::Agent8768,
+            Some(authorization),
+        ));
+        state.tabs.push(tab_record(
+            wrong_origin_tab,
+            current_boot,
+            FixedOriginV2::Approval8766,
+            Some(authorization),
+        ));
+
+        let mut kernel_client_dispatches = 0_u8;
+        for rejected in [
+            absent_tab,
+            forged_tab,
+            unauthenticated_tab,
+            stale_tab,
+            wrong_origin_tab,
+        ] {
+            assert_eq!(
+                authenticated_connector_tab(&mut state, rejected, current_boot).map(|_| {
+                    kernel_client_dispatches += 1;
+                }),
+                Err(AgentBrowserAuthorityErrorV2::InvalidReference)
+            );
+        }
+        assert_eq!(kernel_client_dispatches, 0);
+
+        authenticated_connector_tab(&mut state, valid_tab, current_boot)
+            .map(|_| {
+                kernel_client_dispatches += 1;
+            })
+            .unwrap();
+        assert_eq!(kernel_client_dispatches, 1);
     }
 }

@@ -588,6 +588,9 @@ impl ProtocolApprovalServiceV2 {
             savana_kernel_protocol::v2::ApprovalPurposeV2::FinalRelease => {
                 ApprovalPurposeV2::FinalRelease
             }
+            savana_kernel_protocol::v2::ApprovalPurposeV2::ConnectorRegistration => {
+                ApprovalPurposeV2::ConnectorRegistration
+            }
         };
         let challenge = ApprovalDecisionChallengeV2::from_verified_envelope(
             legacy_purpose,
@@ -770,7 +773,9 @@ impl ProtocolApprovalServiceV2 {
                 ProtocolApprovalPurposeV2::Ingress
             ) | (
                 EndpointRoleV2::AgentApproval,
-                ProtocolApprovalPurposeV2::ToolExecution | ProtocolApprovalPurposeV2::FinalRelease
+                ProtocolApprovalPurposeV2::ToolExecution
+                    | ProtocolApprovalPurposeV2::FinalRelease
+                    | ProtocolApprovalPurposeV2::ConnectorRegistration
             )
         );
         let binding_matches = matches!(
@@ -1541,6 +1546,18 @@ fn validate_restored_approval_settlement(
             envelope.decision_challenge(),
             settlement_unsigned.issued_at(),
         ),
+        ProtocolApprovalPurposeV2::ConnectorRegistration => settlement
+            .verify_connector_registration(
+                deployment.settlement_key_id,
+                deployment.settlement_public_key(),
+                deployment.installation_id,
+                deployment.active_state_manifest_digest,
+                deployment.deployment_generation,
+                envelope_digest,
+                envelope.expected_principal(),
+                envelope.decision_challenge(),
+                settlement_unsigned.issued_at(),
+            ),
     }
     .map_err(|_| ApprovalErrorV2::DurableAuthentication)?;
     let credential = deployment
@@ -2141,6 +2158,118 @@ mod tests {
             .unwrap();
         assert_eq!(verified.envelope_digest(), ui_digest);
         assert_eq!(verified.authenticated_principal(), principal);
+    }
+
+    #[test]
+    fn connector_registration_uses_its_own_approval_settlement_purpose() {
+        let kernel_key = SigningKey::from_bytes(&[0x41; 32]);
+        let correlation_key = SigningKey::from_bytes(&[0x42; 32]);
+        let settlement_key = SigningKey::from_bytes(&[0x43; 32]);
+        let installation = Digest32V2::new([0x44; 32]);
+        let manifest = Digest32V2::new([0x45; 32]);
+        let approvald_identity = ServiceIdentityV2::new([0x46; 32]);
+        let principal = PrincipalIdV2::new([0x47; 32]);
+        let credential_digest = Digest32V2::new([0x48; 32]);
+        let p256_key = P256SigningKey::from_slice(&[0x49; 32]).unwrap();
+        let public = p256_key.verifying_key().to_encoded_point(false);
+        let mut service = ProtocolApprovalServiceV2::from_verified_deployment(
+            installation,
+            manifest,
+            8,
+            BootIdV2::new([0x4a; 32]),
+            1,
+            approvald_identity,
+            derive_ed25519_key_id_v2(kernel_key.verifying_key().to_bytes()),
+            kernel_key.verifying_key().to_bytes(),
+            derive_ed25519_key_id_v2(correlation_key.verifying_key().to_bytes()),
+            correlation_key.verifying_key().to_bytes(),
+            derive_ed25519_key_id_v2(settlement_key.verifying_key().to_bytes()),
+            settlement_key.to_bytes(),
+            8,
+        )
+        .unwrap();
+        service
+            .load_verified_hardware_credential(
+                credential_digest,
+                principal,
+                [0x4b; 16],
+                public.as_bytes().try_into().unwrap(),
+                1,
+            )
+            .unwrap();
+
+        let challenge = Nonce32V2::new([0x4c; 32]);
+        let display = BoundedApprovalDisplayTextV2::new(
+            "Connector registration; name: mail-connector; url: https://api.example.com/mcp"
+                .to_owned(),
+        )
+        .unwrap();
+        let envelope = SignedApprovalEnvelopeV2::sign(
+            UnsignedApprovalEnvelopeV2::new(
+                installation,
+                manifest,
+                8,
+                ApprovalPurposeV2::ConnectorRegistration,
+                Nonce32V2::new([0x4d; 32]),
+                challenge,
+                ApprovalBindingV2::ConnectorRegistration {
+                    descriptor_digest: Digest32V2::new([0x4e; 32]),
+                    previous_head_digest: Digest32V2::new([0x4f; 32]),
+                },
+                principal,
+                Digest32V2::new([0x50; 32]),
+                savana_kernel_protocol::v2::approval_display_digest_v2(display.as_bytes()),
+                display,
+                Some(Digest32V2::new([0x51; 32])),
+                approvald_identity,
+                UnixMillisV2::new(100),
+                UnixMillisV2::new(10_000),
+            )
+            .unwrap(),
+            &kernel_key,
+        )
+        .unwrap();
+        let envelope_digest = service
+            .register_approval_envelope(&envelope, UnixMillisV2::new(200))
+            .unwrap();
+        let settlement = service
+            .settle_approval(
+                envelope_digest,
+                savana_kernel_protocol::v2::ApprovalDecisionV2::Approve,
+                &assertion(&p256_key, credential_digest, principal, challenge, 2),
+                UnixMillisV2::new(300),
+            )
+            .unwrap();
+        assert_eq!(
+            settlement.purpose(),
+            ApprovalPurposeV2::ConnectorRegistration
+        );
+        settlement
+            .verify_connector_registration(
+                service.settlement_key_id(),
+                service.settlement_public_key(),
+                installation,
+                manifest,
+                8,
+                envelope_digest,
+                principal,
+                challenge,
+                UnixMillisV2::new(301),
+            )
+            .unwrap();
+        assert!(settlement
+            .verify_tool_execution(
+                service.settlement_key_id(),
+                service.settlement_public_key(),
+                installation,
+                manifest,
+                8,
+                envelope_digest,
+                principal,
+                challenge,
+                UnixMillisV2::new(301),
+            )
+            .is_err());
     }
 
     #[test]

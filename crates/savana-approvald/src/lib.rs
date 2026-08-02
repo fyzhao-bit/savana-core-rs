@@ -97,6 +97,7 @@ pub enum ApprovalPurposeV2 {
     Ingress,
     ToolExecution,
     FinalRelease,
+    ConnectorRegistration,
 }
 
 impl ApprovalPurposeV2 {
@@ -105,6 +106,7 @@ impl ApprovalPurposeV2 {
             Self::Ingress => 1,
             Self::ToolExecution => 2,
             Self::FinalRelease => 3,
+            Self::ConnectorRegistration => 4,
         }
     }
 
@@ -113,6 +115,7 @@ impl ApprovalPurposeV2 {
             Self::Ingress => b"SAVANA_INGRESS_APPROVAL_ENVELOPE_V2\0",
             Self::ToolExecution => b"SAVANA_TOOL_APPROVAL_ENVELOPE_V2\0",
             Self::FinalRelease => b"SAVANA_RELEASE_APPROVAL_ENVELOPE_V2\0",
+            Self::ConnectorRegistration => b"SAVANA_CONNECTOR_REGISTRATION_APPROVAL_ENVELOPE_V2\0",
         }
     }
 
@@ -121,6 +124,9 @@ impl ApprovalPurposeV2 {
             Self::Ingress => b"SAVANA_INGRESS_APPROVAL_SETTLEMENT_V2\0",
             Self::ToolExecution => b"SAVANA_TOOL_APPROVAL_SETTLEMENT_V2\0",
             Self::FinalRelease => b"SAVANA_RELEASE_APPROVAL_SETTLEMENT_V2\0",
+            Self::ConnectorRegistration => {
+                b"SAVANA_CONNECTOR_REGISTRATION_APPROVAL_SETTLEMENT_V2\0"
+            }
         }
     }
 }
@@ -1386,6 +1392,7 @@ fn decode_purpose(tag: u16) -> Result<ApprovalPurposeV2, ApprovalErrorV2> {
         1 => Ok(ApprovalPurposeV2::Ingress),
         2 => Ok(ApprovalPurposeV2::ToolExecution),
         3 => Ok(ApprovalPurposeV2::FinalRelease),
+        4 => Ok(ApprovalPurposeV2::ConnectorRegistration),
         _ => Err(ApprovalErrorV2::NonCanonicalEnvelope),
     }
 }

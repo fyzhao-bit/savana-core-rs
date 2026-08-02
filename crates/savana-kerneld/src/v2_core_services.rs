@@ -17,11 +17,11 @@ use savana_kernel_protocol::v2::{
     encode_kernel_agent_health_response_v2, encode_kernel_agent_operation_v2,
     encode_kernel_ingress_health_response_v2, encode_kernel_ingress_operation_v2,
     encode_prepare_agent_ui_authentication_response_v2,
-    encode_prepare_followup_ingress_response_v2,
+    encode_prepare_connector_registration_response_v2, encode_prepare_followup_ingress_response_v2,
     encode_prepare_ingress_ui_authentication_response_v2, encode_prepare_new_ingress_response_v2,
     encode_prepare_planner_call_response_v2, encode_prepare_release_response_v2,
-    encode_propose_tool_call_response_v2, encode_read_agent_view_response_v2,
-    encode_register_parser_worker_job_response_v2,
+    encode_propose_connector_registration_response_v2, encode_propose_tool_call_response_v2,
+    encode_read_agent_view_response_v2, encode_register_parser_worker_job_response_v2,
     encode_resume_committed_agent_authentication_response_v2, encode_revoke_vault_response_v2,
     AbortInputResponseV2, AppendInputChunkResponseV2, AppendParserWorkerPageFrameResponseV2,
     AuthenticateAgentUiResponseV2, AuthenticateIngressUiResponseV2, BeginInputResponseV2, BootIdV2,
@@ -29,11 +29,11 @@ use savana_kernel_protocol::v2::{
     CommitParserWorkerResultResponseV2, DeriveValueResponseV2, Digest32V2, DurableTaskIdV2,
     FinalizeInputResponseV2, GetInputStatusResponseV2, InputNextSequenceV2, InputPublicStateV2,
     InputStatusTargetV2, KernelAgentHealthResponseV2, KernelAgentOperationV2,
-    KernelIngressHealthResponseV2, KernelIngressOperationV2, KernelServiceOperationV2,
-    MaskedDocumentHandleV2, PeerIdentityBindingV2, PrepareIngressUiAuthenticationResponseV2,
-    PrincipalIdV2, PublicServiceStateV2, ReadAgentViewResponseV2,
-    RegisterParserWorkerJobResponseV2, RequestIdV2, ServiceIdentityV2, UnixMillisV2,
-    VaultPublicStateV2,
+    KernelConnectorControlOperationV2, KernelIngressHealthResponseV2, KernelIngressOperationV2,
+    KernelServiceOperationV2, MaskedDocumentHandleV2, PeerIdentityBindingV2,
+    PrepareIngressUiAuthenticationResponseV2, PrincipalIdV2, PublicServiceStateV2,
+    ReadAgentViewResponseV2, RegisterParserWorkerJobResponseV2, RequestIdV2, ServiceIdentityV2,
+    UnixMillisV2, VaultPublicStateV2,
 };
 use savana_kernel_protocol::StableCode;
 use sha2::{Digest as _, Sha256};
@@ -57,9 +57,9 @@ use crate::v2_kernel_owner::{KernelRuntimeRequestV2, KernelRuntimeServicesV2};
 use crate::v2_state_owner::{StateOwnerCommitV2, StateOwnerErrorV2};
 use crate::v2_value_owner::{KernelValueErrorV2, KernelValueOwnerV2};
 
-const REQUIRED_AGENT_KERNEL_ROUTES_V2: usize = 25;
+const REQUIRED_AGENT_KERNEL_ROUTES_V2: usize = 27;
 const REQUIRED_INGRESS_KERNEL_ROUTES_V2: usize = 12;
-const IMPLEMENTED_AGENT_KERNEL_ROUTES_V2: usize = 25;
+const IMPLEMENTED_AGENT_KERNEL_ROUTES_V2: usize = 27;
 const IMPLEMENTED_INGRESS_KERNEL_ROUTES_V2: usize = 12;
 
 pub(crate) trait KernelIngressCommitSinkV2: Send + 'static {
@@ -421,6 +421,7 @@ impl CoreKernelRuntimeServicesV2 {
             active_state_manifest_digest,
             deployment_generation,
             effect_fence_epoch,
+            caller_boot_id,
             caller_identity,
         ))
     }
@@ -434,6 +435,7 @@ impl CoreKernelRuntimeServicesV2 {
         active_state_manifest_digest: Digest32V2,
         deployment_generation: u64,
         effect_fence_epoch: u64,
+        caller_boot_id: BootIdV2,
         caller_identity: ServiceIdentityV2,
     ) -> Result<KernelServiceResponseBodyV2, StableCode> {
         match operation {
@@ -453,8 +455,62 @@ impl CoreKernelRuntimeServicesV2 {
                 deployment_generation,
                 caller_identity,
             ),
+            KernelServiceOperationV2::Connector(operation) => self.execute_connector_control(
+                operation,
+                caller_boot_id,
+                now,
+                active_state_manifest_digest,
+                deployment_generation,
+                caller_identity,
+            ),
             KernelServiceOperationV2::Executor(_) => Err(StableCode::IdentityPeerRejected),
         }
+    }
+
+    fn execute_connector_control(
+        &mut self,
+        operation: KernelConnectorControlOperationV2,
+        caller_boot_id: BootIdV2,
+        now: UnixMillisV2,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        caller_identity: ServiceIdentityV2,
+    ) -> Result<KernelServiceResponseBodyV2, StableCode> {
+        let authority = self
+            .agent_authority
+            .as_mut()
+            .ok_or(StableCode::KernelUnavailable)?;
+        let canonical = match operation {
+            KernelConnectorControlOperationV2::PrepareRegistration(request) => {
+                let response = authority
+                    .prepare_connector_registration(
+                        &request,
+                        caller_boot_id,
+                        caller_identity,
+                        active_state_manifest_digest,
+                        deployment_generation,
+                        now,
+                    )
+                    .map_err(map_agent_authority_error)?;
+                encode_prepare_connector_registration_response_v2(response)
+            }
+            KernelConnectorControlOperationV2::ProposeRegistration(request) => {
+                let response = authority
+                    .propose_connector_registration(
+                        &request,
+                        &self.values,
+                        caller_boot_id,
+                        caller_identity,
+                        active_state_manifest_digest,
+                        deployment_generation,
+                        now,
+                    )
+                    .map_err(map_agent_authority_error)?;
+                encode_propose_connector_registration_response_v2(&response)
+            }
+        }
+        .map_err(|_| StableCode::KernelUnavailable)?;
+        typed_body(canonical)
     }
 
     fn execute_finalize_input_prepared(

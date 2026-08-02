@@ -209,7 +209,9 @@ impl ExecdSuiteOneServerV2 {
             } else {
                 let operation = match operation {
                     KernelServiceOperationV2::Executor(operation) => operation,
-                    KernelServiceOperationV2::Agent(_) | KernelServiceOperationV2::Ingress(_) => {
+                    KernelServiceOperationV2::Agent(_)
+                    | KernelServiceOperationV2::Connector(_)
+                    | KernelServiceOperationV2::Ingress(_) => {
                         return Err(ExecdSuiteOneServiceErrorV2::IdentityRejected);
                     }
                 };

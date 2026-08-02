@@ -40,7 +40,7 @@ impl AgentUiAuthenticationCompleteBrowserResponseV2 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentBrowserActionV2 {
     PrepareFollowupIngress,
     RunPlanner,
@@ -53,6 +53,7 @@ pub enum AgentBrowserActionV2 {
     CloseSession,
     RefreshExecution(AgentExecutionRefV2),
     RefreshRelease(AgentReleaseRefV2),
+    RegisterConnector(Vec<u8>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,9 +142,12 @@ pub enum AgentBrowserMutationResponseV2 {
         release: AgentReleaseRefV2,
         state: AgentBrowserReleaseStateV2,
     },
+    ConnectorOpenApproval {
+        post: FixedBrowserFormPostCarrierV2,
+    },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentBrowserRequestV2 {
     ReadView {
         tab: AgentTabSessionCapabilityV2,
@@ -160,13 +164,13 @@ pub enum AgentBrowserRequestV2 {
 }
 
 impl AgentBrowserRequestV2 {
-    pub const fn tab(self) -> AgentTabSessionCapabilityV2 {
+    pub const fn tab(&self) -> AgentTabSessionCapabilityV2 {
         match self {
-            Self::ReadView { tab, .. } | Self::Act { tab, .. } => tab,
+            Self::ReadView { tab, .. } | Self::Act { tab, .. } => *tab,
         }
     }
 
-    pub const fn client_request_nonce(self) -> Nonce32V2 {
+    pub const fn client_request_nonce(&self) -> Nonce32V2 {
         match self {
             Self::ReadView {
                 client_request_nonce,
@@ -175,7 +179,7 @@ impl AgentBrowserRequestV2 {
             | Self::Act {
                 client_request_nonce,
                 ..
-            } => client_request_nonce,
+            } => *client_request_nonce,
         }
     }
 }
@@ -317,7 +321,8 @@ pub fn decode_agent_browser_request_v2(
         },
         _ => return Err(malformed()),
     };
-    if decoder.position() != bytes.len() || encode_agent_browser_request_v2(value)? != bytes {
+    if decoder.position() != bytes.len() || encode_agent_browser_request_v2(value.clone())? != bytes
+    {
         return Err(noncanonical());
     }
     Ok(value)
@@ -482,6 +487,13 @@ pub fn encode_agent_browser_mutation_response_v2(
                 .map_err(ProtocolError::malformed)?;
             encode_release_state(&mut encoder, *state)?;
         }
+        AgentBrowserMutationResponseV2::ConnectorOpenApproval { post } => {
+            encoder
+                .array(2)
+                .and_then(|encoder| encoder.u16(14))
+                .map_err(ProtocolError::malformed)?;
+            encode_post(&mut encoder, *post)?;
+        }
     }
     let bytes = encoder.into_writer();
     if bytes.len() > MAX_AGENT_BROWSER_BODY_BYTES_V2 {
@@ -616,6 +628,17 @@ fn encode_action(
     encoder: &mut minicbor::Encoder<Vec<u8>>,
     value: AgentBrowserActionV2,
 ) -> Result<(), ProtocolError> {
+    if let AgentBrowserActionV2::RegisterConnector(descriptor) = &value {
+        if descriptor.is_empty() || descriptor.len() > MAX_AGENT_BROWSER_BODY_BYTES_V2 - 128 {
+            return Err(malformed());
+        }
+        encoder
+            .array(2)
+            .and_then(|encoder| encoder.u16(12))
+            .and_then(|encoder| encoder.bytes(descriptor))
+            .map_err(ProtocolError::malformed)?;
+        return Ok(());
+    }
     let (tag, handle) = match value {
         AgentBrowserActionV2::PrepareFollowupIngress => (1, None),
         AgentBrowserActionV2::RunPlanner => (2, None),
@@ -652,6 +675,7 @@ fn encode_action(
             11,
             Some(minicbor::to_vec(value).map_err(ProtocolError::malformed)?),
         ),
+        AgentBrowserActionV2::RegisterConnector(_) => unreachable!("handled above"),
     };
     encoder
         .array(if handle.is_some() { 2 } else { 1 })
@@ -699,6 +723,13 @@ fn decode_action(
         (11, Some(2)) => Ok(AgentBrowserActionV2::RefreshRelease(
             minicbor::Decode::decode(decoder, context).map_err(ProtocolError::from_typed_decode)?,
         )),
+        (12, Some(2)) => {
+            let descriptor = decoder.bytes().map_err(ProtocolError::malformed)?.to_vec();
+            if descriptor.is_empty() || descriptor.len() > MAX_AGENT_BROWSER_BODY_BYTES_V2 - 128 {
+                return Err(malformed());
+            }
+            Ok(AgentBrowserActionV2::RegisterConnector(descriptor))
+        }
         _ => Err(malformed()),
     }
 }
@@ -758,10 +789,39 @@ mod tests {
             cursor: None,
             maximum_encoded_bytes: 4096,
         };
-        let encoded = encode_agent_browser_request_v2(request).unwrap();
+        let encoded = encode_agent_browser_request_v2(request.clone()).unwrap();
         assert_eq!(decode_agent_browser_request_v2(&encoded).unwrap(), request);
         let mut trailing = encoded;
         trailing.push(0);
         assert!(decode_agent_browser_request_v2(&trailing).is_err());
+    }
+
+    #[test]
+    fn connector_registration_is_a_descriptor_only_authenticated_tab_action() {
+        let descriptor = vec![0x87, 0x01, 0x02, 0x03];
+        let request = AgentBrowserRequestV2::Act {
+            tab: AgentTabSessionCapabilityV2::from_authority_entropy([4; 32]).unwrap(),
+            client_request_nonce: Nonce32V2::new([5; 32]),
+            action: AgentBrowserActionV2::RegisterConnector(descriptor.clone()),
+        };
+        let encoded = encode_agent_browser_request_v2(request.clone()).unwrap();
+        assert_eq!(decode_agent_browser_request_v2(&encoded).unwrap(), request);
+
+        let mut decoder = minicbor::Decoder::new(&encoded);
+        assert_eq!(decoder.array().unwrap(), Some(4));
+        assert_eq!(decoder.u16().unwrap(), 2);
+        decoder.skip().unwrap();
+        decoder.skip().unwrap();
+        assert_eq!(decoder.array().unwrap(), Some(2));
+        assert_eq!(decoder.u16().unwrap(), 12);
+        assert_eq!(decoder.bytes().unwrap(), descriptor);
+        assert_eq!(decoder.position(), encoded.len());
+
+        assert!(encode_agent_browser_request_v2(AgentBrowserRequestV2::Act {
+            tab: AgentTabSessionCapabilityV2::from_authority_entropy([4; 32]).unwrap(),
+            client_request_nonce: Nonce32V2::new([5; 32]),
+            action: AgentBrowserActionV2::RegisterConnector(Vec::new()),
+        })
+        .is_err());
     }
 }

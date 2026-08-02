@@ -232,6 +232,10 @@ kernel_handle_v2!(
     b"SAVANA_AGENT_UI_AUTHORIZATION_HANDLE_V2\0"
 );
 kernel_handle_v2!(
+    ConnectorUiAuthorizationHandleV2,
+    b"SAVANA_CONNECTOR_UI_AUTHORIZATION_HANDLE_V2\0"
+);
+kernel_handle_v2!(
     IngressWriteCapabilityV2,
     b"SAVANA_INGRESS_WRITE_CAPABILITY_V2\0"
 );
@@ -298,6 +302,10 @@ kernel_handle_v2!(
 kernel_handle_v2!(
     ReleaseApprovalRecordHandleV2,
     b"SAVANA_RELEASE_APPROVAL_RECORD_HANDLE_V2\0"
+);
+kernel_handle_v2!(
+    ConnectorApprovalRecordHandleV2,
+    b"SAVANA_CONNECTOR_APPROVAL_RECORD_HANDLE_V2\0"
 );
 kernel_handle_v2!(
     IngressUiAuthenticationTransferCapabilityV2,

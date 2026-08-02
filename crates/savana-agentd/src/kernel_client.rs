@@ -16,28 +16,32 @@ use savana_kernel_protocol::v2::{
     decode_get_agent_session_status_response_v2, decode_get_execution_status_response_v2,
     decode_get_kernel_task_status_response_v2, decode_get_release_status_response_v2,
     decode_kernel_agent_health_response_v2, decode_kernel_service_application_request_v2,
-    decode_kernel_service_application_response_v2, decode_prepare_followup_ingress_response_v2,
+    decode_kernel_service_application_response_v2,
+    decode_prepare_connector_registration_response_v2, decode_prepare_followup_ingress_response_v2,
     decode_prepare_new_ingress_response_v2, decode_prepare_planner_call_response_v2,
-    decode_prepare_release_response_v2, decode_propose_tool_call_response_v2,
-    decode_read_agent_view_response_v2, decode_resume_committed_agent_authentication_response_v2,
-    decode_revoke_vault_response_v2, encode_kernel_service_application_request_v2,
-    encode_signed_durable_task_correlation_v2, AgentUiAuthenticationPreparationHandleV2,
-    AuthenticateAgentUiRequestV2, AuthenticateAgentUiResponseV2, AuthorizeReleaseRequestV2,
-    AuthorizeReleaseResponseV2, AuthorizeToolCallRequestV2, AuthorizeToolCallResponseV2, BootIdV2,
-    CancelKernelTaskRequestV2, ClaimAgentSessionRequestV2, ClaimAgentSessionResponseV2,
-    CloseAgentSessionRequestV2, CloseAgentSessionResponseV2, CommitPlannerValueRequestV2,
-    CommitPlannerValueResponseV2, Digest32V2, DispatchExecutionRequestV2,
-    DispatchExecutionResponseV2, DispatchReleaseRequestV2, DispatchReleaseResponseV2,
-    Ed25519KeyIdV2, EndpointRoleV2, EvaluateToolCallRequestV2, EvaluateToolCallResponseV2,
-    GetAgentSessionStatusRequestV2, GetAgentSessionStatusResponseV2, GetExecutionStatusRequestV2,
-    GetExecutionStatusResponseV2, GetKernelTaskStatusRequestV2, GetReleaseStatusRequestV2,
-    GetReleaseStatusResponseV2, KernelAgentHealthRequestV2, KernelAgentOperationV2,
-    KernelAgentViewCursorV2, KernelServiceApplicationRequestV2,
-    KernelServiceApplicationResponseBodyV2, KernelServiceHandshakeEdgeV2, KernelServiceOperationV2,
-    MaskedDocumentHandleV2, Nonce32V2, PeerIdentityBindingV2, PrepareFollowupIngressRequestV2,
+    decode_prepare_release_response_v2, decode_propose_connector_registration_response_v2,
+    decode_propose_tool_call_response_v2, decode_read_agent_view_response_v2,
+    decode_resume_committed_agent_authentication_response_v2, decode_revoke_vault_response_v2,
+    encode_kernel_service_application_request_v2, encode_signed_durable_task_correlation_v2,
+    AgentUiAuthenticationPreparationHandleV2, AuthenticateAgentUiRequestV2,
+    AuthenticateAgentUiResponseV2, AuthorizeReleaseRequestV2, AuthorizeReleaseResponseV2,
+    AuthorizeToolCallRequestV2, AuthorizeToolCallResponseV2, BootIdV2, CancelKernelTaskRequestV2,
+    ClaimAgentSessionRequestV2, ClaimAgentSessionResponseV2, CloseAgentSessionRequestV2,
+    CloseAgentSessionResponseV2, CommitPlannerValueRequestV2, CommitPlannerValueResponseV2,
+    Digest32V2, DispatchExecutionRequestV2, DispatchExecutionResponseV2, DispatchReleaseRequestV2,
+    DispatchReleaseResponseV2, Ed25519KeyIdV2, EndpointRoleV2, EvaluateToolCallRequestV2,
+    EvaluateToolCallResponseV2, GetAgentSessionStatusRequestV2, GetAgentSessionStatusResponseV2,
+    GetExecutionStatusRequestV2, GetExecutionStatusResponseV2, GetKernelTaskStatusRequestV2,
+    GetReleaseStatusRequestV2, GetReleaseStatusResponseV2, KernelAgentHealthRequestV2,
+    KernelAgentOperationV2, KernelAgentViewCursorV2, KernelConnectorControlOperationV2,
+    KernelServiceApplicationRequestV2, KernelServiceApplicationResponseBodyV2,
+    KernelServiceHandshakeEdgeV2, KernelServiceOperationV2, MaskedDocumentHandleV2, Nonce32V2,
+    PeerIdentityBindingV2, PrepareConnectorRegistrationRequestV2,
+    PrepareConnectorRegistrationResponseV2, PrepareFollowupIngressRequestV2,
     PrepareFollowupIngressResponseV2, PrepareNewIngressRequestV2, PrepareNewIngressResponseV2,
     PreparePlannerCallRequestV2, PreparePlannerCallResponseV2, PrepareReleaseRequestV2,
-    PrepareReleaseResponseV2, ProposeToolCallRequestV2, ProposeToolCallResponseV2,
+    PrepareReleaseResponseV2, ProposeConnectorRegistrationRequestV2,
+    ProposeConnectorRegistrationResponseV2, ProposeToolCallRequestV2, ProposeToolCallResponseV2,
     PublicServiceStateV2, PublicStableCodeV2, PublicTaskStatusV2, ReadAgentViewRequestV2,
     ReadAgentViewResponseV2, RequestIdV2, ResumeCommittedAgentAuthenticationRequestV2,
     ResumeCommittedAgentAuthenticationResponseV2, RevokeVaultRequestV2, RevokeVaultResponseV2,
@@ -869,6 +873,36 @@ impl SuiteOneAgentKernelClientV2 {
             KernelServiceOperationV2::agent(KernelAgentOperationV2::CloseAgentSession(request)),
         )?;
         decode_close_agent_session_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    pub(crate) fn prepare_connector_registration(
+        &self,
+        request: PrepareConnectorRegistrationRequestV2,
+        deadline: UnixMillisV2,
+    ) -> Result<PrepareConnectorRegistrationResponseV2, AgentControlKernelClientErrorV2> {
+        let body = self.operation_exchange_stable(
+            deadline,
+            KernelServiceOperationV2::connector(
+                KernelConnectorControlOperationV2::PrepareRegistration(request),
+            ),
+        )?;
+        decode_prepare_connector_registration_response_v2(&body)
+            .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+    }
+
+    pub(crate) fn propose_connector_registration(
+        &self,
+        request: ProposeConnectorRegistrationRequestV2,
+        deadline: UnixMillisV2,
+    ) -> Result<ProposeConnectorRegistrationResponseV2, AgentControlKernelClientErrorV2> {
+        let body = self.operation_exchange_stable(
+            deadline,
+            KernelServiceOperationV2::connector(
+                KernelConnectorControlOperationV2::ProposeRegistration(request),
+            ),
+        )?;
+        decode_propose_connector_registration_response_v2(&body)
             .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
     }
 

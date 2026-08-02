@@ -778,6 +778,10 @@ impl ConnectorRegistryStateV2 {
             .map_or([0; 32], VerifyingKey::to_bytes)
     }
 
+    pub fn user_host_allowlist(&self) -> &[BoundedConnectorHostV2] {
+        &self.user_host_allowlist
+    }
+
     pub fn active_connector_count(&self) -> usize {
         self.active.len()
     }

@@ -20,6 +20,8 @@ const APPROVAL_DISPLAY_DIGEST_DOMAIN_V2: &[u8] = b"SAVANA_APPROVAL_DISPLAY_BYTES
 const INGRESS_APPROVAL_ENVELOPE_DOMAIN_V2: &[u8] = b"SAVANA_INGRESS_APPROVAL_ENVELOPE_V2\0";
 const TOOL_APPROVAL_ENVELOPE_DOMAIN_V2: &[u8] = b"SAVANA_TOOL_APPROVAL_ENVELOPE_V2\0";
 const RELEASE_APPROVAL_ENVELOPE_DOMAIN_V2: &[u8] = b"SAVANA_RELEASE_APPROVAL_ENVELOPE_V2\0";
+const CONNECTOR_REGISTRATION_APPROVAL_ENVELOPE_DOMAIN_V2: &[u8] =
+    b"SAVANA_CONNECTOR_REGISTRATION_APPROVAL_ENVELOPE_V2\0";
 const UI_AUTH_INGRESS_ENVELOPE_DOMAIN_V2: &[u8] = b"SAVANA_UI_AUTH_INGRESS_ENVELOPE_V2\0";
 const UI_AUTH_APPROVAL_DISPLAY_ENVELOPE_DOMAIN_V2: &[u8] =
     b"SAVANA_UI_AUTH_APPROVAL_DISPLAY_ENVELOPE_V2\0";
@@ -33,6 +35,8 @@ const UI_AUTH_AGENT_SETTLEMENT_DOMAIN_V2: &[u8] = b"SAVANA_UI_AUTH_AGENT_SETTLEM
 const INGRESS_APPROVAL_SETTLEMENT_DOMAIN_V2: &[u8] = b"SAVANA_INGRESS_APPROVAL_SETTLEMENT_V2\0";
 const TOOL_APPROVAL_SETTLEMENT_DOMAIN_V2: &[u8] = b"SAVANA_TOOL_APPROVAL_SETTLEMENT_V2\0";
 const RELEASE_APPROVAL_SETTLEMENT_DOMAIN_V2: &[u8] = b"SAVANA_RELEASE_APPROVAL_SETTLEMENT_V2\0";
+const CONNECTOR_REGISTRATION_APPROVAL_SETTLEMENT_DOMAIN_V2: &[u8] =
+    b"SAVANA_CONNECTOR_REGISTRATION_APPROVAL_SETTLEMENT_V2\0";
 const AGENT_AUTHENTICATION_CLOSURE_DESCRIPTOR_DOMAIN_V2: &[u8] =
     b"SAVANA_AGENT_AUTH_CLOSURE_DESCRIPTOR_V2\0";
 const AGENT_AUTHENTICATION_CLOSURE_DESCRIPTOR_DIGEST_DOMAIN_V2: &[u8] =
@@ -258,6 +262,7 @@ closed_unit_enum_v2! {
         Ingress = 1,
         ToolExecution = 2,
         FinalRelease = 3,
+        ConnectorRegistration = 4,
     }
 }
 
@@ -1039,6 +1044,10 @@ pub enum ApprovalBindingV2 {
     FinalRelease {
         binding: FinalReleaseSemanticBindingV2,
     },
+    ConnectorRegistration {
+        descriptor_digest: Digest32V2,
+        previous_head_digest: Digest32V2,
+    },
 }
 
 impl ApprovalBindingV2 {
@@ -1047,6 +1056,7 @@ impl ApprovalBindingV2 {
             Self::Ingress { .. } => ApprovalPurposeV2::Ingress,
             Self::ToolExecution { .. } => ApprovalPurposeV2::ToolExecution,
             Self::FinalRelease { .. } => ApprovalPurposeV2::FinalRelease,
+            Self::ConnectorRegistration { .. } => ApprovalPurposeV2::ConnectorRegistration,
         }
     }
 
@@ -1822,6 +1832,33 @@ impl SignedApprovalSettlementV2 {
             expected_active_state_manifest_digest,
             expected_deployment_generation,
             ApprovalPurposeV2::FinalRelease,
+            expected_envelope_digest,
+            expected_principal,
+            expected_challenge,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_connector_registration(
+        &self,
+        expected_key_id: Ed25519KeyIdV2,
+        verifying_key: [u8; 32],
+        expected_installation_id: Digest32V2,
+        expected_active_state_manifest_digest: Digest32V2,
+        expected_deployment_generation: u64,
+        expected_envelope_digest: Digest32V2,
+        expected_principal: PrincipalIdV2,
+        expected_challenge: Nonce32V2,
+        now: UnixMillisV2,
+    ) -> Result<VerifiedApprovalSettlementV2, ProtocolError> {
+        self.verify_for_purpose(
+            expected_key_id,
+            verifying_key,
+            expected_installation_id,
+            expected_active_state_manifest_digest,
+            expected_deployment_generation,
+            ApprovalPurposeV2::ConnectorRegistration,
             expected_envelope_digest,
             expected_principal,
             expected_challenge,
@@ -2659,6 +2696,17 @@ fn encode_approval_binding(
                 .map_err(ProtocolError::malformed)?;
             encode_fixed(encoder, &binding)?;
         }
+        ApprovalBindingV2::ConnectorRegistration {
+            descriptor_digest,
+            previous_head_digest,
+        } => {
+            encoder
+                .array(3)
+                .and_then(|encoder| encoder.u16(4))
+                .map_err(ProtocolError::malformed)?;
+            encode_fixed(encoder, &descriptor_digest)?;
+            encode_fixed(encoder, &previous_head_digest)?;
+        }
     }
     Ok(())
 }
@@ -2682,6 +2730,10 @@ fn decode_approval_binding(
         }),
         (3, Some(2)) => Ok(ApprovalBindingV2::FinalRelease {
             binding: decode_fixed(decoder, context)?,
+        }),
+        (4, Some(3)) => Ok(ApprovalBindingV2::ConnectorRegistration {
+            descriptor_digest: decode_fixed(decoder, context)?,
+            previous_head_digest: decode_fixed(decoder, context)?,
         }),
         _ => Err(malformed()),
     }
@@ -3404,6 +3456,10 @@ fn approval_binding_is_nonzero(binding: ApprovalBindingV2) -> bool {
             action_intent_id, ..
         } => !is_zero(action_intent_id.as_bytes()),
         ApprovalBindingV2::FinalRelease { .. } => true,
+        ApprovalBindingV2::ConnectorRegistration {
+            descriptor_digest,
+            previous_head_digest,
+        } => !is_zero(descriptor_digest.as_bytes()) && !is_zero(previous_head_digest.as_bytes()),
     }
 }
 
@@ -3458,6 +3514,9 @@ const fn approval_envelope_domain(purpose: ApprovalPurposeV2) -> &'static [u8] {
         ApprovalPurposeV2::Ingress => INGRESS_APPROVAL_ENVELOPE_DOMAIN_V2,
         ApprovalPurposeV2::ToolExecution => TOOL_APPROVAL_ENVELOPE_DOMAIN_V2,
         ApprovalPurposeV2::FinalRelease => RELEASE_APPROVAL_ENVELOPE_DOMAIN_V2,
+        ApprovalPurposeV2::ConnectorRegistration => {
+            CONNECTOR_REGISTRATION_APPROVAL_ENVELOPE_DOMAIN_V2
+        }
     }
 }
 
@@ -3482,6 +3541,9 @@ const fn approval_settlement_domain(purpose: ApprovalPurposeV2) -> &'static [u8]
         ApprovalPurposeV2::Ingress => INGRESS_APPROVAL_SETTLEMENT_DOMAIN_V2,
         ApprovalPurposeV2::ToolExecution => TOOL_APPROVAL_SETTLEMENT_DOMAIN_V2,
         ApprovalPurposeV2::FinalRelease => RELEASE_APPROVAL_SETTLEMENT_DOMAIN_V2,
+        ApprovalPurposeV2::ConnectorRegistration => {
+            CONNECTOR_REGISTRATION_APPROVAL_SETTLEMENT_DOMAIN_V2
+        }
     }
 }
 

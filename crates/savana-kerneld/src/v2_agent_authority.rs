@@ -1,17 +1,19 @@
+use base64::Engine as _;
 use chacha20poly1305::aead::{Aead as _, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit as _, Nonce};
 use ed25519_dalek::SigningKey;
 use getrandom::getrandom;
 use hkdf::Hkdf;
 use savana_kernel_protocol::v2::{
-    approval_display_digest_v2, derive_ed25519_key_id_v2, ActionIntentCurrentStateV2,
-    ActionIntentHandleV2, ActionIntentIdV2, ActionTemplateIdV2, ActiveToolViewV2,
-    AgentAuthenticationClosureEvidenceV2, AgentSessionHandleV2, AgentSessionStatusV2,
-    AgentUiAuthenticationPreparationHandleV2, AgentUiAuthorizationHandleV2, ApprovalBindingV2,
-    ApprovalDecisionV2, ApprovalPurposeV2, AuthorityHandleKeyV2, AuthorizeToolCallResponseV2,
-    BootIdV2, BoundedApprovalDisplayTextV2, BoundedCiphertextV2, CancelKernelTaskRequestV2,
-    CancelKernelTaskResponseV2, ClaimAgentSessionRequestV2, ClaimAgentSessionResponseV2,
-    CommitPlannerValueRequestV2, CommitPlannerValueResponseV2, Digest32V2,
+    approval_display_digest_v2, connector_registration_descriptor_digest_v2,
+    derive_ed25519_key_id_v2, ActionIntentCurrentStateV2, ActionIntentHandleV2, ActionIntentIdV2,
+    ActionTemplateIdV2, ActiveToolViewV2, AgentAuthenticationClosureEvidenceV2,
+    AgentSessionHandleV2, AgentSessionStatusV2, AgentUiAuthenticationPreparationHandleV2,
+    AgentUiAuthorizationHandleV2, ApprovalBindingV2, ApprovalDecisionV2, ApprovalPurposeV2,
+    AuthorityHandleKeyV2, AuthorizeToolCallResponseV2, BootIdV2, BoundedApprovalDisplayTextV2,
+    BoundedCiphertextV2, CancelKernelTaskRequestV2, CancelKernelTaskResponseV2,
+    ClaimAgentSessionRequestV2, ClaimAgentSessionResponseV2, CommitPlannerValueRequestV2,
+    CommitPlannerValueResponseV2, ConnectorUiAuthorizationHandleV2, Digest32V2,
     DispatchCoreV2 as ProtocolDispatchCoreV2, DispatchExecutionResponseV2, DispatchRequestV2,
     DispatchSubjectV2 as ProtocolDispatchSubjectV2, DurableRunIdV2, DurableTaskIdV2,
     Ed25519KeyIdV2, EvaluateToolCallRequestV2, EvaluateToolCallResponseV2, ExecutionHandleV2,
@@ -25,18 +27,21 @@ use savana_kernel_protocol::v2::{
     PlannerIntentKindV2, PlannerLimitsV2, PlannerPlanV2, PlannerPurposeV2, PlannerRouteIdV2,
     PlannerSlotCardinalityV2, PlannerSlotConfidentialityV2, PlannerSlotRefV2,
     PlannerTicketHandleV2, PrepareAgentUiAuthenticationRequestV2,
-    PrepareAgentUiAuthenticationResponseV2, PrepareFollowupIngressRequestV2,
+    PrepareAgentUiAuthenticationResponseV2, PrepareConnectorRegistrationRequestV2,
+    PrepareConnectorRegistrationResponseV2, PrepareFollowupIngressRequestV2,
     PrepareFollowupIngressResponseV2, PrepareNewIngressRequestV2, PrepareNewIngressResponseV2,
     PreparePlannerCallRequestV2, PreparePlannerCallResponseV2, PrepareReleaseRequestV2,
-    PrepareReleaseResponseV2, PrincipalIdV2, ProducerIdentityV2, ProposeToolCallRequestV2,
-    ProposeToolCallResponseV2, PublicDecisionTraceV2 as ProtocolDecisionTraceV2,
-    PublicDispatchAcceptedStateV2, PublicDispatchCompletionV2, PublicExecutionStatusV2,
-    PublicFailureClassV2, PublicStableCodeV2, PublicTaskStatusV2, QueryByExecutionNonceRequestV2,
-    ReadAgentViewRequestV2, ReleaseHandleV2, ReleaseKernelApprovalHandleV2, ReleaseStatusTargetV2,
-    ReleaseTicketHandleV2, ResumeCommittedAgentAuthenticationRequestV2,
-    ResumeCommittedAgentAuthenticationResponseV2, RevokeVaultRequestV2, RoleIdV2,
-    RunRevisionDigestV2, RunRevisionObservationV2, SealedExecutionEnvelopePayloadV2,
-    ServiceIdentityV2, SignedAgentAuthenticationClosureDescriptorV2, SignedApprovalEnvelopeV2,
+    PrepareReleaseResponseV2, PrincipalIdV2, ProducerIdentityV2,
+    ProposeConnectorRegistrationRequestV2, ProposeConnectorRegistrationResponseV2,
+    ProposeToolCallRequestV2, ProposeToolCallResponseV2,
+    PublicDecisionTraceV2 as ProtocolDecisionTraceV2, PublicDispatchAcceptedStateV2,
+    PublicDispatchCompletionV2, PublicExecutionStatusV2, PublicFailureClassV2, PublicStableCodeV2,
+    PublicTaskStatusV2, QueryByExecutionNonceRequestV2, ReadAgentViewRequestV2, ReleaseHandleV2,
+    ReleaseKernelApprovalHandleV2, ReleaseStatusTargetV2, ReleaseTicketHandleV2,
+    ResumeCommittedAgentAuthenticationRequestV2, ResumeCommittedAgentAuthenticationResponseV2,
+    RevokeVaultRequestV2, RoleIdV2, RunRevisionDigestV2, RunRevisionObservationV2,
+    SealedExecutionEnvelopePayloadV2, ServiceIdentityV2,
+    SignedAgentAuthenticationClosureDescriptorV2, SignedApprovalEnvelopeV2,
     SignedDurableTaskCorrelationV2, SignedSealedExecutionEnvelopeV2,
     SignedUiAuthenticationEnvelopeV2, SignedUiAuthenticationSettlementV2, SlotKindV2,
     StaticTemplateIdV2, ToolClassIdV2, ToolHandleV2, ToolKernelApprovalHandleV2,
@@ -48,15 +53,16 @@ use savana_kernel_protocol::v2::{
 use savana_policy_core::v2::{
     decode_provenance_record_v2, encode_provenance_record_v2, provenance_digest_v2,
     value_digest_v2, ActiveToolRegistryV2, ClosedCardinalityV2, ClosedDeclassificationPurposeV2,
-    DeclassificationTransitionV2, DispatchQuotaSubjectV2, DurableG4StateV2, EffectSetV2,
-    G5DecisionBranchV2, HandoffJudgmentV2, IdentifierV2, KernelPreparedDispatchV2, KernelValueV2,
-    OntologyExprV2, PlannerSlotConfidentialityV2 as PolicySlotConfidentialityV2,
-    ProvenanceContextV2, ProvenanceRecordV2, ResolvedExecutionTicketV2,
-    SharedVerifiedConnectorRegistryV2, StoredBindingResolverV2, StoredValueRecordV2,
-    TokenSetDigestEntryV2, VerifiedActionIntentMaterialV2, VerifiedEffectGateLeaseV2,
-    VerifiedInternalSlotMaterialV2, VerifiedInternalValidatorRegistryV2,
-    VerifiedOntologyEvaluationV2, VerifiedPlanArgumentV2, VerifiedPolicyDispositionV2,
-    VerifiedProjectionOutputsV2, VerifiedQuotaLimitV2, VerifiedResolvedRelationSetV2,
+    ConnectorDescriptorV2, ConnectorTierV2, ConnectorTransportV2, DeclassificationTransitionV2,
+    DispatchQuotaSubjectV2, DurableG4StateV2, EffectSetV2, G5DecisionBranchV2, HandoffJudgmentV2,
+    IdentifierV2, KernelPreparedDispatchV2, KernelValueV2, OntologyExprV2,
+    PlannerSlotConfidentialityV2 as PolicySlotConfidentialityV2, ProvenanceContextV2,
+    ProvenanceRecordV2, ResolvedExecutionTicketV2, SharedVerifiedConnectorRegistryV2,
+    StoredBindingResolverV2, StoredValueRecordV2, TokenSetDigestEntryV2,
+    VerifiedActionIntentMaterialV2, VerifiedEffectGateLeaseV2, VerifiedInternalSlotMaterialV2,
+    VerifiedInternalValidatorRegistryV2, VerifiedOntologyEvaluationV2, VerifiedPlanArgumentV2,
+    VerifiedPolicyDispositionV2, VerifiedProjectionOutputsV2, VerifiedQuotaLimitV2,
+    VerifiedResolvedRelationSetV2,
 };
 use sha2::{Digest as _, Sha256};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
@@ -438,7 +444,26 @@ struct SessionRecordV2 {
     expires_at: UnixMillisV2,
     revision: RunRevisionObservationV2,
     initial_document: MaskedDocumentHandleV2,
+    initial_value: ValueHandleV2,
     status: AgentSessionStatusV2,
+}
+
+struct ConnectorAuthorizationRecordV2 {
+    authorization_commitment: Digest32V2,
+    session_commitment: Digest32V2,
+    canonical_descriptor: Vec<u8>,
+    descriptor_digest: Digest32V2,
+    previous_head_digest: Digest32V2,
+    principal: PrincipalIdV2,
+    durable_task_id: DurableTaskIdV2,
+    durable_run_id: DurableRunIdV2,
+    origin: FixedOriginV2,
+    caller_boot_id: BootIdV2,
+    active_state_manifest_digest: Digest32V2,
+    deployment_generation: u64,
+    issued_at: UnixMillisV2,
+    expires_at: UnixMillisV2,
+    consumed: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -663,10 +688,10 @@ pub(crate) struct KernelG7RuntimeV2 {
     executor_key_id: HpkeX25519KeyIdV2,
     executor_seal_public_key: [u8; 32],
     connector_registry: SharedVerifiedConnectorRegistryV2,
-    _connector_registry_genesis_digest: Digest32V2,
-    _connector_authority_key_id: Ed25519KeyIdV2,
-    _connector_authority_public_key: [u8; 32],
-    _connector_authority_signing_key: Option<SigningKey>,
+    connector_registry_genesis_digest: Digest32V2,
+    connector_authority_key_id: Ed25519KeyIdV2,
+    connector_authority_public_key: [u8; 32],
+    connector_authority_signing_key: Option<SigningKey>,
     effect_ledger_projection: savana_kernel_protocol::v2::VerifiedEffectLedgerProjectionV2,
     envelope_signing_key: SigningKey,
     executor_receipt_key_id: Ed25519KeyIdV2,
@@ -752,10 +777,10 @@ impl KernelG7RuntimeV2 {
             executor_key_id,
             executor_seal_public_key,
             connector_registry,
-            _connector_registry_genesis_digest: connector_registry_genesis_digest,
-            _connector_authority_key_id: connector_authority_key_id,
-            _connector_authority_public_key: connector_authority_public_key,
-            _connector_authority_signing_key: connector_authority_signing_key,
+            connector_registry_genesis_digest,
+            connector_authority_key_id,
+            connector_authority_public_key,
+            connector_authority_signing_key,
             effect_ledger_projection,
             envelope_signing_key,
             executor_receipt_key_id,
@@ -813,6 +838,7 @@ pub(crate) struct KernelAgentAuthorityV2 {
     authentication_preparations: Vec<AuthenticationPreparationRecordV2>,
     authorizations: Vec<AuthorizationRecordV2>,
     sessions: Vec<SessionRecordV2>,
+    connector_authorizations: Vec<ConnectorAuthorizationRecordV2>,
     planner_tickets: Vec<PlannerTicketRecordV2>,
     tools: Vec<ToolRecordV2>,
     plan_steps: Vec<PlanStepRecordV2>,
@@ -842,6 +868,10 @@ impl std::fmt::Debug for KernelAgentAuthorityV2 {
             )
             .field("authorization_count", &self.authorizations.len())
             .field("session_count", &self.sessions.len())
+            .field(
+                "connector_authorization_count",
+                &self.connector_authorizations.len(),
+            )
             .field("planner_ticket_count", &self.planner_tickets.len())
             .field("tool_count", &self.tools.len())
             .field("plan_step_count", &self.plan_steps.len())
@@ -874,6 +904,7 @@ impl KernelAgentAuthorityV2 {
             authentication_preparations: Vec::new(),
             authorizations: Vec::new(),
             sessions: Vec::new(),
+            connector_authorizations: Vec::new(),
             planner_tickets: Vec::new(),
             tools: Vec::new(),
             plan_steps: Vec::new(),
@@ -1839,6 +1870,7 @@ impl KernelAgentAuthorityV2 {
             expires_at: material.expires_at,
             revision,
             initial_document: material.initial_document,
+            initial_value: initial.handle(),
             status: AgentSessionStatusV2::Running,
         });
         self.tools.extend(
@@ -4659,6 +4691,328 @@ impl KernelAgentAuthorityV2 {
         Ok(session.status)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_connector_registration(
+        &mut self,
+        request: &PrepareConnectorRegistrationRequestV2,
+        caller_boot_id: BootIdV2,
+        caller_identity: ServiceIdentityV2,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        now: UnixMillisV2,
+    ) -> Result<PrepareConnectorRegistrationResponseV2, KernelAgentAuthorityErrorV2> {
+        self.verify_connector_ui_caller(caller_boot_id, caller_identity)?;
+        if now.get() == 0 {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        self.connector_authorizations
+            .retain(|record| now.get() < record.expires_at.get());
+        let session = self
+            .sessions
+            .iter()
+            .find(|session| session.session == request.session())
+            .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        if !matches!(
+            session.status,
+            AgentSessionStatusV2::Ready | AgentSessionStatusV2::Running
+        ) || session.active_state_manifest_digest != active_state_manifest_digest
+            || deployment_generation == 0
+            || now.get() >= session.expires_at.get()
+        {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        let policy = self
+            .policy
+            .as_ref()
+            .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?;
+        let g7 = policy
+            .g7
+            .as_ref()
+            .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?;
+        if is_zero(g7.connector_authority_key_id.as_bytes())
+            || is_zero(&g7.connector_authority_public_key)
+            || g7.connector_authority_signing_key.is_none()
+        {
+            return Err(KernelAgentAuthorityErrorV2::Unavailable);
+        }
+        let registry = g7
+            .connector_registry
+            .snapshot()
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        if registry.genesis_digest() != g7.connector_registry_genesis_digest {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        let descriptor = ConnectorDescriptorV2::from_canonical_bytes(
+            request.canonical_descriptor(),
+            registry.user_host_allowlist(),
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        if descriptor.tier() != ConnectorTierV2::UserRegistered
+            || registry.contains_registered_connector(descriptor.connector_id())
+        {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        if self.connector_authorizations.len() >= self.maximum_records {
+            return Err(KernelAgentAuthorityErrorV2::LimitExceeded);
+        }
+        let descriptor_digest =
+            connector_registration_descriptor_digest_v2(request.canonical_descriptor())
+                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let previous_head_digest = registry.head_digest();
+        let authorization = mint_handle(ConnectorUiAuthorizationHandleV2::from_authority_entropy)?;
+        let authorization_commitment = authorization.authority_commitment(&self.handle_key);
+        if self
+            .connector_authorizations
+            .iter()
+            .any(|record| record.authorization_commitment == authorization_commitment)
+        {
+            return Err(KernelAgentAuthorityErrorV2::Unavailable);
+        }
+        let expires_at = UnixMillisV2::new(
+            checked_deadline(now, TOOL_APPROVAL_TTL_MS)?
+                .get()
+                .min(session.expires_at.get()),
+        );
+        let record = ConnectorAuthorizationRecordV2 {
+            authorization_commitment,
+            session_commitment: session.session.authority_commitment(&self.handle_key),
+            canonical_descriptor: request.canonical_descriptor().to_vec(),
+            descriptor_digest,
+            previous_head_digest,
+            principal: session.principal,
+            durable_task_id: session.durable_task_id,
+            durable_run_id: session.durable_run_id,
+            origin: FixedOriginV2::Agent8768,
+            caller_boot_id,
+            active_state_manifest_digest,
+            deployment_generation,
+            issued_at: now,
+            expires_at,
+            consumed: false,
+        };
+        self.connector_authorizations
+            .try_reserve(1)
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        self.connector_authorizations.push(record);
+        PrepareConnectorRegistrationResponseV2::new(
+            authorization,
+            descriptor_digest,
+            previous_head_digest,
+            expires_at,
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn propose_connector_registration(
+        &mut self,
+        request: &ProposeConnectorRegistrationRequestV2,
+        values: &KernelValueOwnerV2,
+        caller_boot_id: BootIdV2,
+        caller_identity: ServiceIdentityV2,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        now: UnixMillisV2,
+    ) -> Result<ProposeConnectorRegistrationResponseV2, KernelAgentAuthorityErrorV2> {
+        self.verify_connector_ui_caller(caller_boot_id, caller_identity)?;
+        let authorization_commitment = request
+            .authorization()
+            .authority_commitment(&self.handle_key);
+        let authorization_index = self
+            .connector_authorizations
+            .iter()
+            .position(|record| record.authorization_commitment == authorization_commitment)
+            .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        let authorization = &self.connector_authorizations[authorization_index];
+        if authorization.consumed {
+            return Err(KernelAgentAuthorityErrorV2::AlreadyConsumed);
+        }
+        if authorization.origin != FixedOriginV2::Agent8768
+            || authorization.caller_boot_id != caller_boot_id
+            || authorization.active_state_manifest_digest != active_state_manifest_digest
+            || authorization.deployment_generation != deployment_generation
+            || now.get() < authorization.issued_at.get()
+            || now.get() >= authorization.expires_at.get()
+            || authorization.canonical_descriptor != request.canonical_descriptor()
+        {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        let descriptor_digest =
+            connector_registration_descriptor_digest_v2(request.canonical_descriptor())
+                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        if descriptor_digest != authorization.descriptor_digest {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        let session = self
+            .sessions
+            .iter()
+            .find(|session| {
+                session.session.authority_commitment(&self.handle_key)
+                    == authorization.session_commitment
+            })
+            .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        if !matches!(
+            session.status,
+            AgentSessionStatusV2::Ready | AgentSessionStatusV2::Running
+        ) || session.principal != authorization.principal
+            || session.durable_task_id != authorization.durable_task_id
+            || session.durable_run_id != authorization.durable_run_id
+            || session.active_state_manifest_digest != active_state_manifest_digest
+            || now.get() >= session.expires_at.get()
+        {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        let policy = self
+            .policy
+            .as_ref()
+            .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?;
+        let g7 = policy
+            .g7
+            .as_ref()
+            .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?;
+        if is_zero(g7.connector_authority_key_id.as_bytes())
+            || is_zero(&g7.connector_authority_public_key)
+            || g7.connector_authority_signing_key.is_none()
+        {
+            return Err(KernelAgentAuthorityErrorV2::Unavailable);
+        }
+        let registry = g7
+            .connector_registry
+            .snapshot()
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        if registry.head_digest() != authorization.previous_head_digest
+            || registry.genesis_digest() != g7.connector_registry_genesis_digest
+        {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        let descriptor = ConnectorDescriptorV2::from_canonical_bytes(
+            request.canonical_descriptor(),
+            registry.user_host_allowlist(),
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        if descriptor.tier() != ConnectorTierV2::UserRegistered
+            || registry.contains_registered_connector(descriptor.connector_id())
+        {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+
+        let display_text = connector_registration_display(&descriptor)?;
+        let display_digest = approval_display_digest_v2(display_text.as_bytes());
+        let binding = ApprovalBindingV2::ConnectorRegistration {
+            descriptor_digest,
+            previous_head_digest: authorization.previous_head_digest,
+        };
+        let display_projection_digest = domain_digest(
+            b"SAVANA_CONNECTOR_REGISTRATION_DISPLAY_PROJECTION_V2\0",
+            &[
+                descriptor_digest.as_bytes(),
+                authorization.previous_head_digest.as_bytes(),
+            ],
+        );
+        let parent = values
+            .resolve_g4_value(session.run, session.initial_value, now)
+            .map_err(map_value_error)?;
+        let display_value = KernelValueV2::text(display_text.as_str())
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let display_context = ProvenanceContextV2::from_authenticated_runtime(
+            parent.provenance().producer_identity(),
+            session.durable_run_id,
+            active_state_manifest_digest,
+            now,
+            parent.provenance().expires_at(),
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let declassification_rules = policy
+            .declassification_rules
+            .snapshot()
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        let parents = [parent.provenance()];
+        let display_declassification = ProvenanceRecordV2::declassify(
+            &display_value,
+            display_context,
+            DeclassificationTransitionV2::BuildApprovalDisplay,
+            &declassification_rules,
+            ClosedDeclassificationPurposeV2::ApprovalDisplay.purpose_digest(),
+            binding
+                .binding_digest()
+                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?,
+            None,
+            &parents,
+            session.policy_allowed_effects,
+            now.get(),
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        if display_declassification.judge_handoff(
+            DeclassificationTransitionV2::BuildApprovalDisplay,
+            &declassification_rules,
+        ) != HandoffJudgmentV2::Admits
+        {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        let unsigned = UnsignedApprovalEnvelopeV2::new(
+            self.config.installation_id,
+            active_state_manifest_digest,
+            deployment_generation,
+            ApprovalPurposeV2::ConnectorRegistration,
+            Nonce32V2::new(random_bytes()?),
+            Nonce32V2::new(random_bytes()?),
+            binding,
+            session.principal,
+            display_projection_digest,
+            display_digest,
+            display_text,
+            Some(display_declassification.provenance_digest()),
+            policy.approval.approvald_identity,
+            now,
+            authorization.expires_at,
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let envelope = SignedApprovalEnvelopeV2::sign(unsigned, &self.config.envelope_signing_key)
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        let envelope_digest = envelope
+            .envelope_digest()
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        let display_authentication = SignedUiAuthenticationEnvelopeV2::sign(
+            UnsignedUiAuthenticationEnvelopeV2::new(
+                self.config.installation_id,
+                active_state_manifest_digest,
+                deployment_generation,
+                UiAuthenticationPurposeV2::ApprovalDisplay,
+                UiAuthenticationBindingV2::ApprovalDisplay {
+                    durable_task_id: session.durable_task_id,
+                    approval_envelope_digest: envelope_digest,
+                    approval_purpose: ApprovalPurposeV2::ConnectorRegistration,
+                    display_digest,
+                },
+                Some(session.principal),
+                FixedOriginV2::Approval8766,
+                FixedOriginV2::Approval8766,
+                Nonce32V2::new(random_bytes()?),
+                now,
+                authorization.expires_at,
+            )
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?,
+            &self.config.envelope_signing_key,
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        let response =
+            ProposeConnectorRegistrationResponseV2::new(envelope, display_authentication);
+        self.connector_authorizations[authorization_index].consumed = true;
+        Ok(response)
+    }
+
+    fn verify_connector_ui_caller(
+        &self,
+        caller_boot_id: BootIdV2,
+        caller_identity: ServiceIdentityV2,
+    ) -> Result<(), KernelAgentAuthorityErrorV2> {
+        self.verify_agent_caller(caller_identity)?;
+        if caller_boot_id != self.config.agentd_kernel_client_boot_id {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        Ok(())
+    }
+
     fn verify_agent_caller(
         &self,
         caller_identity: ServiceIdentityV2,
@@ -4668,6 +5022,135 @@ impl KernelAgentAuthorityV2 {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
         Ok(())
+    }
+}
+
+fn connector_registration_display(
+    descriptor: &ConnectorDescriptorV2,
+) -> Result<BoundedApprovalDisplayTextV2, KernelAgentAuthorityErrorV2> {
+    use std::fmt::Write as _;
+
+    // Approval display text deliberately has no control characters. The wire
+    // type rejects them, so fields use an explicit printable separator.
+    let mut display = String::from("Connector registration proposal v2; ");
+    display
+        .try_reserve(16 * 1024)
+        .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    write!(
+        &mut display,
+        "tier: UserRegistered ({}); ",
+        descriptor.tier().tag()
+    )
+    .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    write!(
+        &mut display,
+        "name: {}; ",
+        descriptor.display_name().as_str()
+    )
+    .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    match descriptor.transport() {
+        ConnectorTransportV2::Stdio { package_digest } => {
+            write!(&mut display, "transport: stdio; package_digest: ")
+                .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+            push_lower_hex(&mut display, package_digest.as_bytes())?;
+            display.push_str("; ");
+        }
+        ConnectorTransportV2::Https {
+            canonical_url,
+            tls_identity_pin,
+        } => {
+            write!(
+                &mut display,
+                "transport: https; url: {}; tls_identity_pin: ",
+                canonical_url.as_str()
+            )
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+            push_lower_hex(&mut display, tls_identity_pin.as_bytes())?;
+            display.push_str("; ");
+        }
+    }
+    write!(
+        &mut display,
+        "requested_effects: {} (0x{:04x}); ",
+        effect_names(descriptor.requested_effects()),
+        descriptor.requested_effects().bits()
+    )
+    .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    write!(
+        &mut display,
+        "descriptor_version: {}; ",
+        descriptor.descriptor_version()
+    )
+    .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    write!(
+        &mut display,
+        "tool_count: {}; ",
+        descriptor.tool_descriptors().len()
+    )
+    .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    for (index, tool) in descriptor.tool_descriptors().iter().enumerate() {
+        write!(
+            &mut display,
+            "tool[{index}].name: {}; ",
+            tool.provider_tool_id().as_str()
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        write!(
+            &mut display,
+            "tool[{index}].effects: {} (0x{:04x}); ",
+            effect_names(tool.effects()),
+            tool.effects().bits()
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        let canonical =
+            minicbor::to_vec(tool).map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let semantics = base64::engine::general_purpose::STANDARD.encode(canonical);
+        write!(
+            &mut display,
+            "tool[{index}].semantics_canonical_cbor_base64: {semantics}; "
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    }
+    let complete = base64::engine::general_purpose::STANDARD.encode(descriptor.canonical_bytes());
+    write!(
+        &mut display,
+        "connector_descriptor_canonical_cbor_base64: {complete}"
+    )
+    .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    BoundedApprovalDisplayTextV2::new(display)
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)
+}
+
+fn push_lower_hex(output: &mut String, bytes: &[u8]) -> Result<(), KernelAgentAuthorityErrorV2> {
+    use std::fmt::Write as _;
+    output
+        .try_reserve(bytes.len().saturating_mul(2))
+        .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    for byte in bytes {
+        write!(output, "{byte:02x}").map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    }
+    Ok(())
+}
+
+fn effect_names(effects: EffectSetV2) -> String {
+    let mut names = Vec::new();
+    for (effect, name) in [
+        (EffectSetV2::READ, "READ"),
+        (EffectSetV2::CREATE, "CREATE"),
+        (EffectSetV2::UPDATE, "UPDATE"),
+        (EffectSetV2::DELETE, "DELETE"),
+        (EffectSetV2::SEND, "SEND"),
+        (EffectSetV2::EXECUTE, "EXECUTE"),
+        (EffectSetV2::FINAL_RELEASE, "FINAL_RELEASE"),
+    ] {
+        if effects.contains(effect) {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        "NONE".to_owned()
+    } else {
+        names.join("|")
     }
 }
 
@@ -5289,6 +5772,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::{Arc, Mutex};
 
+    use base64::Engine as _;
     use ed25519_dalek::{Signer as _, SigningKey};
     use minicbor::Encode as _;
     use savana_input_runtime::{
@@ -5297,28 +5781,32 @@ mod tests {
     use savana_kernel_protocol::v2::{
         derive_ed25519_key_id_v2, encode_planner_plan_v2, verify_effect_ledger_projection_v2,
         ActionIntentCurrentStateV2, ActionTemplateIdV2, AgentSessionHandleV2, AgentSessionStatusV2,
-        ArgumentNameV2, BootIdV2, CancelKernelTaskRequestV2, CommitPlannerValueRequestV2,
-        Digest32V2, DispatchExecutionRequestV2, DurableRunIdV2, DurableTaskIdV2, Ed25519KeyIdV2,
-        EffectLedgerProjectionBindingV2, EndpointRoleV2, EvaluateToolCallRequestV2,
-        EvaluateToolCallResponseV2, ExecutorIdentityV2, GetKernelTaskStatusRequestV2,
-        KernelServiceHandshakeEdgeV2, MaskedDocumentHandleV2, NamedArgumentValueBindingV2,
-        Nonce32V2, PeerIdentityBindingV2, PlannerIntentKindV2, PlannerLimitsV2, PlannerPlanV2,
-        PlannerPurposeV2, PlannerRouteIdV2, PlannerSlotRefV2, PlannerStepV2,
+        ApprovalBindingV2, ApprovalPurposeV2, ArgumentNameV2, BootIdV2, CancelKernelTaskRequestV2,
+        CommitPlannerValueRequestV2, ConnectorUiAuthorizationHandleV2, Digest32V2,
+        DispatchExecutionRequestV2, DisplayProjectionIdV2, DurableRunIdV2, DurableTaskIdV2,
+        Ed25519KeyIdV2, EffectLedgerProjectionBindingV2, EndpointRoleV2, EvaluateToolCallRequestV2,
+        EvaluateToolCallResponseV2, ExecutorIdentityV2, FixedOriginV2,
+        GetKernelTaskStatusRequestV2, ImplementationIdV2, KernelServiceHandshakeEdgeV2,
+        MaskedDocumentHandleV2, NamedArgumentValueBindingV2, Nonce32V2, PeerIdentityBindingV2,
+        PlannerIntentKindV2, PlannerLimitsV2, PlannerPlanV2, PlannerPurposeV2, PlannerRouteIdV2,
+        PlannerSlotRefV2, PlannerStepV2, PrepareConnectorRegistrationRequestV2,
         PrepareNewIngressRequestV2, PrepareNewIngressResponseV2, PreparePlannerCallRequestV2,
-        PrincipalIdV2, ProducerIdentityV2, ProjectionIdV2, ProposeToolCallRequestV2,
-        PublicTaskStatusV2, RequestIdV2, ResumeCommittedAgentAuthenticationRequestV2,
-        ResumeCommittedAgentAuthenticationResponseV2, RoleIdV2, RunRevisionDigestV2,
-        RunRevisionObservationV2, ServiceIdentityV2, StaticTemplateIdV2, ToolClassIdV2,
-        ToolHandleV2, UnixMillisV2, VersionV2,
+        PrincipalIdV2, ProducerIdentityV2, ProjectionIdV2, ProposeConnectorRegistrationRequestV2,
+        ProposeToolCallRequestV2, PublicTaskStatusV2, RequestIdV2,
+        ResumeCommittedAgentAuthenticationRequestV2, ResumeCommittedAgentAuthenticationResponseV2,
+        RoleIdV2, RunRevisionDigestV2, RunRevisionObservationV2, ServiceIdentityV2,
+        StaticTemplateIdV2, ToolClassIdV2, ToolHandleV2, UiAuthenticationBindingV2,
+        UiAuthenticationPurposeV2, UnixMillisV2, VersionV2,
     };
     use savana_policy_core::v2::{
         activate_internal_validator_registry, declassification_implementation_digest_v2,
-        descriptor_digest_v2, ActiveToolRegistryV2, AttemptKindV2, BoundedConnectorRetryPolicyV2,
-        ClosedDeclassificationPurposeV2, ConnectorRegistryStateV2, ContextFieldV2,
-        DeclassificationRuleSetV2, DeclassificationRuleV2, DispatchQuotaSubjectV2,
-        DurableG4StateV2, DurableStateNamespaceV2, EffectSetV2, ExecutorIdempotencyContractV2,
-        G4Error, IdentifierV2, InternalValidatorDeclarationV2, KernelValueV2, LeakGateDutyV2,
-        OntologyExprV2, OntologyOperandV2, OntologyScalarV2, OperationalTrustRootPurposeV2,
+        descriptor_digest_v2, ActiveToolRegistryV2, AttemptKindV2, BoundedConnectorHostV2,
+        BoundedConnectorRetryPolicyV2, ClosedDeclassificationPurposeV2, ConnectorDescriptorV2,
+        ConnectorRegistryStateV2, ConnectorTierV2, ContextFieldV2, DeclassificationRuleSetV2,
+        DeclassificationRuleV2, DispatchQuotaSubjectV2, DurableG4StateV2, DurableStateNamespaceV2,
+        EffectSetV2, ExecutorIdempotencyContractV2, G4Error, IdentifierV2,
+        InternalValidatorDeclarationV2, KernelValueV2, LeakGateDutyV2, OntologyExprV2,
+        OntologyOperandV2, OntologyScalarV2, OperationalTrustRootPurposeV2,
         OperationalTrustRootSetItemV2, OperationalTrustRootSetV2, ProvenanceContextV2,
         ProvenanceRecordV2, RollbackProtectedStateAnchorV2, RollbackProtectedStateHeadV2,
         SharedVerifiedConnectorRegistryV2, SignedToolDescriptorV2, UnsignedToolDescriptorV2,
@@ -5468,6 +5956,12 @@ mod tests {
     }
 
     fn planner_authority_fixture() -> PlannerAuthorityFixtureV2 {
+        planner_authority_fixture_with_approval_display(true)
+    }
+
+    fn planner_authority_fixture_with_approval_display(
+        include_approval_display: bool,
+    ) -> PlannerAuthorityFixtureV2 {
         let caller_identity = ServiceIdentityV2::new([0x81; 32]);
         let producer = ProducerIdentityV2::new([0x82; 32]);
         let durable_run_id = DurableRunIdV2::new([0x83; 32]);
@@ -5542,7 +6036,10 @@ mod tests {
         let mut authority = KernelAgentAuthorityV2::new(security, 32).unwrap();
         let directory = tempfile::tempdir().unwrap();
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        authority.policy = Some(planner_policy_runtime(directory.path()));
+        authority.policy = Some(planner_policy_runtime(
+            directory.path(),
+            include_approval_display,
+        ));
         authority.sessions.push(SessionRecordV2 {
             session: AgentSessionHandleV2::from_authority_entropy([0x93; 32]).unwrap(),
             run,
@@ -5562,6 +6059,7 @@ mod tests {
             )
             .unwrap(),
             initial_document: MaskedDocumentHandleV2::from_authority_entropy([0x96; 32]).unwrap(),
+            initial_value: prompt,
             status: AgentSessionStatusV2::Ready,
         });
         PlannerAuthorityFixtureV2 {
@@ -5572,6 +6070,839 @@ mod tests {
             run,
             prompt,
         }
+    }
+
+    fn connector_tool_descriptor(
+        seed: u8,
+        name: &str,
+        effects: EffectSetV2,
+    ) -> UnsignedToolDescriptorV2 {
+        let idempotency = ExecutorIdempotencyContractV2::ConnectorIdempotentByExecutionNonce;
+        UnsignedToolDescriptorV2::from_verified_manifest(
+            2,
+            VersionV2::new(1, 0, 0),
+            Digest32V2::new([seed; 32]),
+            IdentifierV2::new(name).unwrap(),
+            ActionTemplateIdV2::new(u32::from(seed) + 1),
+            ToolClassIdV2::new(u32::from(seed) + 2),
+            Digest32V2::new([seed.wrapping_add(1); 32]),
+            Digest32V2::new([seed.wrapping_add(2); 32]),
+            vec![RoleIdV2::new(1)],
+            effects,
+            AttemptKindV2::ToolWrite,
+            BoundedConnectorRetryPolicyV2::new(idempotency, 2, 1_000_000).unwrap(),
+            vec![InternalValidatorDeclarationV2::new(
+                ImplementationIdV2::new(u32::from(seed) + 3),
+                VersionV2::new(1, 0, 0),
+                Digest32V2::new([seed.wrapping_add(3); 32]),
+            )],
+            ExecutorIdentityV2::new([seed.wrapping_add(4); 32]),
+            ProjectionIdV2::new(u32::from(seed) + 4),
+            Digest32V2::new([seed.wrapping_add(5); 32]),
+            DisplayProjectionIdV2::new(u32::from(seed) + 5),
+            Digest32V2::new([seed.wrapping_add(6); 32]),
+            idempotency,
+            UnixMillisV2::new(1),
+            UnixMillisV2::new(10_000),
+        )
+        .unwrap()
+    }
+
+    fn valid_user_connector_descriptor() -> (Vec<u8>, Vec<UnsignedToolDescriptorV2>) {
+        const CONNECTOR_USER_DOMAIN: &[u8] = b"savana.connector.user.v2\0";
+        const NAME: &str = "mail-connector";
+        const URL: &str = "https://api.example.com/mcp/v2?scope=full";
+        let tls_pin = Digest32V2::new([0x34; 32]);
+        let effects = EffectSetV2::READ.union(EffectSetV2::SEND);
+        let tools = vec![
+            connector_tool_descriptor(0xd1, "mail.read", EffectSetV2::READ),
+            connector_tool_descriptor(0xe1, "mail.send", EffectSetV2::SEND),
+        ];
+
+        let mut identity = minicbor::Encoder::new(Vec::new());
+        identity
+            .array(2)
+            .unwrap()
+            .str(NAME)
+            .unwrap()
+            .array(3)
+            .unwrap()
+            .u16(2)
+            .unwrap()
+            .str(URL)
+            .unwrap()
+            .bytes(tls_pin.as_bytes())
+            .unwrap();
+        let connector_id = Digest32V2::new(
+            Sha256::new()
+                .chain_update(CONNECTOR_USER_DOMAIN)
+                .chain_update(identity.into_writer())
+                .finalize()
+                .into(),
+        );
+
+        let mut descriptor = minicbor::Encoder::new(Vec::new());
+        descriptor
+            .array(7)
+            .unwrap()
+            .bytes(connector_id.as_bytes())
+            .unwrap()
+            .str(NAME)
+            .unwrap()
+            .u16(ConnectorTierV2::UserRegistered.tag())
+            .unwrap()
+            .array(3)
+            .unwrap()
+            .u16(2)
+            .unwrap()
+            .str(URL)
+            .unwrap()
+            .bytes(tls_pin.as_bytes())
+            .unwrap()
+            .array(tools.len() as u64)
+            .unwrap();
+        for tool in &tools {
+            descriptor
+                .writer_mut()
+                .extend_from_slice(&minicbor::to_vec(tool).unwrap());
+        }
+        descriptor.u16(effects.bits()).unwrap().u64(1).unwrap();
+        let bytes = descriptor.into_writer();
+        ConnectorDescriptorV2::from_canonical_bytes(
+            &bytes,
+            &[BoundedConnectorHostV2::new("example.com").unwrap()],
+        )
+        .unwrap();
+        (bytes, tools)
+    }
+
+    fn valid_user_stdio_connector_descriptor(tool_count: usize) -> Vec<u8> {
+        const CONNECTOR_USER_DOMAIN: &[u8] = b"savana.connector.user.v2\0";
+        const NAME: &str = "local-mail-connector";
+        let package_digest = Digest32V2::new([0x35; 32]);
+        let tools = (0..tool_count)
+            .map(|index| {
+                connector_tool_descriptor(
+                    u8::try_from(index % 190).unwrap().saturating_add(1),
+                    &format!("bulk.tool.{index:04}"),
+                    EffectSetV2::READ,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let mut identity = minicbor::Encoder::new(Vec::new());
+        identity
+            .array(2)
+            .unwrap()
+            .str(NAME)
+            .unwrap()
+            .array(2)
+            .unwrap()
+            .u16(1)
+            .unwrap()
+            .bytes(package_digest.as_bytes())
+            .unwrap();
+        let connector_id = Digest32V2::new(
+            Sha256::new()
+                .chain_update(CONNECTOR_USER_DOMAIN)
+                .chain_update(identity.into_writer())
+                .finalize()
+                .into(),
+        );
+
+        let mut descriptor = minicbor::Encoder::new(Vec::new());
+        descriptor
+            .array(7)
+            .unwrap()
+            .bytes(connector_id.as_bytes())
+            .unwrap()
+            .str(NAME)
+            .unwrap()
+            .u16(ConnectorTierV2::UserRegistered.tag())
+            .unwrap()
+            .array(2)
+            .unwrap()
+            .u16(1)
+            .unwrap()
+            .bytes(package_digest.as_bytes())
+            .unwrap()
+            .array(tools.len() as u64)
+            .unwrap();
+        for tool in &tools {
+            descriptor
+                .writer_mut()
+                .extend_from_slice(&minicbor::to_vec(tool).unwrap());
+        }
+        descriptor
+            .u16(EffectSetV2::READ.bits())
+            .unwrap()
+            .u64(1)
+            .unwrap();
+        let bytes = descriptor.into_writer();
+        ConnectorDescriptorV2::from_canonical_bytes(&bytes, &[]).unwrap();
+        bytes
+    }
+
+    fn signed_connector_add_delta(
+        previous_head_digest: Digest32V2,
+        canonical_descriptor: &[u8],
+        authority: &SigningKey,
+    ) -> Vec<u8> {
+        let mut payload = minicbor::Encoder::new(Vec::new());
+        payload
+            .array(6)
+            .unwrap()
+            .u16(1)
+            .unwrap()
+            .u64(1)
+            .unwrap()
+            .bytes(previous_head_digest.as_bytes())
+            .unwrap()
+            .array(2)
+            .unwrap()
+            .u16(1)
+            .unwrap();
+        payload.writer_mut().extend_from_slice(canonical_descriptor);
+        payload
+            .bytes(Digest32V2::new([0xfa; 32]).as_bytes())
+            .unwrap()
+            .u64(201)
+            .unwrap();
+        let payload = payload.into_writer();
+        let payload_digest = Digest32V2::new(
+            Sha256::new()
+                .chain_update(b"savana.connector-registry.delta.v2.payload\0")
+                .chain_update(&payload)
+                .finalize()
+                .into(),
+        );
+        let signature_digest = Digest32V2::new(
+            Sha256::new()
+                .chain_update(b"savana.connector-registry.delta.v2.signature\0")
+                .chain_update(payload_digest.as_bytes())
+                .finalize()
+                .into(),
+        );
+        let signature = authority.sign(signature_digest.as_bytes()).to_bytes();
+        let mut delta = minicbor::Encoder::new(Vec::new());
+        delta.array(3).unwrap();
+        delta.writer_mut().extend_from_slice(&payload);
+        delta
+            .bytes(payload_digest.as_bytes())
+            .unwrap()
+            .bytes(&signature)
+            .unwrap();
+        delta.into_writer()
+    }
+
+    fn install_connector_runtime(fixture: &mut PlannerAuthorityFixtureV2, enabled: bool) {
+        let runtime = if enabled {
+            test_g7_runtime_with_connector_authority(
+                Digest32V2::new([0x89; 32]),
+                Digest32V2::new([0x85; 32]),
+                1,
+                1,
+            )
+        } else {
+            test_g7_runtime(
+                Digest32V2::new([0x89; 32]),
+                Digest32V2::new([0x85; 32]),
+                1,
+                1,
+            )
+        };
+        fixture
+            .authority
+            .policy
+            .as_mut()
+            .unwrap()
+            .install_g7(runtime)
+            .unwrap();
+    }
+
+    #[test]
+    fn connector_control_refuses_unknown_session_and_caller_fabricated_authorization() {
+        let mut fixture = planner_authority_fixture();
+        let caller_boot_id = BootIdV2::new([0x8c; 32]);
+        let active_manifest = Digest32V2::new([0x85; 32]);
+        let descriptor = vec![0x80];
+
+        assert_eq!(
+            fixture.authority.prepare_connector_registration(
+                &PrepareConnectorRegistrationRequestV2::new(
+                    AgentSessionHandleV2::from_authority_entropy([0xf1; 32]).unwrap(),
+                    descriptor.clone(),
+                )
+                .unwrap(),
+                caller_boot_id,
+                fixture.caller_identity,
+                active_manifest,
+                1,
+                UnixMillisV2::new(200),
+            ),
+            Err(KernelAgentAuthorityErrorV2::InvalidReference)
+        );
+
+        assert_eq!(
+            fixture.authority.propose_connector_registration(
+                &ProposeConnectorRegistrationRequestV2::new(
+                    ConnectorUiAuthorizationHandleV2::from_authority_entropy([0xf2; 32]).unwrap(),
+                    descriptor,
+                )
+                .unwrap(),
+                &fixture.values,
+                caller_boot_id,
+                fixture.caller_identity,
+                active_manifest,
+                1,
+                UnixMillisV2::new(200),
+            ),
+            Err(KernelAgentAuthorityErrorV2::InvalidReference)
+        );
+    }
+
+    #[test]
+    fn connector_control_refuses_wrong_origin_context_and_dead_session_lifecycle() {
+        let mut fixture = planner_authority_fixture();
+        install_connector_runtime(&mut fixture, true);
+        let (descriptor, _) = valid_user_connector_descriptor();
+        fixture.authority.sessions[0].expires_at = UnixMillisV2::new(1_000_000);
+        let session = fixture.authority.sessions[0].session;
+        let caller_boot_id = BootIdV2::new([0x8c; 32]);
+        let caller_identity = fixture.caller_identity;
+        let active_manifest = Digest32V2::new([0x85; 32]);
+        let request =
+            PrepareConnectorRegistrationRequestV2::new(session, descriptor.clone()).unwrap();
+
+        assert_eq!(
+            fixture.authority.prepare_connector_registration(
+                &request,
+                BootIdV2::new([0xf3; 32]),
+                caller_identity,
+                active_manifest,
+                1,
+                UnixMillisV2::new(200),
+            ),
+            Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+        );
+        assert_eq!(
+            fixture.authority.prepare_connector_registration(
+                &request,
+                caller_boot_id,
+                ServiceIdentityV2::new([0xf4; 32]),
+                active_manifest,
+                1,
+                UnixMillisV2::new(200),
+            ),
+            Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+        );
+
+        let prepared = fixture
+            .authority
+            .prepare_connector_registration(
+                &request,
+                caller_boot_id,
+                caller_identity,
+                active_manifest,
+                1,
+                UnixMillisV2::new(200),
+            )
+            .unwrap();
+
+        for (boot, identity, manifest, generation) in [
+            (
+                BootIdV2::new([0xf3; 32]),
+                caller_identity,
+                active_manifest,
+                1,
+            ),
+            (
+                caller_boot_id,
+                ServiceIdentityV2::new([0xf4; 32]),
+                active_manifest,
+                1,
+            ),
+            (
+                caller_boot_id,
+                caller_identity,
+                Digest32V2::new([0xf5; 32]),
+                1,
+            ),
+            (caller_boot_id, caller_identity, active_manifest, 2),
+        ] {
+            assert_eq!(
+                fixture.authority.propose_connector_registration(
+                    &ProposeConnectorRegistrationRequestV2::new(
+                        prepared.authorization(),
+                        descriptor.clone(),
+                    )
+                    .unwrap(),
+                    &fixture.values,
+                    boot,
+                    identity,
+                    manifest,
+                    generation,
+                    UnixMillisV2::new(201),
+                ),
+                Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+            );
+        }
+
+        assert_eq!(
+            fixture.authority.connector_authorizations[0].origin,
+            FixedOriginV2::Agent8768
+        );
+        fixture.authority.connector_authorizations[0].origin = FixedOriginV2::Approval8766;
+        assert_eq!(
+            fixture.authority.propose_connector_registration(
+                &ProposeConnectorRegistrationRequestV2::new(
+                    prepared.authorization(),
+                    descriptor.clone(),
+                )
+                .unwrap(),
+                &fixture.values,
+                caller_boot_id,
+                caller_identity,
+                active_manifest,
+                1,
+                UnixMillisV2::new(201),
+            ),
+            Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+        );
+        fixture.authority.connector_authorizations[0].origin = FixedOriginV2::Agent8768;
+
+        fixture.authority.sessions[0].status = AgentSessionStatusV2::Closed;
+        assert_eq!(
+            fixture.authority.propose_connector_registration(
+                &ProposeConnectorRegistrationRequestV2::new(
+                    prepared.authorization(),
+                    descriptor.clone(),
+                )
+                .unwrap(),
+                &fixture.values,
+                caller_boot_id,
+                caller_identity,
+                active_manifest,
+                1,
+                UnixMillisV2::new(201),
+            ),
+            Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+        );
+        fixture.authority.sessions[0].status = AgentSessionStatusV2::Ready;
+
+        let principal = fixture.authority.sessions[0].principal;
+        fixture.authority.sessions[0].principal = PrincipalIdV2::new([0xf6; 32]);
+        assert_eq!(
+            fixture.authority.propose_connector_registration(
+                &ProposeConnectorRegistrationRequestV2::new(
+                    prepared.authorization(),
+                    descriptor.clone(),
+                )
+                .unwrap(),
+                &fixture.values,
+                caller_boot_id,
+                caller_identity,
+                active_manifest,
+                1,
+                UnixMillisV2::new(201),
+            ),
+            Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+        );
+        fixture.authority.sessions[0].principal = principal;
+
+        let durable_task_id = fixture.authority.sessions[0].durable_task_id;
+        fixture.authority.sessions[0].durable_task_id = DurableTaskIdV2::new([0xf7; 32]);
+        assert_eq!(
+            fixture.authority.propose_connector_registration(
+                &ProposeConnectorRegistrationRequestV2::new(
+                    prepared.authorization(),
+                    descriptor.clone(),
+                )
+                .unwrap(),
+                &fixture.values,
+                caller_boot_id,
+                caller_identity,
+                active_manifest,
+                1,
+                UnixMillisV2::new(201),
+            ),
+            Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+        );
+        fixture.authority.sessions[0].durable_task_id = durable_task_id;
+
+        let durable_run_id = fixture.authority.sessions[0].durable_run_id;
+        fixture.authority.sessions[0].durable_run_id = DurableRunIdV2::new([0xf8; 32]);
+        assert_eq!(
+            fixture.authority.propose_connector_registration(
+                &ProposeConnectorRegistrationRequestV2::new(
+                    prepared.authorization(),
+                    descriptor.clone(),
+                )
+                .unwrap(),
+                &fixture.values,
+                caller_boot_id,
+                caller_identity,
+                active_manifest,
+                1,
+                UnixMillisV2::new(201),
+            ),
+            Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+        );
+        fixture.authority.sessions[0].durable_run_id = durable_run_id;
+
+        fixture.authority.sessions[0].expires_at = UnixMillisV2::new(201);
+        assert_eq!(
+            fixture.authority.propose_connector_registration(
+                &ProposeConnectorRegistrationRequestV2::new(
+                    prepared.authorization(),
+                    descriptor.clone(),
+                )
+                .unwrap(),
+                &fixture.values,
+                caller_boot_id,
+                caller_identity,
+                active_manifest,
+                1,
+                UnixMillisV2::new(201),
+            ),
+            Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+        );
+        fixture.authority.sessions[0].expires_at = UnixMillisV2::new(1_000_000);
+
+        assert_eq!(
+            fixture.authority.propose_connector_registration(
+                &ProposeConnectorRegistrationRequestV2::new(
+                    prepared.authorization(),
+                    descriptor.clone(),
+                )
+                .unwrap(),
+                &fixture.values,
+                caller_boot_id,
+                caller_identity,
+                active_manifest,
+                1,
+                prepared.expires_at(),
+            ),
+            Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+        );
+
+        let registry = fixture
+            .authority
+            .policy
+            .as_ref()
+            .unwrap()
+            .g7
+            .as_ref()
+            .unwrap()
+            .connector_registry
+            .clone();
+        registry
+            .verify_and_apply_canonical_delta(&signed_connector_add_delta(
+                prepared.previous_head_digest(),
+                &descriptor,
+                &SigningKey::from_bytes(&[0xc3; 32]),
+            ))
+            .unwrap();
+        assert_ne!(
+            registry.current_head_digest().unwrap(),
+            prepared.previous_head_digest()
+        );
+        assert_eq!(
+            fixture.authority.propose_connector_registration(
+                &ProposeConnectorRegistrationRequestV2::new(prepared.authorization(), descriptor,)
+                    .unwrap(),
+                &fixture.values,
+                caller_boot_id,
+                caller_identity,
+                active_manifest,
+                1,
+                UnixMillisV2::new(201),
+            ),
+            Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+        );
+        assert!(!fixture.authority.connector_authorizations[0].consumed);
+    }
+
+    #[test]
+    fn connector_control_binds_one_use_ui_authorization_and_complete_human_display() {
+        let mut fixture = planner_authority_fixture();
+        install_connector_runtime(&mut fixture, true);
+        let (descriptor, tools) = valid_user_connector_descriptor();
+        let session = fixture.authority.sessions[0].session;
+        let prepared = fixture
+            .authority
+            .prepare_connector_registration(
+                &PrepareConnectorRegistrationRequestV2::new(session, descriptor.clone()).unwrap(),
+                BootIdV2::new([0x8c; 32]),
+                fixture.caller_identity,
+                Digest32V2::new([0x85; 32]),
+                1,
+                UnixMillisV2::new(200),
+            )
+            .unwrap();
+        assert_eq!(
+            prepared.descriptor_digest(),
+            savana_kernel_protocol::v2::connector_registration_descriptor_digest_v2(&descriptor)
+                .unwrap()
+        );
+        assert_eq!(
+            prepared.previous_head_digest(),
+            fixture
+                .authority
+                .policy
+                .as_ref()
+                .unwrap()
+                .g7
+                .as_ref()
+                .unwrap()
+                .connector_registry
+                .snapshot()
+                .unwrap()
+                .head_digest()
+        );
+
+        let mut tampered_descriptor = descriptor.clone();
+        *tampered_descriptor.last_mut().unwrap() = 2;
+        assert_eq!(
+            fixture.authority.propose_connector_registration(
+                &ProposeConnectorRegistrationRequestV2::new(
+                    prepared.authorization(),
+                    tampered_descriptor,
+                )
+                .unwrap(),
+                &fixture.values,
+                BootIdV2::new([0x8c; 32]),
+                fixture.caller_identity,
+                Digest32V2::new([0x85; 32]),
+                1,
+                UnixMillisV2::new(201),
+            ),
+            Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+        );
+        assert!(!fixture.authority.connector_authorizations[0].consumed);
+
+        let proposed = fixture
+            .authority
+            .propose_connector_registration(
+                &ProposeConnectorRegistrationRequestV2::new(
+                    prepared.authorization(),
+                    descriptor.clone(),
+                )
+                .unwrap(),
+                &fixture.values,
+                BootIdV2::new([0x8c; 32]),
+                fixture.caller_identity,
+                Digest32V2::new([0x85; 32]),
+                1,
+                UnixMillisV2::new(201),
+            )
+            .unwrap();
+        let envelope_key = SigningKey::from_bytes(&[0x91; 32]);
+        let envelope_key_id = derive_ed25519_key_id_v2(envelope_key.verifying_key().to_bytes());
+        let verified = proposed
+            .envelope()
+            .verify(
+                envelope_key_id,
+                envelope_key.verifying_key().to_bytes(),
+                Digest32V2::new([0x89; 32]),
+                Digest32V2::new([0x85; 32]),
+                1,
+                ApprovalPurposeV2::ConnectorRegistration,
+                PrincipalIdV2::new([0x94; 32]),
+                UnixMillisV2::new(201),
+            )
+            .unwrap();
+        assert_eq!(
+            verified.binding(),
+            ApprovalBindingV2::ConnectorRegistration {
+                descriptor_digest: prepared.descriptor_digest(),
+                previous_head_digest: prepared.previous_head_digest(),
+            }
+        );
+        assert!(verified
+            .display_declassification_provenance_digest()
+            .is_some());
+        let display = verified.display_text().as_str();
+        assert!(!display.chars().any(char::is_control));
+        for required in [
+            "tier: UserRegistered (2)",
+            "name: mail-connector",
+            "url: https://api.example.com/mcp/v2?scope=full",
+            "tls_identity_pin: 3434343434343434343434343434343434343434343434343434343434343434",
+            "requested_effects: READ|SEND (0x0011)",
+            "tool[0].name: mail.read",
+            "tool[0].effects: READ (0x0001)",
+            "tool[1].name: mail.send",
+            "tool[1].effects: SEND (0x0010)",
+        ] {
+            assert!(
+                display.contains(required),
+                "missing display field {required}"
+            );
+        }
+        for (index, tool) in tools.iter().enumerate() {
+            let encoded =
+                base64::engine::general_purpose::STANDARD.encode(minicbor::to_vec(tool).unwrap());
+            assert!(display.contains(&format!(
+                "tool[{index}].semantics_canonical_cbor_base64: {encoded}"
+            )));
+        }
+        let complete = base64::engine::general_purpose::STANDARD.encode(&descriptor);
+        assert!(display.contains(&format!(
+            "connector_descriptor_canonical_cbor_base64: {complete}"
+        )));
+
+        let verified_ui = proposed
+            .display_authentication()
+            .verify(
+                envelope_key_id,
+                envelope_key.verifying_key().to_bytes(),
+                Digest32V2::new([0x89; 32]),
+                Digest32V2::new([0x85; 32]),
+                1,
+                UnixMillisV2::new(201),
+            )
+            .unwrap();
+        assert_eq!(
+            verified_ui.purpose(),
+            UiAuthenticationPurposeV2::ApprovalDisplay
+        );
+        assert_eq!(
+            verified_ui.expected_principal(),
+            Some(PrincipalIdV2::new([0x94; 32]))
+        );
+        assert_eq!(
+            verified_ui.authentication_origin(),
+            FixedOriginV2::Approval8766
+        );
+        assert_eq!(verified_ui.return_origin(), FixedOriginV2::Approval8766);
+        assert!(matches!(
+            verified_ui.binding(),
+            UiAuthenticationBindingV2::ApprovalDisplay {
+                durable_task_id,
+                approval_purpose: ApprovalPurposeV2::ConnectorRegistration,
+                display_digest,
+                ..
+            } if durable_task_id == DurableTaskIdV2::new([0x84; 32])
+                && display_digest == verified.display_digest()
+        ));
+        assert!(fixture.authority.connector_authorizations[0].consumed);
+        assert_eq!(
+            fixture.authority.propose_connector_registration(
+                &ProposeConnectorRegistrationRequestV2::new(prepared.authorization(), descriptor,)
+                    .unwrap(),
+                &fixture.values,
+                BootIdV2::new([0x8c; 32]),
+                fixture.caller_identity,
+                Digest32V2::new([0x85; 32]),
+                1,
+                UnixMillisV2::new(202),
+            ),
+            Err(KernelAgentAuthorityErrorV2::AlreadyConsumed)
+        );
+    }
+
+    #[test]
+    fn connector_control_refuses_missing_tag3_invalid_display_text_and_zero_authority() {
+        let (descriptor, _) = valid_user_connector_descriptor();
+
+        let mut no_tag3 = planner_authority_fixture_with_approval_display(false);
+        install_connector_runtime(&mut no_tag3, true);
+        let prepared = no_tag3
+            .authority
+            .prepare_connector_registration(
+                &PrepareConnectorRegistrationRequestV2::new(
+                    no_tag3.authority.sessions[0].session,
+                    descriptor.clone(),
+                )
+                .unwrap(),
+                BootIdV2::new([0x8c; 32]),
+                no_tag3.caller_identity,
+                Digest32V2::new([0x85; 32]),
+                1,
+                UnixMillisV2::new(200),
+            )
+            .unwrap();
+        assert_eq!(
+            no_tag3.authority.propose_connector_registration(
+                &ProposeConnectorRegistrationRequestV2::new(
+                    prepared.authorization(),
+                    descriptor.clone(),
+                )
+                .unwrap(),
+                &no_tag3.values,
+                BootIdV2::new([0x8c; 32]),
+                no_tag3.caller_identity,
+                Digest32V2::new([0x85; 32]),
+                1,
+                UnixMillisV2::new(201),
+            ),
+            Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+        );
+        assert!(!no_tag3.authority.connector_authorizations[0].consumed);
+
+        let mut invalid_text = planner_authority_fixture();
+        install_connector_runtime(&mut invalid_text, true);
+        let name_offset = descriptor
+            .windows(b"mail-connector".len())
+            .position(|window| window == b"mail-connector")
+            .unwrap();
+        for replacement in [0xff, 0x01] {
+            let mut invalid = descriptor.clone();
+            invalid[name_offset] = replacement;
+            assert_eq!(
+                invalid_text.authority.prepare_connector_registration(
+                    &PrepareConnectorRegistrationRequestV2::new(
+                        invalid_text.authority.sessions[0].session,
+                        invalid,
+                    )
+                    .unwrap(),
+                    BootIdV2::new([0x8c; 32]),
+                    invalid_text.caller_identity,
+                    Digest32V2::new([0x85; 32]),
+                    1,
+                    UnixMillisV2::new(200),
+                ),
+                Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+            );
+        }
+
+        let mut zero_authority = planner_authority_fixture();
+        install_connector_runtime(&mut zero_authority, false);
+        assert_eq!(
+            zero_authority.authority.prepare_connector_registration(
+                &PrepareConnectorRegistrationRequestV2::new(
+                    zero_authority.authority.sessions[0].session,
+                    descriptor,
+                )
+                .unwrap(),
+                BootIdV2::new([0x8c; 32]),
+                zero_authority.caller_identity,
+                Digest32V2::new([0x85; 32]),
+                1,
+                UnixMillisV2::new(200),
+            ),
+            Err(KernelAgentAuthorityErrorV2::Unavailable)
+        );
+    }
+
+    #[test]
+    fn connector_display_covers_stdio_package_digest_and_refuses_oversize_output() {
+        let canonical = valid_user_stdio_connector_descriptor(1);
+        let descriptor = ConnectorDescriptorV2::from_canonical_bytes(&canonical, &[]).unwrap();
+        let display = super::connector_registration_display(&descriptor).unwrap();
+        assert!(display.as_str().contains(&format!(
+            "transport: stdio; package_digest: {}",
+            "35".repeat(32)
+        )));
+        assert!(!display.as_str().contains("url:"));
+
+        let oversized = valid_user_stdio_connector_descriptor(4_096);
+        let descriptor = ConnectorDescriptorV2::from_canonical_bytes(&oversized, &[]).unwrap();
+        assert_eq!(
+            super::connector_registration_display(&descriptor),
+            Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+        );
     }
 
     fn planner_input_runtime() -> InputRuntimeV2 {
@@ -5655,9 +6986,12 @@ mod tests {
         )
     }
 
-    fn planner_policy_runtime(directory: &std::path::Path) -> KernelG4G5RuntimeV2 {
+    fn planner_policy_runtime(
+        directory: &std::path::Path,
+        include_approval_display: bool,
+    ) -> KernelG4G5RuntimeV2 {
         let active_tools = planner_active_tools();
-        let declassification_rules = planner_declassification_rules();
+        let declassification_rules = planner_declassification_rules(include_approval_display);
         let durable = DurableG4StateV2::open(
             &directory.join("kernel-g4-state-v2.cbor"),
             [0x99; 32],
@@ -5761,6 +7095,37 @@ mod tests {
         deployment_generation: u64,
         effect_fence_epoch: u64,
     ) -> KernelG7RuntimeV2 {
+        test_g7_runtime_with_connector_configuration(
+            installation_id,
+            active_state_manifest_digest,
+            deployment_generation,
+            effect_fence_epoch,
+            None,
+        )
+    }
+
+    fn test_g7_runtime_with_connector_authority(
+        installation_id: Digest32V2,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        effect_fence_epoch: u64,
+    ) -> KernelG7RuntimeV2 {
+        test_g7_runtime_with_connector_configuration(
+            installation_id,
+            active_state_manifest_digest,
+            deployment_generation,
+            effect_fence_epoch,
+            Some(SigningKey::from_bytes(&[0xc3; 32])),
+        )
+    }
+
+    fn test_g7_runtime_with_connector_configuration(
+        installation_id: Digest32V2,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        effect_fence_epoch: u64,
+        connector_authority_signing_key: Option<SigningKey>,
+    ) -> KernelG7RuntimeV2 {
         let client_key = SigningKey::from_bytes(&[0xaf; 32]);
         let server_key = SigningKey::from_bytes(&[0xb0; 32]);
         let edge = KernelServiceHandshakeEdgeV2::from_verified_deployment(
@@ -5795,11 +7160,24 @@ mod tests {
         let executor_seal_public_key = x25519_dalek::PublicKey::from(&executor_secret).to_bytes();
         let receipt_key = SigningKey::from_bytes(&[0xbd; 32]);
         let connector_registry_genesis_digest = Digest32V2::new([0xbf; 32]);
+        let connector_authority_public_key = connector_authority_signing_key
+            .as_ref()
+            .map_or([0; 32], |key| key.verifying_key().to_bytes());
+        let connector_authority_key_id = if connector_authority_public_key == [0; 32] {
+            Ed25519KeyIdV2::new([0; 32])
+        } else {
+            derive_ed25519_key_id_v2(connector_authority_public_key)
+        };
+        let user_host_allowlist = if connector_authority_public_key == [0; 32] {
+            Vec::new()
+        } else {
+            vec![BoundedConnectorHostV2::new("example.com").unwrap()]
+        };
         let connector_registry = SharedVerifiedConnectorRegistryV2::from_verified_state(
             ConnectorRegistryStateV2::from_verified_genesis(
                 connector_registry_genesis_digest,
-                [0; 32],
-                vec![],
+                connector_authority_public_key,
+                user_host_allowlist,
                 vec![],
             )
             .unwrap(),
@@ -5812,9 +7190,9 @@ mod tests {
             hpke_x25519_key_id(executor_seal_public_key),
             executor_seal_public_key,
             connector_registry_genesis_digest,
-            Ed25519KeyIdV2::new([0; 32]),
-            [0; 32],
-            None,
+            connector_authority_key_id,
+            connector_authority_public_key,
+            connector_authority_signing_key,
             connector_registry,
             verified_effect_ledger_projection(
                 installation_id,
@@ -5831,6 +7209,7 @@ mod tests {
     }
 
     fn planner_declassification_rules(
+        include_approval_display: bool,
     ) -> crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2 {
         let installer = SigningKey::from_bytes(&[0x9e; 32]);
         let authority = SigningKey::from_bytes(&[0x9f; 32]);
@@ -5853,7 +7232,7 @@ mod tests {
             1,
         )
         .unwrap();
-        let rule = DeclassificationRuleV2::new_for_test(
+        let planner_rule = DeclassificationRuleV2::new_for_test(
             2,
             ClosedDeclassificationPurposeV2::PlannerCall,
             declassification_implementation_digest_v2(2).unwrap(),
@@ -5864,17 +7243,24 @@ mod tests {
             10_000,
         )
         .unwrap();
+        let mut rules = vec![planner_rule];
+        if include_approval_display {
+            rules.push(
+                DeclassificationRuleV2::new_for_test(
+                    3,
+                    ClosedDeclassificationPurposeV2::ApprovalDisplay,
+                    declassification_implementation_digest_v2(3).unwrap(),
+                    LeakGateDutyV2::BlocklistOnly,
+                    None,
+                    None,
+                    1,
+                    10_000,
+                )
+                .unwrap(),
+            );
+        }
         let rules = DeclassificationRuleSetV2::new_signed_for_test(
-            family,
-            1,
-            None,
-            vec![rule],
-            1,
-            10_000,
-            &roots,
-            &authority,
-            1,
-            100,
+            family, 1, None, rules, 1, 10_000, &roots, &authority, 1, 100,
         )
         .unwrap();
         crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2::new(
@@ -6579,7 +7965,7 @@ mod tests {
                 ui_key.verifying_key().to_bytes(),
                 derive_ed25519_key_id_v2(ingress_settlement_key.verifying_key().to_bytes()),
                 ingress_settlement_key.verifying_key().to_bytes(),
-                planner_declassification_rules(),
+                planner_declassification_rules(true),
                 EffectSetV2::SEND,
             )
             .unwrap(),
@@ -6721,7 +8107,7 @@ mod tests {
                 settlement_key.verifying_key().to_bytes(),
                 derive_ed25519_key_id_v2(ingress_settlement_key.verifying_key().to_bytes()),
                 ingress_settlement_key.verifying_key().to_bytes(),
-                planner_declassification_rules(),
+                planner_declassification_rules(true),
                 EffectSetV2::SEND,
             )
             .unwrap(),
@@ -6826,7 +8212,7 @@ mod tests {
                 settlement_key.verifying_key().to_bytes(),
                 derive_ed25519_key_id_v2(ingress_settlement_key.verifying_key().to_bytes()),
                 ingress_settlement_key.verifying_key().to_bytes(),
-                planner_declassification_rules(),
+                planner_declassification_rules(true),
                 EffectSetV2::SEND,
             )
             .unwrap(),
