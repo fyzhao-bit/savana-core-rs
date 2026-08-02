@@ -43,6 +43,7 @@ crates/savana-kernel-protocol/src/v2/primitives.rs
 crates/savana-kernel-protocol/src/v2/service.rs
 crates/savana-kernel-protocol/src/v2/signed.rs
 crates/savana-kernel-protocol/src/v2/transport.rs
+crates/savana-kerneld/src/bin/savana-development-build-inputs.rs
 crates/savana-kerneld/src/v2_activation.rs
 crates/savana-kerneld/src/v2_agent_authority.rs
 crates/savana-kerneld/src/v2_agent_durable.rs
@@ -72,6 +73,9 @@ crates/savana-leak-gate/src/scanner.rs
 crates/savana-leak-gate/src/tables.rs
 crates/savana-leak-gate/src/tests.rs
 crates/savana-leak-gate/src/vectors.json
+crates/savana-policy-core/Cargo.toml
+crates/savana-policy-core/src/bin/savana-development-material.rs
+crates/savana-policy-core/src/bin/savana-systemd-agentd-network-policy-v2.rs
 crates/savana-policy-core/src/v2/authenticated_anchor.rs
 crates/savana-policy-core/src/v2/binding.rs
 crates/savana-policy-core/src/v2/binding_tests.rs
@@ -92,6 +96,7 @@ crates/savana-policy-core/src/v2/deployment_manifest_primitives.rs
 crates/savana-policy-core/src/v2/deployment_merkle.rs
 crates/savana-policy-core/src/v2/deployment_merkle_tests.rs
 crates/savana-policy-core/src/v2/deployment_native_bootstrap.rs
+crates/savana-policy-core/src/v2/deployment_network.rs
 crates/savana-policy-core/src/v2/deployment_operational_trust.rs
 crates/savana-policy-core/src/v2/deployment_plan.rs
 crates/savana-policy-core/src/v2/deployment_recovery.rs
@@ -145,3 +150,7 @@ crates/savana-policy-core/src/v2/verification_evidence.rs
 crates/savana-vault/Cargo.toml
 crates/savana-vault/src/durable.rs
 crates/savana-vault/src/lib.rs
+deploy/macos/development/install.sh
+deploy/macos/development/tls/mapper-server.ext
+deploy/macos/development/validate.sh
+deploy/systemd/savana-agentd.service

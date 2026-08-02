@@ -1,4 +1,5 @@
 use savana_kernel_protocol::v2::{Digest32V2, UnixMillisV2};
+use savana_policy_core::v2::validate_measured_model_connect_addresses_v2;
 #[cfg(all(feature = "test-support", debug_assertions))]
 use sha2::Digest as _;
 use zeroize::Zeroizing;
@@ -8,7 +9,7 @@ use crate::planner_privacy::{
     IntentTrustDeploymentCeilingV2, MappedWorkflowV2, MapperIntentRequestV2,
 };
 #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
-use crate::private_model_transport::{ConnectorFunctionV2, ResolverFunctionV2};
+use crate::private_model_transport::ConnectorFunctionV2;
 use crate::private_model_transport::{
     PinnedMtlsCborEndpointV2, PrivateModelTransportErrorV2, VerifiedMtlsClientCredentialsV2,
 };
@@ -44,11 +45,8 @@ pub enum AgentMapperClientErrorV2 {
 pub struct MapperEndpointDeploymentV2 {
     host: String,
     port: u16,
+    connect_addresses: Vec<std::net::SocketAddr>,
     server_spki_sha256: Digest32V2,
-    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
-    test_address: Option<std::net::SocketAddr>,
-    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
-    test_resolver: Option<std::sync::Arc<ResolverFunctionV2>>,
     #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
     test_connector: Option<std::sync::Arc<ConnectorFunctionV2>>,
 }
@@ -67,6 +65,7 @@ impl MapperEndpointDeploymentV2 {
     pub fn new(
         host: String,
         port: u16,
+        connect_addresses: Vec<std::net::SocketAddr>,
         server_spki_sha256: Digest32V2,
     ) -> Result<Self, AgentMapperClientErrorV2> {
         if host.is_empty()
@@ -77,14 +76,14 @@ impl MapperEndpointDeploymentV2 {
         {
             return Err(AgentMapperClientErrorV2::InvalidDeployment);
         }
+        let connect_addresses =
+            validate_measured_model_connect_addresses_v2(connect_addresses, port)
+                .map_err(|_| AgentMapperClientErrorV2::InvalidDeployment)?;
         Ok(Self {
             host,
             port,
+            connect_addresses,
             server_spki_sha256,
-            #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
-            test_address: None,
-            #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
-            test_resolver: None,
             #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
             test_connector: None,
         })
@@ -97,27 +96,18 @@ impl MapperEndpointDeploymentV2 {
         address: std::net::SocketAddr,
         server_spki_sha256: Digest32V2,
     ) -> Result<Self, AgentMapperClientErrorV2> {
-        let mut deployment = Self::new(host, address.port(), server_spki_sha256)?;
-        deployment.test_address = Some(address);
-        Ok(deployment)
+        Self::new(host, address.port(), vec![address], server_spki_sha256)
     }
 
     #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
     #[allow(dead_code)]
-    fn for_test_resolver<F>(
+    fn for_test_addresses(
         host: String,
         port: u16,
+        connect_addresses: Vec<std::net::SocketAddr>,
         server_spki_sha256: Digest32V2,
-        resolve: F,
-    ) -> Result<Self, AgentMapperClientErrorV2>
-    where
-        F: Fn(&str, u16) -> std::io::Result<Vec<std::net::SocketAddr>> + Send + Sync + 'static,
-    {
-        let mut deployment = Self::new(host, port, server_spki_sha256)?;
-        deployment.test_resolver = Some(std::sync::Arc::new(move |host, port| {
-            resolve(&host, port).map_err(|_| PrivateModelTransportErrorV2::Unavailable)
-        }));
-        Ok(deployment)
+    ) -> Result<Self, AgentMapperClientErrorV2> {
+        Self::new(host, port, connect_addresses, server_spki_sha256)
     }
 
     #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
@@ -224,6 +214,7 @@ fn build_endpoint(
     let endpoint = PinnedMtlsCborEndpointV2::from_verified_deployment(
         deployment.host,
         deployment.port,
+        deployment.connect_addresses,
         deployment.server_spki_sha256,
         credentials,
     )
@@ -231,11 +222,6 @@ fn build_endpoint(
     #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
     let endpoint = {
         let mut endpoint = endpoint;
-        if let Some(resolve) = deployment.test_resolver {
-            endpoint.set_test_resolver(resolve).map_err(map_transport)?;
-        } else if let Some(address) = deployment.test_address {
-            endpoint.set_test_address(address);
-        }
         if let Some(connect) = deployment.test_connector {
             endpoint.set_test_connector(connect);
         }
@@ -729,23 +715,22 @@ mod tests {
     }
 
     #[test]
-    fn resolver_tries_all_addresses_with_the_same_absolute_deadline() {
+    fn measured_transport_tries_all_addresses_with_the_same_absolute_deadline() {
         let request = mapper_request();
         let server_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let good = server_listener.local_addr().unwrap();
-        let unused = TcpListener::bind("127.0.0.1:0").unwrap();
-        let bad = unused.local_addr().unwrap();
-        drop(unused);
+        let port = server_listener.local_addr().unwrap().port();
+        let bad: SocketAddr = format!("126.255.255.255:{port}").parse().unwrap();
+        let good: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
         let server = spawn_mapper_server(
             server_listener,
             encode_mapper_intent_request_v2(&request).unwrap(),
             mapped_response(&request),
         );
-        let endpoint = MapperEndpointDeploymentV2::for_test_resolver(
+        let endpoint = MapperEndpointDeploymentV2::for_test_addresses(
             "provider.example".to_owned(),
-            good.port(),
+            port,
+            vec![bad, good],
             server_pin(),
-            move |_, _| Ok(vec![bad, good]),
         )
         .unwrap()
         .with_test_connector(move |address, timeout| {
@@ -771,17 +756,21 @@ mod tests {
     }
 
     #[test]
-    fn blocked_resolver_is_bounded_by_the_absolute_deadline() {
-        let endpoint = MapperEndpointDeploymentV2::for_test_resolver(
+    fn blocked_measured_address_is_bounded_by_the_absolute_deadline() {
+        let endpoint = MapperEndpointDeploymentV2::for_test_addresses(
             "provider.example".to_owned(),
             443,
+            vec!["127.0.0.1:443".parse().unwrap()],
             server_pin(),
-            |_, _| {
-                thread::sleep(Duration::from_millis(250));
-                Ok(vec![])
-            },
         )
-        .unwrap();
+        .unwrap()
+        .with_test_connector(|_, timeout| {
+            thread::sleep(timeout);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "simulated black-hole address",
+            ))
+        });
         let client =
             mapper_client(IntentTrustDeploymentCeilingV2::PrivateOnly, endpoint, None).unwrap();
         let started = Instant::now();
@@ -801,12 +790,14 @@ mod tests {
         let private = MapperEndpointDeploymentV2::new(
             "private.example".to_owned(),
             443,
+            vec!["127.0.0.1:443".parse().unwrap()],
             savana_kernel_protocol::v2::Digest32V2::new([0x41; 32]),
         )
         .unwrap();
         let third_party = MapperEndpointDeploymentV2::new(
             "third.example".to_owned(),
             443,
+            vec!["127.0.0.2:443".parse().unwrap()],
             savana_kernel_protocol::v2::Digest32V2::new([0x42; 32]),
         )
         .unwrap();
@@ -818,6 +809,39 @@ mod tests {
             ),
             Err(super::AgentMapperClientErrorV2::InvalidDeployment)
         ));
+    }
+
+    #[test]
+    fn mapper_endpoint_rejects_noncanonical_or_unsafe_measured_addresses() {
+        for addresses in [
+            vec![],
+            vec![
+                "127.0.0.1:443".parse().unwrap(),
+                "127.0.0.1:443".parse().unwrap(),
+            ],
+            vec![
+                "127.0.0.2:443".parse().unwrap(),
+                "127.0.0.1:443".parse().unwrap(),
+            ],
+            vec!["127.0.0.1:0".parse().unwrap()],
+            vec!["0.0.0.0:443".parse().unwrap()],
+            vec!["224.0.0.1:443".parse().unwrap()],
+            vec!["255.255.255.255:443".parse().unwrap()],
+            vec!["[::]:443".parse().unwrap()],
+            vec!["[ff02::1]:443".parse().unwrap()],
+            vec!["127.0.0.1:444".parse().unwrap()],
+        ] {
+            assert_eq!(
+                MapperEndpointDeploymentV2::new(
+                    "private.example".to_owned(),
+                    443,
+                    addresses,
+                    savana_kernel_protocol::v2::Digest32V2::new([0x41; 32]),
+                )
+                .unwrap_err(),
+                super::AgentMapperClientErrorV2::InvalidDeployment
+            );
+        }
     }
 
     #[test]
@@ -874,6 +898,7 @@ mod tests {
         let endpoint = MapperEndpointDeploymentV2::new(
             "private.example".to_owned(),
             443,
+            vec!["127.0.0.1:443".parse().unwrap()],
             savana_kernel_protocol::v2::Digest32V2::new([0x71; 32]),
         )
         .unwrap();

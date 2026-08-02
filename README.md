@@ -316,6 +316,31 @@ mapper, and it is rejected unless the measured deployment ceiling permits it.
 The development deployment is `PrivateOnly` and pins distinct mapper and
 planner server identities and agentd-only mTLS credentials.
 
+TLS identity and network routing are deliberately separate. Each endpoint's
+host is used only for SNI, SAN verification, and the HTTP `Host` field. The
+signed bootstrap also carries a bounded, canonical, sorted connect-address
+list; agentd connects only to those measured socket addresses and never falls
+back to DNS. Development binds planner and mapper to `127.0.0.1:9443` and
+`127.0.0.1:9445` while retaining their distinct `.invalid` TLS names.
+
+On Linux the deployment-specific systemd network drop-in is mandatory. The
+base unit has `IPAddressDeny=any` and no allow entry, and its `ExecStartPre`
+refuses startup unless the fixed root-owned drop-in exactly matches the signed
+bootstrap. The root installation sequence is:
+
+```sh
+install -d -o root -g root -m 0755 /etc/systemd/system/savana-agentd.service.d
+/usr/libexec/savana/savana-systemd-agentd-network-policy-v2 install /etc/savana/agentd-bootstrap-v2.json
+/usr/libexec/savana/savana-systemd-agentd-network-policy-v2 validate /etc/savana/agentd-bootstrap-v2.json
+systemctl daemon-reload
+systemctl restart savana-agentd.service
+```
+
+The generator atomically installs only
+`20-measured-network.conf` as root:root `0444`. It permits exactly the unique
+IPs found in the measured endpoint lists; endpoint ports and server identities
+remain enforced by typed configuration and pinned mTLS.
+
 The semantic catalog is an encrypted, rollback-protected local agentd store at
 `/var/lib/savana/agentd/planner-catalog-state-v2.cbor` in production (under the
 fixed agentd state directory on macOS development). Shipped rows are measured;

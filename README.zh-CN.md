@@ -155,6 +155,28 @@ planner 隐私链全部实现在 `savana-agentd`；内核的 planner operation �
 为 mapper 与 planner 测量不同的 server identity、SPKI pin 和仅 agentd
 可读的 mTLS client credential。
 
+TLS identity 与网络路由被明确分开：endpoint host 只用于 SNI、SAN 校验和
+HTTP `Host`；签名 bootstrap 另外携带有界、规范化、已排序的 connect-address
+list。agentd 只连接这些已测量 socket address，不会回退到 DNS。开发部署的
+planner 与 mapper 分别连接 `127.0.0.1:9443` 和 `127.0.0.1:9445`，同时保留
+不同的 `.invalid` TLS name。
+
+Linux 必须安装 deployment-specific systemd 网络 drop-in。基础 unit 只有
+`IPAddressDeny=any`，没有 allow；`ExecStartPre` 会在固定、root-owned 的
+drop-in 与签名 bootstrap 不完全一致时拒绝启动。root 安装流程为：
+
+```sh
+install -d -o root -g root -m 0755 /etc/systemd/system/savana-agentd.service.d
+/usr/libexec/savana/savana-systemd-agentd-network-policy-v2 install /etc/savana/agentd-bootstrap-v2.json
+/usr/libexec/savana/savana-systemd-agentd-network-policy-v2 validate /etc/savana/agentd-bootstrap-v2.json
+systemctl daemon-reload
+systemctl restart savana-agentd.service
+```
+
+生成器只会原子安装 root:root、`0444` 的
+`20-measured-network.conf`，并且仅允许已测量 endpoint list 中的唯一 IP；
+端口和 server identity 仍由 typed config 与 pinned mTLS 强制执行。
+
 semantic catalog 是 agentd 本机的加密、反回滚存储；Linux 生产路径为
 `/var/lib/savana/agentd/planner-catalog-state-v2.cbor`，macOS 开发部署位于
 固定 agentd state 目录。随部署提供的 row 必须经过测量；用户注册的 row

@@ -530,6 +530,11 @@ mod macos {
             Value::String(PLANNER_SERVER_NAME.to_owned()),
         )?;
         set_value(&mut agent, &["planner_port"], Value::from(9443_u16))?;
+        set_value(
+            &mut agent,
+            &["planner_connect_addresses"],
+            serde_json::json!(["127.0.0.1:9443"]),
+        )?;
         set_hex(
             &mut agent,
             &["planner_server_spki_sha256"],
@@ -541,6 +546,11 @@ mod macos {
             Value::String(MAPPER_SERVER_NAME.to_owned()),
         )?;
         set_value(&mut agent, &["private_mapper_port"], Value::from(9445_u16))?;
+        set_value(
+            &mut agent,
+            &["private_mapper_connect_addresses"],
+            serde_json::json!(["127.0.0.1:9445"]),
+        )?;
         set_hex(
             &mut agent,
             &["private_mapper_server_spki_sha256"],

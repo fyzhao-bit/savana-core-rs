@@ -2358,16 +2358,18 @@ mod tests {
 
             let mapper = PinnedMtlsAgentMapperClientV2::from_verified_deployment(
                 IntentTrustDeploymentCeilingV2::UserMayUseThirdParty,
-                MapperEndpointDeploymentV2::for_test(
+                MapperEndpointDeploymentV2::new(
                     "provider.example".to_owned(),
-                    mapper_address,
+                    mapper_address.port(),
+                    vec![mapper_address],
                     server_pin(),
                 )
                 .unwrap(),
                 Some(
-                    MapperEndpointDeploymentV2::for_test(
+                    MapperEndpointDeploymentV2::new(
                         "provider.example".to_owned(),
-                        mapper_address,
+                        mapper_address.port(),
+                        vec![mapper_address],
                         server_pin(),
                     )
                     .unwrap(),
@@ -2377,9 +2379,10 @@ mod tests {
                 Zeroizing::new(tls_fixture("client_key")),
             )
             .unwrap();
-            let planner = PinnedMtlsAgentPlannerClientV2::from_verified_deployment_for_test(
+            let planner = PinnedMtlsAgentPlannerClientV2::from_verified_deployment(
                 "provider.example".to_owned(),
-                planner_address,
+                planner_address.port(),
+                vec![planner_address],
                 server_pin(),
                 tls_fixture("ca_cert"),
                 tls_fixture("client_cert"),

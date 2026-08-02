@@ -6,6 +6,15 @@ an untrusted structural planner without changing the kernel. The remote
 planner necessarily observes the closed graph's structural-shape floor: node
 count, coarse roles/effects, and topology.
 
+The implemented deployment separates TLS identity from network routing. Each
+model endpoint has a DNS-form server name used only for SNI/SAN/HTTP Host and a
+signed bounded canonical connect-address list used for transport. Agentd has
+no DNS fallback. Linux additionally derives a mandatory fail-closed systemd
+drop-in from those lists: the base service denies all IP traffic, while the
+root-owned generated drop-in permits exactly the measured unique IPs. Ports
+and identities remain closed by typed endpoint configuration and SPKI-pinned
+mTLS.
+
 v1.1: O2 resolved — the intent trust boundary (§5) is **user-configured,
 within a deployment ceiling, fail-safe to private**.
 v1.2: O3 resolved — `structural_role` is **signed into the descriptor**

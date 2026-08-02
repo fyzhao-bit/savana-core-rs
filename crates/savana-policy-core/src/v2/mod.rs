@@ -18,6 +18,7 @@ mod deployment_manifest_primitives;
 #[allow(dead_code)] // Consumed by the closed staging/install tree verifier.
 mod deployment_merkle;
 mod deployment_native_bootstrap;
+mod deployment_network;
 mod deployment_operational_trust;
 mod deployment_plan;
 mod deployment_recovery;
@@ -131,6 +132,11 @@ pub use deployment_manifest_primitives::{
 };
 pub use deployment_native_bootstrap::{
     AuthenticatedNativeDeploymentLedgerV2, AuthenticatedNativeDeploymentTrustV2,
+};
+pub use deployment_network::{
+    measured_model_destination_ips_v2, parse_measured_model_connect_addresses_v2,
+    validate_measured_model_connect_addresses_v2, MeasuredModelNetworkErrorV2,
+    MAX_MODEL_CONNECT_ADDRESSES_V2,
 };
 pub use deployment_operational_trust::{
     OperationalTrustRootPurposeV2, OperationalTrustRootSetBindingV2, OperationalTrustRootSetItemV2,

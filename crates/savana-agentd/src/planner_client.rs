@@ -38,6 +38,7 @@ impl PinnedMtlsAgentPlannerClientV2 {
     pub fn from_verified_deployment(
         host: String,
         port: u16,
+        connect_addresses: Vec<std::net::SocketAddr>,
         server_spki_sha256: Digest32V2,
         root_certificate_der: Vec<u8>,
         client_certificate_der: Vec<u8>,
@@ -52,6 +53,7 @@ impl PinnedMtlsAgentPlannerClientV2 {
         let endpoint = PinnedMtlsCborEndpointV2::from_verified_deployment(
             host,
             port,
+            connect_addresses,
             server_spki_sha256,
             credentials,
         )
@@ -70,15 +72,15 @@ impl PinnedMtlsAgentPlannerClientV2 {
         client_certificate_der: Vec<u8>,
         client_private_key_pkcs8_der: Zeroizing<Vec<u8>>,
     ) -> Result<Self, AgentPlannerClientErrorV2> {
-        let mut client = Self::from_verified_deployment(
+        let client = Self::from_verified_deployment(
             host,
             address.port(),
+            vec![address],
             server_spki_sha256,
             root_certificate_der,
             client_certificate_der,
             client_private_key_pkcs8_der,
         )?;
-        client.endpoint.set_test_address(address);
         Ok(client)
     }
 
@@ -257,17 +259,16 @@ mod tests {
         address: std::net::SocketAddr,
         pin: Digest32V2,
     ) -> PinnedMtlsAgentPlannerClientV2 {
-        let mut client = PinnedMtlsAgentPlannerClientV2::from_verified_deployment(
+        PinnedMtlsAgentPlannerClientV2::from_verified_deployment(
             "provider.example".to_owned(),
             address.port(),
+            vec![address],
             pin,
             tls_fixture("ca_cert"),
             tls_fixture("client_cert"),
             Zeroizing::new(tls_fixture("client_key")),
         )
-        .unwrap();
-        client.endpoint.set_test_address(address);
-        client
+        .unwrap()
     }
 
     fn spawn_raw_planner_server(
@@ -451,16 +452,16 @@ mod tests {
             )
             .into(),
         );
-        let mut client = PinnedMtlsAgentPlannerClientV2::from_verified_deployment(
+        let client = PinnedMtlsAgentPlannerClientV2::from_verified_deployment(
             "provider.example".to_owned(),
             address.port(),
+            vec![address],
             pin,
             tls_fixture("ca_cert"),
             tls_fixture("client_cert"),
             Zeroizing::new(tls_fixture("client_key")),
         )
         .unwrap();
-        client.endpoint.set_test_address(address);
         assert_eq!(
             client
                 .plan(&request, deadline_after(Duration::from_secs(2)))
@@ -468,6 +469,72 @@ mod tests {
             expected_plan
         );
         server.join().unwrap();
+    }
+
+    #[test]
+    fn production_client_connects_to_measured_address_while_validating_tls_name() {
+        let request = structural_request();
+        let expected_body = encode_structural_planner_request_v2(&request).unwrap();
+        let response = encode_ordered_structural_plan_v2(&ordered_response()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server =
+            spawn_raw_planner_server(listener, expected_body, raw_success(&response), true);
+
+        let client = PinnedMtlsAgentPlannerClientV2::from_verified_deployment(
+            "provider.example".to_owned(),
+            address.port(),
+            vec![address],
+            server_pin(),
+            tls_fixture("ca_cert"),
+            tls_fixture("client_cert"),
+            Zeroizing::new(tls_fixture("client_key")),
+        )
+        .unwrap();
+        assert_eq!(
+            client
+                .plan(&request, deadline_after(Duration::from_secs(2)))
+                .unwrap(),
+            ordered_response()
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn production_client_rejects_noncanonical_or_unsafe_measured_addresses() {
+        let pin = server_pin();
+        for addresses in [
+            vec![],
+            vec![
+                "127.0.0.1:443".parse().unwrap(),
+                "127.0.0.1:443".parse().unwrap(),
+            ],
+            vec![
+                "127.0.0.2:443".parse().unwrap(),
+                "127.0.0.1:443".parse().unwrap(),
+            ],
+            vec!["127.0.0.1:0".parse().unwrap()],
+            vec!["0.0.0.0:443".parse().unwrap()],
+            vec!["224.0.0.1:443".parse().unwrap()],
+            vec!["255.255.255.255:443".parse().unwrap()],
+            vec!["[::]:443".parse().unwrap()],
+            vec!["[ff02::1]:443".parse().unwrap()],
+            vec!["127.0.0.1:444".parse().unwrap()],
+        ] {
+            assert_eq!(
+                PinnedMtlsAgentPlannerClientV2::from_verified_deployment(
+                    "provider.example".to_owned(),
+                    443,
+                    addresses,
+                    pin,
+                    tls_fixture("ca_cert"),
+                    tls_fixture("client_cert"),
+                    Zeroizing::new(tls_fixture("client_key")),
+                )
+                .unwrap_err(),
+                AgentPlannerClientErrorV2::InvalidDeployment
+            );
+        }
     }
 
     #[test]
@@ -593,6 +660,7 @@ mod tests {
         let client = PinnedMtlsAgentPlannerClientV2::from_verified_deployment(
             "provider.example".to_owned(),
             443,
+            vec!["127.0.0.1:443".parse().unwrap()],
             server_pin(),
             tls_fixture("ca_cert"),
             tls_fixture("client_cert"),

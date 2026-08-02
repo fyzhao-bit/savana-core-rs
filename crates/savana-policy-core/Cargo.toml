@@ -30,6 +30,10 @@ name = "savana-development-material"
 path = "src/bin/savana-development-material.rs"
 required-features = ["macos-development-authority"]
 
+[[bin]]
+name = "savana-systemd-agentd-network-policy-v2"
+path = "src/bin/savana-systemd-agentd-network-policy-v2.rs"
+
 [dependencies]
 savana-kernel-protocol = { path = "../savana-kernel-protocol" }
 savana-platform-identity = { path = "../savana-platform-identity" }

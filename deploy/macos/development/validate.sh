@@ -211,10 +211,14 @@ done
 agentd_configuration="$build_directory/config/agentd-bootstrap-v2.json"
 planner_host=$(require_agent_field planner_host string)
 planner_port=$(require_agent_field planner_port integer)
+planner_connect_count=$(require_agent_field planner_connect_addresses array)
+planner_connect_address=$(require_agent_field planner_connect_addresses.0 string)
 planner_pin=$(require_agent_field planner_server_spki_sha256 string)
 intent_ceiling=$(require_agent_field intent_trust_deployment_ceiling integer)
 mapper_host=$(require_agent_field private_mapper_host string)
 mapper_port=$(require_agent_field private_mapper_port integer)
+mapper_connect_count=$(require_agent_field private_mapper_connect_addresses array)
+mapper_connect_address=$(require_agent_field private_mapper_connect_addresses.0 string)
 mapper_pin=$(require_agent_field private_mapper_server_spki_sha256 string)
 catalog_state=$(require_agent_field planner_catalog_state_path string)
 catalog_anchor=$(require_agent_field planner_catalog_rollback_anchor_path string)
@@ -222,8 +226,12 @@ catalog_store_id=$(require_agent_field planner_catalog_store_id string)
 
 [ "$planner_host" = "planner.savana-development.invalid" ] && \
   [ "$planner_port" = "9443" ] && \
+  [ "$planner_connect_count" = "1" ] && \
+  [ "$planner_connect_address" = "127.0.0.1:9443" ] && \
   [ "$mapper_host" = "mapper.savana-development.invalid" ] && \
-  [ "$mapper_port" = "9445" ] || {
+  [ "$mapper_port" = "9445" ] && \
+  [ "$mapper_connect_count" = "1" ] && \
+  [ "$mapper_connect_address" = "127.0.0.1:9445" ] || {
     echo "planner or private mapper endpoint is not the measured development endpoint" >&2
     exit 66
   }
@@ -247,7 +255,7 @@ zero_digest=0000000000000000000000000000000000000000000000000000000000000000
     echo "planner catalog path is outside the measured private agentd state" >&2
     exit 66
   }
-for field in third_party_mapper_host third_party_mapper_port third_party_mapper_server_spki_sha256; do
+for field in third_party_mapper_host third_party_mapper_port third_party_mapper_connect_addresses third_party_mapper_server_spki_sha256; do
   if /usr/bin/plutil -extract "$field" raw "$agentd_configuration" >/dev/null 2>&1; then
     echo "PrivateOnly development deployment contains a third-party mapper endpoint" >&2
     exit 66

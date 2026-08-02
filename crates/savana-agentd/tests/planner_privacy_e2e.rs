@@ -251,9 +251,13 @@ fn clients(
     PinnedMtlsAgentPlannerClientV2,
 ) {
     let pin = test_certificate_spki_sha256_v2(&tls_fixture("server_cert")).unwrap();
-    let mapper_endpoint =
-        MapperEndpointDeploymentV2::for_test("provider.example".to_owned(), mapper_address, pin)
-            .unwrap();
+    let mapper_endpoint = MapperEndpointDeploymentV2::new(
+        "provider.example".to_owned(),
+        mapper_address.port(),
+        vec![mapper_address],
+        pin,
+    )
+    .unwrap();
     let mapper = PinnedMtlsAgentMapperClientV2::from_verified_deployment(
         IntentTrustDeploymentCeilingV2::PrivateOnly,
         mapper_endpoint,
@@ -263,9 +267,10 @@ fn clients(
         Zeroizing::new(tls_fixture("client_key")),
     )
     .unwrap();
-    let planner = PinnedMtlsAgentPlannerClientV2::from_verified_deployment_for_test(
+    let planner = PinnedMtlsAgentPlannerClientV2::from_verified_deployment(
         "provider.example".to_owned(),
-        planner_address,
+        planner_address.port(),
+        vec![planner_address],
         pin,
         tls_fixture("ca_cert"),
         tls_fixture("client_cert"),

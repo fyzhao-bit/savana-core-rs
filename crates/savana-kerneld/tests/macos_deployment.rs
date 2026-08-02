@@ -1,7 +1,8 @@
 #![cfg(target_os = "macos")]
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::{fs, os::unix::fs::PermissionsExt as _};
 
 use savana_input_runtime::{SignedInputRuntimeAssetsV2, VerifiedInputRuntimeAssetsV2};
@@ -945,9 +946,117 @@ fn planner_privacy_deployment_provisions_distinct_mapper_identity_and_private_cr
         assert!(systemd.contains(&format!("LoadCredentialEncrypted={credential}:")));
     }
     assert!(systemd.contains("IPAddressDeny=any"));
-    assert!(systemd.contains("IPAddressAllow=127.0.0.1"));
-    assert!(!systemd.contains("IPAddressAllow=0.0.0.0/0"));
-    assert!(!systemd.contains("IPAddressAllow=::/0"));
+    assert!(!systemd.contains("IPAddressAllow="));
+    assert!(systemd.contains(
+        "ExecStartPre=/usr/libexec/savana/savana-systemd-agentd-network-policy-v2 validate /etc/savana/agentd-bootstrap-v2.json"
+    ));
+}
+
+#[test]
+fn mapper_tls_profile_executes_to_distinct_server_auth_identity() {
+    let fixture = tempfile::tempdir().unwrap();
+    let ca_key = fixture.path().join("ca.key.pem");
+    let ca_cert = fixture.path().join("ca.cert.pem");
+    assert!(Command::new("/usr/bin/openssl")
+        .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes"])
+        .args(["-keyout", ca_key.to_str().unwrap()])
+        .args(["-out", ca_cert.to_str().unwrap()])
+        .args(["-days", "1", "-subj", "/CN=Savana test CA"])
+        .status()
+        .unwrap()
+        .success());
+
+    let mut certificates = Vec::new();
+    for (leaf, host, profile) in [
+        (
+            "planner",
+            "planner.savana-development.invalid",
+            "planner-server.ext",
+        ),
+        (
+            "mapper",
+            "mapper.savana-development.invalid",
+            "mapper-server.ext",
+        ),
+    ] {
+        let key = fixture.path().join(format!("{leaf}.key.pem"));
+        let csr = fixture.path().join(format!("{leaf}.csr.pem"));
+        let certificate = fixture.path().join(format!("{leaf}.cert.pem"));
+        let serial = fixture.path().join(format!("{leaf}.srl"));
+        assert!(Command::new("/usr/bin/openssl")
+            .args(["req", "-new", "-newkey", "rsa:2048", "-nodes"])
+            .args(["-keyout", key.to_str().unwrap()])
+            .args(["-out", csr.to_str().unwrap()])
+            .args(["-subj", &format!("/CN={host}")])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("/usr/bin/openssl")
+            .args(["x509", "-req", "-in", csr.to_str().unwrap()])
+            .args(["-CA", ca_cert.to_str().unwrap()])
+            .args(["-CAkey", ca_key.to_str().unwrap()])
+            .args(["-CAserial", serial.to_str().unwrap(), "-CAcreateserial"])
+            .args(["-out", certificate.to_str().unwrap(), "-days", "1"])
+            .args([
+                "-extfile",
+                deployment_root()
+                    .join("deploy/macos/development/tls")
+                    .join(profile)
+                    .to_str()
+                    .unwrap(),
+            ])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("/usr/bin/openssl")
+            .args(["verify", "-CAfile", ca_cert.to_str().unwrap()])
+            .arg(&certificate)
+            .status()
+            .unwrap()
+            .success());
+        let certificate_text = Command::new("/usr/bin/openssl")
+            .args([
+                "x509",
+                "-in",
+                certificate.to_str().unwrap(),
+                "-text",
+                "-noout",
+            ])
+            .output()
+            .unwrap();
+        assert!(certificate_text.status.success());
+        let certificate_text = String::from_utf8(certificate_text.stdout).unwrap();
+        assert!(certificate_text.contains(&format!("DNS:{host}")));
+        assert!(certificate_text.contains("TLS Web Server Authentication"));
+
+        let public_key = Command::new("/usr/bin/openssl")
+            .args([
+                "x509",
+                "-in",
+                certificate.to_str().unwrap(),
+                "-pubkey",
+                "-noout",
+            ])
+            .output()
+            .unwrap();
+        assert!(public_key.status.success());
+        let mut spki_command = Command::new("/usr/bin/openssl")
+            .args(["pkey", "-pubin", "-outform", "DER"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        spki_command
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(&public_key.stdout)
+            .unwrap();
+        let spki = spki_command.wait_with_output().unwrap();
+        assert!(spki.status.success());
+        certificates.push(spki.stdout);
+    }
+    assert_ne!(certificates[0], certificates[1]);
 }
 
 #[test]
@@ -1033,10 +1142,12 @@ fn validator_accepts_only_a_complete_nonmutating_build_fixture() {
         }],
         "planner_host": "planner.savana-development.invalid",
         "planner_port": 9443,
+        "planner_connect_addresses": ["127.0.0.1:9443"],
         "planner_server_spki_sha256": "22".repeat(32),
         "intent_trust_deployment_ceiling": 1,
         "private_mapper_host": "mapper.savana-development.invalid",
         "private_mapper_port": 9445,
+        "private_mapper_connect_addresses": ["127.0.0.1:9445"],
         "private_mapper_server_spki_sha256": "33".repeat(32)
     });
     fs::write(
@@ -1225,6 +1336,33 @@ fn validator_accepts_only_a_complete_nonmutating_build_fixture() {
         },
         {
             let mut value = valid_agentd.clone();
+            value["planner_connect_addresses"] = serde_json::json!([]);
+            ("empty planner connect addresses", value)
+        },
+        {
+            let mut value = valid_agentd.clone();
+            value["planner_connect_addresses"] =
+                serde_json::json!(["127.0.0.1:9443", "127.0.0.1:9443"]);
+            ("duplicate planner connect addresses", value)
+        },
+        {
+            let mut value = valid_agentd.clone();
+            value["planner_connect_addresses"] =
+                serde_json::json!(["127.0.0.2:9443", "127.0.0.1:9443"]);
+            ("unsorted planner connect addresses", value)
+        },
+        {
+            let mut value = valid_agentd.clone();
+            value["planner_connect_addresses"] = serde_json::json!(["0.0.0.0:9443"]);
+            ("unsafe planner connect address", value)
+        },
+        {
+            let mut value = valid_agentd.clone();
+            value["private_mapper_connect_addresses"] = serde_json::json!(["127.0.0.1:9444"]);
+            ("mapper connect address port mismatch", value)
+        },
+        {
+            let mut value = valid_agentd.clone();
             value["planner_catalog_state_path"] =
                 serde_json::json!("/tmp/planner-catalog-state-v2.cbor");
             ("catalog outside private state", value)
@@ -1407,10 +1545,18 @@ fn build_input_generator_emits_cryptographically_bound_runtime_inputs() {
     );
     assert_eq!(agentd["planner_port"].as_u64(), Some(9443));
     assert_eq!(
+        agentd["planner_connect_addresses"],
+        serde_json::json!(["127.0.0.1:9443"])
+    );
+    assert_eq!(
         agentd["private_mapper_host"].as_str(),
         Some("mapper.savana-development.invalid")
     );
     assert_eq!(agentd["private_mapper_port"].as_u64(), Some(9445));
+    assert_eq!(
+        agentd["private_mapper_connect_addresses"],
+        serde_json::json!(["127.0.0.1:9445"])
+    );
     assert_eq!(agentd["intent_trust_deployment_ceiling"].as_u64(), Some(1));
     let planner_pin = hex_32(agentd["planner_server_spki_sha256"].as_str().unwrap());
     let mapper_pin = hex_32(

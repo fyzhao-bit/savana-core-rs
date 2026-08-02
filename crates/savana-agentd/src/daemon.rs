@@ -51,9 +51,10 @@ mod implementation {
         verify_native_peer_v2, BoundedIdentityStringV2, NativePeerMeasurementV2,
     };
     use savana_policy_core::v2::{
-        decode_hex_32_v2, read_verified_regular_file_v2, AuthenticatedFileAnchorV2,
-        ClosedServiceEdgeIdV2, ClosedServiceIdV2, ConnectorStructuralRoleV2, EffectSetV2,
-        FilesystemServiceObservationConfigV2, VerifiedDaemonStartupV2,
+        decode_hex_32_v2, parse_measured_model_connect_addresses_v2, read_verified_regular_file_v2,
+        AuthenticatedFileAnchorV2, ClosedServiceEdgeIdV2, ClosedServiceIdV2,
+        ConnectorStructuralRoleV2, EffectSetV2, FilesystemServiceObservationConfigV2,
+        VerifiedDaemonStartupV2,
     };
     use serde::Deserialize;
     use sha2::{Digest as _, Sha256};
@@ -165,15 +166,19 @@ mod implementation {
         approval_server_key_id: String,
         planner_host: String,
         planner_port: u16,
+        planner_connect_addresses: Vec<String>,
         planner_server_spki_sha256: String,
         intent_trust_deployment_ceiling: u16,
         private_mapper_host: String,
         private_mapper_port: u16,
+        private_mapper_connect_addresses: Vec<String>,
         private_mapper_server_spki_sha256: String,
         #[serde(default)]
         third_party_mapper_host: Option<String>,
         #[serde(default)]
         third_party_mapper_port: Option<u16>,
+        #[serde(default)]
+        third_party_mapper_connect_addresses: Option<Vec<String>>,
         #[serde(default)]
         third_party_mapper_server_spki_sha256: Option<String>,
         planner_route_id: u32,
@@ -486,9 +491,15 @@ mod implementation {
             decode_hex_32_v2(&bootstrap.private_mapper_server_spki_sha256)
                 .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?,
         );
+        let planner_connect_addresses = parse_measured_model_connect_addresses_v2(
+            &bootstrap.planner_connect_addresses,
+            bootstrap.planner_port,
+        )
+        .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
         let planner = PinnedMtlsAgentPlannerClientV2::from_verified_deployment(
             bootstrap.planner_host.clone(),
             bootstrap.planner_port,
+            planner_connect_addresses,
             planner_server_spki_sha256,
             read_credential_blob(
                 PLANNER_ROOT_CERTIFICATE_CREDENTIAL_V2,
@@ -518,19 +529,27 @@ mod implementation {
         let private_mapper = MapperEndpointDeploymentV2::new(
             bootstrap.private_mapper_host.clone(),
             bootstrap.private_mapper_port,
+            parse_measured_model_connect_addresses_v2(
+                &bootstrap.private_mapper_connect_addresses,
+                bootstrap.private_mapper_port,
+            )
+            .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?,
             private_mapper_server_spki_sha256,
         )
         .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
         let third_party_mapper = match (
             bootstrap.third_party_mapper_host.clone(),
             bootstrap.third_party_mapper_port,
+            bootstrap.third_party_mapper_connect_addresses.as_ref(),
             bootstrap.third_party_mapper_server_spki_sha256.as_deref(),
         ) {
-            (None, None, None) => None,
-            (Some(host), Some(port), Some(pin)) => Some(
+            (None, None, None, None) => None,
+            (Some(host), Some(port), Some(connect_addresses), Some(pin)) => Some(
                 MapperEndpointDeploymentV2::new(
                     host,
                     port,
+                    parse_measured_model_connect_addresses_v2(connect_addresses, port)
+                        .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?,
                     Digest32V2::new(
                         decode_hex_32_v2(pin)
                             .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?,
