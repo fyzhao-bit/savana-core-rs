@@ -173,12 +173,28 @@ impl KernelServiceHandshakeEdgeV2 {
         self.role
     }
 
+    pub const fn installation_id(self) -> Digest32V2 {
+        self.installation_id
+    }
+
     pub const fn client_identity(self) -> ServiceIdentityV2 {
         self.client_identity
     }
 
     pub const fn server_identity(self) -> ServiceIdentityV2 {
         self.server_identity
+    }
+
+    pub const fn server_boot_id(self) -> BootIdV2 {
+        self.server_boot_id
+    }
+
+    pub const fn active_state_manifest_digest(self) -> Digest32V2 {
+        self.active_state_manifest_digest
+    }
+
+    pub const fn deployment_generation(self) -> u64 {
+        self.deployment_generation
     }
 
     fn validate(&self) -> Result<(), ProtocolError> {
@@ -365,6 +381,12 @@ pub struct V2ClientHandshake {
     ephemeral_secret: StaticSecret,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V2ServerHelloAcceptanceErrorV2 {
+    GenerationAuthorityMismatch,
+    Terminal(ProtocolError),
+}
+
 impl std::fmt::Debug for V2ClientHandshake {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("V2ClientHandshake(<ephemeral>)")
@@ -419,27 +441,55 @@ impl V2ClientHandshake {
         server_public_key: [u8; 32],
         client_signing_key: &SigningKey,
     ) -> Result<(Vec<u8>, V2ClientTransportSession), ProtocolError> {
-        require_key_id(self.edge.server_key_id, server_public_key)?;
+        self.accept_server_hello_classified(frame, server_public_key, client_signing_key)
+            .map_err(|error| match error {
+                V2ServerHelloAcceptanceErrorV2::GenerationAuthorityMismatch => identity_mismatch(),
+                V2ServerHelloAcceptanceErrorV2::Terminal(error) => error,
+            })
+    }
+
+    pub fn accept_server_hello_classified(
+        self,
+        frame: &[u8],
+        server_public_key: [u8; 32],
+        client_signing_key: &SigningKey,
+    ) -> Result<(Vec<u8>, V2ClientTransportSession), V2ServerHelloAcceptanceErrorV2> {
+        let terminal = V2ServerHelloAcceptanceErrorV2::Terminal;
+        require_key_id(self.edge.server_key_id, server_public_key).map_err(terminal)?;
         require_key_id(
             self.edge.client_key_id,
             client_signing_key.verifying_key().to_bytes(),
-        )?;
+        )
+        .map_err(terminal)?;
         let body =
-            decode_handshake_frame(frame, self.edge.role, HandshakeMessageKindV2::ServerHello)?;
+            decode_handshake_frame(frame, self.edge.role, HandshakeMessageKindV2::ServerHello)
+                .map_err(terminal)?;
         let (transcript_bytes, transcript_digest, server_signature) =
-            decode_server_hello_body(body)?;
+            decode_server_hello_body(body).map_err(terminal)?;
         let expected_digest = transcript_digest_for(&transcript_bytes);
         if transcript_digest != expected_digest {
-            return Err(identity_mismatch());
+            return Err(terminal(identity_mismatch()));
         }
-        verify_server_signature(transcript_digest, server_signature, server_public_key)?;
-        let transcript = decode_transcript(&transcript_bytes)?;
+        verify_server_signature(transcript_digest, server_signature, server_public_key)
+            .map_err(terminal)?;
+        let transcript = decode_transcript(&transcript_bytes).map_err(terminal)?;
+        if transcript.edge != self.edge
+            && generation_authority_is_the_only_transcript_mismatch(
+                &self.edge,
+                &self.hello,
+                &self.expected_observed_peer,
+                &transcript,
+            )
+        {
+            return Err(V2ServerHelloAcceptanceErrorV2::GenerationAuthorityMismatch);
+        }
         require_client_transcript(
             &self.edge,
             &self.hello,
             &self.expected_observed_peer,
             &transcript,
-        )?;
+        )
+        .map_err(terminal)?;
         let shared_secret = self
             .ephemeral_secret
             .diffie_hellman(&X25519PublicKey::from(transcript.server_ephemeral_x25519))
@@ -450,7 +500,8 @@ impl V2ClientHandshake {
             transcript.server_nonce,
             transcript_digest,
             self.edge.role,
-        )?;
+        )
+        .map_err(terminal)?;
         let client_signature =
             sign_client_finish(transcript_digest, server_signature, client_signing_key);
         let client_confirm_mac = client_confirm_mac(
@@ -458,23 +509,27 @@ impl V2ClientHandshake {
             transcript_digest,
             server_signature,
             client_signature,
-        )?;
+        )
+        .map_err(terminal)?;
         let finish_body = encode_client_finish_body(
             transcript_digest,
             server_signature,
             client_signature,
             client_confirm_mac,
-        )?;
+        )
+        .map_err(terminal)?;
         let finish_frame = encode_handshake_frame(
             self.edge.role,
             HandshakeMessageKindV2::ClientFinish,
             &finish_body,
-        )?;
+        )
+        .map_err(terminal)?;
         let expected_server_confirm_mac = server_confirm_mac(
             &keys.server_confirm_key,
             transcript_digest,
             client_confirm_mac,
-        )?;
+        )
+        .map_err(terminal)?;
         Ok((
             finish_frame,
             V2ClientTransportSession {
@@ -1666,6 +1721,45 @@ fn require_client_transcript(
         return Err(identity_mismatch());
     }
     Ok(())
+}
+
+fn generation_authority_is_the_only_transcript_mismatch(
+    expected_edge: &KernelServiceHandshakeEdgeV2,
+    hello: &ClientHelloBodyV2,
+    expected_observed_peer: &PeerIdentityBindingV2,
+    transcript: &HandshakeTranscriptV2,
+) -> bool {
+    let received_edge = &transcript.edge;
+    received_edge.role == expected_edge.role
+        && received_edge.installation_id == expected_edge.installation_id
+        && received_edge.client_identity == expected_edge.client_identity
+        && received_edge.server_identity == expected_edge.server_identity
+        && received_edge.client_key_id == expected_edge.client_key_id
+        && received_edge.server_key_id == expected_edge.server_key_id
+        && received_edge.server_boot_id == expected_edge.server_boot_id
+        && received_edge.release_identity_digest == expected_edge.release_identity_digest
+        && received_edge.model_set_identity_digest == expected_edge.model_set_identity_digest
+        && received_edge.resource_profile_identity_digest
+            == expected_edge.resource_profile_identity_digest
+        && received_edge.approval_lock_identity_digest
+            == expected_edge.approval_lock_identity_digest
+        && received_edge.planner_lock_identity_digest == expected_edge.planner_lock_identity_digest
+        && received_edge.executor_key_lock_identity_digest
+            == expected_edge.executor_key_lock_identity_digest
+        && (received_edge.active_state_manifest_sequence
+            != expected_edge.active_state_manifest_sequence
+            || received_edge.active_state_manifest_digest
+                != expected_edge.active_state_manifest_digest
+            || received_edge.deployment_generation != expected_edge.deployment_generation
+            || received_edge.effect_fence_epoch != expected_edge.effect_fence_epoch)
+        && transcript.client_boot_id == hello.client_boot_id
+        && transcript.client_nonce == hello.client_nonce
+        && transcript.client_ephemeral_x25519 == hello.client_ephemeral_x25519
+        && transcript.edge.client_identity == hello.client_identity
+        && transcript.edge.client_key_id == hello.client_key_id
+        && &transcript.observed_client_peer == expected_observed_peer
+        && !is_zero(transcript.server_nonce.as_bytes())
+        && !is_zero(&transcript.server_ephemeral_x25519)
 }
 
 fn require_handshake_body(bytes: &[u8]) -> Result<(), ProtocolError> {

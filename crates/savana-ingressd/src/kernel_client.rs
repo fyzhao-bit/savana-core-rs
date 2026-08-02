@@ -28,8 +28,8 @@ use savana_kernel_protocol::v2::{
     Nonce32V2, PeerIdentityBindingV2, PrepareIngressUiAuthenticationRequestV2,
     PrepareIngressUiAuthenticationResponseV2, PublicStableCodeV2, RegisterParserWorkerJobRequestV2,
     RegisterParserWorkerJobResponseV2, RequestIdV2, UnixMillisV2, V2ClientHandshake,
-    HANDSHAKE_FRAME_HEADER_BYTES_V2, MAX_HANDSHAKE_BODY_BYTES_V2, MAX_RECORD_CIPHERTEXT_BYTES_V2,
-    MAX_RECORD_HEADER_BYTES_V2, RECORD_FRAME_HEADER_BYTES_V2,
+    V2ServerHelloAcceptanceErrorV2, HANDSHAKE_FRAME_HEADER_BYTES_V2, MAX_HANDSHAKE_BODY_BYTES_V2,
+    MAX_RECORD_CIPHERTEXT_BYTES_V2, MAX_RECORD_HEADER_BYTES_V2, RECORD_FRAME_HEADER_BYTES_V2,
 };
 use savana_policy_core::v2::{
     ClosedServiceEdgeIdV2, ClosedServiceIdV2, ServiceDeploymentLockV2, ServiceEdgeLockV2,
@@ -609,31 +609,16 @@ impl SuiteOneIngressKernelClientV2 {
             )
             .map_err(|_| IngressKernelClientErrorV2::Unavailable)?;
             write_handshake_frame(&mut stream, &hello, io_deadline)?;
-            let server_hello = match read_handshake_frame(&mut stream, io_deadline) {
-                Ok(server_hello) => server_hello,
-                Err(IngressKernelClientErrorV2::DeadlineExceeded) => {
-                    return Err(IngressKernelClientErrorV2::DeadlineExceeded);
-                }
-                Err(_error) if allow_reload => {
-                    let _ = stream.shutdown(Shutdown::Both);
-                    self.reload_after_handshake_rejection(&authority)?;
-                    return self.exchange_attempt(
-                        operation,
-                        request_id,
-                        deadline,
-                        io_deadline,
-                        false,
-                    );
-                }
-                Err(error) => return Err(error),
-            };
-            let (finish, mut session) = match pending.accept_server_hello(
+            let server_hello = read_handshake_frame(&mut stream, io_deadline)?;
+            let (finish, mut session) = match pending.accept_server_hello_classified(
                 &server_hello,
                 self.shared.server_public_key,
                 &self.shared.client_signing_key,
             ) {
                 Ok(accepted) => accepted,
-                Err(_) if allow_reload => {
+                Err(V2ServerHelloAcceptanceErrorV2::GenerationAuthorityMismatch)
+                    if allow_reload =>
+                {
                     let _ = stream.shutdown(Shutdown::Both);
                     self.reload_after_handshake_rejection(&authority)?;
                     return self.exchange_attempt(
@@ -1133,6 +1118,114 @@ mod tests {
 
         assert_eq!(
             client.health(UnixMillisV2::new(now + 2_000)),
+            Err(IngressKernelClientErrorV2::Unavailable),
+        );
+        assert_eq!(client.authority().unwrap().edge, initial_edge);
+        server.join().unwrap();
+    }
+
+    #[derive(Clone, Copy)]
+    enum ServerHelloTerminalFailureV2 {
+        Eof,
+        MalformedFrame,
+        MalformedCbor,
+        InvalidSignature,
+    }
+
+    #[test]
+    fn server_hello_eof_never_reloads_authority() {
+        assert_terminal_server_hello_failure_does_not_reload(ServerHelloTerminalFailureV2::Eof);
+    }
+
+    #[test]
+    fn malformed_server_hello_frame_never_reloads_authority() {
+        assert_terminal_server_hello_failure_does_not_reload(
+            ServerHelloTerminalFailureV2::MalformedFrame,
+        );
+    }
+
+    #[test]
+    fn malformed_server_hello_cbor_never_reloads_authority() {
+        assert_terminal_server_hello_failure_does_not_reload(
+            ServerHelloTerminalFailureV2::MalformedCbor,
+        );
+    }
+
+    #[test]
+    fn invalid_server_hello_signature_never_reloads_authority() {
+        assert_terminal_server_hello_failure_does_not_reload(
+            ServerHelloTerminalFailureV2::InvalidSignature,
+        );
+    }
+
+    fn assert_terminal_server_hello_failure_does_not_reload(failure: ServerHelloTerminalFailureV2) {
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("ingress-kernel-terminal-hello.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let client_key = SigningKey::from_bytes(&[0xb1; 32]);
+        let server_key = SigningKey::from_bytes(&[0xb2; 32]);
+        let server_public_key = server_key.verifying_key().to_bytes();
+        let initial_edge = edge_at(&client_key, &server_key, 5, [6; 32], 7, 8);
+        let successor_edge = edge_at(&client_key, &server_key, 6, [0xb3; 32], 8, 9);
+        let observed_peer =
+            PeerIdentityBindingV2::linux(501, 20, 42, 99, Digest32V2::new([0xb4; 32])).unwrap();
+        let server_observed_peer = observed_peer.clone();
+        let client_public_key = client_key.verifying_key().to_bytes();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let io_deadline = Instant::now() + Duration::from_secs(1);
+            let hello = read_handshake_frame(&mut stream, io_deadline).unwrap();
+            match failure {
+                ServerHelloTerminalFailureV2::Eof => return,
+                ServerHelloTerminalFailureV2::MalformedFrame => {
+                    stream
+                        .write_all(&[0; HANDSHAKE_FRAME_HEADER_BYTES_V2])
+                        .unwrap();
+                    stream.flush().unwrap();
+                    return;
+                }
+                ServerHelloTerminalFailureV2::MalformedCbor
+                | ServerHelloTerminalFailureV2::InvalidSignature => {}
+            }
+            let (_, mut server_hello) = V2ServerHandshake::accept_client_hello(
+                initial_edge,
+                server_observed_peer,
+                &hello,
+                Nonce32V2::new([0xb5; 32]),
+                StaticSecret::from([0xb6; 32]),
+                client_public_key,
+                &server_key,
+            )
+            .unwrap();
+            match failure {
+                ServerHelloTerminalFailureV2::MalformedCbor => {
+                    server_hello[HANDSHAKE_FRAME_HEADER_BYTES_V2] = 0xff;
+                }
+                ServerHelloTerminalFailureV2::InvalidSignature => {
+                    *server_hello.last_mut().unwrap() ^= 1;
+                }
+                ServerHelloTerminalFailureV2::Eof
+                | ServerHelloTerminalFailureV2::MalformedFrame => unreachable!(),
+            }
+            write_handshake_frame(&mut stream, &server_hello, io_deadline).unwrap();
+        });
+        let client = SuiteOneIngressKernelClientV2::from_verified_deployment(
+            initial_edge,
+            BootIdV2::new([0xb7; 32]),
+            observed_peer,
+            client_key,
+            server_public_key,
+        )
+        .unwrap()
+        .with_socket_path_for_test(socket_path)
+        .with_successor_edge_for_test(successor_edge);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        assert_eq!(
+            client.health(UnixMillisV2::new(now + 1_000)),
             Err(IngressKernelClientErrorV2::Unavailable),
         );
         assert_eq!(client.authority().unwrap().edge, initial_edge);

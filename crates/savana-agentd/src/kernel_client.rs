@@ -43,8 +43,8 @@ use savana_kernel_protocol::v2::{
     ResumeCommittedAgentAuthenticationResponseV2, RevokeVaultRequestV2, RevokeVaultResponseV2,
     SignedAgentAuthenticationAttemptClosureProofV2, SignedDurableTaskCorrelationV2,
     SignedUiAuthenticationSettlementV2, UnixMillisV2, V2ClientHandshake,
-    HANDSHAKE_FRAME_HEADER_BYTES_V2, MAX_HANDSHAKE_BODY_BYTES_V2, MAX_RECORD_CIPHERTEXT_BYTES_V2,
-    MAX_RECORD_HEADER_BYTES_V2, RECORD_FRAME_HEADER_BYTES_V2,
+    V2ServerHelloAcceptanceErrorV2, HANDSHAKE_FRAME_HEADER_BYTES_V2, MAX_HANDSHAKE_BODY_BYTES_V2,
+    MAX_RECORD_CIPHERTEXT_BYTES_V2, MAX_RECORD_HEADER_BYTES_V2, RECORD_FRAME_HEADER_BYTES_V2,
 };
 use savana_policy_core::v2::{
     ClosedServiceEdgeIdV2, ClosedServiceIdV2, ServiceDeploymentLockV2, ServiceEdgeLockV2,
@@ -365,6 +365,26 @@ impl SuiteOneAgentKernelClientV2 {
                 .as_ref()
                 .map(|value| value.deployment_generation)
         })
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn prepare_ingress_for_test_support(
+        &self,
+        request_id: RequestIdV2,
+        client_request_nonce: Nonce32V2,
+        machine_boot_id: BootIdV2,
+        deadline: UnixMillisV2,
+    ) -> Result<VerifiedKernelTaskPreparationV2, AgentControlKernelClientErrorV2> {
+        let request = KernelTaskPreparationRequestV2::from_authenticated_control(
+            request_id,
+            client_request_nonce,
+            machine_boot_id,
+            deadline,
+        )
+        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
+        let mut client = self.clone();
+        client.prepare_task(request)
     }
 
     fn reload_after_handshake_rejection(
@@ -893,34 +913,16 @@ impl SuiteOneAgentKernelClientV2 {
             )
             .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
             write_handshake_frame(&mut stream, &hello, io_deadline)?;
-            let server_hello = match read_handshake_frame(&mut stream, io_deadline) {
-                Ok(server_hello) => server_hello,
-                Err(AgentControlKernelClientErrorV2::DeadlineExceeded) => {
-                    return Err(AgentControlKernelClientErrorV2::DeadlineExceeded);
-                }
-                Err(_error) if allow_reload => {
-                    let _ = stream.shutdown(Shutdown::Both);
-                    self.reload_after_handshake_rejection(&authority)?;
-                    let retry = UnixStream::connect(&self.shared.socket_path)
-                        .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
-                    return self.operation_over_stream_attempt(
-                        retry,
-                        request_id,
-                        deadline,
-                        io_deadline,
-                        operation,
-                        false,
-                    );
-                }
-                Err(error) => return Err(error),
-            };
-            let (finish, mut session) = match pending.accept_server_hello(
+            let server_hello = read_handshake_frame(&mut stream, io_deadline)?;
+            let (finish, mut session) = match pending.accept_server_hello_classified(
                 &server_hello,
                 self.shared.server_public_key,
                 &self.shared.client_signing_key,
             ) {
                 Ok(accepted) => accepted,
-                Err(_) if allow_reload => {
+                Err(V2ServerHelloAcceptanceErrorV2::GenerationAuthorityMismatch)
+                    if allow_reload =>
+                {
                     let _ = stream.shutdown(Shutdown::Both);
                     self.reload_after_handshake_rejection(&authority)?;
                     let retry = UnixStream::connect(&self.shared.socket_path)
@@ -1012,15 +1014,15 @@ impl SuiteOneAgentKernelClientV2 {
             .verify(
                 authority.task_authority_key_id,
                 authority.task_authority_public_key,
-                request.installation_id(),
-                request.active_state_manifest_digest(),
-                request.agentd_identity(),
+                authority.edge.installation_id(),
+                authority.edge.active_state_manifest_digest(),
+                authority.edge.client_identity(),
                 now,
             )
             .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;
-        if unsigned.deployment_generation() != request.deployment_generation()
-            || unsigned.agentd_kernel_client_boot_id() != request.agentd_server_boot_id()
-            || unsigned.kerneld_server_boot_id() != request.kerneld_server_boot_id()
+        if unsigned.deployment_generation() != authority.edge.deployment_generation()
+            || unsigned.agentd_kernel_client_boot_id() != self.shared.client_boot_id
+            || unsigned.kerneld_server_boot_id() != authority.edge.server_boot_id()
             || unsigned.machine_boot_id() != request.machine_boot_id()
         {
             return Err(AgentControlKernelClientErrorV2::Unavailable);
@@ -1379,11 +1381,11 @@ mod tests {
     use savana_kernel_protocol::v2::{
         decode_kernel_service_application_request_v2, derive_ed25519_key_id_v2,
         encode_cancel_kernel_task_response_v2, encode_kernel_agent_health_response_v2,
-        encode_kernel_service_application_response_v2, CancelKernelTaskResponseV2, Digest32V2,
-        DurableTaskIdV2, KernelAgentHealthResponseV2, KernelIngressBootstrapTransferCapabilityV2,
-        KernelServiceApplicationResponseV2, NewTaskPreparationHandleV2, PublicServiceStateV2,
-        ServiceIdentityV2, SignedDurableTaskCorrelationV2, UnsignedDurableTaskCorrelationV2,
-        V2ServerHandshake,
+        encode_kernel_service_application_response_v2, encode_prepare_new_ingress_response_v2,
+        CancelKernelTaskResponseV2, Digest32V2, DurableTaskIdV2, KernelAgentHealthResponseV2,
+        KernelIngressBootstrapTransferCapabilityV2, KernelServiceApplicationResponseV2,
+        NewTaskPreparationHandleV2, PublicServiceStateV2, ServiceIdentityV2,
+        SignedDurableTaskCorrelationV2, UnsignedDurableTaskCorrelationV2, V2ServerHandshake,
     };
 
     use super::*;
@@ -1486,6 +1488,130 @@ mod tests {
     }
 
     #[test]
+    fn preexisting_client_prepares_task_with_the_successful_handshake_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("agent-kernel-task-rollover.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let client_key = SigningKey::from_bytes(&[0x41; 32]);
+        let server_key = SigningKey::from_bytes(&[0x42; 32]);
+        let server_public_key = server_key.verifying_key().to_bytes();
+        let task_authority_key = SigningKey::from_bytes(&[0x43; 32]);
+        let task_authority_public_key = task_authority_key.verifying_key().to_bytes();
+        let initial_edge = edge_at(&client_key, &server_key, 5, [6; 32], 7, 8);
+        let successor_edge = edge_at(&client_key, &server_key, 6, [0x44; 32], 8, 9);
+        let observed_peer =
+            PeerIdentityBindingV2::linux(501, 20, 42, 99, Digest32V2::new([0x45; 32])).unwrap();
+        let server_observed_peer = observed_peer.clone();
+        let client_public_key = client_key.verifying_key().to_bytes();
+        let client_boot_id = BootIdV2::new([0x46; 32]);
+        let machine_boot_id = BootIdV2::new([0x47; 32]);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let server = thread::spawn(move || {
+            let io_deadline = Instant::now() + Duration::from_secs(2);
+            let (mut stale, _) = listener.accept().unwrap();
+            let hello = read_handshake_frame(&mut stale, io_deadline).unwrap();
+            let (_, stale_server_hello) = V2ServerHandshake::accept_client_hello(
+                successor_edge,
+                server_observed_peer.clone(),
+                &hello,
+                Nonce32V2::new([0x48; 32]),
+                StaticSecret::from([0x49; 32]),
+                client_public_key,
+                &server_key,
+            )
+            .unwrap();
+            write_handshake_frame(&mut stale, &stale_server_hello, io_deadline).unwrap();
+            drop(stale);
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let hello = read_handshake_frame(&mut stream, io_deadline).unwrap();
+            let (pending, server_hello) = V2ServerHandshake::accept_client_hello(
+                successor_edge,
+                server_observed_peer,
+                &hello,
+                Nonce32V2::new([0x4a; 32]),
+                StaticSecret::from([0x4b; 32]),
+                client_public_key,
+                &server_key,
+            )
+            .unwrap();
+            write_handshake_frame(&mut stream, &server_hello, io_deadline).unwrap();
+            let finish = read_handshake_frame(&mut stream, io_deadline).unwrap();
+            let (accepted, mut session, _) = pending.accept_client_finish(&finish).unwrap();
+            write_record_frame(&mut stream, &accepted, io_deadline).unwrap();
+            let request_record = read_record_frame(&mut stream, io_deadline).unwrap();
+            let opened = session.open_application_request(&request_record).unwrap();
+            let request = decode_kernel_service_application_request_v2(opened.plaintext()).unwrap();
+            assert!(matches!(
+                request.operation(),
+                KernelServiceOperationV2::Agent(KernelAgentOperationV2::PrepareNewIngress(_))
+            ));
+            let unsigned = UnsignedDurableTaskCorrelationV2::new(
+                Digest32V2::new([1; 32]),
+                Digest32V2::new([0x44; 32]),
+                8,
+                DurableTaskIdV2::new([0x4c; 32]),
+                ServiceIdentityV2::new([2; 32]),
+                client_boot_id,
+                BootIdV2::new([4; 32]),
+                machine_boot_id,
+                UnixMillisV2::new(now.saturating_sub(1)),
+                UnixMillisV2::new(now + 5_000),
+                UnixMillisV2::new(now + 10_000),
+            )
+            .unwrap();
+            let prepared = PrepareNewIngressResponseV2::Prepared {
+                preparation: NewTaskPreparationHandleV2::from_authority_entropy([0x4d; 32])
+                    .unwrap(),
+                correlation: SignedDurableTaskCorrelationV2::sign(unsigned, &task_authority_key)
+                    .unwrap(),
+                ingress_transfer:
+                    KernelIngressBootstrapTransferCapabilityV2::from_authority_entropy([0x4e; 32])
+                        .unwrap(),
+            };
+            let body = encode_prepare_new_ingress_response_v2(&prepared).unwrap();
+            let response = KernelServiceApplicationResponseV2::success(
+                EndpointRoleV2::AgentKernel,
+                opened.request_id(),
+                opened.operation_tag(),
+                body,
+            )
+            .unwrap();
+            let plaintext = encode_kernel_service_application_response_v2(&response).unwrap();
+            let response_record = session
+                .seal_application_response(opened.request_id(), opened.operation_tag(), &plaintext)
+                .unwrap();
+            write_record_frame(&mut stream, &response_record, io_deadline).unwrap();
+        });
+        let mut client = SuiteOneAgentKernelClientV2::from_verified_deployment(
+            initial_edge,
+            client_boot_id,
+            observed_peer,
+            client_key,
+            server_public_key,
+            derive_ed25519_key_id_v2(task_authority_public_key),
+            task_authority_public_key,
+        )
+        .unwrap()
+        .with_socket_path_for_test(socket_path)
+        .with_successor_edge_for_test(successor_edge);
+        let stale_request = KernelTaskPreparationRequestV2::from_authenticated_control(
+            RequestIdV2::new([0x4f; 16]),
+            Nonce32V2::new([0x50; 32]),
+            machine_boot_id,
+            UnixMillisV2::new(now + 2_000),
+        )
+        .unwrap();
+
+        assert!(client.prepare_task(stale_request).is_ok());
+        assert_eq!(client.authority().unwrap().edge, successor_edge);
+        server.join().unwrap();
+    }
+
+    #[test]
     fn server_hello_deadline_never_reloads_authority() {
         let directory = tempfile::tempdir().unwrap();
         let socket_path = directory.path().join("agent-kernel-deadline.sock");
@@ -1524,6 +1650,48 @@ mod tests {
         assert_eq!(
             client.health(RequestIdV2::new([0x87; 16]), UnixMillisV2::new(now + 75),),
             Err(AgentControlKernelClientErrorV2::DeadlineExceeded),
+        );
+        assert_eq!(client.authority().unwrap().edge, initial_edge);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn server_hello_eof_never_reloads_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("agent-kernel-eof.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let client_key = SigningKey::from_bytes(&[0xb1; 32]);
+        let server_key = SigningKey::from_bytes(&[0xb2; 32]);
+        let task_authority_key = SigningKey::from_bytes(&[0xb3; 32]);
+        let task_authority_public_key = task_authority_key.verifying_key().to_bytes();
+        let initial_edge = edge_at(&client_key, &server_key, 5, [6; 32], 7, 8);
+        let successor_edge = edge_at(&client_key, &server_key, 6, [0xb4; 32], 8, 9);
+        let observed_peer =
+            PeerIdentityBindingV2::linux(501, 20, 42, 99, Digest32V2::new([0xb5; 32])).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_handshake_frame(&mut stream, Instant::now() + Duration::from_secs(1)).unwrap();
+        });
+        let mut client = SuiteOneAgentKernelClientV2::from_verified_deployment(
+            initial_edge,
+            BootIdV2::new([0xb6; 32]),
+            observed_peer,
+            client_key,
+            server_key.verifying_key().to_bytes(),
+            derive_ed25519_key_id_v2(task_authority_public_key),
+            task_authority_public_key,
+        )
+        .unwrap()
+        .with_socket_path_for_test(socket_path)
+        .with_successor_edge_for_test(successor_edge);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        assert_eq!(
+            client.health(RequestIdV2::new([0xb7; 16]), UnixMillisV2::new(now + 1_000)),
+            Err(AgentControlKernelClientErrorV2::Unavailable),
         );
         assert_eq!(client.authority().unwrap().edge, initial_edge);
         server.join().unwrap();
@@ -1885,26 +2053,18 @@ mod tests {
         let request = KernelTaskPreparationRequestV2::from_authenticated_control(
             RequestIdV2::new([0x36; 16]),
             Nonce32V2::new([0x37; 32]),
-            Digest32V2::new([1; 32]),
-            Digest32V2::new([6; 32]),
-            7,
-            Digest32V2::new([9; 32]),
-            ServiceIdentityV2::new([2; 32]),
             BootIdV2::new([0x38; 32]),
-            BootIdV2::new([0x39; 32]),
-            BootIdV2::new([0x35; 32]),
-            BootIdV2::new([4; 32]),
             UnixMillisV2::new(500),
         )
         .unwrap();
         let unsigned = UnsignedDurableTaskCorrelationV2::new(
-            request.installation_id(),
-            request.active_state_manifest_digest(),
-            request.deployment_generation(),
+            Digest32V2::new([1; 32]),
+            Digest32V2::new([6; 32]),
+            7,
             DurableTaskIdV2::new([0x40; 32]),
-            request.agentd_identity(),
-            request.agentd_server_boot_id(),
-            request.kerneld_server_boot_id(),
+            ServiceIdentityV2::new([2; 32]),
+            BootIdV2::new([0x35; 32]),
+            BootIdV2::new([4; 32]),
             request.machine_boot_id(),
             UnixMillisV2::new(90),
             UnixMillisV2::new(1_000),
@@ -1957,13 +2117,13 @@ mod tests {
         );
 
         let wrong_boot_unsigned = UnsignedDurableTaskCorrelationV2::new(
-            request.installation_id(),
-            request.active_state_manifest_digest(),
-            request.deployment_generation(),
+            Digest32V2::new([1; 32]),
+            Digest32V2::new([6; 32]),
+            7,
             DurableTaskIdV2::new([0x40; 32]),
-            request.agentd_identity(),
+            ServiceIdentityV2::new([2; 32]),
             BootIdV2::new([0x43; 32]),
-            request.kerneld_server_boot_id(),
+            BootIdV2::new([4; 32]),
             request.machine_boot_id(),
             UnixMillisV2::new(90),
             UnixMillisV2::new(1_000),
@@ -1986,6 +2146,106 @@ mod tests {
             client.verify_preparation_response(request, wrong, UnixMillisV2::new(100), &authority,),
             Err(AgentControlKernelClientErrorV2::Unavailable)
         );
+    }
+
+    #[derive(Clone, Copy)]
+    enum ServerHelloTerminalFailureV2 {
+        MalformedFrame,
+        MalformedCbor,
+        InvalidSignature,
+    }
+
+    #[test]
+    fn malformed_server_hello_frame_never_reloads_authority() {
+        assert_terminal_server_hello_failure_does_not_reload(
+            ServerHelloTerminalFailureV2::MalformedFrame,
+        );
+    }
+
+    #[test]
+    fn malformed_server_hello_cbor_never_reloads_authority() {
+        assert_terminal_server_hello_failure_does_not_reload(
+            ServerHelloTerminalFailureV2::MalformedCbor,
+        );
+    }
+
+    #[test]
+    fn invalid_server_hello_signature_never_reloads_authority() {
+        assert_terminal_server_hello_failure_does_not_reload(
+            ServerHelloTerminalFailureV2::InvalidSignature,
+        );
+    }
+
+    fn assert_terminal_server_hello_failure_does_not_reload(failure: ServerHelloTerminalFailureV2) {
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("agent-kernel-terminal-hello.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let client_key = SigningKey::from_bytes(&[0xc1; 32]);
+        let server_key = SigningKey::from_bytes(&[0xc2; 32]);
+        let server_public_key = server_key.verifying_key().to_bytes();
+        let task_authority_key = SigningKey::from_bytes(&[0xc3; 32]);
+        let task_authority_public_key = task_authority_key.verifying_key().to_bytes();
+        let initial_edge = edge_at(&client_key, &server_key, 5, [6; 32], 7, 8);
+        let successor_edge = edge_at(&client_key, &server_key, 6, [0xc4; 32], 8, 9);
+        let observed_peer =
+            PeerIdentityBindingV2::linux(501, 20, 42, 99, Digest32V2::new([0xc5; 32])).unwrap();
+        let server_observed_peer = observed_peer.clone();
+        let client_public_key = client_key.verifying_key().to_bytes();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let io_deadline = Instant::now() + Duration::from_secs(1);
+            let hello = read_handshake_frame(&mut stream, io_deadline).unwrap();
+            if matches!(failure, ServerHelloTerminalFailureV2::MalformedFrame) {
+                stream
+                    .write_all(&[0; HANDSHAKE_FRAME_HEADER_BYTES_V2])
+                    .unwrap();
+                stream.flush().unwrap();
+                return;
+            }
+            let (_, mut server_hello) = V2ServerHandshake::accept_client_hello(
+                initial_edge,
+                server_observed_peer,
+                &hello,
+                Nonce32V2::new([0xc6; 32]),
+                StaticSecret::from([0xc7; 32]),
+                client_public_key,
+                &server_key,
+            )
+            .unwrap();
+            match failure {
+                ServerHelloTerminalFailureV2::MalformedFrame => unreachable!(),
+                ServerHelloTerminalFailureV2::MalformedCbor => {
+                    server_hello[HANDSHAKE_FRAME_HEADER_BYTES_V2] = 0xff;
+                }
+                ServerHelloTerminalFailureV2::InvalidSignature => {
+                    *server_hello.last_mut().unwrap() ^= 1;
+                }
+            }
+            write_handshake_frame(&mut stream, &server_hello, io_deadline).unwrap();
+        });
+        let mut client = SuiteOneAgentKernelClientV2::from_verified_deployment(
+            initial_edge,
+            BootIdV2::new([0xc8; 32]),
+            observed_peer,
+            client_key,
+            server_public_key,
+            derive_ed25519_key_id_v2(task_authority_public_key),
+            task_authority_public_key,
+        )
+        .unwrap()
+        .with_socket_path_for_test(socket_path)
+        .with_successor_edge_for_test(successor_edge);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        assert_eq!(
+            client.health(RequestIdV2::new([0xc9; 16]), UnixMillisV2::new(now + 1_000)),
+            Err(AgentControlKernelClientErrorV2::Unavailable),
+        );
+        assert_eq!(client.authority().unwrap().edge, initial_edge);
+        server.join().unwrap();
     }
 
     fn edge(client_key: &SigningKey, server_key: &SigningKey) -> KernelServiceHandshakeEdgeV2 {

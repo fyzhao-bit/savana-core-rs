@@ -70,8 +70,12 @@ mod native {
     #[cfg(feature = "test-support")]
     use savana_kernel_protocol::v2::{
         encode_kernel_agent_health_response_v2, encode_kernel_ingress_health_response_v2,
-        EndpointRoleV2, KernelAgentHealthResponseV2, KernelIngressHealthResponseV2,
-        PublicServiceStateV2, RequestIdV2,
+        encode_prepare_new_ingress_response_v2, DurableTaskIdV2, EndpointRoleV2,
+        KernelAgentHealthResponseV2, KernelAgentOperationV2,
+        KernelIngressBootstrapTransferCapabilityV2, KernelIngressHealthResponseV2,
+        KernelIngressOperationV2, KernelServiceOperationV2, NewTaskPreparationHandleV2,
+        PrepareNewIngressResponseV2, PublicServiceStateV2, RequestIdV2,
+        SignedDurableTaskCorrelationV2, UnsignedDurableTaskCorrelationV2,
     };
     use savana_kernel_protocol::StableCode;
     use savana_policy_core::v2::{
@@ -91,7 +95,10 @@ mod native {
     use zeroize::Zeroizing;
 
     #[cfg(feature = "test-support")]
-    use savana_agentd::{AgentControlKernelClientV2, SuiteOneAgentKernelClientV2};
+    use savana_agentd::{
+        AgentControlKernelClientV2, AgentTaskServiceV2, AuthenticatedJarvisControlV2,
+        SuiteOneAgentKernelClientV2,
+    };
     #[cfg(feature = "test-support")]
     use savana_ingressd::SuiteOneIngressKernelClientV2;
 
@@ -891,9 +898,14 @@ mod native {
         let observations = Arc::new(Mutex::new(Vec::<RolloverDispatchObservationV2>::new()));
         let handler_observations = Arc::clone(&observations);
         let handler_rules = active_rules.clone();
+        let task_authority = SigningKey::from_bytes(&[0xa6; 32]);
+        let installation_id = initial_startup.installation_id();
+        let agentd_identity = initial_startup
+            .service_identity(ClosedServiceIdV2::Agentd)
+            .expect("rollover agentd identity");
         let owner = Arc::new(
             KernelRuntimeOwnerV2::spawn_for_test_support(8, move |request| {
-                let (peer, lease, _, _, _, _) = request.into_parts();
+                let (peer, lease, _, _, _, operation) = request.into_parts();
                 let rule_digest = handler_rules
                     .snapshot()
                     .map_err(|_| StableCode::KernelUnavailable)?
@@ -906,13 +918,56 @@ mod native {
                         generation: lease.deployment_generation(),
                         rule_digest,
                     });
-                let body = match peer.role() {
-                    EndpointRoleV2::AgentKernel => encode_kernel_agent_health_response_v2(
-                        &KernelAgentHealthResponseV2::new(true, PublicServiceStateV2::Ready),
-                    ),
-                    EndpointRoleV2::IngressKernel => encode_kernel_ingress_health_response_v2(
-                        &KernelIngressHealthResponseV2::new(true, PublicServiceStateV2::Ready),
-                    ),
+                let body = match operation {
+                    KernelServiceOperationV2::Agent(KernelAgentOperationV2::Health(_)) => {
+                        encode_kernel_agent_health_response_v2(&KernelAgentHealthResponseV2::new(
+                            true,
+                            PublicServiceStateV2::Ready,
+                        ))
+                    }
+                    KernelServiceOperationV2::Agent(KernelAgentOperationV2::PrepareNewIngress(
+                        _,
+                    )) => {
+                        let mut task_id = [0xe1; 32];
+                        task_id[31] = u8::try_from(lease.deployment_generation())
+                            .map_err(|_| StableCode::KernelUnavailable)?;
+                        let unsigned = UnsignedDurableTaskCorrelationV2::new(
+                            installation_id,
+                            lease.active_state_manifest_digest(),
+                            lease.deployment_generation(),
+                            DurableTaskIdV2::new(task_id),
+                            agentd_identity,
+                            BootIdV2::new([0xd1; 32]),
+                            BootIdV2::new([0xc1; 32]),
+                            BootIdV2::new([0xd3; 32]),
+                            UnixMillisV2::new(1),
+                            UnixMillisV2::new(u64::MAX - 1),
+                            UnixMillisV2::new(u64::MAX),
+                        )
+                        .map_err(|_| StableCode::KernelUnavailable)?;
+                        let response = PrepareNewIngressResponseV2::Prepared {
+                            preparation: NewTaskPreparationHandleV2::from_authority_entropy(
+                                task_id,
+                            )
+                            .ok_or(StableCode::KernelUnavailable)?,
+                            correlation: SignedDurableTaskCorrelationV2::sign(
+                                unsigned,
+                                &task_authority,
+                            )
+                            .map_err(|_| StableCode::KernelUnavailable)?,
+                            ingress_transfer:
+                                KernelIngressBootstrapTransferCapabilityV2::from_authority_entropy(
+                                    [0xe2; 32],
+                                )
+                                .ok_or(StableCode::KernelUnavailable)?,
+                        };
+                        encode_prepare_new_ingress_response_v2(&response)
+                    }
+                    KernelServiceOperationV2::Ingress(KernelIngressOperationV2::Health(_)) => {
+                        encode_kernel_ingress_health_response_v2(
+                            &KernelIngressHealthResponseV2::new(true, PublicServiceStateV2::Ready),
+                        )
+                    }
                     _ => return Err(StableCode::KernelUnavailable),
                 }
                 .map_err(|_| StableCode::KernelUnavailable)?;
@@ -1199,6 +1254,7 @@ mod native {
         agent_path: PathBuf,
         ingress_path: PathBuf,
         agent: SuiteOneAgentKernelClientV2,
+        agent_tasks: AgentTaskServiceV2,
         ingress: SuiteOneIngressKernelClientV2,
     }
 
@@ -1220,6 +1276,7 @@ mod native {
             let keys = rollover_endpoint_keys();
             let task_authority = SigningKey::from_bytes(&[0xa6; 32]);
             let task_authority_public_key = task_authority.verifying_key().to_bytes();
+            let task_authority_key_id = derive_ed25519_key_id_v2(task_authority_public_key);
             let agent_source = Arc::clone(&source);
             let agent = SuiteOneAgentKernelClientV2::from_verified_startup_for_test_support(
                 startup,
@@ -1228,7 +1285,7 @@ mod native {
                 rollover_peer_binding(startup, EndpointRoleV2::AgentKernel),
                 keys.agent_client,
                 keys.agent_server.verifying_key().to_bytes(),
-                derive_ed25519_key_id_v2(task_authority_public_key),
+                task_authority_key_id,
                 task_authority_public_key,
                 agent_path.clone(),
                 move || {
@@ -1237,6 +1294,21 @@ mod native {
                 },
             )
             .expect("verified agent rollover client");
+            let agent_tasks = AgentTaskServiceV2::from_verified_deployment(
+                startup.installation_id(),
+                startup.active_state_manifest_digest(),
+                startup.deployment_generation(),
+                startup.protocol_abi_digest(),
+                startup
+                    .service_identity(ClosedServiceIdV2::Agentd)
+                    .expect("rollover agentd identity"),
+                BootIdV2::new([0xd1; 32]),
+                BootIdV2::new([0xc1; 32]),
+                task_authority_key_id,
+                task_authority_public_key,
+                128,
+            )
+            .expect("verified pre-rollover agent task service");
             let ingress_source = source;
             let ingress = SuiteOneIngressKernelClientV2::from_verified_startup_for_test_support(
                 startup,
@@ -1258,6 +1330,7 @@ mod native {
                 agent_path,
                 ingress_path,
                 agent,
+                agent_tasks,
                 ingress,
             }
         }
@@ -1296,21 +1369,62 @@ mod native {
                 Arc::clone(&verifier),
             )
             .expect("agent rollover endpoint");
-            let connection_count = if startup.deployment_generation() == 1 {
-                1
-            } else {
+            let agent_connection_count = if startup.deployment_generation() == 1 {
                 2
+            } else {
+                3
             };
-            let agent_server =
-                thread::spawn(move || serve_rollover_connections(agent_listener, connection_count));
+            let agent_server = thread::spawn(move || {
+                serve_rollover_connections(agent_listener, agent_connection_count)
+            });
             let deadline = rollover_request_deadline();
             let agent_result = self.agent.health(RequestIdV2::new([0xd4; 16]), deadline);
+            let mut request_id = [0xd5; 16];
+            request_id[15] = u8::try_from(startup.deployment_generation())
+                .expect("rollover generation fits request fixture");
+            let mut request_nonce = [0xd6; 32];
+            request_nonce[31] = u8::try_from(startup.deployment_generation())
+                .expect("rollover generation fits nonce fixture");
+            let task_result = self.agent.prepare_ingress_for_test_support(
+                RequestIdV2::new(request_id),
+                savana_kernel_protocol::v2::Nonce32V2::new(request_nonce),
+                BootIdV2::new([0xd3; 32]),
+                deadline,
+            );
             let agent_server_result = agent_server.join().expect("agent rollover listener thread");
             assert_eq!(
                 agent_result,
                 Ok(PublicServiceStateV2::Ready),
                 "server result: {agent_server_result:?}",
             );
+            let preparation = task_result.unwrap_or_else(|error| {
+                panic!(
+                    "post-rollover PrepareNewIngress failed: {error:?}; server result: {agent_server_result:?}"
+                )
+            });
+            let context = AuthenticatedJarvisControlV2::from_mutual_authentication(
+                startup.installation_id(),
+                Digest32V2::new([0xd7; 32]),
+                Digest32V2::new([0xd8; 32]),
+                BootIdV2::new([0xd3; 32]),
+                BootIdV2::new([0xd9; 32]),
+                BootIdV2::new([0xd1; 32]),
+                BootIdV2::new([0xc1; 32]),
+            )
+            .expect("rollover authenticated JARVIS context");
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("rollover task clock")
+                .as_millis();
+            let now = UnixMillisV2::new(u64::try_from(now).expect("rollover task time fits u64"));
+            self.agent_tasks
+                .prepare_ingress(
+                    context,
+                    savana_kernel_protocol::v2::Nonce32V2::new(request_nonce),
+                    preparation,
+                    now,
+                )
+                .expect("same pre-rollover agent task service accepts successor preparation");
             assert_eq!(agent_server_result, Ok(()));
             fs::remove_file(&self.agent_path).expect("remove agent rollover socket");
 
@@ -1320,8 +1434,13 @@ mod native {
                 verifier,
             )
             .expect("ingress rollover endpoint");
+            let ingress_connection_count = if startup.deployment_generation() == 1 {
+                1
+            } else {
+                2
+            };
             let ingress_server = thread::spawn(move || {
-                serve_rollover_connections(ingress_listener, connection_count)
+                serve_rollover_connections(ingress_listener, ingress_connection_count)
             });
             let health = self
                 .ingress
@@ -1352,12 +1471,15 @@ mod native {
             if index + 1 == connection_count {
                 return result;
             }
-            assert!(matches!(
-                result,
-                Err(crate::v2_listener::V2ListenerError::Connection(
-                    crate::v2_dispatch::KernelServiceDispatchErrorV2::Malformed
-                ))
-            ));
+            assert!(
+                result.is_ok()
+                    || matches!(
+                        result,
+                        Err(crate::v2_listener::V2ListenerError::Connection(
+                            crate::v2_dispatch::KernelServiceDispatchErrorV2::Malformed
+                        ))
+                    )
+            );
         }
         unreachable!("rollover clients always require a connection")
     }

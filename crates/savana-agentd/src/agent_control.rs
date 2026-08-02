@@ -45,64 +45,28 @@ pub enum AgentControlDispatchErrorV2 {
 pub struct KernelTaskPreparationRequestV2 {
     request_id: RequestIdV2,
     client_request_nonce: Nonce32V2,
-    installation_id: Digest32V2,
-    active_state_manifest_digest: Digest32V2,
-    deployment_generation: u64,
-    protocol_abi_digest: Digest32V2,
-    agentd_identity: ServiceIdentityV2,
     machine_boot_id: BootIdV2,
-    jarvis_control_client_boot_id: BootIdV2,
-    agentd_server_boot_id: BootIdV2,
-    kerneld_server_boot_id: BootIdV2,
     deadline: UnixMillisV2,
 }
 
 impl KernelTaskPreparationRequestV2 {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_authenticated_control(
         request_id: RequestIdV2,
         client_request_nonce: Nonce32V2,
-        installation_id: Digest32V2,
-        active_state_manifest_digest: Digest32V2,
-        deployment_generation: u64,
-        protocol_abi_digest: Digest32V2,
-        agentd_identity: ServiceIdentityV2,
         machine_boot_id: BootIdV2,
-        jarvis_control_client_boot_id: BootIdV2,
-        agentd_server_boot_id: BootIdV2,
-        kerneld_server_boot_id: BootIdV2,
         deadline: UnixMillisV2,
     ) -> Result<Self, AgentControlDispatchErrorV2> {
-        if deployment_generation == 0
-            || deadline.get() == 0
-            || [
-                client_request_nonce.as_bytes(),
-                installation_id.as_bytes(),
-                active_state_manifest_digest.as_bytes(),
-                protocol_abi_digest.as_bytes(),
-                agentd_identity.as_bytes(),
-                machine_boot_id.as_bytes(),
-                jarvis_control_client_boot_id.as_bytes(),
-                agentd_server_boot_id.as_bytes(),
-                kerneld_server_boot_id.as_bytes(),
-            ]
-            .iter()
-            .any(|value| is_zero(value))
+        if deadline.get() == 0
+            || [client_request_nonce.as_bytes(), machine_boot_id.as_bytes()]
+                .iter()
+                .any(|value| is_zero(value))
         {
             return Err(AgentControlDispatchErrorV2::IdentityRejected);
         }
         Ok(Self {
             request_id,
             client_request_nonce,
-            installation_id,
-            active_state_manifest_digest,
-            deployment_generation,
-            protocol_abi_digest,
-            agentd_identity,
             machine_boot_id,
-            jarvis_control_client_boot_id,
-            agentd_server_boot_id,
-            kerneld_server_boot_id,
             deadline,
         })
     }
@@ -115,40 +79,8 @@ impl KernelTaskPreparationRequestV2 {
         self.client_request_nonce
     }
 
-    pub const fn installation_id(self) -> Digest32V2 {
-        self.installation_id
-    }
-
-    pub const fn active_state_manifest_digest(self) -> Digest32V2 {
-        self.active_state_manifest_digest
-    }
-
-    pub const fn deployment_generation(self) -> u64 {
-        self.deployment_generation
-    }
-
-    pub const fn protocol_abi_digest(self) -> Digest32V2 {
-        self.protocol_abi_digest
-    }
-
-    pub const fn agentd_identity(self) -> ServiceIdentityV2 {
-        self.agentd_identity
-    }
-
     pub const fn machine_boot_id(self) -> BootIdV2 {
         self.machine_boot_id
-    }
-
-    pub const fn jarvis_control_client_boot_id(self) -> BootIdV2 {
-        self.jarvis_control_client_boot_id
-    }
-
-    pub const fn agentd_server_boot_id(self) -> BootIdV2 {
-        self.agentd_server_boot_id
-    }
-
-    pub const fn kerneld_server_boot_id(self) -> BootIdV2 {
-        self.kerneld_server_boot_id
     }
 
     pub const fn deadline(self) -> UnixMillisV2 {
@@ -800,15 +732,7 @@ fn dispatch(
             let kernel_request = KernelTaskPreparationRequestV2::from_authenticated_control(
                 command.envelope.request_id(),
                 *request.client_request_nonce(),
-                deployment.installation_id,
-                deployment.active_state_manifest_digest,
-                deployment.deployment_generation,
-                deployment.protocol_abi_digest,
-                deployment.agentd_identity,
                 command.peer.machine_boot_id,
-                command.peer.caller_boot_id,
-                deployment.agentd_server_boot_id,
-                deployment.kerneld_server_boot_id,
                 command.envelope.deadline(),
             )?;
             match kernel_client.prepare_task(kernel_request) {
