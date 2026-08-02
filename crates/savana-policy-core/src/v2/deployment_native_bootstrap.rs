@@ -9,8 +9,9 @@ use savana_platform_identity::{
 use super::{
     AuthenticatedDeploymentLedgerSnapshotV2, DeploymentActivationVerifierV2,
     DeploymentAuthorizationKeyRefsV2, DeploymentAuthorizationVerifierV2, DeploymentControlErrorV2,
-    DeploymentLedgerStoreV2, InstallerOrMdmVerifierV2, OperationalTrustRootPurposeV2,
-    OperationalTrustRootSetV2, ReleaseTrustRootSetV2,
+    DeploymentLedgerRecordV2, DeploymentLedgerStoreV2, DeploymentTransactionV2,
+    InstallerOrMdmVerifierV2, OperationalTrustRootPurposeV2, OperationalTrustRootSetV2,
+    ReleaseTrustRootSetV2,
 };
 
 /// Four complete installer-authenticated trust-root chains. Keeping every
@@ -143,6 +144,29 @@ impl AuthenticatedNativeDeploymentTrustV2 {
             key_refs.authorization_time_unix_ms(),
         )?;
         Ok((rollback, transaction))
+    }
+
+    /// Binds a signature-authenticated staged transaction to the exact root
+    /// revisions from this already installer-authenticated native trust chain.
+    pub fn validate_authenticated_transaction_pre_state(
+        &self,
+        transaction: &DeploymentTransactionV2,
+        selected: &DeploymentLedgerRecordV2,
+    ) -> Result<(), DeploymentControlErrorV2> {
+        transaction.validate_authenticated_pre_state(
+            selected,
+            self.deployment_trust_root_set()
+                .binding()
+                .member_set_digest(),
+            self.activation_trust_root_set()
+                .binding()
+                .member_set_digest(),
+            self.release_trust_root_set()
+                .release_trust_root_set_digest(),
+            self.declassification_trust_root_set()
+                .binding()
+                .member_set_digest(),
+        )
     }
 }
 
