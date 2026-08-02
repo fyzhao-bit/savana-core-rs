@@ -41,8 +41,10 @@ use zeroize::Zeroizing;
 
 use crate::{
     effect_gate::{EffectGateCoordinatorV2, EffectGateErrorV2, EffectGateOperationKindV2},
-    AgentControlKernelClientErrorV2, AgentPlannerClientErrorV2, DurablePlannerCatalogV2,
-    PinnedMtlsAgentPlannerClientV2, SuiteOneAgentKernelClientV2,
+    planner_privacy::IntentTrustBoundaryV2,
+    AgentControlKernelClientErrorV2, AgentMapperClientErrorV2, AgentPlannerClientErrorV2,
+    DurablePlannerCatalogV2, PinnedMtlsAgentMapperClientV2, PinnedMtlsAgentPlannerClientV2,
+    SuiteOneAgentKernelClientV2,
 };
 
 const MAX_AUTHENTICATIONS_V2: usize = 4096;
@@ -193,6 +195,7 @@ pub struct AgentBrowserAuthorityV2 {
     effect_gate: EffectGateCoordinatorV2,
     kernel: SuiteOneAgentKernelClientV2,
     approval: ApprovalSuiteOneClientV2,
+    mapper: PinnedMtlsAgentMapperClientV2,
     planner: PinnedMtlsAgentPlannerClientV2,
     planner_route: PlannerRouteIdV2,
     planner_template: StaticTemplateIdV2,
@@ -219,6 +222,7 @@ impl AgentBrowserAuthorityV2 {
         effect_gate: EffectGateCoordinatorV2,
         kernel: SuiteOneAgentKernelClientV2,
         approval: ApprovalSuiteOneClientV2,
+        mapper: PinnedMtlsAgentMapperClientV2,
         planner: PinnedMtlsAgentPlannerClientV2,
         planner_route: PlannerRouteIdV2,
         planner_template: StaticTemplateIdV2,
@@ -234,6 +238,7 @@ impl AgentBrowserAuthorityV2 {
             effect_gate,
             kernel,
             approval,
+            mapper,
             planner,
             planner_route,
             planner_template,
@@ -541,6 +546,18 @@ impl AgentBrowserAuthorityV2 {
         else {
             return Err(AgentBrowserAuthorityErrorV2::InvalidReference);
         };
+        let planner_boundary = match &action {
+            AgentBrowserActionV2::RunPlanner
+            | AgentBrowserActionV2::RunPlannerWithThirdPartyMapper => {
+                Some(planner_intent_boundary_for_action_v2(&action)?)
+            }
+            _ => None,
+        };
+        if let Some(boundary) = planner_boundary {
+            self.mapper
+                .authorize_boundary(boundary)
+                .map_err(map_mapper)?;
+        }
         let request_digest = browser_action_request_digest(tab, action.clone())?;
         let request_id = browser_kernel_request_id(tab, client_request_nonce, action.clone())?;
         let effect_operation_id =
@@ -594,7 +611,8 @@ impl AgentBrowserAuthorityV2 {
                     ),
                 }
             }
-            AgentBrowserActionV2::RunPlanner => {
+            AgentBrowserActionV2::RunPlanner
+            | AgentBrowserActionV2::RunPlannerWithThirdPartyMapper => {
                 let _effect_guard = self
                     .effect_gate
                     .acquire(
@@ -1812,6 +1830,22 @@ fn map_planner(_: AgentPlannerClientErrorV2) -> AgentBrowserAuthorityErrorV2 {
     AgentBrowserAuthorityErrorV2::Unavailable
 }
 
+fn map_mapper(_: AgentMapperClientErrorV2) -> AgentBrowserAuthorityErrorV2 {
+    AgentBrowserAuthorityErrorV2::Unavailable
+}
+
+fn planner_intent_boundary_for_action_v2(
+    action: &AgentBrowserActionV2,
+) -> Result<IntentTrustBoundaryV2, AgentBrowserAuthorityErrorV2> {
+    match action {
+        AgentBrowserActionV2::RunPlanner => Ok(IntentTrustBoundaryV2::Private),
+        AgentBrowserActionV2::RunPlannerWithThirdPartyMapper => {
+            Ok(IntentTrustBoundaryV2::ThirdParty)
+        }
+        _ => Err(AgentBrowserAuthorityErrorV2::InvalidReference),
+    }
+}
+
 fn map_approval(error: ApprovalSuiteOneClientErrorV2) -> AgentBrowserAuthorityErrorV2 {
     match error {
         ApprovalSuiteOneClientErrorV2::Rejected(_) => {
@@ -1832,6 +1866,8 @@ mod tests {
         ConnectorRemovalAuthorizationHandleV2, PrincipalIdV2, SignedApprovalSettlementV2,
         UnsignedApprovalSettlementV2,
     };
+
+    use crate::planner_privacy::IntentTrustDeploymentCeilingV2;
 
     use super::*;
 
@@ -1877,6 +1913,37 @@ mod tests {
             )
             .unwrap(),
         }
+    }
+
+    #[test]
+    fn planner_actions_bind_private_default_and_explicit_third_party_per_request() {
+        assert_eq!(
+            planner_intent_boundary_for_action_v2(&AgentBrowserActionV2::RunPlanner).unwrap(),
+            IntentTrustBoundaryV2::Private
+        );
+        assert_eq!(
+            planner_intent_boundary_for_action_v2(
+                &AgentBrowserActionV2::RunPlannerWithThirdPartyMapper
+            )
+            .unwrap(),
+            IntentTrustBoundaryV2::ThirdParty
+        );
+        assert!(IntentTrustDeploymentCeilingV2::PrivateOnly.permits(IntentTrustBoundaryV2::Private));
+        assert!(
+            !IntentTrustDeploymentCeilingV2::PrivateOnly.permits(IntentTrustBoundaryV2::ThirdParty)
+        );
+        assert!(IntentTrustDeploymentCeilingV2::UserMayUseThirdParty
+            .permits(IntentTrustBoundaryV2::ThirdParty));
+
+        let tab = AgentTabSessionCapabilityV2::from_authority_entropy([0x5a; 32]).unwrap();
+        assert_ne!(
+            browser_action_request_digest(tab, AgentBrowserActionV2::RunPlanner).unwrap(),
+            browser_action_request_digest(
+                tab,
+                AgentBrowserActionV2::RunPlannerWithThirdPartyMapper
+            )
+            .unwrap()
+        );
     }
 
     fn connector_settlement(decision: ApprovalDecisionV2) -> SignedApprovalSettlementV2 {

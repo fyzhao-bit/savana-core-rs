@@ -67,9 +67,9 @@ mod implementation {
         AgentTaskErrorV2, AgentTaskRollbackAnchorV2, AgentTaskServiceV2, AgentTaskStateHeadV2,
         AgentTaskStateOwnerV2, BoundedPlannerSemanticTextV2, DurableAgentTaskNamespaceV2,
         DurablePlannerCatalogNamespaceV2, DurablePlannerCatalogV2, KernelTaskAuthorityVerifierV2,
-        PinnedMtlsAgentPlannerClientV2, PlannerCatalogEntryV2, PlannerCatalogErrorV2,
-        PlannerCatalogRollbackAnchorV2, PlannerCatalogStateHeadV2, SuiteOneAgentKernelClientV2,
-        VerifiedAgentControlPeerV2,
+        MapperEndpointDeploymentV2, PinnedMtlsAgentMapperClientV2, PinnedMtlsAgentPlannerClientV2,
+        PlannerCatalogEntryV2, PlannerCatalogErrorV2, PlannerCatalogRollbackAnchorV2,
+        PlannerCatalogStateHeadV2, SuiteOneAgentKernelClientV2, VerifiedAgentControlPeerV2,
     };
 
     #[cfg(target_os = "linux")]
@@ -163,6 +163,16 @@ mod implementation {
         planner_host: String,
         planner_port: u16,
         planner_server_spki_sha256: String,
+        intent_trust_deployment_ceiling: u16,
+        private_mapper_host: String,
+        private_mapper_port: u16,
+        private_mapper_server_spki_sha256: String,
+        #[serde(default)]
+        third_party_mapper_host: Option<String>,
+        #[serde(default)]
+        third_party_mapper_port: Option<u16>,
+        #[serde(default)]
+        third_party_mapper_server_spki_sha256: Option<String>,
         planner_route_id: u32,
         planner_template_id: u32,
         planner_intent_tag: u16,
@@ -486,6 +496,57 @@ mod implementation {
             )?),
         )
         .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
+        let intent_trust_ceiling =
+            crate::planner_privacy::IntentTrustDeploymentCeilingV2::from_tag(
+                bootstrap.intent_trust_deployment_ceiling,
+            )
+            .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
+        let private_mapper = MapperEndpointDeploymentV2::new(
+            bootstrap.private_mapper_host.clone(),
+            bootstrap.private_mapper_port,
+            Digest32V2::new(
+                decode_hex_32_v2(&bootstrap.private_mapper_server_spki_sha256)
+                    .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?,
+            ),
+        )
+        .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
+        let third_party_mapper = match (
+            bootstrap.third_party_mapper_host.clone(),
+            bootstrap.third_party_mapper_port,
+            bootstrap.third_party_mapper_server_spki_sha256.as_deref(),
+        ) {
+            (None, None, None) => None,
+            (Some(host), Some(port), Some(pin)) => Some(
+                MapperEndpointDeploymentV2::new(
+                    host,
+                    port,
+                    Digest32V2::new(
+                        decode_hex_32_v2(pin)
+                            .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?,
+                    ),
+                )
+                .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?,
+            ),
+            _ => return Err(AgentdDaemonErrorV2::DeploymentUnavailable),
+        };
+        let mapper = PinnedMtlsAgentMapperClientV2::from_verified_deployment(
+            intent_trust_ceiling,
+            private_mapper,
+            third_party_mapper,
+            read_credential_blob(
+                PLANNER_ROOT_CERTIFICATE_CREDENTIAL_V2,
+                MAX_TLS_CREDENTIAL_BYTES_V2,
+            )?,
+            read_credential_blob(
+                PLANNER_CLIENT_CERTIFICATE_CREDENTIAL_V2,
+                MAX_TLS_CREDENTIAL_BYTES_V2,
+            )?,
+            Zeroizing::new(read_credential_blob(
+                PLANNER_CLIENT_PRIVATE_KEY_CREDENTIAL_V2,
+                MAX_TLS_CREDENTIAL_BYTES_V2,
+            )?),
+        )
+        .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
         if bootstrap.planner_route_id == 0
             || bootstrap.planner_template_id == 0
             || bootstrap.release_destination_projection == 0
@@ -524,6 +585,7 @@ mod implementation {
             effect_gate,
             browser_kernel,
             approval_client,
+            mapper,
             planner,
             PlannerRouteIdV2::new(bootstrap.planner_route_id),
             StaticTemplateIdV2::new(bootstrap.planner_template_id),

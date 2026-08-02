@@ -528,7 +528,18 @@ mod macos {
         set_hex(
             &mut agent,
             &["planner_server_spki_sha256"],
-            Sha256::digest(planner_spki).into(),
+            Sha256::digest(&planner_spki).into(),
+        )?;
+        set_value(
+            &mut agent,
+            &["private_mapper_host"],
+            Value::String(PLANNER_SERVER_NAME.to_owned()),
+        )?;
+        set_value(&mut agent, &["private_mapper_port"], Value::from(9443_u16))?;
+        set_hex(
+            &mut agent,
+            &["private_mapper_server_spki_sha256"],
+            Sha256::digest(&planner_spki).into(),
         )?;
         write_json(&root.join("config/agentd-bootstrap-v2.json"), &agent)?;
 

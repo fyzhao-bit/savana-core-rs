@@ -14,9 +14,11 @@ mod daemon;
 mod durable;
 mod kernel_authority;
 mod kernel_client;
+mod mapper_client;
 mod planner_catalog;
 mod planner_client;
 pub mod planner_privacy;
+mod private_model_transport;
 mod state_owner;
 
 use std::collections::HashSet;
@@ -47,6 +49,9 @@ pub use kernel_authority::{
     KernelTaskAuthorityVerifierV2, KernelTaskStatementV2, SignedKernelTaskStatementV2,
 };
 pub use kernel_client::SuiteOneAgentKernelClientV2;
+pub use mapper_client::{
+    AgentMapperClientErrorV2, MapperEndpointDeploymentV2, PinnedMtlsAgentMapperClientV2,
+};
 pub use planner_catalog::{
     project_connector_descriptor_v2, BoundedPlannerSemanticTextV2,
     DurablePlannerCatalogNamespaceV2, DurablePlannerCatalogV2, PlannerCatalogEntryV2,

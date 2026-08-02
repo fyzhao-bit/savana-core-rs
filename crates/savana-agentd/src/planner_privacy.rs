@@ -25,6 +25,34 @@ pub enum PlannerPrivacyErrorV2 {
     EntropyUnavailable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum IntentTrustDeploymentCeilingV2 {
+    PrivateOnly = 1,
+    UserMayUseThirdParty = 2,
+}
+
+impl IntentTrustDeploymentCeilingV2 {
+    pub const fn from_tag(tag: u16) -> Result<Self, PlannerPrivacyErrorV2> {
+        match tag {
+            1 => Ok(Self::PrivateOnly),
+            2 => Ok(Self::UserMayUseThirdParty),
+            _ => Err(PlannerPrivacyErrorV2::Invalid),
+        }
+    }
+
+    pub const fn permits(self, boundary: IntentTrustBoundaryV2) -> bool {
+        matches!(boundary, IntentTrustBoundaryV2::Private)
+            || matches!(self, Self::UserMayUseThirdParty)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntentTrustBoundaryV2 {
+    Private,
+    ThirdParty,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u16)]
 pub enum StructuralRoleV2 {

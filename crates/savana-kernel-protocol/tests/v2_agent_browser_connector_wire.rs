@@ -62,6 +62,38 @@ fn connector_completion_removal_and_snapshot_are_closed_browser_actions_only() {
 }
 
 #[test]
+fn planner_intent_boundary_actions_have_fixed_browser_only_tags() {
+    let private =
+        encode_agent_browser_request_v2(browser_request(AgentBrowserActionV2::RunPlanner, 0x57))
+            .unwrap();
+    let third_party = encode_agent_browser_request_v2(browser_request(
+        AgentBrowserActionV2::RunPlannerWithThirdPartyMapper,
+        0x58,
+    ))
+    .unwrap();
+
+    assert_eq!(private.last(), Some(&0x02));
+    assert_eq!(third_party.last(), Some(&0x10));
+    assert_eq!(
+        decode_agent_browser_request_v2(&private).unwrap(),
+        browser_request(AgentBrowserActionV2::RunPlanner, 0x57)
+    );
+    assert_eq!(
+        decode_agent_browser_request_v2(&third_party).unwrap(),
+        browser_request(AgentBrowserActionV2::RunPlannerWithThirdPartyMapper, 0x58)
+    );
+    assert!(decode_kernel_agent_operation_v2(&private).is_err());
+    assert!(decode_kernel_agent_operation_v2(&third_party).is_err());
+    assert_eq!(
+        kernel_agent_operation_tags_v2(),
+        &[
+            0, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+            41, 42, 43,
+        ]
+    );
+}
+
+#[test]
 fn connector_browser_responses_round_trip_pending_commit_and_bounded_snapshot() {
     let pending =
         AgentPendingConnectorRegistrationRefV2::from_authority_entropy([0x61; 16]).unwrap();
