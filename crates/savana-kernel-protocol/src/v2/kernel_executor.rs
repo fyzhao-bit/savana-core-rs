@@ -7,10 +7,10 @@ use crate::{ProtocolError, StableCode};
 
 use super::{
     cbor::{scan_single, V2DecodeContext},
-    ActionIntentIdV2, AttemptKindV2, Digest32V2, DurableReleaseIdV2, DurableRunIdV2,
-    DurableTaskIdV2, Ed25519KeyIdV2, Ed25519SignatureV2, ExecutorIdentityV2,
-    FinalReleaseSemanticBindingV2, FixedBytes32V2, HpkeX25519KeyIdV2, InternalStepIdV2, Nonce32V2,
-    PlanRevisionDigestV2, UnixMillisV2,
+    derive_ed25519_key_id_v2, ActionIntentIdV2, AttemptKindV2, BoundedConnectorRegistryDeltaV2,
+    Digest32V2, DurableReleaseIdV2, DurableRunIdV2, DurableTaskIdV2, Ed25519KeyIdV2,
+    Ed25519SignatureV2, ExecutorIdentityV2, FinalReleaseSemanticBindingV2, FixedBytes32V2,
+    HpkeX25519KeyIdV2, InternalStepIdV2, Nonce32V2, PlanRevisionDigestV2, UnixMillisV2,
 };
 
 const MAX_HPKE_CIPHERTEXT_BYTES_V2: usize = 7 * 1024 * 1024 + 16;
@@ -18,6 +18,9 @@ const MAX_SIGNED_EXECUTION_ENVELOPE_PAYLOAD_BYTES_V2: usize = 8 * 1024 * 1024;
 const DISPATCH_SUBJECT_DOMAIN: &[u8] = b"SAVANA_DISPATCH_SUBJECT_V2\0";
 const DISPATCH_CORE_DOMAIN: &[u8] = b"SAVANA_DISPATCH_CORE_V2\0";
 const SEALED_EXECUTION_ENVELOPE_DOMAIN: &[u8] = b"SAVANA_SEALED_EXECUTION_ENVELOPE_V2\0";
+const CONNECTOR_REGISTRY_SYNC_PAGE_DOMAIN_V2: &[u8] = b"SAVANA_CONNECTOR_REGISTRY_SYNC_PAGE_V2\0";
+pub const MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTAS_V2: usize = 256;
+pub const MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTA_BYTES_V2: usize = 8 * 1024 * 1024 - 4096;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct BoundedCiphertextV2(Vec<u8>);
@@ -398,6 +401,7 @@ impl DispatchCoreV2 {
 pub struct SealedExecutionEnvelopePayloadV2 {
     core: DispatchCoreV2,
     dispatch_core_digest: Digest32V2,
+    declassification_provenance_digest: Digest32V2,
     hpke_enc: FixedBytes32V2,
     hpke_ciphertext: BoundedCiphertextV2,
 }
@@ -405,16 +409,18 @@ pub struct SealedExecutionEnvelopePayloadV2 {
 impl SealedExecutionEnvelopePayloadV2 {
     pub fn new(
         core: DispatchCoreV2,
+        declassification_provenance_digest: Digest32V2,
         hpke_enc: FixedBytes32V2,
         hpke_ciphertext: BoundedCiphertextV2,
     ) -> Result<Self, ProtocolError> {
-        if is_zero(hpke_enc.as_bytes()) {
+        if is_zero(declassification_provenance_digest.as_bytes()) || is_zero(hpke_enc.as_bytes()) {
             return Err(malformed());
         }
         let dispatch_core_digest = core.semantic_digest()?;
         Ok(Self {
             core,
             dispatch_core_digest,
+            declassification_provenance_digest,
             hpke_enc,
             hpke_ciphertext,
         })
@@ -426,6 +432,10 @@ impl SealedExecutionEnvelopePayloadV2 {
 
     pub const fn dispatch_core_digest(&self) -> Digest32V2 {
         self.dispatch_core_digest
+    }
+
+    pub const fn declassification_provenance_digest(&self) -> Digest32V2 {
+        self.declassification_provenance_digest
     }
 
     pub const fn hpke_enc(&self) -> FixedBytes32V2 {
@@ -781,6 +791,222 @@ impl FetchCompletionRequestV2 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectorRegistrySyncScopeV2 {
+    installation_id: Digest32V2,
+    active_state_manifest_digest: Digest32V2,
+    deployment_generation: u64,
+    genesis_head_digest: Digest32V2,
+    authority_key_id: Ed25519KeyIdV2,
+    authority_public_key: FixedBytes32V2,
+    canonical_host_allowlist_digest: Digest32V2,
+}
+
+impl ConnectorRegistrySyncScopeV2 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        installation_id: Digest32V2,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        genesis_head_digest: Digest32V2,
+        authority_key_id: Ed25519KeyIdV2,
+        authority_public_key: FixedBytes32V2,
+        canonical_host_allowlist_digest: Digest32V2,
+    ) -> Result<Self, ProtocolError> {
+        let key_id_is_zero = is_zero(authority_key_id.as_bytes());
+        let public_key_is_zero = is_zero(authority_public_key.as_bytes());
+        if deployment_generation == 0
+            || is_zero(installation_id.as_bytes())
+            || is_zero(active_state_manifest_digest.as_bytes())
+            || is_zero(genesis_head_digest.as_bytes())
+            || is_zero(canonical_host_allowlist_digest.as_bytes())
+            || key_id_is_zero != public_key_is_zero
+            || (!public_key_is_zero
+                && derive_ed25519_key_id_v2(*authority_public_key.as_bytes()) != authority_key_id)
+        {
+            return Err(malformed());
+        }
+        Ok(Self {
+            installation_id,
+            active_state_manifest_digest,
+            deployment_generation,
+            genesis_head_digest,
+            authority_key_id,
+            authority_public_key,
+            canonical_host_allowlist_digest,
+        })
+    }
+
+    pub const fn installation_id(self) -> Digest32V2 {
+        self.installation_id
+    }
+
+    pub const fn active_state_manifest_digest(self) -> Digest32V2 {
+        self.active_state_manifest_digest
+    }
+
+    pub const fn deployment_generation(self) -> u64 {
+        self.deployment_generation
+    }
+
+    pub const fn genesis_head_digest(self) -> Digest32V2 {
+        self.genesis_head_digest
+    }
+
+    pub const fn authority_key_id(self) -> Ed25519KeyIdV2 {
+        self.authority_key_id
+    }
+
+    pub const fn authority_public_key(self) -> FixedBytes32V2 {
+        self.authority_public_key
+    }
+
+    pub const fn canonical_host_allowlist_digest(self) -> Digest32V2 {
+        self.canonical_host_allowlist_digest
+    }
+
+    pub fn authority_enabled(self) -> bool {
+        !is_zero(self.authority_key_id.as_bytes())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectorRegistrySyncPageV2 {
+    base_sequence: u64,
+    base_head_digest: Digest32V2,
+    page_final_sequence: u64,
+    page_final_head_digest: Digest32V2,
+    source_final_sequence: u64,
+    source_final_head_digest: Digest32V2,
+    deltas: Vec<BoundedConnectorRegistryDeltaV2>,
+    commitment: Digest32V2,
+}
+
+impl ConnectorRegistrySyncPageV2 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        base_sequence: u64,
+        base_head_digest: Digest32V2,
+        page_final_sequence: u64,
+        page_final_head_digest: Digest32V2,
+        source_final_sequence: u64,
+        source_final_head_digest: Digest32V2,
+        deltas: Vec<BoundedConnectorRegistryDeltaV2>,
+    ) -> Result<Self, ProtocolError> {
+        if deltas.is_empty()
+            || deltas.len() > MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTAS_V2
+            || is_zero(base_head_digest.as_bytes())
+            || is_zero(page_final_head_digest.as_bytes())
+            || is_zero(source_final_head_digest.as_bytes())
+        {
+            return Err(malformed());
+        }
+        let delta_count = u64::try_from(deltas.len()).map_err(|_| malformed())?;
+        if base_sequence.checked_add(delta_count) != Some(page_final_sequence)
+            || source_final_sequence < page_final_sequence
+            || ((source_final_sequence == page_final_sequence)
+                != (source_final_head_digest == page_final_head_digest))
+        {
+            return Err(malformed());
+        }
+        let total_delta_bytes = deltas.iter().try_fold(0usize, |total, delta| {
+            total
+                .checked_add(delta.as_bytes().len())
+                .ok_or_else(malformed)
+        })?;
+        if total_delta_bytes > MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTA_BYTES_V2 {
+            return Err(malformed());
+        }
+        let commitment = connector_registry_sync_page_commitment(
+            base_sequence,
+            base_head_digest,
+            page_final_sequence,
+            page_final_head_digest,
+            source_final_sequence,
+            source_final_head_digest,
+            &deltas,
+        )?;
+        Ok(Self {
+            base_sequence,
+            base_head_digest,
+            page_final_sequence,
+            page_final_head_digest,
+            source_final_sequence,
+            source_final_head_digest,
+            deltas,
+            commitment,
+        })
+    }
+
+    pub const fn base_sequence(&self) -> u64 {
+        self.base_sequence
+    }
+
+    pub const fn base_head_digest(&self) -> Digest32V2 {
+        self.base_head_digest
+    }
+
+    pub const fn page_final_sequence(&self) -> u64 {
+        self.page_final_sequence
+    }
+
+    pub const fn page_final_head_digest(&self) -> Digest32V2 {
+        self.page_final_head_digest
+    }
+
+    pub const fn source_final_sequence(&self) -> u64 {
+        self.source_final_sequence
+    }
+
+    pub const fn source_final_head_digest(&self) -> Digest32V2 {
+        self.source_final_head_digest
+    }
+
+    pub fn deltas(&self) -> &[BoundedConnectorRegistryDeltaV2] {
+        &self.deltas
+    }
+
+    pub const fn commitment(&self) -> Digest32V2 {
+        self.commitment
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectorRegistrySyncModeV2 {
+    Probe,
+    ApplyPage(ConnectorRegistrySyncPageV2),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectorRegistrySyncRequestV2 {
+    scope: ConnectorRegistrySyncScopeV2,
+    mode: ConnectorRegistrySyncModeV2,
+}
+
+impl ConnectorRegistrySyncRequestV2 {
+    pub fn new(
+        scope: ConnectorRegistrySyncScopeV2,
+        mode: ConnectorRegistrySyncModeV2,
+    ) -> Result<Self, ProtocolError> {
+        if !scope.authority_enabled() && matches!(mode, ConnectorRegistrySyncModeV2::ApplyPage(_)) {
+            return Err(malformed());
+        }
+        Ok(Self { scope, mode })
+    }
+
+    pub const fn scope(&self) -> &ConnectorRegistrySyncScopeV2 {
+        &self.scope
+    }
+
+    pub const fn mode(&self) -> &ConnectorRegistrySyncModeV2 {
+        &self.mode
+    }
+
+    pub fn into_parts(self) -> (ConnectorRegistrySyncScopeV2, ConnectorRegistrySyncModeV2) {
+        (self.scope, self.mode)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub enum KernelExecutorOperationV2 {
@@ -789,6 +1015,7 @@ pub enum KernelExecutorOperationV2 {
     QueryByExecutionNonce(QueryByExecutionNonceRequestV2),
     AcknowledgeCommittedCompletion(AcknowledgeCommittedCompletionRequestV2),
     FetchCompletion(FetchCompletionRequestV2),
+    ConnectorRegistrySync(ConnectorRegistrySyncRequestV2),
 }
 
 impl KernelExecutorOperationV2 {
@@ -799,12 +1026,13 @@ impl KernelExecutorOperationV2 {
             Self::QueryByExecutionNonce(_) => 61,
             Self::AcknowledgeCommittedCompletion(_) => 62,
             Self::FetchCompletion(_) => 63,
+            Self::ConnectorRegistrySync(_) => 64,
         }
     }
 }
 
-pub const fn kernel_executor_operation_tags_v2() -> &'static [u16; 5] {
-    &[0, 60, 61, 62, 63]
+pub const fn kernel_executor_operation_tags_v2() -> &'static [u16; 6] {
+    &[0, 60, 61, 62, 63, 64]
 }
 
 pub fn encode_kernel_executor_operation_v2(
@@ -846,6 +1074,11 @@ pub fn encode_kernel_executor_operation_v2(
                 request.dispatch_subject_digest,
             )?;
             encode_completion_descriptor(&mut encoder, request.completion)?;
+        }
+        KernelExecutorOperationV2::ConnectorRegistrySync(request) => {
+            encode_header(&mut encoder, 64, 2)?;
+            encode_connector_registry_sync_scope(&mut encoder, request.scope)?;
+            encode_connector_registry_sync_mode(&mut encoder, &request.mode)?;
         }
     }
     Ok(encoder.into_writer())
@@ -901,12 +1134,204 @@ pub fn decode_kernel_executor_operation_v2(
                 nonce, core, subject, completion,
             )?)
         }
+        64 => {
+            expect_array(&mut decoder, 2)?;
+            let scope = decode_connector_registry_sync_scope(&mut decoder, &mut context)?;
+            let mode = decode_connector_registry_sync_mode(&mut decoder, &mut context)?;
+            KernelExecutorOperationV2::ConnectorRegistrySync(ConnectorRegistrySyncRequestV2::new(
+                scope, mode,
+            )?)
+        }
         _ => return Err(ProtocolError::stable(StableCode::ProtocolUnknownOperation)),
     };
     if decoder.position() != bytes.len() || encode_kernel_executor_operation_v2(&value)? != bytes {
         return Err(malformed());
     }
     Ok(value)
+}
+
+fn encode_connector_registry_sync_scope(
+    encoder: &mut minicbor::Encoder<Vec<u8>>,
+    scope: ConnectorRegistrySyncScopeV2,
+) -> Result<(), ProtocolError> {
+    encoder.array(7).map_err(ProtocolError::malformed)?;
+    encode_fixed(encoder, &scope.installation_id)?;
+    encode_fixed(encoder, &scope.active_state_manifest_digest)?;
+    encoder
+        .u64(scope.deployment_generation)
+        .map_err(ProtocolError::malformed)?;
+    encode_fixed(encoder, &scope.genesis_head_digest)?;
+    encode_fixed(encoder, &scope.authority_key_id)?;
+    encode_fixed(encoder, &scope.authority_public_key)?;
+    encode_fixed(encoder, &scope.canonical_host_allowlist_digest)
+}
+
+fn decode_connector_registry_sync_scope(
+    decoder: &mut minicbor::Decoder<'_>,
+    context: &mut V2DecodeContext,
+) -> Result<ConnectorRegistrySyncScopeV2, ProtocolError> {
+    expect_array(decoder, 7)?;
+    ConnectorRegistrySyncScopeV2::new(
+        decode_fixed(decoder, context)?,
+        decode_fixed(decoder, context)?,
+        decoder.u64().map_err(ProtocolError::malformed)?,
+        decode_fixed(decoder, context)?,
+        decode_fixed(decoder, context)?,
+        decode_fixed(decoder, context)?,
+        decode_fixed(decoder, context)?,
+    )
+}
+
+fn encode_connector_registry_sync_mode(
+    encoder: &mut minicbor::Encoder<Vec<u8>>,
+    mode: &ConnectorRegistrySyncModeV2,
+) -> Result<(), ProtocolError> {
+    match mode {
+        ConnectorRegistrySyncModeV2::Probe => {
+            encoder
+                .array(1)
+                .and_then(|encoder| encoder.u16(0))
+                .map_err(ProtocolError::malformed)?;
+        }
+        ConnectorRegistrySyncModeV2::ApplyPage(page) => {
+            encoder
+                .array(2)
+                .and_then(|encoder| encoder.u16(1))
+                .map_err(ProtocolError::malformed)?;
+            encode_connector_registry_sync_page(encoder, page)?;
+        }
+    }
+    Ok(())
+}
+
+fn decode_connector_registry_sync_mode(
+    decoder: &mut minicbor::Decoder<'_>,
+    context: &mut V2DecodeContext,
+) -> Result<ConnectorRegistrySyncModeV2, ProtocolError> {
+    let length = decoder
+        .array()
+        .map_err(ProtocolError::malformed)?
+        .ok_or_else(malformed)?;
+    let tag = decoder.u16().map_err(ProtocolError::malformed)?;
+    match (tag, length) {
+        (0, 1) => Ok(ConnectorRegistrySyncModeV2::Probe),
+        (1, 2) => decode_connector_registry_sync_page(decoder, context)
+            .map(ConnectorRegistrySyncModeV2::ApplyPage),
+        _ => Err(malformed()),
+    }
+}
+
+fn encode_connector_registry_sync_page(
+    encoder: &mut minicbor::Encoder<Vec<u8>>,
+    page: &ConnectorRegistrySyncPageV2,
+) -> Result<(), ProtocolError> {
+    encoder
+        .array(8)
+        .and_then(|encoder| encoder.u64(page.base_sequence))
+        .map_err(ProtocolError::malformed)?;
+    encode_fixed(encoder, &page.base_head_digest)?;
+    encoder
+        .u64(page.page_final_sequence)
+        .map_err(ProtocolError::malformed)?;
+    encode_fixed(encoder, &page.page_final_head_digest)?;
+    encoder
+        .u64(page.source_final_sequence)
+        .map_err(ProtocolError::malformed)?;
+    encode_fixed(encoder, &page.source_final_head_digest)?;
+    encoder
+        .array(u64::try_from(page.deltas.len()).map_err(|_| malformed())?)
+        .map_err(ProtocolError::malformed)?;
+    for delta in &page.deltas {
+        encoder
+            .bytes(delta.as_bytes())
+            .map_err(ProtocolError::malformed)?;
+    }
+    encode_fixed(encoder, &page.commitment)
+}
+
+fn decode_connector_registry_sync_page(
+    decoder: &mut minicbor::Decoder<'_>,
+    context: &mut V2DecodeContext,
+) -> Result<ConnectorRegistrySyncPageV2, ProtocolError> {
+    expect_array(decoder, 8)?;
+    let base_sequence = decoder.u64().map_err(ProtocolError::malformed)?;
+    let base_head_digest = decode_fixed(decoder, context)?;
+    let page_final_sequence = decoder.u64().map_err(ProtocolError::malformed)?;
+    let page_final_head_digest = decode_fixed(decoder, context)?;
+    let source_final_sequence = decoder.u64().map_err(ProtocolError::malformed)?;
+    let source_final_head_digest = decode_fixed(decoder, context)?;
+    let delta_count = decoder
+        .array()
+        .map_err(ProtocolError::malformed)?
+        .ok_or_else(malformed)?;
+    let delta_count = usize::try_from(delta_count).map_err(|_| malformed())?;
+    if delta_count == 0 || delta_count > MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTAS_V2 {
+        return Err(malformed());
+    }
+    let mut total_delta_bytes = 0usize;
+    let mut deltas = Vec::with_capacity(delta_count);
+    for _ in 0..delta_count {
+        let bytes = decoder.bytes().map_err(ProtocolError::malformed)?.to_vec();
+        total_delta_bytes = total_delta_bytes
+            .checked_add(bytes.len())
+            .ok_or_else(malformed)?;
+        if total_delta_bytes > MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTA_BYTES_V2 {
+            return Err(malformed());
+        }
+        deltas.push(BoundedConnectorRegistryDeltaV2::new(bytes)?);
+    }
+    let claimed_commitment: Digest32V2 = decode_fixed(decoder, context)?;
+    let page = ConnectorRegistrySyncPageV2::new(
+        base_sequence,
+        base_head_digest,
+        page_final_sequence,
+        page_final_head_digest,
+        source_final_sequence,
+        source_final_head_digest,
+        deltas,
+    )?;
+    if claimed_commitment != page.commitment {
+        return Err(malformed());
+    }
+    Ok(page)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn connector_registry_sync_page_commitment(
+    base_sequence: u64,
+    base_head_digest: Digest32V2,
+    page_final_sequence: u64,
+    page_final_head_digest: Digest32V2,
+    source_final_sequence: u64,
+    source_final_head_digest: Digest32V2,
+    deltas: &[BoundedConnectorRegistryDeltaV2],
+) -> Result<Digest32V2, ProtocolError> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder
+        .array(7)
+        .and_then(|encoder| encoder.u64(base_sequence))
+        .map_err(ProtocolError::malformed)?;
+    encode_fixed(&mut encoder, &base_head_digest)?;
+    encoder
+        .u64(page_final_sequence)
+        .map_err(ProtocolError::malformed)?;
+    encode_fixed(&mut encoder, &page_final_head_digest)?;
+    encoder
+        .u64(source_final_sequence)
+        .map_err(ProtocolError::malformed)?;
+    encode_fixed(&mut encoder, &source_final_head_digest)?;
+    encoder
+        .array(u64::try_from(deltas.len()).map_err(|_| malformed())?)
+        .map_err(ProtocolError::malformed)?;
+    for delta in deltas {
+        encoder
+            .bytes(delta.as_bytes())
+            .map_err(ProtocolError::malformed)?;
+    }
+    Ok(domain_hash(
+        CONNECTOR_REGISTRY_SYNC_PAGE_DOMAIN_V2,
+        &encoder.into_writer(),
+    ))
 }
 
 impl<C> minicbor::Encode<C> for SignedSealedExecutionEnvelopeV2 {
@@ -1110,11 +1535,12 @@ fn encode_sealed_execution_envelope_payload(
 ) -> Result<Vec<u8>, ProtocolError> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
     encoder
-        .array(5)
+        .array(6)
         .and_then(|encoder| encoder.u16(2))
         .map_err(ProtocolError::malformed)?;
     encode_dispatch_core(&mut encoder, value.core)?;
     encode_fixed(&mut encoder, &value.dispatch_core_digest)?;
+    encode_fixed(&mut encoder, &value.declassification_provenance_digest)?;
     encode_fixed(&mut encoder, &value.hpke_enc)?;
     encode_fixed(&mut encoder, &value.hpke_ciphertext)?;
     Ok(encoder.into_writer())
@@ -1125,16 +1551,22 @@ fn decode_sealed_execution_envelope_payload(
 ) -> Result<SealedExecutionEnvelopePayloadV2, ProtocolError> {
     scan_single(bytes)?;
     let mut decoder = minicbor::Decoder::new(bytes);
-    expect_array(&mut decoder, 5)?;
+    expect_array(&mut decoder, 6)?;
     if decoder.u16().map_err(ProtocolError::malformed)? != 2 {
         return Err(malformed());
     }
     let mut context = V2DecodeContext;
     let core = decode_dispatch_core(&mut decoder, &mut context)?;
     let claimed_core_digest: Digest32V2 = decode_fixed(&mut decoder, &mut context)?;
+    let declassification_provenance_digest = decode_fixed(&mut decoder, &mut context)?;
     let hpke_enc = decode_fixed(&mut decoder, &mut context)?;
     let hpke_ciphertext = decode_fixed(&mut decoder, &mut context)?;
-    let value = SealedExecutionEnvelopePayloadV2::new(core, hpke_enc, hpke_ciphertext)?;
+    let value = SealedExecutionEnvelopePayloadV2::new(
+        core,
+        declassification_provenance_digest,
+        hpke_enc,
+        hpke_ciphertext,
+    )?;
     if claimed_core_digest != value.dispatch_core_digest
         || decoder.position() != bytes.len()
         || encode_sealed_execution_envelope_payload(&value)? != bytes

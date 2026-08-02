@@ -235,6 +235,8 @@ fn deployment_hard_limits_are_one_canonical_protocol_lock() {
     assert_eq!(limits.max_file_tree_entries(), 65_536);
     assert_eq!(limits.max_staging_tree_bytes(), 68_719_476_736);
     assert_eq!(limits.max_attestation_bytes(), 16_777_216);
+    assert_eq!(limits.max_active_tool_descriptors(), 4_096);
+    assert_eq!(limits.max_user_connectors(), 16);
     assert_eq!(
         limits.values(),
         &[
@@ -267,11 +269,14 @@ fn deployment_hard_limits_are_one_canonical_protocol_lock() {
             4_096,
             16_777_216,
             255,
+            64,
+            16,
+            16,
         ]
     );
     assert_eq!(
         limits.digest().as_bytes(),
-        &decode_hex_32("8518c18736a469cf07432c4f7921ae08c5c684f1052ce87fff5b4deec9a7d79c")
+        &decode_hex_32("e1bdf7b67d2e017e325c41aded8c07f694bba6542c5ad7b4caf17d2eacf0dabc")
     );
 }
 

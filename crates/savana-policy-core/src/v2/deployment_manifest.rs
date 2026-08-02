@@ -20,8 +20,8 @@ use super::{
 
 const MANIFEST_SCHEMA_VERSION_V2: u16 = 2;
 const MANIFEST_OBJECT_DOMAIN_TAG_V2: u16 = 1;
-const MANIFEST_COMPLETE_FIELDS_V2: u64 = 17;
-const MANIFEST_PAYLOAD_FIELDS_V2: u64 = 16;
+const MANIFEST_COMPLETE_FIELDS_V2: u64 = 18;
+const MANIFEST_PAYLOAD_FIELDS_V2: u64 = 17;
 const COMPONENT_SIGNATURE_FIELDS_V2: u64 = 3;
 const COMPONENT_BINDING_FIELDS_V2: u64 = 2;
 const MANIFEST_PAYLOAD_DOMAIN_V2: &[u8] = b"savana.security-state-manifest.v2.payload\0";
@@ -89,6 +89,7 @@ pub struct SecurityStateManifestMaterialV2 {
     pub bootstrap_tcb_lock: BootstrapTcbLockV2,
     pub persistent_store_compatibility: PersistentStoreCompatibilitySetV2,
     pub agent_claim_compatibility_edges: AgentClaimCompatibilitySetV2,
+    pub declassification_rule_set_digest: Digest32V2,
     pub file_tree: FileTreeV2,
 }
 
@@ -307,6 +308,11 @@ fn validate_material(
             .as_bytes()
             .iter()
             .all(|byte| *byte == 0)
+        || material
+            .declassification_rule_set_digest
+            .as_bytes()
+            .iter()
+            .all(|byte| *byte == 0)
     {
         return Err(DeploymentControlErrorV2::InvalidSecurityStateManifest);
     }
@@ -508,6 +514,7 @@ fn decode_manifest(
         &mut decoder,
         AgentClaimCompatibilitySetV2::from_canonical_bytes,
     )?;
+    let declassification_rule_set_digest = decode_digest(&mut decoder)?;
     let file_tree = decode_nested(&mut decoder, FileTreeV2::from_canonical_bytes)?;
     if decode_digest(&mut decoder)? != file_tree.merkle_root() {
         return Err(DeploymentControlErrorV2::InvalidSecurityStateManifest);
@@ -539,6 +546,7 @@ fn decode_manifest(
             bootstrap_tcb_lock,
             persistent_store_compatibility,
             agent_claim_compatibility_edges,
+            declassification_rule_set_digest,
             file_tree,
         },
         component_signature_set,
@@ -619,10 +627,15 @@ fn encode_manifest_prefix(
         material.bootstrap_tcb_lock.canonical_bytes(),
         material.persistent_store_compatibility.canonical_bytes(),
         material.agent_claim_compatibility_edges.canonical_bytes(),
-        material.file_tree.canonical_bytes(),
     ] {
         encoder.writer_mut().extend_from_slice(nested);
     }
+    encoder
+        .bytes(material.declassification_rule_set_digest.as_bytes())
+        .map_err(|_| DeploymentControlErrorV2::InvalidSecurityStateManifest)?;
+    encoder
+        .writer_mut()
+        .extend_from_slice(material.file_tree.canonical_bytes());
     encoder
         .bytes(material.file_tree.merkle_root().as_bytes())
         .map(|_| ())

@@ -232,6 +232,22 @@ kernel_handle_v2!(
     b"SAVANA_AGENT_UI_AUTHORIZATION_HANDLE_V2\0"
 );
 kernel_handle_v2!(
+    ConnectorUiAuthorizationHandleV2,
+    b"SAVANA_CONNECTOR_UI_AUTHORIZATION_HANDLE_V2\0"
+);
+kernel_handle_v2!(
+    PendingConnectorRegistrationHandleV2,
+    b"SAVANA_PENDING_CONNECTOR_REGISTRATION_HANDLE_V2\0"
+);
+kernel_handle_v2!(
+    ApprovedConnectorRegistrationHandleV2,
+    b"SAVANA_APPROVED_CONNECTOR_REGISTRATION_HANDLE_V2\0"
+);
+kernel_handle_v2!(
+    ConnectorRemovalAuthorizationHandleV2,
+    b"SAVANA_CONNECTOR_REMOVAL_AUTHORIZATION_HANDLE_V2\0"
+);
+kernel_handle_v2!(
     IngressWriteCapabilityV2,
     b"SAVANA_INGRESS_WRITE_CAPABILITY_V2\0"
 );
@@ -298,6 +314,10 @@ kernel_handle_v2!(
 kernel_handle_v2!(
     ReleaseApprovalRecordHandleV2,
     b"SAVANA_RELEASE_APPROVAL_RECORD_HANDLE_V2\0"
+);
+kernel_handle_v2!(
+    ConnectorApprovalRecordHandleV2,
+    b"SAVANA_CONNECTOR_APPROVAL_RECORD_HANDLE_V2\0"
 );
 kernel_handle_v2!(
     IngressUiAuthenticationTransferCapabilityV2,
@@ -378,6 +398,10 @@ browser_reference_v2!(
 );
 browser_reference_v2!(AgentExecutionRefV2, b"SAVANA_AGENT_EXECUTION_REF_V2\0");
 browser_reference_v2!(AgentReleaseRefV2, b"SAVANA_AGENT_RELEASE_REF_V2\0");
+browser_reference_v2!(
+    AgentPendingConnectorRegistrationRefV2,
+    b"SAVANA_AGENT_PENDING_CONNECTOR_REGISTRATION_REF_V2\0"
+);
 kernel_handle_v2!(
     ApprovalDecisionCeremonyCapabilityV2,
     b"SAVANA_APPROVAL_DECISION_CEREMONY_V2\0"

@@ -10,7 +10,9 @@ use savana_kernel_protocol::v2::{
     UnixMillisV2, VersionV2,
 };
 use savana_policy_core::v2::{
-    AttemptKindV2, EffectSetV2, SignedToolDescriptorV2, VerifiedRegistryPublisherV2,
+    AttemptKindV2, ClosedDeclassificationPurposeV2, DeclassificationRuleSetV2, EffectSetV2,
+    InstallerOrMdmVerifierV2, OperationalTrustRootSetV2, SignedToolDescriptorV2,
+    VerifiedRegistryPublisherV2,
 };
 
 const ROOT: &str = "/Library/Application Support/Savana/Development";
@@ -868,15 +870,38 @@ fn development_material_binds_parser_files_to_the_installed_ingress_account() {
     assert!(source.contains("account_identity(\"_savana_ingress_dev\")?"));
     assert!(source.contains("&[\"parser\", \"file_owner_uid\"]"));
     assert!(source.contains("&[\"parser\", \"file_owner_gid\"]"));
+    assert!(source.contains("let connector_authority = if connector_authority_enabled"));
+    assert!(source.contains("connector-authority-v2.seed"));
+    assert!(source.contains("connector_authority: connector_authority.as_ref()"));
+    assert!(source.contains("fn connector_authority_mode("));
     for path in [
         "state/kerneld/kernel-agent-authority-state-v2.cbor",
         "state/kerneld/kernel-g4-state-v2.cbor",
         "state/agentd/agent-task-state-v2.cbor",
         "state/approvald/approval-protocol-state-v2.cbor",
         "state/execd/execd-journal-v2.cbor",
+        "state/execd/connector-registry-v2.cbor",
+        "state/execd/connector-registry-anchor-v2.bin",
     ] {
         assert!(source.contains(path), "missing exact durable path: {path}");
     }
+    assert!(source.contains("provider-server-spki-v2.der"));
+    assert!(source.contains("&[\"provider\", \"server_spki_sha256\"]"));
+}
+
+#[test]
+fn installer_requires_connector_authority_private_material_exactly_when_enabled() {
+    let source =
+        fs::read_to_string(deployment_root().join("deploy/macos/development/install.sh")).unwrap();
+    assert!(source.contains(
+        "connector_authority_credential=\"$install_root/credentials/kerneld/connector-authority-v2.seed\""
+    ));
+    assert!(source
+        .contains("disabled connector authority unexpectedly materialized a private credential"));
+    assert!(source.contains("enabled connector authority has incomplete private material"));
+    assert!(source.contains("/usr/bin/stat -f %z \"$connector_authority_credential\""));
+    assert!(source.contains("provider-server.spki.der"));
+    assert!(source.contains("provider-server-spki-v2.der"));
 }
 
 #[test]
@@ -891,6 +916,13 @@ fn installer_and_validator_close_over_the_signed_tool_descriptor() {
         install.contains("\"$install_root/config/policy/development-draft-report-tool-v2.cbor\"")
     );
     assert!(validate.contains("development-draft-report-tool-v2.cbor"));
+}
+
+#[test]
+fn validator_never_executes_artifacts_from_the_untrusted_build_directory() {
+    let validate =
+        fs::read_to_string(deployment_root().join("deploy/macos/development/validate.sh")).unwrap();
+    assert!(!validate.contains("--validate-connector-host-v2"));
 }
 
 #[test]
@@ -950,7 +982,26 @@ fn validator_accepts_only_a_complete_nonmutating_build_fixture() {
     ] {
         fs::write(fixture.path().join("config").join(leaf), b"{}").unwrap();
     }
+    let zero = "00".repeat(32);
+    let genesis = "11".repeat(32);
+    fs::write(
+        fixture.path().join("config/kerneld-bootstrap-v2.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "policy_runtime": {
+                "executor_connector_registry_digest": genesis,
+                "connector_registry_genesis_digest": genesis,
+                "connector_authority_key_id": zero,
+                "connector_authority_public_key": zero,
+                "user_tier_host_allowlist": []
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     for leaf in [
+        "declassification-installer-root-v2.json",
+        "declassification-rule-set-v2.cbor",
+        "declassification-trust-root-set-v2.cbor",
         "development-draft-report-tool-v2.cbor",
         "effect-ledger-projection-v2.cbor",
         "input-runtime-assets-v2.cbor",
@@ -980,8 +1031,20 @@ fn validator_accepts_only_a_complete_nonmutating_build_fixture() {
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    let validator_marker = fixture.path().join("untrusted-validator-executed");
+    let untrusted_validator = fixture
+        .path()
+        .join("libexec/savana-development-build-inputs");
+    fs::write(
+        &untrusted_validator,
+        b"#!/bin/sh\n: > \"$SAVANA_VALIDATOR_MARKER\"\nexit 0\n",
+    )
+    .unwrap();
+    fs::set_permissions(&untrusted_validator, fs::Permissions::from_mode(0o755)).unwrap();
+
     let output = Command::new(deployment_root().join("deploy/macos/development/validate.sh"))
         .arg(fixture.path())
+        .env("SAVANA_VALIDATOR_MARKER", &validator_marker)
         .output()
         .unwrap();
     assert!(
@@ -994,6 +1057,85 @@ fn validator_accepts_only_a_complete_nonmutating_build_fixture() {
         "planned launchd labels: com.savana.development.kerneld com.savana.development.agentd"
     ));
     assert!(stdout.contains("planned logical development authority ID: SAVANADEV1"));
+    assert!(
+        !validator_marker.exists(),
+        "validator executed an untrusted build-directory artifact"
+    );
+
+    let kerneld_path = fixture.path().join("config/kerneld-bootstrap-v2.json");
+    let mut kerneld: serde_json::Value =
+        serde_json::from_slice(&fs::read(&kerneld_path).unwrap()).unwrap();
+    kerneld["policy_runtime"]["connector_authority_public_key"] =
+        serde_json::Value::String("22".repeat(32));
+    fs::write(&kerneld_path, serde_json::to_vec(&kerneld).unwrap()).unwrap();
+    assert_eq!(
+        Command::new(deployment_root().join("deploy/macos/development/validate.sh"))
+            .arg(fixture.path())
+            .status()
+            .unwrap()
+            .code(),
+        Some(66)
+    );
+    kerneld["policy_runtime"]["connector_authority_public_key"] =
+        serde_json::Value::String("00".repeat(32));
+    fs::write(&kerneld_path, serde_json::to_vec(&kerneld).unwrap()).unwrap();
+
+    for invalid_host in [
+        "bad..example.com",
+        "-bad.example",
+        "bad_.example",
+        "192.0.002.1",
+        "[2001:0db8::1]",
+        "bücher.example",
+        "0x7f.0.0.1",
+        "example.1",
+        "example.077",
+    ] {
+        kerneld["policy_runtime"]["user_tier_host_allowlist"] = serde_json::json!([invalid_host]);
+        fs::write(&kerneld_path, serde_json::to_vec(&kerneld).unwrap()).unwrap();
+        assert_eq!(
+            Command::new(deployment_root().join("deploy/macos/development/validate.sh"))
+                .arg(fixture.path())
+                .status()
+                .unwrap()
+                .code(),
+            Some(66),
+            "validator accepted noncanonical connector host {invalid_host:?}"
+        );
+    }
+
+    kerneld["policy_runtime"]["user_tier_host_allowlist"] = serde_json::Value::Array(
+        (0..=4_096)
+            .map(|index| serde_json::Value::String(format!("host{index:04}.example")))
+            .collect(),
+    );
+    fs::write(&kerneld_path, serde_json::to_vec(&kerneld).unwrap()).unwrap();
+    assert_eq!(
+        Command::new(deployment_root().join("deploy/macos/development/validate.sh"))
+            .arg(fixture.path())
+            .status()
+            .unwrap()
+            .code(),
+        Some(66),
+        "validator accepted more than 4096 connector hosts"
+    );
+
+    kerneld["policy_runtime"]["user_tier_host_allowlist"] =
+        serde_json::json!(["192.0.2.1", "example.com", "xn--bcher-kva.example"]);
+    fs::write(&kerneld_path, serde_json::to_vec(&kerneld).unwrap()).unwrap();
+    assert!(
+        Command::new(deployment_root().join("deploy/macos/development/validate.sh"))
+            .arg(fixture.path())
+            .env("SAVANA_VALIDATOR_MARKER", &validator_marker)
+            .status()
+            .unwrap()
+            .success(),
+        "validator rejected canonical connector hosts"
+    );
+    assert!(
+        !validator_marker.exists(),
+        "validator executed an untrusted build-directory artifact while checking hosts"
+    );
 
     fs::remove_file(fixture.path().join("signing/deployment-manifest-v2.seed")).unwrap();
     assert_eq!(
@@ -1060,9 +1202,43 @@ fn build_input_generator_emits_cryptographically_bound_runtime_inputs() {
     );
     let execd: serde_json::Value =
         serde_json::from_slice(&fs::read(config.join("execd-bootstrap-v2.json")).unwrap()).unwrap();
+    let zero_digest = "00".repeat(32);
     assert_eq!(
         execd["journal_path"].as_str(),
         Some("/Library/Application Support/Savana/Development/state/execd/execd-journal-v2.cbor")
+    );
+    assert_eq!(
+        execd["connector_registry_path"].as_str(),
+        Some(
+            "/Library/Application Support/Savana/Development/state/execd/connector-registry-v2.cbor"
+        )
+    );
+    assert_eq!(
+        execd["connector_registry_anchor_path"].as_str(),
+        Some(
+            "/Library/Application Support/Savana/Development/state/execd/connector-registry-anchor-v2.bin"
+        )
+    );
+    assert_ne!(execd["store_id"], execd["connector_registry_store_id"]);
+    assert_eq!(
+        execd["connector_set_digest"],
+        execd["connector_registry_genesis_digest"]
+    );
+    assert_eq!(
+        execd["connector_authority_key_id"].as_str(),
+        Some(zero_digest.as_str())
+    );
+    assert_eq!(
+        execd["connector_authority_public_key"].as_str(),
+        Some(zero_digest.as_str())
+    );
+    assert_eq!(
+        execd["provider"]["canonical_url"].as_str(),
+        Some("https://provider.savana-development.invalid:9444/")
+    );
+    assert_ne!(
+        hex_32(execd["provider"]["server_spki_sha256"].as_str().unwrap()),
+        [0; 32]
     );
     assert_eq!(agentd["planner_route_id"].as_u64(), Some(1));
     let jarvis_entitlements = fs::read_to_string(
@@ -1127,7 +1303,71 @@ fn build_input_generator_emits_cryptographically_bound_runtime_inputs() {
     )
     .unwrap();
 
+    let declassification_installer: serde_json::Value = serde_json::from_slice(
+        &fs::read(artifacts.join("declassification-installer-root-v2.json")).unwrap(),
+    )
+    .unwrap();
+    let declassification_verifier = InstallerOrMdmVerifierV2::new(
+        Ed25519KeyIdV2::new(hex_32(
+            declassification_installer["key_id"].as_str().unwrap(),
+        )),
+        declassification_installer["key_epoch"].as_u64().unwrap(),
+        hex_32(declassification_installer["public_key"].as_str().unwrap()),
+    )
+    .unwrap();
+    let declassification_roots = OperationalTrustRootSetV2::from_canonical_bytes(
+        &fs::read(artifacts.join("declassification-trust-root-set-v2.cbor")).unwrap(),
+        &declassification_verifier,
+    )
+    .unwrap();
+    let declassification_rules = DeclassificationRuleSetV2::from_canonical_bytes(
+        &fs::read(artifacts.join("declassification-rule-set-v2.cbor")).unwrap(),
+        &declassification_roots,
+        current_unix_millis(),
+    )
+    .unwrap();
+    assert_eq!(declassification_rules.rules().len(), 5);
+    assert_eq!(
+        declassification_rules
+            .rules()
+            .iter()
+            .map(|rule| rule.purpose())
+            .collect::<Vec<_>>(),
+        ClosedDeclassificationPurposeV2::ALL
+    );
+    assert_eq!(
+        declassification_rules.signed_digest().as_bytes(),
+        &hex_32(
+            template["declassification_rule_set_digest"]
+                .as_str()
+                .unwrap()
+        )
+    );
+    assert_eq!(
+        kerneld["declassification_rule_set_path"].as_str(),
+        Some(
+            "/Library/Application Support/Savana/Development/config/policy/declassification-rule-set-v2.cbor"
+        )
+    );
+
     let policy = &kerneld["policy_runtime"];
+    let disabled = "00".repeat(32);
+    assert_eq!(
+        policy["connector_registry_genesis_digest"],
+        policy["executor_connector_registry_digest"]
+    );
+    assert_eq!(
+        policy["connector_authority_key_id"].as_str(),
+        Some(disabled.as_str())
+    );
+    assert_eq!(
+        policy["connector_authority_public_key"].as_str(),
+        Some(disabled.as_str())
+    );
+    assert!(policy["user_tier_host_allowlist"]
+        .as_array()
+        .unwrap()
+        .is_empty());
     let registry_key = hex_32(policy["registry_publisher_public_key"].as_str().unwrap());
     let registry_key_id = Ed25519KeyIdV2::new(hex_32(
         policy["registry_publisher_key_id"].as_str().unwrap(),

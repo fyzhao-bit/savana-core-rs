@@ -128,6 +128,66 @@ fn deployment_and_activation_root_sets_are_complete_signed_closed_objects() {
 }
 
 #[test]
+fn declassification_root_set_has_closed_binding_purpose_and_domain() {
+    let installer = SigningKey::from_bytes(&[0x31; 32]);
+    let verifier = InstallerOrMdmVerifierV2::new(
+        derive_ed25519_key_id_v2(installer.verifying_key().to_bytes()),
+        11,
+        installer.verifying_key().to_bytes(),
+    )
+    .unwrap();
+    let member = root(
+        OperationalTrustRootPurposeV2::DeclassificationAuthority,
+        0x32,
+    );
+    let set = OperationalTrustRootSetV2::new_declassification_signed_for_test(
+        digest(0x33),
+        1,
+        None,
+        vec![member],
+        5,
+        100,
+        &installer,
+        11,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        set.binding(),
+        OperationalTrustRootSetBindingV2::Declassification { .. }
+    ));
+    assert_eq!(set.binding().tag(), 3);
+    assert_eq!(
+        OperationalTrustRootPurposeV2::DeclassificationAuthority.tag(),
+        5
+    );
+    let decoded =
+        OperationalTrustRootSetV2::from_canonical_bytes(set.canonical_bytes(), &verifier).unwrap();
+    let identity = VersionedIdentityV2::new(
+        ClosedSecurityDomainV2::DeclassificationTrustRootSet,
+        decoded.root_set_sequence(),
+        decoded.signed_digest(),
+        verifier.key_id(),
+        verifier.key_epoch(),
+        decoded.not_before_unix_ms(),
+        decoded.not_after_unix_ms(),
+    )
+    .unwrap();
+    decoded.matches_versioned_identity(&identity).unwrap();
+    let wrong_version = VersionedIdentityV2::new(
+        ClosedSecurityDomainV2::DeclassificationTrustRootSet,
+        decoded.root_set_sequence() + 1,
+        decoded.signed_digest(),
+        verifier.key_id(),
+        verifier.key_epoch(),
+        decoded.not_before_unix_ms(),
+        decoded.not_after_unix_ms(),
+    )
+    .unwrap();
+    assert!(decoded.matches_versioned_identity(&wrong_version).is_err());
+}
+
+#[test]
 fn operational_root_sets_reject_wrong_purpose_key_reuse_and_chain_forks() {
     let installer = SigningKey::from_bytes(&[10; 32]);
     let deployment_only = vec![root(
@@ -220,7 +280,7 @@ fn operational_root_sets_reject_wrong_purpose_key_reuse_and_chain_forks() {
 }
 
 #[test]
-fn native_bootstrap_trust_requires_three_complete_same_product_chains() {
+fn native_bootstrap_trust_requires_four_complete_same_product_chains() {
     let installer = SigningKey::from_bytes(&[0x21; 32]);
     let family = digest(0x22);
     let mut deployment_members = vec![
@@ -246,6 +306,20 @@ fn native_bootstrap_trust_requires_three_complete_same_product_chains() {
         vec![root(
             OperationalTrustRootPurposeV2::InstallationActivation,
             0x25,
+        )],
+        5,
+        100,
+        &installer,
+        9,
+    )
+    .unwrap();
+    let declassification = OperationalTrustRootSetV2::new_declassification_signed_for_test(
+        family,
+        1,
+        None,
+        vec![root(
+            OperationalTrustRootPurposeV2::DeclassificationAuthority,
+            0x2a,
         )],
         5,
         100,
@@ -299,6 +373,7 @@ fn native_bootstrap_trust_requires_three_complete_same_product_chains() {
         installer.verifying_key().to_bytes(),
         vec![deployment.canonical_bytes().to_vec()],
         vec![activation.canonical_bytes().to_vec()],
+        vec![declassification.canonical_bytes().to_vec()],
         vec![release_set.canonical_bytes().to_vec()],
     )
     .unwrap();
@@ -315,6 +390,12 @@ fn native_bootstrap_trust_requires_three_complete_same_product_chains() {
     assert_eq!(
         authenticated.release_trust_root_set().signed_digest(),
         release_set.signed_digest()
+    );
+    assert_eq!(
+        authenticated
+            .declassification_trust_root_set()
+            .signed_digest(),
+        declassification.signed_digest()
     );
 
     let wrong_family_release = ReleaseTrustRootSetV2::new_signed_for_test(
@@ -335,8 +416,45 @@ fn native_bootstrap_trust_requires_three_complete_same_product_chains() {
         installer.verifying_key().to_bytes(),
         vec![deployment.canonical_bytes().to_vec()],
         vec![activation.canonical_bytes().to_vec()],
+        vec![declassification.canonical_bytes().to_vec()],
         vec![wrong_family_release.canonical_bytes().to_vec()],
     )
     .unwrap();
     assert!(AuthenticatedNativeDeploymentTrustV2::verify(&mismatched).is_err());
+
+    let wrong_domain = NativeDeploymentBootstrapTrustMaterialV2::new_for_test(
+        *derive_ed25519_key_id_v2(installer.verifying_key().to_bytes()).as_bytes(),
+        9,
+        installer.verifying_key().to_bytes(),
+        vec![deployment.canonical_bytes().to_vec()],
+        vec![activation.canonical_bytes().to_vec()],
+        vec![activation.canonical_bytes().to_vec()],
+        vec![release_set.canonical_bytes().to_vec()],
+    )
+    .unwrap();
+    assert!(AuthenticatedNativeDeploymentTrustV2::verify(&wrong_domain).is_err());
+
+    let wrong_family_declassification =
+        OperationalTrustRootSetV2::new_declassification_signed_for_test(
+            digest(0x30),
+            1,
+            None,
+            declassification.members().to_vec(),
+            5,
+            100,
+            &installer,
+            9,
+        )
+        .unwrap();
+    let mismatched_declassification = NativeDeploymentBootstrapTrustMaterialV2::new_for_test(
+        *derive_ed25519_key_id_v2(installer.verifying_key().to_bytes()).as_bytes(),
+        9,
+        installer.verifying_key().to_bytes(),
+        vec![deployment.canonical_bytes().to_vec()],
+        vec![activation.canonical_bytes().to_vec()],
+        vec![wrong_family_declassification.canonical_bytes().to_vec()],
+        vec![release_set.canonical_bytes().to_vec()],
+    )
+    .unwrap();
+    assert!(AuthenticatedNativeDeploymentTrustV2::verify(&mismatched_declassification).is_err());
 }

@@ -68,7 +68,7 @@ fn exact_suite_one_handshake_confirms_both_sides_and_encrypts_one_request_respon
     .unwrap();
     let (server_pending, server_hello) = V2ServerHandshake::accept_client_hello(
         edge,
-        observed,
+        observed.clone(),
         &client_hello,
         Nonce32V2::new([0x28; 32]),
         StaticSecret::from([0x29; 32]),
@@ -87,6 +87,7 @@ fn exact_suite_one_handshake_confirms_both_sides_and_encrypts_one_request_respon
         server_pending.accept_client_finish(&client_finish).unwrap();
     assert_eq!(peer.role(), EndpointRoleV2::AgentKernel);
     assert_eq!(peer.client_boot_id(), BootIdV2::new([0x23; 32]));
+    assert_eq!(peer.observed_client_peer(), &observed);
     let mut changed_accepted = accepted.clone();
     *changed_accepted.last_mut().unwrap() ^= 1;
     assert!(client_session
@@ -116,12 +117,18 @@ fn exact_suite_one_handshake_confirms_both_sides_and_encrypts_one_request_respon
     assert_eq!(opened.plaintext(), request_plaintext);
     assert!(server_session.open_application_request(&request).is_err());
 
-    assert!(server_session
-        .seal_application_response(RequestIdV2::new([0x2b; 16]), 29, &[0x81, 0x01])
-        .is_err());
-    let response = server_session
-        .seal_application_response(request_id, 29, &[0x81, 0x01])
+    let failed = server_session
+        .prepare_application_response(RequestIdV2::new([0x2b; 16]), 29, &[0x81, 0x01])
+        .unwrap_err();
+    let (server_session, _) = failed.into_parts();
+    let staged = server_session
+        .prepare_application_response(request_id, 29, &[0x81, 0x01])
         .unwrap();
+    let server_session = staged.rollback();
+    let response = server_session
+        .prepare_application_response(request_id, 29, &[0x81, 0x01])
+        .unwrap()
+        .commit();
     let mut changed_response = response.clone();
     *changed_response.last_mut().unwrap() ^= 1;
     assert!(client_session

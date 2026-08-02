@@ -292,3 +292,215 @@ pub(super) fn evaluation_fixture(
         stored,
     )
 }
+
+#[test]
+fn intent_flow_confinement_blocks_untrusted_arguments_on_authorizing_effects() {
+    use crate::v2::validator::intent_flow_is_confined;
+    use crate::v2::{EffectSetV2, IntegrityV2};
+
+    // Every authorizing effect refuses an `ExternalUntrusted` argument. These
+    // are the integrities carried by planner output and by tool results, so
+    // this is what stops fetched content from choosing the destination of a
+    // state-changing call.
+    for effect in [
+        EffectSetV2::CREATE,
+        EffectSetV2::UPDATE,
+        EffectSetV2::DELETE,
+        EffectSetV2::SEND,
+        EffectSetV2::EXECUTE,
+        EffectSetV2::FINAL_RELEASE,
+    ] {
+        assert!(
+            !intent_flow_is_confined(effect, [IntegrityV2::ExternalUntrusted].into_iter()),
+            "{effect:?} must refuse an ExternalUntrusted argument"
+        );
+        // One untrusted argument among trusted ones is still refused.
+        assert!(!intent_flow_is_confined(
+            effect,
+            [
+                IntegrityV2::UserAuthorized,
+                IntegrityV2::ExternalUntrusted,
+                IntegrityV2::KernelTrusted,
+            ]
+            .into_iter()
+        ));
+        // The ordinary path is unaffected: a recipient the user supplied
+        // through ingress stays `UserAuthorized` even when the planner selects
+        // it by internal id.
+        assert!(intent_flow_is_confined(
+            effect,
+            [IntegrityV2::UserAuthorized, IntegrityV2::KernelTrusted].into_iter()
+        ));
+    }
+}
+
+#[test]
+fn intent_flow_confinement_permits_reads_and_holds_over_effect_combinations() {
+    use crate::v2::validator::intent_flow_is_confined;
+    use crate::v2::{EffectSetV2, IntegrityV2};
+
+    // A pure read may be steered by untrusted data — analysing fetched content
+    // is the point. Only authorizing effects are confined.
+    assert!(intent_flow_is_confined(
+        EffectSetV2::READ,
+        [IntegrityV2::ExternalUntrusted].into_iter()
+    ));
+    assert!(intent_flow_is_confined(
+        EffectSetV2::EMPTY,
+        [IntegrityV2::ExternalUntrusted].into_iter()
+    ));
+    // A read combined with any authorizing effect is confined, so a descriptor
+    // cannot launder SEND past the check by also declaring READ.
+    assert!(!intent_flow_is_confined(
+        EffectSetV2::READ.union(EffectSetV2::SEND),
+        [IntegrityV2::ExternalUntrusted].into_iter()
+    ));
+    assert!(!intent_flow_is_confined(
+        EffectSetV2::ALL,
+        [IntegrityV2::ExternalUntrusted].into_iter()
+    ));
+    // No arguments is vacuously confined; the fact only constrains steering
+    // data that actually exists.
+    assert!(intent_flow_is_confined(
+        EffectSetV2::SEND,
+        std::iter::empty()
+    ));
+}
+
+#[test]
+fn effect_authorizing_set_covers_every_effect_except_read() {
+    use crate::v2::validator::EFFECT_AUTHORIZING_V2;
+    use crate::v2::EffectSetV2;
+
+    // Pin the partition so a new effect bit cannot silently land outside the
+    // confined set: ALL minus READ must be exactly the authorizing set.
+    assert_eq!(
+        EFFECT_AUTHORIZING_V2.union(EffectSetV2::READ),
+        EffectSetV2::ALL
+    );
+    assert!(!EFFECT_AUTHORIZING_V2.contains(EffectSetV2::READ));
+    assert_eq!(
+        EFFECT_AUTHORIZING_V2.bits(),
+        EffectSetV2::ALL.bits() & !EffectSetV2::READ.bits()
+    );
+}
+
+#[test]
+fn intent_flow_confinement_has_its_own_closed_implementation_id() {
+    // The kind must be distinct from the five pre-existing validators and must
+    // keep implementation id 6; `savana-kerneld`'s startup decoder maps that
+    // tag, and a shifted id would silently activate the wrong validator.
+    assert_eq!(
+        InternalValidatorImplementationKindV2::IntentFlowConfinement
+            .implementation_id()
+            .get(),
+        6
+    );
+    for other in [
+        InternalValidatorImplementationKindV2::ArgumentBindingIntegrity,
+        InternalValidatorImplementationKindV2::LabelEffectConfinement,
+        InternalValidatorImplementationKindV2::RootEvidencePresence,
+        InternalValidatorImplementationKindV2::ProjectionBindingIntegrity,
+        InternalValidatorImplementationKindV2::TokenExecutorBinding,
+    ] {
+        assert_ne!(
+            other.implementation_id().get(),
+            InternalValidatorImplementationKindV2::IntentFlowConfinement
+                .implementation_id()
+                .get()
+        );
+    }
+}
+
+#[test]
+fn decision_branch_meet_is_a_greatest_lower_bound() {
+    use crate::v2::validator::G5DecisionBranchV2 as B;
+
+    const ALL: [B; 3] = [B::Permit, B::RequireApproval, B::Deny];
+
+    // Deny absorbs, Permit is the identity: the two properties the decision
+    // path relies on when folding ontology, validators, and policy together.
+    for branch in ALL {
+        assert_eq!(B::Deny.meet(branch), B::Deny);
+        assert_eq!(branch.meet(B::Deny), B::Deny);
+        assert_eq!(B::Permit.meet(branch), branch);
+        assert_eq!(branch.meet(B::Permit), branch);
+        assert_eq!(branch.meet(branch), branch);
+    }
+
+    // Commutative and associative, so the fold order over the activated
+    // validator set cannot change a decision.
+    for left in ALL {
+        for right in ALL {
+            assert_eq!(left.meet(right), right.meet(left));
+            for third in ALL {
+                assert_eq!(
+                    left.meet(right).meet(third),
+                    left.meet(right.meet(third)),
+                    "meet must be associative"
+                );
+            }
+        }
+    }
+
+    assert_eq!(B::RequireApproval.meet(B::Permit), B::RequireApproval);
+    assert_eq!(B::RequireApproval.meet(B::Deny), B::Deny);
+}
+
+#[test]
+fn meet_never_widens_what_policy_allowed() {
+    use crate::v2::validator::G5DecisionBranchV2 as B;
+
+    const ALL: [B; 3] = [B::Permit, B::RequireApproval, B::Deny];
+
+    // The safety invariant for the whole three-way mechanism: whatever the
+    // validators say, the combined branch is never more permissive than the
+    // policy disposition alone. A compromised or buggy validator can only
+    // narrow authority, never grant it.
+    for policy in ALL {
+        for validators in ALL {
+            for ontology in ALL {
+                let combined = ontology.meet(validators).meet(policy);
+                assert!(
+                    rank(combined) <= rank(policy),
+                    "combined {combined:?} must not outrank policy {policy:?}"
+                );
+                assert!(rank(combined) <= rank(validators));
+                assert!(rank(combined) <= rank(ontology));
+            }
+        }
+    }
+
+    fn rank(branch: B) -> u8 {
+        match branch {
+            B::Deny => 0,
+            B::RequireApproval => 1,
+            B::Permit => 2,
+        }
+    }
+}
+
+#[test]
+fn binding_validators_deny_and_flow_confinement_escalates() {
+    use crate::v2::validator::G5DecisionBranchV2 as B;
+
+    // The five original validators check bindings: a failure means the call is
+    // malformed and no human answer repairs it, so their behaviour is
+    // unchanged by the three-way mechanism.
+    for kind in [
+        InternalValidatorImplementationKindV2::ArgumentBindingIntegrity,
+        InternalValidatorImplementationKindV2::LabelEffectConfinement,
+        InternalValidatorImplementationKindV2::RootEvidencePresence,
+        InternalValidatorImplementationKindV2::ProjectionBindingIntegrity,
+        InternalValidatorImplementationKindV2::TokenExecutorBinding,
+    ] {
+        assert_eq!(kind.failure_branch(), B::Deny, "{kind:?} must keep denying");
+    }
+
+    // Intent flow confinement asks a question a person can answer — "should
+    // untrusted data steer this effect?" — so it escalates instead.
+    assert_eq!(
+        InternalValidatorImplementationKindV2::IntentFlowConfinement.failure_branch(),
+        B::RequireApproval
+    );
+}

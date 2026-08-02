@@ -180,6 +180,7 @@ fn fixed_manifest_closures_round_trip_and_lock_roles() {
         identity(ClosedSecurityDomainV2::DeploymentTrustRootSet, 106),
         identity(ClosedSecurityDomainV2::ActivationTrustRootSet, 109),
         identity(ClosedSecurityDomainV2::ReleaseTrustRootSet, 112),
+        identity(ClosedSecurityDomainV2::DeclassificationTrustRootSet, 115),
         1,
     )
     .expect("bootstrap closure");
@@ -567,6 +568,7 @@ fn complete_security_state_manifest_round_trips_and_rejects_signature_mutation()
         identity(ClosedSecurityDomainV2::DeploymentTrustRootSet, 206),
         identity(ClosedSecurityDomainV2::ActivationTrustRootSet, 209),
         release_root_identity,
+        identity(ClosedSecurityDomainV2::DeclassificationTrustRootSet, 212),
         1,
     )
     .expect("bootstrap");
@@ -614,6 +616,7 @@ fn complete_security_state_manifest_round_trips_and_rejects_signature_mutation()
         persistent_store_compatibility: stores,
         agent_claim_compatibility_edges: AgentClaimCompatibilitySetV2::new(vec![])
             .expect("empty edges"),
+        declassification_rule_set_digest: digest(221),
         file_tree,
     };
     let manifest = SecurityStateManifestV2::new_signed_for_test(
@@ -630,6 +633,18 @@ fn complete_security_state_manifest_round_trips_and_rejects_signature_mutation()
         SecurityStateManifestV2::from_canonical_bytes(manifest.canonical_bytes(), &root_set, 20)
             .expect("decode manifest");
     assert_eq!(decoded, manifest);
+    assert_eq!(
+        decoded.material().declassification_rule_set_digest,
+        digest(221)
+    );
+    assert_eq!(
+        decoded
+            .material()
+            .bootstrap_tcb_lock
+            .declassification_trust_root_set()
+            .domain(),
+        ClosedSecurityDomainV2::DeclassificationTrustRootSet
+    );
     decoded
         .validate_for_normal_transaction()
         .expect("normal manifest");
@@ -707,6 +722,10 @@ fn complete_security_state_manifest_round_trips_and_rejects_signature_mutation()
             .activation_trust_root_set()
             .content_digest(),
         root_set.release_trust_root_set_digest(),
+        desired_material
+            .bootstrap_tcb_lock
+            .declassification_trust_root_set()
+            .content_digest(),
         digest(61),
         installation_epoch,
         selected_ledger.projection().effect_fence_epoch(),
@@ -865,6 +884,7 @@ fn complete_security_state_manifest_round_trips_and_rejects_signature_mutation()
             expected.deployment_trust_root_set_digest(),
             expected.activation_trust_root_set_digest(),
             expected.release_trust_root_set_digest(),
+            expected.declassification_trust_root_set_digest(),
         )
         .expect("authenticated transaction pre-state");
     assert!(signed_transaction
@@ -873,6 +893,7 @@ fn complete_security_state_manifest_round_trips_and_rejects_signature_mutation()
             digest(99),
             expected.activation_trust_root_set_digest(),
             expected.release_trust_root_set_digest(),
+            expected.declassification_trust_root_set_digest(),
         )
         .is_err());
     core.validate_selected_ledger_pre_state(&selected_ledger)

@@ -66,20 +66,10 @@ pub fn run_apply(
         &transaction_verifier,
     )
     .map_err(map_deployment_control_error)?;
-    transaction
-        .validate_authenticated_pre_state(
+    trust
+        .validate_authenticated_transaction_pre_state(
+            &transaction,
             ledger.snapshot().selected_record(),
-            trust
-                .deployment_trust_root_set()
-                .binding()
-                .member_set_digest(),
-            trust
-                .activation_trust_root_set()
-                .binding()
-                .member_set_digest(),
-            trust
-                .release_trust_root_set()
-                .release_trust_root_set_digest(),
         )
         .map_err(map_deployment_control_error)?;
     let expected_selector = staging_selector_v2(
@@ -96,6 +86,7 @@ pub fn run_apply(
         transaction_verifier,
         trust.deployment_trust_root_set().clone(),
         trust.activation_trust_root_set().clone(),
+        trust.declassification_trust_root_set().clone(),
         trust.release_trust_root_set().clone(),
     )
     .map_err(map_deployment_control_error)?;
@@ -176,6 +167,7 @@ pub fn run_watchdog(
                 transaction_verifier,
                 trust.deployment_trust_root_set().clone(),
                 trust.activation_trust_root_set().clone(),
+                trust.declassification_trust_root_set().clone(),
                 trust.release_trust_root_set().clone(),
             )
             .map_err(map_deployment_control_error)?;

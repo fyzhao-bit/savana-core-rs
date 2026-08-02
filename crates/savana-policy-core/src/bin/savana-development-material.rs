@@ -54,6 +54,8 @@ mod macos {
             return Err("invalid closed development-material invocation".to_owned());
         }
         require_safe_root(&root)?;
+        let connector_authority_enabled =
+            connector_authority_mode(&read_json(&root.join("config/kerneld-bootstrap-v2.json"))?)?;
 
         let mut issued = HashSet::new();
         let agent_client = ed25519(&mut issued)?;
@@ -73,6 +75,11 @@ mod macos {
         let parser_descriptor = ed25519(&mut issued)?;
         let effect_receipt = ed25519(&mut issued)?;
         let connector_descriptor = ed25519(&mut issued)?;
+        let connector_authority = if connector_authority_enabled {
+            Some(ed25519(&mut issued)?)
+        } else {
+            None
+        };
 
         let kerneld_boot = random_unique(&mut issued)?;
         let agentd_boot = random_unique(&mut issued)?;
@@ -208,6 +215,16 @@ mod macos {
                 ),
             ],
         )?;
+        if let Some(connector_authority) = connector_authority.as_ref() {
+            write_credentials(
+                &root,
+                &[(
+                    "kerneld",
+                    "connector-authority-v2.seed",
+                    connector_authority.seed,
+                )],
+            )?;
+        }
 
         write_public_keys(
             &root,
@@ -285,6 +302,7 @@ mod macos {
                 approval_settlement: &approval_settlement,
                 parser_descriptor: &parser_descriptor,
                 effect_receipt: &effect_receipt,
+                connector_authority: connector_authority.as_ref(),
                 agentd_boot,
                 jarvis_boot,
                 approvald_boot,
@@ -313,6 +331,7 @@ mod macos {
         approval_settlement: &'a Ed25519Material,
         parser_descriptor: &'a Ed25519Material,
         effect_receipt: &'a Ed25519Material,
+        connector_authority: Option<&'a Ed25519Material>,
         agentd_boot: [u8; 32],
         jarvis_boot: [u8; 32],
         approvald_boot: [u8; 32],
@@ -433,6 +452,16 @@ mod macos {
             &["policy_runtime", "executor_receipt_public_key"],
             patch.effect_receipt,
         )?;
+        if let Some(connector_authority) = patch.connector_authority {
+            set_key_pair(
+                &mut kernel,
+                &["policy_runtime", "connector_authority_key_id"],
+                &["policy_runtime", "connector_authority_public_key"],
+                connector_authority,
+            )?;
+        } else if connector_authority_mode(&kernel)? {
+            return Err("disabled connector authority changed during materialization".to_owned());
+        }
         write_json(&root.join("config/kerneld-bootstrap-v2.json"), &kernel)?;
 
         let planner_spki = read_bounded(
@@ -676,6 +705,34 @@ mod macos {
         )?;
         set_value(
             &mut exec,
+            &["connector_registry_path"],
+            fixed_path(root, "state/execd/connector-registry-v2.cbor"),
+        )?;
+        set_value(
+            &mut exec,
+            &["connector_registry_anchor_path"],
+            fixed_path(root, "state/execd/connector-registry-anchor-v2.bin"),
+        )?;
+        for (exec_field, kernel_field) in [
+            (
+                "connector_registry_genesis_digest",
+                "connector_registry_genesis_digest",
+            ),
+            ("connector_authority_key_id", "connector_authority_key_id"),
+            (
+                "connector_authority_public_key",
+                "connector_authority_public_key",
+            ),
+            ("user_tier_host_allowlist", "user_tier_host_allowlist"),
+        ] {
+            let value = kernel
+                .pointer(&format!("/policy_runtime/{kernel_field}"))
+                .cloned()
+                .ok_or_else(|| format!("missing policy_runtime.{kernel_field}"))?;
+            set_value(&mut exec, &[exec_field], value)?;
+        }
+        set_value(
+            &mut exec,
             &["effect_gate_path"],
             fixed_path(root, "config/effect-gate-v2"),
         )?;
@@ -738,6 +795,20 @@ mod macos {
             &mut exec,
             &["provider", "server_name"],
             Value::String(PROVIDER_SERVER_NAME.to_owned()),
+        )?;
+        set_value(
+            &mut exec,
+            &["provider", "canonical_url"],
+            Value::String(format!("https://{PROVIDER_SERVER_NAME}:9444/")),
+        )?;
+        let provider_spki = read_bounded(
+            &root.join("config/tls/provider-server-spki-v2.der"),
+            MAX_CERTIFICATE_BYTES,
+        )?;
+        set_hex(
+            &mut exec,
+            &["provider", "server_spki_sha256"],
+            Sha256::digest(provider_spki).into(),
         )?;
         set_value(
             &mut exec,
@@ -944,14 +1015,20 @@ mod macos {
     }
 
     fn ed25519(issued: &mut HashSet<[u8; 32]>) -> Result<Ed25519Material, String> {
-        let seed = random_unique(issued)?;
-        let public_key = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
-        let key_id = *derive_ed25519_key_id_v2(public_key).as_bytes();
-        Ok(Ed25519Material {
-            seed,
-            public_key,
-            key_id,
-        })
+        for _ in 0..16 {
+            let seed = random_unique(issued)?;
+            let public_key = SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+            if public_key == [0; 32] || public_key == seed || !issued.insert(public_key) {
+                continue;
+            }
+            let key_id = *derive_ed25519_key_id_v2(public_key).as_bytes();
+            return Ok(Ed25519Material {
+                seed,
+                public_key,
+                key_id,
+            });
+        }
+        Err("secure entropy did not produce distinct Ed25519 material".to_owned())
     }
 
     fn random_unique(issued: &mut HashSet<[u8; 32]>) -> Result<[u8; 32], String> {
@@ -1055,6 +1132,53 @@ mod macos {
 
     fn fixed_path(root: &Path, leaf: &str) -> Value {
         Value::String(root.join(leaf).to_string_lossy().into_owned())
+    }
+
+    fn connector_authority_mode(kernel: &Value) -> Result<bool, String> {
+        let key_id = config_hex_32(kernel, &["policy_runtime", "connector_authority_key_id"])?;
+        let public_key = config_hex_32(
+            kernel,
+            &["policy_runtime", "connector_authority_public_key"],
+        )?;
+        match (key_id == [0; 32], public_key == [0; 32]) {
+            (true, true) => Ok(false),
+            (false, false) => Ok(true),
+            _ => {
+                Err("connector authority must be either fully disabled or fully enabled".to_owned())
+            }
+        }
+    }
+
+    fn config_hex_32(value: &Value, path: &[&str]) -> Result<[u8; 32], String> {
+        let mut current = value;
+        for component in path {
+            current = current
+                .as_object()
+                .and_then(|object| object.get(*component))
+                .ok_or_else(|| format!("missing JSON field: {component}"))?;
+        }
+        let encoded = current
+            .as_str()
+            .ok_or_else(|| "connector authority field is not a string".to_owned())?;
+        let bytes = encoded.as_bytes();
+        if bytes.len() != 64 {
+            return Err("connector authority field is not exact hex-32".to_owned());
+        }
+        let mut decoded = [0_u8; 32];
+        for (index, output) in decoded.iter_mut().enumerate() {
+            let high = lowercase_hex_nibble(bytes[index * 2])?;
+            let low = lowercase_hex_nibble(bytes[index * 2 + 1])?;
+            *output = (high << 4) | low;
+        }
+        Ok(decoded)
+    }
+
+    fn lowercase_hex_nibble(byte: u8) -> Result<u8, String> {
+        match byte {
+            b'0'..=b'9' => Ok(byte - b'0'),
+            b'a'..=b'f' => Ok(byte - b'a' + 10),
+            _ => Err("connector authority field is not canonical lowercase hex".to_owned()),
+        }
     }
 
     fn read_json(path: &Path) -> Result<Value, String> {

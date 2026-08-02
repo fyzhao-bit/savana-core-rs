@@ -175,8 +175,10 @@ pub struct ServiceEdgeLockV2 {
 
 #[derive(Debug)]
 pub struct VerifiedDeploymentManifestV2 {
+    deployment_manifest_signing_public_key: [u8; 32],
     installation_id: Digest32V2,
     active_state_manifest_digest: Digest32V2,
+    declassification_rule_set_digest: Digest32V2,
     active_state_manifest_sequence: u64,
     deployment_generation: u64,
     effect_fence_epoch: u64,
@@ -232,7 +234,8 @@ impl VerifiedDeploymentManifestV2 {
         verifying_key
             .verify_strict(&signature_input, &Ed25519Signature::from_bytes(&signature))
             .map_err(|_| DeploymentTrustErrorV2::InvalidManifestSignature)?;
-        let manifest = decode_manifest_payload(&payload)?;
+        let mut manifest = decode_manifest_payload(&payload)?;
+        manifest.deployment_manifest_signing_public_key = offline_public_key;
         if encode_manifest_payload(&manifest)? != payload {
             return Err(DeploymentTrustErrorV2::NonCanonicalManifest);
         }
@@ -242,8 +245,10 @@ impl VerifiedDeploymentManifestV2 {
 
     fn validate(&self) -> Result<(), DeploymentTrustErrorV2> {
         if [
+            &self.deployment_manifest_signing_public_key,
             self.installation_id.as_bytes(),
             self.active_state_manifest_digest.as_bytes(),
+            self.declassification_rule_set_digest.as_bytes(),
             self.protocol_abi_digest.as_bytes(),
             self.release_identity_digest.as_bytes(),
             self.model_set_identity_digest.as_bytes(),
@@ -391,8 +396,10 @@ pub trait PlatformDeploymentTrustV2 {
 }
 
 pub struct VerifiedDaemonStartupV2 {
+    deployment_manifest_signing_public_key: [u8; 32],
     installation_id: Digest32V2,
     active_state_manifest_digest: Digest32V2,
+    declassification_rule_set_digest: Digest32V2,
     active_state_manifest_sequence: u64,
     deployment_generation: u64,
     effect_fence_epoch: u64,
@@ -487,8 +494,10 @@ impl VerifiedDaemonStartupV2 {
         let projection = verify_effect_ledger_projection_v2(&projection_bytes, projection_binding)
             .map_err(|_| DeploymentTrustErrorV2::EffectLedgerMismatch)?;
         Ok(Self {
+            deployment_manifest_signing_public_key: manifest.deployment_manifest_signing_public_key,
             installation_id: manifest.installation_id,
             active_state_manifest_digest: manifest.active_state_manifest_digest,
+            declassification_rule_set_digest: manifest.declassification_rule_set_digest,
             active_state_manifest_sequence: manifest.active_state_manifest_sequence,
             deployment_generation: manifest.deployment_generation,
             effect_fence_epoch: manifest.effect_fence_epoch,
@@ -511,6 +520,10 @@ impl VerifiedDaemonStartupV2 {
 
     pub const fn effect_ledger_projection_binding(&self) -> EffectLedgerProjectionBindingV2 {
         self.effect_ledger_projection_binding
+    }
+
+    pub const fn deployment_manifest_signing_public_key(&self) -> [u8; 32] {
+        self.deployment_manifest_signing_public_key
     }
 
     /// Binds the exact bootstrap bytes already parsed by a daemon to the
@@ -555,6 +568,10 @@ impl VerifiedDaemonStartupV2 {
         self.active_state_manifest_digest
     }
 
+    pub const fn declassification_rule_set_digest(&self) -> Digest32V2 {
+        self.declassification_rule_set_digest
+    }
+
     pub const fn deployment_generation(&self) -> u64 {
         self.deployment_generation
     }
@@ -569,6 +586,26 @@ impl VerifiedDaemonStartupV2 {
 
     pub const fn protocol_abi_digest(&self) -> Digest32V2 {
         self.protocol_abi_digest
+    }
+
+    pub const fn release_identity_digest(&self) -> Digest32V2 {
+        self.release_identity_digest
+    }
+
+    pub const fn model_set_identity_digest(&self) -> Digest32V2 {
+        self.model_set_identity_digest
+    }
+
+    pub const fn resource_profile_identity_digest(&self) -> Digest32V2 {
+        self.resource_profile_identity_digest
+    }
+
+    pub const fn approval_lock_identity_digest(&self) -> Digest32V2 {
+        self.approval_lock_identity_digest
+    }
+
+    pub const fn planner_lock_identity_digest(&self) -> Digest32V2 {
+        self.planner_lock_identity_digest
     }
 
     pub const fn kernel_envelope_signing_key_id(&self) -> Ed25519KeyIdV2 {
@@ -725,7 +762,7 @@ fn decode_manifest_payload(
     bytes: &[u8],
 ) -> Result<VerifiedDeploymentManifestV2, DeploymentTrustErrorV2> {
     let mut decoder = minicbor::Decoder::new(bytes);
-    require_array(&mut decoder, 20)?;
+    require_array(&mut decoder, 21)?;
     if decoder
         .u16()
         .map_err(|_| DeploymentTrustErrorV2::NonCanonicalManifest)?
@@ -735,6 +772,7 @@ fn decode_manifest_payload(
     }
     let installation_id = Digest32V2::new(decode_fixed::<32>(&mut decoder)?);
     let active_state_manifest_digest = Digest32V2::new(decode_fixed::<32>(&mut decoder)?);
+    let declassification_rule_set_digest = Digest32V2::new(decode_fixed::<32>(&mut decoder)?);
     let active_state_manifest_sequence = decoder
         .u64()
         .map_err(|_| DeploymentTrustErrorV2::NonCanonicalManifest)?;
@@ -788,8 +826,10 @@ fn decode_manifest_payload(
         return Err(DeploymentTrustErrorV2::NonCanonicalManifest);
     }
     Ok(VerifiedDeploymentManifestV2 {
+        deployment_manifest_signing_public_key: [0; 32],
         installation_id,
         active_state_manifest_digest,
+        declassification_rule_set_digest,
         active_state_manifest_sequence,
         deployment_generation,
         effect_fence_epoch,
@@ -884,10 +924,11 @@ fn encode_manifest_payload(
 ) -> Result<Vec<u8>, DeploymentTrustErrorV2> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
     encoder
-        .array(20)
+        .array(21)
         .and_then(|encoder| encoder.u16(2))
         .and_then(|encoder| encoder.bytes(manifest.installation_id.as_bytes()))
         .and_then(|encoder| encoder.bytes(manifest.active_state_manifest_digest.as_bytes()))
+        .and_then(|encoder| encoder.bytes(manifest.declassification_rule_set_digest.as_bytes()))
         .and_then(|encoder| encoder.u64(manifest.active_state_manifest_sequence))
         .and_then(|encoder| encoder.u64(manifest.deployment_generation))
         .and_then(|encoder| encoder.u64(manifest.effect_fence_epoch))
@@ -1245,8 +1286,12 @@ mod tests {
     fn unsigned_manifest() -> VerifiedDeploymentManifestV2 {
         let projection_key = SigningKey::from_bytes(&[0x98; 32]);
         VerifiedDeploymentManifestV2 {
+            deployment_manifest_signing_public_key: SigningKey::from_bytes(&[0x95; 32])
+                .verifying_key()
+                .to_bytes(),
             installation_id: Digest32V2::new([0x91; 32]),
             active_state_manifest_digest: Digest32V2::new([0x92; 32]),
+            declassification_rule_set_digest: Digest32V2::new([0x90; 32]),
             active_state_manifest_sequence: 6,
             deployment_generation: 7,
             effect_fence_epoch: 8,

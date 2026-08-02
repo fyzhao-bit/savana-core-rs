@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 savana-kernel-protocol = { path = "../savana-kernel-protocol" }
+savana-leak-gate = { path = "../savana-leak-gate" }
 thiserror.workspace = true
 minicbor.workspace = true
 ed25519-dalek.workspace = true

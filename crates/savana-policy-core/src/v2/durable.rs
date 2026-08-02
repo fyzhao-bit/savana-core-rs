@@ -197,6 +197,8 @@ pub struct DurableG4StateV2 {
     current_head: RollbackProtectedStateHeadV2,
     rollback_anchor: Box<dyn RollbackProtectedStateAnchorV2>,
     poisoned: bool,
+    #[cfg(test)]
+    before_next_commit_hook: Option<Box<dyn FnOnce() -> Result<(), G4Error> + Send>>,
     _lock: LedgerLock,
 }
 
@@ -289,6 +291,8 @@ impl DurableG4StateV2 {
             current_head,
             rollback_anchor,
             poisoned: false,
+            #[cfg(test)]
+            before_next_commit_hook: None,
             _lock: lock,
         })
     }
@@ -318,6 +322,14 @@ impl DurableG4StateV2 {
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
             .map_err(|_| G4Error::DurableStateIo)?;
         Self::open_with_anchor(path, encryption_key, Box::new(rollback_anchor), namespace)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_before_next_commit_hook_for_test(
+        &mut self,
+        hook: impl FnOnce() -> Result<(), G4Error> + Send + 'static,
+    ) {
+        self.before_next_commit_hook = Some(Box::new(hook));
     }
 
     pub(crate) fn create_or_replay_intent(
@@ -508,53 +520,57 @@ impl DurableG4StateV2 {
         sealed_envelope_digest: Digest32V2,
     ) -> Result<DispatchPreparationV2, G4Error> {
         self.ensure_usable()?;
-        let mut next = self.snapshot.clone();
-        let intent = next
-            .intents
-            .intents
-            .iter()
-            .find(|entry| entry.record.action_intent_id == action_intent_id)
-            .cloned()
-            .ok_or(G4Error::IntentNotFound)?;
-        let decision = next
-            .decisions
-            .entries
-            .iter()
-            .find(|entry| entry.action_intent_id == action_intent_id)
-            .map(|entry| entry.branch)
-            .ok_or(G4Error::StateConflict)?;
-        let preparation = next.dispatch.prepare_tool_or_replay(
-            &intent.record,
-            decision,
-            approval,
-            ticket,
-            authority,
-            sealed_envelope_digest,
-        )?;
-        if preparation.kind() == DispatchPreparationKindV2::Replay {
-            return Ok(preparation);
-        }
-        let journal_entry = next
-            .dispatch
-            .entries
-            .last()
-            .cloned()
-            .ok_or(G4Error::StateConflict)?;
-        next.quota.reserve_or_replay(
-            verified_limit,
-            intent.record.durable_run_id,
-            journal_entry.quota_subject,
-            preparation.dispatch_subject_digest(),
-            preparation.execution_nonce(),
-        )?;
-        if decision == G5DecisionBranchV2::RequireApproval {
+        let guard_authority = authority.clone();
+        guard_authority.while_current_connector_registry_head(|connector_registry_digest| {
+            let mut next = self.snapshot.clone();
+            let intent = next
+                .intents
+                .intents
+                .iter()
+                .find(|entry| entry.record.action_intent_id == action_intent_id)
+                .cloned()
+                .ok_or(G4Error::IntentNotFound)?;
+            let decision = next
+                .decisions
+                .entries
+                .iter()
+                .find(|entry| entry.action_intent_id == action_intent_id)
+                .map(|entry| entry.branch)
+                .ok_or(G4Error::StateConflict)?;
+            let preparation = next.dispatch.prepare_tool_or_replay_at_current_head(
+                &intent.record,
+                decision,
+                approval,
+                ticket,
+                authority,
+                sealed_envelope_digest,
+                connector_registry_digest,
+            )?;
+            if preparation.kind() == DispatchPreparationKindV2::Replay {
+                return Ok(preparation);
+            }
+            let journal_entry = next
+                .dispatch
+                .entries
+                .last()
+                .cloned()
+                .ok_or(G4Error::StateConflict)?;
+            next.quota.reserve_or_replay(
+                verified_limit,
+                intent.record.durable_run_id,
+                journal_entry.quota_subject,
+                preparation.dispatch_subject_digest(),
+                preparation.execution_nonce(),
+            )?;
+            if decision == G5DecisionBranchV2::RequireApproval {
+                next.intents
+                    .advance_verified(action_intent_id, ActionIntentStateV2::AuthorizedApproval)?;
+            }
             next.intents
-                .advance_verified(action_intent_id, ActionIntentStateV2::AuthorizedApproval)?;
-        }
-        next.intents
-            .advance_verified(action_intent_id, ActionIntentStateV2::DispatchPrepared)?;
-        self.commit(next)?;
-        Ok(preparation)
+                .advance_verified(action_intent_id, ActionIntentStateV2::DispatchPrepared)?;
+            self.commit(next)?;
+            Ok(preparation)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -598,39 +614,45 @@ impl DurableG4StateV2 {
         sealed_envelope_digest: Digest32V2,
     ) -> Result<DispatchPreparationV2, G4Error> {
         self.ensure_usable()?;
-        let mut next = self.snapshot.clone();
-        let preparation = next.dispatch.prepare_final_release_or_replay(
-            release,
-            approval,
-            ticket,
-            authority,
-            sealed_envelope_digest,
-        )?;
-        if preparation.kind() == DispatchPreparationKindV2::Replay {
-            return Ok(preparation);
-        }
-        let journal_entry = next
-            .dispatch
-            .entries
-            .last()
-            .cloned()
-            .ok_or(G4Error::StateConflict)?;
-        next.quota.reserve_or_replay(
-            verified_limit,
-            release.durable_run_id(),
-            journal_entry.quota_subject,
-            preparation.dispatch_subject_digest(),
-            preparation.execution_nonce(),
-        )?;
-        self.commit(next)?;
-        Ok(preparation)
+        let guard_authority = authority.clone();
+        guard_authority.while_current_connector_registry_head(|connector_registry_digest| {
+            let mut next = self.snapshot.clone();
+            let preparation = next
+                .dispatch
+                .prepare_final_release_or_replay_at_current_head(
+                    release,
+                    approval,
+                    ticket,
+                    authority,
+                    sealed_envelope_digest,
+                    connector_registry_digest,
+                )?;
+            if preparation.kind() == DispatchPreparationKindV2::Replay {
+                return Ok(preparation);
+            }
+            let journal_entry = next
+                .dispatch
+                .entries
+                .last()
+                .cloned()
+                .ok_or(G4Error::StateConflict)?;
+            next.quota.reserve_or_replay(
+                verified_limit,
+                release.durable_run_id(),
+                journal_entry.quota_subject,
+                preparation.dispatch_subject_digest(),
+                preparation.execution_nonce(),
+            )?;
+            self.commit(next)?;
+            Ok(preparation)
+        })
     }
 
     pub fn prepare_verified_final_release_dispatch(
         &mut self,
         release: &super::VerifiedFinalReleaseRecordV2,
         verified_limit: VerifiedQuotaLimitV2,
-        approval: super::VerifiedFinalReleaseSettlementV2,
+        approval: &super::VerifiedFinalReleaseSettlementV2,
         ticket: super::ResolvedFinalReleaseTicketV2,
         authority: super::VerifiedEffectGateLeaseV2,
         sealed_envelope_digest: Digest32V2,
@@ -1128,6 +1150,10 @@ impl DurableG4StateV2 {
             sequence: next.sequence,
             state_digest: state_head_digest(self.namespace, &bytes),
         };
+        #[cfg(test)]
+        if let Some(hook) = self.before_next_commit_hook.take() {
+            hook()?;
+        }
         self._lock.recheck().map_err(|_| G4Error::DurableStateIo)?;
         match self.anchored_path.replace(&bytes) {
             Ok(()) => {
@@ -2996,7 +3022,7 @@ fn provenance_entry_cmp(
         .cmp(&minicbor::to_vec(right).unwrap_or_default())
 }
 
-struct DurableAnchoredPathV2 {
+pub(crate) struct DurableAnchoredPathV2 {
     parent: File,
     parent_path: PathBuf,
     parent_dev: u64,
@@ -3007,7 +3033,7 @@ struct DurableAnchoredPathV2 {
 }
 
 impl DurableAnchoredPathV2 {
-    fn open(path: &Path) -> Result<Self, G4Error> {
+    pub(crate) fn open(path: &Path) -> Result<Self, G4Error> {
         if !path.is_absolute() {
             return Err(G4Error::DurableStateIo);
         }
@@ -3050,7 +3076,7 @@ impl DurableAnchoredPathV2 {
         Ok(anchored)
     }
 
-    fn recheck_parent(&self) -> Result<(), G4Error> {
+    pub(crate) fn recheck_parent(&self) -> Result<(), G4Error> {
         let opened = self
             .parent
             .metadata()
@@ -3072,7 +3098,7 @@ impl DurableAnchoredPathV2 {
         Ok(())
     }
 
-    fn read_existing(&self) -> Result<Option<Vec<u8>>, G4Error> {
+    pub(crate) fn read_existing(&self) -> Result<Option<Vec<u8>>, G4Error> {
         let before = match statat(&self.parent, &self.leaf, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(stat) => stat,
             Err(Errno::NOENT) => return Ok(None),
@@ -3143,6 +3169,45 @@ impl DurableAnchoredPathV2 {
                 "durable parent identity changed",
             ))
         })
+    }
+
+    pub(crate) fn replace_observed<O>(
+        &self,
+        bytes: &[u8],
+        observe: O,
+    ) -> Result<(), atomic_file::ReplaceError>
+    where
+        O: FnMut(atomic_file::AtomicReplaceBoundary) -> Result<(), crate::PolicyError>,
+    {
+        atomic_file::replace_at_observed(
+            &self.parent,
+            &self.leaf,
+            bytes,
+            self.owner_uid,
+            self.owner_gid,
+            || {
+                self.recheck_parent()
+                    .map_err(|_| crate::PolicyError::io("durable parent identity changed"))
+            },
+            observe,
+        )?;
+        self.recheck_parent().map_err(|_| {
+            atomic_file::ReplaceError::after_rename(crate::PolicyError::io(
+                "durable parent identity changed",
+            ))
+        })
+    }
+
+    pub(crate) const fn parent(&self) -> &File {
+        &self.parent
+    }
+
+    pub(crate) fn owner_uid(&self) -> u32 {
+        self.owner_uid
+    }
+
+    pub(crate) fn owner_gid(&self) -> u32 {
+        self.owner_gid
     }
 }
 

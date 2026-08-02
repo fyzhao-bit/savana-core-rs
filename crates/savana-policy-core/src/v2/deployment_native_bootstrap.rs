@@ -9,11 +9,12 @@ use savana_platform_identity::{
 use super::{
     AuthenticatedDeploymentLedgerSnapshotV2, DeploymentActivationVerifierV2,
     DeploymentAuthorizationKeyRefsV2, DeploymentAuthorizationVerifierV2, DeploymentControlErrorV2,
-    DeploymentLedgerStoreV2, InstallerOrMdmVerifierV2, OperationalTrustRootPurposeV2,
-    OperationalTrustRootSetV2, ReleaseTrustRootSetV2,
+    DeploymentLedgerRecordV2, DeploymentLedgerStoreV2, DeploymentTransactionV2,
+    InstallerOrMdmVerifierV2, OperationalTrustRootPurposeV2, OperationalTrustRootSetV2,
+    ReleaseTrustRootSetV2,
 };
 
-/// Three complete installer-authenticated trust-root chains. Keeping every
+/// Four complete installer-authenticated trust-root chains. Keeping every
 /// predecessor alive here prevents a current root object from being accepted
 /// without proving its exact genesis-to-current ancestry.
 #[derive(Debug, Clone)]
@@ -21,6 +22,7 @@ pub struct AuthenticatedNativeDeploymentTrustV2 {
     installer_verifier: InstallerOrMdmVerifierV2,
     deployment_chain: Vec<OperationalTrustRootSetV2>,
     activation_chain: Vec<OperationalTrustRootSetV2>,
+    declassification_chain: Vec<OperationalTrustRootSetV2>,
     release_chain: Vec<ReleaseTrustRootSetV2>,
 }
 
@@ -43,6 +45,11 @@ impl AuthenticatedNativeDeploymentTrustV2 {
             &installer_verifier,
             2,
         )?;
+        let declassification_chain = decode_operational_chain(
+            material.declassification_trust_root_chain(),
+            &installer_verifier,
+            3,
+        )?;
         let release_chain =
             decode_release_chain(material.release_trust_root_chain(), &installer_verifier)?;
         let deployment = deployment_chain
@@ -51,10 +58,14 @@ impl AuthenticatedNativeDeploymentTrustV2 {
         let activation = activation_chain
             .last()
             .ok_or(DeploymentControlErrorV2::InvalidOperationalTrustRootSet)?;
+        let declassification = declassification_chain
+            .last()
+            .ok_or(DeploymentControlErrorV2::InvalidOperationalTrustRootSet)?;
         let release = release_chain
             .last()
             .ok_or(DeploymentControlErrorV2::InvalidSecurityStateManifest)?;
         if deployment.product_family_digest() != activation.product_family_digest()
+            || deployment.product_family_digest() != declassification.product_family_digest()
             || deployment.product_family_digest() != release.product_family_digest()
         {
             return Err(DeploymentControlErrorV2::InvalidOperationalTrustRootSet);
@@ -63,6 +74,7 @@ impl AuthenticatedNativeDeploymentTrustV2 {
             installer_verifier,
             deployment_chain,
             activation_chain,
+            declassification_chain,
             release_chain,
         })
     }
@@ -87,6 +99,12 @@ impl AuthenticatedNativeDeploymentTrustV2 {
         self.release_chain
             .last()
             .expect("authenticated release chain is nonempty")
+    }
+
+    pub fn declassification_trust_root_set(&self) -> &OperationalTrustRootSetV2 {
+        self.declassification_chain
+            .last()
+            .expect("authenticated declassification chain is nonempty")
     }
 
     pub fn transaction_authorization_verifiers(
@@ -126,6 +144,29 @@ impl AuthenticatedNativeDeploymentTrustV2 {
             key_refs.authorization_time_unix_ms(),
         )?;
         Ok((rollback, transaction))
+    }
+
+    /// Binds a signature-authenticated staged transaction to the exact root
+    /// revisions from this already installer-authenticated native trust chain.
+    pub fn validate_authenticated_transaction_pre_state(
+        &self,
+        transaction: &DeploymentTransactionV2,
+        selected: &DeploymentLedgerRecordV2,
+    ) -> Result<(), DeploymentControlErrorV2> {
+        transaction.validate_authenticated_pre_state(
+            selected,
+            self.deployment_trust_root_set()
+                .binding()
+                .member_set_digest(),
+            self.activation_trust_root_set()
+                .binding()
+                .member_set_digest(),
+            self.release_trust_root_set()
+                .release_trust_root_set_digest(),
+            self.declassification_trust_root_set()
+                .binding()
+                .member_set_digest(),
+        )
     }
 }
 

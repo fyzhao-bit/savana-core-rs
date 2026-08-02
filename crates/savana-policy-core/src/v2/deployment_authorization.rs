@@ -657,6 +657,7 @@ impl DeploymentTransactionV2 {
         deployment_trust_root_set_digest: Digest32V2,
         activation_trust_root_set_digest: Digest32V2,
         release_trust_root_set_digest: Digest32V2,
+        declassification_trust_root_set_digest: Digest32V2,
     ) -> Result<(), DeploymentControlErrorV2> {
         let expected = self.intent.expected_pre_state();
         let projection = selected.projection();
@@ -675,6 +676,8 @@ impl DeploymentTransactionV2 {
             || deployment_trust_root_set_digest != expected.deployment_trust_root_set_digest()
             || activation_trust_root_set_digest != expected.activation_trust_root_set_digest()
             || release_trust_root_set_digest != expected.release_trust_root_set_digest()
+            || declassification_trust_root_set_digest
+                != expected.declassification_trust_root_set_digest()
         {
             return Err(DeploymentControlErrorV2::TransactionBindingMismatch);
         }

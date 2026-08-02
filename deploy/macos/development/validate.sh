@@ -1,5 +1,6 @@
 #!/bin/bash
 set -eu
+export LC_ALL=C
 
 usage() {
   echo "usage: validate.sh <absolute-build-directory>" >&2
@@ -82,6 +83,121 @@ for leaf in $configuration_files; do
   }
 done
 
+require_hex_32() {
+  [[ "$1" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "connector registry material must be canonical lowercase hex-32" >&2
+    exit 66
+  }
+}
+
+reject_connector_host() {
+  echo "connector host allowlist is invalid or noncanonical" >&2
+  exit 66
+}
+
+# Build validation accepts the exact canonical ASCII domain and IPv4 subset
+# used by the development profile. Unicode and IPv6 fail closed here; the
+# runtime's Rust parser remains authoritative for its broader host grammar.
+require_canonical_connector_host() {
+  host=$1
+  [ -n "$host" ] && [ "${#host}" -le 253 ] || reject_connector_host
+  case "$host" in
+    .*|*.|*..*) reject_connector_host ;;
+  esac
+  case "$host" in
+    *[!0-9.]* )
+      case "$host" in
+        *[!a-z0-9.-]*) reject_connector_host ;;
+      esac
+      remaining=$host
+      while :; do
+        label=${remaining%%.*}
+        [ -n "$label" ] && [ "${#label}" -le 63 ] || reject_connector_host
+        case "$label" in
+          [a-z0-9]*[a-z0-9]|[a-z0-9]) ;;
+          *) reject_connector_host ;;
+        esac
+        case "$label" in
+          *[!a-z0-9-]*) reject_connector_host ;;
+        esac
+        [ "$remaining" = "$label" ] && break
+        remaining=${remaining#*.}
+      done
+      case "$label" in
+        *[!0-9]*) ;;
+        *) reject_connector_host ;;
+      esac
+      case "$label" in
+        0x*)
+          numeric_suffix=${label#0x}
+          case "$numeric_suffix" in
+            *[!0-9a-f]*) ;;
+            *) reject_connector_host ;;
+          esac
+          ;;
+      esac
+      ;;
+    * )
+      old_ifs=$IFS
+      IFS=.
+      set -- $host
+      IFS=$old_ifs
+      [ "$#" -eq 4 ] || reject_connector_host
+      for octet in "$@"; do
+        [ -n "$octet" ] || reject_connector_host
+        case "$octet" in
+          0|[1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;;
+          *) reject_connector_host ;;
+        esac
+        [ "$octet" -le 255 ] || reject_connector_host
+      done
+      ;;
+  esac
+}
+
+kerneld_configuration="$build_directory/config/kerneld-bootstrap-v2.json"
+legacy_connector_digest=$(/usr/bin/plutil -extract policy_runtime.executor_connector_registry_digest raw -expect string "$kerneld_configuration")
+connector_genesis_digest=$(/usr/bin/plutil -extract policy_runtime.connector_registry_genesis_digest raw -expect string "$kerneld_configuration")
+connector_authority_key_id=$(/usr/bin/plutil -extract policy_runtime.connector_authority_key_id raw -expect string "$kerneld_configuration")
+connector_authority_public_key=$(/usr/bin/plutil -extract policy_runtime.connector_authority_public_key raw -expect string "$kerneld_configuration")
+for value in "$legacy_connector_digest" "$connector_genesis_digest" "$connector_authority_key_id" "$connector_authority_public_key"; do
+  require_hex_32 "$value"
+done
+zero_connector_authority=0000000000000000000000000000000000000000000000000000000000000000
+[ "$connector_genesis_digest" != "$zero_connector_authority" ] && [ "$legacy_connector_digest" = "$connector_genesis_digest" ] || {
+  echo "connector registry genesis and migration alias must be equal and nonzero" >&2
+  exit 66
+}
+if [ "$connector_authority_key_id" = "$zero_connector_authority" ] || [ "$connector_authority_public_key" = "$zero_connector_authority" ]; then
+  [ "$connector_authority_key_id" = "$zero_connector_authority" ] && [ "$connector_authority_public_key" = "$zero_connector_authority" ] || {
+    echo "connector authority must be either fully disabled or fully enabled" >&2
+    exit 66
+  }
+fi
+connector_host_count=$(/usr/bin/plutil -extract policy_runtime.user_tier_host_allowlist raw -expect array "$kerneld_configuration")
+[ "$connector_host_count" -le 4096 ] || {
+  echo "connector host allowlist exceeds the runtime limit" >&2
+  exit 66
+}
+previous_connector_host=
+connector_host_index=0
+while [ "$connector_host_index" -lt "$connector_host_count" ]; do
+  connector_host=$(/usr/bin/plutil -extract "policy_runtime.user_tier_host_allowlist.$connector_host_index" raw -expect string "$kerneld_configuration")
+  case "$connector_host" in
+    ""|*[A-Z]*|*.)
+      echo "connector host allowlist is not canonical" >&2
+      exit 66
+      ;;
+  esac
+  require_canonical_connector_host "$connector_host"
+  if [ -n "$previous_connector_host" ] && [[ ! "$previous_connector_host" < "$connector_host" ]]; then
+    echo "connector host allowlist must be strictly sorted and unique" >&2
+    exit 66
+  fi
+  previous_connector_host=$connector_host
+  connector_host_index=$((connector_host_index + 1))
+done
+
 sandbox_files="
 parser-profile-v2.json
 connector-no-network-profile-v2.json
@@ -99,6 +215,9 @@ artifact_files="
 effect-ledger-projection-v2.cbor
 input-runtime-assets-v2.cbor
 development-draft-report-tool-v2.cbor
+declassification-installer-root-v2.json
+declassification-trust-root-set-v2.cbor
+declassification-rule-set-v2.cbor
 "
 for leaf in $artifact_files; do
   path="$build_directory/artifacts/$leaf"

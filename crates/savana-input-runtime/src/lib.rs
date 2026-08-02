@@ -70,22 +70,34 @@ impl InputChannelV2 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum DetectionClassV2 {
-    EmailAddress,
-    PhoneNumber,
-    CredentialAssignment,
-    BearerToken,
-    PrivateKeyMaterial,
+    /// Keys, tokens, and anything else that grants access on presentation.
+    Credential,
+    /// Data about a person: identifiers, contact details, account numbers.
+    PersonalData,
+    /// A path or filename whose name alone discloses protected content.
+    ProtectedReference,
 }
 
 impl DetectionClassV2 {
+    /// Slot kinds 1-5 named the five hand-written detectors this crate used
+    /// before the gate became the single definition. They are deliberately not
+    /// reused: a durable slot recorded as kind 1 means "email address", and
+    /// redefining 1 would silently change what already-persisted records say.
+    /// The retired numbers stay retired and the current classes start at 6.
     const fn default_slot_kind(self) -> SlotKindV2 {
         SlotKindV2::new(match self {
-            Self::EmailAddress => 1,
-            Self::PhoneNumber => 2,
-            Self::CredentialAssignment => 3,
-            Self::BearerToken => 4,
-            Self::PrivateKeyMaterial => 5,
+            Self::Credential => 6,
+            Self::PersonalData => 7,
+            Self::ProtectedReference => 8,
         })
+    }
+
+    const fn from_gate(class: savana_leak_gate::PiiClassV2) -> Self {
+        match class {
+            savana_leak_gate::PiiClassV2::Credential => Self::Credential,
+            savana_leak_gate::PiiClassV2::PersonalData => Self::PersonalData,
+            savana_leak_gate::PiiClassV2::ProtectedReference => Self::ProtectedReference,
+        }
     }
 }
 
@@ -173,6 +185,18 @@ pub struct PlannerLimitsV2 {
 impl PlannerLimitsV2 {
     pub const fn maximum_steps(self) -> u16 {
         self.maximum_steps
+    }
+
+    pub const fn maximum_dependencies_per_step(self) -> u16 {
+        self.maximum_dependencies_per_step
+    }
+
+    pub const fn maximum_arguments_per_step(self) -> u16 {
+        self.maximum_arguments_per_step
+    }
+
+    pub const fn maximum_encoded_plan_bytes(self) -> u32 {
+        self.maximum_encoded_plan_bytes
     }
 }
 
@@ -266,8 +290,24 @@ pub struct PlannerEnvelopeV2 {
 }
 
 impl PlannerEnvelopeV2 {
+    pub const fn planner_route(&self) -> PlannerRouteIdV2 {
+        self.planner_route
+    }
+
+    pub const fn task_template(&self) -> u32 {
+        self.task_template
+    }
+
     pub const fn intent(&self) -> IntentKindV2 {
         self.intent
+    }
+
+    pub fn allowed_action_templates(&self) -> &[ActionTemplateIdV2] {
+        &self.allowed_action_templates
+    }
+
+    pub const fn effective_limits(&self) -> PlannerLimitsV2 {
+        self.effective_limits
     }
 
     pub fn slots(&self) -> &[AbstractSlotV2] {
@@ -693,158 +733,34 @@ fn select_extraction_rule<'rules>(
     Ok(selected)
 }
 
+/// Every region the leak gate considers sensitive.
+///
+/// This crate used to carry its own hand-written detectors — a byte scanner for
+/// five classes, covering emails, phone numbers, `bearer `, three credential
+/// assignment prefixes, and private key blocks. The kernel verifies
+/// declassification against a different and much broader definition, and two
+/// definitions of "sensitive" cannot agree by inspection: anything the masker
+/// missed but the verifier catches (bank card numbers, national identifiers, IP
+/// addresses, JWTs, cloud keys, sensitive paths) would leave a value masked
+/// here and refused there. Both sides now call the same function, so they agree
+/// by construction. The gate's differential asserts the exact property this
+/// relies on: spans are found precisely when redaction would rewrite something.
 fn detect_protected_spans(value: &str) -> Result<Vec<DetectedSpanV2>, InputRuntimeError> {
-    let bytes = value.as_bytes();
     let mut spans = Vec::new();
-    detect_marker_to_token(
-        bytes,
-        b"-----BEGIN ",
-        b"-----END ",
-        DetectionClassV2::PrivateKeyMaterial,
-        &mut spans,
-    )?;
-    detect_prefixed_secret(bytes, b"bearer ", DetectionClassV2::BearerToken, &mut spans)?;
-    for prefix in [b"password=".as_slice(), b"api_key=", b"secret="] {
-        detect_prefixed_secret(
-            bytes,
-            prefix,
-            DetectionClassV2::CredentialAssignment,
-            &mut spans,
-        )?;
-    }
-    detect_emails(bytes, &mut spans)?;
-    detect_phone_numbers(bytes, &mut spans)?;
-    canonicalize_spans(spans)
-}
-
-fn detect_marker_to_token(
-    bytes: &[u8],
-    start_marker: &[u8],
-    end_marker: &[u8],
-    class: DetectionClassV2,
-    spans: &mut Vec<DetectedSpanV2>,
-) -> Result<(), InputRuntimeError> {
-    let folded = ascii_lowercase(bytes);
-    let start_folded = ascii_lowercase(start_marker);
-    let end_folded = ascii_lowercase(end_marker);
-    let mut cursor = 0;
-    while let Some(relative_start) = find_bytes(&folded[cursor..], &start_folded) {
-        let start = cursor + relative_start;
-        let search_from = start + start_folded.len();
-        let end = find_bytes(&folded[search_from..], &end_folded)
-            .map(|relative| search_from + relative + end_folded.len())
-            .unwrap_or(bytes.len());
-        push_span(spans, DetectedSpanV2 { start, end, class })?;
-        cursor = end;
-    }
-    Ok(())
-}
-
-fn detect_prefixed_secret(
-    bytes: &[u8],
-    prefix: &[u8],
-    class: DetectionClassV2,
-    spans: &mut Vec<DetectedSpanV2>,
-) -> Result<(), InputRuntimeError> {
-    let folded = ascii_lowercase(bytes);
-    let prefix = ascii_lowercase(prefix);
-    let mut cursor = 0;
-    while let Some(relative) = find_bytes(&folded[cursor..], &prefix) {
-        let start = cursor + relative;
-        let mut end = start + prefix.len();
-        while end < bytes.len()
-            && !bytes[end].is_ascii_whitespace()
-            && !b",;\"'".contains(&bytes[end])
-        {
-            end += 1;
-        }
-        push_span(spans, DetectedSpanV2 { start, end, class })?;
-        cursor = end.max(start + 1);
-    }
-    Ok(())
-}
-
-fn detect_emails(bytes: &[u8], spans: &mut Vec<DetectedSpanV2>) -> Result<(), InputRuntimeError> {
-    for (index, byte) in bytes.iter().enumerate() {
-        if *byte != b'@' {
-            continue;
-        }
-        let mut start = index;
-        while start > 0 && is_email_local(bytes[start - 1]) {
-            start -= 1;
-        }
-        let mut end = index + 1;
-        while end < bytes.len() && is_email_domain(bytes[end]) {
-            end += 1;
-        }
-        let domain = &bytes[index + 1..end];
-        if start < index
-            && domain.contains(&b'.')
-            && !domain.starts_with(b".")
-            && !domain.ends_with(b".")
-        {
-            push_span(
-                spans,
-                DetectedSpanV2 {
-                    start,
-                    end,
-                    class: DetectionClassV2::EmailAddress,
-                },
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn detect_phone_numbers(
-    bytes: &[u8],
-    spans: &mut Vec<DetectedSpanV2>,
-) -> Result<(), InputRuntimeError> {
-    let mut cursor = 0;
-    while cursor < bytes.len() {
-        if !bytes[cursor].is_ascii_digit() && bytes[cursor] != b'+' {
-            cursor += 1;
-            continue;
-        }
-        let start = cursor;
-        let mut digits = 0_usize;
-        while cursor < bytes.len()
-            && (bytes[cursor].is_ascii_digit() || b"+-(). ".contains(&bytes[cursor]))
-        {
-            digits += usize::from(bytes[cursor].is_ascii_digit());
-            cursor += 1;
-        }
-        let mut end = cursor;
-        while end > start && bytes[end - 1].is_ascii_whitespace() {
-            end -= 1;
-        }
-        if (7..=15).contains(&digits) {
-            push_span(
-                spans,
-                DetectedSpanV2 {
-                    start,
-                    end,
-                    class: DetectionClassV2::PhoneNumber,
-                },
-            )?;
-        }
-        cursor = cursor.max(start + 1);
-    }
-    Ok(())
-}
-
-fn push_span(
-    spans: &mut Vec<DetectedSpanV2>,
-    span: DetectedSpanV2,
-) -> Result<(), InputRuntimeError> {
-    if spans.len() >= MAX_PROTECTED_SPANS {
-        return Err(InputRuntimeError::InputLimitExceeded);
-    }
+    let found = savana_leak_gate::pii_spans(value);
     spans
-        .try_reserve(1)
+        .try_reserve_exact(found.len())
         .map_err(|_| InputRuntimeError::AllocationFailure)?;
-    spans.push(span);
-    Ok(())
+    // `pii_spans` already returns spans sorted and non-overlapping, asserted
+    // over the gate's whole corpus, so there is nothing to reconcile here.
+    for span in found {
+        spans.push(DetectedSpanV2 {
+            start: span.start,
+            end: span.end,
+            class: DetectionClassV2::from_gate(span.class),
+        });
+    }
+    canonicalize_spans(spans)
 }
 
 fn canonicalize_spans(
@@ -941,17 +857,21 @@ fn placeholder_token(
     ordinal: usize,
     reference: PlannerSlotRefV2,
 ) -> Result<String, InputRuntimeError> {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
+    const ALPHA_HEX: &[u8; 16] = b"abcdefghijklmnop";
+    let ordinal = u32::try_from(ordinal).map_err(|_| InputRuntimeError::InputLimitExceeded)?;
     let mut token = String::new();
     token
-        .try_reserve_exact(29 + reference.as_bytes().len() * 2)
+        .try_reserve_exact(59)
         .map_err(|_| InputRuntimeError::AllocationFailure)?;
     token.push_str("[SAVANA_REDACTED_");
-    use std::fmt::Write as _;
-    write!(&mut token, "{ordinal:08x}_").map_err(|_| InputRuntimeError::AllocationFailure)?;
+    for byte in ordinal.to_be_bytes() {
+        token.push(char::from(ALPHA_HEX[usize::from(byte >> 4)]));
+        token.push(char::from(ALPHA_HEX[usize::from(byte & 0x0f)]));
+    }
+    token.push('_');
     for byte in reference.as_bytes() {
-        token.push(char::from(HEX[usize::from(byte >> 4)]));
-        token.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        token.push(char::from(ALPHA_HEX[usize::from(byte >> 4)]));
+        token.push(char::from(ALPHA_HEX[usize::from(byte & 0x0f)]));
     }
     token.push(']');
     Ok(token)
@@ -1254,28 +1174,6 @@ fn domain_hash(domain: &[u8], bytes: &[u8]) -> Digest32V2 {
     Digest32V2::new(hasher.finalize().into())
 }
 
-fn ascii_lowercase(bytes: &[u8]) -> Vec<u8> {
-    bytes.iter().map(u8::to_ascii_lowercase).collect()
-}
-
-fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    (!needle.is_empty() && needle.len() <= haystack.len())
-        .then(|| {
-            haystack
-                .windows(needle.len())
-                .position(|window| window == needle)
-        })
-        .flatten()
-}
-
-fn is_email_local(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || b".!#$%&'*+/=?^_`{|}~-".contains(&byte)
-}
-
-fn is_email_domain(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')
-}
-
 fn bounded_array(
     decoder: &mut minicbor::Decoder<'_>,
     maximum: usize,
@@ -1429,7 +1327,7 @@ mod tests {
         assert_eq!(accepted.protected_values().len(), 2);
         assert_eq!(
             accepted.protected_values()[0].class(),
-            DetectionClassV2::EmailAddress
+            DetectionClassV2::PersonalData
         );
         assert_ne!(accepted.input_commitment().as_bytes(), &[0; 32]);
         let masked = accepted.masked_agent_input().unwrap();
@@ -1438,9 +1336,16 @@ mod tests {
         assert_eq!(masked.placeholders().len(), 2);
         for (ordinal, placeholder) in masked.placeholders().iter().enumerate() {
             assert!(masked.text().contains(placeholder.token()));
+            let ordinal = u32::try_from(ordinal).unwrap();
+            let encoded_ordinal = ordinal
+                .to_be_bytes()
+                .into_iter()
+                .flat_map(|byte| [byte >> 4, byte & 0x0f])
+                .map(|nibble| char::from(b'a' + nibble))
+                .collect::<String>();
             assert!(placeholder
                 .token()
-                .starts_with(&format!("[SAVANA_REDACTED_{ordinal:08x}_")));
+                .starts_with(&format!("[SAVANA_REDACTED_{encoded_ordinal}_")));
         }
         assert_eq!(
             runtime
@@ -1465,6 +1370,14 @@ mod tests {
     }
 
     #[test]
+    fn masked_placeholder_tokens_are_not_residual_pii() {
+        let reference = PlannerSlotRefV2([0x08; 16]);
+        let token = placeholder_token(0, reference).unwrap();
+
+        assert_eq!(savana_leak_gate::redact_pii(&token), token);
+    }
+
+    #[test]
     fn g2_is_closed_ambiguous_fail_closed_and_planner_bytes_contain_no_input() {
         let runtime = runtime();
         let gated = runtime
@@ -1475,6 +1388,36 @@ mod tests {
             )
             .unwrap();
         assert_eq!(gated.planner_envelope().intent(), IntentKindV2::SendMessage);
+        assert_eq!(
+            gated.planner_envelope().planner_route(),
+            PlannerRouteIdV2::new(7)
+        );
+        assert_eq!(gated.planner_envelope().task_template(), 11);
+        assert_eq!(
+            gated.planner_envelope().effective_limits().maximum_steps(),
+            8
+        );
+        assert_eq!(
+            gated
+                .planner_envelope()
+                .effective_limits()
+                .maximum_dependencies_per_step(),
+            8
+        );
+        assert_eq!(
+            gated
+                .planner_envelope()
+                .effective_limits()
+                .maximum_arguments_per_step(),
+            8
+        );
+        assert_eq!(
+            gated
+                .planner_envelope()
+                .effective_limits()
+                .maximum_encoded_plan_bytes(),
+            65_536
+        );
         assert_eq!(gated.planner_envelope().slots().len(), 2);
         let wire = gated.planner_envelope().to_canonical_bytes().unwrap();
         for forbidden in [b"alice@example.test".as_slice(), b"hunter2", b"password"] {
@@ -1517,7 +1460,7 @@ mod tests {
         assert_eq!(gated.protected_values().len(), 1);
         assert_eq!(
             gated.protected_values()[0].class(),
-            DetectionClassV2::BearerToken
+            DetectionClassV2::Credential
         );
     }
 }

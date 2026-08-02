@@ -743,6 +743,73 @@ impl ExecutorHealthResponseV2 {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectorRegistrySyncStatusV2 {
+    Converged,
+    Behind,
+    Diverged,
+    DisabledGenesisOnly,
+}
+
+impl ConnectorRegistrySyncStatusV2 {
+    pub const fn tag(self) -> u16 {
+        match self {
+            Self::Converged => 0,
+            Self::Behind => 1,
+            Self::Diverged => 2,
+            Self::DisabledGenesisOnly => 3,
+        }
+    }
+
+    fn from_tag(tag: u16) -> Result<Self, ProtocolError> {
+        match tag {
+            0 => Ok(Self::Converged),
+            1 => Ok(Self::Behind),
+            2 => Ok(Self::Diverged),
+            3 => Ok(Self::DisabledGenesisOnly),
+            _ => Err(malformed()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectorRegistrySyncResponseV2 {
+    status: ConnectorRegistrySyncStatusV2,
+    local_sequence: u64,
+    local_head_digest: Digest32V2,
+}
+
+impl ConnectorRegistrySyncResponseV2 {
+    pub fn new(
+        status: ConnectorRegistrySyncStatusV2,
+        local_sequence: u64,
+        local_head_digest: Digest32V2,
+    ) -> Result<Self, ProtocolError> {
+        if local_head_digest.as_bytes() == &[0; 32]
+            || (status == ConnectorRegistrySyncStatusV2::DisabledGenesisOnly && local_sequence != 0)
+        {
+            return Err(malformed());
+        }
+        Ok(Self {
+            status,
+            local_sequence,
+            local_head_digest,
+        })
+    }
+
+    pub const fn status(self) -> ConnectorRegistrySyncStatusV2 {
+        self.status
+    }
+
+    pub const fn local_sequence(self) -> u64 {
+        self.local_sequence
+    }
+
+    pub const fn local_head_digest(self) -> Digest32V2 {
+        self.local_head_digest
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchResponseV2 {
     status: ExecutorStatusV2,
@@ -1013,6 +1080,38 @@ pub fn decode_executor_health_response_v2(
             )
         },
         encode_executor_health_response_v2,
+    )
+}
+
+pub fn encode_connector_registry_sync_response_v2(
+    value: &ConnectorRegistrySyncResponseV2,
+) -> Result<Vec<u8>, ProtocolError> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder
+        .array(3)
+        .and_then(|encoder| encoder.u16(value.status.tag()))
+        .and_then(|encoder| encoder.u64(value.local_sequence))
+        .and_then(|encoder| encoder.bytes(value.local_head_digest.as_bytes()))
+        .map_err(ProtocolError::malformed)?;
+    Ok(encoder.into_writer())
+}
+
+pub fn decode_connector_registry_sync_response_v2(
+    bytes: &[u8],
+) -> Result<ConnectorRegistrySyncResponseV2, ProtocolError> {
+    exact_decode(
+        bytes,
+        |decoder, _context| {
+            expect_array(decoder, 3)?;
+            ConnectorRegistrySyncResponseV2::new(
+                ConnectorRegistrySyncStatusV2::from_tag(
+                    decoder.u16().map_err(ProtocolError::malformed)?,
+                )?,
+                decoder.u64().map_err(ProtocolError::malformed)?,
+                Digest32V2::new(decode_fixed::<32>(decoder)?),
+            )
+        },
+        encode_connector_registry_sync_response_v2,
     )
 }
 

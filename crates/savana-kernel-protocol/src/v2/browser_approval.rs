@@ -2,9 +2,9 @@ use minicbor::Encode as _;
 use zeroize::Zeroizing;
 
 use super::{
-    cbor::V2DecodeContext, ApprovalDecisionCeremonyCapabilityV2, ApprovalDecisionV2,
-    ApprovalPurposeV2, ApprovalTabSessionCapabilityV2, BrowserWebAuthnAssertionV2, Digest32V2,
-    Nonce32V2,
+    approval_display_digest_v2, cbor::V2DecodeContext, ApprovalDecisionCeremonyCapabilityV2,
+    ApprovalDecisionV2, ApprovalPurposeV2, ApprovalTabSessionCapabilityV2,
+    BoundedApprovalDisplayTextV2, BrowserWebAuthnAssertionV2, Digest32V2, Nonce32V2,
 };
 use crate::{ProtocolError, StableCode};
 
@@ -25,11 +25,13 @@ impl ApprovalDisplayBrowserRequestV2 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalDisplayViewV2 {
     purpose: ApprovalPurposeV2,
     display_projection_digest: Digest32V2,
     display_digest: Digest32V2,
+    display_text: BoundedApprovalDisplayTextV2,
+    display_declassification_provenance_digest: Digest32V2,
 }
 
 impl ApprovalDisplayViewV2 {
@@ -37,8 +39,14 @@ impl ApprovalDisplayViewV2 {
         purpose: ApprovalPurposeV2,
         display_projection_digest: Digest32V2,
         display_digest: Digest32V2,
+        display_text: BoundedApprovalDisplayTextV2,
+        display_declassification_provenance_digest: Digest32V2,
     ) -> Result<Self, ProtocolError> {
-        if display_projection_digest.as_bytes() == &[0; 32] || display_digest.as_bytes() == &[0; 32]
+        if display_projection_digest.as_bytes() == &[0; 32]
+            || display_digest.as_bytes() == &[0; 32]
+            || display_text.as_bytes().len() > MAX_APPROVAL_BROWSER_BODY_BYTES_V2
+            || approval_display_digest_v2(display_text.as_bytes()) != display_digest
+            || display_declassification_provenance_digest.as_bytes() == &[0; 32]
         {
             return Err(malformed());
         }
@@ -46,19 +54,29 @@ impl ApprovalDisplayViewV2 {
             purpose,
             display_projection_digest,
             display_digest,
+            display_text,
+            display_declassification_provenance_digest,
         })
     }
 
-    pub const fn purpose(self) -> ApprovalPurposeV2 {
+    pub const fn purpose(&self) -> ApprovalPurposeV2 {
         self.purpose
     }
 
-    pub const fn display_projection_digest(self) -> Digest32V2 {
+    pub const fn display_projection_digest(&self) -> Digest32V2 {
         self.display_projection_digest
     }
 
-    pub const fn display_digest(self) -> Digest32V2 {
+    pub const fn display_digest(&self) -> Digest32V2 {
         self.display_digest
+    }
+
+    pub fn display_text(&self) -> &BoundedApprovalDisplayTextV2 {
+        &self.display_text
+    }
+
+    pub const fn display_declassification_provenance_digest(&self) -> Digest32V2 {
+        self.display_declassification_provenance_digest
     }
 }
 
@@ -202,10 +220,10 @@ pub fn decode_approval_display_browser_request_v2(
 }
 
 pub fn encode_approval_display_view_v2(
-    value: ApprovalDisplayViewV2,
+    value: &ApprovalDisplayViewV2,
 ) -> Result<Vec<u8>, ProtocolError> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
-    encoder.array(3).map_err(ProtocolError::malformed)?;
+    encoder.array(5).map_err(ProtocolError::malformed)?;
     value
         .purpose
         .encode(&mut encoder, &mut ())
@@ -215,6 +233,13 @@ pub fn encode_approval_display_view_v2(
                 .encode(&mut encoder, &mut ())
         })
         .and_then(|()| value.display_digest.encode(&mut encoder, &mut ()))
+        .map_err(ProtocolError::malformed)?;
+    encoder
+        .str(value.display_text.as_str())
+        .map_err(ProtocolError::malformed)?;
+    value
+        .display_declassification_provenance_digest
+        .encode(&mut encoder, &mut ())
         .map_err(ProtocolError::malformed)?;
     Ok(encoder.into_writer())
 }
@@ -362,4 +387,81 @@ fn validate(bytes: &[u8]) -> Result<(), ProtocolError> {
 
 fn malformed() -> ProtocolError {
     ProtocolError::stable(StableCode::ProtocolMalformedCbor)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_view_encodes_exact_gated_text_and_node_digest() {
+        let display =
+            BoundedApprovalDisplayTextV2::new("批准：complete approval artifact".repeat(4))
+                .unwrap();
+        let node = Digest32V2::new([0x41; 32]);
+        let view = ApprovalDisplayViewV2::new(
+            ApprovalPurposeV2::ToolExecution,
+            Digest32V2::new([0x42; 32]),
+            approval_display_digest_v2(display.as_bytes()),
+            display.clone(),
+            node,
+        )
+        .unwrap();
+        assert_eq!(view.display_text(), &display);
+        assert_eq!(view.display_declassification_provenance_digest(), node);
+        let encoded = encode_approval_display_view_v2(&view).unwrap();
+        assert!(encoded
+            .windows(display.as_bytes().len())
+            .any(|window| window == display.as_bytes()));
+        assert!(ApprovalDisplayViewV2::new(
+            ApprovalPurposeV2::ToolExecution,
+            Digest32V2::new([0x42; 32]),
+            approval_display_digest_v2(display.as_bytes()),
+            display,
+            Digest32V2::new([0; 32]),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn browser_view_refuses_invalid_utf8_controls_and_missing_node_before_display() {
+        for forbidden in [vec![0xff, 0xfe], b"approve\nrelease".to_vec()] {
+            assert!(BoundedApprovalDisplayTextV2::from_utf8_bytes(forbidden).is_err());
+        }
+
+        let display =
+            BoundedApprovalDisplayTextV2::new("complete approval text".to_owned()).unwrap();
+        assert!(ApprovalDisplayViewV2::new(
+            ApprovalPurposeV2::Ingress,
+            Digest32V2::new([0x42; 32]),
+            approval_display_digest_v2(display.as_bytes()),
+            display,
+            Digest32V2::new([0; 32]),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn binary_display_is_complete_reversible_canonical_base64() {
+        let display = BoundedApprovalDisplayTextV2::from_binary(&[0x00, 0x81, 0xfe, 0xff]).unwrap();
+        assert_eq!(display.as_str(), "base64:AIH+/w==");
+    }
+
+    #[test]
+    fn approval_display_text_enforces_canonical_utf8_byte_bound() {
+        assert!(BoundedApprovalDisplayTextV2::new(
+            "x".repeat(super::super::MAX_APPROVAL_DISPLAY_BYTES_V2)
+        )
+        .is_ok());
+        assert!(BoundedApprovalDisplayTextV2::new(
+            "x".repeat(super::super::MAX_APPROVAL_DISPLAY_BYTES_V2 + 1)
+        )
+        .is_err());
+        assert!(BoundedApprovalDisplayTextV2::new("e\u{301}".to_owned()).is_err());
+
+        let largest_binary = vec![0x5a; 786_426];
+        assert!(BoundedApprovalDisplayTextV2::from_binary(&largest_binary).is_ok());
+        let oversized_binary = vec![0x5a; 786_427];
+        assert!(BoundedApprovalDisplayTextV2::from_binary(&oversized_binary).is_err());
+    }
 }

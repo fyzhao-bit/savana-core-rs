@@ -165,6 +165,12 @@ closed_enum_v2! {
     }
 }
 
+closed_enum_v2! {
+    PlannerPurposeV2 {
+        PlannerCall = 1,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 // The closure proof is a bounded signed protocol object. Keeping it inline
 // avoids an extra attacker-triggerable allocation during authenticated decode.
@@ -314,6 +320,22 @@ impl PlannerLimitsV2 {
             maximum_arguments_per_step,
             maximum_encoded_plan_bytes,
         })
+    }
+
+    pub const fn maximum_steps(self) -> u16 {
+        self.maximum_steps
+    }
+
+    pub const fn maximum_dependencies_per_step(self) -> u16 {
+        self.maximum_dependencies_per_step
+    }
+
+    pub const fn maximum_arguments_per_step(self) -> u16 {
+        self.maximum_arguments_per_step
+    }
+
+    pub const fn maximum_encoded_plan_bytes(self) -> u32 {
+        self.maximum_encoded_plan_bytes
     }
 }
 
@@ -609,6 +631,7 @@ pub struct PreparePlannerCallResponseV2 {
     ticket: PlannerTicketHandleV2,
     envelope: PlannerEnvelopeV2,
     envelope_digest: Digest32V2,
+    declassification_provenance_digest: Digest32V2,
     expires_at: UnixMillisV2,
 }
 
@@ -617,11 +640,15 @@ impl PreparePlannerCallResponseV2 {
         ticket: PlannerTicketHandleV2,
         envelope: PlannerEnvelopeV2,
         envelope_digest: Digest32V2,
+        declassification_provenance_digest: Digest32V2,
         expires_at: UnixMillisV2,
     ) -> Result<Self, ProtocolError> {
         let canonical = minicbor::to_vec(&envelope).map_err(ProtocolError::malformed)?;
         let expected = Digest32V2::new(sha2::Sha256::digest(&canonical).into());
-        if envelope_digest != expected || expires_at != envelope.expires_at || expires_at.get() == 0
+        if envelope_digest != expected
+            || is_zero(declassification_provenance_digest.as_bytes())
+            || expires_at != envelope.expires_at
+            || expires_at.get() == 0
         {
             return Err(malformed());
         }
@@ -629,6 +656,7 @@ impl PreparePlannerCallResponseV2 {
             ticket,
             envelope,
             envelope_digest,
+            declassification_provenance_digest,
             expires_at,
         })
     }
@@ -640,12 +668,17 @@ impl PreparePlannerCallResponseV2 {
     pub const fn envelope(&self) -> &PlannerEnvelopeV2 {
         &self.envelope
     }
+
+    pub const fn declassification_provenance_digest(&self) -> Digest32V2 {
+        self.declassification_provenance_digest
+    }
 }
 
-impl_struct_codec!(PreparePlannerCallResponseV2, 4, {
+impl_struct_codec!(PreparePlannerCallResponseV2, 5, {
     ticket,
     envelope,
     envelope_digest,
+    declassification_provenance_digest,
     expires_at
 });
 
@@ -1478,11 +1511,23 @@ impl<'bytes> minicbor::Decode<'bytes, V2DecodeContext> for AgentViewV2 {
 pub struct ReadAgentViewResponseV2 {
     view: AgentViewV2,
     next: Option<KernelAgentViewCursorV2>,
+    declassification_provenance_digest: Digest32V2,
 }
 
 impl ReadAgentViewResponseV2 {
-    pub const fn new(view: AgentViewV2, next: Option<KernelAgentViewCursorV2>) -> Self {
-        Self { view, next }
+    pub fn new(
+        view: AgentViewV2,
+        next: Option<KernelAgentViewCursorV2>,
+        declassification_provenance_digest: Digest32V2,
+    ) -> Result<Self, ProtocolError> {
+        if is_zero(declassification_provenance_digest.as_bytes()) {
+            return Err(malformed());
+        }
+        Ok(Self {
+            view,
+            next,
+            declassification_provenance_digest,
+        })
     }
 
     pub const fn view(&self) -> &AgentViewV2 {
@@ -1492,6 +1537,10 @@ impl ReadAgentViewResponseV2 {
     pub const fn next(&self) -> Option<KernelAgentViewCursorV2> {
         self.next
     }
+
+    pub const fn declassification_provenance_digest(&self) -> Digest32V2 {
+        self.declassification_provenance_digest
+    }
 }
 
 impl<C> minicbor::Encode<C> for ReadAgentViewResponseV2 {
@@ -1500,9 +1549,11 @@ impl<C> minicbor::Encode<C> for ReadAgentViewResponseV2 {
         encoder: &mut minicbor::Encoder<W>,
         context: &mut C,
     ) -> Result<(), minicbor::encode::Error<W::Error>> {
-        encoder.array(2)?;
+        encoder.array(3)?;
         self.view.encode(encoder, context)?;
-        encode_option(encoder, context, self.next.as_ref())
+        encode_option(encoder, context, self.next.as_ref())?;
+        self.declassification_provenance_digest
+            .encode(encoder, context)
     }
 }
 
@@ -1512,13 +1563,15 @@ impl<'bytes> minicbor::Decode<'bytes, V2DecodeContext> for ReadAgentViewResponse
         context: &mut V2DecodeContext,
     ) -> Result<Self, minicbor::decode::Error> {
         let position = decoder.position();
-        if decoder.array()? != Some(2) {
+        if decoder.array()? != Some(3) {
             return Err(decode_error(position));
         }
-        Ok(Self::new(
+        Self::new(
             minicbor::Decode::decode(decoder, context)?,
             decode_option(decoder, context)?,
-        ))
+            minicbor::Decode::decode(decoder, context)?,
+        )
+        .map_err(|_| decode_error(position))
     }
 }
 

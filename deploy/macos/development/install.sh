@@ -664,6 +664,10 @@ attestation_root_measurement=$(
   -pubkey -noout \
   | /usr/bin/openssl pkey -pubin -outform DER \
     -out "$temporary_directory/planner-server.spki.der"
+/usr/bin/openssl x509 -in "$temporary_directory/provider-server.cert.pem" \
+  -pubkey -noout \
+  | /usr/bin/openssl pkey -pubin -outform DER \
+    -out "$temporary_directory/provider-server.spki.der"
 
 /usr/bin/install -o root -g wheel -m 0444 \
   "$temporary_directory/runtime-ca.cert.der" \
@@ -671,6 +675,9 @@ attestation_root_measurement=$(
 /usr/bin/install -o root -g wheel -m 0444 \
   "$temporary_directory/planner-server.spki.der" \
   "$install_root/config/tls/planner-server-spki-v2.der"
+/usr/bin/install -o root -g wheel -m 0444 \
+  "$temporary_directory/provider-server.spki.der" \
+  "$install_root/config/tls/provider-server-spki-v2.der"
 /usr/bin/install -o root -g wheel -m 0444 \
   "$temporary_directory/provider-client.cert.der" \
   "$install_root/config/tls/provider-client-v2.der"
@@ -717,6 +724,15 @@ done
 /usr/bin/install -o root -g wheel -m 0444 \
   "$build_directory/artifacts/development-draft-report-tool-v2.cbor" \
   "$install_root/config/policy/development-draft-report-tool-v2.cbor"
+/usr/bin/install -o root -g wheel -m 0444 \
+  "$build_directory/artifacts/declassification-installer-root-v2.json" \
+  "$install_root/config/trust/declassification-installer-root-v2.json"
+/usr/bin/install -o root -g wheel -m 0444 \
+  "$build_directory/artifacts/declassification-trust-root-set-v2.cbor" \
+  "$install_root/config/trust/declassification-trust-root-set-v2.cbor"
+/usr/bin/install -o root -g wheel -m 0444 \
+  "$build_directory/artifacts/declassification-rule-set-v2.cbor" \
+  "$install_root/config/policy/declassification-rule-set-v2.cbor"
 /usr/bin/install -o root -g _savana_runtime_dev -m 0444 /dev/null \
   "$install_root/config/effect-gate-v2"
 
@@ -754,6 +770,32 @@ harden_generated_public_keys() {
 
 SAVANA_AUTHORITY_CLASS=development \
   "$install_root/libexec/savana-development-material" "$install_root"
+connector_authority_credential="$install_root/credentials/kerneld/connector-authority-v2.seed"
+connector_authority_key_id=$(
+  /usr/bin/plutil -extract policy_runtime.connector_authority_key_id raw -expect string \
+    "$install_root/config/kerneld-bootstrap-v2.json"
+)
+connector_authority_public_key=$(
+  /usr/bin/plutil -extract policy_runtime.connector_authority_public_key raw -expect string \
+    "$install_root/config/kerneld-bootstrap-v2.json"
+)
+zero_connector_authority=0000000000000000000000000000000000000000000000000000000000000000
+if [ "$connector_authority_key_id" = "$zero_connector_authority" ] && \
+   [ "$connector_authority_public_key" = "$zero_connector_authority" ]; then
+  [ ! -e "$connector_authority_credential" ] || {
+    echo "disabled connector authority unexpectedly materialized a private credential" >&2
+    exit 70
+  }
+else
+  [ "$connector_authority_key_id" != "$zero_connector_authority" ] && \
+    [ "$connector_authority_public_key" != "$zero_connector_authority" ] && \
+    [ -f "$connector_authority_credential" ] && \
+    [ ! -L "$connector_authority_credential" ] && \
+    [ "$(/usr/bin/stat -f %z "$connector_authority_credential")" = "32" ] || {
+      echo "enabled connector authority has incomplete private material" >&2
+      exit 70
+    }
+fi
 /usr/sbin/chown _savana_ingress_dev:_savana_ingress_dev \
   "$install_root/sandbox/ingressd/parser-profile-v2.json"
 /bin/chmod 0444 "$install_root/sandbox/ingressd/parser-profile-v2.json"
@@ -789,6 +831,9 @@ done
 harden_generated_trust_file "$install_root/config/jarvis-python-v2.json"
 harden_generated_trust_file "$install_root/config/development-manifest-template-v2.json"
 harden_generated_trust_file "$install_root/config/trust/deployment-manifest-root-v2.json"
+harden_generated_trust_file "$install_root/config/trust/declassification-installer-root-v2.json"
+harden_generated_trust_file "$install_root/config/trust/declassification-trust-root-set-v2.cbor"
+harden_generated_trust_file "$install_root/config/policy/declassification-rule-set-v2.cbor"
 harden_generated_trust_file "$install_root/config/deployment-manifest-v2.cbor"
 
 plist_directory=$(CDPATH= cd -- "$script_directory/../../launchd/development" && pwd -P)

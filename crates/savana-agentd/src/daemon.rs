@@ -38,8 +38,8 @@ mod implementation {
         AgentUiAuthenticationSettlementTransferCapabilityV2, BootIdV2, BootstrapKindV2, Digest32V2,
         DisplayProjectionIdV2, Ed25519KeyIdV2, EndpointRoleV2, ExecutorIdentityV2,
         FixedHttpErrorV2, FixedHttpRouteV2, FixedHttpServiceV2, PeerIdentityBindingV2,
-        PlannerRouteIdV2, ProjectionIdV2, ServiceIdentityV2, UnixMillisV2,
-        SAVANA_BROWSER_SCRIPT_V2,
+        PlannerIntentKindV2, PlannerLimitsV2, PlannerRouteIdV2, ProjectionIdV2, ServiceIdentityV2,
+        StaticTemplateIdV2, UnixMillisV2, SAVANA_BROWSER_SCRIPT_V2,
     };
     #[cfg(target_os = "linux")]
     use savana_platform_identity::{
@@ -57,6 +57,8 @@ mod implementation {
     };
     use serde::Deserialize;
     use sha2::{Digest as _, Sha256};
+    use signal_hook::consts::signal::SIGHUP;
+    use signal_hook::iterator::Signals;
     use zeroize::Zeroizing;
 
     use super::AgentdDaemonErrorV2;
@@ -152,6 +154,12 @@ mod implementation {
         planner_port: u16,
         planner_server_spki_sha256: String,
         planner_route_id: u32,
+        planner_template_id: u32,
+        planner_intent_tag: u16,
+        planner_maximum_steps: u16,
+        planner_maximum_dependencies_per_step: u16,
+        planner_maximum_arguments_per_step: u16,
+        planner_maximum_encoded_plan_bytes: u32,
         release_executor_identity: String,
         release_destination_projection: u32,
         release_display_projection: u32,
@@ -212,23 +220,9 @@ mod implementation {
         if config_path != Path::new(NATIVE_BOOTSTRAP_PATH_V2) {
             return Err(AgentdDaemonErrorV2::DeploymentUnavailable);
         }
-        let bytes =
-            read_verified_regular_file_v2(config_path, MAX_BOOTSTRAP_BYTES_V2, Some((0, 0, 0o444)))
-                .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
-        let bootstrap: BootstrapDtoV2 = serde_json::from_slice(&bytes)
-            .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
-        if !bootstrap.signed_manifest_path.is_absolute()
-            || !bootstrap.effect_ledger_projection_path.is_absolute()
-            || !bootstrap.effect_gate_path.is_absolute()
-            || !bootstrap.task_state_path.is_absolute()
-            || !bootstrap.rollback_anchor_path.is_absolute()
-        {
-            return Err(AgentdDaemonErrorV2::DeploymentUnavailable);
-        }
-        let startup = load_native_startup(&bootstrap)?;
-        startup
-            .verify_loaded_service_config_v2(ClosedServiceIdV2::Agentd, &bytes)
-            .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
+        let reload_signals =
+            Signals::new([SIGHUP]).map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
+        let (_bytes, bootstrap, startup) = load_verified_fixed_startup()?;
         let self_lock = startup
             .service_lock(ClosedServiceIdV2::Agentd)
             .ok_or(AgentdDaemonErrorV2::DeploymentUnavailable)?;
@@ -329,30 +323,28 @@ mod implementation {
             task_authority_public_key,
         )
         .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
-        let handshake_edge = startup
-            .kernel_service_handshake_edge(ClosedServiceEdgeIdV2::AgentKernel, kerneld_boot_id)
-            .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
         let self_binding = current_process_binding(edge_lock, &self_process)?;
-        let kernel_client = SuiteOneAgentKernelClientV2::from_verified_deployment(
-            handshake_edge,
+        let expected_task_authority_key_id = bootstrap.kernel_task_authority_key_id.clone();
+        let kernel_client = SuiteOneAgentKernelClientV2::from_verified_startup(
+            &startup,
             agentd_boot_id,
+            kerneld_boot_id,
             self_binding.clone(),
             client_signing_key.clone(),
             server_public_key,
             task_authority_key_id,
             task_authority_public_key,
+            move || {
+                let (_, bootstrap, startup) = load_verified_fixed_startup().map_err(|_| ())?;
+                if bootstrap.kernel_task_authority_key_id != expected_task_authority_key_id {
+                    return Err(());
+                }
+                Ok(startup)
+            },
         )
         .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
-        let browser_kernel = SuiteOneAgentKernelClientV2::from_verified_deployment(
-            handshake_edge,
-            agentd_boot_id,
-            self_binding.clone(),
-            client_signing_key,
-            server_public_key,
-            task_authority_key_id,
-            task_authority_public_key,
-        )
-        .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
+        let browser_kernel = kernel_client.clone();
+        spawn_kernel_reload_signal(reload_signals, kernel_client.clone())?;
         let effect_gate =
             crate::effect_gate::EffectGateCoordinatorV2::from_shared_only_descriptors(
                 open_read_only_single_link(&bootstrap.effect_gate_path)?,
@@ -415,6 +407,7 @@ mod implementation {
         )
         .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
         if bootstrap.planner_route_id == 0
+            || bootstrap.planner_template_id == 0
             || bootstrap.release_destination_projection == 0
             || bootstrap.release_display_projection == 0
         {
@@ -426,6 +419,21 @@ mod implementation {
             approval_client,
             planner,
             PlannerRouteIdV2::new(bootstrap.planner_route_id),
+            StaticTemplateIdV2::new(bootstrap.planner_template_id),
+            match bootstrap.planner_intent_tag {
+                1 => PlannerIntentKindV2::SendMessage,
+                2 => PlannerIntentKindV2::Search,
+                3 => PlannerIntentKindV2::SummarizeDocument,
+                4 => PlannerIntentKindV2::StoreRecord,
+                _ => return Err(AgentdDaemonErrorV2::DeploymentUnavailable),
+            },
+            PlannerLimitsV2::new(
+                bootstrap.planner_maximum_steps,
+                bootstrap.planner_maximum_dependencies_per_step,
+                bootstrap.planner_maximum_arguments_per_step,
+                bootstrap.planner_maximum_encoded_plan_bytes,
+            )
+            .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?,
             ExecutorIdentityV2::new(
                 decode_hex_32_v2(&bootstrap.release_executor_identity)
                     .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?,
@@ -500,6 +508,57 @@ mod implementation {
             &bootstrap.services,
         )
         .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn load_verified_fixed_startup(
+    ) -> Result<(Vec<u8>, BootstrapDtoV2, VerifiedDaemonStartupV2), AgentdDaemonErrorV2> {
+        let bytes = read_verified_regular_file_v2(
+            Path::new(NATIVE_BOOTSTRAP_PATH_V2),
+            MAX_BOOTSTRAP_BYTES_V2,
+            Some((0, 0, 0o444)),
+        )
+        .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
+        let bootstrap: BootstrapDtoV2 = serde_json::from_slice(&bytes)
+            .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
+        if !bootstrap.signed_manifest_path.is_absolute()
+            || !bootstrap.effect_ledger_projection_path.is_absolute()
+            || !bootstrap.effect_gate_path.is_absolute()
+            || !bootstrap.task_state_path.is_absolute()
+            || !bootstrap.rollback_anchor_path.is_absolute()
+        {
+            return Err(AgentdDaemonErrorV2::DeploymentUnavailable);
+        }
+        let startup = load_native_startup(&bootstrap)?;
+        startup
+            .verify_loaded_service_config_v2(ClosedServiceIdV2::Agentd, &bytes)
+            .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
+        Ok((bytes, bootstrap, startup))
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn spawn_kernel_reload_signal(
+        mut signals: Signals,
+        kernel_client: SuiteOneAgentKernelClientV2,
+    ) -> Result<(), AgentdDaemonErrorV2> {
+        std::thread::Builder::new()
+            .name("savana-agent-kernel-reload".to_owned())
+            .spawn(move || {
+                for signal in signals.forever() {
+                    handle_kernel_reload_signal(signal, || {
+                        let _ = kernel_client.reload_verified_authority();
+                    });
+                }
+            })
+            .map(|_| ())
+            .map_err(|_| AgentdDaemonErrorV2::EndpointUnavailable)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn handle_kernel_reload_signal(signal: i32, reload: impl FnOnce()) {
+        if signal == SIGHUP {
+            reload();
+        }
     }
 
     #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
@@ -1311,6 +1370,8 @@ mod implementation {
 
     #[cfg(test)]
     mod tests {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
         use super::*;
 
         #[test]
@@ -1319,6 +1380,18 @@ mod implementation {
                 path_digest(Path::new(CONTROL_SOCKET_PATH_V2)).unwrap(),
                 Digest32V2::new(Sha256::digest(CONTROL_SOCKET_PATH_V2).into())
             );
+        }
+
+        #[test]
+        fn only_sighup_invokes_the_kernel_reload_lifecycle_helper() {
+            let calls = AtomicUsize::new(0);
+            handle_kernel_reload_signal(SIGHUP, || {
+                calls.fetch_add(1, Ordering::SeqCst);
+            });
+            handle_kernel_reload_signal(signal_hook::consts::signal::SIGTERM, || {
+                calls.fetch_add(1, Ordering::SeqCst);
+            });
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
         }
     }
 }

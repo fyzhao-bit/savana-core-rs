@@ -6,7 +6,7 @@ use savana_kernel_protocol::v2::{Digest32V2, ExecutorFailureClassV2, UnixMillisV
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
-use crate::protocol_service::PreparedDispatchProcessorV2;
+use crate::protocol_service::{PreparedConnectorDispatchV2, PreparedDispatchProcessorV2};
 use crate::worker_protocol::ConnectorJobDescriptorIssuerV2;
 use crate::worker_supervisor::{
     ConnectorWorkerOutcomeV2, ConnectorWorkerSupervisorErrorV2, ConnectorWorkerSupervisorV2,
@@ -52,6 +52,7 @@ impl VerifiedConnectorExecutionRuntimeV2 {
         owner: &ExecdStateOwnerV2,
         query: ExecdQueryV2,
         payload: Zeroizing<Vec<u8>>,
+        connector: Option<&PreparedConnectorDispatchV2>,
         now: UnixMillisV2,
         deadline: Instant,
     ) -> Result<(), ExecdProtocolServiceErrorV2> {
@@ -62,6 +63,19 @@ impl VerifiedConnectorExecutionRuntimeV2 {
         {
             return Err(ExecdProtocolServiceErrorV2::Binding);
         }
+        let mut transport = self.transport.lock().map_err(|_| {
+            self.ready.store(false, Ordering::Release);
+            ExecdProtocolServiceErrorV2::ResultUnavailable
+        })?;
+        let target = match connector {
+            Some(connector) => transport.verify_connector_target(
+                connector.descriptor().tier(),
+                connector.descriptor().transport(),
+                connector.active_host_allowlist(),
+            ),
+            None => transport.verified_deployment_target(),
+        }
+        .map_err(|_| ExecdProtocolServiceErrorV2::Binding)?;
         let descriptor_deadline = UnixMillisV2::new(
             now.get()
                 .checked_add(30_000)
@@ -77,11 +91,8 @@ impl VerifiedConnectorExecutionRuntimeV2 {
                 descriptor_deadline,
             )
             .map_err(|_| ExecdProtocolServiceErrorV2::Binding)?;
-        let mut transport = self.transport.lock().map_err(|_| {
-            self.ready.store(false, Ordering::Release);
-            ExecdProtocolServiceErrorV2::ResultUnavailable
-        })?;
-        let mut provider = OwnerBackedProviderAttemptV2::new(owner, transport.as_mut(), now);
+        let mut provider =
+            OwnerBackedProviderAttemptV2::new(owner, transport.as_mut(), &target, now);
         let outcome = self.supervisor.prepare_and_decode(
             &descriptor,
             payload,
@@ -317,10 +328,11 @@ impl PreparedDispatchProcessorV2 for VerifiedConnectorExecutionRuntimeV2 {
         owner: &ExecdStateOwnerV2,
         query: ExecdQueryV2,
         payload: Zeroizing<Vec<u8>>,
+        connector: Option<&PreparedConnectorDispatchV2>,
         now: UnixMillisV2,
         deadline: Instant,
     ) -> Result<(), ExecdProtocolServiceErrorV2> {
-        self.process_inner(owner, query, payload, now, deadline)
+        self.process_inner(owner, query, payload, connector, now, deadline)
     }
 
     fn recover(

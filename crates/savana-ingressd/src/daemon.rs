@@ -43,6 +43,8 @@ mod implementation {
     };
     use serde::Deserialize;
     use sha2::{Digest as _, Sha256};
+    use signal_hook::consts::signal::SIGHUP;
+    use signal_hook::iterator::Signals;
     use zeroize::Zeroizing;
 
     use super::IngressdDaemonErrorV2;
@@ -137,15 +139,9 @@ mod implementation {
         if config_path != Path::new(NATIVE_BOOTSTRAP_PATH_V2) {
             return Err(IngressdDaemonErrorV2::DeploymentUnavailable);
         }
-        let bytes =
-            read_verified_regular_file_v2(config_path, MAX_BOOTSTRAP_BYTES_V2, Some((0, 0, 0o444)))
-                .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)?;
-        let bootstrap: BootstrapDtoV2 = serde_json::from_slice(&bytes)
-            .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)?;
-        let startup = load_native_startup(&bootstrap)?;
-        startup
-            .verify_loaded_service_config_v2(ClosedServiceIdV2::Ingressd, &bytes)
-            .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)?;
+        let reload_signals =
+            Signals::new([SIGHUP]).map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)?;
+        let (_bytes, bootstrap, startup) = load_verified_fixed_startup()?;
         let listener = take_verified_listener()?;
         let ingressd_boot_id = BootIdV2::new(read_credential_32(INGRESSD_BOOT_CREDENTIAL_V2)?);
         let kerneld_boot_id = BootIdV2::new(read_credential_32(KERNELD_BOOT_CREDENTIAL_V2)?);
@@ -183,17 +179,21 @@ mod implementation {
         {
             return Err(IngressdDaemonErrorV2::DeploymentUnavailable);
         }
-        let kernel_edge = startup
-            .kernel_service_handshake_edge(ClosedServiceEdgeIdV2::IngressKernel, kerneld_boot_id)
-            .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)?;
-        let kernel = SuiteOneIngressKernelClientV2::from_verified_deployment(
-            kernel_edge,
+        let kernel = SuiteOneIngressKernelClientV2::from_verified_startup(
+            &startup,
             ingressd_boot_id,
+            kerneld_boot_id,
             self_binding.clone(),
             kernel_signing_key,
             kernel_public_key,
+            move || {
+                load_verified_fixed_startup()
+                    .map(|(_, _, startup)| startup)
+                    .map_err(|_| ())
+            },
         )
         .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)?;
+        spawn_kernel_reload_signal(reload_signals, kernel.clone())?;
 
         let approval_seed = Zeroizing::new(read_credential_32(APPROVAL_CLIENT_SEED_CREDENTIAL_V2)?);
         let approval_signing_key = SigningKey::from_bytes(&approval_seed);
@@ -291,6 +291,49 @@ mod implementation {
             &bootstrap.services,
         )
         .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn load_verified_fixed_startup(
+    ) -> Result<(Vec<u8>, BootstrapDtoV2, VerifiedDaemonStartupV2), IngressdDaemonErrorV2> {
+        let bytes = read_verified_regular_file_v2(
+            Path::new(NATIVE_BOOTSTRAP_PATH_V2),
+            MAX_BOOTSTRAP_BYTES_V2,
+            Some((0, 0, 0o444)),
+        )
+        .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)?;
+        let bootstrap: BootstrapDtoV2 = serde_json::from_slice(&bytes)
+            .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)?;
+        let startup = load_native_startup(&bootstrap)?;
+        startup
+            .verify_loaded_service_config_v2(ClosedServiceIdV2::Ingressd, &bytes)
+            .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)?;
+        Ok((bytes, bootstrap, startup))
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn spawn_kernel_reload_signal(
+        mut signals: Signals,
+        kernel: SuiteOneIngressKernelClientV2,
+    ) -> Result<(), IngressdDaemonErrorV2> {
+        std::thread::Builder::new()
+            .name("savana-ingress-kernel-reload".to_owned())
+            .spawn(move || {
+                for signal in signals.forever() {
+                    handle_kernel_reload_signal(signal, || {
+                        let _ = kernel.reload_verified_authority();
+                    });
+                }
+            })
+            .map(|_| ())
+            .map_err(|_| IngressdDaemonErrorV2::EndpointUnavailable)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn handle_kernel_reload_signal(signal: i32, reload: impl FnOnce()) {
+        if signal == SIGHUP {
+            reload();
+        }
     }
 
     #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
@@ -659,6 +702,25 @@ mod implementation {
             )
             .ok_or(IngressdDaemonErrorV2::EndpointUnavailable)?;
         Ok(UnixMillisV2::new(deadline))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use super::*;
+
+        #[test]
+        fn only_sighup_invokes_the_kernel_reload_lifecycle_helper() {
+            let calls = AtomicUsize::new(0);
+            handle_kernel_reload_signal(SIGHUP, || {
+                calls.fetch_add(1, Ordering::SeqCst);
+            });
+            handle_kernel_reload_signal(signal_hook::consts::signal::SIGTERM, || {
+                calls.fetch_add(1, Ordering::SeqCst);
+            });
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
     }
 }
 

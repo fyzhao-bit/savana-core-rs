@@ -5,7 +5,11 @@ use savana_kernel_protocol::v2::{
     ClosedRedactionClassV2, Digest32V2, Ed25519KeyIdV2, Ed25519SignatureV2, PlaceholderViewV2,
     ReadAgentViewResponseV2, UnixMillisV2,
 };
-use savana_policy_core::v2::{DispatchSubjectV2, KernelPreparedDispatchV2};
+use savana_policy_core::v2::{
+    ClosedDeclassificationPurposeV2, DeclassificationRuleSetV2, DeclassificationTransitionV2,
+    DispatchSubjectV2, HandoffJudgmentV2, KernelPreparedDispatchV2, KernelValueV2,
+    ProvenanceRecordV2,
+};
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
@@ -15,6 +19,7 @@ use crate::DaemonError;
 const SEALED_EXECUTION_ENVELOPE_DOMAIN: &[u8] = b"SAVANA_SEALED_EXECUTION_ENVELOPE_V2\0";
 const MASKED_AGENT_VIEW_RECORD_TAG_V2: u16 = 0;
 const MAX_AGENT_VIEW_RESPONSE_BYTES_V2: usize = 8 * 1024 * 1024;
+const MASKED_SUBSTITUTION_SET_DOMAIN_V2: &[u8] = b"SAVANA_MASKED_SUBSTITUTION_SET_V2\0";
 
 pub(crate) struct KernelTaskSigningIdentityV2 {
     key_id: Ed25519KeyIdV2,
@@ -78,7 +83,8 @@ pub(crate) enum KernelIngressPipelineErrorV2 {
 
 pub(crate) struct AcceptedKernelIngressV2 {
     gated_input: savana_input_runtime::GatedPlannerInputV2,
-    provenance: savana_policy_core::v2::ProvenanceRecordV2,
+    agent_value: KernelValueV2,
+    provenance: ProvenanceRecordV2,
     live_vault_segment: savana_vault::LiveVaultSegmentV2,
 }
 
@@ -109,10 +115,16 @@ impl AcceptedKernelIngressV2 {
         self,
     ) -> (
         savana_input_runtime::GatedPlannerInputV2,
-        savana_policy_core::v2::ProvenanceRecordV2,
+        KernelValueV2,
+        ProvenanceRecordV2,
         savana_vault::LiveVaultSegmentV2,
     ) {
-        (self.gated_input, self.provenance, self.live_vault_segment)
+        (
+            self.gated_input,
+            self.agent_value,
+            self.provenance,
+            self.live_vault_segment,
+        )
     }
 }
 
@@ -185,6 +197,7 @@ pub(crate) fn accept_ingress_into_kernel(
         .map_err(|_| KernelIngressPipelineErrorV2::Vault)?;
     Ok(AcceptedKernelIngressV2 {
         gated_input,
+        agent_value: normalized_value,
         provenance,
         live_vault_segment,
     })
@@ -194,6 +207,7 @@ pub(crate) fn accept_ingress_into_kernel(
 pub(crate) fn accept_finalized_input_into_kernel(
     input_runtime: &savana_input_runtime::InputRuntimeV2,
     vault: &mut savana_vault::DurableVaultServiceV2,
+    declassification_rules: &DeclassificationRuleSetV2,
     finalized: &FinalizedKernelInputV2,
     expected_installation_id: Digest32V2,
     expected_active_state_manifest_digest: Digest32V2,
@@ -271,13 +285,46 @@ pub(crate) fn accept_finalized_input_into_kernel(
     )
     .map_err(|_| KernelIngressPipelineErrorV2::Provenance)?;
 
-    let masked_agent_view = encode_masked_agent_view(&gated_input)?;
+    let (masked_agent_view, masked_input) = build_masked_agent_view(&gated_input)?;
+    let masked_view_bytes = minicbor::to_vec(&masked_agent_view)
+        .map_err(|_| KernelIngressPipelineErrorV2::InputGate)?;
+    let masked_value = KernelValueV2::bytes(masked_view_bytes)
+        .map_err(|_| KernelIngressPipelineErrorV2::Provenance)?;
+    let token_set_digest = masked_substitution_set_digest(&gated_input, &masked_input)?;
+    let masked_provenance = ProvenanceRecordV2::declassify(
+        &masked_value,
+        provenance_context,
+        DeclassificationTransitionV2::MaskTokenizeAndLeakCheck,
+        declassification_rules,
+        ClosedDeclassificationPurposeV2::AgentIngressMasking.purpose_digest(),
+        token_set_digest,
+        None,
+        &[&provenance],
+        policy_allowed_effects,
+        now.get(),
+    )
+    .map_err(|_| KernelIngressPipelineErrorV2::Provenance)?;
+    if masked_provenance.judge_handoff(
+        DeclassificationTransitionV2::MaskTokenizeAndLeakCheck,
+        declassification_rules,
+    ) != HandoffJudgmentV2::Admits
+    {
+        return Err(KernelIngressPipelineErrorV2::Provenance);
+    }
+    let masked_agent_response = ReadAgentViewResponseV2::new(
+        masked_agent_view,
+        None,
+        masked_provenance.provenance_digest(),
+    )
+    .map_err(|_| KernelIngressPipelineErrorV2::Provenance)?;
+    let masked_agent_view = encode_read_agent_view_response_v2(&masked_agent_response)
+        .map_err(|_| KernelIngressPipelineErrorV2::InputGate)?;
     let sensitive_bytes = encode_finalized_vault_material(channels, &masked_agent_view)?;
     let material = savana_vault::VaultIngressMaterialV2::from_verified_gated_input(
         durable_task_id,
         durable_run_id,
         authorization.authenticated_principal(),
-        provenance.provenance_digest(),
+        masked_provenance.provenance_digest(),
         finalized.input_commitment(),
         expires_at,
         sensitive_bytes,
@@ -288,7 +335,8 @@ pub(crate) fn accept_finalized_input_into_kernel(
         .map_err(|_| KernelIngressPipelineErrorV2::Vault)?;
     Ok(AcceptedKernelIngressV2 {
         gated_input,
-        provenance,
+        agent_value: masked_value,
+        provenance: masked_provenance,
         live_vault_segment,
     })
 }
@@ -321,9 +369,9 @@ fn encode_finalized_vault_material(
     Ok(encoded)
 }
 
-fn encode_masked_agent_view(
+fn build_masked_agent_view(
     gated_input: &savana_input_runtime::GatedPlannerInputV2,
-) -> Result<Vec<u8>, KernelIngressPipelineErrorV2> {
+) -> Result<(AgentViewV2, savana_input_runtime::MaskedAgentInputV2), KernelIngressPipelineErrorV2> {
     let masked = gated_input
         .masked_agent_input()
         .map_err(|_| KernelIngressPipelineErrorV2::InputGate)?;
@@ -339,14 +387,17 @@ fn encode_masked_agent_view(
             let token = BoundedAgentTextV2::new(placeholder.token().to_owned())
                 .map_err(|_| KernelIngressPipelineErrorV2::InputGate)?;
             let class = match placeholder.class() {
-                savana_input_runtime::DetectionClassV2::EmailAddress
-                | savana_input_runtime::DetectionClassV2::PhoneNumber => {
+                savana_input_runtime::DetectionClassV2::PersonalData => {
                     ClosedRedactionClassV2::PersonalData
                 }
-                savana_input_runtime::DetectionClassV2::CredentialAssignment
-                | savana_input_runtime::DetectionClassV2::BearerToken
-                | savana_input_runtime::DetectionClassV2::PrivateKeyMaterial => {
+                savana_input_runtime::DetectionClassV2::Credential => {
                     ClosedRedactionClassV2::Credential
+                }
+                // A path or filename that discloses protected content by its
+                // name alone is neither a credential nor data about a person;
+                // it is protected because policy says the reference itself is.
+                savana_input_runtime::DetectionClassV2::ProtectedReference => {
+                    ClosedRedactionClassV2::PolicyProtected
                 }
             };
             PlaceholderViewV2::new(ordinal, token, class)
@@ -355,13 +406,50 @@ fn encode_masked_agent_view(
         .collect::<Result<Vec<_>, _>>()?;
     let view = AgentViewV2::masked_text(text, placeholders)
         .map_err(|_| KernelIngressPipelineErrorV2::InputGate)?;
-    let response = ReadAgentViewResponseV2::new(view, None);
-    let encoded = encode_read_agent_view_response_v2(&response)
-        .map_err(|_| KernelIngressPipelineErrorV2::InputGate)?;
+    let encoded = minicbor::to_vec(&view).map_err(|_| KernelIngressPipelineErrorV2::InputGate)?;
     if encoded.len() > MAX_AGENT_VIEW_RESPONSE_BYTES_V2 {
         return Err(KernelIngressPipelineErrorV2::InputGate);
     }
-    Ok(encoded)
+    Ok((view, masked))
+}
+
+fn masked_substitution_set_digest(
+    gated_input: &savana_input_runtime::GatedPlannerInputV2,
+    masked: &savana_input_runtime::MaskedAgentInputV2,
+) -> Result<Digest32V2, KernelIngressPipelineErrorV2> {
+    if gated_input.protected_values().len() != masked.placeholders().len() {
+        return Err(KernelIngressPipelineErrorV2::InputGate);
+    }
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder
+        .array(masked.placeholders().len() as u64)
+        .map_err(|_| KernelIngressPipelineErrorV2::InputGate)?;
+    for (placeholder, protected) in masked
+        .placeholders()
+        .iter()
+        .zip(gated_input.protected_values())
+    {
+        let class = match placeholder.class() {
+            savana_input_runtime::DetectionClassV2::Credential => 1_u16,
+            savana_input_runtime::DetectionClassV2::PersonalData => 2,
+            savana_input_runtime::DetectionClassV2::ProtectedReference => 3,
+        };
+        encoder
+            .array(4)
+            .and_then(|encoder| encoder.str(placeholder.token()))
+            .and_then(|encoder| encoder.u16(class))
+            .and_then(|encoder| encoder.bytes(protected.slot_reference().as_bytes()))
+            .and_then(|encoder| encoder.bytes(gated_input.input_commitment().as_bytes()))
+            .map_err(|_| KernelIngressPipelineErrorV2::InputGate)?;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(MASKED_SUBSTITUTION_SET_DOMAIN_V2);
+    hasher.update(encoder.into_writer());
+    let digest = Digest32V2::new(hasher.finalize().into());
+    if is_zero(digest.as_bytes()) {
+        return Err(KernelIngressPipelineErrorV2::InputGate);
+    }
+    Ok(digest)
 }
 
 pub(crate) struct KernelDispatchSigningIdentityV2 {
@@ -575,7 +663,11 @@ pub(crate) fn verify_final_release_approval_settlement(
         settlement.settlement_digest(),
         binding.durable_release_id(),
         binding_digest,
+        binding.destination_digest(),
+        binding.token_set_digest(),
         active_state_manifest_digest,
+        settlement.issued_at(),
+        settlement.expires_at(),
     )
     .map_err(|_| v2_runtime_error())
 }
@@ -618,10 +710,13 @@ mod tests {
         ZeroizingBytesV2,
     };
     use savana_policy_core::v2::{
+        declassification_implementation_digest_v2, ClosedDeclassificationPurposeV2,
+        ConnectorRegistryStateV2, DeclassificationRuleSetV2, DeclassificationRuleV2,
         DispatchQuotaSubjectV2, DurableG4StateV2, DurableStateNamespaceV2, KernelDispatchStateV2,
-        ResolvedFinalReleaseTicketV2, RollbackProtectedStateAnchorV2, RollbackProtectedStateHeadV2,
-        VerifiedEffectGateLeaseV2, VerifiedFinalReleaseRecordV2, VerifiedFinalReleaseSettlementV2,
-        VerifiedQuotaLimitV2,
+        LeakGateDutyV2, OperationalTrustRootPurposeV2, OperationalTrustRootSetItemV2,
+        OperationalTrustRootSetV2, ResolvedFinalReleaseTicketV2, RollbackProtectedStateAnchorV2,
+        RollbackProtectedStateHeadV2, SharedVerifiedConnectorRegistryV2, VerifiedEffectGateLeaseV2,
+        VerifiedFinalReleaseRecordV2, VerifiedFinalReleaseSettlementV2, VerifiedQuotaLimitV2,
     };
     use savana_vault::{
         DurableVaultNamespaceV2, DurableVaultServiceV2, VaultAccessContextV2, VaultErrorV2,
@@ -782,6 +877,54 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    fn masking_rules() -> DeclassificationRuleSetV2 {
+        let installer = SigningKey::from_bytes(&[0xa1; 32]);
+        let authority = SigningKey::from_bytes(&[0xa2; 32]);
+        let product = Digest32V2::new([0xa3; 32]);
+        let root = OperationalTrustRootSetV2::new_declassification_signed_for_test(
+            product,
+            1,
+            None,
+            vec![OperationalTrustRootSetItemV2::new(
+                OperationalTrustRootPurposeV2::DeclassificationAuthority,
+                authority.verifying_key().to_bytes(),
+                1,
+                1,
+                10_000,
+            )
+            .unwrap()],
+            1,
+            10_000,
+            &installer,
+            1,
+        )
+        .unwrap();
+        let rule = DeclassificationRuleV2::new_for_test(
+            1,
+            ClosedDeclassificationPurposeV2::AgentIngressMasking,
+            declassification_implementation_digest_v2(1).unwrap(),
+            LeakGateDutyV2::BlocklistAndNoResidualPii,
+            None,
+            None,
+            1,
+            10_000,
+        )
+        .unwrap();
+        DeclassificationRuleSetV2::new_signed_for_test(
+            product,
+            1,
+            None,
+            vec![rule],
+            1,
+            10_000,
+            &root,
+            &authority,
+            1,
+            35,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -968,8 +1111,8 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        let finalized = input_owner
-            .finalize(
+        let (finalized, ()) = input_owner
+            .finalize_with(
                 savana_kernel_protocol::v2::FinalizeInputRequestV2::new(
                     begun.session(),
                     vec![InputChannelCommitmentV2::new(
@@ -989,6 +1132,7 @@ mod tests {
                     .unwrap(),
                 )
                 .unwrap(),
+                |_| Ok::<(), std::convert::Infallible>(()),
             )
             .unwrap();
 
@@ -1021,6 +1165,7 @@ mod tests {
         let accepted = accept_finalized_input_into_kernel(
             &input_runtime(),
             &mut vault,
+            &masking_rules(),
             &finalized,
             installation,
             manifest,
@@ -1035,7 +1180,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(accepted.gated_input().protected_values().len(), 1);
-        assert_eq!(accepted.provenance().root_evidence().as_slice().len(), 4);
+        assert_eq!(accepted.provenance().root_evidence().as_slice().len(), 9);
         assert_eq!(vault.segment_count(), 1);
         let agent_context = VaultAccessContextV2::from_authenticated_agent(
             BootIdV2::new([0x64; 32]),
@@ -1056,6 +1201,10 @@ mod tests {
             .read_agent_bytes(&document, agent_context, UnixMillisV2::new(37))
             .unwrap();
         let response = crate::v2_data_plane::decode_persisted_agent_view(&material).unwrap();
+        assert_eq!(
+            response.declassification_provenance_digest(),
+            accepted.provenance().provenance_digest()
+        );
         match response.view() {
             AgentViewV2::MaskedText { text, placeholders } => {
                 assert!(!text.as_str().contains("alice@example.com"));
@@ -1126,6 +1275,16 @@ mod tests {
             binding,
         )
         .unwrap();
+        let connector_registry = SharedVerifiedConnectorRegistryV2::from_verified_state(
+            ConnectorRegistryStateV2::from_verified_genesis(
+                Digest32V2::new([0x2a; 32]),
+                [0; 32],
+                vec![],
+                vec![],
+            )
+            .unwrap(),
+        )
+        .unwrap();
         let prepared = policy
             .prepare_verified_final_release_dispatch(
                 &release,
@@ -1135,11 +1294,15 @@ mod tests {
                     DispatchQuotaSubjectV2::final_release(binding.release_quota_subject_digest()),
                 )
                 .unwrap(),
-                VerifiedFinalReleaseSettlementV2::from_consumed_exact_settlement(
+                &VerifiedFinalReleaseSettlementV2::from_consumed_exact_settlement(
                     Digest32V2::new([0x27; 32]),
                     release_id,
                     binding.semantic_digest().unwrap(),
+                    binding.destination_digest(),
+                    binding.token_set_digest(),
                     manifest,
+                    UnixMillisV2::new(10),
+                    UnixMillisV2::new(100),
                 )
                 .unwrap(),
                 ResolvedFinalReleaseTicketV2::from_resolved_kernel_ticket(
@@ -1156,7 +1319,7 @@ mod tests {
                     false,
                     executor,
                     HpkeX25519KeyIdV2::new([0x29; 32]),
-                    Digest32V2::new([0x2a; 32]),
+                    &connector_registry,
                     UnixMillisV2::new(10_000),
                 )
                 .unwrap(),
@@ -1173,6 +1336,7 @@ mod tests {
         let signed = SignedSealedExecutionEnvelopeV2::sign(
             SealedExecutionEnvelopePayloadV2::new(
                 protocol_core,
+                Digest32V2::new([0x2b; 32]),
                 FixedBytes32V2::new([0x2c; 32]),
                 BoundedCiphertextV2::new(vec![0x2d; 64]).unwrap(),
             )

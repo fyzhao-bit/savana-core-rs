@@ -11,7 +11,11 @@ workspace = true
 
 [features]
 default = []
-test-support = ["savana-policy-core/test-support"]
+test-support = [
+    "savana-agentd/test-support",
+    "savana-ingressd/test-support",
+    "savana-policy-core/test-support",
+]
 macos-development-authority = [
     "savana-agentd/macos-development-authority",
     "savana-approvald/macos-development-authority",
@@ -45,6 +49,7 @@ minicbor.workspace = true
 x25519-dalek.workspace = true
 hkdf.workspace = true
 chacha20poly1305.workspace = true
+base64.workspace = true
 
 [dev-dependencies]
 tempfile = "=3.23.0"

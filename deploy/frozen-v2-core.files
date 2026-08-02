@@ -1,6 +1,7 @@
 crates/savana-agentd/src/state_owner.rs
 crates/savana-approvald/src/protocol_state_owner.rs
 crates/savana-approvald/src/state_owner.rs
+crates/savana-execd/src/connector_registry.rs
 crates/savana-execd/src/state_owner.rs
 crates/savana-ingressd/src/state_owner.rs
 crates/savana-input-runtime/Cargo.toml
@@ -21,6 +22,7 @@ crates/savana-kernel-protocol/src/v2/http.rs
 crates/savana-kernel-protocol/src/v2/jarvis.rs
 crates/savana-kernel-protocol/src/v2/kernel_agent.rs
 crates/savana-kernel-protocol/src/v2/kernel_agent_success.rs
+crates/savana-kernel-protocol/src/v2/kernel_connector.rs
 crates/savana-kernel-protocol/src/v2/kernel_executor.rs
 crates/savana-kernel-protocol/src/v2/kernel_executor_success.rs
 crates/savana-kernel-protocol/src/v2/kernel_ingress.rs
@@ -36,8 +38,10 @@ crates/savana-kerneld/src/v2_agent_authority.rs
 crates/savana-kerneld/src/v2_agent_durable.rs
 crates/savana-kerneld/src/v2_channel.rs
 crates/savana-kerneld/src/v2_connection.rs
+crates/savana-kerneld/src/v2_connector_authority.rs
 crates/savana-kerneld/src/v2_core_services.rs
 crates/savana-kerneld/src/v2_data_plane.rs
+crates/savana-kerneld/src/v2_declassification_policy.rs
 crates/savana-kerneld/src/v2_dispatch.rs
 crates/savana-kerneld/src/v2_edge.rs
 crates/savana-kerneld/src/v2_executor_client.rs
@@ -51,10 +55,20 @@ crates/savana-kerneld/src/v2_server.rs
 crates/savana-kerneld/src/v2_state_owner.rs
 crates/savana-kerneld/src/v2_transport_owner.rs
 crates/savana-kerneld/src/v2_value_owner.rs
+crates/savana-leak-gate/Cargo.toml
+crates/savana-leak-gate/src/fuzz_vectors.json
+crates/savana-leak-gate/src/lib.rs
+crates/savana-leak-gate/src/scanner.rs
+crates/savana-leak-gate/src/tables.rs
+crates/savana-leak-gate/src/tests.rs
+crates/savana-leak-gate/src/vectors.json
 crates/savana-policy-core/src/v2/authenticated_anchor.rs
 crates/savana-policy-core/src/v2/binding.rs
 crates/savana-policy-core/src/v2/binding_tests.rs
 crates/savana-policy-core/src/v2/commit_attestation.rs
+crates/savana-policy-core/src/v2/connector_registry.rs
+crates/savana-policy-core/src/v2/connector_store.rs
+crates/savana-policy-core/src/v2/declassification.rs
 crates/savana-policy-core/src/v2/deployment_authorization.rs
 crates/savana-policy-core/src/v2/deployment_control.rs
 crates/savana-policy-core/src/v2/deployment_failure.rs
@@ -100,6 +114,7 @@ crates/savana-policy-core/src/v2/intent.rs
 crates/savana-policy-core/src/v2/intent_tests.rs
 crates/savana-policy-core/src/v2/labels.rs
 crates/savana-policy-core/src/v2/labels_tests.rs
+crates/savana-policy-core/src/v2/leak_gate.rs
 crates/savana-policy-core/src/v2/mod.rs
 crates/savana-policy-core/src/v2/ontology.rs
 crates/savana-policy-core/src/v2/ontology_tests.rs

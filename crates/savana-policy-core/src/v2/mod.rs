@@ -2,6 +2,9 @@ mod authenticated_anchor;
 #[allow(dead_code)] // Stored binding resolution is consumed by the G4 intent adapter.
 mod binding;
 mod commit_attestation;
+mod connector_registry;
+mod connector_store;
+mod declassification;
 mod deployment_authorization;
 mod deployment_control;
 mod deployment_failure;
@@ -46,6 +49,8 @@ mod installation_evidence_store;
 #[allow(dead_code)] // Intent construction is consumed by the kerneld transaction adapter.
 mod intent;
 mod labels;
+mod leak_gate;
+
 #[allow(dead_code)] // Closed AST is activated only through the G4 verified-state adapter.
 mod ontology;
 mod production;
@@ -71,6 +76,22 @@ pub use binding::{
     VerifiedRequiredTokenV2, VerifiedResolvedRelationSetV2, VerifiedStoredBindingsV2,
 };
 pub use commit_attestation::{ClosedCommitDigestFieldV2, CommitAttestationV2};
+pub use connector_registry::{
+    connector_host_allowlist_digest_v2, user_tier_host_allowed_v2, BoundedConnectorHostV2,
+    BoundedConnectorNameV2, BoundedConnectorUrlV2, ConnectorDescriptorV2, ConnectorRegistryDeltaV2,
+    ConnectorRegistryStateV2, ConnectorTierV2, ConnectorTransportV2,
+    PreparedConnectorRegistryDeltaV2,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use connector_store::TestConnectorStoreCrashPointV2;
+pub use connector_store::{
+    ConnectorStoreRevisionV2, DurableConnectorRegistryStoreV2,
+    MAX_CONNECTOR_AUTHORITY_STATE_BYTES_V2,
+};
+pub use declassification::{
+    declassification_implementation_digest_v2, ClosedDeclassificationPurposeV2,
+    DeclassificationRuleSetV2, DeclassificationRuleV2,
+};
 pub use deployment_authorization::{
     DeploymentAuthorizationKeyRefsV2, DeploymentAuthorizationVerifierV2, DeploymentTransactionV2,
     RecoveryPhaseHighWaterV2, RollbackGrantV2,
@@ -210,21 +231,24 @@ pub use intent::{
 };
 pub use labels::{
     ConfidentialityV2, EffectSetV2, G3Error, IntegrityV2, ReaderSetV2, SecurityLabelV2,
+    UNTRUSTED_EFFECT_CEILING_V2,
 };
+pub use leak_gate::LeakGateDutyV2;
 pub use ontology::{
     AttemptKindV2, ContextFieldV2, FieldPathV2, G4Error, OntologyExprV2, OntologyOperandV2,
     OntologyScalarV2, VerifiedOntologySetV2,
 };
 pub use production::{
     activate_internal_validator_registry, InternalValidatorBuildV2, KernelPreparedDispatchV2,
-    ResolvedExecutionTicketV2, ResolvedFinalReleaseTicketV2, VerifiedEffectGateLeaseV2,
-    VerifiedFinalReleaseRecordV2, VerifiedFinalReleaseSettlementV2, VerifiedOntologyEvaluationV2,
-    VerifiedPolicyDispositionV2, VerifiedToolApprovalSettlementV2,
+    ResolvedExecutionTicketV2, ResolvedFinalReleaseTicketV2, SharedVerifiedConnectorRegistryV2,
+    VerifiedEffectGateLeaseV2, VerifiedFinalReleaseRecordV2, VerifiedFinalReleaseSettlementV2,
+    VerifiedOntologyEvaluationV2, VerifiedPolicyDispositionV2, VerifiedToolApprovalSettlementV2,
 };
 pub use provenance::{
     decode_provenance_record_v2, encode_provenance_record_v2, provenance_digest_v2,
-    DeclassificationTransitionV2, DeriveOperationV2, PolicyConstantIdV2, ProvenanceContextV2,
-    ProvenanceRecordV2, RootEvidenceV2, SourceKindV2, VerifiedIngressProvenanceEvidenceSourceV2,
+    DeclassificationTransitionV2, DeriveOperationV2, HandoffJudgmentV2, PolicyConstantIdV2,
+    ProvenanceContextV2, ProvenanceRecordV2, RootEvidenceV2, SourceKindV2,
+    VerifiedIngressProvenanceEvidenceSourceV2,
 };
 pub use quota::{
     AuthenticatedEffectDispositionV2, DispatchQuotaCounterV2, DispatchQuotaMutationKindV2,

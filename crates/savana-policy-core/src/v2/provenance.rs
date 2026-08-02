@@ -5,9 +5,11 @@ use savana_kernel_protocol::v2::{
 use sha2::{Digest as _, Sha256};
 use unicode_normalization::UnicodeNormalization as _;
 
+use super::leak_gate::{enforce_for_declassification, LeakGateDutyV2};
 use super::{
-    value_digest_v2, ArgumentNameV2, ConfidentialityV2, EffectSetV2, G3Error, IntegrityV2,
-    KernelValueV2, ReaderSetV2, SecurityLabelV2,
+    declassification::compiled_implementation_digest, value_digest_v2, ArgumentNameV2,
+    ConfidentialityV2, DeclassificationRuleSetV2, EffectSetV2, G3Error, IntegrityV2, KernelValueV2,
+    ReaderSetV2, SecurityLabelV2, VerifiedFinalReleaseSettlementV2,
 };
 
 const MAX_ROOT_EVIDENCE: usize = 64;
@@ -263,8 +265,31 @@ pub enum DeclassificationTransitionV2 {
     MaskTokenizeAndLeakCheck,
     BuildPlannerEnvelope,
     BuildApprovalDisplay,
-    BuildExecutionEnvelope,
-    BuildFinalRelease,
+    /// Hands the value to ONE exact executor, named by its identity digest.
+    ///
+    /// The identity rides in the variant rather than alongside it so the
+    /// transition cannot be named without naming its reader. `ReaderSetV2` can
+    /// only say "an executor may read this"; the design requires "this executor
+    /// may read this", and a class bit cannot express the difference.
+    BuildExecutionEnvelope {
+        executor_identity_digest: Digest32V2,
+    },
+    /// Hands the value to ONE exact external sink, named by its identity digest.
+    ///
+    /// This is the egress boundary — the transition after which the value has
+    /// left. Binding the exact sink is what distinguishes a release the user
+    /// asked for from a release to somewhere else entirely; the reader class
+    /// alone treats both as "an external sink".
+    BuildFinalRelease {
+        sink_identity_digest: Digest32V2,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandoffJudgmentV2 {
+    Admits,
+    Refuses,
+    Unproven,
 }
 
 impl DeclassificationTransitionV2 {
@@ -273,8 +298,31 @@ impl DeclassificationTransitionV2 {
             Self::MaskTokenizeAndLeakCheck => 1,
             Self::BuildPlannerEnvelope => 2,
             Self::BuildApprovalDisplay => 3,
-            Self::BuildExecutionEnvelope => 4,
-            Self::BuildFinalRelease => 5,
+            Self::BuildExecutionEnvelope { .. } => 4,
+            Self::BuildFinalRelease { .. } => 5,
+        }
+    }
+
+    /// What the leak gate must prove before this transition may run.
+    ///
+    /// The split follows who reads the result, not how far confidentiality
+    /// drops. A language model is the one recipient that cannot be trusted to
+    /// hold personal data without it becoming training input, prompt context,
+    /// or an outbound request, so those two transitions must be free of
+    /// residual PII. The human approving the action, and the executor carrying
+    /// it out, both need the real values to do their job at all — masking
+    /// those would not be a stricter gate, it would be a broken one.
+    ///
+    /// The blocklist applies everywhere: injected instructions are not data any
+    /// recipient is entitled to, under any transition.
+    const fn leak_gate_duty(self) -> LeakGateDutyV2 {
+        match self {
+            Self::MaskTokenizeAndLeakCheck | Self::BuildPlannerEnvelope => {
+                LeakGateDutyV2::BlocklistAndNoResidualPii
+            }
+            Self::BuildApprovalDisplay
+            | Self::BuildExecutionEnvelope { .. }
+            | Self::BuildFinalRelease { .. } => LeakGateDutyV2::BlocklistOnly,
         }
     }
 
@@ -289,8 +337,31 @@ impl DeclassificationTransitionV2 {
                 ConfidentialityV2::AgentMasked,
                 ReaderSetV2::APPROVAL_DISPLAY,
             ),
-            Self::BuildExecutionEnvelope => (ConfidentialityV2::VaultBound, ReaderSetV2::EXECUTOR),
-            Self::BuildFinalRelease => (ConfidentialityV2::VaultBound, ReaderSetV2::EXTERNAL_SINK),
+            Self::BuildExecutionEnvelope { .. } => {
+                (ConfidentialityV2::VaultBound, ReaderSetV2::EXECUTOR)
+            }
+            Self::BuildFinalRelease { .. } => {
+                (ConfidentialityV2::VaultBound, ReaderSetV2::EXTERNAL_SINK)
+            }
+        }
+    }
+
+    /// The exact reader this transition names, for the two that name one.
+    ///
+    /// Bound into the declassification's provenance node so the record says
+    /// which executor or sink the value was released to, not merely that it was
+    /// released to some member of a class.
+    const fn exact_reader_identity(self) -> Option<Digest32V2> {
+        match self {
+            Self::BuildExecutionEnvelope {
+                executor_identity_digest: identity,
+            }
+            | Self::BuildFinalRelease {
+                sink_identity_digest: identity,
+            } => Some(identity),
+            Self::MaskTokenizeAndLeakCheck
+            | Self::BuildPlannerEnvelope
+            | Self::BuildApprovalDisplay => None,
         }
     }
 }
@@ -827,12 +898,52 @@ impl ProvenanceRecordV2 {
         transition: DeclassificationTransitionV2,
         rule_digest: Digest32V2,
         implementation_digest: Digest32V2,
-        leak_gate_digest: Digest32V2,
         token_set_digest: Digest32V2,
         purpose_digest: Digest32V2,
+        duty_floor: LeakGateDutyV2,
         parents: &[&Self],
         policy_allowed_effects: EffectSetV2,
     ) -> Result<Self, G3Error> {
+        // The gate runs here, and its digest is derived from what it actually
+        // saw. Taking `leak_gate_digest` as a parameter would let the caller
+        // assert a check the kernel cannot verify happened, at the one point
+        // where the kernel gives up a confidentiality guarantee.
+        // A declassification is only legitimate after a signed rule authorized
+        // it, so a node whose rule, implementation, token set, or purpose is
+        // all zeroes binds nothing and must not be built: it would claim
+        // authority from a rule that names nothing. `from_verified_kernel_input`
+        // already refuses null bindings; there is no reason for the path that
+        // gives up confidentiality to be the laxer of the two.
+        if [
+            rule_digest.as_bytes(),
+            implementation_digest.as_bytes(),
+            token_set_digest.as_bytes(),
+            purpose_digest.as_bytes(),
+        ]
+        .iter()
+        .any(|digest| digest.iter().all(|byte| *byte == 0))
+        {
+            return Err(G3Error::BindingMismatch);
+        }
+        let leak_gate_digest =
+            enforce_for_declassification(value, transition.leak_gate_duty().strictest(duty_floor))?;
+        let mut evidence = vec![
+            rule_digest,
+            implementation_digest,
+            leak_gate_digest,
+            token_set_digest,
+            purpose_digest,
+        ];
+        // The two transitions that hand the value to one exact reader bind that
+        // reader's identity into the node, so the record says WHERE the value
+        // went and not merely that it left. An all-zero digest names nobody, and
+        // accepting it would collapse "one exact sink" back into the class bit.
+        if let Some(identity) = transition.exact_reader_identity() {
+            if identity.as_bytes().iter().all(|byte| *byte == 0) {
+                return Err(G3Error::BindingMismatch);
+            }
+            evidence.push(identity);
+        }
         let value_digest = value_digest_v2(value)?;
         let parent_label = derived_label(parents, policy_allowed_effects)?;
         let (confidentiality, readers) = transition.target();
@@ -847,14 +958,75 @@ impl ProvenanceRecordV2 {
             value_digest,
             context,
             parents,
-            vec![
-                rule_digest,
-                implementation_digest,
-                leak_gate_digest,
-                token_set_digest,
-                purpose_digest,
-            ],
+            evidence,
             label,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn declassify(
+        value: &KernelValueV2,
+        context: ProvenanceContextV2,
+        transition: DeclassificationTransitionV2,
+        rule_set: &DeclassificationRuleSetV2,
+        purpose_digest: Digest32V2,
+        token_set_digest: Digest32V2,
+        consent: Option<&VerifiedFinalReleaseSettlementV2>,
+        parents: &[&Self],
+        policy_allowed_effects: EffectSetV2,
+        at_unix_ms: u64,
+    ) -> Result<Self, G3Error> {
+        if transition.tag() == 5
+            && token_set_digest
+                == super::token_set_digest_v2(&[]).map_err(|_| G3Error::BindingMismatch)?
+        {
+            return Err(G3Error::BindingMismatch);
+        }
+        if at_unix_ms < rule_set.not_before_unix_ms() || at_unix_ms > rule_set.not_after_unix_ms() {
+            return Err(G3Error::RuleSetExpired);
+        }
+        let rule = rule_set
+            .authorizing_rule(transition.tag(), purpose_digest)
+            .ok_or(G3Error::NoAuthorizingRule)?;
+        if at_unix_ms < rule.not_before_unix_ms() || at_unix_ms > rule.not_after_unix_ms() {
+            return Err(G3Error::RuleExpired);
+        }
+        if rule.implementation_digest() != compiled_implementation_digest(transition) {
+            return Err(G3Error::ImplementationMismatch);
+        }
+        if let Some(identity) = transition.exact_reader_identity() {
+            if rule
+                .reader_identities()
+                .binary_search_by(|candidate| candidate.as_bytes().cmp(identity.as_bytes()))
+                .is_err()
+            {
+                return Err(G3Error::ReaderNotAuthorized);
+            }
+        }
+        if let Some(max_age_ms) = rule.consent_max_age_ms() {
+            let consent = consent.ok_or(G3Error::ConsentMissing)?;
+            let destination = transition
+                .exact_reader_identity()
+                .ok_or(G3Error::ConsentScopeMismatch)?;
+            consent.validate_declassification(
+                destination,
+                token_set_digest,
+                context.active_state_manifest_digest,
+                at_unix_ms,
+                max_age_ms,
+            )?;
+        }
+        Self::kernel_declassification(
+            value,
+            context,
+            transition,
+            rule.rule_digest(),
+            rule.implementation_digest(),
+            token_set_digest,
+            purpose_digest,
+            rule.duty_floor(),
+            parents,
+            policy_allowed_effects,
         )
     }
 
@@ -975,6 +1147,41 @@ impl ProvenanceRecordV2 {
 
     pub const fn expires_at(&self) -> UnixMillisV2 {
         self.expires_at
+    }
+
+    pub fn judge_handoff(
+        &self,
+        transition: DeclassificationTransitionV2,
+        rule_set: &DeclassificationRuleSetV2,
+    ) -> HandoffJudgmentV2 {
+        let SourceKindV2::KernelDeclassification { rule_digest } = &self.source_kind else {
+            return HandoffJudgmentV2::Unproven;
+        };
+        let Some(rule) = rule_set.rule_by_digest(*rule_digest) else {
+            return HandoffJudgmentV2::Unproven;
+        };
+        let (confidentiality, readers) = transition.target();
+        if rule.transition_tag() != transition.tag()
+            || self.label.confidentiality() != confidentiality
+            || !self.label.readers().contains(readers)
+        {
+            return HandoffJudgmentV2::Refuses;
+        }
+        if let Some(identity) = transition.exact_reader_identity() {
+            if rule
+                .reader_identities()
+                .binary_search_by(|candidate| candidate.as_bytes().cmp(identity.as_bytes()))
+                .is_err()
+                || self
+                    .root_evidence
+                    .as_slice()
+                    .binary_search_by(|candidate| candidate.as_bytes().cmp(identity.as_bytes()))
+                    .is_err()
+            {
+                return HandoffJudgmentV2::Refuses;
+            }
+        }
+        HandoffJudgmentV2::Admits
     }
 }
 

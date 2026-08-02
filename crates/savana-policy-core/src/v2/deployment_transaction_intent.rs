@@ -9,7 +9,7 @@ use super::{
 const INTENT_SCHEMA_VERSION_V2: u16 = 2;
 const INTENT_DOMAIN_TAG_V2: u16 = 2;
 const INTENT_FIELDS_V2: u64 = 26;
-const EXPECTED_PRE_STATE_FIELDS_V2: u64 = 16;
+const EXPECTED_PRE_STATE_FIELDS_V2: u64 = 17;
 const INTENT_DIGEST_DOMAIN_V2: &[u8] = b"savana.deployment-transaction.v2.intent\0";
 const RECOVERY_TARGET_DIGEST_DOMAIN_V2: &[u8] = b"savana.deployment-recovery-target.v2\0";
 
@@ -29,6 +29,7 @@ pub struct ExpectedPreStateV2 {
     deployment_trust_root_set_digest: Digest32V2,
     activation_trust_root_set_digest: Digest32V2,
     release_trust_root_set_digest: Digest32V2,
+    declassification_trust_root_set_digest: Digest32V2,
     bootstrap_slot_closure_digest: Digest32V2,
     installation_epoch: u64,
     effect_fence_epoch: u64,
@@ -50,6 +51,7 @@ impl ExpectedPreStateV2 {
         deployment_trust_root_set_digest: Digest32V2,
         activation_trust_root_set_digest: Digest32V2,
         release_trust_root_set_digest: Digest32V2,
+        declassification_trust_root_set_digest: Digest32V2,
         bootstrap_slot_closure_digest: Digest32V2,
         installation_epoch: u64,
         effect_fence_epoch: u64,
@@ -68,6 +70,7 @@ impl ExpectedPreStateV2 {
             deployment_trust_root_set_digest,
             activation_trust_root_set_digest,
             release_trust_root_set_digest,
+            declassification_trust_root_set_digest,
             bootstrap_slot_closure_digest,
             installation_epoch,
             effect_fence_epoch,
@@ -110,6 +113,7 @@ impl ExpectedPreStateV2 {
             deployment_trust_root_set_digest: decode_digest(&mut decoder)?,
             activation_trust_root_set_digest: decode_digest(&mut decoder)?,
             release_trust_root_set_digest: decode_digest(&mut decoder)?,
+            declassification_trust_root_set_digest: decode_digest(&mut decoder)?,
             bootstrap_slot_closure_digest: decode_digest(&mut decoder)?,
             installation_epoch: decode_u64(&mut decoder)?,
             effect_fence_epoch: decode_u64(&mut decoder)?,
@@ -137,6 +141,7 @@ impl ExpectedPreStateV2 {
             deployment_trust_root_set_digest: fields.deployment_trust_root_set_digest,
             activation_trust_root_set_digest: fields.activation_trust_root_set_digest,
             release_trust_root_set_digest: fields.release_trust_root_set_digest,
+            declassification_trust_root_set_digest: fields.declassification_trust_root_set_digest,
             bootstrap_slot_closure_digest: fields.bootstrap_slot_closure_digest,
             installation_epoch: fields.installation_epoch,
             effect_fence_epoch: fields.effect_fence_epoch,
@@ -199,6 +204,10 @@ impl ExpectedPreStateV2 {
         self.release_trust_root_set_digest
     }
 
+    pub const fn declassification_trust_root_set_digest(&self) -> Digest32V2 {
+        self.declassification_trust_root_set_digest
+    }
+
     pub const fn bootstrap_slot_closure_digest(&self) -> Digest32V2 {
         self.bootstrap_slot_closure_digest
     }
@@ -227,6 +236,7 @@ struct ExpectedPreStateFieldsV2 {
     deployment_trust_root_set_digest: Digest32V2,
     activation_trust_root_set_digest: Digest32V2,
     release_trust_root_set_digest: Digest32V2,
+    declassification_trust_root_set_digest: Digest32V2,
     bootstrap_slot_closure_digest: Digest32V2,
     installation_epoch: u64,
     effect_fence_epoch: u64,
@@ -270,6 +280,7 @@ fn validate_expected_pre_state(
             value.deployment_trust_root_set_digest.as_bytes(),
             value.activation_trust_root_set_digest.as_bytes(),
             value.release_trust_root_set_digest.as_bytes(),
+            value.declassification_trust_root_set_digest.as_bytes(),
             value.bootstrap_slot_closure_digest.as_bytes(),
         ]
         .iter()
@@ -310,6 +321,7 @@ fn encode_expected_pre_state(
         .bytes(value.deployment_trust_root_set_digest.as_bytes())
         .and_then(|encoder| encoder.bytes(value.activation_trust_root_set_digest.as_bytes()))
         .and_then(|encoder| encoder.bytes(value.release_trust_root_set_digest.as_bytes()))
+        .and_then(|encoder| encoder.bytes(value.declassification_trust_root_set_digest.as_bytes()))
         .and_then(|encoder| encoder.bytes(value.bootstrap_slot_closure_digest.as_bytes()))
         .and_then(|encoder| encoder.u64(value.installation_epoch))
         .and_then(|encoder| encoder.u64(value.effect_fence_epoch))

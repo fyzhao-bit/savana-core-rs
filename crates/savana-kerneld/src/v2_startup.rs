@@ -23,16 +23,44 @@ pub(crate) fn run(
     }
 }
 
+#[cfg(feature = "test-support")]
+pub(crate) fn probe_declassification_rollover(
+    scenario: crate::test_support::V2DeclassificationRolloverScenario,
+) -> crate::test_support::V2DeclassificationRolloverProbe {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        native::probe_declassification_rollover(scenario)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = scenario;
+        unreachable!("V2 test support requires a native Unix target")
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod native {
     use std::fs;
     use std::io::Write as _;
+    use std::os::unix::fs::DirBuilderExt as _;
     use std::os::unix::fs::MetadataExt as _;
     use std::os::unix::fs::OpenOptionsExt as _;
+    #[cfg(feature = "test-support")]
+    use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
+    #[cfg(feature = "test-support")]
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
     use std::sync::Arc;
+    #[cfg(feature = "test-support")]
+    use std::sync::Mutex;
+    #[cfg(feature = "test-support")]
+    use std::thread;
+    #[cfg(feature = "test-support")]
+    use std::time::{Duration, Instant};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[cfg(feature = "test-support")]
+    use ed25519_dalek::Signer as _;
     use ed25519_dalek::SigningKey;
     use hmac::{Hmac, Mac as _};
     use savana_kernel_protocol::v2::{
@@ -40,20 +68,42 @@ mod native {
         ExecutorIdentityV2, HpkeX25519KeyIdV2, ImplementationIdV2, PeerIdentityBindingV2,
         ProducerIdentityV2, RoleIdV2, UnixMillisV2, VersionV2,
     };
+    #[cfg(feature = "test-support")]
+    use savana_kernel_protocol::v2::{
+        encode_kernel_agent_health_response_v2, encode_kernel_ingress_health_response_v2,
+        encode_prepare_new_ingress_response_v2, DurableTaskIdV2, EndpointRoleV2,
+        KernelAgentHealthResponseV2, KernelAgentOperationV2,
+        KernelIngressBootstrapTransferCapabilityV2, KernelIngressHealthResponseV2,
+        KernelIngressOperationV2, KernelServiceOperationV2, NewTaskPreparationHandleV2,
+        PrepareNewIngressResponseV2, PublicServiceStateV2, RequestIdV2,
+        SignedDurableTaskCorrelationV2, UnsignedDurableTaskCorrelationV2,
+    };
     use savana_kernel_protocol::StableCode;
     use savana_policy_core::v2::{
-        activate_internal_validator_registry, ActiveToolRegistryV2, ContextFieldV2,
+        activate_internal_validator_registry, ActiveToolRegistryV2, BoundedConnectorHostV2,
+        ConnectorRegistryStateV2, ContextFieldV2, DurableConnectorRegistryStoreV2,
         DurableG4StateV2, DurableStateNamespaceV2, FilesystemServiceObservationConfigV2,
-        InternalValidatorBuildV2, InternalValidatorDeclarationV2,
+        InstallerOrMdmVerifierV2, InternalValidatorBuildV2, InternalValidatorDeclarationV2,
         InternalValidatorImplementationKindV2, OntologyExprV2, OntologyOperandV2, OntologyScalarV2,
-        SignedToolDescriptorV2, VerifiedInternalValidatorRegistryV2,
-        VerifiedManifestToolConstraintSetV2, VerifiedManifestToolConstraintV2,
-        VerifiedPolicyDispositionV2, VerifiedPolicyToolActivationV2, VerifiedPolicyToolSetV2,
-        VerifiedRegistryPublisherV2, VerifiedToolRegistryV2,
+        OperationalTrustRootSetV2, SharedVerifiedConnectorRegistryV2, SignedToolDescriptorV2,
+        VerifiedInternalValidatorRegistryV2, VerifiedManifestToolConstraintSetV2,
+        VerifiedManifestToolConstraintV2, VerifiedPolicyDispositionV2,
+        VerifiedPolicyToolActivationV2, VerifiedPolicyToolSetV2, VerifiedRegistryPublisherV2,
+        VerifiedToolRegistryV2,
     };
+    #[cfg(feature = "test-support")]
+    use savana_policy_core::Clock;
     use serde::Deserialize;
     use sha2::{Digest as _, Sha256};
     use zeroize::Zeroizing;
+
+    #[cfg(feature = "test-support")]
+    use savana_agentd::{
+        AgentControlKernelClientV2, AgentTaskServiceV2, AuthenticatedJarvisControlV2,
+        SuiteOneAgentKernelClientV2,
+    };
+    #[cfg(feature = "test-support")]
+    use savana_ingressd::SuiteOneIngressKernelClientV2;
 
     use super::ServerLifecycle;
     use crate::deployment_trust::{
@@ -71,9 +121,14 @@ mod native {
         KernelAgentAuthorityV2, KernelAgentSecurityConfigV2, KernelG4G5RuntimeV2,
         KernelG7RuntimeV2, KernelToolApprovalConfigV2,
     };
+    use crate::v2_connector_authority::KernelConnectorAuthorityV2;
     use crate::v2_core_services::CoreKernelRuntimeServicesV2;
     use crate::v2_data_plane::ProductionKernelDataPlaneV2;
-    use crate::v2_dispatch::{KernelServiceDeploymentV2, KernelServiceDispatcherV2};
+    use crate::v2_declassification_policy::{
+        V2LiveEndpointRuntimeV2, VerifiedV2DeclassificationSuccessorV2,
+    };
+    #[cfg(feature = "test-support")]
+    use crate::v2_dispatch::KernelServiceResponseBodyV2;
     use crate::v2_edge::VerifiedServiceEdgeV2;
     use crate::v2_executor_client::SuiteOneKernelExecutorClientV2;
     use crate::v2_ingress_authority::{KernelIngressAuthorityV2, KernelIngressSecurityConfigV2};
@@ -82,10 +137,11 @@ mod native {
     use crate::v2_listener::KerneldV2EndpointListener;
     #[cfg(target_os = "linux")]
     use crate::v2_listener::LinuxNativeUnixPeerVerifierV2;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", feature = "test-support"))]
     use crate::v2_listener::NativeUnixPeerVerifierV2;
-    use crate::v2_server::run_kerneld_v2_workers;
-    use crate::v2_transport_owner::KernelV2HandshakeOwner;
+    use crate::v2_server::{run_kerneld_v2_workers, V2VerifiedSuccessorPublisher};
+    #[cfg(feature = "test-support")]
+    use savana_platform_identity::NativePeerMeasurementV2;
 
     #[cfg(target_os = "linux")]
     const NATIVE_BOOTSTRAP_PATH_V2: &str = "/etc/savana/kerneld-bootstrap-v2.json";
@@ -142,15 +198,28 @@ mod native {
     const G4_STATE_ANCHOR_AUTHENTICATION_KEY_CREDENTIAL_V2: &str =
         "g4-anchor-authentication-v2.key";
     const EXECUTOR_CLIENT_SEED_CREDENTIAL_V2: &str = "executor-kernel-v2.seed";
+    const CONNECTOR_AUTHORITY_SEED_CREDENTIAL_V2: &str = "connector-authority-v2.seed";
     const MAX_BOOTSTRAP_BYTES_V2: usize = 128 * 1024;
     const MAX_ARTIFACT_BYTES_V2: usize = 256 * 1024 * 1024;
+    const MAX_DECLASSIFICATION_OBJECT_BYTES_V2: usize = 1024 * 1024;
     const MAX_SERVICE_COUNT_V2: usize = 5;
     const VAULT_ANCHOR_MAC_DOMAIN_V2: &[u8] = b"SAVANA_VAULT_ANCHOR_MAC_V2\0";
     const AGENT_ANCHOR_MAC_DOMAIN_V2: &[u8] = b"SAVANA_AGENT_AUTHORITY_ANCHOR_MAC_V2\0";
     const G4_ANCHOR_MAC_DOMAIN_V2: &[u8] = b"SAVANA_G4_ANCHOR_MAC_V2\0";
+    const CONNECTOR_ANCHOR_MAC_DOMAIN_V2: &[u8] = b"SAVANA_CONNECTOR_REGISTRY_ANCHOR_MAC_V2\0";
+    const CONNECTOR_STORE_ID_DOMAIN_V2: &[u8] = b"SAVANA_CONNECTOR_REGISTRY_STORE_ID_V2\0";
+    const CONNECTOR_STORE_ENCRYPTION_DERIVATION_DOMAIN_V2: &[u8] =
+        b"SAVANA_CONNECTOR_REGISTRY_STORE_ENCRYPTION_DERIVATION_V2\0";
+    const CONNECTOR_STORE_ANCHOR_DERIVATION_DOMAIN_V2: &[u8] =
+        b"SAVANA_CONNECTOR_REGISTRY_STORE_ANCHOR_DERIVATION_V2\0";
+    const CONNECTOR_HANDLE_DERIVATION_DOMAIN_V2: &[u8] =
+        b"SAVANA_CONNECTOR_REGISTRY_HANDLE_DERIVATION_V2\0";
+    const CONNECTOR_DISABLED_HANDLE_DERIVATION_DOMAIN_V2: &[u8] =
+        b"SAVANA_DISABLED_CONNECTOR_HANDLE_DERIVATION_V2\0";
     const VAULT_ANCHOR_MAGIC_V2: [u8; 8] = *b"SV2ANCH\0";
     const AGENT_ANCHOR_MAGIC_V2: [u8; 8] = *b"SA2ANCH\0";
     const G4_ANCHOR_MAGIC_V2: [u8; 8] = *b"SG2ANCH\0";
+    const CONNECTOR_ANCHOR_MAGIC_V2: [u8; 8] = *b"SC2ANCH\0";
     const AUTHENTICATED_ANCHOR_BYTES_V2: usize = 80;
 
     #[derive(Deserialize)]
@@ -170,6 +239,9 @@ mod native {
             allow(dead_code)
         )]
         effect_ledger_projection_path: PathBuf,
+        declassification_installer_root_path: PathBuf,
+        declassification_trust_root_set_path: PathBuf,
+        declassification_rule_set_path: PathBuf,
         input_runtime_assets_path: PathBuf,
         input_runtime_publisher_key_id: String,
         input_runtime_publisher_public_key: String,
@@ -199,6 +271,14 @@ mod native {
 
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
+    struct DeclassificationInstallerRootDtoV2 {
+        key_id: String,
+        key_epoch: u64,
+        public_key: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct PolicyRuntimeDtoV2 {
         registry_version: [u16; 3],
         registry_publisher_key_id: String,
@@ -220,6 +300,10 @@ mod native {
         executor_seal_key_id: String,
         executor_seal_public_key: String,
         executor_connector_registry_digest: String,
+        connector_registry_genesis_digest: String,
+        connector_authority_key_id: String,
+        connector_authority_public_key: String,
+        user_tier_host_allowlist: Vec<String>,
         executor_receipt_key_id: String,
         executor_receipt_public_key: String,
     }
@@ -293,6 +377,7 @@ mod native {
         g4_anchor_authentication_key: [u8; 32],
         executor_client_signing_key: SigningKey,
         executor_server_public_key: [u8; 32],
+        connector_authority_signing_key: Option<SigningKey>,
     }
 
     struct RuntimeMaterialV2 {
@@ -318,8 +403,16 @@ mod native {
         g4_store_id: Digest32V2,
         policy_allowed_effects: savana_policy_core::v2::EffectSetV2,
         logical_run_ttl_ms: u64,
+        connector_authority_distinct_public_keys: Vec<[u8; 32]>,
+        declassification: DeclassificationMaterialV2,
         policy: LoadedPolicyRuntimeV2,
         parser_trust: KernelParserTrustV2,
+    }
+
+    struct DeclassificationMaterialV2 {
+        canonical_rule_set: Vec<u8>,
+        trust_roots: Arc<OperationalTrustRootSetV2>,
+        installer_verifier: InstallerOrMdmVerifierV2,
     }
 
     struct LoadedPolicyRuntimeV2 {
@@ -336,9 +429,52 @@ mod native {
         executor_identity: ExecutorIdentityV2,
         executor_seal_key_id: HpkeX25519KeyIdV2,
         executor_seal_public_key: [u8; 32],
-        executor_connector_registry_digest: Digest32V2,
+        connector_registry_genesis_digest: Digest32V2,
+        connector_authority_key_id: Ed25519KeyIdV2,
+        connector_authority_public_key: [u8; 32],
+        user_tier_host_allowlist: Vec<BoundedConnectorHostV2>,
         executor_receipt_key_id: Ed25519KeyIdV2,
         executor_receipt_public_key: [u8; 32],
+    }
+
+    struct ProductionV2SuccessorPublisher {
+        config_path: PathBuf,
+        kernel_boot_id: BootIdV2,
+        coordinator: Arc<crate::policy_runtime::PolicyRolloverCoordinator>,
+        owner: Arc<KernelRuntimeOwnerV2>,
+    }
+
+    impl V2VerifiedSuccessorPublisher for ProductionV2SuccessorPublisher {
+        fn publish_next_verified_successor(&self) -> Result<(), StableCode> {
+            let (startup, keys, runtime_material) = load_verified_startup(&self.config_path)?;
+            if BootIdV2::new(keys.boot_id) != self.kernel_boot_id {
+                return Err(StableCode::KernelUnavailable);
+            }
+            let live_endpoints = Arc::new(
+                V2LiveEndpointRuntimeV2::from_verified_deployment(
+                    &startup,
+                    self.kernel_boot_id,
+                    keys.agent_client_public_key,
+                    keys.agent_server_signing_key,
+                    keys.ingress_client_public_key,
+                    keys.ingress_server_signing_key,
+                    keys.envelope_signing_key,
+                    Arc::clone(&self.owner),
+                )
+                .map_err(|_| StableCode::KernelUnavailable)?,
+            );
+            let declassification = runtime_material.declassification;
+            let successor = VerifiedV2DeclassificationSuccessorV2::from_verified_deployment(
+                &startup,
+                declassification.canonical_rule_set,
+                declassification.trust_roots,
+                current_unix_millis()?.get(),
+                live_endpoints,
+            )
+            .map_err(|_| StableCode::KernelUnavailable)?;
+            self.coordinator
+                .publish_v2_declassification_successor(successor)
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -460,17 +596,11 @@ mod native {
         let (agent_listener, ingress_listener) = inherited.into_parts();
 
         let runtime = Arc::new(V2GenerationRuntime::new());
-        runtime.activate(&startup)?;
+        let rollover = crate::bootstrap::v2_policy_rollover_coordinator(Arc::clone(&runtime));
+        let declassification_rule_set = runtime.active_declassification_rules();
         let kernel_identity = startup
             .service_identity(ClosedServiceIdV2::Kerneld)
             .ok_or(StableCode::KernelUnavailable)?;
-        let deployment = KernelServiceDeploymentV2::from_verified_startup(
-            boot_id,
-            kernel_identity,
-            startup.active_state_manifest_digest(),
-            startup.deployment_generation(),
-        )
-        .map_err(|_| StableCode::KernelUnavailable)?;
         let (mut services, readiness) =
             CoreKernelRuntimeServicesV2::new_production_starting(128, 64 * 1024 * 1024, 256, 4096)?;
         let now = current_unix_millis()?;
@@ -582,6 +712,7 @@ mod native {
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
         let mut policy_runtime = KernelG4G5RuntimeV2::from_verified_policy(
+            declassification_rule_set.clone(),
             runtime_material.policy.active_tools,
             runtime_material.policy.validators,
             g4_durable,
@@ -606,13 +737,112 @@ mod native {
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
         let projection = startup.verified_effect_ledger_projection();
+        let connector_genesis = ConnectorRegistryStateV2::from_verified_genesis(
+            runtime_material.policy.connector_registry_genesis_digest,
+            runtime_material.policy.connector_authority_public_key,
+            runtime_material.policy.user_tier_host_allowlist,
+            vec![],
+        )
+        .map_err(|_| StableCode::KernelUnavailable)?;
+        let connector_store_id = connector_store_id_v2(
+            startup.installation_id(),
+            connector_genesis.genesis_digest(),
+            connector_genesis.connector_authority_public_key(),
+        );
+        let (connector_registry, connector_authority) = if let Some(signing_key) =
+            keys.connector_authority_signing_key.as_ref()
+        {
+            let signing_seed = Zeroizing::new(signing_key.to_bytes());
+            let encryption_key = derive_connector_runtime_secret_v2(
+                &signing_seed,
+                CONNECTOR_STORE_ENCRYPTION_DERIVATION_DOMAIN_V2,
+                startup.installation_id(),
+                connector_genesis.genesis_digest(),
+                connector_store_id,
+            )?;
+            let anchor_key = derive_connector_runtime_secret_v2(
+                &signing_seed,
+                CONNECTOR_STORE_ANCHOR_DERIVATION_DOMAIN_V2,
+                startup.installation_id(),
+                connector_genesis.genesis_digest(),
+                connector_store_id,
+            )?;
+            let handle_key = derive_connector_runtime_secret_v2(
+                &signing_seed,
+                CONNECTOR_HANDLE_DERIVATION_DOMAIN_V2,
+                startup.installation_id(),
+                connector_genesis.genesis_digest(),
+                connector_store_id,
+            )?;
+            if encryption_key == anchor_key
+                || encryption_key == handle_key
+                || anchor_key == handle_key
+                || encryption_key.as_slice() == signing_seed.as_slice()
+                || anchor_key.as_slice() == signing_seed.as_slice()
+                || handle_key.as_slice() == signing_seed.as_slice()
+            {
+                return Err(StableCode::KernelUnavailable);
+            }
+            let (state_path, anchor_path) = connector_store_paths_v2(
+                &runtime_material.agent_authority_state_path,
+                connector_genesis.genesis_digest(),
+            )?;
+            let namespace = DurableStateNamespaceV2::from_verified_installation(
+                startup.installation_id(),
+                connector_store_id,
+            )
+            .map_err(|_| StableCode::KernelUnavailable)?;
+            let anchor = PosixAuthenticatedAnchorFileV2::new(
+                anchor_path,
+                startup.installation_id(),
+                connector_store_id,
+                anchor_key,
+                CONNECTOR_ANCHOR_MAC_DOMAIN_V2,
+                CONNECTOR_ANCHOR_MAGIC_V2,
+            )?;
+            let store = DurableConnectorRegistryStoreV2::open(
+                &state_path,
+                encryption_key,
+                namespace,
+                Box::new(anchor),
+                connector_genesis,
+            )
+            .map_err(|_| StableCode::KernelUnavailable)?;
+            let recovered = store
+                .snapshot()
+                .map_err(|_| StableCode::KernelUnavailable)?;
+            let shared = SharedVerifiedConnectorRegistryV2::from_verified_state(recovered)
+                .map_err(|_| StableCode::KernelUnavailable)?;
+            let authority =
+                KernelConnectorAuthorityV2::from_durable_store(store, shared.clone(), handle_key)
+                    .map_err(|_| StableCode::KernelUnavailable)?;
+            (shared, authority)
+        } else {
+            let disabled_seed = Zeroizing::new(keys.envelope_signing_key.to_bytes());
+            let handle_key = derive_connector_runtime_secret_v2(
+                &disabled_seed,
+                CONNECTOR_DISABLED_HANDLE_DERIVATION_DOMAIN_V2,
+                startup.installation_id(),
+                connector_genesis.genesis_digest(),
+                connector_store_id,
+            )?;
+            let shared = SharedVerifiedConnectorRegistryV2::from_verified_state(connector_genesis)
+                .map_err(|_| StableCode::KernelUnavailable)?;
+            let authority = KernelConnectorAuthorityV2::disabled(shared.clone(), handle_key)
+                .map_err(|_| StableCode::KernelUnavailable)?;
+            (shared, authority)
+        };
         let g7_runtime = KernelG7RuntimeV2::from_verified_deployment(
             runtime_material.policy.quota_limit,
             runtime_material.policy.quota_policy_digest,
             runtime_material.policy.executor_identity,
             runtime_material.policy.executor_seal_key_id,
             runtime_material.policy.executor_seal_public_key,
-            runtime_material.policy.executor_connector_registry_digest,
+            runtime_material.policy.connector_registry_genesis_digest,
+            runtime_material.policy.connector_authority_key_id,
+            runtime_material.policy.connector_authority_public_key,
+            keys.connector_authority_signing_key,
+            connector_registry,
             projection,
             keys.envelope_signing_key.clone(),
             runtime_material.policy.executor_receipt_key_id,
@@ -635,11 +865,14 @@ mod native {
             runtime_material.ui_settlement_public_key,
             runtime_material.ingress_settlement_key_id,
             runtime_material.ingress_settlement_public_key,
+            declassification_rule_set.clone(),
+            runtime_material.policy_allowed_effects,
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
         let data_plane = ProductionKernelDataPlaneV2::new(
             input_runtime,
             vault,
+            declassification_rule_set,
             startup.installation_id(),
             ProducerIdentityV2::new(*ingressd_identity.as_bytes()),
             runtime_material.agentd_boot_id,
@@ -649,6 +882,7 @@ mod native {
             runtime_material.logical_run_ttl_ms,
         )?;
         services.install_agent_security(agent_authority)?;
+        services.install_connector_authority(connector_authority)?;
         services.install_ingress_security(
             KernelIngressAuthorityV2::new(ingress_security, 65_536)
                 .map_err(|_| StableCode::KernelUnavailable)?,
@@ -656,69 +890,1503 @@ mod native {
         )?;
         services.install_parser_trust(runtime_material.parser_trust)?;
         services.verify_production_complete()?;
-        let owner = KernelRuntimeOwnerV2::spawn(128, services)
-            .map_err(|_| StableCode::KernelUnavailable)?;
-        let envelope_key_id =
-            derive_ed25519_key_id_v2(keys.envelope_signing_key.verifying_key().to_bytes());
-        if envelope_key_id != startup.kernel_envelope_signing_key_id() {
-            return Err(StableCode::KernelUnavailable);
-        }
-        let dispatcher = Arc::new(
-            KernelServiceDispatcherV2::spawn(
-                deployment,
-                envelope_key_id,
-                keys.envelope_signing_key,
-                owner,
-            )
-            .map_err(|_| StableCode::KernelUnavailable)?,
+        let owner = Arc::new(
+            KernelRuntimeOwnerV2::spawn(128, services)
+                .map_err(|_| StableCode::KernelUnavailable)?,
         );
-        let agent_handshake_edge = startup
-            .kernel_service_handshake_edge(ClosedServiceEdgeIdV2::AgentKernel, boot_id)
-            .map_err(|_| StableCode::KernelUnavailable)?;
-        let ingress_handshake_edge = startup
-            .kernel_service_handshake_edge(ClosedServiceEdgeIdV2::IngressKernel, boot_id)
-            .map_err(|_| StableCode::KernelUnavailable)?;
-        let agent_handshake = Arc::new(
-            KernelV2HandshakeOwner::spawn(
-                agent_handshake_edge,
+        let live_endpoints = Arc::new(
+            V2LiveEndpointRuntimeV2::from_verified_deployment(
+                &startup,
+                boot_id,
                 keys.agent_client_public_key,
                 keys.agent_server_signing_key,
-                128,
-            )
-            .map_err(|_| StableCode::KernelUnavailable)?,
-        );
-        let ingress_handshake = Arc::new(
-            KernelV2HandshakeOwner::spawn(
-                ingress_handshake_edge,
                 keys.ingress_client_public_key,
                 keys.ingress_server_signing_key,
-                128,
+                keys.envelope_signing_key,
+                Arc::clone(&owner),
             )
             .map_err(|_| StableCode::KernelUnavailable)?,
         );
+        let declassification = runtime_material.declassification;
+        let successor = VerifiedV2DeclassificationSuccessorV2::from_verified_deployment(
+            &startup,
+            declassification.canonical_rule_set,
+            declassification.trust_roots,
+            current_unix_millis()?.get(),
+            live_endpoints,
+        )
+        .map_err(|_| StableCode::KernelUnavailable)?;
+        rollover.publish_v2_declassification_successor(successor)?;
         #[cfg(target_os = "linux")]
         let peer_verifier = Arc::new(LinuxNativeUnixPeerVerifierV2);
         #[cfg(target_os = "macos")]
         let peer_verifier = Arc::new(MacOsNativeUnixPeerVerifierV2);
         let agent = KerneldV2EndpointListener::new_agent(
             agent_listener,
-            Arc::clone(&agent_edge),
             Arc::clone(&runtime),
             peer_verifier.clone(),
-            agent_handshake,
-            Arc::clone(&dispatcher),
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
         let ingress = KerneldV2EndpointListener::new_ingress(
             ingress_listener,
-            ingress_edge,
             Arc::clone(&runtime),
             peer_verifier,
-            ingress_handshake,
-            dispatcher,
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
-        run_kerneld_v2_workers(agent, ingress, runtime.as_ref(), readiness, lifecycle)
+        let successor_publisher = ProductionV2SuccessorPublisher {
+            config_path: config_path.to_path_buf(),
+            kernel_boot_id: boot_id,
+            coordinator: rollover,
+            owner,
+        };
+        run_kerneld_v2_workers(
+            agent,
+            ingress,
+            runtime.as_ref(),
+            readiness,
+            lifecycle,
+            &successor_publisher,
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(super) fn probe_declassification_rollover(
+        scenario: crate::test_support::V2DeclassificationRolloverScenario,
+    ) -> crate::test_support::V2DeclassificationRolloverProbe {
+        use savana_policy_core::v2::{
+            declassification_implementation_digest_v2, ClosedDeclassificationPurposeV2,
+            DeclassificationRuleSetV2, DeclassificationRuleV2, LeakGateDutyV2,
+            OperationalTrustRootPurposeV2, OperationalTrustRootSetItemV2,
+        };
+
+        let installer = SigningKey::from_bytes(&[0x31; 32]);
+        let authority = SigningKey::from_bytes(&[0x32; 32]);
+        let family = Digest32V2::new([0x33; 32]);
+        let member = OperationalTrustRootSetItemV2::new(
+            OperationalTrustRootPurposeV2::DeclassificationAuthority,
+            authority.verifying_key().to_bytes(),
+            1,
+            5,
+            100,
+        )
+        .expect("declassification rollover authority member");
+        let roots = Arc::new(
+            OperationalTrustRootSetV2::new_declassification_signed_for_test(
+                family,
+                1,
+                None,
+                vec![member],
+                5,
+                100,
+                &installer,
+                1,
+            )
+            .expect("declassification rollover roots"),
+        );
+        let signed_rules = |sequence, predecessor, not_before, not_after, now| {
+            let rule = DeclassificationRuleV2::new_for_test(
+                2,
+                ClosedDeclassificationPurposeV2::PlannerCall,
+                declassification_implementation_digest_v2(2)
+                    .expect("planner implementation digest"),
+                LeakGateDutyV2::BlocklistAndNoResidualPii,
+                None,
+                None,
+                not_before,
+                not_after,
+            )
+            .expect("declassification rollover rule");
+            DeclassificationRuleSetV2::new_signed_for_test(
+                family,
+                sequence,
+                predecessor,
+                vec![rule],
+                not_before,
+                not_after,
+                roots.as_ref(),
+                &authority,
+                1,
+                now,
+            )
+            .expect("declassification rollover rule set")
+        };
+
+        let initial = signed_rules(7, Some(Digest32V2::new([0x34; 32])), 10, 90, 50);
+        let old_digest = initial.signed_digest();
+        let initial_startup = verified_rollover_startup(1, old_digest);
+        let runtime = Arc::new(V2GenerationRuntime::new());
+        let publication_clock = Arc::new(RolloverPublicationClockV2::new(50));
+        let coordinator = Arc::new(
+            crate::policy_runtime::PolicyRolloverCoordinator::new_v2_with_clock_for_test_support(
+                Arc::clone(&runtime),
+                Arc::clone(&publication_clock) as Arc<dyn Clock + Send + Sync>,
+            ),
+        );
+        let active_rules = runtime.active_declassification_rules();
+        let observations = Arc::new(Mutex::new(Vec::<RolloverDispatchObservationV2>::new()));
+        let handler_observations = Arc::clone(&observations);
+        let handler_rules = active_rules.clone();
+        let task_authority = SigningKey::from_bytes(&[0xa6; 32]);
+        let installation_id = initial_startup.installation_id();
+        let agentd_identity = initial_startup
+            .service_identity(ClosedServiceIdV2::Agentd)
+            .expect("rollover agentd identity");
+        let owner = Arc::new(
+            KernelRuntimeOwnerV2::spawn_for_test_support(8, move |request| {
+                let (peer, lease, _, _, _, _, operation) = request.into_parts();
+                let rule_digest = handler_rules
+                    .snapshot()
+                    .map_err(|_| StableCode::KernelUnavailable)?
+                    .signed_digest();
+                handler_observations
+                    .lock()
+                    .map_err(|_| StableCode::KernelUnavailable)?
+                    .push(RolloverDispatchObservationV2 {
+                        role: peer.role(),
+                        generation: lease.deployment_generation(),
+                        rule_digest,
+                    });
+                let body = match operation {
+                    KernelServiceOperationV2::Agent(KernelAgentOperationV2::Health(_)) => {
+                        encode_kernel_agent_health_response_v2(&KernelAgentHealthResponseV2::new(
+                            true,
+                            PublicServiceStateV2::Ready,
+                        ))
+                    }
+                    KernelServiceOperationV2::Agent(KernelAgentOperationV2::PrepareNewIngress(
+                        _,
+                    )) => {
+                        let mut task_id = [0xe1; 32];
+                        task_id[31] = u8::try_from(lease.deployment_generation())
+                            .map_err(|_| StableCode::KernelUnavailable)?;
+                        let unsigned = UnsignedDurableTaskCorrelationV2::new(
+                            installation_id,
+                            lease.active_state_manifest_digest(),
+                            lease.deployment_generation(),
+                            DurableTaskIdV2::new(task_id),
+                            agentd_identity,
+                            BootIdV2::new([0xd1; 32]),
+                            BootIdV2::new([0xc1; 32]),
+                            BootIdV2::new([0xd3; 32]),
+                            UnixMillisV2::new(1),
+                            UnixMillisV2::new(u64::MAX - 1),
+                            UnixMillisV2::new(u64::MAX),
+                        )
+                        .map_err(|_| StableCode::KernelUnavailable)?;
+                        let response = PrepareNewIngressResponseV2::Prepared {
+                            preparation: NewTaskPreparationHandleV2::from_authority_entropy(
+                                task_id,
+                            )
+                            .ok_or(StableCode::KernelUnavailable)?,
+                            correlation: SignedDurableTaskCorrelationV2::sign(
+                                unsigned,
+                                &task_authority,
+                            )
+                            .map_err(|_| StableCode::KernelUnavailable)?,
+                            ingress_transfer:
+                                KernelIngressBootstrapTransferCapabilityV2::from_authority_entropy(
+                                    [0xe2; 32],
+                                )
+                                .ok_or(StableCode::KernelUnavailable)?,
+                        };
+                        encode_prepare_new_ingress_response_v2(&response)
+                    }
+                    KernelServiceOperationV2::Ingress(KernelIngressOperationV2::Health(_)) => {
+                        encode_kernel_ingress_health_response_v2(
+                            &KernelIngressHealthResponseV2::new(true, PublicServiceStateV2::Ready),
+                        )
+                    }
+                    _ => return Err(StableCode::KernelUnavailable),
+                }
+                .map_err(|_| StableCode::KernelUnavailable)?;
+                KernelServiceResponseBodyV2::from_typed_handler(body)
+                    .map_err(|_| StableCode::KernelUnavailable)
+            })
+            .expect("rollover runtime owner"),
+        );
+        let initial_endpoints = Arc::new(
+            rollover_live_endpoints(&initial_startup, Arc::clone(&owner), false)
+                .expect("complete initial endpoint runtime"),
+        );
+        coordinator
+            .publish_v2_declassification_successor(
+                VerifiedV2DeclassificationSuccessorV2::from_verified_deployment(
+                    &initial_startup,
+                    initial.canonical_bytes().to_vec(),
+                    Arc::clone(&roots),
+                    50,
+                    initial_endpoints,
+                )
+                .expect("verified initial declassification deployment"),
+            )
+            .expect("publish initial declassification deployment");
+        let client_source = Arc::new(Mutex::new(Some((1_u64, old_digest))));
+        let mut live_clients =
+            RolloverLiveClientsV2::new(&initial_startup, Arc::clone(&client_source));
+        live_clients.exercise(Arc::clone(&runtime), &initial_startup);
+
+        let successor = signed_rules(8, Some(old_digest), 20, 90, 50);
+        let candidate_digest = successor.signed_digest();
+        let (generation, manifest_pin, mut bytes, verification_time, incomplete_endpoints) =
+            match scenario {
+            crate::test_support::V2DeclassificationRolloverScenario::ValidSuccessor => (
+                2,
+                candidate_digest,
+                successor.canonical_bytes().to_vec(),
+                50,
+                false,
+            ),
+            crate::test_support::V2DeclassificationRolloverScenario::RuleSetRollback => {
+                (2, old_digest, initial.canonical_bytes().to_vec(), 50, false)
+            }
+            crate::test_support::V2DeclassificationRolloverScenario::WrongManifestPin => (
+                2,
+                Digest32V2::new([0x7f; 32]),
+                successor.canonical_bytes().to_vec(),
+                50,
+                false,
+            ),
+            crate::test_support::V2DeclassificationRolloverScenario::BadRuleSetSignature => (
+                2,
+                candidate_digest,
+                successor.canonical_bytes().to_vec(),
+                50,
+                false,
+            ),
+            crate::test_support::V2DeclassificationRolloverScenario::ExpiredRuleSet => (
+                2,
+                candidate_digest,
+                successor.canonical_bytes().to_vec(),
+                95,
+                false,
+            ),
+            crate::test_support::V2DeclassificationRolloverScenario::ExpiresBeforePublication => (
+                2,
+                candidate_digest,
+                successor.canonical_bytes().to_vec(),
+                50,
+                false,
+            ),
+            crate::test_support::V2DeclassificationRolloverScenario::IncompleteEndpointRuntime => (
+                2,
+                candidate_digest,
+                successor.canonical_bytes().to_vec(),
+                50,
+                true,
+            ),
+            crate::test_support::V2DeclassificationRolloverScenario::GenerationGap => (
+                3,
+                candidate_digest,
+                successor.canonical_bytes().to_vec(),
+                50,
+                false,
+            ),
+        };
+        if scenario == crate::test_support::V2DeclassificationRolloverScenario::BadRuleSetSignature
+        {
+            *bytes.last_mut().expect("nonempty successor") ^= 1;
+        }
+        let startup = verified_rollover_startup(generation, manifest_pin);
+        let candidate = rollover_live_endpoints(&startup, Arc::clone(&owner), incomplete_endpoints)
+            .and_then(|endpoints| {
+                VerifiedV2DeclassificationSuccessorV2::from_verified_deployment(
+                    &startup,
+                    bytes,
+                    roots,
+                    verification_time,
+                    Arc::new(endpoints),
+                )
+            });
+        let verified_successor_constructed = candidate.is_ok();
+        if scenario
+            == crate::test_support::V2DeclassificationRolloverScenario::ExpiresBeforePublication
+        {
+            publication_clock.set(95);
+        }
+        let result = candidate
+            .map_err(|_| StableCode::KernelUnavailable)
+            .and_then(|candidate| coordinator.publish_v2_declassification_successor(candidate));
+        let serving_startup = if result.is_ok() {
+            *client_source.lock().expect("rollover client source") =
+                Some((generation, manifest_pin));
+            &startup
+        } else {
+            *client_source.lock().expect("rollover client source") = None;
+            live_clients.assert_rejected_reload_retains_generation(1);
+            &initial_startup
+        };
+        live_clients.exercise(Arc::clone(&runtime), serving_startup);
+        let observations = observations.lock().expect("rollover observations");
+        let ingress = observations
+            .iter()
+            .rev()
+            .find(|observation| observation.role == EndpointRoleV2::IngressKernel)
+            .copied()
+            .expect("real ingress dispatch observation");
+        let agent = observations
+            .iter()
+            .rev()
+            .find(|observation| observation.role == EndpointRoleV2::AgentKernel)
+            .copied()
+            .expect("real agent dispatch observation");
+        let active_generation = runtime
+            .active_declassification_rules()
+            .generation_snapshot()
+            .expect("active V2 generation")
+            .deployment_generation();
+        crate::test_support::V2DeclassificationRolloverProbe::new(
+            result,
+            old_digest,
+            candidate_digest,
+            verified_successor_constructed,
+            ingress.rule_digest,
+            agent.rule_digest,
+            ingress.generation,
+            agent.generation,
+            active_generation,
+            runtime.admission_resumed_for_test_support(),
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    #[derive(Clone, Copy)]
+    struct RolloverDispatchObservationV2 {
+        role: EndpointRoleV2,
+        generation: u64,
+        rule_digest: Digest32V2,
+    }
+
+    #[cfg(feature = "test-support")]
+    struct RolloverPublicationClockV2(AtomicU64);
+
+    #[cfg(feature = "test-support")]
+    impl RolloverPublicationClockV2 {
+        const fn new(now_unix_ms: u64) -> Self {
+            Self(AtomicU64::new(now_unix_ms))
+        }
+
+        fn set(&self, now_unix_ms: u64) {
+            self.0.store(now_unix_ms, AtomicOrdering::Release);
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    impl Clock for RolloverPublicationClockV2 {
+        fn wall_now(
+            &self,
+        ) -> Result<savana_kernel_protocol::UnixMillis, savana_kernel_protocol::StableCode>
+        {
+            Ok(savana_kernel_protocol::UnixMillis::new(
+                self.0.load(AtomicOrdering::Acquire),
+            ))
+        }
+
+        fn monotonic_now_millis(&self) -> Result<u64, savana_kernel_protocol::StableCode> {
+            Ok(self.0.load(AtomicOrdering::Acquire))
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    struct RolloverEndpointKeysV2 {
+        agent_client: SigningKey,
+        agent_server: SigningKey,
+        ingress_client: SigningKey,
+        ingress_server: SigningKey,
+        envelope: SigningKey,
+    }
+
+    #[cfg(feature = "test-support")]
+    fn rollover_endpoint_keys() -> RolloverEndpointKeysV2 {
+        RolloverEndpointKeysV2 {
+            agent_client: SigningKey::from_bytes(&[0xa1; 32]),
+            agent_server: SigningKey::from_bytes(&[0xa2; 32]),
+            ingress_client: SigningKey::from_bytes(&[0xa3; 32]),
+            ingress_server: SigningKey::from_bytes(&[0xa4; 32]),
+            envelope: SigningKey::from_bytes(&[0xa5; 32]),
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    fn rollover_live_endpoints(
+        startup: &VerifiedDaemonStartupV2,
+        owner: Arc<KernelRuntimeOwnerV2>,
+        incomplete: bool,
+    ) -> Result<V2LiveEndpointRuntimeV2, savana_policy_core::v2::DeploymentControlErrorV2> {
+        let keys = rollover_endpoint_keys();
+        let envelope = if incomplete {
+            SigningKey::from_bytes(&[0xee; 32])
+        } else {
+            keys.envelope
+        };
+        V2LiveEndpointRuntimeV2::from_verified_deployment(
+            startup,
+            BootIdV2::new([0xc1; 32]),
+            keys.agent_client.verifying_key().to_bytes(),
+            keys.agent_server,
+            keys.ingress_client.verifying_key().to_bytes(),
+            keys.ingress_server,
+            envelope,
+            owner,
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    struct RolloverPeerVerifierV2 {
+        agent: NativePeerMeasurementV2,
+        ingress: NativePeerMeasurementV2,
+    }
+
+    #[cfg(feature = "test-support")]
+    impl NativeUnixPeerVerifierV2 for RolloverPeerVerifierV2 {
+        fn verify(
+            &self,
+            _stream: &UnixStream,
+            edge: &VerifiedServiceEdgeV2,
+        ) -> Result<
+            crate::v2_edge::VerifiedAcceptedPeerV2,
+            crate::deployment_trust::DeploymentTrustErrorV2,
+        > {
+            let measurement = match edge.role() {
+                EndpointRoleV2::AgentKernel => &self.agent,
+                EndpointRoleV2::IngressKernel => &self.ingress,
+                _ => return Err(crate::deployment_trust::DeploymentTrustErrorV2::EdgeLockMismatch),
+            };
+            edge.verify_native_peer(measurement)
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    fn rollover_peer_measurement(
+        startup: &VerifiedDaemonStartupV2,
+        role: EndpointRoleV2,
+    ) -> NativePeerMeasurementV2 {
+        let service = match role {
+            EndpointRoleV2::AgentKernel => ClosedServiceIdV2::Agentd,
+            EndpointRoleV2::IngressKernel => ClosedServiceIdV2::Ingressd,
+            _ => unreachable!("rollover probe has only agent and ingress roles"),
+        };
+        let lock = startup.service_lock(service).expect("rollover client lock");
+        NativePeerMeasurementV2::linux(
+            lock.uid,
+            lock.gid,
+            700 + u32::from(service.tag()),
+            800 + u64::from(service.tag()),
+            *lock.executable_digest.as_bytes(),
+        )
+        .expect("rollover native peer measurement")
+    }
+
+    #[cfg(feature = "test-support")]
+    struct RolloverLiveClientsV2 {
+        directory: PathBuf,
+        agent_path: PathBuf,
+        ingress_path: PathBuf,
+        agent: SuiteOneAgentKernelClientV2,
+        agent_tasks: AgentTaskServiceV2,
+        ingress: SuiteOneIngressKernelClientV2,
+    }
+
+    #[cfg(feature = "test-support")]
+    impl RolloverLiveClientsV2 {
+        fn new(
+            startup: &VerifiedDaemonStartupV2,
+            source: Arc<Mutex<Option<(u64, Digest32V2)>>>,
+        ) -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("rollover directory clock")
+                .as_nanos();
+            let directory =
+                PathBuf::from("/tmp").join(format!("sv2-clients-{}-{nonce:x}", std::process::id()));
+            fs::create_dir(&directory).expect("rollover listener directory");
+            let agent_path = directory.join("agent.sock");
+            let ingress_path = directory.join("ingress.sock");
+            let keys = rollover_endpoint_keys();
+            let task_authority = SigningKey::from_bytes(&[0xa6; 32]);
+            let task_authority_public_key = task_authority.verifying_key().to_bytes();
+            let task_authority_key_id = derive_ed25519_key_id_v2(task_authority_public_key);
+            let agent_source = Arc::clone(&source);
+            let agent = SuiteOneAgentKernelClientV2::from_verified_startup_for_test_support(
+                startup,
+                BootIdV2::new([0xd1; 32]),
+                BootIdV2::new([0xc1; 32]),
+                rollover_peer_binding(startup, EndpointRoleV2::AgentKernel),
+                keys.agent_client,
+                keys.agent_server.verifying_key().to_bytes(),
+                task_authority_key_id,
+                task_authority_public_key,
+                agent_path.clone(),
+                move || {
+                    let (generation, digest) = (*agent_source.lock().map_err(|_| ())?).ok_or(())?;
+                    Ok(verified_rollover_startup(generation, digest))
+                },
+            )
+            .expect("verified agent rollover client");
+            let agent_tasks = AgentTaskServiceV2::from_verified_deployment(
+                startup.installation_id(),
+                startup.active_state_manifest_digest(),
+                startup.deployment_generation(),
+                startup.protocol_abi_digest(),
+                startup
+                    .service_identity(ClosedServiceIdV2::Agentd)
+                    .expect("rollover agentd identity"),
+                BootIdV2::new([0xd1; 32]),
+                BootIdV2::new([0xc1; 32]),
+                task_authority_key_id,
+                task_authority_public_key,
+                128,
+            )
+            .expect("verified pre-rollover agent task service");
+            let ingress_source = source;
+            let ingress = SuiteOneIngressKernelClientV2::from_verified_startup_for_test_support(
+                startup,
+                BootIdV2::new([0xd2; 32]),
+                BootIdV2::new([0xc1; 32]),
+                rollover_peer_binding(startup, EndpointRoleV2::IngressKernel),
+                keys.ingress_client,
+                keys.ingress_server.verifying_key().to_bytes(),
+                ingress_path.clone(),
+                move || {
+                    let (generation, digest) =
+                        (*ingress_source.lock().map_err(|_| ())?).ok_or(())?;
+                    Ok(verified_rollover_startup(generation, digest))
+                },
+            )
+            .expect("verified ingress rollover client");
+            Self {
+                directory,
+                agent_path,
+                ingress_path,
+                agent,
+                agent_tasks,
+                ingress,
+            }
+        }
+
+        fn assert_rejected_reload_retains_generation(&self, generation: u64) {
+            assert!(self
+                .agent
+                .reload_verified_authority_for_test_support()
+                .is_err());
+            assert!(self
+                .ingress
+                .reload_verified_authority_for_test_support()
+                .is_err());
+            assert_eq!(
+                self.agent.active_generation_for_test_support(),
+                Some(generation)
+            );
+            assert_eq!(
+                self.ingress.active_generation_for_test_support(),
+                Some(generation)
+            );
+        }
+
+        fn exercise(
+            &mut self,
+            runtime: Arc<V2GenerationRuntime>,
+            startup: &VerifiedDaemonStartupV2,
+        ) {
+            let verifier: Arc<dyn NativeUnixPeerVerifierV2> = Arc::new(RolloverPeerVerifierV2 {
+                agent: rollover_peer_measurement(startup, EndpointRoleV2::AgentKernel),
+                ingress: rollover_peer_measurement(startup, EndpointRoleV2::IngressKernel),
+            });
+            let agent_listener = KerneldV2EndpointListener::new_agent(
+                UnixListener::bind(&self.agent_path).expect("agent rollover listener"),
+                Arc::clone(&runtime),
+                Arc::clone(&verifier),
+            )
+            .expect("agent rollover endpoint");
+            let agent_connection_count = if startup.deployment_generation() == 1 {
+                2
+            } else {
+                3
+            };
+            let agent_server = thread::spawn(move || {
+                serve_rollover_connections(agent_listener, agent_connection_count)
+            });
+            let deadline = rollover_request_deadline();
+            let agent_result = self.agent.health(RequestIdV2::new([0xd4; 16]), deadline);
+            let mut request_id = [0xd5; 16];
+            request_id[15] = u8::try_from(startup.deployment_generation())
+                .expect("rollover generation fits request fixture");
+            let mut request_nonce = [0xd6; 32];
+            request_nonce[31] = u8::try_from(startup.deployment_generation())
+                .expect("rollover generation fits nonce fixture");
+            let task_result = self.agent.prepare_ingress_for_test_support(
+                RequestIdV2::new(request_id),
+                savana_kernel_protocol::v2::Nonce32V2::new(request_nonce),
+                BootIdV2::new([0xd3; 32]),
+                deadline,
+            );
+            let agent_server_result = agent_server.join().expect("agent rollover listener thread");
+            assert_eq!(
+                agent_result,
+                Ok(PublicServiceStateV2::Ready),
+                "server result: {agent_server_result:?}",
+            );
+            let preparation = task_result.unwrap_or_else(|error| {
+                panic!(
+                    "post-rollover PrepareNewIngress failed: {error:?}; server result: {agent_server_result:?}"
+                )
+            });
+            let context = AuthenticatedJarvisControlV2::from_mutual_authentication(
+                startup.installation_id(),
+                Digest32V2::new([0xd7; 32]),
+                Digest32V2::new([0xd8; 32]),
+                BootIdV2::new([0xd3; 32]),
+                BootIdV2::new([0xd9; 32]),
+                BootIdV2::new([0xd1; 32]),
+                BootIdV2::new([0xc1; 32]),
+            )
+            .expect("rollover authenticated JARVIS context");
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("rollover task clock")
+                .as_millis();
+            let now = UnixMillisV2::new(u64::try_from(now).expect("rollover task time fits u64"));
+            self.agent_tasks
+                .prepare_ingress(
+                    context,
+                    savana_kernel_protocol::v2::Nonce32V2::new(request_nonce),
+                    preparation,
+                    now,
+                )
+                .expect("same pre-rollover agent task service accepts successor preparation");
+            assert_eq!(agent_server_result, Ok(()));
+            fs::remove_file(&self.agent_path).expect("remove agent rollover socket");
+
+            let ingress_listener = KerneldV2EndpointListener::new_ingress(
+                UnixListener::bind(&self.ingress_path).expect("ingress rollover listener"),
+                runtime,
+                verifier,
+            )
+            .expect("ingress rollover endpoint");
+            let ingress_connection_count = if startup.deployment_generation() == 1 {
+                1
+            } else {
+                2
+            };
+            let ingress_server = thread::spawn(move || {
+                serve_rollover_connections(ingress_listener, ingress_connection_count)
+            });
+            let health = self
+                .ingress
+                .health(deadline)
+                .expect("ingress rollover client health");
+            assert!(health.ready());
+            assert_eq!(health.state(), PublicServiceStateV2::Ready);
+            assert_eq!(
+                ingress_server
+                    .join()
+                    .expect("ingress rollover listener thread"),
+                Ok(())
+            );
+            fs::remove_file(&self.ingress_path).expect("remove ingress rollover socket");
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    fn serve_rollover_connections(
+        listener: KerneldV2EndpointListener,
+        connection_count: usize,
+    ) -> Result<(), crate::v2_listener::V2ListenerError> {
+        for index in 0..connection_count {
+            let result = listener.serve_one(
+                UnixMillisV2::new(50),
+                Instant::now() + Duration::from_secs(3),
+            );
+            if index + 1 == connection_count {
+                return result;
+            }
+            assert!(
+                result.is_ok()
+                    || matches!(
+                        result,
+                        Err(crate::v2_listener::V2ListenerError::Connection(
+                            crate::v2_dispatch::KernelServiceDispatchErrorV2::Malformed
+                        ))
+                    )
+            );
+        }
+        unreachable!("rollover clients always require a connection")
+    }
+
+    #[cfg(feature = "test-support")]
+    impl Drop for RolloverLiveClientsV2 {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.agent_path);
+            let _ = fs::remove_file(&self.ingress_path);
+            let _ = fs::remove_dir(&self.directory);
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    fn rollover_peer_binding(
+        startup: &VerifiedDaemonStartupV2,
+        role: EndpointRoleV2,
+    ) -> PeerIdentityBindingV2 {
+        let service = match role {
+            EndpointRoleV2::AgentKernel => ClosedServiceIdV2::Agentd,
+            EndpointRoleV2::IngressKernel => ClosedServiceIdV2::Ingressd,
+            _ => unreachable!("rollover probe has only agent and ingress roles"),
+        };
+        let lock = startup.service_lock(service).expect("rollover client lock");
+        PeerIdentityBindingV2::linux(
+            lock.uid,
+            lock.gid,
+            700 + u32::from(service.tag()),
+            800 + u64::from(service.tag()),
+            lock.executable_digest,
+        )
+        .expect("rollover peer binding")
+    }
+
+    #[cfg(feature = "test-support")]
+    fn rollover_request_deadline() -> UnixMillisV2 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("rollover request clock")
+            .as_millis() as u64;
+        UnixMillisV2::new(now + 2_000)
+    }
+
+    #[cfg(all(test, feature = "test-support"))]
+    fn rollover_authority_test_clients<FA, FI>(
+        startup: &VerifiedDaemonStartupV2,
+        agent_loader: FA,
+        ingress_loader: FI,
+    ) -> (SuiteOneAgentKernelClientV2, SuiteOneIngressKernelClientV2)
+    where
+        FA: Fn() -> Result<VerifiedDaemonStartupV2, ()> + Send + Sync + 'static,
+        FI: Fn() -> Result<VerifiedDaemonStartupV2, ()> + Send + Sync + 'static,
+    {
+        let keys = rollover_endpoint_keys();
+        let task_authority = SigningKey::from_bytes(&[0xa6; 32]);
+        let task_authority_public_key = task_authority.verifying_key().to_bytes();
+        let agent = SuiteOneAgentKernelClientV2::from_verified_startup_for_test_support(
+            startup,
+            BootIdV2::new([0xd1; 32]),
+            BootIdV2::new([0xc1; 32]),
+            rollover_peer_binding(startup, EndpointRoleV2::AgentKernel),
+            keys.agent_client,
+            keys.agent_server.verifying_key().to_bytes(),
+            derive_ed25519_key_id_v2(task_authority_public_key),
+            task_authority_public_key,
+            PathBuf::from("/tmp/savana-agent-rollover-unused.sock"),
+            agent_loader,
+        )
+        .expect("verified agent rollover authority test client");
+        let ingress = SuiteOneIngressKernelClientV2::from_verified_startup_for_test_support(
+            startup,
+            BootIdV2::new([0xd2; 32]),
+            BootIdV2::new([0xc1; 32]),
+            rollover_peer_binding(startup, EndpointRoleV2::IngressKernel),
+            keys.ingress_client,
+            keys.ingress_server.verifying_key().to_bytes(),
+            PathBuf::from("/tmp/savana-ingress-rollover-unused.sock"),
+            ingress_loader,
+        )
+        .expect("verified ingress rollover authority test client");
+        (agent, ingress)
+    }
+
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn client_rollover_loader_failure_keeps_old_authority() {
+        let startup = verified_rollover_startup(1, Digest32V2::new([0x41; 32]));
+        let (agent, ingress) = rollover_authority_test_clients(&startup, || Err(()), || Err(()));
+
+        assert!(agent.reload_verified_authority_for_test_support().is_err());
+        assert!(ingress
+            .reload_verified_authority_for_test_support()
+            .is_err());
+        assert_eq!(agent.active_generation_for_test_support(), Some(1));
+        assert_eq!(ingress.active_generation_for_test_support(), Some(1));
+    }
+
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn client_rollover_generation_gap_keeps_old_authority() {
+        let startup = verified_rollover_startup(1, Digest32V2::new([0x42; 32]));
+        let (agent, ingress) = rollover_authority_test_clients(
+            &startup,
+            || Ok(verified_rollover_startup(3, Digest32V2::new([0x43; 32]))),
+            || Ok(verified_rollover_startup(3, Digest32V2::new([0x43; 32]))),
+        );
+
+        assert!(agent.reload_verified_authority_for_test_support().is_err());
+        assert!(ingress
+            .reload_verified_authority_for_test_support()
+            .is_err());
+        assert_eq!(agent.active_generation_for_test_support(), Some(1));
+        assert_eq!(ingress.active_generation_for_test_support(), Some(1));
+    }
+
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn client_rollover_identity_change_keeps_old_authority() {
+        let startup = verified_rollover_startup(1, Digest32V2::new([0x44; 32]));
+        let (agent, ingress) = rollover_authority_test_clients(
+            &startup,
+            || {
+                Ok(verified_rollover_startup_with_identity_change(
+                    2,
+                    Digest32V2::new([0x45; 32]),
+                    true,
+                ))
+            },
+            || {
+                Ok(verified_rollover_startup_with_identity_change(
+                    2,
+                    Digest32V2::new([0x45; 32]),
+                    true,
+                ))
+            },
+        );
+
+        assert!(agent.reload_verified_authority_for_test_support().is_err());
+        assert!(ingress
+            .reload_verified_authority_for_test_support()
+            .is_err());
+        assert_eq!(agent.active_generation_for_test_support(), Some(1));
+        assert_eq!(ingress.active_generation_for_test_support(), Some(1));
+    }
+
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn client_rollover_listener_change_keeps_old_authority() {
+        let startup = verified_rollover_startup(1, Digest32V2::new([0x4a; 32]));
+        let (agent, ingress) = rollover_authority_test_clients(
+            &startup,
+            || {
+                Ok(verified_rollover_startup_with_mutation(
+                    2,
+                    Digest32V2::new([0x4b; 32]),
+                    RolloverStartupMutationV2::ListenerIdentity,
+                ))
+            },
+            || {
+                Ok(verified_rollover_startup_with_mutation(
+                    2,
+                    Digest32V2::new([0x4b; 32]),
+                    RolloverStartupMutationV2::ListenerIdentity,
+                ))
+            },
+        );
+
+        assert!(agent.reload_verified_authority_for_test_support().is_err());
+        assert!(ingress
+            .reload_verified_authority_for_test_support()
+            .is_err());
+        assert_eq!(agent.active_generation_for_test_support(), Some(1));
+        assert_eq!(ingress.active_generation_for_test_support(), Some(1));
+    }
+
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn client_rollover_handshake_key_change_keeps_old_authority() {
+        let startup = verified_rollover_startup(1, Digest32V2::new([0x4c; 32]));
+        let (agent, ingress) = rollover_authority_test_clients(
+            &startup,
+            || {
+                Ok(verified_rollover_startup_with_mutation(
+                    2,
+                    Digest32V2::new([0x4d; 32]),
+                    RolloverStartupMutationV2::HandshakeKeys,
+                ))
+            },
+            || {
+                Ok(verified_rollover_startup_with_mutation(
+                    2,
+                    Digest32V2::new([0x4d; 32]),
+                    RolloverStartupMutationV2::HandshakeKeys,
+                ))
+            },
+        );
+
+        assert!(agent.reload_verified_authority_for_test_support().is_err());
+        assert!(ingress
+            .reload_verified_authority_for_test_support()
+            .is_err());
+        assert_eq!(agent.active_generation_for_test_support(), Some(1));
+        assert_eq!(ingress.active_generation_for_test_support(), Some(1));
+    }
+
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn client_rollover_same_generation_manifest_change_keeps_old_authority() {
+        let startup = verified_rollover_startup(1, Digest32V2::new([0x4e; 32]));
+        let (agent, ingress) = rollover_authority_test_clients(
+            &startup,
+            || {
+                Ok(verified_rollover_startup_with_mutation(
+                    1,
+                    Digest32V2::new([0x4f; 32]),
+                    RolloverStartupMutationV2::ActiveManifest,
+                ))
+            },
+            || {
+                Ok(verified_rollover_startup_with_mutation(
+                    1,
+                    Digest32V2::new([0x4f; 32]),
+                    RolloverStartupMutationV2::ActiveManifest,
+                ))
+            },
+        );
+
+        assert!(agent.reload_verified_authority_for_test_support().is_err());
+        assert!(ingress
+            .reload_verified_authority_for_test_support()
+            .is_err());
+        assert_eq!(agent.active_generation_for_test_support(), Some(1));
+        assert_eq!(ingress.active_generation_for_test_support(), Some(1));
+    }
+
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn client_rollover_rollback_keeps_current_authority() {
+        let startup = verified_rollover_startup(2, Digest32V2::new([0x46; 32]));
+        let (agent, ingress) = rollover_authority_test_clients(
+            &startup,
+            || Ok(verified_rollover_startup(1, Digest32V2::new([0x47; 32]))),
+            || Ok(verified_rollover_startup(1, Digest32V2::new([0x47; 32]))),
+        );
+
+        assert!(agent.reload_verified_authority_for_test_support().is_err());
+        assert!(ingress
+            .reload_verified_authority_for_test_support()
+            .is_err());
+        assert_eq!(agent.active_generation_for_test_support(), Some(2));
+        assert_eq!(ingress.active_generation_for_test_support(), Some(2));
+    }
+
+    #[test]
+    #[cfg(feature = "test-support")]
+    fn concurrent_client_clones_share_one_successor_publication() {
+        let startup = verified_rollover_startup(1, Digest32V2::new([0x48; 32]));
+        let (agent, ingress) = rollover_authority_test_clients(
+            &startup,
+            || Ok(verified_rollover_startup(2, Digest32V2::new([0x49; 32]))),
+            || Ok(verified_rollover_startup(2, Digest32V2::new([0x49; 32]))),
+        );
+        let agent_first = agent.clone();
+        let agent_second = agent.clone();
+        let ingress_first = ingress.clone();
+        let ingress_second = ingress.clone();
+
+        let agent_first_reload =
+            thread::spawn(move || agent_first.reload_verified_authority_for_test_support());
+        let agent_second_reload =
+            thread::spawn(move || agent_second.reload_verified_authority_for_test_support());
+        let ingress_first_reload =
+            thread::spawn(move || ingress_first.reload_verified_authority_for_test_support());
+        let ingress_second_reload =
+            thread::spawn(move || ingress_second.reload_verified_authority_for_test_support());
+
+        assert!(agent_first_reload
+            .join()
+            .expect("first agent reload")
+            .is_ok());
+        assert!(agent_second_reload
+            .join()
+            .expect("second agent reload")
+            .is_ok());
+        assert!(ingress_first_reload
+            .join()
+            .expect("first ingress reload")
+            .is_ok());
+        assert!(ingress_second_reload
+            .join()
+            .expect("second ingress reload")
+            .is_ok());
+        assert_eq!(agent.active_generation_for_test_support(), Some(2));
+        assert_eq!(ingress.active_generation_for_test_support(), Some(2));
+    }
+
+    #[cfg(feature = "test-support")]
+    fn verified_rollover_startup(
+        deployment_generation: u64,
+        declassification_rule_set_digest: Digest32V2,
+    ) -> VerifiedDaemonStartupV2 {
+        verified_rollover_startup_with_identity_change(
+            deployment_generation,
+            declassification_rule_set_digest,
+            false,
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    fn verified_rollover_startup_with_identity_change(
+        deployment_generation: u64,
+        declassification_rule_set_digest: Digest32V2,
+        identity_change: bool,
+    ) -> VerifiedDaemonStartupV2 {
+        verified_rollover_startup_with_mutation(
+            deployment_generation,
+            declassification_rule_set_digest,
+            if identity_change {
+                RolloverStartupMutationV2::ServiceIdentity
+            } else {
+                RolloverStartupMutationV2::None
+            },
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum RolloverStartupMutationV2 {
+        None,
+        ServiceIdentity,
+        ListenerIdentity,
+        HandshakeKeys,
+        ActiveManifest,
+    }
+
+    #[cfg(feature = "test-support")]
+    fn verified_rollover_startup_with_mutation(
+        deployment_generation: u64,
+        declassification_rule_set_digest: Digest32V2,
+        mutation: RolloverStartupMutationV2,
+    ) -> VerifiedDaemonStartupV2 {
+        use savana_kernel_protocol::v2::{Ed25519KeyIdV2, EndpointRoleV2, ServiceIdentityV2};
+        use savana_platform_identity::{BoundedIdentityStringV2, ExpectedNativePeerV2};
+        use savana_policy_core::v2::{
+            ClosedServiceEdgeIdV2, ClosedServiceIdV2, DeploymentTrustErrorV2,
+            PlatformDeploymentTrustV2, PlatformServiceObservationV2, ServiceAuthorityHandlesV2,
+            ServiceDeploymentLockV2, ServiceEdgeLockV2, VerifiedDeploymentManifestV2,
+        };
+
+        struct Platform {
+            observations: Vec<PlatformServiceObservationV2>,
+            authorities: Vec<ServiceAuthorityHandlesV2>,
+            projection: Vec<u8>,
+        }
+
+        impl PlatformDeploymentTrustV2 for Platform {
+            fn observe_service(
+                &mut self,
+                service: ClosedServiceIdV2,
+            ) -> Result<PlatformServiceObservationV2, DeploymentTrustErrorV2> {
+                self.observations
+                    .iter()
+                    .copied()
+                    .find(|observed| observed.lock.service == service)
+                    .ok_or(DeploymentTrustErrorV2::PlatformUnavailable)
+            }
+
+            fn acquire_service_authorities(
+                &mut self,
+                service: ClosedServiceIdV2,
+            ) -> Result<ServiceAuthorityHandlesV2, DeploymentTrustErrorV2> {
+                let index = self
+                    .authorities
+                    .iter()
+                    .position(|authority| authority.service == service)
+                    .ok_or(DeploymentTrustErrorV2::PlatformUnavailable)?;
+                Ok(self.authorities.remove(index))
+            }
+
+            fn read_effect_ledger_projection(&mut self) -> Result<Vec<u8>, DeploymentTrustErrorV2> {
+                Ok(self.projection.clone())
+            }
+        }
+
+        let service_lock = |service: ClosedServiceIdV2| {
+            let seed = service.tag() as u8;
+            ServiceDeploymentLockV2 {
+                service,
+                service_identity: ServiceIdentityV2::new(
+                    [seed + 80 + u8::from(mutation == RolloverStartupMutationV2::ServiceIdentity);
+                        32],
+                ),
+                uid: 500 + u32::from(seed),
+                gid: 600 + u32::from(seed),
+                executable_digest: Digest32V2::new([seed; 32]),
+                config_digest: Digest32V2::new([seed + 10; 32]),
+                config_path_digest: Digest32V2::new([seed + 20; 32]),
+                socket_path_digest: Digest32V2::new([seed + 30; 32]),
+                socket_uid: 500 + u32::from(seed),
+                socket_gid: 600 + u32::from(seed),
+                socket_mode: 0o660,
+                code_identity_digest: Digest32V2::new([seed + 40; 32]),
+                sandbox_profile_digest: Digest32V2::new([seed + 50; 32]),
+                keystore_authority_identity: Digest32V2::new([seed + 60; 32]),
+                rollback_authority_identity: Digest32V2::new([seed + 70; 32]),
+            }
+        };
+        let services: Vec<_> = ClosedServiceIdV2::ALL
+            .iter()
+            .copied()
+            .map(service_lock)
+            .collect();
+        let endpoint_keys = rollover_endpoint_keys();
+        let agent_client_key_id =
+            derive_ed25519_key_id_v2(endpoint_keys.agent_client.verifying_key().to_bytes());
+        let agent_server_key_id =
+            derive_ed25519_key_id_v2(endpoint_keys.agent_server.verifying_key().to_bytes());
+        let ingress_client_key_id =
+            derive_ed25519_key_id_v2(endpoint_keys.ingress_client.verifying_key().to_bytes());
+        let ingress_server_key_id =
+            derive_ed25519_key_id_v2(endpoint_keys.ingress_server.verifying_key().to_bytes());
+        let changed_agent_client_key_id = derive_ed25519_key_id_v2(
+            SigningKey::from_bytes(&[0xb6; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let changed_agent_server_key_id = derive_ed25519_key_id_v2(
+            SigningKey::from_bytes(&[0xb7; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let changed_ingress_client_key_id = derive_ed25519_key_id_v2(
+            SigningKey::from_bytes(&[0xb8; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let changed_ingress_server_key_id = derive_ed25519_key_id_v2(
+            SigningKey::from_bytes(&[0xb9; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let envelope_key_id =
+            derive_ed25519_key_id_v2(endpoint_keys.envelope.verifying_key().to_bytes());
+        let edges: Vec<_> = ClosedServiceEdgeIdV2::ALL
+            .iter()
+            .copied()
+            .map(|edge_id| {
+                let seed = edge_id.tag() as u8;
+                let client = service_lock(edge_id.client_service());
+                let (client_handshake_key_id, server_handshake_key_id) = match edge_id {
+                    ClosedServiceEdgeIdV2::AgentKernel
+                        if mutation == RolloverStartupMutationV2::HandshakeKeys =>
+                    {
+                        (changed_agent_client_key_id, changed_agent_server_key_id)
+                    }
+                    ClosedServiceEdgeIdV2::AgentKernel => {
+                        (agent_client_key_id, agent_server_key_id)
+                    }
+                    ClosedServiceEdgeIdV2::IngressKernel
+                        if mutation == RolloverStartupMutationV2::HandshakeKeys =>
+                    {
+                        (changed_ingress_client_key_id, changed_ingress_server_key_id)
+                    }
+                    ClosedServiceEdgeIdV2::IngressKernel => {
+                        (ingress_client_key_id, ingress_server_key_id)
+                    }
+                    ClosedServiceEdgeIdV2::KernelExecutor => (
+                        Ed25519KeyIdV2::new([0xb0 + seed * 2; 32]),
+                        Ed25519KeyIdV2::new([0xb1 + seed * 2; 32]),
+                    ),
+                };
+                ServiceEdgeLockV2 {
+                    edge_id,
+                    client_service: edge_id.client_service(),
+                    server_service: edge_id.server_service(),
+                    role: match edge_id {
+                        ClosedServiceEdgeIdV2::AgentKernel => EndpointRoleV2::AgentKernel,
+                        ClosedServiceEdgeIdV2::IngressKernel => EndpointRoleV2::IngressKernel,
+                        ClosedServiceEdgeIdV2::KernelExecutor => EndpointRoleV2::KernelExecutor,
+                    },
+                    listener_identity_digest: Digest32V2::new(
+                        [0xa0 + seed
+                            + u8::from(mutation == RolloverStartupMutationV2::ListenerIdentity);
+                            32],
+                    ),
+                    client_handshake_key_id,
+                    server_handshake_key_id,
+                    expected_client: ExpectedNativePeerV2::linux(
+                        BoundedIdentityStringV2::new(edge_id.role_identity().to_owned())
+                            .expect("rollover role identity"),
+                        client.uid,
+                        client.gid,
+                        *client.executable_digest.as_bytes(),
+                    )
+                    .expect("rollover expected native peer"),
+                }
+            })
+            .collect();
+        let installation_id = Digest32V2::new([0x91; 32]);
+        let active_manifest = Digest32V2::new(
+            [deployment_generation as u8
+                + 0x40
+                + u8::from(mutation == RolloverStartupMutationV2::ActiveManifest); 32],
+        );
+        let protocol_abi = Digest32V2::new([0x93; 32]);
+        let projection_identity = Digest32V2::new([0x94; 32]);
+        let ledger_head = Digest32V2::new([0x97; 32]);
+        let projection_key = SigningKey::from_bytes(&[0x98; 32]);
+        let projection_key_id = Ed25519KeyIdV2::new([0x99; 32]);
+
+        let payload = encode_rollover_manifest(
+            installation_id,
+            active_manifest,
+            declassification_rule_set_digest,
+            deployment_generation,
+            protocol_abi,
+            envelope_key_id,
+            projection_identity,
+            ledger_head,
+            projection_key_id,
+            projection_key.verifying_key().to_bytes(),
+            &services,
+            &edges,
+        );
+        let manifest_key = SigningKey::from_bytes(&[0x95; 32]);
+        let manifest_key_id = Ed25519KeyIdV2::new([0x96; 32]);
+        let digest: [u8; 32] = Sha256::digest(&payload).into();
+        let mut signature_input =
+            Vec::from(b"SAVANA_DEPLOYMENT_MANIFEST_SIGNATURE_V2\0".as_slice());
+        signature_input.extend_from_slice(&digest);
+        let signature = manifest_key.sign(&signature_input).to_bytes();
+        let mut signed = minicbor::Encoder::new(Vec::new());
+        signed
+            .array(3)
+            .expect("manifest outer")
+            .bytes(&payload)
+            .expect("manifest payload")
+            .bytes(manifest_key_id.as_bytes())
+            .expect("manifest key")
+            .bytes(&signature)
+            .expect("manifest signature");
+        let manifest = VerifiedDeploymentManifestV2::verify(
+            &signed.into_writer(),
+            manifest_key_id,
+            manifest_key.verifying_key().to_bytes(),
+        )
+        .expect("verified rollover deployment manifest");
+
+        let projection = encode_rollover_projection(
+            installation_id,
+            active_manifest,
+            deployment_generation,
+            deployment_generation,
+            projection_identity,
+            ledger_head,
+            projection_key_id,
+            &projection_key,
+        );
+        let observations = services
+            .iter()
+            .copied()
+            .map(|lock| PlatformServiceObservationV2 {
+                lock,
+                executable_is_regular_single_link: true,
+                config_is_regular_single_link: true,
+                executable_parent_root_owned_not_writable: true,
+                config_parent_root_owned_not_writable: true,
+                endpoint_identity_is_verified: true,
+            })
+            .collect();
+        let authorities = services
+            .iter()
+            .map(|lock| ServiceAuthorityHandlesV2 {
+                service: lock.service,
+                keystore_authority_identity: lock.keystore_authority_identity,
+                rollback_authority_identity: lock.rollback_authority_identity,
+            })
+            .collect();
+        VerifiedDaemonStartupV2::verify(
+            manifest,
+            &mut Platform {
+                observations,
+                authorities,
+                projection,
+            },
+        )
+        .expect("verified rollover daemon startup")
+    }
+
+    #[cfg(feature = "test-support")]
+    #[allow(clippy::too_many_arguments)]
+    fn encode_rollover_manifest(
+        installation_id: Digest32V2,
+        active_manifest: Digest32V2,
+        declassification_rule_set_digest: Digest32V2,
+        deployment_generation: u64,
+        protocol_abi: Digest32V2,
+        envelope_key_id: Ed25519KeyIdV2,
+        projection_identity: Digest32V2,
+        ledger_head: Digest32V2,
+        projection_key_id: Ed25519KeyIdV2,
+        projection_public_key: [u8; 32],
+        services: &[savana_policy_core::v2::ServiceDeploymentLockV2],
+        edges: &[savana_policy_core::v2::ServiceEdgeLockV2],
+    ) -> Vec<u8> {
+        let mut encoder = minicbor::Encoder::new(Vec::new());
+        encoder
+            .array(21)
+            .expect("manifest fields")
+            .u16(2)
+            .expect("manifest version")
+            .bytes(installation_id.as_bytes())
+            .expect("installation")
+            .bytes(active_manifest.as_bytes())
+            .expect("active manifest")
+            .bytes(declassification_rule_set_digest.as_bytes())
+            .expect("rule pin")
+            .u64(deployment_generation)
+            .expect("manifest sequence")
+            .u64(deployment_generation)
+            .expect("deployment generation")
+            .u64(deployment_generation)
+            .expect("fence")
+            .bytes(protocol_abi.as_bytes())
+            .expect("protocol ABI");
+        for digest in [0x81_u8, 0x82, 0x83, 0x84, 0x85, 0x86] {
+            encoder
+                .bytes(&[digest; 32])
+                .expect("manifest identity digest");
+        }
+        encoder
+            .bytes(envelope_key_id.as_bytes())
+            .expect("envelope key")
+            .bytes(projection_identity.as_bytes())
+            .expect("projection identity")
+            .bytes(ledger_head.as_bytes())
+            .expect("ledger head")
+            .bytes(projection_key_id.as_bytes())
+            .expect("projection key id")
+            .bytes(&projection_public_key)
+            .expect("projection public key")
+            .array(services.len() as u64)
+            .expect("service count");
+        for service in services {
+            encoder
+                .array(15)
+                .expect("service fields")
+                .u16(service.service.tag())
+                .expect("service tag")
+                .bytes(service.service_identity.as_bytes())
+                .expect("service identity")
+                .u32(service.uid)
+                .expect("service uid")
+                .u32(service.gid)
+                .expect("service gid")
+                .bytes(service.executable_digest.as_bytes())
+                .expect("executable")
+                .bytes(service.config_digest.as_bytes())
+                .expect("config")
+                .bytes(service.config_path_digest.as_bytes())
+                .expect("config path")
+                .bytes(service.socket_path_digest.as_bytes())
+                .expect("socket path")
+                .u32(service.socket_uid)
+                .expect("socket uid")
+                .u32(service.socket_gid)
+                .expect("socket gid")
+                .u32(service.socket_mode)
+                .expect("socket mode")
+                .bytes(service.code_identity_digest.as_bytes())
+                .expect("code identity")
+                .bytes(service.sandbox_profile_digest.as_bytes())
+                .expect("sandbox")
+                .bytes(service.keystore_authority_identity.as_bytes())
+                .expect("keystore")
+                .bytes(service.rollback_authority_identity.as_bytes())
+                .expect("rollback");
+        }
+        encoder.array(edges.len() as u64).expect("edge count");
+        for edge in edges {
+            encoder
+                .array(8)
+                .expect("edge fields")
+                .u16(edge.edge_id.tag())
+                .expect("edge id")
+                .u16(edge.client_service.tag())
+                .expect("edge client")
+                .u16(edge.server_service.tag())
+                .expect("edge server")
+                .u16(edge.role.tag())
+                .expect("edge role")
+                .bytes(edge.listener_identity_digest.as_bytes())
+                .expect("listener")
+                .bytes(edge.client_handshake_key_id.as_bytes())
+                .expect("client key")
+                .bytes(edge.server_handshake_key_id.as_bytes())
+                .expect("server key");
+            match &edge.expected_client {
+                savana_platform_identity::ExpectedNativePeerV2::Linux {
+                    role_identity,
+                    uid,
+                    gid,
+                    executable_measurement,
+                } => {
+                    encoder
+                        .array(5)
+                        .expect("peer fields")
+                        .u16(1)
+                        .expect("peer tag")
+                        .str(role_identity.as_str())
+                        .expect("peer role")
+                        .u32(*uid)
+                        .expect("peer uid")
+                        .u32(*gid)
+                        .expect("peer gid")
+                        .bytes(executable_measurement)
+                        .expect("peer executable");
+                }
+                _ => unreachable!("rollover fixture uses Linux identity projection"),
+            }
+        }
+        encoder.into_writer()
+    }
+
+    #[cfg(feature = "test-support")]
+    #[allow(clippy::too_many_arguments)]
+    fn encode_rollover_projection(
+        installation_id: Digest32V2,
+        active_manifest: Digest32V2,
+        deployment_generation: u64,
+        effect_fence_epoch: u64,
+        projection_identity: Digest32V2,
+        ledger_head: Digest32V2,
+        projection_key_id: Ed25519KeyIdV2,
+        projection_key: &SigningKey,
+    ) -> Vec<u8> {
+        let mut payload = minicbor::Encoder::new(Vec::new());
+        payload
+            .array(11)
+            .expect("projection fields")
+            .u16(2)
+            .expect("projection version")
+            .bytes(installation_id.as_bytes())
+            .expect("projection installation")
+            .bytes(active_manifest.as_bytes())
+            .expect("projection manifest")
+            .u64(deployment_generation)
+            .expect("projection generation")
+            .u64(effect_fence_epoch)
+            .expect("projection fence")
+            .bytes(projection_identity.as_bytes())
+            .expect("projection identity")
+            .bytes(ledger_head.as_bytes())
+            .expect("projection head")
+            .bool(false)
+            .expect("effects not fenced")
+            .bool(true)
+            .expect("terminal projection")
+            .bytes(&[0x9a; 32])
+            .expect("selected record")
+            .bytes(&[0; 32])
+            .expect("predecessor");
+        let payload = payload.into_writer();
+        let digest: [u8; 32] = Sha256::digest(&payload).into();
+        let mut signature_input =
+            Vec::from(b"SAVANA_EFFECT_LEDGER_PROJECTION_SIGNATURE_V2\0".as_slice());
+        signature_input.extend_from_slice(&digest);
+        let signature = projection_key.sign(&signature_input).to_bytes();
+        let mut outer = minicbor::Encoder::new(Vec::new());
+        outer
+            .array(3)
+            .expect("projection outer")
+            .bytes(&payload)
+            .expect("projection payload")
+            .bytes(projection_key_id.as_bytes())
+            .expect("projection key")
+            .bytes(&signature)
+            .expect("projection signature");
+        outer.into_writer()
     }
 
     fn load_verified_startup(
@@ -745,8 +2413,10 @@ mod native {
         startup
             .verify_loaded_service_config_v2(ClosedServiceIdV2::Kerneld, &bootstrap_bytes)
             .map_err(|_| StableCode::KernelUnavailable)?;
-        let keys = load_key_material(&startup)?;
-        let runtime = load_runtime_material(&bootstrap)?;
+        let mut keys = load_key_material(&startup)?;
+        let runtime = load_runtime_material(&bootstrap, &startup)?;
+        keys.connector_authority_signing_key =
+            load_connector_authority_signing_key(&keys, &runtime)?;
         Ok((startup, keys, runtime))
     }
 
@@ -792,6 +2462,9 @@ mod native {
             &bootstrap.signed_manifest_path,
             &bootstrap.effect_ledger_projection_path,
             &bootstrap.input_runtime_assets_path,
+            &bootstrap.declassification_installer_root_path,
+            &bootstrap.declassification_trust_root_set_path,
+            &bootstrap.declassification_rule_set_path,
             &bootstrap.vault_state_path,
             &bootstrap.vault_rollback_anchor_path,
             &bootstrap.agent_authority_state_path,
@@ -948,10 +2621,80 @@ mod native {
             g4_anchor_authentication_key,
             executor_client_signing_key,
             executor_server_public_key,
+            connector_authority_signing_key: None,
         })
     }
 
-    fn load_runtime_material(bootstrap: &BootstrapDtoV2) -> Result<RuntimeMaterialV2, StableCode> {
+    fn load_connector_authority_signing_key(
+        keys: &KernelKeyMaterialV2,
+        runtime: &RuntimeMaterialV2,
+    ) -> Result<Option<SigningKey>, StableCode> {
+        let key_id = *runtime.policy.connector_authority_key_id.as_bytes();
+        let public_key = runtime.policy.connector_authority_public_key;
+        let authority_disabled = key_id == [0; 32] && public_key == [0; 32];
+        let private_key = load_connector_authority_private_material(
+            authority_disabled,
+            || native_credential_present(CONNECTOR_AUTHORITY_SEED_CREDENTIAL_V2),
+            || read_native_credential(CONNECTOR_AUTHORITY_SEED_CREDENTIAL_V2),
+        )?;
+        let distinct_material = connector_authority_distinct_material(keys, runtime);
+        validate_connector_authority_material(key_id, public_key, private_key, &distinct_material)
+    }
+
+    fn load_connector_authority_private_material(
+        authority_disabled: bool,
+        credential_present: impl FnOnce() -> Result<bool, StableCode>,
+        read_credential: impl FnOnce() -> Result<[u8; 32], StableCode>,
+    ) -> Result<Option<[u8; 32]>, StableCode> {
+        match (authority_disabled, credential_present()?) {
+            (true, false) => Ok(None),
+            (false, true) => read_credential().map(Some),
+            (true, true) | (false, false) => Err(StableCode::KernelUnavailable),
+        }
+    }
+
+    fn connector_authority_distinct_material(
+        keys: &KernelKeyMaterialV2,
+        runtime: &RuntimeMaterialV2,
+    ) -> Vec<[u8; 32]> {
+        let signing_keys = [
+            &keys.agent_server_signing_key,
+            &keys.ingress_server_signing_key,
+            &keys.envelope_signing_key,
+            &keys.authority_envelope_signing_key,
+            &keys.task_correlation_signing_key,
+            &keys.executor_client_signing_key,
+        ];
+        let mut material = Vec::with_capacity(32);
+        for signing_key in signing_keys {
+            material.push(signing_key.to_bytes());
+            material.push(signing_key.verifying_key().to_bytes());
+        }
+        material.extend([
+            keys.agent_client_public_key,
+            keys.ingress_client_public_key,
+            keys.vault_encryption_key,
+            keys.vault_anchor_authentication_key,
+            keys.agent_state_encryption_key,
+            keys.agent_state_anchor_authentication_key,
+            keys.g4_state_encryption_key,
+            keys.g4_anchor_authentication_key,
+            keys.executor_server_public_key,
+            runtime.input_runtime_publisher_public_key,
+            runtime.ui_settlement_public_key,
+            runtime.ingress_settlement_public_key,
+            runtime.policy.tool_settlement_public_key,
+            runtime.policy.executor_seal_public_key,
+            runtime.policy.executor_receipt_public_key,
+        ]);
+        material.extend_from_slice(&runtime.connector_authority_distinct_public_keys);
+        material
+    }
+
+    fn load_runtime_material(
+        bootstrap: &BootstrapDtoV2,
+        startup: &VerifiedDaemonStartupV2,
+    ) -> Result<RuntimeMaterialV2, StableCode> {
         if !bootstrap.vault_state_path.is_absolute()
             || !bootstrap.vault_rollback_anchor_path.is_absolute()
             || !bootstrap.agent_authority_state_path.is_absolute()
@@ -967,6 +2710,7 @@ mod native {
             MAX_ARTIFACT_BYTES_V2,
             None,
         )?;
+        let declassification = load_declassification_material(bootstrap)?;
         let input_runtime_publisher_key_id =
             Ed25519KeyIdV2::new(decode_hex_32(&bootstrap.input_runtime_publisher_key_id)?);
         let input_runtime_publisher_public_key =
@@ -1025,6 +2769,13 @@ mod native {
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
         let policy = load_policy_runtime(&bootstrap.policy_runtime)?;
+        let mut connector_authority_distinct_public_keys = vec![
+            parser_public_key,
+            decode_hex_32(&bootstrap.policy_runtime.registry_publisher_public_key)?,
+        ];
+        connector_authority_distinct_public_keys.extend(
+            authenticated_connector_authority_verification_keys(startup, &declassification)?,
+        );
         Ok(RuntimeMaterialV2 {
             input_runtime_assets,
             input_runtime_publisher_key_id,
@@ -1058,9 +2809,77 @@ mod native {
             .filter(|effects| *effects != savana_policy_core::v2::EffectSetV2::EMPTY)
             .ok_or(StableCode::KernelUnavailable)?,
             logical_run_ttl_ms: bootstrap.logical_run_ttl_ms,
+            connector_authority_distinct_public_keys,
+            declassification,
             policy,
             parser_trust,
         })
+    }
+
+    fn load_declassification_material(
+        bootstrap: &BootstrapDtoV2,
+    ) -> Result<DeclassificationMaterialV2, StableCode> {
+        if !bootstrap.declassification_installer_root_path.is_absolute()
+            || !bootstrap.declassification_trust_root_set_path.is_absolute()
+            || !bootstrap.declassification_rule_set_path.is_absolute()
+        {
+            return Err(StableCode::KernelUnavailable);
+        }
+        let root_material = read_regular_file(
+            &bootstrap.declassification_installer_root_path,
+            4096,
+            Some((0, 0, 0o444)),
+        )?;
+        let root_material: DeclassificationInstallerRootDtoV2 =
+            serde_json::from_slice(&root_material).map_err(|_| StableCode::KernelUnavailable)?;
+        let installer_public_key = decode_hex_32(&root_material.public_key)?;
+        let verifier = InstallerOrMdmVerifierV2::new(
+            Ed25519KeyIdV2::new(decode_hex_32(&root_material.key_id)?),
+            root_material.key_epoch,
+            installer_public_key,
+        )
+        .map_err(|_| StableCode::KernelUnavailable)?;
+        let root_bytes = read_regular_file(
+            &bootstrap.declassification_trust_root_set_path,
+            MAX_DECLASSIFICATION_OBJECT_BYTES_V2,
+            None,
+        )?;
+        let root_set = OperationalTrustRootSetV2::from_canonical_bytes(&root_bytes, &verifier)
+            .map_err(|_| StableCode::KernelUnavailable)?;
+        let rule_bytes = read_regular_file(
+            &bootstrap.declassification_rule_set_path,
+            MAX_DECLASSIFICATION_OBJECT_BYTES_V2,
+            None,
+        )?;
+        Ok(DeclassificationMaterialV2 {
+            canonical_rule_set: rule_bytes,
+            trust_roots: Arc::new(root_set),
+            installer_verifier: verifier,
+        })
+    }
+
+    fn authenticated_connector_authority_verification_keys(
+        startup: &VerifiedDaemonStartupV2,
+        declassification: &DeclassificationMaterialV2,
+    ) -> Result<Vec<[u8; 32]>, StableCode> {
+        let mut keys = Vec::new();
+        keys.try_reserve_exact(3 + declassification.trust_roots.members().len())
+            .map_err(|_| StableCode::KernelUnavailable)?;
+        keys.push(startup.deployment_manifest_signing_public_key());
+        keys.push(
+            startup
+                .effect_ledger_projection_binding()
+                .signing_public_key(),
+        );
+        keys.push(declassification.installer_verifier.public_key());
+        keys.extend(
+            declassification
+                .trust_roots
+                .members()
+                .iter()
+                .map(|member| member.public_key()),
+        );
+        Ok(keys)
     }
 
     fn load_policy_runtime(
@@ -1183,9 +3002,28 @@ mod native {
         let executor_receipt_key_id =
             Ed25519KeyIdV2::new(decode_hex_32(&policy.executor_receipt_key_id)?);
         let executor_receipt_public_key = decode_hex_32(&policy.executor_receipt_public_key)?;
+        let legacy_connector_registry_digest =
+            Digest32V2::new(decode_hex_32(&policy.executor_connector_registry_digest)?);
+        let connector_registry_genesis_digest =
+            Digest32V2::new(decode_hex_32(&policy.connector_registry_genesis_digest)?);
+        let connector_authority_key_id_bytes =
+            decode_hex_32_allow_zero(&policy.connector_authority_key_id)?;
+        let connector_authority_public_key =
+            decode_hex_32_allow_zero(&policy.connector_authority_public_key)?;
+        let connector_authority_key_id = Ed25519KeyIdV2::new(connector_authority_key_id_bytes);
+        let connector_authority_disabled = connector_authority_key_id_bytes == [0; 32]
+            && connector_authority_public_key == [0; 32];
+        let user_tier_host_allowlist =
+            decode_user_tier_host_allowlist(&policy.user_tier_host_allowlist)?;
         if derive_ed25519_key_id_v2(tool_settlement_public_key) != tool_settlement_key_id
             || hpke_x25519_key_id(executor_seal_public_key) != executor_seal_key_id
             || derive_ed25519_key_id_v2(executor_receipt_public_key) != executor_receipt_key_id
+            || legacy_connector_registry_digest != connector_registry_genesis_digest
+            || (!connector_authority_disabled
+                && (connector_authority_key_id_bytes == [0; 32]
+                    || connector_authority_public_key == [0; 32]
+                    || derive_ed25519_key_id_v2(connector_authority_public_key)
+                        != connector_authority_key_id))
         {
             return Err(StableCode::KernelUnavailable);
         }
@@ -1203,9 +3041,10 @@ mod native {
             executor_identity: ExecutorIdentityV2::new(decode_hex_32(&policy.executor_identity)?),
             executor_seal_key_id,
             executor_seal_public_key,
-            executor_connector_registry_digest: Digest32V2::new(decode_hex_32(
-                &policy.executor_connector_registry_digest,
-            )?),
+            connector_registry_genesis_digest,
+            connector_authority_key_id,
+            connector_authority_public_key,
+            user_tier_host_allowlist,
             executor_receipt_key_id,
             executor_receipt_public_key,
         })
@@ -1240,11 +3079,12 @@ mod native {
             3 => Ok(InternalValidatorImplementationKindV2::RootEvidencePresence),
             4 => Ok(InternalValidatorImplementationKindV2::ProjectionBindingIntegrity),
             5 => Ok(InternalValidatorImplementationKindV2::TokenExecutorBinding),
+            6 => Ok(InternalValidatorImplementationKindV2::IntentFlowConfinement),
             _ => Err(StableCode::KernelUnavailable),
         }
     }
 
-    fn read_native_credential(name: &str) -> Result<[u8; 32], StableCode> {
+    fn native_credential_path(name: &str) -> Result<PathBuf, StableCode> {
         if name.is_empty()
             || name.contains('/')
             || !name
@@ -1269,11 +3109,25 @@ mod native {
         {
             return Err(StableCode::KernelUnavailable);
         }
+        Ok(directory.join(name))
+    }
+
+    fn native_credential_present(name: &str) -> Result<bool, StableCode> {
+        let path = native_credential_path(name)?;
+        match fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(_) => Err(StableCode::KernelUnavailable),
+        }
+    }
+
+    fn read_native_credential(name: &str) -> Result<[u8; 32], StableCode> {
+        let path = native_credential_path(name)?;
         #[cfg(target_os = "linux")]
         let identity = (0, 0, 0o400);
         #[cfg(target_os = "macos")]
         let identity = (0, nix::unistd::getegid().as_raw(), 0o440);
-        read_regular_file(&directory.join(name), 32, Some(identity))?
+        read_regular_file(&path, 32, Some(identity))?
             .try_into()
             .map_err(|_| StableCode::KernelUnavailable)
     }
@@ -1289,6 +3143,93 @@ mod native {
         }
         let bytes = read_regular_file(path, 32, None)?;
         bytes.try_into().map_err(|_| StableCode::KernelUnavailable)
+    }
+
+    fn connector_store_id_v2(
+        installation_id: Digest32V2,
+        genesis_digest: Digest32V2,
+        authority_public_key: [u8; 32],
+    ) -> Digest32V2 {
+        let mut hasher = Sha256::new();
+        hasher.update(CONNECTOR_STORE_ID_DOMAIN_V2);
+        hasher.update(installation_id.as_bytes());
+        hasher.update(genesis_digest.as_bytes());
+        hasher.update(authority_public_key);
+        Digest32V2::new(hasher.finalize().into())
+    }
+
+    fn derive_connector_runtime_secret_v2(
+        source_secret: &[u8; 32],
+        domain: &[u8],
+        installation_id: Digest32V2,
+        genesis_digest: Digest32V2,
+        store_id: Digest32V2,
+    ) -> Result<[u8; 32], StableCode> {
+        if source_secret.iter().all(|byte| *byte == 0) || domain.is_empty() {
+            return Err(StableCode::KernelUnavailable);
+        }
+        let mut mac = Hmac::<Sha256>::new_from_slice(source_secret)
+            .map_err(|_| StableCode::KernelUnavailable)?;
+        mac.update(domain);
+        mac.update(installation_id.as_bytes());
+        mac.update(genesis_digest.as_bytes());
+        mac.update(store_id.as_bytes());
+        let derived: [u8; 32] = mac.finalize().into_bytes().into();
+        if derived == [0; 32] || derived == *source_secret {
+            return Err(StableCode::KernelUnavailable);
+        }
+        Ok(derived)
+    }
+
+    fn connector_store_paths_v2(
+        neighboring_state_path: &Path,
+        genesis_digest: Digest32V2,
+    ) -> Result<(PathBuf, PathBuf), StableCode> {
+        if !neighboring_state_path.is_absolute() {
+            return Err(StableCode::KernelUnavailable);
+        }
+        let base = neighboring_state_path
+            .parent()
+            .ok_or(StableCode::KernelUnavailable)?;
+        let base_metadata =
+            fs::symlink_metadata(base).map_err(|_| StableCode::KernelUnavailable)?;
+        if base_metadata.file_type().is_symlink()
+            || !base_metadata.is_dir()
+            || base_metadata.mode() & 0o7777 != 0o700
+        {
+            return Err(StableCode::KernelUnavailable);
+        }
+        let mut suffix = String::with_capacity(64);
+        for byte in genesis_digest.as_bytes() {
+            use std::fmt::Write as _;
+            write!(&mut suffix, "{byte:02x}").map_err(|_| StableCode::KernelUnavailable)?;
+        }
+        let directory = base.join(format!("connector-registry-{suffix}"));
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700);
+        match builder.create(&directory) {
+            Ok(()) => {
+                fs::File::open(base)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|_| StableCode::KernelUnavailable)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(StableCode::KernelUnavailable),
+        }
+        let metadata =
+            fs::symlink_metadata(&directory).map_err(|_| StableCode::KernelUnavailable)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || metadata.mode() & 0o7777 != 0o700
+            || metadata.uid() != base_metadata.uid()
+            || metadata.gid() != base_metadata.gid()
+        {
+            return Err(StableCode::KernelUnavailable);
+        }
+        Ok((
+            directory.join("connector-registry-v2.cbor"),
+            directory.join("connector-registry-anchor-v2.bin"),
+        ))
     }
 
     struct PosixAuthenticatedAnchorFileV2 {
@@ -1336,10 +3277,17 @@ mod native {
                 }
                 Err(_) => return Err(()),
             };
-            if metadata.file_type().is_symlink()
+            let parent = self.path.parent().ok_or(())?;
+            let parent_metadata = fs::symlink_metadata(parent).map_err(|_| ())?;
+            if parent_metadata.file_type().is_symlink()
+                || !parent_metadata.is_dir()
+                || parent_metadata.mode() & 0o7777 != 0o700
+                || metadata.file_type().is_symlink()
                 || !metadata.is_file()
                 || metadata.nlink() != 1
                 || metadata.mode() & 0o7777 != 0o600
+                || metadata.uid() != parent_metadata.uid()
+                || metadata.gid() != parent_metadata.gid()
                 || usize::try_from(metadata.len()).ok() != Some(AUTHENTICATED_ANCHOR_BYTES_V2)
             {
                 return Err(());
@@ -1399,7 +3347,7 @@ mod native {
             let parent_metadata = fs::symlink_metadata(parent).map_err(|_| ())?;
             if parent_metadata.file_type().is_symlink()
                 || !parent_metadata.is_dir()
-                || parent_metadata.mode() & 0o022 != 0
+                || parent_metadata.mode() & 0o7777 != 0o700
             {
                 return Err(());
             }
@@ -1611,6 +3559,14 @@ mod native {
     }
 
     fn decode_hex_32(value: &str) -> Result<[u8; 32], StableCode> {
+        let output = decode_hex_32_allow_zero(value)?;
+        if output.iter().all(|byte| *byte == 0) {
+            return Err(StableCode::KernelUnavailable);
+        }
+        Ok(output)
+    }
+
+    fn decode_hex_32_allow_zero(value: &str) -> Result<[u8; 32], StableCode> {
         if value.len() != 64 {
             return Err(StableCode::KernelUnavailable);
         }
@@ -1620,10 +3576,64 @@ mod native {
             *slot = u8::from_str_radix(&value[offset..offset + 2], 16)
                 .map_err(|_| StableCode::KernelUnavailable)?;
         }
-        if output.iter().all(|byte| *byte == 0) {
+        Ok(output)
+    }
+
+    fn validate_connector_authority_material(
+        key_id: [u8; 32],
+        public_key: [u8; 32],
+        private_key: Option<[u8; 32]>,
+        distinct_material: &[[u8; 32]],
+    ) -> Result<Option<SigningKey>, StableCode> {
+        let key_id_is_zero = key_id == [0; 32];
+        let public_key_is_zero = public_key == [0; 32];
+        match (key_id_is_zero, public_key_is_zero, private_key) {
+            (true, true, None) => Ok(None),
+            (false, false, Some(private_key)) => {
+                if private_key == [0; 32]
+                    || private_key == public_key
+                    || distinct_material
+                        .iter()
+                        .any(|material| *material == private_key || *material == public_key)
+                {
+                    return Err(StableCode::KernelUnavailable);
+                }
+                let signing_key = SigningKey::from_bytes(&private_key);
+                if signing_key.verifying_key().to_bytes() != public_key
+                    || derive_ed25519_key_id_v2(public_key).as_bytes() != &key_id
+                {
+                    return Err(StableCode::KernelUnavailable);
+                }
+                Ok(Some(signing_key))
+            }
+            _ => Err(StableCode::KernelUnavailable),
+        }
+    }
+
+    fn decode_user_tier_host_allowlist(
+        hosts: &[String],
+    ) -> Result<Vec<BoundedConnectorHostV2>, StableCode> {
+        if hosts.len() > 4_096 {
             return Err(StableCode::KernelUnavailable);
         }
-        Ok(output)
+        let mut parsed = Vec::new();
+        parsed
+            .try_reserve_exact(hosts.len())
+            .map_err(|_| StableCode::KernelUnavailable)?;
+        let mut previous: Option<&str> = None;
+        for host in hosts {
+            if previous.is_some_and(|value| value >= host.as_str()) {
+                return Err(StableCode::KernelUnavailable);
+            }
+            let bounded =
+                BoundedConnectorHostV2::new(host).map_err(|_| StableCode::KernelUnavailable)?;
+            if bounded.as_str() != host {
+                return Err(StableCode::KernelUnavailable);
+            }
+            previous = Some(host);
+            parsed.push(bounded);
+        }
+        Ok(parsed)
     }
 
     fn hpke_x25519_key_id(public_key: [u8; 32]) -> HpkeX25519KeyIdV2 {
@@ -1631,5 +3641,388 @@ mod native {
         hasher.update(b"SAVANA_HPKE_X25519_KEY_ID_V2\0");
         hasher.update(public_key);
         HpkeX25519KeyIdV2::new(hasher.finalize().into())
+    }
+
+    #[cfg(test)]
+    mod connector_authority_tests {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        use super::*;
+
+        fn test_connector_anchor(path: PathBuf) -> PosixAuthenticatedAnchorFileV2 {
+            PosixAuthenticatedAnchorFileV2::new(
+                path,
+                Digest32V2::new([0x61; 32]),
+                Digest32V2::new([0x62; 32]),
+                [0x63; 32],
+                CONNECTOR_ANCHOR_MAC_DOMAIN_V2,
+                CONNECTOR_ANCHOR_MAGIC_V2,
+            )
+            .unwrap()
+        }
+
+        fn connector_anchor_head(
+            sequence: u64,
+            byte: u8,
+        ) -> savana_policy_core::v2::RollbackProtectedStateHeadV2 {
+            savana_policy_core::v2::RollbackProtectedStateHeadV2::new(
+                sequence,
+                Digest32V2::new(if sequence == 0 { [0; 32] } else { [byte; 32] }),
+            )
+            .unwrap()
+        }
+
+        fn enabled_material(seed: u8) -> ([u8; 32], [u8; 32], [u8; 32]) {
+            let private = [seed; 32];
+            let public = SigningKey::from_bytes(&private).verifying_key().to_bytes();
+            let key_id = *derive_ed25519_key_id_v2(public).as_bytes();
+            (key_id, public, private)
+        }
+
+        #[test]
+        fn connector_authority_accepts_only_clean_disabled_or_exact_distinct_key() {
+            let zero = [0_u8; 32];
+            assert!(validate_connector_authority_material(zero, zero, None, &[])
+                .unwrap()
+                .is_none());
+
+            let (key_id, public, private) = enabled_material(0x41);
+            assert_eq!(
+                validate_connector_authority_material(key_id, public, Some(private), &[])
+                    .unwrap()
+                    .unwrap()
+                    .verifying_key()
+                    .to_bytes(),
+                public
+            );
+
+            let wrong_id = enabled_material(0x42).0;
+            assert!(
+                validate_connector_authority_material(wrong_id, public, Some(private), &[])
+                    .is_err()
+            );
+            assert!(
+                validate_connector_authority_material(key_id, public, Some([0x43; 32]), &[])
+                    .is_err()
+            );
+            assert!(
+                validate_connector_authority_material(zero, public, Some(private), &[]).is_err()
+            );
+            assert!(
+                validate_connector_authority_material(key_id, zero, Some(private), &[]).is_err()
+            );
+            assert!(validate_connector_authority_material(key_id, public, None, &[]).is_err());
+            assert!(validate_connector_authority_material(zero, zero, Some(private), &[]).is_err());
+            assert!(validate_connector_authority_material(
+                key_id,
+                public,
+                Some(private),
+                &[private],
+            )
+            .is_err());
+            assert!(validate_connector_authority_material(
+                key_id,
+                public,
+                Some(private),
+                &[public],
+            )
+            .is_err());
+        }
+
+        #[test]
+        fn connector_authority_always_probes_optional_private_credential() {
+            let mut disabled_probes = 0;
+            let mut disabled_reads = 0;
+            assert!(load_connector_authority_private_material(
+                true,
+                || {
+                    disabled_probes += 1;
+                    Ok(true)
+                },
+                || {
+                    disabled_reads += 1;
+                    Ok([0x44; 32])
+                },
+            )
+            .is_err());
+            assert_eq!(disabled_probes, 1);
+            assert_eq!(disabled_reads, 0);
+
+            let mut enabled_probes = 0;
+            let mut enabled_reads = 0;
+            assert!(load_connector_authority_private_material(
+                false,
+                || {
+                    enabled_probes += 1;
+                    Ok(false)
+                },
+                || {
+                    enabled_reads += 1;
+                    Ok([0x45; 32])
+                },
+            )
+            .is_err());
+            assert_eq!(enabled_probes, 1);
+            assert_eq!(enabled_reads, 0);
+        }
+
+        #[test]
+        fn connector_store_secrets_are_domain_and_deployment_separated() {
+            let source = [0x51; 32];
+            let installation = Digest32V2::new([0x52; 32]);
+            let genesis = Digest32V2::new([0x53; 32]);
+            let store = connector_store_id_v2(
+                installation,
+                genesis,
+                SigningKey::from_bytes(&source).verifying_key().to_bytes(),
+            );
+            let encryption = derive_connector_runtime_secret_v2(
+                &source,
+                CONNECTOR_STORE_ENCRYPTION_DERIVATION_DOMAIN_V2,
+                installation,
+                genesis,
+                store,
+            )
+            .unwrap();
+            let anchor = derive_connector_runtime_secret_v2(
+                &source,
+                CONNECTOR_STORE_ANCHOR_DERIVATION_DOMAIN_V2,
+                installation,
+                genesis,
+                store,
+            )
+            .unwrap();
+            let handle = derive_connector_runtime_secret_v2(
+                &source,
+                CONNECTOR_HANDLE_DERIVATION_DOMAIN_V2,
+                installation,
+                genesis,
+                store,
+            )
+            .unwrap();
+            assert_ne!(encryption, anchor);
+            assert_ne!(encryption, handle);
+            assert_ne!(anchor, handle);
+            assert_ne!(encryption, source);
+            assert_ne!(anchor, source);
+            assert_ne!(handle, source);
+            assert_ne!(
+                encryption,
+                derive_connector_runtime_secret_v2(
+                    &source,
+                    CONNECTOR_STORE_ENCRYPTION_DERIVATION_DOMAIN_V2,
+                    Digest32V2::new([0x54; 32]),
+                    genesis,
+                    store,
+                )
+                .unwrap()
+            );
+            assert!(derive_connector_runtime_secret_v2(
+                &[0; 32],
+                CONNECTOR_STORE_ENCRYPTION_DERIVATION_DOMAIN_V2,
+                installation,
+                genesis,
+                store,
+            )
+            .is_err());
+        }
+
+        #[test]
+        fn connector_store_paths_are_private_canonical_and_idempotent() {
+            let directory = tempfile::tempdir().unwrap();
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let neighboring = directory.path().join("agent-authority-state-v2.cbor");
+            let genesis = Digest32V2::new([0x5a; 32]);
+            let expected_directory = directory
+                .path()
+                .join(format!("connector-registry-{}", "5a".repeat(32)));
+
+            let first = connector_store_paths_v2(&neighboring, genesis).unwrap();
+            let second = connector_store_paths_v2(&neighboring, genesis).unwrap();
+            assert_eq!(first, second);
+            assert_eq!(
+                first.0,
+                expected_directory.join("connector-registry-v2.cbor")
+            );
+            assert_eq!(
+                first.1,
+                expected_directory.join("connector-registry-anchor-v2.bin")
+            );
+            assert_eq!(
+                fs::symlink_metadata(&expected_directory)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                0o700
+            );
+            assert!(connector_store_paths_v2(Path::new("relative-state"), genesis).is_err());
+
+            fs::set_permissions(&expected_directory, fs::Permissions::from_mode(0o750)).unwrap();
+            assert!(connector_store_paths_v2(&neighboring, genesis).is_err());
+        }
+
+        #[test]
+        fn connector_posix_anchor_rejects_permissions_links_and_partial_files() {
+            use savana_policy_core::v2::RollbackProtectedStateAnchorV2 as _;
+
+            let permissions = tempfile::tempdir().unwrap();
+            fs::set_permissions(permissions.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let mut anchor = test_connector_anchor(permissions.path().join("anchor.bin"));
+            anchor
+                .compare_and_advance(connector_anchor_head(0, 0), connector_anchor_head(1, 0x71))
+                .unwrap();
+            fs::set_permissions(
+                permissions.path().join("anchor.bin"),
+                fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
+            assert!(anchor.current_head().is_err());
+
+            let links = tempfile::tempdir().unwrap();
+            fs::set_permissions(links.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let mut original = test_connector_anchor(links.path().join("original.bin"));
+            original
+                .compare_and_advance(connector_anchor_head(0, 0), connector_anchor_head(1, 0x72))
+                .unwrap();
+            fs::hard_link(
+                links.path().join("original.bin"),
+                links.path().join("hard-link.bin"),
+            )
+            .unwrap();
+            assert!(original.current_head().is_err());
+            let hard_link = test_connector_anchor(links.path().join("hard-link.bin"));
+            assert!(hard_link.current_head().is_err());
+
+            let symlink_anchor = test_connector_anchor(links.path().join("symlink.bin"));
+            symlink(
+                links.path().join("original.bin"),
+                links.path().join("symlink.bin"),
+            )
+            .unwrap();
+            assert!(symlink_anchor.current_head().is_err());
+
+            let partial = tempfile::tempdir().unwrap();
+            fs::set_permissions(partial.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let partial_path = partial.path().join("anchor.bin");
+            fs::write(&partial_path, [0_u8; 17]).unwrap();
+            fs::set_permissions(&partial_path, fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(test_connector_anchor(partial_path).current_head().is_err());
+        }
+
+        #[test]
+        fn connector_posix_anchor_accepts_valid_old_file_crash_outcome_before_rename() {
+            use savana_policy_core::v2::RollbackProtectedStateAnchorV2 as _;
+
+            let directory = tempfile::tempdir().unwrap();
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let path = directory.path().join("anchor.bin");
+            let mut anchor = test_connector_anchor(path.clone());
+            let first = connector_anchor_head(1, 0x73);
+            anchor
+                .compare_and_advance(connector_anchor_head(0, 0), first)
+                .unwrap();
+            let old_file = fs::read(&path).unwrap();
+            let second = connector_anchor_head(2, 0x74);
+            anchor.compare_and_advance(first, second).unwrap();
+
+            fs::write(&path, old_file).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(anchor.current_head().unwrap(), first);
+        }
+
+        #[cfg(feature = "test-support")]
+        #[test]
+        fn connector_authority_rejects_every_authenticated_verification_key() {
+            use savana_policy_core::v2::{
+                OperationalTrustRootPurposeV2, OperationalTrustRootSetItemV2,
+            };
+
+            let installer = SigningKey::from_bytes(&[0x31; 32]);
+            let declassification_authority = SigningKey::from_bytes(&[0x32; 32]);
+            let installer_verifier = InstallerOrMdmVerifierV2::new(
+                derive_ed25519_key_id_v2(installer.verifying_key().to_bytes()),
+                1,
+                installer.verifying_key().to_bytes(),
+            )
+            .unwrap();
+            let member = OperationalTrustRootSetItemV2::new(
+                OperationalTrustRootPurposeV2::DeclassificationAuthority,
+                declassification_authority.verifying_key().to_bytes(),
+                1,
+                5,
+                100,
+            )
+            .unwrap();
+            let declassification = DeclassificationMaterialV2 {
+                canonical_rule_set: Vec::new(),
+                trust_roots: Arc::new(
+                    OperationalTrustRootSetV2::new_declassification_signed_for_test(
+                        Digest32V2::new([0x33; 32]),
+                        1,
+                        None,
+                        vec![member],
+                        5,
+                        100,
+                        &installer,
+                        1,
+                    )
+                    .unwrap(),
+                ),
+                installer_verifier,
+            };
+            let startup = verified_rollover_startup(1, Digest32V2::new([0x34; 32]));
+            let verification_keys =
+                authenticated_connector_authority_verification_keys(&startup, &declassification)
+                    .unwrap();
+            let expected = vec![
+                startup.deployment_manifest_signing_public_key(),
+                startup
+                    .effect_ledger_projection_binding()
+                    .signing_public_key(),
+                declassification.installer_verifier.public_key(),
+                declassification.trust_roots.members()[0].public_key(),
+            ];
+            assert_eq!(verification_keys, expected);
+
+            for private_key in [[0x95; 32], [0x98; 32], [0x31; 32], [0x32; 32]] {
+                let public_key = SigningKey::from_bytes(&private_key)
+                    .verifying_key()
+                    .to_bytes();
+                let key_id = *derive_ed25519_key_id_v2(public_key).as_bytes();
+                assert!(validate_connector_authority_material(
+                    key_id,
+                    public_key,
+                    Some(private_key),
+                    &verification_keys,
+                )
+                .is_err());
+            }
+        }
+
+        #[test]
+        fn connector_host_allowlist_requires_sorted_unique_canonical_hosts() {
+            let canonical = vec![
+                "192.0.2.1".to_owned(),
+                "example.com".to_owned(),
+                "xn--bcher-kva.example".to_owned(),
+            ];
+            let loaded = decode_user_tier_host_allowlist(&canonical).unwrap();
+            assert_eq!(
+                loaded.iter().map(|host| host.as_str()).collect::<Vec<_>>(),
+                ["192.0.2.1", "example.com", "xn--bcher-kva.example"]
+            );
+
+            for invalid in [
+                vec!["example.com".to_owned(), "192.0.2.1".to_owned()],
+                vec!["example.com".to_owned(), "example.com".to_owned()],
+                vec!["EXAMPLE.com".to_owned()],
+                vec!["example.com.".to_owned()],
+                vec!["bad..example.com".to_owned()],
+            ] {
+                assert!(decode_user_tier_host_allowlist(&invalid).is_err());
+            }
+        }
     }
 }

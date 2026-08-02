@@ -4,15 +4,15 @@ use std::os::unix::net::UnixStream;
 use std::time::Instant;
 
 use savana_kernel_protocol::v2::{
-    decode_kernel_service_application_request_v2, encode_kernel_service_application_response_v2,
-    peek_kernel_service_application_request_v2, PeerIdentityBindingV2, PublicStableCodeV2,
-    UnixMillisV2,
+    decode_kernel_service_application_request_v2, peek_kernel_service_application_request_v2,
+    PeerIdentityBindingV2, PublicStableCodeV2, UnixMillisV2,
 };
 
 use crate::policy_runtime::V2GenerationLease;
 use crate::v2_channel::{ChannelErrorV2, UnixV2FrameChannel, V2FrameChannel};
 use crate::v2_dispatch::{
-    KernelServiceDispatchErrorV2, KernelServiceDispatcherV2, VerifiedKernelServicePeerV2,
+    KernelServiceDispatchErrorV2, KernelServiceDispatcherV2, SuiteOneResponseSessionSlotV2,
+    VerifiedKernelServicePeerV2,
 };
 use crate::v2_transport_owner::{KernelV2HandshakeError, KernelV2HandshakeOwner};
 
@@ -101,11 +101,7 @@ pub(crate) fn serve_one_suite_one_v2_channel(
             .finish(started, client_finish, deadline)
             .map_err(map_handshake_error)?;
         let (accepted_record, mut session, handshake_peer) = completed.into_parts();
-        let peer = VerifiedKernelServicePeerV2::from_mutual_authentication(
-            handshake_peer.role(),
-            handshake_peer.client_boot_id(),
-            handshake_peer.client_identity(),
-        )?;
+        let peer = VerifiedKernelServicePeerV2::from_mutual_authentication(handshake_peer.clone())?;
 
         channel
             .write_record_frame(&accepted_record, deadline)
@@ -127,51 +123,42 @@ pub(crate) fn serve_one_suite_one_v2_channel(
         }
         let request = decode_kernel_service_application_request_v2(opened.plaintext())
             .map_err(|_| KernelServiceDispatchErrorV2::Malformed)?;
-        let response =
-            match dispatcher.dispatch_one_application(peer, lease, request, now, deadline) {
-                Ok(response) => response,
-                Err(KernelServiceDispatchErrorV2::Busy) => {
-                    savana_kernel_protocol::v2::KernelServiceApplicationResponseV2::error(
-                        routing.role(),
-                        routing.request_id(),
-                        routing.operation_tag(),
-                        PublicStableCodeV2::Overloaded,
-                    )
-                    .map_err(|_| KernelServiceDispatchErrorV2::Unavailable)?
-                }
-                Err(KernelServiceDispatchErrorV2::DeadlineExceeded) => {
-                    savana_kernel_protocol::v2::KernelServiceApplicationResponseV2::error(
-                        routing.role(),
-                        routing.request_id(),
-                        routing.operation_tag(),
-                        PublicStableCodeV2::DeadlineExceeded,
-                    )
-                    .map_err(|_| KernelServiceDispatchErrorV2::DeadlineExceeded)?
-                }
-                Err(KernelServiceDispatchErrorV2::Unavailable) => {
-                    savana_kernel_protocol::v2::KernelServiceApplicationResponseV2::error(
-                        routing.role(),
-                        routing.request_id(),
-                        routing.operation_tag(),
-                        PublicStableCodeV2::ServiceUnavailable,
-                    )
-                    .map_err(|_| KernelServiceDispatchErrorV2::Unavailable)?
-                }
-                Err(
-                    KernelServiceDispatchErrorV2::Malformed
-                    | KernelServiceDispatchErrorV2::IdentityRejected
-                    | KernelServiceDispatchErrorV2::Operation(_),
-                ) => return Err(KernelServiceDispatchErrorV2::IdentityRejected),
-            };
-        let response_plaintext = encode_kernel_service_application_response_v2(&response)
-            .map_err(|_| KernelServiceDispatchErrorV2::Unavailable)?;
-        let response_record = session
-            .seal_application_response(
+        let response_session = SuiteOneResponseSessionSlotV2::new(session);
+        let response_record = match dispatcher.dispatch_one_suite_one(
+            peer,
+            lease,
+            request,
+            response_session.clone(),
+            now,
+            deadline,
+        ) {
+            Ok(record) => record,
+            Err(KernelServiceDispatchErrorV2::Busy) => response_session.seal_public_error(
+                routing.role(),
                 routing.request_id(),
                 routing.operation_tag(),
-                &response_plaintext,
-            )
-            .map_err(|_| KernelServiceDispatchErrorV2::Unavailable)?;
+                PublicStableCodeV2::Overloaded,
+            )?,
+            Err(KernelServiceDispatchErrorV2::DeadlineExceeded) => response_session
+                .cancel_staged_and_seal_public_error(
+                    routing.role(),
+                    routing.request_id(),
+                    routing.operation_tag(),
+                    PublicStableCodeV2::DeadlineExceeded,
+                )
+                .map_err(|_| KernelServiceDispatchErrorV2::DeadlineExceeded)?,
+            Err(KernelServiceDispatchErrorV2::Unavailable) => response_session.seal_public_error(
+                routing.role(),
+                routing.request_id(),
+                routing.operation_tag(),
+                PublicStableCodeV2::ServiceUnavailable,
+            )?,
+            Err(
+                KernelServiceDispatchErrorV2::Malformed
+                | KernelServiceDispatchErrorV2::IdentityRejected
+                | KernelServiceDispatchErrorV2::Operation(_),
+            ) => return Err(KernelServiceDispatchErrorV2::IdentityRejected),
+        };
 
         channel
             .write_record_frame(&response_record, deadline)
@@ -273,8 +260,8 @@ mod tests {
     use crate::policy_runtime::V2GenerationLease;
     use crate::v2_channel::{UnixV2FrameChannel, V2FrameChannel};
     use crate::v2_dispatch::{
-        KernelServiceDeploymentV2, KernelServiceDispatcherV2, KernelServiceResponseBodyV2,
-        VerifiedKernelServicePeerV2,
+        KernelServiceDeploymentV2, KernelServiceDispatchErrorV2, KernelServiceDispatcherV2,
+        KernelServiceResponseBodyV2, VerifiedKernelServicePeerV2,
     };
     use crate::v2_kernel_owner::KernelRuntimeOwnerV2;
     use crate::v2_transport_owner::KernelV2HandshakeOwner;
@@ -314,10 +301,11 @@ mod tests {
             )
             .unwrap(),
         );
-        let peer = VerifiedKernelServicePeerV2::from_mutual_authentication(
+        let peer = VerifiedKernelServicePeerV2::from_test_mutual_authentication(
             EndpointRoleV2::AgentKernel,
             BootIdV2::new([5; 32]),
             ServiceIdentityV2::new([6; 32]),
+            PeerIdentityBindingV2::linux(501, 502, 503, 504, Digest32V2::new([15; 32])).unwrap(),
         )
         .unwrap();
         let request = encode_kernel_service_request_envelope_v2(
@@ -363,7 +351,15 @@ mod tests {
             verify_kernel_service_response_envelope_v2(&response, key_id, public_key).unwrap();
         assert_eq!(decoded.operation_tag(), 29);
         let mut eof = [0_u8; 1];
-        assert_eq!(client.read(&mut eof).unwrap(), 0);
+        // The second request above is written deliberately and never read: the
+        // server answers exactly one and closes. Closing a stream socket that
+        // still holds unread data resets the connection on Linux and reports a
+        // clean EOF on macOS, so accept either. Both say the server closed
+        // after one response without consuming the second request.
+        match client.read(&mut eof) {
+            Ok(read) => assert_eq!(read, 0),
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset),
+        }
         assert_eq!(server_thread.join().unwrap(), Ok(()));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -503,5 +499,87 @@ mod tests {
         assert_eq!(client.read(&mut eof).unwrap(), 0);
         assert_eq!(server_thread.join().unwrap(), Ok(()));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn v1_prefix_gets_no_response_and_never_reaches_suite_one_dispatch() {
+        let client_key = SigningKey::from_bytes(&[0x41; 32]);
+        let server_key = SigningKey::from_bytes(&[0x42; 32]);
+        let edge = KernelServiceHandshakeEdgeV2::from_verified_deployment(
+            EndpointRoleV2::AgentKernel,
+            Digest32V2::new([1; 32]),
+            ServiceIdentityV2::new([2; 32]),
+            ServiceIdentityV2::new([3; 32]),
+            derive_ed25519_key_id_v2(client_key.verifying_key().to_bytes()),
+            derive_ed25519_key_id_v2(server_key.verifying_key().to_bytes()),
+            BootIdV2::new([4; 32]),
+            5,
+            Digest32V2::new([6; 32]),
+            7,
+            8,
+            Digest32V2::new([9; 32]),
+            Digest32V2::new([10; 32]),
+            Digest32V2::new([11; 32]),
+            Digest32V2::new([12; 32]),
+            Digest32V2::new([13; 32]),
+            Digest32V2::new([14; 32]),
+        )
+        .unwrap();
+        let handshake_owner = Arc::new(
+            KernelV2HandshakeOwner::spawn(
+                edge,
+                client_key.verifying_key().to_bytes(),
+                server_key,
+                4,
+            )
+            .unwrap(),
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handled = Arc::clone(&calls);
+        let owner = KernelRuntimeOwnerV2::spawn_for_test(4, move |_| {
+            handled.fetch_add(1, Ordering::SeqCst);
+            Ok(KernelServiceResponseBodyV2::from_typed_handler(vec![0x80]).unwrap())
+        })
+        .unwrap();
+        let dispatcher = Arc::new(
+            KernelServiceDispatcherV2::spawn(
+                KernelServiceDeploymentV2::from_verified_startup(
+                    BootIdV2::new([4; 32]),
+                    ServiceIdentityV2::new([3; 32]),
+                    Digest32V2::new([6; 32]),
+                    7,
+                )
+                .unwrap(),
+                Ed25519KeyIdV2::new([16; 32]),
+                SigningKey::from_bytes(&[17; 32]),
+                owner,
+            )
+            .unwrap(),
+        );
+        let observed =
+            PeerIdentityBindingV2::linux(501, 502, 503, 504, Digest32V2::new([15; 32])).unwrap();
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let server_thread = thread::spawn(move || {
+            serve_one_suite_one_v2_connection(
+                server,
+                observed,
+                V2GenerationLease::for_dispatch_test(Digest32V2::new([6; 32]), 7),
+                handshake_owner.as_ref(),
+                dispatcher.as_ref(),
+                UnixMillisV2::new(100),
+                Instant::now() + Duration::from_secs(2),
+            )
+        });
+
+        client.write_all(b"SAVANA1\0").unwrap();
+        client.write_all(&[0_u8; 12]).unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut byte = [0_u8; 1];
+        assert_eq!(client.read(&mut byte).unwrap(), 0);
+        assert_eq!(
+            server_thread.join().unwrap(),
+            Err(KernelServiceDispatchErrorV2::Malformed)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

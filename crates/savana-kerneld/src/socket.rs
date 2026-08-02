@@ -1450,6 +1450,11 @@ mod tests {
 
     #[test]
     fn provisional_socket_group_is_closed_to_daemon_or_client_group() {
+        // `SocketFixture::new` reads the process group and chowns the socket
+        // parent, so it has to run under the same guard as every other test
+        // that touches process-global identity. Without it this test races a
+        // guarded test mid-mutation and the chown intermittently returns EPERM.
+        let _test_guard = PROCESS_TEST_LOCK.lock().unwrap();
         let fixture = SocketFixture::new();
         let base = LeafIdentity {
             dev: 1,

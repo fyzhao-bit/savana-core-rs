@@ -182,6 +182,30 @@ pub const SAVANA_BROWSER_SCRIPT_V2: &[u8] = br####""use strict";
     return value;
   };
 
+  const approvalDisplayText = async (view) => {
+    if (!Array.isArray(view) || view.length !== 5
+        || !Array.isArray(view[0]) || view[0].length !== 1
+        || typeof view[3] !== "string" || view[3].length === 0
+        || !(view[1] instanceof Uint8Array) || view[1].length !== 32
+        || !(view[2] instanceof Uint8Array) || view[2].length !== 32
+        || !(view[4] instanceof Uint8Array) || view[4].length !== 32
+        || view[1].every((byte) => byte === 0)
+        || view[2].every((byte) => byte === 0)
+        || view[4].every((byte) => byte === 0)
+        || view[3].normalize("NFC") !== view[3]
+        || /[\u0000-\u001f\u007f-\u009f]/u.test(view[3])) {
+      throw new Error("invalid approval display artifact");
+    }
+    const textBytes = new TextEncoder().encode(view[3]);
+    if (textBytes.length > 1024 * 1024) throw new Error("approval display artifact is too large");
+    const domain = new TextEncoder().encode("SAVANA_APPROVAL_DISPLAY_BYTES_V2\0");
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", concat(domain, textBytes)));
+    if (!digest.every((byte, index) => byte === view[2][index])) {
+      throw new Error("approval display digest mismatch");
+    }
+    return view[3];
+  };
+
   const runJarvis = async (main) => {
     if (!main || main.dataset.bootstrap !== "true") return;
     const selectorText = location.pathname.split("/").pop();
@@ -249,7 +273,7 @@ pub const SAVANA_BROWSER_SCRIPT_V2: &[u8] = br####""use strict";
     const heading = document.createElement("h1");
     heading.textContent = "Review Savana approval";
     const summary = document.createElement("pre");
-    summary.textContent = JSON.stringify(printable(view), null, 2);
+    summary.textContent = await approvalDisplayText(view);
     const deny = document.createElement("button");
     deny.textContent = "Deny";
     const approve = document.createElement("button");
@@ -491,3 +515,133 @@ pub const SAVANA_BROWSER_SCRIPT_V2: &[u8] = br####""use strict";
     .catch(fail);
 })();
 "####;
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    use super::SAVANA_BROWSER_SCRIPT_V2;
+
+    #[test]
+    fn approval_dom_renders_complete_non_ascii_text_without_byte_summary() {
+        let browser_script = std::str::from_utf8(SAVANA_BROWSER_SCRIPT_V2).unwrap();
+        let mut harness = String::from("const browserScript = ");
+        harness.push_str(&serde_json::to_string(browser_script).unwrap());
+        harness.push_str(
+            r####";
+const exactText = "批准：é漢字 — " + "approval artifact ".repeat(6);
+const elements = new Map();
+let approvalText = null;
+const element = (tag) => ({
+  tagName: tag.toUpperCase(),
+  dataset: {},
+  disabled: false,
+  textContent: "",
+  setAttribute() {},
+  append() {},
+  replaceChildren() {},
+  addEventListener(kind, listener) { this[kind] = listener; }
+});
+const main = element("main");
+main.dataset.purpose = "approval-display";
+const preAuthentication = Uint8Array.of(0x58, 0x20, ...new Uint8Array(32).fill(0x11));
+main.dataset.preAuthentication = Buffer.from(preAuthentication).toString("base64url");
+const authenticate = element("button");
+const status = element("p");
+elements.set("main", main);
+elements.set("#savana-authenticate", authenticate);
+elements.set("#savana-status", status);
+globalThis.document = {
+  body: element("body"),
+  querySelector(selector) { return elements.get(selector) ?? null; },
+  createElement(tag) {
+    const created = element(tag);
+    if (tag === "pre") {
+      Object.defineProperty(created, "textContent", {
+        get() { return approvalText; },
+        set(value) { approvalText = value; }
+      });
+    }
+    return created;
+  }
+};
+globalThis.location = {port: "8766", pathname: "/"};
+Object.defineProperty(globalThis, "navigator", {value: {credentials: {get: async () => ({
+  rawId: Uint8Array.of(1).buffer,
+  response: {
+    authenticatorData: Uint8Array.of(2).buffer,
+    clientDataJSON: Uint8Array.of(3).buffer,
+    signature: Uint8Array.of(4).buffer,
+    userHandle: new Uint8Array(32).fill(5).buffer
+  }
+})}}, configurable: true});
+const concat = (...parts) => {
+  const output = new Uint8Array(parts.reduce((length, part) => length + part.length, 0));
+  let offset = 0;
+  for (const part of parts) { output.set(part, offset); offset += part.length; }
+  return output;
+};
+const head = (major, length) => length < 24
+  ? Uint8Array.of((major << 5) | length)
+  : length <= 0xff
+    ? Uint8Array.of((major << 5) | 24, length)
+    : Uint8Array.of((major << 5) | 25, length >> 8, length & 0xff);
+const unsigned = (value) => head(0, value);
+const bytes = (value) => concat(head(2, value.length), value);
+const text = (value) => {
+  const encoded = new TextEncoder().encode(value);
+  return concat(head(3, encoded.length), encoded);
+};
+const array = (...values) => concat(head(4, values.length), ...values);
+const projection = new Uint8Array(32).fill(0x22);
+const digest = new Uint8Array(require("crypto").createHash("sha256")
+  .update(Buffer.from("SAVANA_APPROVAL_DISPLAY_BYTES_V2\0"))
+  .update(Buffer.from(exactText))
+  .digest());
+const node = new Uint8Array(32).fill(0x55);
+const responses = new Map([
+  ["/v2/ui-auth/begin", array(unsigned(2), bytes(new Uint8Array(32).fill(0x33)), bytes(new TextEncoder().encode('{"challenge":"AA"}')))],
+  ["/v2/ui-auth/finish", array(unsigned(2), bytes(new Uint8Array(32).fill(0x44)))],
+  ["/v2/approval/display", array(array(unsigned(2)), bytes(projection), bytes(digest), text(exactText), bytes(node))]
+]);
+globalThis.fetch = async (path) => {
+  const response = responses.get(path);
+  if (!response) throw new Error(`unexpected fetch ${path}`);
+  return {
+    ok: true,
+    status: 200,
+    arrayBuffer: async () => response.buffer.slice(response.byteOffset, response.byteOffset + response.byteLength)
+  };
+};
+eval(browserScript);
+const waitFor = async (predicate) => {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error(`browser behavior did not complete (status: ${status.textContent})`);
+};
+(async () => {
+  await waitFor(() => typeof authenticate.click === "function");
+  authenticate.click();
+  await waitFor(() => approvalText !== null);
+  if (approvalText !== exactText) {
+    throw new Error(`expected exact DOM text ${JSON.stringify(exactText)}, got ${JSON.stringify(approvalText)}`);
+  }
+  if (approvalText.includes("bytes:")) throw new Error("diagnostic byte summary reached approval DOM");
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"####,
+        );
+        let output = Command::new("node")
+            .arg("-e")
+            .arg(harness)
+            .output()
+            .expect("Node.js is required for fixed browser asset behavior tests");
+        assert!(
+            output.status.success(),
+            "browser behavior failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}

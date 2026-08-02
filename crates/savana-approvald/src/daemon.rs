@@ -875,7 +875,7 @@ mod implementation {
                 let view = authority
                     .approval_display(decoded.tab(), now, deadline)
                     .map_err(|_| ApprovaldDaemonErrorV2::EndpointUnavailable)?;
-                let body = encode_approval_display_view_v2(view)
+                let body = encode_approval_display_view_v2(&view)
                     .map_err(|_| ApprovaldDaemonErrorV2::EndpointUnavailable)?;
                 write_http(&mut stream, 200, "application/cbor", &body)
             }

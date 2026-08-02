@@ -1,14 +1,19 @@
 use std::time::Instant;
 
 use savana_kernel_protocol::v2::{
-    EndpointRoleV2, KernelAgentOperationV2, KernelIngressOperationV2, KernelServiceOperationV2,
-    RequestIdV2, UnixMillisV2,
+    EndpointRoleV2, KernelAgentOperationV2, KernelConnectorControlOperationV2,
+    KernelIngressOperationV2, KernelServiceOperationV2, RequestIdV2, UnixMillisV2,
 };
 use savana_kernel_protocol::StableCode;
 
 use crate::policy_runtime::V2GenerationLease;
-use crate::v2_dispatch::{KernelServiceResponseBodyV2, VerifiedKernelServicePeerV2};
-use crate::v2_state_owner::{StateOwnerErrorV2, StateOwnerV2};
+#[cfg(any(test, feature = "test-support"))]
+use crate::v2_dispatch::KernelServiceResponseBodyV2;
+use crate::v2_dispatch::{
+    KernelRuntimeResponseBuilderV2, KernelRuntimeResponsePreparationErrorV2,
+    PreparedKernelServiceResponseV2, VerifiedKernelServicePeerV2,
+};
+use crate::v2_state_owner::{StateOwnerCommitV2, StateOwnerErrorV2, StateOwnerV2};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KernelRuntimeHandlerV2 {
@@ -37,6 +42,13 @@ pub(crate) enum KernelRuntimeHandlerV2 {
     GetKernelTaskStatus,
     CancelKernelTask,
     ResumeCommittedAgentAuthentication,
+    PrepareConnectorRegistration,
+    ProposeConnectorRegistration,
+    AuthorizeConnectorRegistration,
+    ApplyApprovedConnectorRegistration,
+    PrepareConnectorRemoval,
+    RemoveConnector,
+    SnapshotConnectorRegistry,
     IngressHealth,
     BeginInput,
     AppendInputChunk,
@@ -79,6 +91,13 @@ impl KernelRuntimeHandlerV2 {
             | Self::GetKernelTaskStatus
             | Self::CancelKernelTask
             | Self::ResumeCommittedAgentAuthentication => EndpointRoleV2::AgentKernel,
+            Self::PrepareConnectorRegistration
+            | Self::ProposeConnectorRegistration
+            | Self::AuthorizeConnectorRegistration
+            | Self::ApplyApprovedConnectorRegistration
+            | Self::PrepareConnectorRemoval
+            | Self::RemoveConnector
+            | Self::SnapshotConnectorRegistry => EndpointRoleV2::AgentKernel,
             Self::IngressHealth
             | Self::BeginInput
             | Self::AppendInputChunk
@@ -121,6 +140,13 @@ impl KernelRuntimeHandlerV2 {
             Self::GetKernelTaskStatus | Self::AppendInputChunk => 41,
             Self::CancelKernelTask | Self::FinalizeInput => 42,
             Self::ResumeCommittedAgentAuthentication | Self::CommitInputSettlement => 43,
+            Self::PrepareConnectorRegistration => 70,
+            Self::ProposeConnectorRegistration => 71,
+            Self::AuthorizeConnectorRegistration => 72,
+            Self::ApplyApprovedConnectorRegistration => 73,
+            Self::PrepareConnectorRemoval => 74,
+            Self::RemoveConnector => 75,
+            Self::SnapshotConnectorRegistry => 76,
             Self::AbortInput => 44,
             Self::GetInputStatus => 45,
             Self::PrepareIngressUiAuthentication => 46,
@@ -133,7 +159,7 @@ impl KernelRuntimeHandlerV2 {
 }
 
 #[cfg(test)]
-pub(crate) const ALL_KERNEL_RUNTIME_HANDLERS_V2: [KernelRuntimeHandlerV2; 37] = [
+pub(crate) const ALL_KERNEL_RUNTIME_HANDLERS_V2: [KernelRuntimeHandlerV2; 44] = [
     KernelRuntimeHandlerV2::AgentHealth,
     KernelRuntimeHandlerV2::ClaimAgentSession,
     KernelRuntimeHandlerV2::PrepareFollowupIngress,
@@ -159,6 +185,13 @@ pub(crate) const ALL_KERNEL_RUNTIME_HANDLERS_V2: [KernelRuntimeHandlerV2; 37] = 
     KernelRuntimeHandlerV2::GetKernelTaskStatus,
     KernelRuntimeHandlerV2::CancelKernelTask,
     KernelRuntimeHandlerV2::ResumeCommittedAgentAuthentication,
+    KernelRuntimeHandlerV2::PrepareConnectorRegistration,
+    KernelRuntimeHandlerV2::ProposeConnectorRegistration,
+    KernelRuntimeHandlerV2::AuthorizeConnectorRegistration,
+    KernelRuntimeHandlerV2::ApplyApprovedConnectorRegistration,
+    KernelRuntimeHandlerV2::PrepareConnectorRemoval,
+    KernelRuntimeHandlerV2::RemoveConnector,
+    KernelRuntimeHandlerV2::SnapshotConnectorRegistry,
     KernelRuntimeHandlerV2::IngressHealth,
     KernelRuntimeHandlerV2::BeginInput,
     KernelRuntimeHandlerV2::AppendInputChunk,
@@ -260,23 +293,72 @@ pub(crate) fn handler_for_operation_v2(
                 KernelRuntimeHandlerV2::CommitParserWorkerResult
             }
         }),
+        KernelServiceOperationV2::Connector(operation) => Ok(match operation {
+            KernelConnectorControlOperationV2::PrepareRegistration(_) => {
+                KernelRuntimeHandlerV2::PrepareConnectorRegistration
+            }
+            KernelConnectorControlOperationV2::ProposeRegistration(_) => {
+                KernelRuntimeHandlerV2::ProposeConnectorRegistration
+            }
+            KernelConnectorControlOperationV2::AuthorizeRegistration(_) => {
+                KernelRuntimeHandlerV2::AuthorizeConnectorRegistration
+            }
+            KernelConnectorControlOperationV2::ApplyApprovedRegistration(_) => {
+                KernelRuntimeHandlerV2::ApplyApprovedConnectorRegistration
+            }
+            KernelConnectorControlOperationV2::PrepareRemoval(_) => {
+                KernelRuntimeHandlerV2::PrepareConnectorRemoval
+            }
+            KernelConnectorControlOperationV2::Remove(_) => KernelRuntimeHandlerV2::RemoveConnector,
+            KernelConnectorControlOperationV2::Snapshot(_) => {
+                KernelRuntimeHandlerV2::SnapshotConnectorRegistry
+            }
+        }),
         KernelServiceOperationV2::Executor(_) => Err(StableCode::IdentityPeerRejected),
     }
 }
 
 pub(crate) struct KernelRuntimeRequestV2 {
+    context: KernelRuntimeRequestContextV2,
+    response_builder: KernelRuntimeResponseBuilderV2,
+}
+
+pub(crate) struct KernelRuntimeRequestContextV2 {
     peer: VerifiedKernelServicePeerV2,
     lease: V2GenerationLease,
     request_id: RequestIdV2,
+    logical_deadline: UnixMillisV2,
     now: UnixMillisV2,
     handler: KernelRuntimeHandlerV2,
     operation: KernelServiceOperationV2,
 }
 
 impl KernelRuntimeRequestV2 {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        KernelRuntimeRequestContextV2,
+        KernelRuntimeResponseBuilderV2,
+    ) {
+        (self.context, self.response_builder)
+    }
+
+    fn validate(&self) -> Result<(), StableCode> {
+        self.context.validate()
+    }
+
+    fn prepares_finalize_before_commit(&self) -> bool {
+        matches!(
+            self.context.operation,
+            KernelServiceOperationV2::Ingress(KernelIngressOperationV2::FinalizeInput(_))
+        )
+    }
+}
+
+impl KernelRuntimeRequestContextV2 {
     #[cfg(test)]
-    pub(crate) const fn peer(&self) -> VerifiedKernelServicePeerV2 {
-        self.peer
+    pub(crate) const fn peer(&self) -> &VerifiedKernelServicePeerV2 {
+        &self.peer
     }
 
     #[cfg(test)]
@@ -284,7 +366,7 @@ impl KernelRuntimeRequestV2 {
         self.handler
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) const fn operation(&self) -> &KernelServiceOperationV2 {
         &self.operation
     }
@@ -296,6 +378,7 @@ impl KernelRuntimeRequestV2 {
         V2GenerationLease,
         RequestIdV2,
         UnixMillisV2,
+        UnixMillisV2,
         KernelRuntimeHandlerV2,
         KernelServiceOperationV2,
     ) {
@@ -303,6 +386,7 @@ impl KernelRuntimeRequestV2 {
             self.peer,
             self.lease,
             self.request_id,
+            self.logical_deadline,
             self.now,
             self.handler,
             self.operation,
@@ -311,6 +395,7 @@ impl KernelRuntimeRequestV2 {
 
     fn validate(&self) -> Result<(), StableCode> {
         if self.request_id.as_bytes().iter().all(|byte| *byte == 0)
+            || self.logical_deadline.get() == 0
             || self.now.get() == 0
             || self.lease.deployment_generation() == 0
             || self.lease.effect_fence_epoch() == 0
@@ -333,7 +418,8 @@ pub(crate) trait KernelRuntimeServicesV2: Send + 'static {
     fn execute(
         &mut self,
         request: KernelRuntimeRequestV2,
-    ) -> Result<KernelServiceResponseBodyV2, StableCode>;
+        commit: Option<StateOwnerCommitV2>,
+    ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,7 +431,10 @@ pub(crate) enum KernelRuntimeOwnerErrorV2 {
 }
 
 pub(crate) struct KernelRuntimeOwnerV2 {
-    owner: StateOwnerV2<KernelRuntimeRequestV2, Result<KernelServiceResponseBodyV2, StableCode>>,
+    owner: StateOwnerV2<
+        KernelRuntimeRequestV2,
+        Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2>,
+    >,
 }
 
 impl std::fmt::Debug for KernelRuntimeOwnerV2 {
@@ -359,13 +448,19 @@ impl KernelRuntimeOwnerV2 {
         capacity: usize,
         mut services: impl KernelRuntimeServicesV2,
     ) -> Result<Self, KernelRuntimeOwnerErrorV2> {
-        let owner = StateOwnerV2::spawn(
+        let owner = StateOwnerV2::spawn_transactional(
             "savana-kerneld-runtime-v2",
             capacity,
-            move |request: KernelRuntimeRequestV2| {
+            move |request: KernelRuntimeRequestV2, commit| {
                 Ok(match request.validate() {
-                    Ok(()) => services.execute(request),
-                    Err(error) => Err(error),
+                    Ok(()) => {
+                        let commit = request.prepares_finalize_before_commit().then_some(commit);
+                        services.execute(request, commit)
+                    }
+                    Err(error) => {
+                        let (_, builder) = request.into_parts();
+                        builder.prepare(Err(error))
+                    }
                 })
             },
         )
@@ -376,7 +471,7 @@ impl KernelRuntimeOwnerV2 {
     #[cfg(test)]
     pub(crate) fn spawn_for_test(
         capacity: usize,
-        handler: impl FnMut(KernelRuntimeRequestV2) -> Result<KernelServiceResponseBodyV2, StableCode>
+        handler: impl FnMut(KernelRuntimeRequestContextV2) -> Result<KernelServiceResponseBodyV2, StableCode>
             + Send
             + 'static,
     ) -> Result<Self, KernelRuntimeOwnerErrorV2> {
@@ -384,30 +479,87 @@ impl KernelRuntimeOwnerV2 {
 
         impl<Handler> KernelRuntimeServicesV2 for TestServicesV2<Handler>
         where
-            Handler: FnMut(KernelRuntimeRequestV2) -> Result<KernelServiceResponseBodyV2, StableCode>
+            Handler: FnMut(
+                    KernelRuntimeRequestContextV2,
+                ) -> Result<KernelServiceResponseBodyV2, StableCode>
                 + Send
                 + 'static,
         {
             fn execute(
                 &mut self,
                 request: KernelRuntimeRequestV2,
-            ) -> Result<KernelServiceResponseBodyV2, StableCode> {
-                (self.0)(request)
+                commit: Option<StateOwnerCommitV2>,
+            ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2>
+            {
+                let (context, builder) = request.into_parts();
+                if matches!(
+                    context.operation(),
+                    KernelServiceOperationV2::Ingress(KernelIngressOperationV2::FinalizeInput(_))
+                ) {
+                    commit
+                        .ok_or(KernelRuntimeResponsePreparationErrorV2::Unavailable)?
+                        .claim()
+                        .map_err(map_commit_preparation_error)?;
+                }
+                builder.prepare((self.0)(context))
             }
         }
 
         Self::spawn(capacity, TestServicesV2(handler))
     }
 
+    #[cfg(feature = "test-support")]
+    pub(crate) fn spawn_for_test_support(
+        capacity: usize,
+        handler: impl FnMut(KernelRuntimeRequestContextV2) -> Result<KernelServiceResponseBodyV2, StableCode>
+            + Send
+            + 'static,
+    ) -> Result<Self, KernelRuntimeOwnerErrorV2> {
+        struct TestSupportServicesV2<Handler>(Handler);
+
+        impl<Handler> KernelRuntimeServicesV2 for TestSupportServicesV2<Handler>
+        where
+            Handler: FnMut(
+                    KernelRuntimeRequestContextV2,
+                ) -> Result<KernelServiceResponseBodyV2, StableCode>
+                + Send
+                + 'static,
+        {
+            fn execute(
+                &mut self,
+                request: KernelRuntimeRequestV2,
+                commit: Option<StateOwnerCommitV2>,
+            ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2>
+            {
+                let (context, builder) = request.into_parts();
+                if matches!(
+                    context.operation(),
+                    KernelServiceOperationV2::Ingress(KernelIngressOperationV2::FinalizeInput(_))
+                ) {
+                    commit
+                        .ok_or(KernelRuntimeResponsePreparationErrorV2::Unavailable)?
+                        .claim()
+                        .map_err(map_commit_preparation_error)?;
+                }
+                builder.prepare((self.0)(context))
+            }
+        }
+
+        Self::spawn(capacity, TestSupportServicesV2(handler))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn dispatch(
         &self,
         peer: VerifiedKernelServicePeerV2,
         lease: V2GenerationLease,
         request_id: RequestIdV2,
         operation: KernelServiceOperationV2,
+        logical_deadline: UnixMillisV2,
         now: UnixMillisV2,
         deadline: Instant,
-    ) -> Result<KernelServiceResponseBodyV2, KernelRuntimeOwnerErrorV2> {
+        response_builder: KernelRuntimeResponseBuilderV2,
+    ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeOwnerErrorV2> {
         if Instant::now() >= deadline {
             return Err(KernelRuntimeOwnerErrorV2::DeadlineExceeded);
         }
@@ -429,17 +581,46 @@ impl KernelRuntimeOwnerV2 {
         self.owner
             .request(
                 KernelRuntimeRequestV2 {
-                    peer,
-                    lease,
-                    request_id,
-                    now,
-                    handler,
-                    operation,
+                    context: KernelRuntimeRequestContextV2 {
+                        peer,
+                        lease,
+                        request_id,
+                        logical_deadline,
+                        now,
+                        handler,
+                        operation,
+                    },
+                    response_builder,
                 },
                 deadline,
             )
             .map_err(map_owner_error)?
-            .map_err(KernelRuntimeOwnerErrorV2::Operation)
+            .map_err(|error| match error {
+                KernelRuntimeResponsePreparationErrorV2::DeadlineExceeded => {
+                    KernelRuntimeOwnerErrorV2::DeadlineExceeded
+                }
+                KernelRuntimeResponsePreparationErrorV2::Unavailable => {
+                    KernelRuntimeOwnerErrorV2::Unavailable
+                }
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queued_for_test(&self) -> usize {
+        self.owner.queued_for_test()
+    }
+}
+
+const fn map_commit_preparation_error(
+    error: StateOwnerErrorV2,
+) -> KernelRuntimeResponsePreparationErrorV2 {
+    match error {
+        StateOwnerErrorV2::DeadlineExceeded => {
+            KernelRuntimeResponsePreparationErrorV2::DeadlineExceeded
+        }
+        StateOwnerErrorV2::RuntimeBusy | StateOwnerErrorV2::RuntimeUnavailable => {
+            KernelRuntimeResponsePreparationErrorV2::Unavailable
+        }
     }
 }
 
@@ -456,25 +637,31 @@ mod tests {
     use std::collections::BTreeSet;
 
     use savana_kernel_protocol::v2::{
-        kernel_agent_operation_tags_v2, kernel_ingress_operation_tags_v2, EndpointRoleV2,
-        ExecutorHealthRequestV2, KernelExecutorOperationV2, KernelServiceOperationV2,
+        kernel_agent_operation_tags_v2, kernel_connector_control_operation_tags_v2,
+        kernel_ingress_operation_tags_v2, EndpointRoleV2, ExecutorHealthRequestV2,
+        KernelExecutorOperationV2, KernelServiceOperationV2,
     };
     use savana_kernel_protocol::StableCode;
 
     use super::{handler_for_operation_v2, ALL_KERNEL_RUNTIME_HANDLERS_V2};
 
     #[test]
-    fn exhaustive_handler_table_covers_all_37_kerneld_operations_once() {
-        assert_eq!(ALL_KERNEL_RUNTIME_HANDLERS_V2.len(), 37);
+    fn exhaustive_handler_table_covers_all_44_kerneld_operations_once() {
+        assert_eq!(ALL_KERNEL_RUNTIME_HANDLERS_V2.len(), 44);
         let actual = ALL_KERNEL_RUNTIME_HANDLERS_V2
             .into_iter()
             .map(|handler| (role_tag(handler.role()), handler.tag()))
             .collect::<BTreeSet<_>>();
-        assert_eq!(actual.len(), 37);
+        assert_eq!(actual.len(), 44);
 
         let expected = kernel_agent_operation_tags_v2()
             .iter()
             .map(|tag| (role_tag(EndpointRoleV2::AgentKernel), *tag))
+            .chain(
+                kernel_connector_control_operation_tags_v2()
+                    .iter()
+                    .map(|tag| (role_tag(EndpointRoleV2::AgentKernel), *tag)),
+            )
             .chain(
                 kernel_ingress_operation_tags_v2()
                     .iter()

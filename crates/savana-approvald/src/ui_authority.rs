@@ -13,10 +13,11 @@ use savana_kernel_protocol::v2::{
     ApprovalDisplayUiPreAuthenticationTabCapabilityV2, ApprovalDisplayViewV2, ApprovalPurposeV2,
     ApprovalSettlementViewV2, ApprovalTabSessionCapabilityV2, ApprovalUiRecordHandleV2,
     BeginEnrollmentBrowserRequestV2, BeginEnrollmentBrowserResponseV2, BrowserWebAuthnAssertionV2,
-    ClosedCredentialRevocationReasonV2, CreateEnrollmentCodeResponseV2, CredentialPublicStateV2,
-    Digest32V2, EndpointRoleV2, EnrollmentCeremonyCapabilityV2, EnrollmentProfileIdV2,
-    FinishEnrollmentBrowserRequestV2, FinishEnrollmentBrowserResponseV2, FixedOriginV2,
-    IngressApprovalRecordHandleV2, IngressUiAuthenticationBrowserCeremonyCapabilityV2,
+    ClosedCredentialRevocationReasonV2, ConnectorApprovalRecordHandleV2,
+    CreateEnrollmentCodeResponseV2, CredentialPublicStateV2, Digest32V2, EndpointRoleV2,
+    EnrollmentCeremonyCapabilityV2, EnrollmentProfileIdV2, FinishEnrollmentBrowserRequestV2,
+    FinishEnrollmentBrowserResponseV2, FixedOriginV2, IngressApprovalRecordHandleV2,
+    IngressUiAuthenticationBrowserCeremonyCapabilityV2,
     IngressUiAuthenticationSettlementTransferCapabilityV2,
     IngressUiAuthenticationTransferCapabilityV2, IngressUiPreAuthenticationTabCapabilityV2,
     RegisteredApprovalV2, RegisteredUiAuthenticationV2, ReleaseApprovalRecordHandleV2,
@@ -121,6 +122,7 @@ enum ApprovalRecordHandleV2 {
     Ingress(IngressApprovalRecordHandleV2),
     Tool(ToolApprovalRecordHandleV2),
     Release(ReleaseApprovalRecordHandleV2),
+    Connector(ConnectorApprovalRecordHandleV2),
 }
 
 #[derive(Debug)]
@@ -494,6 +496,12 @@ impl ApprovalUiAuthorityV2 {
                         .ok_or(ApprovalUiAuthorityErrorV2::Unavailable)?,
                 )
             }
+            (EndpointRoleV2::AgentApproval, ApprovalPurposeV2::ConnectorRegistration) => {
+                ApprovalRecordHandleV2::Connector(
+                    ConnectorApprovalRecordHandleV2::from_authority_entropy(handle_entropy)
+                        .ok_or(ApprovalUiAuthorityErrorV2::Unavailable)?,
+                )
+            }
             _ => return Err(ApprovalUiAuthorityErrorV2::InvalidReference),
         };
         approvals.push(ApprovalRecordV2 {
@@ -553,6 +561,9 @@ impl ApprovalUiAuthorityV2 {
         let handle = match approval {
             AgentApprovalRecordTargetV2::Tool(handle) => ApprovalRecordHandleV2::Tool(handle),
             AgentApprovalRecordTargetV2::Release(handle) => ApprovalRecordHandleV2::Release(handle),
+            AgentApprovalRecordTargetV2::Connector(handle) => {
+                ApprovalRecordHandleV2::Connector(handle)
+            }
         };
         self.get_approval_settlement(handle, EndpointRoleV2::AgentApproval, now, deadline)
     }
@@ -842,10 +853,15 @@ impl ApprovalUiAuthorityV2 {
             .state
             .approval_challenge(envelope_digest, now, deadline)
             .map_err(map_owner)?;
+        let display_declassification_provenance_digest = challenge
+            .display_declassification_provenance_digest()
+            .ok_or(ApprovalUiAuthorityErrorV2::Unavailable)?;
         ApprovalDisplayViewV2::new(
             challenge.purpose(),
             challenge.display_projection_digest(),
             challenge.display_digest(),
+            challenge.display_text().clone(),
+            display_declassification_provenance_digest,
         )
         .map_err(|_| ApprovalUiAuthorityErrorV2::Unavailable)
     }
@@ -1018,6 +1034,10 @@ fn registered_approval(
             display_authentication: record.display_transfer,
         }),
         ApprovalRecordHandleV2::Release(approval) => Ok(RegisteredApprovalV2::Release {
+            approval,
+            display_authentication: record.display_transfer,
+        }),
+        ApprovalRecordHandleV2::Connector(approval) => Ok(RegisteredApprovalV2::Connector {
             approval,
             display_authentication: record.display_transfer,
         }),

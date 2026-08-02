@@ -974,6 +974,10 @@ impl ServerLifecycle for TestLifecycle<'_> {
         }
         Ok(false)
     }
+
+    fn take_v2_rollover_request(&mut self) -> Result<bool, StableCode> {
+        self.inner.take_v2_rollover_request()
+    }
 }
 
 fn control_status(code: StableCode) -> u8 {

@@ -1332,12 +1332,21 @@ pub(crate) struct MappedInstallation {
     gid: u32,
 }
 
+// The fixture binds Unix sockets under this root, so it must be short enough
+// for `sun_path` and already canonical. macOS resolves `/tmp` to
+// `/private/tmp` and its default TMPDIR under `/var/folders` is too long, so
+// the canonical form is named directly there.
+#[cfg(target_os = "macos")]
+const FIXTURE_TEMP_ROOT: &str = "/private/tmp";
+#[cfg(not(target_os = "macos"))]
+const FIXTURE_TEMP_ROOT: &str = "/tmp";
+
 impl MappedInstallation {
     pub(crate) fn new() -> Self {
         let fixture = startup_fixture();
         let root = tempfile::Builder::new()
             .prefix("skd-")
-            .tempdir_in("/private/tmp")
+            .tempdir_in(FIXTURE_TEMP_ROOT)
             .unwrap();
         let root_path = fs::canonicalize(root.path()).unwrap();
         nix::unistd::chown(

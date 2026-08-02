@@ -1,5 +1,9 @@
 use ed25519_dalek::{Signature, VerifyingKey};
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(
+    test,
+    feature = "test-support",
+    feature = "macos-development-authority"
+))]
 use ed25519_dalek::{Signer as _, SigningKey};
 use savana_kernel_protocol::v2::{
     derive_ed25519_key_id_v2, Digest32V2, Ed25519KeyIdV2, Ed25519SignatureV2,
@@ -263,7 +267,11 @@ impl ManifestDomainSignatureV2 {
         self.signature
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(
+        test,
+        feature = "test-support",
+        feature = "macos-development-authority"
+    ))]
     pub fn sign_for_test(
         domain_tag: u16,
         domain: &[u8],
@@ -315,6 +323,10 @@ impl InstallerOrMdmVerifierV2 {
 
     pub const fn key_epoch(&self) -> u64 {
         self.key_epoch
+    }
+
+    pub fn public_key(&self) -> [u8; 32] {
+        self.verifying_key.to_bytes()
     }
 
     pub(crate) fn verify_operational_root_signature(
@@ -393,7 +405,11 @@ impl ReleaseTrustRootSetV2 {
         })
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(
+        test,
+        feature = "test-support",
+        feature = "macos-development-authority"
+    ))]
     #[allow(clippy::too_many_arguments)]
     pub fn new_signed_for_test(
         product_family_digest: Digest32V2,

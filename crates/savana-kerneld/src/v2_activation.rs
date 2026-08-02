@@ -137,9 +137,10 @@ fn verify_listener_v2(
     let local = listener
         .local_addr()
         .map_err(|_| DeploymentTrustErrorV2::UnsafeSocket)?;
-    if !local.as_pathname().is_some_and(|actual_path| {
-        savana_platform_identity::launchd_unix_socket_path_matches_v2(actual_path, expected_path)
-    }) {
+    if !local
+        .as_pathname()
+        .is_some_and(|actual_path| socket_path_matches_v2(actual_path, expected_path))
+    {
         return Err(DeploymentTrustErrorV2::UnsafeSocket);
     }
     let descriptor = fstat(listener).map_err(|_| DeploymentTrustErrorV2::UnsafeSocket)?;
@@ -176,6 +177,21 @@ fn listener_is_accepting_v2(_listener: &UnixListener) -> Result<bool, Deployment
     // SO_ACCEPTCONN is not available for AF_UNIX on every development
     // platform. Production is Linux and performs the kernel-level check.
     Ok(true)
+}
+
+// launchd returns a `sockaddr_un` padded with trailing NUL bytes, so macOS
+// compares the logical prefix and requires the remainder to be zero.
+#[cfg(target_os = "macos")]
+fn socket_path_matches_v2(actual: &Path, expected: &Path) -> bool {
+    savana_platform_identity::launchd_unix_socket_path_matches_v2(actual, expected)
+}
+
+// Elsewhere the address carries no launchd padding: `as_pathname` already
+// honours the address length and a Linux filename cannot contain NUL, so exact
+// equality is both correct and strictly tighter than the padded comparison.
+#[cfg(not(target_os = "macos"))]
+fn socket_path_matches_v2(actual: &Path, expected: &Path) -> bool {
+    actual == expected
 }
 
 pub(crate) fn listener_identity_digest_v2(

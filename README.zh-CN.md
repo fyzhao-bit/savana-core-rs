@@ -9,7 +9,7 @@ seccomp、macOS CoreFoundation / Security.framework 和 Seatbelt 原生边界
 
 ## 组成
 
-生产工作区固定为十个 crate：
+生产工作区固定为十一个 crate：
 
 - `savana-kernel-protocol`：V1/V2 隔离的规范 CBOR、有限帧、稳定错误码、
   opaque handle 和资源上限；
@@ -17,6 +17,8 @@ seccomp、macOS CoreFoundation / Security.framework 和 Seatbelt 原生边界
   G3-G7 策略核心；
 - `savana-vault`：由内核权威持有的敏感数据存储；
 - `savana-input-runtime`：Rust 持有的 G1/G2 输入处理；
+- `savana-leak-gate`：masker 与内核去密级验证共用的确定性 blocklist 和
+  PII 检测器；
 - `savana-platform-identity`：进程、可执行文件、对端凭据及
   systemd/launchd listener 的原生测量；
 - `savana-agentd`：JARVIS 控制入口和 agent session 边界；
@@ -38,7 +40,8 @@ V1 仅作为 debug `test-support` 下的冻结兼容和回归证据。
 
 - G1/G2：输入规范化、注入/secret/PII 检查、受保护片段 tokenization，
   以及不含原始敏感内容的 planner envelope；
-- G3：label、provenance、不可改善派生和不含 handle 的语义摘要；
+- G3：label、provenance、不可改善派生、不含 handle 的语义摘要，以及
+  manifest pin 锁定的签名去密级规则；
 - G4：绑定存储、descriptor/registry 激活、action intent 去重和
   ontology projection；
 - G5：只允许内核内部选择的 validator dispatch；
@@ -46,6 +49,11 @@ V1 仅作为 debug `test-support` 下的冻结兼容和回归证据。
   加密和反回滚；
 - G7：tool/final release dispatch、审批和 quota 精确绑定、唯一持久
   execution nonce、签名执行回执及恢复对账。
+
+五个会扩大可读范围的交接必须经过同一个去密级入口：masked agent
+view、planner envelope、approval display、executor handoff 和 final
+release。内核检查实际出站字节、生成 provenance 节点、校验 reader class
+及精确 executor/sink（适用时），并把节点摘要绑定进签名交接对象。
 
 每个 daemon 的可变安全状态由一个有界 owner 线程独占。请求有固定
 deadline 和有界队列；owner panic、审计失败、身份变化、回滚或不确定
@@ -89,6 +97,29 @@ vault 或某个 G1-G7 状态机。Python 包可以封装 agent-control 协议，
 
 这里没有通用 `execute`、原始策略求值、vault read、key export、socket
 选择、role 选择或任意 operation 接口。
+
+### 签名去密级接口
+
+去密级是 Rust 内部策略边界，不是 Python 控制 API。`kerneld` 启动时
+加载规范 CBOR `DeclassificationRuleSetV2`，通过用途为
+`DeclassificationAuthority` 的 operational trust root 验证 Ed25519
+签名，并要求规则集 signed digest 与 deployment manifest pin 完全一致。
+唯一能生成去密级节点的入口是：
+
+```rust
+ProvenanceRecordV2::declassify(
+    value, context, transition, verified_rule_set, purpose_digest,
+    token_set_digest, final_release_settlement, parents, effects, now,
+)
+```
+
+封闭 transition 只有 `MaskTokenizeAndLeakCheck`、
+`BuildPlannerEnvelope`、`BuildApprovalDisplay`、
+`BuildExecutionEnvelope` 和 `BuildFinalRelease`。`judge_handoff` 返回
+`Admits`、`Refuses` 或 `Unproven`，只有 `Admits` 可以跨服务边界。
+agent view、planner ticket、approval envelope 和 sealed execution payload
+都会携带对应的去密级 provenance digest；最终释放还必须具有 fresh、
+精确绑定、single-use 的审批 settlement，以及非空 value scope。
 
 ### 浏览器 localhost HTTP
 

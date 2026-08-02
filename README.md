@@ -10,7 +10,7 @@ CoreFoundation/Security.framework FFI and Seatbelt worker-launcher modules.
 Those four modules deny unsafe code by default and annotate every required
 unsafe operation locally.
 
-The production workspace is frozen to these ten crates:
+The production workspace is frozen to these eleven crates:
 
 - `savana-kernel-protocol`: bounded framing, canonical CBOR, isolated V1/V2
   wire types, stable error codes, opaque handles, and hard resource ceilings;
@@ -19,6 +19,8 @@ The production workspace is frozen to these ten crates:
   projections;
 - `savana-vault`: authority-owned sensitive-data storage boundary;
 - `savana-input-runtime`: Rust-owned input processing boundary;
+- `savana-leak-gate`: the shared deterministic blocklist and PII detector used
+  by both masking and in-kernel declassification verification;
 - `savana-platform-identity`: audited native peer, process, executable, and
   service-manager listener measurements;
 - `savana-agentd`: JARVIS control and agent-session boundary;
@@ -51,7 +53,7 @@ The V2 Rust runtime implements:
 - signed G1/G2 input assets, normalization, injection/secret/PII gates,
   protected-span tokenization, and a closed planner envelope;
 - G3 labels, provenance, non-improving derivation, and handle-free semantic
-  digests;
+  digests, plus manifest-pinned signed declassification rules;
 - G4 stored binding, descriptor/registry activation, action-intent
   deduplication, and ontology projection;
 - internal-only G5 validator dispatch;
@@ -59,6 +61,11 @@ The V2 Rust runtime implements:
   counters, replay consumption, encryption, and rollback protection;
 - G7 tool/final-release dispatch, exact approval and quota binding, a single
   durable execution nonce, signed executor receipts, and reconciliation;
+- five mandatory declassification transitions for masked agent views, planner
+  envelopes, approval displays, executor handoffs, and final releases. Each
+  transition gates the exact outgoing bytes, records a provenance node, checks
+  the recipient class and exact executor/sink where applicable, and binds the
+  node digest into the signed handoff object;
 - encrypted, rollback-protected vault, execd journal, policy WAL, approval
   state, and agentd `TaskHandleV2` resolver;
 - canonical kerneld-to-agentd task statements bound to the deployment signing
@@ -249,6 +256,29 @@ handles, fixed deadlines, and bounded messages. The complete operation set is:
 There is no generic `execute`, raw policy-evaluation, vault-read, key-export,
 socket-selection, role-selection, or arbitrary-operation call on this
 boundary.
+
+### Signed declassification interface
+
+Declassification is an internal Rust policy boundary, not a Python control
+API. `kerneld` loads a canonical `DeclassificationRuleSetV2`, verifies its
+Ed25519 signer through a declassification-purpose operational trust-root set,
+and requires its signed digest to equal the deployment-manifest pin. The only
+node-minting entry is:
+
+```rust
+ProvenanceRecordV2::declassify(
+    value, context, transition, verified_rule_set, purpose_digest,
+    token_set_digest, final_release_settlement, parents, effects, now,
+)
+```
+
+The closed transition set is `MaskTokenizeAndLeakCheck`,
+`BuildPlannerEnvelope`, `BuildApprovalDisplay`, `BuildExecutionEnvelope`, and
+`BuildFinalRelease`. `judge_handoff` returns `Admits`, `Refuses`, or `Unproven`;
+only `Admits` can cross a service boundary. Agent-view, planner-ticket,
+approval-envelope, and sealed-execution payloads carry the resulting
+declassification provenance digest. Final release additionally requires a
+fresh, exact, single-use approval settlement and a non-empty value scope.
 
 ### Browser loopback HTTP
 

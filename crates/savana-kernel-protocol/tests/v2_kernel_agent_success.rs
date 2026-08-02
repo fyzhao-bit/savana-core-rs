@@ -9,11 +9,12 @@ use savana_kernel_protocol::v2::{
     encode_get_release_status_response_v2, encode_propose_tool_call_response_v2,
     encode_read_agent_view_response_v2, encode_revoke_vault_response_v2,
     ActionIntentCurrentStateV2, ActionIntentHandleV2, AgentContentStateV2, AgentViewV2,
-    AuthorizeReleaseResponseV2, AuthorizeToolCallResponseV2, DispatchExecutionResponseV2,
-    DispatchReleaseResponseV2, ExecutionHandleV2, ExecutionTicketHandleV2,
-    GetExecutionStatusResponseV2, GetReleaseStatusResponseV2, ProposeToolCallResponseV2,
-    PublicDispatchAcceptedStateV2, PublicExecutionStatusV2, ReadAgentViewResponseV2,
-    ReleaseHandleV2, ReleaseTicketHandleV2, RevokeVaultResponseV2, VaultPublicStateV2,
+    AuthorizeReleaseResponseV2, AuthorizeToolCallResponseV2, Digest32V2,
+    DispatchExecutionResponseV2, DispatchReleaseResponseV2, ExecutionHandleV2,
+    ExecutionTicketHandleV2, GetExecutionStatusResponseV2, GetReleaseStatusResponseV2,
+    ProposeToolCallResponseV2, PublicDispatchAcceptedStateV2, PublicExecutionStatusV2,
+    ReadAgentViewResponseV2, ReleaseHandleV2, ReleaseTicketHandleV2, RevokeVaultResponseV2,
+    VaultPublicStateV2,
 };
 
 fn round_trip<T: PartialEq + std::fmt::Debug>(
@@ -71,8 +72,12 @@ fn remaining_agent_success_bodies_are_exact_and_canonical() {
         decode_get_execution_status_response_v2,
     );
 
-    let view =
-        ReadAgentViewResponseV2::new(AgentViewV2::ContentState(AgentContentStateV2::Ready), None);
+    let view = ReadAgentViewResponseV2::new(
+        AgentViewV2::ContentState(AgentContentStateV2::Ready),
+        None,
+        Digest32V2::new([0x61; 32]),
+    )
+    .unwrap();
     round_trip(
         &view,
         encode_read_agent_view_response_v2,

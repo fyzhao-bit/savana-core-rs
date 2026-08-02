@@ -134,3 +134,99 @@ fn derive_operations_bind_their_exact_semantic_parameters() {
         G3Error::NonCanonicalOrder
     );
 }
+
+#[test]
+fn untrusted_sources_cannot_carry_authorizing_effects() {
+    // A session grants one `policy_allowed_effects` set to every value it
+    // produces, so without the ceiling a tool result or planner output would
+    // carry SEND exactly like user input does.
+    let session_effects = EffectSetV2::READ
+        .union(EffectSetV2::SEND)
+        .union(EffectSetV2::CREATE);
+
+    let untrusted = SecurityLabelV2::from_verified_source(
+        IntegrityV2::ExternalUntrusted,
+        ConfidentialityV2::VaultBound,
+        ReaderSetV2::KERNEL,
+        session_effects,
+    );
+    assert_eq!(untrusted.effects(), EffectSetV2::READ);
+
+    // Trusted sources are untouched: a recipient the user supplied through
+    // ingress keeps the effects the session granted it.
+    for integrity in [IntegrityV2::UserAuthorized, IntegrityV2::KernelTrusted] {
+        let trusted = SecurityLabelV2::from_verified_source(
+            integrity,
+            ConfidentialityV2::AgentMasked,
+            ReaderSetV2::KERNEL,
+            session_effects,
+        );
+        assert_eq!(trusted.effects(), session_effects);
+    }
+
+    // An untrusted value that was never granted READ ends up with no effects
+    // at all rather than silently gaining one.
+    let write_only = SecurityLabelV2::from_verified_source(
+        IntegrityV2::ExternalUntrusted,
+        ConfidentialityV2::VaultBound,
+        ReaderSetV2::KERNEL,
+        EffectSetV2::SEND,
+    );
+    assert_eq!(write_only.effects(), EffectSetV2::EMPTY);
+}
+
+#[test]
+fn derivation_strips_authorizing_effects_once_any_parent_is_untrusted() {
+    // Both parents carry SEND, so effect intersection alone would preserve it.
+    // The integrity join makes the result `ExternalUntrusted`, and the ceiling
+    // must be re-applied after that join or a trusted parent would launder an
+    // authorizing effect into untrusted data.
+    let trusted = SecurityLabelV2::from_verified_source(
+        IntegrityV2::UserAuthorized,
+        ConfidentialityV2::AgentMasked,
+        ReaderSetV2::KERNEL,
+        EffectSetV2::READ.union(EffectSetV2::SEND),
+    );
+    let untrusted = SecurityLabelV2::from_verified_source(
+        IntegrityV2::ExternalUntrusted,
+        ConfidentialityV2::VaultBound,
+        ReaderSetV2::KERNEL,
+        EffectSetV2::READ.union(EffectSetV2::SEND),
+    );
+
+    let derived = SecurityLabelV2::derive_normal(
+        &[trusted, untrusted],
+        EffectSetV2::READ.union(EffectSetV2::SEND),
+    )
+    .unwrap();
+
+    assert_eq!(derived.integrity(), IntegrityV2::ExternalUntrusted);
+    assert_eq!(derived.effects(), EffectSetV2::READ);
+    assert!(!derived.effects().contains(EffectSetV2::SEND));
+
+    // Deriving only from trusted parents keeps the authorizing effect.
+    let trusted_only = SecurityLabelV2::derive_normal(
+        &[trusted, trusted],
+        EffectSetV2::READ.union(EffectSetV2::SEND),
+    )
+    .unwrap();
+    assert_eq!(trusted_only.integrity(), IntegrityV2::UserAuthorized);
+    assert!(trusted_only.effects().contains(EffectSetV2::SEND));
+}
+
+#[test]
+fn untrusted_effect_ceiling_is_read_only() {
+    // Pin the ceiling: untrusted data stays readable, and every authorizing
+    // effect stays outside it.
+    assert_eq!(crate::v2::UNTRUSTED_EFFECT_CEILING_V2, EffectSetV2::READ);
+    for effect in [
+        EffectSetV2::CREATE,
+        EffectSetV2::UPDATE,
+        EffectSetV2::DELETE,
+        EffectSetV2::SEND,
+        EffectSetV2::EXECUTE,
+        EffectSetV2::FINAL_RELEASE,
+    ] {
+        assert!(!crate::v2::UNTRUSTED_EFFECT_CEILING_V2.contains(effect));
+    }
+}

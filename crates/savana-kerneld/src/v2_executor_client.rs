@@ -4,12 +4,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
 use savana_kernel_protocol::v2::{
-    decode_acknowledge_committed_completion_response_v2, decode_dispatch_response_v2,
+    decode_acknowledge_committed_completion_response_v2,
+    decode_connector_registry_sync_response_v2, decode_dispatch_response_v2,
     decode_fetch_completion_response_v2, decode_kernel_service_application_response_v2,
     decode_query_by_execution_nonce_response_v2, encode_kernel_service_application_request_v2,
     AcknowledgeCommittedCompletionRequestV2, AcknowledgeCommittedCompletionResponseV2, BootIdV2,
-    DispatchRequestV2, DispatchResponseV2, EndpointRoleV2, FetchCompletionRequestV2,
-    FetchCompletionResponseV2, KernelExecutorOperationV2, KernelServiceApplicationRequestV2,
+    ConnectorRegistrySyncRequestV2, ConnectorRegistrySyncResponseV2, DispatchRequestV2,
+    DispatchResponseV2, EndpointRoleV2, FetchCompletionRequestV2, FetchCompletionResponseV2,
+    KernelExecutorOperationV2, KernelServiceApplicationRequestV2,
     KernelServiceApplicationResponseBodyV2, KernelServiceHandshakeEdgeV2, KernelServiceOperationV2,
     Nonce32V2, PeerIdentityBindingV2, PublicStableCodeV2, QueryByExecutionNonceRequestV2,
     QueryByExecutionNonceResponseV2, RequestIdV2, UnixMillisV2, V2ClientHandshake,
@@ -72,7 +74,10 @@ impl SuiteOneKernelExecutorClientV2 {
         })
     }
 
+    // Retained for tests that need to redirect the fixed production socket
+    // path; no current test exercises it.
     #[cfg(test)]
+    #[allow(dead_code)]
     fn with_socket_path_for_test(mut self, socket_path: PathBuf) -> Self {
         self.socket_path = socket_path;
         self
@@ -134,6 +139,41 @@ impl SuiteOneKernelExecutorClientV2 {
             KernelExecutorOperationV2::FetchCompletion(request),
         )?;
         decode_fetch_completion_response_v2(&body)
+            .map_err(|_| KernelExecutorClientErrorV2::Unavailable)
+    }
+
+    pub(crate) fn synchronize_connector_registry(
+        &self,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+        request: ConnectorRegistrySyncRequestV2,
+    ) -> Result<ConnectorRegistrySyncResponseV2, KernelExecutorClientErrorV2> {
+        let body = self.exchange(
+            request_id,
+            deadline,
+            KernelExecutorOperationV2::ConnectorRegistrySync(request),
+        )?;
+        decode_connector_registry_sync_response_v2(&body)
+            .map_err(|_| KernelExecutorClientErrorV2::Unavailable)
+    }
+
+    #[cfg(test)]
+    fn synchronize_connector_registry_over_stream_for_test(
+        &self,
+        stream: UnixStream,
+        request_id: RequestIdV2,
+        deadline: UnixMillisV2,
+        io_deadline: Instant,
+        request: ConnectorRegistrySyncRequestV2,
+    ) -> Result<ConnectorRegistrySyncResponseV2, KernelExecutorClientErrorV2> {
+        let body = self.exchange_over_stream(
+            stream,
+            request_id,
+            deadline,
+            io_deadline,
+            KernelExecutorOperationV2::ConnectorRegistrySync(request),
+        )?;
+        decode_connector_registry_sync_response_v2(&body)
             .map_err(|_| KernelExecutorClientErrorV2::Unavailable)
     }
 
@@ -275,12 +315,15 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use savana_kernel_protocol::v2::{
         decode_kernel_service_application_request_v2, decode_query_by_execution_nonce_response_v2,
-        derive_ed25519_key_id_v2, encode_kernel_service_application_response_v2,
-        encode_query_by_execution_nonce_response_v2, BootIdV2, Digest32V2, EndpointRoleV2,
-        ExecutorStatusV2, KernelExecutorOperationV2, KernelServiceApplicationResponseV2,
-        KernelServiceHandshakeEdgeV2, Nonce32V2, PeerIdentityBindingV2,
-        QueryByExecutionNonceRequestV2, QueryByExecutionNonceResponseV2, RequestIdV2,
-        ServiceIdentityV2, UnixMillisV2, V2ServerHandshake,
+        derive_ed25519_key_id_v2, encode_connector_registry_sync_response_v2,
+        encode_kernel_service_application_response_v2, encode_query_by_execution_nonce_response_v2,
+        BootIdV2, ConnectorRegistrySyncModeV2, ConnectorRegistrySyncRequestV2,
+        ConnectorRegistrySyncResponseV2, ConnectorRegistrySyncScopeV2,
+        ConnectorRegistrySyncStatusV2, Digest32V2, Ed25519KeyIdV2, EndpointRoleV2,
+        ExecutorStatusV2, FixedBytes32V2, KernelExecutorOperationV2,
+        KernelServiceApplicationResponseV2, KernelServiceHandshakeEdgeV2, Nonce32V2,
+        PeerIdentityBindingV2, QueryByExecutionNonceRequestV2, QueryByExecutionNonceResponseV2,
+        RequestIdV2, ServiceIdentityV2, UnixMillisV2, V2ServerHandshake,
     };
     use x25519_dalek::StaticSecret;
 
@@ -404,6 +447,106 @@ mod tests {
                 .status(),
             &ExecutorStatusV2::Prepared
         );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn fixed_kernel_executor_client_verifies_encrypted_registry_sync_response_binding() {
+        let client_key = SigningKey::from_bytes(&[0x31; 32]);
+        let server_key = SigningKey::from_bytes(&[0x32; 32]);
+        let edge = edge(&client_key, &server_key);
+        let client = SuiteOneKernelExecutorClientV2::from_verified_deployment(
+            edge,
+            BootIdV2::new([0x33; 32]),
+            observed(),
+            client_key.clone(),
+            server_key.verifying_key().to_bytes(),
+        )
+        .unwrap();
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let io_deadline = Instant::now() + Duration::from_secs(2);
+        let request_id = RequestIdV2::new([0x34; 16]);
+        let genesis = Digest32V2::new([0x35; 32]);
+        let request = ConnectorRegistrySyncRequestV2::new(
+            ConnectorRegistrySyncScopeV2::new(
+                Digest32V2::new([1; 32]),
+                Digest32V2::new([6; 32]),
+                7,
+                genesis,
+                Ed25519KeyIdV2::new([0; 32]),
+                FixedBytes32V2::new([0; 32]),
+                Digest32V2::new([0x36; 32]),
+            )
+            .unwrap(),
+            ConnectorRegistrySyncModeV2::Probe,
+        )
+        .unwrap();
+
+        let server = thread::spawn(move || {
+            let mut channel = UnixV2FrameChannel::new(server_stream);
+            let hello = channel.read_handshake_frame(io_deadline).unwrap();
+            let (pending, server_hello) = V2ServerHandshake::accept_client_hello(
+                edge,
+                observed(),
+                &hello,
+                Nonce32V2::new([0x37; 32]),
+                StaticSecret::from([0x38; 32]),
+                client_key.verifying_key().to_bytes(),
+                &server_key,
+            )
+            .unwrap();
+            channel
+                .write_handshake_frame(&server_hello, io_deadline)
+                .unwrap();
+            let finish = channel.read_handshake_frame(io_deadline).unwrap();
+            let (confirmation, mut session, _) = pending.accept_client_finish(&finish).unwrap();
+            channel
+                .write_record_frame(&confirmation, io_deadline)
+                .unwrap();
+            let record = channel.read_record_frame(io_deadline).unwrap();
+            let opened = session.open_application_request(&record).unwrap();
+            let request = decode_kernel_service_application_request_v2(opened.plaintext()).unwrap();
+            assert_eq!(request.operation().tag(), 64);
+            assert_eq!(request.request_id(), request_id);
+            let body = encode_connector_registry_sync_response_v2(
+                &ConnectorRegistrySyncResponseV2::new(
+                    ConnectorRegistrySyncStatusV2::DisabledGenesisOnly,
+                    0,
+                    genesis,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let response = KernelServiceApplicationResponseV2::success(
+                EndpointRoleV2::KernelExecutor,
+                request_id,
+                64,
+                body,
+            )
+            .unwrap();
+            let plaintext = encode_kernel_service_application_response_v2(&response).unwrap();
+            let record = session
+                .seal_application_response(request_id, 64, &plaintext)
+                .unwrap();
+            channel.write_record_frame(&record, io_deadline).unwrap();
+            channel.close();
+        });
+
+        let response = client
+            .synchronize_connector_registry_over_stream_for_test(
+                client_stream,
+                request_id,
+                wall_clock_deadline(),
+                io_deadline,
+                request,
+            )
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            ConnectorRegistrySyncStatusV2::DisabledGenesisOnly
+        );
+        assert_eq!(response.local_sequence(), 0);
+        assert_eq!(response.local_head_digest(), genesis);
         server.join().unwrap();
     }
 }

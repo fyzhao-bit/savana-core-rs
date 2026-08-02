@@ -2,10 +2,11 @@ use minicbor::Encode as _;
 
 use super::{
     cbor::V2DecodeContext, AgentBrowserViewCursorCapabilityV2, AgentExecutionRefV2,
-    AgentExecutionTicketRefV2, AgentMaskedDocumentRefV2, AgentPendingToolCallRefV2,
-    AgentPlanStepRefV2, AgentReleaseRefV2, AgentReleaseTicketRefV2, AgentSessionStatusV2,
-    AgentTabSessionCapabilityV2, AgentViewV2, ApprovalDisplayAuthenticationTransferCapabilityV2,
-    KernelIngressBootstrapTransferCapabilityV2, Nonce32V2, PublicDecisionTraceV2,
+    AgentExecutionTicketRefV2, AgentMaskedDocumentRefV2, AgentPendingConnectorRegistrationRefV2,
+    AgentPendingToolCallRefV2, AgentPlanStepRefV2, AgentReleaseRefV2, AgentReleaseTicketRefV2,
+    AgentSessionStatusV2, AgentTabSessionCapabilityV2, AgentViewV2,
+    ApprovalDisplayAuthenticationTransferCapabilityV2, BoundedConnectorRegistrySnapshotV2,
+    Digest32V2, KernelIngressBootstrapTransferCapabilityV2, Nonce32V2, PublicDecisionTraceV2,
     PublicDispatchAcceptedStateV2, PublicFailureClassV2, PublicStableCodeV2, VaultPublicStateV2,
 };
 use crate::{ProtocolError, StableCode};
@@ -40,7 +41,7 @@ impl AgentUiAuthenticationCompleteBrowserResponseV2 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentBrowserActionV2 {
     PrepareFollowupIngress,
     RunPlanner,
@@ -53,6 +54,10 @@ pub enum AgentBrowserActionV2 {
     CloseSession,
     RefreshExecution(AgentExecutionRefV2),
     RefreshRelease(AgentReleaseRefV2),
+    RegisterConnector(Vec<u8>),
+    FinalizeConnectorRegistration(AgentPendingConnectorRegistrationRefV2),
+    RemoveConnector(Digest32V2),
+    SnapshotConnectors,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,9 +146,29 @@ pub enum AgentBrowserMutationResponseV2 {
         release: AgentReleaseRefV2,
         state: AgentBrowserReleaseStateV2,
     },
+    ConnectorOpenApproval {
+        pending: AgentPendingConnectorRegistrationRefV2,
+        post: FixedBrowserFormPostCarrierV2,
+    },
+    ConnectorRegistrationCommitted {
+        pending: AgentPendingConnectorRegistrationRefV2,
+        signed_delta_digest: Digest32V2,
+        head_digest: Digest32V2,
+        sequence: u64,
+        connector_id: Digest32V2,
+    },
+    ConnectorRemovalCommitted {
+        signed_delta_digest: Digest32V2,
+        head_digest: Digest32V2,
+        sequence: u64,
+        connector_id: Digest32V2,
+    },
+    ConnectorRegistrySnapshot {
+        canonical_snapshot: BoundedConnectorRegistrySnapshotV2,
+    },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentBrowserRequestV2 {
     ReadView {
         tab: AgentTabSessionCapabilityV2,
@@ -160,13 +185,13 @@ pub enum AgentBrowserRequestV2 {
 }
 
 impl AgentBrowserRequestV2 {
-    pub const fn tab(self) -> AgentTabSessionCapabilityV2 {
+    pub const fn tab(&self) -> AgentTabSessionCapabilityV2 {
         match self {
-            Self::ReadView { tab, .. } | Self::Act { tab, .. } => tab,
+            Self::ReadView { tab, .. } | Self::Act { tab, .. } => *tab,
         }
     }
 
-    pub const fn client_request_nonce(self) -> Nonce32V2 {
+    pub const fn client_request_nonce(&self) -> Nonce32V2 {
         match self {
             Self::ReadView {
                 client_request_nonce,
@@ -175,7 +200,7 @@ impl AgentBrowserRequestV2 {
             | Self::Act {
                 client_request_nonce,
                 ..
-            } => client_request_nonce,
+            } => *client_request_nonce,
         }
     }
 }
@@ -317,7 +342,8 @@ pub fn decode_agent_browser_request_v2(
         },
         _ => return Err(malformed()),
     };
-    if decoder.position() != bytes.len() || encode_agent_browser_request_v2(value)? != bytes {
+    if decoder.position() != bytes.len() || encode_agent_browser_request_v2(value.clone())? != bytes
+    {
         return Err(noncanonical());
     }
     Ok(value)
@@ -482,12 +508,236 @@ pub fn encode_agent_browser_mutation_response_v2(
                 .map_err(ProtocolError::malformed)?;
             encode_release_state(&mut encoder, *state)?;
         }
+        AgentBrowserMutationResponseV2::ConnectorOpenApproval { pending, post } => {
+            encoder
+                .array(3)
+                .and_then(|encoder| encoder.u16(14))
+                .map_err(ProtocolError::malformed)?;
+            pending
+                .encode(&mut encoder, &mut ())
+                .map_err(ProtocolError::malformed)?;
+            encode_post(&mut encoder, *post)?;
+        }
+        AgentBrowserMutationResponseV2::ConnectorRegistrationCommitted {
+            pending,
+            signed_delta_digest,
+            head_digest,
+            sequence,
+            connector_id,
+        } => {
+            validate_committed_connector_response(
+                *signed_delta_digest,
+                *head_digest,
+                *sequence,
+                *connector_id,
+            )?;
+            encoder
+                .array(6)
+                .and_then(|encoder| encoder.u16(15))
+                .map_err(ProtocolError::malformed)?;
+            pending
+                .encode(&mut encoder, &mut ())
+                .map_err(ProtocolError::malformed)?;
+            signed_delta_digest
+                .encode(&mut encoder, &mut ())
+                .map_err(ProtocolError::malformed)?;
+            head_digest
+                .encode(&mut encoder, &mut ())
+                .map_err(ProtocolError::malformed)?;
+            encoder.u64(*sequence).map_err(ProtocolError::malformed)?;
+            connector_id
+                .encode(&mut encoder, &mut ())
+                .map_err(ProtocolError::malformed)?;
+        }
+        AgentBrowserMutationResponseV2::ConnectorRemovalCommitted {
+            signed_delta_digest,
+            head_digest,
+            sequence,
+            connector_id,
+        } => {
+            validate_committed_connector_response(
+                *signed_delta_digest,
+                *head_digest,
+                *sequence,
+                *connector_id,
+            )?;
+            encoder
+                .array(5)
+                .and_then(|encoder| encoder.u16(16))
+                .map_err(ProtocolError::malformed)?;
+            signed_delta_digest
+                .encode(&mut encoder, &mut ())
+                .map_err(ProtocolError::malformed)?;
+            head_digest
+                .encode(&mut encoder, &mut ())
+                .map_err(ProtocolError::malformed)?;
+            encoder.u64(*sequence).map_err(ProtocolError::malformed)?;
+            connector_id
+                .encode(&mut encoder, &mut ())
+                .map_err(ProtocolError::malformed)?;
+        }
+        AgentBrowserMutationResponseV2::ConnectorRegistrySnapshot { canonical_snapshot } => {
+            encoder
+                .array(2)
+                .and_then(|encoder| encoder.u16(17))
+                .and_then(|encoder| encoder.bytes(canonical_snapshot.as_bytes()))
+                .map_err(ProtocolError::malformed)?;
+        }
     }
     let bytes = encoder.into_writer();
     if bytes.len() > MAX_AGENT_BROWSER_BODY_BYTES_V2 {
         return Err(malformed());
     }
     Ok(bytes)
+}
+
+pub fn decode_agent_browser_mutation_response_v2(
+    bytes: &[u8],
+) -> Result<AgentBrowserMutationResponseV2, ProtocolError> {
+    if bytes.is_empty() || bytes.len() > MAX_AGENT_BROWSER_BODY_BYTES_V2 {
+        return Err(malformed());
+    }
+    let mut decoder = minicbor::Decoder::new(bytes);
+    let count = decoder.array().map_err(ProtocolError::malformed)?;
+    let tag = decoder.u16().map_err(ProtocolError::malformed)?;
+    let mut context = V2DecodeContext;
+    let value = match (tag, count) {
+        (1, Some(2)) => AgentBrowserMutationResponseV2::FollowupOpenIngress {
+            post: decode_post(&mut decoder, &mut context)?,
+        },
+        (2, Some(2)) => {
+            let length = decoder
+                .array()
+                .map_err(ProtocolError::malformed)?
+                .ok_or_else(malformed)?;
+            if length > 256 {
+                return Err(malformed());
+            }
+            let mut steps = Vec::with_capacity(usize::try_from(length).map_err(|_| malformed())?);
+            for _ in 0..length {
+                steps.push(
+                    minicbor::Decode::decode(&mut decoder, &mut context)
+                        .map_err(ProtocolError::from_typed_decode)?,
+                );
+            }
+            AgentBrowserMutationResponseV2::PlannerCommitted { steps }
+        }
+        (3, Some(2)) => AgentBrowserMutationResponseV2::ToolProposed {
+            pending: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        },
+        (4, Some(3)) => AgentBrowserMutationResponseV2::ToolDenied {
+            code: PublicStableCodeV2::from_tag(decoder.u16().map_err(ProtocolError::malformed)?)?,
+            trace: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        },
+        (5, Some(3)) => AgentBrowserMutationResponseV2::ToolOpenApproval {
+            post: decode_post(&mut decoder, &mut context)?,
+            trace: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        },
+        (6, Some(3)) => AgentBrowserMutationResponseV2::ToolAuthorized {
+            ticket: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+            trace: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        },
+        (7, Some(3)) => AgentBrowserMutationResponseV2::ExecutionDispatched {
+            execution: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+            state: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        },
+        (8, Some(2)) => AgentBrowserMutationResponseV2::ReleaseOpenApproval {
+            post: decode_post(&mut decoder, &mut context)?,
+        },
+        (9, Some(3)) => AgentBrowserMutationResponseV2::ReleaseDispatched {
+            release: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+            state: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        },
+        (10, Some(2)) => AgentBrowserMutationResponseV2::VaultRevoked {
+            state: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        },
+        (11, Some(2)) => AgentBrowserMutationResponseV2::SessionClosed {
+            state: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        },
+        (12, Some(3)) => AgentBrowserMutationResponseV2::ExecutionRefreshed {
+            execution: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+            state: decode_execution_state(&mut decoder, &mut context)?,
+        },
+        (13, Some(3)) => AgentBrowserMutationResponseV2::ReleaseRefreshed {
+            release: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+            state: decode_release_state(&mut decoder, &mut context)?,
+        },
+        (14, Some(3)) => AgentBrowserMutationResponseV2::ConnectorOpenApproval {
+            pending: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+            post: decode_post(&mut decoder, &mut context)?,
+        },
+        (15, Some(6)) => {
+            let pending = minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?;
+            let signed_delta_digest = minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?;
+            let head_digest = minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?;
+            let sequence = decoder.u64().map_err(ProtocolError::malformed)?;
+            let connector_id = minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?;
+            validate_committed_connector_response(
+                signed_delta_digest,
+                head_digest,
+                sequence,
+                connector_id,
+            )?;
+            AgentBrowserMutationResponseV2::ConnectorRegistrationCommitted {
+                pending,
+                signed_delta_digest,
+                head_digest,
+                sequence,
+                connector_id,
+            }
+        }
+        (16, Some(5)) => {
+            let signed_delta_digest = minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?;
+            let head_digest = minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?;
+            let sequence = decoder.u64().map_err(ProtocolError::malformed)?;
+            let connector_id = minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?;
+            validate_committed_connector_response(
+                signed_delta_digest,
+                head_digest,
+                sequence,
+                connector_id,
+            )?;
+            AgentBrowserMutationResponseV2::ConnectorRemovalCommitted {
+                signed_delta_digest,
+                head_digest,
+                sequence,
+                connector_id,
+            }
+        }
+        (17, Some(2)) => AgentBrowserMutationResponseV2::ConnectorRegistrySnapshot {
+            canonical_snapshot: BoundedConnectorRegistrySnapshotV2::new(
+                decoder.bytes().map_err(ProtocolError::malformed)?.to_vec(),
+            )?,
+        },
+        _ => return Err(malformed()),
+    };
+    if decoder.position() != bytes.len()
+        || encode_agent_browser_mutation_response_v2(&value)? != bytes
+    {
+        return Err(noncanonical());
+    }
+    Ok(value)
 }
 
 fn encode_post(
@@ -510,6 +760,24 @@ fn encode_post(
         }
     }
     Ok(())
+}
+
+fn decode_post(
+    decoder: &mut minicbor::Decoder<'_>,
+    context: &mut V2DecodeContext,
+) -> Result<FixedBrowserFormPostCarrierV2, ProtocolError> {
+    if decoder.array().map_err(ProtocolError::malformed)? != Some(2) {
+        return Err(malformed());
+    }
+    match decoder.u16().map_err(ProtocolError::malformed)? {
+        7 => Ok(FixedBrowserFormPostCarrierV2::AgentFollowupIngress(
+            minicbor::Decode::decode(decoder, context).map_err(ProtocolError::from_typed_decode)?,
+        )),
+        8 => Ok(FixedBrowserFormPostCarrierV2::AgentApprovalDisplay(
+            minicbor::Decode::decode(decoder, context).map_err(ProtocolError::from_typed_decode)?,
+        )),
+        _ => Err(malformed()),
+    }
 }
 
 fn encode_object(
@@ -571,6 +839,35 @@ fn encode_execution_state(
     }
 }
 
+fn decode_execution_state(
+    decoder: &mut minicbor::Decoder<'_>,
+    context: &mut V2DecodeContext,
+) -> Result<AgentBrowserExecutionStateV2, ProtocolError> {
+    let count = decoder.array().map_err(ProtocolError::malformed)?;
+    let tag = decoder.u16().map_err(ProtocolError::malformed)?;
+    match (tag, count) {
+        (1, Some(1)) => Ok(AgentBrowserExecutionStateV2::Prepared),
+        (2, Some(1)) => Ok(AgentBrowserExecutionStateV2::Dispatching),
+        (3, Some(1)) => Ok(AgentBrowserExecutionStateV2::ResultGatePending),
+        (4, Some(2)) => Ok(AgentBrowserExecutionStateV2::Succeeded {
+            document: minicbor::Decode::decode(decoder, context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        }),
+        (5, Some(2)) => Ok(
+            AgentBrowserExecutionStateV2::EffectSucceededOutputQuarantined {
+                class: minicbor::Decode::decode(decoder, context)
+                    .map_err(ProtocolError::from_typed_decode)?,
+            },
+        ),
+        (6, Some(2)) => Ok(AgentBrowserExecutionStateV2::FailedNoEffect {
+            class: minicbor::Decode::decode(decoder, context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        }),
+        (7, Some(1)) => Ok(AgentBrowserExecutionStateV2::Indeterminate),
+        _ => Err(malformed()),
+    }
+}
+
 fn encode_release_state(
     encoder: &mut minicbor::Encoder<Vec<u8>>,
     state: AgentBrowserReleaseStateV2,
@@ -601,6 +898,31 @@ fn encode_release_state(
     }
 }
 
+fn decode_release_state(
+    decoder: &mut minicbor::Decoder<'_>,
+    context: &mut V2DecodeContext,
+) -> Result<AgentBrowserReleaseStateV2, ProtocolError> {
+    let count = decoder.array().map_err(ProtocolError::malformed)?;
+    let tag = decoder.u16().map_err(ProtocolError::malformed)?;
+    match (tag, count) {
+        (1, Some(1)) => Ok(AgentBrowserReleaseStateV2::Prepared),
+        (2, Some(1)) => Ok(AgentBrowserReleaseStateV2::Dispatching),
+        (3, Some(1)) => Ok(AgentBrowserReleaseStateV2::Succeeded),
+        (4, Some(2)) => Ok(
+            AgentBrowserReleaseStateV2::EffectSucceededOutputQuarantined {
+                class: minicbor::Decode::decode(decoder, context)
+                    .map_err(ProtocolError::from_typed_decode)?,
+            },
+        ),
+        (5, Some(2)) => Ok(AgentBrowserReleaseStateV2::FailedNoEffect {
+            class: minicbor::Decode::decode(decoder, context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        }),
+        (6, Some(1)) => Ok(AgentBrowserReleaseStateV2::Indeterminate),
+        _ => Err(malformed()),
+    }
+}
+
 fn encode_unit_state(
     encoder: &mut minicbor::Encoder<Vec<u8>>,
     tag: u16,
@@ -616,6 +938,22 @@ fn encode_action(
     encoder: &mut minicbor::Encoder<Vec<u8>>,
     value: AgentBrowserActionV2,
 ) -> Result<(), ProtocolError> {
+    if let AgentBrowserActionV2::RegisterConnector(descriptor) = &value {
+        if descriptor.is_empty() || descriptor.len() > MAX_AGENT_BROWSER_BODY_BYTES_V2 - 128 {
+            return Err(malformed());
+        }
+        encoder
+            .array(2)
+            .and_then(|encoder| encoder.u16(12))
+            .and_then(|encoder| encoder.bytes(descriptor))
+            .map_err(ProtocolError::malformed)?;
+        return Ok(());
+    }
+    if let AgentBrowserActionV2::RemoveConnector(connector_id) = &value {
+        if is_zero(connector_id.as_bytes()) {
+            return Err(malformed());
+        }
+    }
     let (tag, handle) = match value {
         AgentBrowserActionV2::PrepareFollowupIngress => (1, None),
         AgentBrowserActionV2::RunPlanner => (2, None),
@@ -652,6 +990,16 @@ fn encode_action(
             11,
             Some(minicbor::to_vec(value).map_err(ProtocolError::malformed)?),
         ),
+        AgentBrowserActionV2::RegisterConnector(_) => unreachable!("handled above"),
+        AgentBrowserActionV2::FinalizeConnectorRegistration(value) => (
+            13,
+            Some(minicbor::to_vec(value).map_err(ProtocolError::malformed)?),
+        ),
+        AgentBrowserActionV2::RemoveConnector(value) => (
+            14,
+            Some(minicbor::to_vec(value).map_err(ProtocolError::malformed)?),
+        ),
+        AgentBrowserActionV2::SnapshotConnectors => (15, None),
     };
     encoder
         .array(if handle.is_some() { 2 } else { 1 })
@@ -699,6 +1047,25 @@ fn decode_action(
         (11, Some(2)) => Ok(AgentBrowserActionV2::RefreshRelease(
             minicbor::Decode::decode(decoder, context).map_err(ProtocolError::from_typed_decode)?,
         )),
+        (12, Some(2)) => {
+            let descriptor = decoder.bytes().map_err(ProtocolError::malformed)?.to_vec();
+            if descriptor.is_empty() || descriptor.len() > MAX_AGENT_BROWSER_BODY_BYTES_V2 - 128 {
+                return Err(malformed());
+            }
+            Ok(AgentBrowserActionV2::RegisterConnector(descriptor))
+        }
+        (13, Some(2)) => Ok(AgentBrowserActionV2::FinalizeConnectorRegistration(
+            minicbor::Decode::decode(decoder, context).map_err(ProtocolError::from_typed_decode)?,
+        )),
+        (14, Some(2)) => {
+            let connector_id: Digest32V2 = minicbor::Decode::decode(decoder, context)
+                .map_err(ProtocolError::from_typed_decode)?;
+            if is_zero(connector_id.as_bytes()) {
+                return Err(malformed());
+            }
+            Ok(AgentBrowserActionV2::RemoveConnector(connector_id))
+        }
+        (15, Some(1)) => Ok(AgentBrowserActionV2::SnapshotConnectors),
         _ => Err(malformed()),
     }
 }
@@ -737,6 +1104,26 @@ where
     }
 }
 
+fn validate_committed_connector_response(
+    signed_delta_digest: Digest32V2,
+    head_digest: Digest32V2,
+    sequence: u64,
+    connector_id: Digest32V2,
+) -> Result<(), ProtocolError> {
+    if is_zero(signed_delta_digest.as_bytes())
+        || is_zero(head_digest.as_bytes())
+        || sequence == 0
+        || is_zero(connector_id.as_bytes())
+    {
+        return Err(malformed());
+    }
+    Ok(())
+}
+
+fn is_zero(bytes: &[u8]) -> bool {
+    bytes.iter().all(|byte| *byte == 0)
+}
+
 fn malformed() -> ProtocolError {
     ProtocolError::stable(StableCode::ProtocolMalformedCbor)
 }
@@ -758,10 +1145,39 @@ mod tests {
             cursor: None,
             maximum_encoded_bytes: 4096,
         };
-        let encoded = encode_agent_browser_request_v2(request).unwrap();
+        let encoded = encode_agent_browser_request_v2(request.clone()).unwrap();
         assert_eq!(decode_agent_browser_request_v2(&encoded).unwrap(), request);
         let mut trailing = encoded;
         trailing.push(0);
         assert!(decode_agent_browser_request_v2(&trailing).is_err());
+    }
+
+    #[test]
+    fn connector_registration_is_a_descriptor_only_authenticated_tab_action() {
+        let descriptor = vec![0x87, 0x01, 0x02, 0x03];
+        let request = AgentBrowserRequestV2::Act {
+            tab: AgentTabSessionCapabilityV2::from_authority_entropy([4; 32]).unwrap(),
+            client_request_nonce: Nonce32V2::new([5; 32]),
+            action: AgentBrowserActionV2::RegisterConnector(descriptor.clone()),
+        };
+        let encoded = encode_agent_browser_request_v2(request.clone()).unwrap();
+        assert_eq!(decode_agent_browser_request_v2(&encoded).unwrap(), request);
+
+        let mut decoder = minicbor::Decoder::new(&encoded);
+        assert_eq!(decoder.array().unwrap(), Some(4));
+        assert_eq!(decoder.u16().unwrap(), 2);
+        decoder.skip().unwrap();
+        decoder.skip().unwrap();
+        assert_eq!(decoder.array().unwrap(), Some(2));
+        assert_eq!(decoder.u16().unwrap(), 12);
+        assert_eq!(decoder.bytes().unwrap(), descriptor);
+        assert_eq!(decoder.position(), encoded.len());
+
+        assert!(encode_agent_browser_request_v2(AgentBrowserRequestV2::Act {
+            tab: AgentTabSessionCapabilityV2::from_authority_entropy([4; 32]).unwrap(),
+            client_request_nonce: Nonce32V2::new([5; 32]),
+            action: AgentBrowserActionV2::RegisterConnector(Vec::new()),
+        })
+        .is_err());
     }
 }

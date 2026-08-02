@@ -21,6 +21,7 @@ use savana_kernel_protocol::v2::{
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
+mod connector_registry;
 mod connector_runtime;
 mod daemon;
 mod durable;
@@ -55,6 +56,10 @@ pub fn run(config_path: &std::path::Path) -> Result<(), ExecdDaemonErrorV2> {
     daemon::run(config_path)
 }
 
+pub use connector_registry::{
+    ExecdConnectorRegistryErrorV2, ExecdConnectorRegistryGuardV2, ExecdConnectorRegistryTrustV2,
+    ExecdConnectorRegistryV2,
+};
 pub use daemon::ExecdDaemonErrorV2;
 
 /// Private executable entry point for the installed one-job connector codec.
@@ -1855,29 +1860,44 @@ fn is_zero<const N: usize>(bytes: &[u8; N]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use chacha20poly1305::aead::{Aead as _, Payload};
+    use chacha20poly1305::{ChaCha20Poly1305, KeyInit as _, Nonce};
     use std::fs::{self, File, OpenOptions};
     use std::os::unix::fs::PermissionsExt as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use ed25519_dalek::{Signer as _, SigningKey};
+    use hkdf::Hkdf;
     use minicbor::Encode as _;
     use savana_kernel_protocol::v2::{
         encode_signed_sealed_execution_envelope_v2, ActionIntentIdV2, AttemptKindV2,
-        BoundedCiphertextV2, Digest32V2, DispatchCoreV2, DispatchSubjectV2, DurableRunIdV2,
-        DurableTaskIdV2, Ed25519KeyIdV2, EffectLedgerProjectionBindingV2, ExecutorFailureClassV2,
-        ExecutorIdentityV2, FinalReleaseSemanticBindingV2, FixedBytes32V2, HpkeX25519KeyIdV2,
-        InternalStepIdV2, Nonce32V2, PlanRevisionDigestV2, SealedExecutionEnvelopePayloadV2,
-        SignedExecutorEffectStartedReceiptV2, SignedSealedExecutionEnvelopeV2,
-        ToolExecutionSemanticBindingV2, UnixMillisV2,
+        BoundedCiphertextV2, Digest32V2, DispatchCoreV2, DispatchRequestV2, DispatchSubjectV2,
+        DurableReleaseIdV2, DurableRunIdV2, DurableTaskIdV2, Ed25519KeyIdV2,
+        EffectLedgerProjectionBindingV2, ExecutorFailureClassV2, ExecutorIdentityV2,
+        FinalReleaseSemanticBindingV2, FixedBytes32V2, HpkeX25519KeyIdV2, InternalStepIdV2,
+        KernelExecutorOperationV2, Nonce32V2, PlanRevisionDigestV2,
+        SealedExecutionEnvelopePayloadV2, SignedExecutorEffectStartedReceiptV2,
+        SignedSealedExecutionEnvelopeV2, ToolExecutionSemanticBindingV2, UnixMillisV2,
+    };
+    use savana_policy_core::v2::{
+        DurableStateNamespaceV2, G4Error, RollbackProtectedStateAnchorV2,
+        RollbackProtectedStateHeadV2,
     };
     use sha2::{Digest as _, Sha256};
+    use zeroize::Zeroizing;
 
     use super::{
         DispatchEnvelopeKindV2, DurableExecdNamespaceV2, DurableExecdServiceV2,
-        EffectGatedExecdRuntimeV2, ExecdErrorV2, ExecdJournalStateV2, ExecdRollbackAnchorV2,
+        EffectGatedExecdRuntimeV2, ExecdConnectorRegistryTrustV2, ExecdConnectorRegistryV2,
+        ExecdErrorV2, ExecdJournalStateV2, ExecdQueryV2, ExecdRollbackAnchorV2,
         ExecdRuntimeErrorV2, ExecdServiceV2, ExecdStateHeadV2, ExecdStateOwnerErrorV2,
         ExecdStateOwnerV2, VerifiedExecdDeploymentV2,
+    };
+    use crate::protocol_service::{
+        hpke_x25519_key_id, ExecdProtocolDeploymentV2, ExecdProtocolServiceErrorV2,
+        ExecdProtocolServiceV2, PreparedConnectorDispatchV2, PreparedDispatchProcessorV2,
     };
 
     const ENVELOPE_DOMAIN: &[u8] = b"SAVANA_SEALED_EXECUTION_ENVELOPE_V2\0";
@@ -1968,6 +1988,7 @@ mod tests {
         let envelope = SignedSealedExecutionEnvelopeV2::sign(
             SealedExecutionEnvelopePayloadV2::new(
                 core,
+                Digest32V2::new([0x4f; 32]),
                 FixedBytes32V2::new([0x50; 32]),
                 BoundedCiphertextV2::new(vec![0x51; 64]).unwrap(),
             )
@@ -2147,6 +2168,632 @@ mod tests {
             *head = next;
             Ok(())
         }
+    }
+
+    #[derive(Clone)]
+    struct ConnectorTestAnchor(Arc<Mutex<RollbackProtectedStateHeadV2>>);
+
+    impl Default for ConnectorTestAnchor {
+        fn default() -> Self {
+            Self(Arc::new(Mutex::new(
+                RollbackProtectedStateHeadV2::new(0, Digest32V2::new([0; 32])).unwrap(),
+            )))
+        }
+    }
+
+    impl RollbackProtectedStateAnchorV2 for ConnectorTestAnchor {
+        fn current_head(&self) -> Result<RollbackProtectedStateHeadV2, G4Error> {
+            self.0
+                .lock()
+                .map(|head| *head)
+                .map_err(|_| G4Error::StateConflict)
+        }
+
+        fn compare_and_advance(
+            &mut self,
+            expected: RollbackProtectedStateHeadV2,
+            next: RollbackProtectedStateHeadV2,
+        ) -> Result<(), G4Error> {
+            let mut head = self.0.lock().map_err(|_| G4Error::StateConflict)?;
+            if *head != expected || next.sequence() != expected.sequence().saturating_add(1) {
+                return Err(G4Error::DurableStateRollback);
+            }
+            *head = next;
+            Ok(())
+        }
+    }
+
+    struct CountingDispatchProcessorV2(Arc<AtomicUsize>);
+
+    impl PreparedDispatchProcessorV2 for CountingDispatchProcessorV2 {
+        fn is_ready(&self) -> bool {
+            true
+        }
+
+        fn process(
+            &self,
+            _owner: &ExecdStateOwnerV2,
+            _query: ExecdQueryV2,
+            _payload: Zeroizing<Vec<u8>>,
+            _connector: Option<&PreparedConnectorDispatchV2>,
+            _now: UnixMillisV2,
+            _deadline: Instant,
+        ) -> Result<(), ExecdProtocolServiceErrorV2> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn recover(
+            &self,
+            _owner: &ExecdStateOwnerV2,
+            _query: ExecdQueryV2,
+            _now: UnixMillisV2,
+            _deadline: Instant,
+        ) -> Result<(), ExecdProtocolServiceErrorV2> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct FailingBeforeEffectProcessorV2(Arc<AtomicUsize>);
+
+    impl PreparedDispatchProcessorV2 for FailingBeforeEffectProcessorV2 {
+        fn is_ready(&self) -> bool {
+            true
+        }
+
+        fn process(
+            &self,
+            _owner: &ExecdStateOwnerV2,
+            _query: ExecdQueryV2,
+            _payload: Zeroizing<Vec<u8>>,
+            _connector: Option<&PreparedConnectorDispatchV2>,
+            _now: UnixMillisV2,
+            _deadline: Instant,
+        ) -> Result<(), ExecdProtocolServiceErrorV2> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(ExecdProtocolServiceErrorV2::Binding)
+        }
+
+        fn recover(
+            &self,
+            _owner: &ExecdStateOwnerV2,
+            _query: ExecdQueryV2,
+            _now: UnixMillisV2,
+            _deadline: Instant,
+        ) -> Result<(), ExecdProtocolServiceErrorV2> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(ExecdProtocolServiceErrorV2::Binding)
+        }
+    }
+
+    struct ExpiringBeforeEffectProcessorV2;
+
+    impl PreparedDispatchProcessorV2 for ExpiringBeforeEffectProcessorV2 {
+        fn is_ready(&self) -> bool {
+            true
+        }
+
+        fn process(
+            &self,
+            _owner: &ExecdStateOwnerV2,
+            _query: ExecdQueryV2,
+            _payload: Zeroizing<Vec<u8>>,
+            _connector: Option<&PreparedConnectorDispatchV2>,
+            _now: UnixMillisV2,
+            deadline: Instant,
+        ) -> Result<(), ExecdProtocolServiceErrorV2> {
+            if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+                std::thread::sleep(remaining + Duration::from_millis(5));
+            }
+            Err(ExecdProtocolServiceErrorV2::Binding)
+        }
+
+        fn recover(
+            &self,
+            _owner: &ExecdStateOwnerV2,
+            _query: ExecdQueryV2,
+            _now: UnixMillisV2,
+            _deadline: Instant,
+        ) -> Result<(), ExecdProtocolServiceErrorV2> {
+            Err(ExecdProtocolServiceErrorV2::Binding)
+        }
+    }
+
+    fn protocol_registry_fixture(
+        root: &std::path::Path,
+        registry_genesis: Digest32V2,
+    ) -> (
+        Fixture,
+        SigningKey,
+        HpkeX25519KeyIdV2,
+        [u8; 32],
+        ExecdProtocolDeploymentV2,
+        ExecdStateOwnerV2,
+        Arc<ExecdConnectorRegistryV2>,
+    ) {
+        let journal_path = root.join("execd-journal-v2.cbor");
+        let registry_path = root.join("connector-registry-v2.cbor");
+        let (values, kernel_key, _, deployment) = fixture();
+        let seal_private_key = [0xd1; 32];
+        let seal_public_key =
+            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(seal_private_key))
+                .to_bytes();
+        let seal_key_id = hpke_x25519_key_id(seal_public_key);
+        let protocol_deployment = ExecdProtocolDeploymentV2::from_verified_deployment(
+            &deployment,
+            seal_key_id,
+            seal_private_key,
+            1,
+            1,
+            registry_genesis,
+        )
+        .unwrap();
+        let (gate, projection, projection_binding, _, _) = effect_gate_fixture(root, values);
+        let owner = ExecdStateOwnerV2::open(
+            &journal_path,
+            [0xd2; 32],
+            DurableExecdNamespaceV2::from_verified_installation(
+                values.installation,
+                Digest32V2::new([0xd3; 32]),
+            )
+            .unwrap(),
+            Box::new(TestAnchor::default()),
+            deployment,
+            gate,
+            projection,
+            projection_binding,
+            Instant::now() + Duration::from_secs(1),
+            16,
+        )
+        .unwrap();
+        let registry = Arc::new(
+            ExecdConnectorRegistryV2::open(
+                &registry_path,
+                [0xd4; 32],
+                DurableStateNamespaceV2::from_verified_installation(
+                    values.installation,
+                    Digest32V2::new([0xd5; 32]),
+                )
+                .unwrap(),
+                Box::new(ConnectorTestAnchor::default()),
+                ExecdConnectorRegistryTrustV2::from_authenticated_deployment(
+                    values.installation,
+                    values.manifest,
+                    7,
+                    registry_genesis,
+                    Ed25519KeyIdV2::new([0; 32]),
+                    [0; 32],
+                    vec![],
+                    vec![],
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        (
+            values,
+            kernel_key,
+            seal_key_id,
+            seal_public_key,
+            protocol_deployment,
+            owner,
+            registry,
+        )
+    }
+
+    fn sealed_registry_dispatch_request(
+        values: Fixture,
+        kernel_key: &SigningKey,
+        seal_key_id: HpkeX25519KeyIdV2,
+        seal_public_key: [u8; 32],
+        registry_head: Digest32V2,
+        nonce: Nonce32V2,
+    ) -> DispatchRequestV2 {
+        let binding = ToolExecutionSemanticBindingV2::new(
+            PlanRevisionDigestV2::new([0xd6; 32]),
+            InternalStepIdV2::new([0xd7; 32]),
+            Digest32V2::new([0xd8; 32]),
+            Digest32V2::new([0xd9; 32]),
+            Digest32V2::new([0xda; 32]),
+            Digest32V2::new([0xdb; 32]),
+            Digest32V2::new([0xdc; 32]),
+            Digest32V2::new([0xdd; 32]),
+            Digest32V2::new([0xde; 32]),
+            values.executor_identity,
+            AttemptKindV2::new(1),
+        )
+        .unwrap();
+        let core = DispatchCoreV2::new(
+            values.installation,
+            values.manifest,
+            7,
+            9,
+            DurableTaskIdV2::new([0xdf; 32]),
+            DurableRunIdV2::new([0xe0; 32]),
+            nonce,
+            DispatchSubjectV2::tool_execution(ActionIntentIdV2::new([0xe1; 32]), binding, None)
+                .unwrap(),
+            ExecutorIdentityV2::new(*values.executor_identity.as_bytes()),
+            seal_key_id,
+            registry_head,
+            UnixMillisV2::new(10_000),
+        )
+        .unwrap();
+        let core_digest = core.semantic_digest().unwrap();
+        let ephemeral_secret = x25519_dalek::StaticSecret::from([0xe2; 32]);
+        let ephemeral_public = x25519_dalek::PublicKey::from(&ephemeral_secret).to_bytes();
+        let shared = ephemeral_secret
+            .diffie_hellman(&x25519_dalek::PublicKey::from(seal_public_key))
+            .to_bytes();
+        let mut key_nonce = [0_u8; 44];
+        let mut info = Vec::new();
+        info.extend_from_slice(b"SAVANA_EXECUTION_HPKE_X25519_CHACHA20POLY1305_V2\0");
+        info.extend_from_slice(&ephemeral_public);
+        info.extend_from_slice(&seal_public_key);
+        Hkdf::<Sha256>::new(Some(core_digest.as_bytes()), &shared)
+            .expand(&info, &mut key_nonce)
+            .unwrap();
+        let plaintext = b"credential-free connector material";
+        let ciphertext = ChaCha20Poly1305::new_from_slice(&key_nonce[..32])
+            .unwrap()
+            .encrypt(
+                Nonce::from_slice(&key_nonce[32..]),
+                Payload {
+                    msg: plaintext,
+                    aad: core_digest.as_bytes(),
+                },
+            )
+            .unwrap();
+        DispatchRequestV2::new(
+            SignedSealedExecutionEnvelopeV2::sign(
+                SealedExecutionEnvelopePayloadV2::new(
+                    core,
+                    Digest32V2::new([0xe3; 32]),
+                    FixedBytes32V2::new(ephemeral_public),
+                    BoundedCiphertextV2::new(ciphertext).unwrap(),
+                )
+                .unwrap(),
+                kernel_key,
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn deterministic_processor_preflight_failure_is_terminal_before_registry_guard_release() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let genesis = Digest32V2::new([0xe4; 32]);
+        let (values, kernel_key, seal_key_id, seal_public_key, deployment, owner, registry) =
+            protocol_registry_fixture(root.path(), genesis);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let service = ExecdProtocolServiceV2::new_with_connector_registry(
+            deployment,
+            owner,
+            Box::new(FailingBeforeEffectProcessorV2(Arc::clone(&calls))),
+            registry,
+        )
+        .unwrap();
+        let nonce = Nonce32V2::new([0xe5; 32]);
+        let request = sealed_registry_dispatch_request(
+            values,
+            &kernel_key,
+            seal_key_id,
+            seal_public_key,
+            genesis,
+            nonce,
+        );
+
+        service
+            .execute(
+                KernelExecutorOperationV2::Dispatch(request),
+                UnixMillisV2::new(200),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+
+        let projection = service
+            .recovery_projection_for_test(Instant::now() + Duration::from_secs(1))
+            .unwrap();
+        let query = projection
+            .iter()
+            .find(|query| query.execution_nonce() == nonce)
+            .unwrap();
+        assert_eq!(query.state(), ExecdJournalStateV2::FailedNoEffect);
+        assert_eq!(
+            query.failure_class(),
+            Some(ExecutorFailureClassV2::ConnectorUnavailableBeforeEffect)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn expired_effect_deadline_uses_bounded_owner_cleanup_to_terminalize_before_guard_release() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let genesis = Digest32V2::new([0xea; 32]);
+        let (values, kernel_key, seal_key_id, seal_public_key, deployment, owner, registry) =
+            protocol_registry_fixture(root.path(), genesis);
+        let service = ExecdProtocolServiceV2::new_with_connector_registry(
+            deployment,
+            owner,
+            Box::new(ExpiringBeforeEffectProcessorV2),
+            registry,
+        )
+        .unwrap();
+        let nonce = Nonce32V2::new([0xeb; 32]);
+        let request = sealed_registry_dispatch_request(
+            values,
+            &kernel_key,
+            seal_key_id,
+            seal_public_key,
+            genesis,
+            nonce,
+        );
+
+        service
+            .execute(
+                KernelExecutorOperationV2::Dispatch(request),
+                UnixMillisV2::new(200),
+                Instant::now() + Duration::from_millis(100),
+            )
+            .unwrap();
+
+        let query = service
+            .recovery_projection_for_test(Instant::now() + Duration::from_secs(1))
+            .unwrap()
+            .into_iter()
+            .find(|query| query.execution_nonce() == nonce)
+            .unwrap();
+        assert_eq!(query.state(), ExecdJournalStateV2::FailedNoEffect);
+        assert_eq!(
+            query.failure_class(),
+            Some(ExecutorFailureClassV2::ConnectorUnavailableBeforeEffect)
+        );
+    }
+
+    #[test]
+    fn stale_prepared_head_terminalizes_on_restart_but_poisoned_registry_aborts_recovery() {
+        for poisoned in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let genesis = Digest32V2::new([0xe6; 32]);
+            let (values, kernel_key, seal_key_id, seal_public_key, deployment, owner, registry) =
+                protocol_registry_fixture(root.path(), genesis);
+            let nonce = Nonce32V2::new([if poisoned { 0xe7 } else { 0xe8 }; 32]);
+            let recorded_head = if poisoned {
+                genesis
+            } else {
+                Digest32V2::new([0xe9; 32])
+            };
+            let request = sealed_registry_dispatch_request(
+                values,
+                &kernel_key,
+                seal_key_id,
+                seal_public_key,
+                recorded_head,
+                nonce,
+            );
+            owner
+                .accept_signed_dispatch(
+                    encode_signed_sealed_execution_envelope_v2(request.envelope()).unwrap(),
+                    UnixMillisV2::new(200),
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .unwrap();
+            if poisoned {
+                registry.poison_for_test();
+            }
+            let calls = Arc::new(AtomicUsize::new(0));
+            let result = ExecdProtocolServiceV2::recover_prepared_with_connector_registry(
+                &deployment,
+                &owner,
+                &CountingDispatchProcessorV2(Arc::clone(&calls)),
+                &registry,
+                UnixMillisV2::new(210),
+                Instant::now() + Duration::from_secs(1),
+            );
+            let query = owner
+                .query(nonce, Instant::now() + Duration::from_secs(1))
+                .unwrap();
+            if poisoned {
+                assert!(result.is_err());
+                assert_eq!(query.state(), ExecdJournalStateV2::Prepared);
+            } else {
+                result.unwrap();
+                assert_eq!(query.state(), ExecdJournalStateV2::FailedNoEffect);
+                assert_eq!(
+                    query.failure_class(),
+                    Some(ExecutorFailureClassV2::ConnectorUnavailableBeforeEffect)
+                );
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    fn stale_registry_dispatch_request(
+        values: Fixture,
+        kernel_key: &SigningKey,
+        seal_key_id: HpkeX25519KeyIdV2,
+        nonce: Nonce32V2,
+        subject: DispatchSubjectV2,
+    ) -> DispatchRequestV2 {
+        let core = DispatchCoreV2::new(
+            values.installation,
+            values.manifest,
+            7,
+            9,
+            DurableTaskIdV2::new([0xf1; 32]),
+            DurableRunIdV2::new([0xf2; 32]),
+            nonce,
+            subject,
+            ExecutorIdentityV2::new(*values.executor_identity.as_bytes()),
+            seal_key_id,
+            Digest32V2::new([0xf3; 32]),
+            UnixMillisV2::new(10_000),
+        )
+        .unwrap();
+        DispatchRequestV2::new(
+            SignedSealedExecutionEnvelopeV2::sign(
+                SealedExecutionEnvelopePayloadV2::new(
+                    core,
+                    Digest32V2::new([0xf4; 32]),
+                    FixedBytes32V2::new([0xf5; 32]),
+                    BoundedCiphertextV2::new(vec![0xf6; 64]).unwrap(),
+                )
+                .unwrap(),
+                kernel_key,
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn stale_registry_head_refuses_tool_and_release_before_journal_or_effect_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let journal_path = root.path().join("execd-journal-v2.cbor");
+        let registry_path = root.path().join("connector-registry-v2.cbor");
+        let (values, kernel_key, _, deployment) = fixture();
+        let seal_private_key = [0xf7; 32];
+        let seal_public_key =
+            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(seal_private_key))
+                .to_bytes();
+        let seal_key_id = hpke_x25519_key_id(seal_public_key);
+        let registry_genesis = Digest32V2::new([0xf8; 32]);
+        let protocol_deployment = ExecdProtocolDeploymentV2::from_verified_deployment(
+            &deployment,
+            seal_key_id,
+            seal_private_key,
+            1,
+            1,
+            registry_genesis,
+        )
+        .unwrap();
+        let (gate, projection, projection_binding, _, _) = effect_gate_fixture(root.path(), values);
+        let owner = ExecdStateOwnerV2::open(
+            &journal_path,
+            [0xf9; 32],
+            DurableExecdNamespaceV2::from_verified_installation(
+                values.installation,
+                Digest32V2::new([0xfa; 32]),
+            )
+            .unwrap(),
+            Box::new(TestAnchor::default()),
+            deployment,
+            gate,
+            projection,
+            projection_binding,
+            Instant::now() + Duration::from_secs(1),
+            16,
+        )
+        .unwrap();
+        let connector_registry = Arc::new(
+            ExecdConnectorRegistryV2::open(
+                &registry_path,
+                [0xfb; 32],
+                DurableStateNamespaceV2::from_verified_installation(
+                    values.installation,
+                    Digest32V2::new([0xfc; 32]),
+                )
+                .unwrap(),
+                Box::new(ConnectorTestAnchor::default()),
+                ExecdConnectorRegistryTrustV2::from_authenticated_deployment(
+                    values.installation,
+                    values.manifest,
+                    7,
+                    registry_genesis,
+                    Ed25519KeyIdV2::new([0; 32]),
+                    [0; 32],
+                    vec![],
+                    vec![],
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let processor_calls = Arc::new(AtomicUsize::new(0));
+        let service = ExecdProtocolServiceV2::new_with_connector_registry(
+            protocol_deployment,
+            owner,
+            Box::new(CountingDispatchProcessorV2(Arc::clone(&processor_calls))),
+            connector_registry,
+        )
+        .unwrap();
+        let journal_before = fs::read(&journal_path).ok();
+
+        let tool_binding = ToolExecutionSemanticBindingV2::new(
+            PlanRevisionDigestV2::new([0x81; 32]),
+            InternalStepIdV2::new([0x82; 32]),
+            Digest32V2::new([0x83; 32]),
+            Digest32V2::new([0x84; 32]),
+            Digest32V2::new([0x85; 32]),
+            Digest32V2::new([0x86; 32]),
+            Digest32V2::new([0x87; 32]),
+            Digest32V2::new([0x88; 32]),
+            Digest32V2::new([0x89; 32]),
+            values.executor_identity,
+            AttemptKindV2::new(1),
+        )
+        .unwrap();
+        let tool = stale_registry_dispatch_request(
+            values,
+            &kernel_key,
+            seal_key_id,
+            Nonce32V2::new([0x8a; 32]),
+            DispatchSubjectV2::tool_execution(
+                ActionIntentIdV2::new([0x8b; 32]),
+                tool_binding,
+                None,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            service.execute(
+                KernelExecutorOperationV2::Dispatch(tool),
+                UnixMillisV2::new(200),
+                Instant::now() + Duration::from_secs(1),
+            ),
+            Err(ExecdProtocolServiceErrorV2::Binding)
+        );
+
+        let release_binding = FinalReleaseSemanticBindingV2::from_nonzero_components(
+            DurableReleaseIdV2::new([0x91; 32]),
+            Digest32V2::new([0x92; 32]),
+            Digest32V2::new([0x93; 32]),
+            Digest32V2::new([0x94; 32]),
+            Digest32V2::new([0x95; 32]),
+            Digest32V2::new([0x96; 32]),
+            Digest32V2::new([0x97; 32]),
+            Digest32V2::new([0x98; 32]),
+            Digest32V2::new([0x99; 32]),
+            values.executor_identity,
+            Digest32V2::new([0x9a; 32]),
+        )
+        .unwrap();
+        let release = stale_registry_dispatch_request(
+            values,
+            &kernel_key,
+            seal_key_id,
+            Nonce32V2::new([0x9b; 32]),
+            DispatchSubjectV2::final_release(release_binding, Digest32V2::new([0x9c; 32])).unwrap(),
+        );
+        assert_eq!(
+            service.execute(
+                KernelExecutorOperationV2::Dispatch(release),
+                UnixMillisV2::new(201),
+                Instant::now() + Duration::from_secs(1),
+            ),
+            Err(ExecdProtocolServiceErrorV2::Binding)
+        );
+        assert!(service
+            .recovery_projection_for_test(Instant::now() + Duration::from_secs(1))
+            .unwrap()
+            .is_empty());
+        assert_eq!(service.active_effect_guard_count_for_test(), 0);
+        assert_eq!(processor_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fs::read(journal_path).ok(), journal_before);
     }
 
     #[test]
@@ -2420,6 +3067,7 @@ mod tests {
         .unwrap();
         let payload = SealedExecutionEnvelopePayloadV2::new(
             core,
+            Digest32V2::new([0x89; 32]),
             FixedBytes32V2::new([0x8a; 32]),
             BoundedCiphertextV2::new(vec![0x8b; 64]).unwrap(),
         )

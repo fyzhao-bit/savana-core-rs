@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use nix::sys::signal::{SigSet, SigmaskHow, Signal};
 use savana_kernel_protocol::StableCode;
-use signal_hook::consts::signal::{SIGINT, SIGPIPE, SIGTERM};
+use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGPIPE, SIGTERM};
 use signal_hook::iterator::Signals;
 use signal_hook::{flag as signal_flag, low_level, SigId};
 
@@ -34,6 +34,7 @@ impl SignalMaskGuard {
         let mut shutdown = SigSet::empty();
         shutdown.add(Signal::SIGTERM);
         shutdown.add(Signal::SIGINT);
+        shutdown.add(Signal::SIGHUP);
         let previous = shutdown
             .thread_swap_mask(SigmaskHow::SIG_BLOCK)
             .map_err(|_| StableCode::KernelUnavailable)?;
@@ -126,6 +127,7 @@ pub(crate) struct SignalController {
     mask: SignalMaskGuard,
     sigpipe: SigpipeGuard,
     reason: Option<ShutdownReason>,
+    v2_rollover_requested: bool,
 }
 
 impl std::fmt::Debug for SignalController {
@@ -142,7 +144,7 @@ impl SignalController {
         if mask.state != MaskState::Blocked {
             return Err(Box::new((StableCode::KernelUnavailable, mask, sigpipe)));
         }
-        let signals = match Signals::new([SIGTERM, SIGINT]) {
+        let signals = match Signals::new([SIGTERM, SIGINT, SIGHUP]) {
             Ok(signals) => signals,
             Err(_) => return Err(Box::new((StableCode::KernelUnavailable, mask, sigpipe))),
         };
@@ -151,6 +153,7 @@ impl SignalController {
             mask,
             sigpipe,
             reason: None,
+            v2_rollover_requested: false,
         })
     }
 
@@ -175,13 +178,16 @@ impl SignalController {
         let signals = self.signals.as_mut().ok_or(StableCode::KernelUnavailable)?;
         let mut saw_term = false;
         let mut saw_int = false;
+        let mut saw_hup = false;
         for signal in signals.pending() {
             match signal {
                 SIGTERM => saw_term = true,
                 SIGINT => saw_int = true,
+                SIGHUP => saw_hup = true,
                 _ => return Err(StableCode::KernelUnavailable),
             }
         }
+        self.v2_rollover_requested |= saw_hup;
         if self.reason.is_none() {
             self.reason = if saw_term {
                 Some(ShutdownReason::Sigterm)
@@ -203,6 +209,11 @@ impl ServerLifecycle for SignalController {
     fn poll_shutdown(&mut self) -> Result<bool, StableCode> {
         self.drain()?;
         Ok(self.reason.is_some())
+    }
+
+    fn take_v2_rollover_request(&mut self) -> Result<bool, StableCode> {
+        self.drain()?;
+        Ok(std::mem::take(&mut self.v2_rollover_requested))
     }
 }
 
@@ -232,11 +243,13 @@ mod tests {
         let blocked = SigSet::thread_get_mask().unwrap();
         assert!(blocked.contains(Signal::SIGTERM));
         assert!(blocked.contains(Signal::SIGINT));
+        assert!(blocked.contains(Signal::SIGHUP));
 
         guard.unblock_shutdown().unwrap();
         let unblocked = SigSet::thread_get_mask().unwrap();
         assert!(!unblocked.contains(Signal::SIGTERM));
         assert!(!unblocked.contains(Signal::SIGINT));
+        assert!(!unblocked.contains(Signal::SIGHUP));
 
         guard.restore().unwrap();
         assert_eq!(SigSet::thread_get_mask().unwrap(), before);
@@ -265,6 +278,25 @@ mod tests {
             controller.shutdown_reason(),
             Some(ShutdownReason::Sigterm)
         ));
+
+        controller.final_drain_and_restore().unwrap();
+        assert_eq!(SigSet::thread_get_mask().unwrap(), before);
+        controller.unregister().unwrap();
+    }
+
+    #[test]
+    fn sighup_requests_one_v2_rollover_without_requesting_shutdown() {
+        let _process_guard = PROCESS_SIGNAL_TEST_LOCK.lock().unwrap();
+        let before = SigSet::thread_get_mask().unwrap();
+        let mask = SignalMaskGuard::block_shutdown().unwrap();
+        let sigpipe = SigpipeGuard::install().unwrap();
+        let mut controller = SignalController::install(mask, sigpipe).unwrap();
+
+        signal_hook::low_level::raise(signal_hook::consts::signal::SIGHUP).unwrap();
+        controller.workers_started().unwrap();
+        assert!(!controller.poll_shutdown().unwrap());
+        assert!(controller.take_v2_rollover_request().unwrap());
+        assert!(!controller.take_v2_rollover_request().unwrap());
 
         controller.final_drain_and_restore().unwrap();
         assert_eq!(SigSet::thread_get_mask().unwrap(), before);

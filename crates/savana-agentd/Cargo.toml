@@ -11,6 +11,7 @@ workspace = true
 
 [features]
 default = []
+test-support = []
 macos-development-authority = [
     "savana-approvald/macos-development-authority",
     "savana-policy-core/macos-development-authority",
@@ -36,6 +37,7 @@ zeroize.workspace = true
 x25519-dalek.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+signal-hook.workspace = true
 
 [dev-dependencies]
 tempfile = "=3.23.0"

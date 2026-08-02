@@ -49,6 +49,7 @@ const CLIENT_CONFIRM_LABEL: &[u8] = b"SAVANA_CLIENT_CONFIRM_V2\0";
 const SERVER_CONFIRM_LABEL: &[u8] = b"SAVANA_SERVER_CONFIRM_V2\0";
 const CLIENT_CONFIRM_MAC_DOMAIN: &[u8] = b"SAVANA_CLIENT_CONFIRM_MAC_V2\0";
 const SERVER_CONFIRM_MAC_DOMAIN: &[u8] = b"SAVANA_SERVER_CONFIRM_MAC_V2\0";
+const PEER_IDENTITY_BINDING_DIGEST_DOMAIN: &[u8] = b"SAVANA_PEER_IDENTITY_BINDING_V2\0";
 const RECORD_AAD_DOMAIN: &[u8] = b"SAVANA_RECORD_AAD_V2\0";
 const ED25519_KEY_ID_DOMAIN: &[u8] = b"savana.ed25519-key-id.v2\0";
 
@@ -173,12 +174,28 @@ impl KernelServiceHandshakeEdgeV2 {
         self.role
     }
 
+    pub const fn installation_id(self) -> Digest32V2 {
+        self.installation_id
+    }
+
     pub const fn client_identity(self) -> ServiceIdentityV2 {
         self.client_identity
     }
 
     pub const fn server_identity(self) -> ServiceIdentityV2 {
         self.server_identity
+    }
+
+    pub const fn server_boot_id(self) -> BootIdV2 {
+        self.server_boot_id
+    }
+
+    pub const fn active_state_manifest_digest(self) -> Digest32V2 {
+        self.active_state_manifest_digest
+    }
+
+    pub const fn deployment_generation(self) -> u64 {
+        self.deployment_generation
     }
 
     fn validate(&self) -> Result<(), ProtocolError> {
@@ -312,28 +329,46 @@ impl PeerIdentityBindingV2 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub fn peer_identity_binding_digest_v2(
+    peer: &PeerIdentityBindingV2,
+) -> Result<Digest32V2, ProtocolError> {
+    peer.validate()?;
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encode_peer_binding(&mut encoder, peer)?;
+    let canonical = encoder.into_writer();
+    let mut hash = Sha256::new();
+    hash.update(PEER_IDENTITY_BINDING_DIGEST_DOMAIN);
+    hash.update(canonical);
+    Ok(Digest32V2::new(hash.finalize().into()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedV2HandshakePeer {
     role: EndpointRoleV2,
     client_identity: ServiceIdentityV2,
     client_boot_id: BootIdV2,
+    observed_client_peer: PeerIdentityBindingV2,
     transcript_digest: Digest32V2,
 }
 
 impl VerifiedV2HandshakePeer {
-    pub const fn role(self) -> EndpointRoleV2 {
+    pub const fn role(&self) -> EndpointRoleV2 {
         self.role
     }
 
-    pub const fn client_identity(self) -> ServiceIdentityV2 {
+    pub const fn client_identity(&self) -> ServiceIdentityV2 {
         self.client_identity
     }
 
-    pub const fn client_boot_id(self) -> BootIdV2 {
+    pub const fn client_boot_id(&self) -> BootIdV2 {
         self.client_boot_id
     }
 
-    pub const fn transcript_digest(self) -> Digest32V2 {
+    pub const fn observed_client_peer(&self) -> &PeerIdentityBindingV2 {
+        &self.observed_client_peer
+    }
+
+    pub const fn transcript_digest(&self) -> Digest32V2 {
         self.transcript_digest
     }
 }
@@ -363,6 +398,12 @@ pub struct V2ClientHandshake {
     hello: ClientHelloBodyV2,
     expected_observed_peer: PeerIdentityBindingV2,
     ephemeral_secret: StaticSecret,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V2ServerHelloAcceptanceErrorV2 {
+    GenerationAuthorityMismatch,
+    Terminal(ProtocolError),
 }
 
 impl std::fmt::Debug for V2ClientHandshake {
@@ -419,27 +460,55 @@ impl V2ClientHandshake {
         server_public_key: [u8; 32],
         client_signing_key: &SigningKey,
     ) -> Result<(Vec<u8>, V2ClientTransportSession), ProtocolError> {
-        require_key_id(self.edge.server_key_id, server_public_key)?;
+        self.accept_server_hello_classified(frame, server_public_key, client_signing_key)
+            .map_err(|error| match error {
+                V2ServerHelloAcceptanceErrorV2::GenerationAuthorityMismatch => identity_mismatch(),
+                V2ServerHelloAcceptanceErrorV2::Terminal(error) => error,
+            })
+    }
+
+    pub fn accept_server_hello_classified(
+        self,
+        frame: &[u8],
+        server_public_key: [u8; 32],
+        client_signing_key: &SigningKey,
+    ) -> Result<(Vec<u8>, V2ClientTransportSession), V2ServerHelloAcceptanceErrorV2> {
+        let terminal = V2ServerHelloAcceptanceErrorV2::Terminal;
+        require_key_id(self.edge.server_key_id, server_public_key).map_err(terminal)?;
         require_key_id(
             self.edge.client_key_id,
             client_signing_key.verifying_key().to_bytes(),
-        )?;
+        )
+        .map_err(terminal)?;
         let body =
-            decode_handshake_frame(frame, self.edge.role, HandshakeMessageKindV2::ServerHello)?;
+            decode_handshake_frame(frame, self.edge.role, HandshakeMessageKindV2::ServerHello)
+                .map_err(terminal)?;
         let (transcript_bytes, transcript_digest, server_signature) =
-            decode_server_hello_body(body)?;
+            decode_server_hello_body(body).map_err(terminal)?;
         let expected_digest = transcript_digest_for(&transcript_bytes);
         if transcript_digest != expected_digest {
-            return Err(identity_mismatch());
+            return Err(terminal(identity_mismatch()));
         }
-        verify_server_signature(transcript_digest, server_signature, server_public_key)?;
-        let transcript = decode_transcript(&transcript_bytes)?;
+        verify_server_signature(transcript_digest, server_signature, server_public_key)
+            .map_err(terminal)?;
+        let transcript = decode_transcript(&transcript_bytes).map_err(terminal)?;
+        if transcript.edge != self.edge
+            && generation_authority_is_the_only_transcript_mismatch(
+                &self.edge,
+                &self.hello,
+                &self.expected_observed_peer,
+                &transcript,
+            )
+        {
+            return Err(V2ServerHelloAcceptanceErrorV2::GenerationAuthorityMismatch);
+        }
         require_client_transcript(
             &self.edge,
             &self.hello,
             &self.expected_observed_peer,
             &transcript,
-        )?;
+        )
+        .map_err(terminal)?;
         let shared_secret = self
             .ephemeral_secret
             .diffie_hellman(&X25519PublicKey::from(transcript.server_ephemeral_x25519))
@@ -450,7 +519,8 @@ impl V2ClientHandshake {
             transcript.server_nonce,
             transcript_digest,
             self.edge.role,
-        )?;
+        )
+        .map_err(terminal)?;
         let client_signature =
             sign_client_finish(transcript_digest, server_signature, client_signing_key);
         let client_confirm_mac = client_confirm_mac(
@@ -458,23 +528,27 @@ impl V2ClientHandshake {
             transcript_digest,
             server_signature,
             client_signature,
-        )?;
+        )
+        .map_err(terminal)?;
         let finish_body = encode_client_finish_body(
             transcript_digest,
             server_signature,
             client_signature,
             client_confirm_mac,
-        )?;
+        )
+        .map_err(terminal)?;
         let finish_frame = encode_handshake_frame(
             self.edge.role,
             HandshakeMessageKindV2::ClientFinish,
             &finish_body,
-        )?;
+        )
+        .map_err(terminal)?;
         let expected_server_confirm_mac = server_confirm_mac(
             &keys.server_confirm_key,
             transcript_digest,
             client_confirm_mac,
-        )?;
+        )
+        .map_err(terminal)?;
         Ok((
             finish_frame,
             V2ClientTransportSession {
@@ -537,7 +611,7 @@ impl V2ServerHandshake {
             server_nonce,
             client_ephemeral_x25519: hello.client_ephemeral_x25519,
             server_ephemeral_x25519,
-            observed_client_peer,
+            observed_client_peer: observed_client_peer.clone(),
         };
         let transcript_bytes = encode_transcript(&transcript)?;
         let transcript_digest = transcript_digest_for(&transcript_bytes);
@@ -566,6 +640,7 @@ impl V2ServerHandshake {
                 edge,
                 client_boot_id: hello.client_boot_id,
                 client_nonce: hello.client_nonce,
+                observed_client_peer,
                 transcript_digest,
                 server_signature,
                 client_public_key,
@@ -580,6 +655,7 @@ pub struct V2PendingServerHandshake {
     edge: KernelServiceHandshakeEdgeV2,
     client_boot_id: BootIdV2,
     client_nonce: Nonce32V2,
+    observed_client_peer: PeerIdentityBindingV2,
     transcript_digest: Digest32V2,
     server_signature: [u8; 64],
     client_public_key: [u8; 32],
@@ -669,6 +745,7 @@ impl V2PendingServerHandshake {
                 role: self.edge.role,
                 client_identity: self.edge.client_identity,
                 client_boot_id: self.client_boot_id,
+                observed_client_peer: self.observed_client_peer,
                 transcript_digest,
             },
         ))
@@ -789,6 +866,44 @@ pub struct V2ServerTransportSession {
     response_sent: bool,
 }
 
+pub struct PreparedV2ServerApplicationResponse {
+    session: V2ServerTransportSession,
+    record: Vec<u8>,
+}
+
+impl std::fmt::Debug for PreparedV2ServerApplicationResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PreparedV2ServerApplicationResponse(<traffic-keys-redacted>)")
+    }
+}
+
+impl PreparedV2ServerApplicationResponse {
+    pub fn commit(self) -> Vec<u8> {
+        self.record
+    }
+
+    pub fn rollback(self) -> V2ServerTransportSession {
+        self.session
+    }
+}
+
+pub struct V2ServerApplicationResponsePreparationError {
+    session: V2ServerTransportSession,
+    error: ProtocolError,
+}
+
+impl std::fmt::Debug for V2ServerApplicationResponsePreparationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("V2ServerApplicationResponsePreparationError(<closed>)")
+    }
+}
+
+impl V2ServerApplicationResponsePreparationError {
+    pub fn into_parts(self) -> (V2ServerTransportSession, ProtocolError) {
+        (self.session, self.error)
+    }
+}
+
 impl std::fmt::Debug for V2ServerTransportSession {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("V2ServerTransportSession(<traffic-keys-redacted>)")
@@ -831,13 +946,46 @@ impl V2ServerTransportSession {
         operation_tag: u16,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, ProtocolError> {
+        let record = self.build_application_response(request_id, operation_tag, plaintext)?;
+        self.response_sent = true;
+        Ok(record)
+    }
+
+    /// Stages the endpoint-fixed response while consuming the live session.
+    /// The resulting capability can be committed once or rolled back to the
+    /// session; callers cannot prepare multiple records under the same nonce.
+    pub fn prepare_application_response(
+        self,
+        request_id: RequestIdV2,
+        operation_tag: u16,
+        plaintext: &[u8],
+    ) -> Result<PreparedV2ServerApplicationResponse, V2ServerApplicationResponsePreparationError>
+    {
+        match self.build_application_response(request_id, operation_tag, plaintext) {
+            Ok(record) => Ok(PreparedV2ServerApplicationResponse {
+                session: self,
+                record,
+            }),
+            Err(error) => Err(V2ServerApplicationResponsePreparationError {
+                session: self,
+                error,
+            }),
+        }
+    }
+
+    fn build_application_response(
+        &self,
+        request_id: RequestIdV2,
+        operation_tag: u16,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, ProtocolError> {
         if self.response_sent
             || is_zero(request_id.as_bytes())
             || self.request_binding != Some((request_id, operation_tag))
         {
             return Err(identity_replay());
         }
-        let record = seal_record(
+        seal_record(
             &self.s2c_key,
             &self.s2c_iv,
             self.transcript_digest,
@@ -851,9 +999,7 @@ impl V2ServerTransportSession {
                 plaintext_length: checked_plaintext_length(plaintext)?,
             },
             plaintext,
-        )?;
-        self.response_sent = true;
-        Ok(record)
+        )
     }
 }
 
@@ -1666,6 +1812,45 @@ fn require_client_transcript(
         return Err(identity_mismatch());
     }
     Ok(())
+}
+
+fn generation_authority_is_the_only_transcript_mismatch(
+    expected_edge: &KernelServiceHandshakeEdgeV2,
+    hello: &ClientHelloBodyV2,
+    expected_observed_peer: &PeerIdentityBindingV2,
+    transcript: &HandshakeTranscriptV2,
+) -> bool {
+    let received_edge = &transcript.edge;
+    received_edge.role == expected_edge.role
+        && received_edge.installation_id == expected_edge.installation_id
+        && received_edge.client_identity == expected_edge.client_identity
+        && received_edge.server_identity == expected_edge.server_identity
+        && received_edge.client_key_id == expected_edge.client_key_id
+        && received_edge.server_key_id == expected_edge.server_key_id
+        && received_edge.server_boot_id == expected_edge.server_boot_id
+        && received_edge.release_identity_digest == expected_edge.release_identity_digest
+        && received_edge.model_set_identity_digest == expected_edge.model_set_identity_digest
+        && received_edge.resource_profile_identity_digest
+            == expected_edge.resource_profile_identity_digest
+        && received_edge.approval_lock_identity_digest
+            == expected_edge.approval_lock_identity_digest
+        && received_edge.planner_lock_identity_digest == expected_edge.planner_lock_identity_digest
+        && received_edge.executor_key_lock_identity_digest
+            == expected_edge.executor_key_lock_identity_digest
+        && (received_edge.active_state_manifest_sequence
+            != expected_edge.active_state_manifest_sequence
+            || received_edge.active_state_manifest_digest
+                != expected_edge.active_state_manifest_digest
+            || received_edge.deployment_generation != expected_edge.deployment_generation
+            || received_edge.effect_fence_epoch != expected_edge.effect_fence_epoch)
+        && transcript.client_boot_id == hello.client_boot_id
+        && transcript.client_nonce == hello.client_nonce
+        && transcript.client_ephemeral_x25519 == hello.client_ephemeral_x25519
+        && transcript.edge.client_identity == hello.client_identity
+        && transcript.edge.client_key_id == hello.client_key_id
+        && &transcript.observed_client_peer == expected_observed_peer
+        && !is_zero(transcript.server_nonce.as_bytes())
+        && !is_zero(&transcript.server_ephemeral_x25519)
 }
 
 fn require_handshake_body(bytes: &[u8]) -> Result<(), ProtocolError> {

@@ -62,6 +62,7 @@ LoadCredentialEncrypted=agent-authority-anchor-authentication-v2.key:/etc/savana
 LoadCredentialEncrypted=g4-state-encryption-v2.key:/etc/savana/credentials/kerneld/g4-state-encryption-v2.key.cred
 LoadCredentialEncrypted=g4-anchor-authentication-v2.key:/etc/savana/credentials/kerneld/g4-anchor-authentication-v2.key.cred
 LoadCredentialEncrypted=executor-kernel-v2.seed:/etc/savana/credentials/kerneld/executor-kernel-v2.seed.cred
+LoadCredentialEncrypted=connector-authority-v2.seed
 
 [Install]
 WantedBy=savana-kernel.target

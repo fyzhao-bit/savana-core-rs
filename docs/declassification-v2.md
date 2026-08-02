@@ -1,0 +1,908 @@
+# Savana V2 Declassification: Signed Rules and the Gated Pipeline
+
+Status: accepted design, v1.1 (2026-08-01). This document specifies the signed
+declassification rule surface and the wiring that routes every confidentiality
+widening through `kernel_declassification`. It changes no code by itself.
+Decisions O1 (manifest delivery) and O2 (closed purpose vocabulary) are
+resolved; see §17.
+
+v1.1: a conformance audit of the live egress and tool-execution pipelines
+(§18) corrected §1.5 — consent machinery largely *exists* — rebased §10.2–10.3
+onto the real settlement flow instead of a new consent object, resolved O3 and
+O4 by audit, and added failure row F14 plus the S3 intent-vocabulary
+prerequisite.
+
+Companion reading: `docs/protocol-v1.md` for the V1 byte-level conventions this
+design mirrors (domain separation, canonical CBOR, fail-closed dispatch).
+
+---
+
+## 1. Problem statement
+
+The V2 kernel has a fully built declassification door and no road that leads
+through it. Every load-bearing piece exists and is individually correct:
+
+| Piece | Where | State |
+|---|---|---|
+| Five declassification transitions with per-transition gate duty and target label | `crates/savana-policy-core/src/v2/provenance.rs:263-359` | complete |
+| The constructor that runs the leak gate and mints a `KernelDeclassification` node | `provenance.rs:887` (`kernel_declassification`) | complete, **zero production callers** |
+| The deterministic leak gate (blocklist + residual-PII duty) | `crates/savana-policy-core/src/v2/leak_gate.rs:61` (`enforce_for_declassification`) | complete, reachable **only** through the dead constructor |
+| One shared definition of "sensitive" for masker and verifier | `crates/savana-leak-gate` (union of scanner + pattern table) | complete (commit `ed567d6`) |
+| Null-binding refusal, exact-reader binding | `provenance.rs:908-936` | complete (commits `8543926`, `8b0de14`) |
+
+The consequences, with evidence:
+
+1. **`rule_digest` has no referent.** `kernel_declassification` takes
+   `rule_digest`, `implementation_digest`, `token_set_digest`,
+   `purpose_digest` as bare `Digest32V2` arguments. The only validation is
+   the non-zero guard at `provenance.rs:908-918`. No signed declassification
+   rule type exists anywhere in the workspace; nothing verifies that
+   `rule_digest` names a rule someone actually signed. The words appear only
+   inside `savana-policy-core` — no policy authoring, delivery, or
+   verification surface exists.
+
+2. **The masked agent view bypasses the gate.** In
+   `crates/savana-kerneld/src/v2_runtime.rs`, ingress builds a
+   `GatedIngress` provenance node for the raw value (`:263`,
+   `from_verified_kernel_input`), then builds the masked view directly:
+   `encode_masked_agent_view(&gated_input)` (`:274`) →
+   `AgentViewV2::masked_text(...)` (`:359`) → vault record tagged
+   `MASKED_AGENT_VIEW_RECORD_TAG_V2` → read back by the agent via
+   `decode_persisted_agent_view` (`crates/savana-kerneld/src/v2_data_plane.rs:392`).
+   No `KernelDeclassification` node is minted, no `leak_gate_digest` is
+   recorded for the bytes the agent actually reads, and the
+   `MaskTokenizeAndLeakCheck` transition is never instantiated outside tests.
+   Masking itself is real (`savana-input-runtime` calls
+   `savana_leak_gate::pii_spans` to find spans and substitutes placeholder
+   tokens), but the result is *trusted by construction* rather than
+   *verified at the boundary*.
+
+3. **The planner envelope bypasses the gate.** `prepare_planner_call`
+   (`crates/savana-kerneld/src/v2_agent_authority.rs:1728`) assembles a
+   `PlannerEnvelopeV2` (`:1795`) from abstract slots and digests it under
+   `PLANNER_ENVELOPE_DOMAIN` (`:1810`). No `BuildPlannerEnvelope`
+   declassification is recorded.
+
+4. **Two label dimensions are inert.** `SecurityLabelV2` carries
+   `confidentiality` and `readers`
+   (`crates/savana-policy-core/src/v2/labels.rs:256`), propagation is correct
+   (join / intersect, `labels.rs:299-320`), but no judgment anywhere reads
+   either dimension. Today the kernel is safe because *nothing ever widens*
+   — safety by inertness, not safety by gated widening.
+
+5. **The egress pipeline exists, is strong, and bypasses the gate.**
+   *(Corrected in v1.1 — the v1 draft wrongly said consent does not exist.)*
+   `prepare_release` / `authorize_release` / `dispatch_release`
+   (`crates/savana-kerneld/src/v2_agent_authority.rs:3160,3348,3449`) already
+   implement approval envelopes with challenge nonces, approvald-signed
+   settlement verification bound to principal and manifest
+   (`:3393-3406`), single-use consumption (`:3439`), quota, effect-gate
+   leases, durable dispatch, payload-digest re-verification (`:3497-3506`)
+   and HPKE sealing to the exact executor key (`:3578-3584`). What is
+   missing is precisely four things: no leak gate ever runs over the
+   released plaintext, no `KernelDeclassification` node is minted, no
+   signed rule authorizes the sink, and the token-set scope is stubbed
+   empty (`token_set_digest_v2(&[])`, `:3216`). §18 carries the full
+   audit.
+
+The design goal is the one the transition vocabulary already states: **every
+confidentiality widening is a recorded transition, authorized by a signed
+rule, verified by the in-kernel gate, naming the exact reader it releases
+to.** This document specifies the missing rule surface and the five wiring
+points, in dependency order.
+
+## 2. Goals and non-goals
+
+Goals:
+
+- G-A: a signed, canonically encoded, hash-chained **declassification rule
+  set** the kernel verifies against its operational trust root.
+- G-B: a single **rule-checked kernel entry** through which all five
+  transitions run; `kernel_declassification` stays private behind it.
+- G-C: the **masked agent view** and **planner envelope** paths route through
+  the entry (the two transitions that face a language model, hence carry the
+  strictest duty).
+- G-D: `readers` and `confidentiality` become **consulted** dimensions:
+  handoff judgments refuse recipients outside a value's reader set, and
+  envelope builders refuse values whose lineage lacks the matching
+  declassification node.
+- G-E: consent **bound to the existing approvald-signed release
+  settlements** (§10.3), demanded by rule for `BuildFinalRelease` — no new
+  consent object.
+
+Non-goals:
+
+- Changing the leak-gate corpus, pattern tables, or digest scheme.
+- ML/NER recall improvements (§12 sketches the follow-on; it is orthogonal).
+- V1 paths. Everything here is V2-only.
+- Machine-code attestation of transformation binaries — that remains the
+  deployment manifest's job (§6.3 explains the layering).
+
+## 3. Design overview
+
+```mermaid
+flowchart TD
+    A[Rule authoring, offline] -->|canonical CBOR| B[DeclassificationRuleSetV2\nsigned by DeclassificationAuthority key]
+    R[OperationalTrustRootSetV2\nbinding: Declassification] -->|authorizes signer key| V
+    MF[Deployment manifest\npins signed_digest] -->|pin must match| V
+    B --> V{kerneld verify at\nstartup / rollover}
+    V -->|active set in runtime deps| E[declassify entry\npolicy-core, pub]
+    subgraph kernel [savana-kerneld runtime]
+        M[ingress masking] -->|MaskTokenizeAndLeakCheck| E
+        P[prepare_planner_call] -->|BuildPlannerEnvelope| E
+        D[approval display] -->|BuildApprovalDisplay| E
+        X[execution envelope] -->|BuildExecutionEnvelope + executor id| E
+        F[final release] -->|BuildFinalRelease + sink id + consent| E
+    end
+    E -->|rule found, window, implementation,\nreader, duty floor OK| K[kernel_declassification\nprivate: leak gate runs here]
+    K --> N[KernelDeclassification node\nrule_digest + evidence]
+    N --> H[handoff judgments read\nreaders / confidentiality]
+```
+
+Two authorities at two timescales gate the two halves of the risk:
+
+- **Installer-time**: the signed rule set says which transitions are possible
+  at all, under which purpose, performed by which implementation contract,
+  released to which readers. It changes rarely and is hash-chained.
+- **Runtime**: the leak gate proves the *content* property over the exact
+  released bytes on every single transition, and (for final release) a fresh
+  single-use consent proves the *user* wanted this one.
+
+A rule can make a declassification possible; only the gate plus (where
+demanded) consent make a particular one legitimate.
+
+## 4. Authority chain: extending the operational trust root
+
+The signer of rule sets is rooted exactly the way deployment and activation
+signers already are (`crates/savana-policy-core/src/v2/deployment_operational_trust.rs`).
+
+Additions:
+
+- `OperationalTrustRootPurposeV2::DeclassificationAuthority = 5`.
+- A third binding variant:
+
+  ```rust
+  OperationalTrustRootSetBindingV2::Declassification {
+      declassification_trust_root_set_digest: Digest32V2,
+  }
+  ```
+
+  with member-set domain `savana.set.declassification-trust-root.v2\0` and
+  binding tag `3`. A separate binding — rather than piggybacking members
+  onto the Deployment or Activation sets — preserves the existing
+  `validate_payload` invariant that a binding constrains its members'
+  purposes (`deployment_operational_trust.rs:528-546`): a Declassification
+  set must contain *only* `DeclassificationAuthority` members, at least one.
+- A `ClosedSecurityDomainV2::DeclassificationTrustRootSet` variant so
+  `matches_versioned_identity` (`deployment_operational_trust.rs:343`)
+  covers the new binding.
+
+Everything else — key epochs, per-member validity windows nested inside the
+set window, sort/dedup by `(purpose, key_id, epoch)`, predecessor chaining
+via `validate_predecessor`, canonical re-encode check — is inherited
+unchanged. The `authorizes(purpose, key_id, key_epoch, at)` predicate
+(`deployment_operational_trust.rs:368`) works as-is for the new purpose.
+
+Delivery (**decided — O1**): the two objects travel on the two channels that
+match their lifecycles.
+
+- The Declassification-bound **operational trust root set** rides the same
+  installer/MDM channel as the existing Deployment and Activation root sets —
+  root keys change with installations.
+- The **rule set** is a deployment-manifest item: the manifest claim gains a
+  pinned entry carrying the rule set's `signed_digest` (additive schema
+  change to `deployment_manifest_claim`, same discipline as the existing
+  projection pins at `deployment_manifest_claim.rs:98-126`, whose
+  `projection_rule_digest` is zero-refused at construction). Rules change
+  with releases, not with installations. At load, kerneld verifies the rule
+  set's signature chain **and** that its `signed_digest` equals the manifest
+  pin; a set that verifies but does not match the pinned digest is refused
+  (F12) — a valid-but-unpinned rule set is exactly the substitution the pin
+  exists to stop.
+
+A deployment that ships neither object gets a kernel in which **no
+declassification is possible**: ingress masking fails closed and no agent
+view is ever produced. That is the intended default for a security kernel,
+not an error state to paper over.
+
+## 5. Wire object: `DeclassificationRuleSetV2`
+
+Mirror of `OperationalTrustRootSetV2`, same three-layer encoding:
+
+```text
+complete  = array(3) [ payload, payload_digest, authority_signature ]
+payload   = array(8) [
+    schema_version:          u16      = 1,
+    product_family_digest:   bytes32,
+    rule_set_sequence:       u64      (>= 1),
+    previous_signed_digest:  option   (array(1)[0] | array(2)[1, bytes32]),
+    rules:                   array of DeclassificationRuleV2 (§6),
+    not_before_unix_ms:      u64,
+    not_after_unix_ms:       u64,
+    trust_root_set_digest:   bytes32,
+]
+```
+
+Domains (all new, all NUL-terminated following the existing convention):
+
+| Purpose | Domain string |
+|---|---|
+| payload digest | `savana.declassification-rule-set.v2.payload\0` |
+| signed digest | `savana.declassification-rule-set.v2.signed\0` |
+| signature | `savana.declassification-rule-set.v2.signature\0` |
+| per-rule digest | `savana.declassification-rule.v2\0` |
+| purpose string digest | `savana.declassification-purpose.v2\0` |
+
+Signature: `ManifestDomainSignatureV2` with a fresh signature tag (next
+unassigned; `OPERATIONAL_ROOT_SIGNATURE_TAG_V2 = 28`, so presumptively `29` —
+confirm against the tag registry at implementation time, see O5). The signer
+key must satisfy
+`root_set.authorizes(DeclassificationAuthority, key_id, epoch, now)` where
+`root_set` is the Declassification-bound operational trust root whose
+`signed_digest` equals the payload's `trust_root_set_digest` field. Binding
+the authorizing root set digest *into* the signed payload pins which root
+generation the rule set claims descent from — a rule set cannot be replayed
+under a later, differently-membered root without failing this check.
+
+Validation on `from_canonical_bytes` (same shape as
+`deployment_operational_trust.rs:179-214` and `:496-554`):
+
+- object size ≤ existing manifest object bound; canonical re-encode equality;
+  EOF exactness.
+- non-zero `product_family_digest`; `sequence == 1 ⇔ previous is None`;
+  non-zero previous digest when present; `not_before < not_after`.
+- `rules` non-empty, `len ≤ DeploymentHardLimitsV2::compiled().max_declassification_rules()`
+  (new limit; proposed 64), strictly sorted by `(transition_tag, purpose_digest)`,
+  no duplicate `(transition_tag, purpose_digest)` pair, every rule window
+  nested inside the set window.
+- payload digest match, then signature verification, in that order.
+
+Chaining: `validate_predecessor` identical to the trust-root version —
+`sequence + 1`, previous signed digest equality, same product family. The
+chain is the revocation mechanism: to revoke a rule, publish a successor set
+without it. There is no per-rule revocation object; the set is small and
+atomic replacement is simpler to reason about than tombstones.
+
+Struct fields stay private; the only constructor is
+`from_canonical_bytes(bytes, root_set, now)`. As with the trust root set,
+**possessing a value of this type is proof of verification** — the
+rule-checked entry (§7) takes `&DeclassificationRuleSetV2` and needs no
+further signature logic.
+
+## 6. Per-rule object: `DeclassificationRuleV2`
+
+```text
+rule = array(8) [
+    transition_tag:         u16          (1..=5, the DeclassificationTransitionV2 tags),
+    purpose_digest:         bytes32      (digest of a closed-vocabulary purpose; §6.5),
+    implementation_digest:  bytes32      (§6.3),
+    duty_floor:             u16          (LeakGateDutyV2 tag; §6.2),
+    reader_constraint:      option       (§6.1),
+    consent_requirement:    option       (§6.4; present only for tag 5),
+    not_before_unix_ms:     u64,
+    not_after_unix_ms:      u64,
+]
+rule_digest = hash_domain("savana.declassification-rule.v2\0", canonical rule bytes)
+```
+
+`rule_digest` is not a wire field — it is derived, exactly like the private
+registry identity in V1 (`docs/protocol-v1.md`). It is the digest that flows
+into `SourceKindV2::KernelDeclassification { rule_digest }` and the node's
+evidence vector, giving the existing parameter its referent at last.
+
+### 6.1 Reader constraint
+
+- Tags 1–3 (`MaskTokenizeAndLeakCheck`, `BuildPlannerEnvelope`,
+  `BuildApprovalDisplay`): the target reader class is already fixed by
+  `transition.target()` (`provenance.rs:321-339`) and the transition names no
+  individual. `reader_constraint` MUST be absent (`array(1)[0]`); a rule
+  cannot widen a class transition into naming readers it does not have.
+- Tags 4–5 (`BuildExecutionEnvelope`, `BuildFinalRelease`):
+  `reader_constraint` MUST be present: `array(2)[1, identities]` where
+  `identities` is a non-empty, strictly sorted, deduplicated array of
+  `bytes32` identity digests, `len ≤ max_rule_readers()` (new hard limit;
+  proposed 16). The entry checks
+  `transition.exact_reader_identity() ∈ identities`. An empty list is
+  invalid at decode: a rule that names nobody authorizes nothing — the same
+  principle as the null-binding refusal at `provenance.rs:908-918`, now one
+  layer up.
+
+### 6.2 Duty floor
+
+`leak_gate_duty()` at `provenance.rs:310` stays exactly as it is and becomes
+the **floor**. The effective duty is:
+
+```text
+effective_duty = strictest_of(transition.leak_gate_duty(), rule.duty_floor)
+```
+
+A rule may tighten (e.g. force `BlocklistAndNoResidualPii` on an approval
+display in a deployment that never wants raw PII on screen); no rule content
+can ever drop the LLM-facing transitions below `BlocklistAndNoResidualPii`,
+because the hardcoded map is consulted regardless of what the rule says.
+Defense in depth: a compromised rule-signing key cannot buy a weaker gate,
+only a narrower or wider *possibility* space.
+
+To keep "caller asserts nothing" intact, the private constructor computes the
+effective duty itself: `kernel_declassification` gains a
+`duty_floor: LeakGateDutyV2` parameter and internally runs
+`enforce_for_declassification(value, strictest_of(transition.leak_gate_duty(), duty_floor))`
+at `provenance.rs:919`. The duty is never passed in pre-resolved.
+
+### 6.3 Implementation identity
+
+`implementation_digest` pins the **transformation contract**, not machine
+code:
+
+```text
+implementation_digest = hash_domain(
+    "savana.declassification-implementation.v2\0",
+    transition_tag || contract_version:u16 || contract_inputs
+)
+```
+
+where `contract_inputs` is per-transition; for `MaskTokenizeAndLeakCheck` it
+is `savana-leak-gate`'s `pattern_set_digest` (already computed and folded
+into `leak_gate_digest` today) plus the masking algorithm version. Each
+in-kernel transformation exports its compiled identity as a constant; the
+entry compares the rule's `implementation_digest` against it and refuses on
+mismatch.
+
+Layering, stated plainly: this digest binds *which contract* (pattern set,
+algorithm revision) the rule authorizes — so a pattern-table change without a
+rule update is a refused declassification, loudly. Binding *which machine
+code* runs is already the deployment manifest's job
+(`deployment_manifest_claim.rs` signs binaries and projections). The rule
+does not duplicate that; two mechanisms, two failure domains.
+
+### 6.4 Consent requirement (tag 5 only)
+
+```text
+consent_requirement = array(1)[0]                       — none
+                    | array(2)[1, max_age_unix_ms:u64]  — required, fresh within max_age
+```
+
+Present ⇒ the entry demands a matching consumed-exact release settlement
+(§10.3) no older than `max_age_unix_ms`. The default is not a new choice:
+the codebase already compiled it — `TOOL_APPROVAL_TTL_MS = 5 * 60 * 1_000`
+(`v2_agent_authority.rs:79`); a rule's `max_age` must be ≤ the approval
+envelope TTL or it demands a freshness the envelope cannot prove.
+MUST be absent for tags 1–4: consent is an egress concept; demanding it
+mid-pipeline would train users to click through. (Tool-execution approvals
+— `ApprovalPurposeV2::ToolExecution`, `v2_agent_authority.rs:2468` — are
+G5-side *action authorization*, a different question answered by the policy
+engine; they are untouched by this design and are not this consent.)
+
+### 6.5 Purpose vocabulary (**decided — O2**)
+
+Purposes are a closed `u16` enum in code, `DeclassificationPurposeV2`. The
+wire carries the digest, not the tag — the digest of the canonical name is
+what the rule digest and the node evidence already bind, it stays stable as
+the enum grows, and the canonical string is the human-auditable form:
+
+```text
+purpose_digest = hash_domain("savana.declassification-purpose.v2\0", canonical name)
+```
+
+Initial vocabulary, one purpose per transition:
+
+| Tag | Variant | Canonical name | Owning transition |
+|---|---|---|---|
+| 1 | `AgentIngressMasking` | `agent-ingress-masking` | 1 `MaskTokenizeAndLeakCheck` |
+| 2 | `PlannerCall` | `planner-call` | 2 `BuildPlannerEnvelope` |
+| 3 | `ApprovalDisplay` | `approval-display` | 3 `BuildApprovalDisplay` |
+| 4 | `ExecutionHandoff` | `execution-handoff` | 4 `BuildExecutionEnvelope` |
+| 5 | `FinalRelease` | `final-release` | 5 `BuildFinalRelease` |
+
+Closure is enforced at the object boundary, not at lookup time:
+
+- A rule whose `purpose_digest` matches no enum member is a **decode-time
+  error** (`InvalidDeclassificationRuleSet`) — an unknown purpose cannot ride
+  inside a valid set and then merely fail lookups.
+- Each purpose names its owning transition; a rule whose `transition_tag`
+  differs from its purpose's owner is likewise a decode-time error. The
+  transition tag stays on the wire regardless — encoded-then-recomputed, the
+  same discipline as `decode_member`'s `key_id` cross-check
+  (`deployment_operational_trust.rs:707`).
+- The composite lookup key `(transition_tag, purpose_digest)` already
+  supports several purposes per transition; when a deployment needs
+  differentiated rules (say, two release purposes with different consent
+  freshness), the vocabulary grows by adding an enum variant — a kernel
+  release plus a new rule-set generation, i.e. a signed, visible change,
+  never a silent one (§12's versioning philosophy).
+
+## 7. The rule-checked kernel entry
+
+One new public function in `savana-policy-core`, the *only* road to the door:
+
+```rust
+impl ProvenanceRecordV2 {
+    pub fn declassify(
+        value: &KernelValueV2,
+        context: ProvenanceContextV2,
+        transition: DeclassificationTransitionV2,
+        rule_set: &DeclassificationRuleSetV2,
+        purpose_digest: Digest32V2,
+        token_set_digest: Digest32V2,
+        consent: Option<&VerifiedFinalReleaseSettlementV2>, // stage 5; earlier: None
+        parents: &[&Self],
+        policy_allowed_effects: EffectSetV2,
+        at_unix_ms: u64,
+    ) -> Result<Self, G3Error>;
+}
+```
+
+Check order (each failure a distinct error, all fail-closed):
+
+1. `rule_set` window contains `at_unix_ms` — `RuleSetExpired`.
+2. Lookup by `(transition.tag(), purpose_digest)` — `NoAuthorizingRule`.
+3. Rule window contains `at_unix_ms` — `RuleExpired`.
+4. `rule.implementation_digest == compiled identity for transition` —
+   `ImplementationMismatch`.
+5. Tags 4–5: `transition.exact_reader_identity() ∈ rule.readers` —
+   `ReaderNotAuthorized`. (The all-zero identity was already refused at
+   `provenance.rs:931-934`; that guard stays.)
+6. Tag 5 with consent required: consent present, matching (§10.3), fresh,
+   unconsumed — `ConsentMissing` / `ConsentExpired` / `ConsentScopeMismatch`
+   / `ConsentConsumed`.
+7. Call the **private** `kernel_declassification` with
+   `rule.rule_digest()`, `rule.implementation_digest`, `token_set_digest`,
+   `purpose_digest`, `rule.duty_floor` — the gate runs there, on the exact
+   bytes, as today (`provenance.rs:919`), and the non-zero guards stay as a
+   second line.
+
+New `G3Error` variants: `RuleSetExpired`, `NoAuthorizingRule`, `RuleExpired`,
+`ImplementationMismatch`, `ReaderNotAuthorized`, `ConsentMissing`,
+`ConsentExpired`, `ConsentScopeMismatch`, `ConsentConsumed`. Distinct
+variants, not overloads of `BindingMismatch`: an operator debugging a refused
+release must be able to tell "no rule" from "stale consent" without a
+debugger.
+
+Two properties this preserves:
+
+- **Unskippable**: `kernel_declassification` stays private
+  (`provenance.rs:887`); `declassify` requires a `&DeclassificationRuleSetV2`,
+  which can only exist post-verification (§5). There is no API through which
+  a caller can mint a `KernelDeclassification` node from asserted digests.
+- **Replayable (G5)**: every input to every check is explicit — value bytes,
+  rule set bytes, clock. No ambient state; the decision replays bit-exact.
+
+## 8. Wiring point A: the masked agent view
+
+Anchor: `crates/savana-kerneld/src/v2_runtime.rs`.
+
+Today:
+
+```text
+:263  provenance = from_verified_kernel_input(...)        → GatedIngress node (raw value)
+:274  masked_agent_view = encode_masked_agent_view(&gated_input)
+:359  AgentViewV2::masked_text(text, placeholders)         → exact agent-visible bytes
+      → vault record MASKED_AGENT_VIEW_RECORD_TAG_V2
+      → v2_data_plane.rs:392 decode_persisted_agent_view   → agent reads it back
+```
+
+Target:
+
+```text
+:263  GatedIngress node for the raw value            (unchanged — the parent)
+      masking runs                                    (unchanged — input-runtime, pii_spans)
+NEW   masked_node = declassify(
+          masked_value,                               // digest of the exact :359 bytes
+          MaskTokenizeAndLeakCheck,
+          &active_rule_set,
+          PURPOSE_AGENT_INGRESS_MASKING,
+          token_set_digest,                           // §8.1
+          None,
+          &[&ingress_node],
+          effects, now)
+      → gate re-verifies the masked bytes (BlocklistAndNoResidualPii)
+      → node label: (AgentMasked, AGENT) from transition.target()
+      persist node digest WITH the masked-view vault record
+      → read-back at v2_data_plane.rs:392 returns the view bound to its node
+```
+
+### 8.1 `token_set_digest`
+
+The "Tokenize" in the transition name, finally bound: the canonical digest of
+the placeholder → vault-handle substitution set masking produced (sorted by
+placeholder, domain-hashed). The node then attests not only "residual-PII
+free" but *which* substitutions map the masked view back to vault-bound
+originals. Any later unmasking step must present the same set digest.
+
+### 8.2 Failure semantics — the drift tripwire
+
+Since `ed567d6`, masker and verifier share one definition
+(`savana-leak-gate`: `pii_spans` is the union of scanner and pattern table;
+the gate's duty checks the same corpus), so the gate passing over masked
+output is guaranteed **by construction** — the differential corpus (2 030
+vectors) asserts the implication `masked(x) ⇒ gate_passes(masked(x))`.
+Routing through the gate therefore costs no false blocks today. What it buys:
+if the two ever drift again (a pattern added to one side, a scanner change),
+the gate refuses, ingress fails closed, and the drift is a loud production
+error instead of a silent leak. Refusal handling: the ingress request errors;
+no partial agent view, no vault record, nothing for the agent to read.
+
+### 8.3 Read-back binding
+
+The vault record gains the node digest so
+`decode_persisted_agent_view` can return the view *and* its declassification
+evidence together. What the agent reads is then provably the bytes the gate
+passed — closing the residual gap where a vault record could in principle be
+written outside the checked path.
+
+## 9. Wiring point B: the planner envelope
+
+Anchor: `crates/savana-kerneld/src/v2_agent_authority.rs:1728`
+(`prepare_planner_call`).
+
+The envelope is already *structurally* confidentiality-preserving: prompt
+values enter as abstract slots
+(`PlannerAbstractSlotV2`, `PlannerSlotConfidentialityV2::ConfidentialAbstract`,
+`:1763-1771`) — opaque slot references, never raw bytes; the envelope's other
+fields are enums, limits, and nonces (`:1795-1806`). The declassification
+here is of *shape*, VaultBound → PlannerAbstract: slot count, cardinalities,
+kinds, template id, intent kind, route.
+
+Wiring: after assembly and before ticket minting, run
+
+```text
+declassify(envelope_canonical_bytes, BuildPlannerEnvelope, &active_rule_set,
+           PURPOSE_PLANNER_CALL, slot_binding_set_digest, None,
+           parents = nodes of all prompt_values, effects, now)
+```
+
+with `token_set_digest` := digest of the sorted slot-binding set (slot ref →
+value handle, `:1783-1789` already builds exactly this list). Bind the
+resulting node digest into the `PlannerTicketRecordV2` (`:1818`) next to
+`envelope_digest`.
+
+Why gate bytes that today contain no free text: **this is the covert-channel
+tripwire.** The envelope is precisely where smuggled content would ride if
+any field ever grows free text (a template body, a guidance string — two
+`Vec::new()` placeholders sit at `:1799` and `:1801` today). The gate over
+canonical envelope bytes is nearly free now and refuses the day someone adds
+a text field that can carry blocklisted content or PII. The duty is
+`BlocklistAndNoResidualPii` (LLM-facing, `provenance.rs:312`), the strictest
+— correct for the one artifact that leaves for an external model.
+
+Parents: the prompt values' provenance nodes, so the planner envelope's
+lineage records exactly which vault values shaped it, and
+`derive`-style reader narrowing applies to anything later built from the
+planner's answer.
+
+## 10. Wiring points C–E, and consent
+
+### 10.1 C: approval display (`BuildApprovalDisplay`)
+
+Same pattern as §8: the display artifact rendered for the human approver is
+declassified under a rule with purpose `PURPOSE_APPROVAL_DISPLAY`, duty floor
+`BlocklistOnly` (the human must see real values to approve meaningfully —
+`provenance.rs:315-317`; a deployment may tighten via §6.2). The node digest
+is bound into the approval envelope so the settlement (§10.3) can prove
+*what was shown* when consent is later checked. Anchor: the approval
+envelope flow already present in `v2_agent_authority.rs`
+(`SignedApprovalEnvelopeV2` / `UnsignedApprovalEnvelopeV2` imports, `:37-42`).
+
+### 10.2 D: execution envelope (`BuildExecutionEnvelope`)
+
+*(v1.1: rebased onto the live pipeline.)* The executor handoff already
+exists and already pins its reader: G7 policy holds the exact executor —
+identity (`prepare_release` refuses `request.executor() != g7.executor_identity`,
+`v2_agent_authority.rs:3196`), seal public key (`:3580`), signing key, and
+connector-registry digest (`:3537-3539`). The tool path HPKE-seals the
+plaintext arguments to that key and signs the sealed envelope (`:2780`);
+the release path does the same (`:3585`).
+
+What the transition adds on top of G7's pin:
+
+- `declassify(..., BuildExecutionEnvelope { executor_identity_digest }, ...)`
+  runs immediately before the HPKE seal, so the leak gate's blocklist duty
+  covers the exact plaintext being sealed, and the
+  `KernelDeclassification` node records the handoff in the value's lineage.
+- The rule's reader allowlist (§6.1) is checked by *membership*, G7's pin by
+  *equality* — both must pass. A rule naming an executor that G7 does not
+  pin authorizes nothing; the redundancy is deliberate (two failure domains:
+  rule-signing key vs. G7 policy channel).
+- The sealed envelope (`SealedExecutionEnvelopePayloadV2`) carries the node
+  digest.
+
+Duty `BlocklistOnly` (`provenance.rs:316`).
+
+### 10.3 E: final release (`BuildFinalRelease`) — consent is the settlement
+
+*(v1.1: the v1 draft specified a new `ConsentRecordV2`; the audit (§18)
+found the machinery already built. This section now binds to it instead of
+duplicating it.)*
+
+What exists today, end to end (`v2_agent_authority.rs`):
+
+1. `prepare_release` (`:3160`) — builds an
+   `ApprovalPurposeV2::FinalRelease` envelope with a challenge nonce,
+   principal binding, display digests, and a 5-minute TTL (`:3266-3283`);
+   signs it; pairs it with a UI-authentication envelope for the approval
+   display (`:3290-3313`); records the pending release with a vault binding
+   whose `destination_digest` covers the destination projection **and** the
+   executor identity (`:3225-3229`).
+2. `authorize_release` (`:3348`) — verifies the approvald-signed settlement
+   against the settlement key, installation, manifest digest, deployment
+   generation, envelope digest, principal, and challenge (`:3393-3406`);
+   refuses any decision but `Approve`; converts it into a
+   `VerifiedFinalReleaseSettlementV2` via `from_consumed_exact_settlement`
+   (`:3422-3429`); marks the pending release consumed — **single-use is
+   already implemented** (`:3439`), with idempotent ticket replay
+   (`:3369-3379`).
+3. `dispatch_release` (`:3449`) — re-reads the plaintext and re-verifies its
+   digest against the authorized binding (`:3497-3506`), enforces quota and
+   the effect-gate lease, prepares durable dispatch, HPKE-seals to the
+   executor key, dispatches.
+
+That settlement **is** the consent: signed by approvald, challenge-fresh,
+principal-bound, display-digest-bound, single-use. The design therefore
+binds rather than mints — `declassify`'s consent input (§7) is
+`Option<&VerifiedFinalReleaseSettlementV2>`, and step 6 checks: the
+settlement's binding digest matches the release binding whose
+`destination_digest` is the transition's `sink_identity_digest`; envelope
+age ≤ the rule's `max_age`; the underlying pending release is unconsumed at
+authorization time (existing semantics). No new consent object, no new
+signature domain, no parallel state.
+
+What is still missing on this path — the actual v1.1 gap list:
+
+- **No leak gate over the released plaintext.** The blocklist duty for
+  `BuildFinalRelease` never runs; plaintext goes from vault read to HPKE
+  seal (`:3497 → :3578`) on digest checks alone. Wiring point: `declassify`
+  runs between the payload re-verification and the seal, over the exact
+  bytes being sealed.
+- **No `KernelDeclassification` node**: the release leaves no transition in
+  any value's lineage; the label never moves; §11's judgments have nothing
+  to read. (Provenance is *touched* today only as evidence digests attached
+  at prepare, `:3199-3215` — necessary, not sufficient.)
+- **No signed rule**: the sink is whatever the request proposed and the
+  human approved. The rule's reader allowlist (§6.1, entries =
+  `destination_digest` values) adds the machine-checkable constraint that
+  this sink class is releasable *at all* — the human approves an instance,
+  the rule authorizes the class.
+- **Token scope is a stub**: `token_set_digest_v2(&[])` (`:3216`).
+  The scope of what the approval covers must be the real substitution/value
+  set. Note the trap: the digest of an *empty* set is a valid non-zero
+  digest, so the constructor's null-binding guard (`provenance.rs:908-918`)
+  does not catch it — the entry must refuse an empty token set for tag 5
+  **semantically** (failure row F14).
+
+## 11. Making `readers` and `confidentiality` load-bearing
+
+Two enforcement points, both cheap, both three-valued per the G5 convention
+(`585539b`):
+
+1. **Handoff judgment.** Wherever the kernel hands a value to a recipient
+   (agent view read-back, planner call, approval display, executor dispatch,
+   release), a new validator fact evaluates:
+   `recipient_class ⊆ value.label().readers()` — and for tags 4–5, the
+   recipient's identity digest equals the one bound in the value's
+   declassification node. Verdicts: `Admits` / `Refuses` /
+   `Unproven` (missing label ⇒ `Unproven` ⇒ refuse, fail-closed).
+   `ReaderSetV2::contains` (`labels.rs:149`) is the whole predicate.
+
+2. **Envelope lineage check.** Each envelope builder accepts only values
+   whose provenance head is `SourceKindV2::KernelDeclassification` with the
+   transition matching the envelope kind (agent view ⇐ tag 1's target
+   `(AgentMasked, AGENT)`, planner ⇐ tag 2, …), verified by walking the
+   node, not by trusting the label alone. This is the structural guarantee
+   that the bypass of §1.2–1.3 cannot be reintroduced: an un-declassified
+   value is not just *mislabeled* for an envelope — it is *unusable* in one.
+
+Propagation stays untouched: `derive_normal` already narrows readers by
+intersection and joins confidentiality upward (`labels.rs:299-320`); the
+`UNTRUSTED_EFFECT_CEILING_V2` re-application after join (`labels.rs:318`)
+already prevents effect laundering. These laws were always correct — they
+simply now have a consumer.
+
+## 12. Deferred follow-on: detection recall (NER)
+
+Out of scope here, sketched so the rule surface anticipates it: a measured
+worker (ONNX NER, as in the legacy system) may **propose** spans to mask.
+Proposals only ever *add* masking — the deterministic union
+(`pii_spans`) remains the floor, the gate remains the sole decider, and the
+worker's output is `ExternalUntrusted` so it can authorize nothing
+(`labels.rs:273`). Because §6.3 pins the masking contract by
+`pattern_set_digest` + algorithm version, adding a proposal source bumps the
+contract version and therefore requires a rule update — recall improvements
+become visible, signed policy changes, not silent behavior drift. No changes
+to this design are needed to accommodate it later.
+
+## 13. Compatibility and encoding impact
+
+- `SourceKindV2::KernelDeclassification { rule_digest }` — tag 7, `array(2)`
+  (`provenance.rs:447-450`, `:493-495`) — **unchanged**. The richer binding
+  (implementation, leak gate, token set, purpose, reader) already lives in
+  the node's evidence vector (`provenance.rs:920-936`). No store migration.
+  Locating the full rule from a historical node is possible because rule
+  sets are hash-chained and durable: search the chain for the set containing
+  `rule_digest`.
+- New wire objects: `DeclassificationRuleSetV2` (+ trust-root binding variant
+  and purpose). New `ClosedSecurityDomainV2` variant. New signature tag.
+  New hard limits: `max_declassification_rules` (64),
+  `max_rule_readers` (16). All additive.
+- Deployment manifest claim gains a pinned rule-set item carrying the set's
+  `signed_digest` (§4) — additive, versioned by the manifest schema, zero
+  digest refused at construction like the existing projection pin.
+- `DeclassificationPurposeV2` is a closed enum (§6.5); growing it is a code
+  change plus a new rule-set generation, never a wire-compatible free-form
+  extension.
+- `kernel_declassification` signature gains `duty_floor` (private fn —
+  no API break).
+- New `G3Error` variants (§7) — additive to a `#[non_exhaustive]`-style
+  match discipline; audit existing exhaustive matches on `G3Error` when
+  implementing.
+- No V1 impact; no `savana-kernel-protocol` message changes until stage 2
+  touches the vault record layout for the agent view (one tagged field
+  addition, versioned by the record tag).
+
+## 14. Invariants and failure model
+
+Testable properties, numbered for traceability into the test plan:
+
+- **I1 — Unskippable gate** *(exists, preserved)*: no code path constructs a
+  `KernelDeclassification` node without `enforce_for_declassification`
+  running over the exact released bytes inside the constructor.
+- **I2 — No unauthorized rule** *(new)*: every minted node's `rule_digest`
+  names a rule inside a signature-verified, window-valid, chain-valid set
+  whose signer the operational trust root authorizes for
+  `DeclassificationAuthority`.
+- **I3 — Duty floor** *(new)*: effective gate duty is never below
+  `transition.leak_gate_duty()`, for any rule content whatsoever.
+- **I4 — Exact reader** *(extends `8b0de14`)*: for tags 4–5, the released-to
+  identity is non-zero, bound in the node, and a member of the rule's
+  allowlist.
+- **I5 — Null refusal** *(extends `8543926`)*: zero digests, empty rule
+  sets, empty reader lists, absent-where-required and
+  present-where-forbidden options are all construction/decode errors.
+- **I6 — Reader judgment** *(new)*: no handoff to a recipient outside the
+  value's reader set; unproven labels refuse.
+- **I7 — Consent** *(new)*: no `BuildFinalRelease` under a consent-requiring
+  rule without a fresh, matching, unconsumed consent; consumption is atomic
+  with dispatch; a consent never authorizes two releases.
+- **I8 — Fail closed** *(new)*: missing/expired/invalid rule set ⇒
+  `declassify` refuses ⇒ no agent view, no planner call, no release. The
+  kernel runs; nothing widens.
+
+Failure-mode table (each row a distinct error and at least one test):
+
+| # | Condition | Error | Effect |
+|---|---|---|---|
+| F1 | rule set signature invalid / signer not in root / wrong purpose | `InvalidDeclassificationRuleSet` (decode-time) | set never constructed |
+| F2 | canonical re-encode mismatch (any mutated byte) | same | set never constructed |
+| F3 | sequence gap, fork, wrong previous digest, family mismatch | same (`validate_predecessor`) | successor rejected, prior set stays active until its window ends |
+| F4 | set/rule window excludes `now` | `RuleSetExpired` / `RuleExpired` | refuse |
+| F5 | no rule for `(transition, purpose)` | `NoAuthorizingRule` | refuse |
+| F6 | implementation contract drift | `ImplementationMismatch` | refuse — pattern-set change without rule update is loud |
+| F7 | executor/sink not in allowlist | `ReaderNotAuthorized` | refuse |
+| F8 | blocklisted content / residual PII in released bytes | `LeakGateBlockedContent` / `LeakGateResidualPii` | refuse (existing errors, `labels.rs:205-208`) |
+| F9 | consent absent / stale / scope mismatch / already consumed | `Consent*` | refuse; user re-approves |
+| F10 | recipient outside reader set at handoff | validator `Refuses` | handoff denied |
+| F11 | value without matching declassification node offered to an envelope | lineage check fails | envelope construction denied |
+| F12 | rule set verifies but `signed_digest` ≠ deployment-manifest pin | refused at load | kernel starts with no active set (I8) |
+| F13 | unknown purpose digest, or transition/purpose owner mismatch | `InvalidDeclassificationRuleSet` (decode-time) | set never constructed |
+| F14 | empty token set on a tag-5 declassification (digest-of-empty is non-zero, so the null guard cannot catch it) | `BindingMismatch` (semantic emptiness check in the entry) | release refused |
+
+## 15. Test plan
+
+- **policy-core, rule objects**: CBOR round-trip; canonicality (single-byte
+  mutation ⇒ F2); chain suite (genesis, happy succession, gap, fork, replay
+  of an older set as successor — F3); window nesting; sort/dedup violations;
+  reader-constraint presence rules per tag; limits; closed vocabulary —
+  unknown purpose digest and transition/purpose owner mismatch both refuse
+  at decode (F13).
+- **policy-core, entry**: pairwise authorize matrix over
+  {right/wrong transition} × {right/wrong purpose} × {valid/expired} ×
+  {matching/mismatched implementation} × {member/non-member reader} —
+  refusals map to exactly one error each; happy path per transition mints a
+  node whose evidence vector equals the rule's digests; I3 property test —
+  random rules never lower the duty for tags 1–2.
+- **leak-gate differential** *(exists, extend)*: corpus implication
+  `masked ⇒ gate-passes` re-asserted through `declassify` end-to-end rather
+  than through `enforce_for_declassification` directly.
+- **kerneld integration**: masked view read-back carries a node digest whose
+  transition is tag 1 (§8.3); gate refusal ⇒ ingress error and *no* vault
+  record; planner ticket records the node digest (§9); rule set absent ⇒ I8
+  behavior (agent view request fails closed); a signature-valid rule set
+  whose digest differs from the manifest pin is refused at load (F12).
+- **attack rows** (extend `policy_attack_matrix`): forged rule-set signature;
+  rule set signed by a Deployment-purpose key; stale predecessor replay;
+  consent replay across two releases; consent for sink A presented for
+  sink B; empty-token-set release (F14); blocklisted content in a release
+  payload refused *before* HPKE sealing.
+- **G5 replay**: a recorded declassification decision replays bit-exact from
+  (value bytes, rule set bytes, clock) — no ambient inputs.
+
+## 16. Staged delivery
+
+Five stages, each independently shippable, tests green at every boundary:
+
+| Stage | Content | Behavior change |
+|---|---|---|
+| S1 | Trust-root extension + `DeclassificationRuleSetV2`/`RuleV2` + purpose enum + manifest pin schema + `declassify` entry + all §15 policy-core tests | none (no callers) |
+| S2 | kerneld loads the manifest-pinned set, verifies chain + pin at startup+rollover; masking routed (§8); vault record binding | ingress fails closed without a valid, pinned rule set |
+| S3 | planner envelope routed (§9) | planner calls fail closed without their rule |
+| S4 | reader-dimension facts + envelope lineage checks (§11) | mislabeled/unlabeled handoffs refuse |
+| S5 | approval display routed; tool + release dispatch routed through `declassify` (gate over plaintext before HPKE seal, node minted, rule lookup, real token scope); consent bound to existing settlements (§10.3) | egress and executor handoffs demand a rule; releases demand fresh settlement + non-empty scope |
+
+S1 is pure addition and can merge immediately after review. S2 is the first
+stage with operational impact and needs a rule set authored for the dev
+deployment before it lands.
+
+S3 has a prerequisite outside this design's scope: the planner intent
+vocabulary must become real. Today every planner call hardcodes
+`PlannerIntentKindV2::SummarizeDocument`, `StaticTemplateIdV2::new(1)`, and
+fixed limits (`v2_agent_authority.rs:1797-1802`), so a rule for
+`BuildPlannerEnvelope` would authorize a constant fiction rather than the
+run's actual intent (§18, A4). S5's scope *shrank* in v1.1: consent,
+single-use, quota, effect leases, and executor pinning already exist — S5
+adds the gate, the node, the rule, and the scope, nothing else.
+
+## 17. Decisions and remaining open items
+
+Resolved (numbering kept stable for traceability):
+
+- **O1 — Delivery vehicle: decided — deployment-manifest item.** The
+  manifest claim pins the rule set's `signed_digest`; kerneld refuses a
+  verifying-but-unpinned set (§4, F12). The Declassification trust root set
+  stays on the installer/MDM channel with its siblings. Rationale: rules
+  change with releases, root keys with installations.
+- **O2 — Purpose vocabulary: decided — closed enum.**
+  `DeclassificationPurposeV2` (§6.5), digests on the wire, unknown digests
+  and owner mismatches refused at decode (F13). Growth is a kernel release
+  plus a new rule-set generation — signed and visible, never silent.
+
+- **O3 — Consent signature: resolved by audit (v1.1).** The question assumed
+  consent had to be built; it exists as the approvald-signed release
+  settlement, verified against the settlement key with challenge, principal,
+  and manifest bindings (`v2_agent_authority.rs:3393-3406`) — already a
+  signed object, stronger than either drafted option. §10.3 binds to it.
+- **O4 — Consent freshness default: resolved by audit (v1.1).** The codebase
+  compiled it years before the question was asked:
+  `TOOL_APPROVAL_TTL_MS = 300_000` (`v2_agent_authority.rs:79`). Rule
+  `max_age` must be ≤ the envelope TTL (§6.4).
+
+Remaining open items (proposed defaults apply until revisited):
+
+- **O5 — Registry assignments**: signature tag (presumptively 29), binding
+  tag 3, purpose 5, `ClosedSecurityDomainV2` variant value, hard-limit
+  numbers (64 rules / 16 readers). Assign against the authoritative
+  registries at S1 implementation time.
+- **O6 — Approval-display duty**: floor stays `BlocklistOnly` (human needs
+  real values); should the default *rule* for approval display tighten it in
+  privacy-sensitive deployments? Deployment-specific; the mechanism (§6.2)
+  supports either.
+
+## 18. Conformance audit addendum (v1.1)
+
+A second audit pass over the live kerneld pipelines, run after v1 was
+accepted. Each finding carries its evidence and its disposition into the
+staged plan. A-numbered to keep them distinct from failure rows.
+
+| # | Finding | Evidence | Disposition |
+|---|---|---|---|
+| A1 | The final-release pipeline exists and is elaborate — approval envelope, settlement verification, single-use, quota, effect lease, durable dispatch, payload re-verification, HPKE seal — and none of it runs the leak gate, mints a declassification node, consults a rule, or carries a real token scope | `v2_agent_authority.rs:3160-3626` | §10.3 rewritten around it; the four gaps are S5's exact scope |
+| A2 | The tool-execution pipeline is equally complete (intent state machine Proposed → Evaluating → AwaitingApproval / Authorized / Denied; `ToolExecution` approval envelopes; semantic-binding checks; HPKE seal) and equally gate-free | `:2242-2540` (state machine), `:2468,2494` (approvals), `:2780` (seal) | `BuildExecutionEnvelope` wiring point is the seal site; §10.2 rebased |
+| A3 | G7 policy already pins the exact executor — identity equality check, seal key, connector-registry digest — so the exact-reader half of tag 4 exists today at the policy layer | `:3196`, `:3537-3539`, `:3580` | Rule allowlist checks membership, G7 checks equality, both must pass (§10.2); deliberate two-domain redundancy |
+| A4 | Every planner call hardcodes intent `SummarizeDocument`, template id 1, and fixed limits — the intent vocabulary is not yet real, so a planner rule would authorize a constant, not an intent | `:1797-1802` | Prerequisite for S3, outside this design (§16) |
+| A5 | The approval display binds *what to approve* by digest chain — `display_digest = H(payload, evidence, destination)` and a UI-authentication envelope — but the artifact the human actually sees is rendered outside any gate, with the display projection chosen by the agent's request | `:3230-3242`, `:3290-3313` | §10.1's wiring point sharpened: the gated `BuildApprovalDisplay` constructs the rendered artifact whose digest enters this chain |
+| A6 | `token_set_digest_v2(&[])` — release scope stubbed empty; the empty set digests to a valid non-zero value, escaping the null-binding guard | `:3216`; guard at `provenance.rs:908-918` | F14: semantic emptiness refused for tag 5; real scope is S5 work |
+| A7 | Provenance already reaches the release record as sorted evidence digests resolved from value handles — necessary but not sufficient: the released value's own lineage never transitions | `:3199-3215` | Kept as-is; the node from `declassify` completes it |
+| A8 | Audited conformant: parentless planner output labels `(ExternalUntrusted, PlannerAbstract, KERNEL)`; the agent's data-plane read surface is a single endpoint that serves only the masked-view record tag | `provenance.rs:816-826`; `v2_data_plane.rs:16,392` | No action |
+| A9 | `SourceKindV2::KernelExtraction` (tag 2) has no production caller — a second defined-but-unwired vocabulary item alongside declassification | grep: kerneld + input-runtime, zero non-test hits | Note only; extraction wiring is out of scope here and should follow the same pattern when it lands |
+
+Two corrections the audit forced on v1 of this document, recorded so the
+reasoning is auditable too: consent was declared missing when it exists
+(§1.5, §10.3 — the v1 map pass looked for `kernel_declassification` callers
+and concluded "no egress"; the egress simply does not use provenance), and
+the consent design duplicated machinery instead of binding it. The general
+lesson stands for future revisions: **absence of a symbol is not absence of
+a pipeline** — audit by data flow, not by grep alone.
+
+---
+
+*Every file:line reference in this document was verified against the working
+tree at commit `ed567d6` on `claude/security-capabilities-assessment-06bjbl`;
+the v1.1 audit rows (§18) were verified against the same tree.*

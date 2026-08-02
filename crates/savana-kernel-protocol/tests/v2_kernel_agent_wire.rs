@@ -13,17 +13,18 @@ use savana_kernel_protocol::v2::{
     GetAgentSessionStatusRequestV2, GetExecutionStatusRequestV2, GetKernelTaskStatusRequestV2,
     GetReleaseStatusRequestV2, KernelAgentHealthRequestV2, KernelAgentOperationV2,
     MaskedDocumentHandleV2, NamedArgumentValueBindingV2, NewTaskPreparationHandleV2, Nonce32V2,
-    PendingReleaseHandleV2, PlannerPlanV2, PlannerRouteIdV2, PlannerSlotRefV2, PlannerStepV2,
-    PrepareAgentUiAuthenticationRequestV2, PrepareFollowupIngressRequestV2,
-    PrepareNewIngressRequestV2, PreparePlannerCallRequestV2, PrepareReleaseRequestV2,
-    PrincipalIdV2, ProjectionIdV2, ProposeToolCallRequestV2, ReadAgentViewRequestV2,
-    ReleaseHandleV2, ReleaseKernelApprovalHandleV2, ReleaseStatusTargetV2, ReleaseTicketHandleV2,
-    ResumeCommittedAgentAuthenticationRequestV2, RevokeVaultRequestV2, RunHandleV2,
-    ServiceIdentityV2, SignedAgentAuthenticationAttemptClosureProofV2, SignedApprovalSettlementV2,
-    SignedDurableTaskCorrelationV2, SignedUiAuthenticationSettlementV2, ToolClassIdV2,
-    ToolHandleV2, ToolKernelApprovalHandleV2, UiAuthenticationPurposeV2, UnixMillisV2,
-    UnsignedAgentAuthenticationAttemptClosureProofV2, UnsignedApprovalSettlementV2,
-    UnsignedDurableTaskCorrelationV2, UnsignedUiAuthenticationSettlementV2, ValueHandleV2,
+    PendingReleaseHandleV2, PlannerIntentKindV2, PlannerLimitsV2, PlannerPlanV2, PlannerPurposeV2,
+    PlannerRouteIdV2, PlannerSlotRefV2, PlannerStepV2, PrepareAgentUiAuthenticationRequestV2,
+    PrepareFollowupIngressRequestV2, PrepareNewIngressRequestV2, PreparePlannerCallRequestV2,
+    PrepareReleaseRequestV2, PrincipalIdV2, ProjectionIdV2, ProposeToolCallRequestV2,
+    ReadAgentViewRequestV2, ReleaseHandleV2, ReleaseKernelApprovalHandleV2, ReleaseStatusTargetV2,
+    ReleaseTicketHandleV2, ResumeCommittedAgentAuthenticationRequestV2, RevokeVaultRequestV2,
+    RunHandleV2, ServiceIdentityV2, SignedAgentAuthenticationAttemptClosureProofV2,
+    SignedApprovalSettlementV2, SignedDurableTaskCorrelationV2, SignedUiAuthenticationSettlementV2,
+    StaticTemplateIdV2, ToolClassIdV2, ToolHandleV2, ToolKernelApprovalHandleV2,
+    UiAuthenticationPurposeV2, UnixMillisV2, UnsignedAgentAuthenticationAttemptClosureProofV2,
+    UnsignedApprovalSettlementV2, UnsignedDurableTaskCorrelationV2,
+    UnsignedUiAuthenticationSettlementV2, ValueHandleV2,
 };
 
 #[test]
@@ -295,13 +296,25 @@ fn planner_preparation_has_a_bounded_typed_value_list() {
     let run = RunHandleV2::from_authority_entropy([0x23; 32]).unwrap();
     let first = ValueHandleV2::from_authority_entropy([0x24; 32]).unwrap();
     let second = ValueHandleV2::from_authority_entropy([0x25; 32]).unwrap();
+    let limits = PlannerLimitsV2::new(8, 8, 8, 65_536).unwrap();
     let request = KernelAgentOperationV2::PreparePlannerCall(
-        PreparePlannerCallRequestV2::new(run, PlannerRouteIdV2::new(7), vec![first, second])
-            .unwrap(),
+        PreparePlannerCallRequestV2::new(
+            run,
+            PlannerRouteIdV2::new(7),
+            StaticTemplateIdV2::new(11),
+            PlannerIntentKindV2::SummarizeDocument,
+            PlannerPurposeV2::PlannerCall,
+            limits,
+            vec![first, second],
+        )
+        .unwrap(),
     );
-    let mut expected = vec![0x82, 0x17, 0x83, 0x58, 0x20];
+    let mut expected = vec![0x82, 0x17, 0x87, 0x58, 0x20];
     expected.extend_from_slice(&[0x23; 32]);
-    expected.extend_from_slice(&[0x07, 0x82, 0x58, 0x20]);
+    expected.extend_from_slice(&[
+        0x07, 0x0b, 0x81, 0x03, 0x81, 0x01, 0x84, 0x08, 0x08, 0x08, 0x1a, 0x00, 0x01, 0x00, 0x00,
+        0x82, 0x58, 0x20,
+    ]);
     expected.extend_from_slice(&[0x24; 32]);
     expected.extend_from_slice(&[0x58, 0x20]);
     expected.extend_from_slice(&[0x25; 32]);
@@ -314,9 +327,24 @@ fn planner_preparation_has_a_bounded_typed_value_list() {
         decode_kernel_agent_operation_v2(&expected).unwrap(),
         request
     );
-    assert!(
-        PreparePlannerCallRequestV2::new(run, PlannerRouteIdV2::new(7), vec![first; 257],).is_err()
-    );
+    let mut unknown_purpose = expected.clone();
+    let purpose_tag = unknown_purpose
+        .windows(3)
+        .position(|window| window == [0x81, 0x01, 0x84])
+        .unwrap()
+        + 1;
+    unknown_purpose[purpose_tag] = 0x02;
+    assert!(decode_kernel_agent_operation_v2(&unknown_purpose).is_err());
+    assert!(PreparePlannerCallRequestV2::new(
+        run,
+        PlannerRouteIdV2::new(7),
+        StaticTemplateIdV2::new(11),
+        PlannerIntentKindV2::SummarizeDocument,
+        PlannerPurposeV2::PlannerCall,
+        limits,
+        vec![first; 257],
+    )
+    .is_err());
 }
 
 #[test]

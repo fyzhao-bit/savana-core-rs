@@ -217,6 +217,10 @@ pub(crate) trait ServerLifecycle {
     }
 
     fn poll_shutdown(&mut self) -> Result<bool, StableCode>;
+
+    fn take_v2_rollover_request(&mut self) -> Result<bool, StableCode> {
+        Ok(false)
+    }
 }
 
 struct NoopLifecycle;

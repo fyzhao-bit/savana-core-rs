@@ -1,6 +1,8 @@
 use crate::{ProtocolError, StableCode};
+use base64::Engine as _;
 use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
 use sha2::{Digest as _, Sha256};
+use unicode_normalization::UnicodeNormalization as _;
 
 use super::{
     cbor::{scan_single, V2DecodeContext},
@@ -11,9 +13,15 @@ use super::{
 };
 
 const MAX_SIGNED_PAYLOAD_BYTES_V2: usize = 8 * 1024;
+const MAX_APPROVAL_SIGNED_PAYLOAD_BYTES_V2: usize = 1024 * 1024 + 8 * 1024;
+pub const MAX_APPROVAL_DISPLAY_BYTES_V2: usize = 1024 * 1024;
+const APPROVAL_BINARY_DISPLAY_PREFIX_V2: &str = "base64:";
+const APPROVAL_DISPLAY_DIGEST_DOMAIN_V2: &[u8] = b"SAVANA_APPROVAL_DISPLAY_BYTES_V2\0";
 const INGRESS_APPROVAL_ENVELOPE_DOMAIN_V2: &[u8] = b"SAVANA_INGRESS_APPROVAL_ENVELOPE_V2\0";
 const TOOL_APPROVAL_ENVELOPE_DOMAIN_V2: &[u8] = b"SAVANA_TOOL_APPROVAL_ENVELOPE_V2\0";
 const RELEASE_APPROVAL_ENVELOPE_DOMAIN_V2: &[u8] = b"SAVANA_RELEASE_APPROVAL_ENVELOPE_V2\0";
+const CONNECTOR_REGISTRATION_APPROVAL_ENVELOPE_DOMAIN_V2: &[u8] =
+    b"SAVANA_CONNECTOR_REGISTRATION_APPROVAL_ENVELOPE_V2\0";
 const UI_AUTH_INGRESS_ENVELOPE_DOMAIN_V2: &[u8] = b"SAVANA_UI_AUTH_INGRESS_ENVELOPE_V2\0";
 const UI_AUTH_APPROVAL_DISPLAY_ENVELOPE_DOMAIN_V2: &[u8] =
     b"SAVANA_UI_AUTH_APPROVAL_DISPLAY_ENVELOPE_V2\0";
@@ -27,6 +35,8 @@ const UI_AUTH_AGENT_SETTLEMENT_DOMAIN_V2: &[u8] = b"SAVANA_UI_AUTH_AGENT_SETTLEM
 const INGRESS_APPROVAL_SETTLEMENT_DOMAIN_V2: &[u8] = b"SAVANA_INGRESS_APPROVAL_SETTLEMENT_V2\0";
 const TOOL_APPROVAL_SETTLEMENT_DOMAIN_V2: &[u8] = b"SAVANA_TOOL_APPROVAL_SETTLEMENT_V2\0";
 const RELEASE_APPROVAL_SETTLEMENT_DOMAIN_V2: &[u8] = b"SAVANA_RELEASE_APPROVAL_SETTLEMENT_V2\0";
+const CONNECTOR_REGISTRATION_APPROVAL_SETTLEMENT_DOMAIN_V2: &[u8] =
+    b"SAVANA_CONNECTOR_REGISTRATION_APPROVAL_SETTLEMENT_V2\0";
 const AGENT_AUTHENTICATION_CLOSURE_DESCRIPTOR_DOMAIN_V2: &[u8] =
     b"SAVANA_AGENT_AUTH_CLOSURE_DESCRIPTOR_V2\0";
 const AGENT_AUTHENTICATION_CLOSURE_DESCRIPTOR_DIGEST_DOMAIN_V2: &[u8] =
@@ -35,7 +45,7 @@ const AGENT_AUTHENTICATION_ATTEMPT_CLOSURE_PROOF_DOMAIN_V2: &[u8] =
     b"SAVANA_AGENT_AUTH_ATTEMPT_CLOSURE_PROOF_V2\0";
 
 macro_rules! signed_kernel_envelope_v2 {
-    ($name:ident) => {
+    ($name:ident, $maximum_payload_bytes:expr) => {
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub struct $name {
             canonical_payload: Vec<u8>,
@@ -50,7 +60,7 @@ macro_rules! signed_kernel_envelope_v2 {
                 signature: Ed25519SignatureV2,
             ) -> Result<Self, ProtocolError> {
                 if canonical_payload.is_empty()
-                    || canonical_payload.len() > MAX_SIGNED_PAYLOAD_BYTES_V2
+                    || canonical_payload.len() > $maximum_payload_bytes
                     || is_zero(key_id.as_bytes())
                     || is_zero(signature.as_bytes())
                 {
@@ -102,7 +112,7 @@ macro_rules! signed_kernel_envelope_v2 {
                     return Err(decode_error(position));
                 }
                 let payload = decoder.bytes()?;
-                if payload.is_empty() || payload.len() > MAX_SIGNED_PAYLOAD_BYTES_V2 {
+                if payload.is_empty() || payload.len() > $maximum_payload_bytes {
                     return Err(decode_error(position));
                 }
                 let canonical_payload = payload.to_vec();
@@ -125,8 +135,75 @@ macro_rules! signed_kernel_envelope_v2 {
     };
 }
 
-signed_kernel_envelope_v2!(SignedApprovalEnvelopeV2);
-signed_kernel_envelope_v2!(SignedUiAuthenticationEnvelopeV2);
+signed_kernel_envelope_v2!(
+    SignedApprovalEnvelopeV2,
+    MAX_APPROVAL_SIGNED_PAYLOAD_BYTES_V2
+);
+signed_kernel_envelope_v2!(
+    SignedUiAuthenticationEnvelopeV2,
+    MAX_SIGNED_PAYLOAD_BYTES_V2
+);
+
+pub fn approval_display_digest_v2(display_bytes: &[u8]) -> Digest32V2 {
+    domain_hash(APPROVAL_DISPLAY_DIGEST_DOMAIN_V2, display_bytes)
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct BoundedApprovalDisplayTextV2(String);
+
+impl BoundedApprovalDisplayTextV2 {
+    pub fn new(value: String) -> Result<Self, ProtocolError> {
+        if value.is_empty()
+            || value.len() > MAX_APPROVAL_DISPLAY_BYTES_V2
+            || value.chars().any(char::is_control)
+            || !value.nfc().eq(value.chars())
+        {
+            return Err(malformed());
+        }
+        Ok(Self(value))
+    }
+
+    pub fn from_utf8_bytes(value: Vec<u8>) -> Result<Self, ProtocolError> {
+        Self::new(String::from_utf8(value).map_err(ProtocolError::malformed)?)
+    }
+
+    pub fn from_binary(value: &[u8]) -> Result<Self, ProtocolError> {
+        if value.is_empty() {
+            return Err(malformed());
+        }
+        let encoded_length = value
+            .len()
+            .checked_add(2)
+            .and_then(|length| length.checked_div(3))
+            .and_then(|groups| groups.checked_mul(4))
+            .and_then(|length| length.checked_add(APPROVAL_BINARY_DISPLAY_PREFIX_V2.len()))
+            .ok_or_else(malformed)?;
+        if encoded_length > MAX_APPROVAL_DISPLAY_BYTES_V2 {
+            return Err(malformed());
+        }
+        let mut display = String::new();
+        display
+            .try_reserve_exact(encoded_length)
+            .map_err(ProtocolError::malformed)?;
+        display.push_str(APPROVAL_BINARY_DISPLAY_PREFIX_V2);
+        base64::engine::general_purpose::STANDARD.encode_string(value, &mut display);
+        Self::new(display)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl core::fmt::Debug for BoundedApprovalDisplayTextV2 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("BoundedApprovalDisplayTextV2(<redacted>)")
+    }
+}
 
 macro_rules! closed_unit_enum_v2 {
     (
@@ -185,6 +262,7 @@ closed_unit_enum_v2! {
         Ingress = 1,
         ToolExecution = 2,
         FinalRelease = 3,
+        ConnectorRegistration = 4,
     }
 }
 
@@ -966,6 +1044,10 @@ pub enum ApprovalBindingV2 {
     FinalRelease {
         binding: FinalReleaseSemanticBindingV2,
     },
+    ConnectorRegistration {
+        descriptor_digest: Digest32V2,
+        previous_head_digest: Digest32V2,
+    },
 }
 
 impl ApprovalBindingV2 {
@@ -974,6 +1056,7 @@ impl ApprovalBindingV2 {
             Self::Ingress { .. } => ApprovalPurposeV2::Ingress,
             Self::ToolExecution { .. } => ApprovalPurposeV2::ToolExecution,
             Self::FinalRelease { .. } => ApprovalPurposeV2::FinalRelease,
+            Self::ConnectorRegistration { .. } => ApprovalPurposeV2::ConnectorRegistration,
         }
     }
 
@@ -987,7 +1070,7 @@ impl ApprovalBindingV2 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnsignedApprovalEnvelopeV2 {
     installation_id: Digest32V2,
     active_state_manifest_digest: Digest32V2,
@@ -999,6 +1082,8 @@ pub struct UnsignedApprovalEnvelopeV2 {
     expected_principal: PrincipalIdV2,
     display_projection_digest: Digest32V2,
     display_digest: Digest32V2,
+    display_text: BoundedApprovalDisplayTextV2,
+    display_declassification_provenance_digest: Option<Digest32V2>,
     approvald_endpoint_identity: ServiceIdentityV2,
     issued_at: UnixMillisV2,
     expires_at: UnixMillisV2,
@@ -1017,6 +1102,8 @@ impl UnsignedApprovalEnvelopeV2 {
         expected_principal: PrincipalIdV2,
         display_projection_digest: Digest32V2,
         display_digest: Digest32V2,
+        display_text: BoundedApprovalDisplayTextV2,
+        display_declassification_provenance_digest: Option<Digest32V2>,
         approvald_endpoint_identity: ServiceIdentityV2,
         issued_at: UnixMillisV2,
         expires_at: UnixMillisV2,
@@ -1030,6 +1117,11 @@ impl UnsignedApprovalEnvelopeV2 {
             || is_zero(expected_principal.as_bytes())
             || is_zero(display_projection_digest.as_bytes())
             || is_zero(display_digest.as_bytes())
+            || approval_display_digest_v2(display_text.as_bytes()) != display_digest
+            || display_declassification_provenance_digest
+                .is_some_and(|digest| is_zero(digest.as_bytes()))
+            || (purpose != ApprovalPurposeV2::Ingress
+                && display_declassification_provenance_digest.is_none())
             || is_zero(approvald_endpoint_identity.as_bytes())
             || issued_at.get() == 0
             || issued_at.get() >= expires_at.get()
@@ -1048,61 +1140,71 @@ impl UnsignedApprovalEnvelopeV2 {
             expected_principal,
             display_projection_digest,
             display_digest,
+            display_text,
+            display_declassification_provenance_digest,
             approvald_endpoint_identity,
             issued_at,
             expires_at,
         })
     }
 
-    pub const fn purpose(self) -> ApprovalPurposeV2 {
+    pub const fn purpose(&self) -> ApprovalPurposeV2 {
         self.purpose
     }
 
-    pub const fn installation_id(self) -> Digest32V2 {
+    pub const fn installation_id(&self) -> Digest32V2 {
         self.installation_id
     }
 
-    pub const fn active_state_manifest_digest(self) -> Digest32V2 {
+    pub const fn active_state_manifest_digest(&self) -> Digest32V2 {
         self.active_state_manifest_digest
     }
 
-    pub const fn deployment_generation(self) -> u64 {
+    pub const fn deployment_generation(&self) -> u64 {
         self.deployment_generation
     }
 
-    pub const fn envelope_nonce(self) -> Nonce32V2 {
+    pub const fn envelope_nonce(&self) -> Nonce32V2 {
         self.envelope_nonce
     }
 
-    pub const fn binding(self) -> ApprovalBindingV2 {
+    pub const fn binding(&self) -> ApprovalBindingV2 {
         self.binding
     }
 
-    pub const fn expected_principal(self) -> PrincipalIdV2 {
+    pub const fn expected_principal(&self) -> PrincipalIdV2 {
         self.expected_principal
     }
 
-    pub const fn decision_challenge(self) -> Nonce32V2 {
+    pub const fn decision_challenge(&self) -> Nonce32V2 {
         self.decision_challenge
     }
 
-    pub const fn display_projection_digest(self) -> Digest32V2 {
+    pub const fn display_projection_digest(&self) -> Digest32V2 {
         self.display_projection_digest
     }
 
-    pub const fn display_digest(self) -> Digest32V2 {
+    pub const fn display_digest(&self) -> Digest32V2 {
         self.display_digest
     }
 
-    pub const fn approvald_endpoint_identity(self) -> ServiceIdentityV2 {
+    pub fn display_text(&self) -> &BoundedApprovalDisplayTextV2 {
+        &self.display_text
+    }
+
+    pub const fn display_declassification_provenance_digest(&self) -> Option<Digest32V2> {
+        self.display_declassification_provenance_digest
+    }
+
+    pub const fn approvald_endpoint_identity(&self) -> ServiceIdentityV2 {
         self.approvald_endpoint_identity
     }
 
-    pub const fn issued_at(self) -> UnixMillisV2 {
+    pub const fn issued_at(&self) -> UnixMillisV2 {
         self.issued_at
     }
 
-    pub const fn expires_at(self) -> UnixMillisV2 {
+    pub const fn expires_at(&self) -> UnixMillisV2 {
         self.expires_at
     }
 }
@@ -1730,6 +1832,33 @@ impl SignedApprovalSettlementV2 {
             expected_active_state_manifest_digest,
             expected_deployment_generation,
             ApprovalPurposeV2::FinalRelease,
+            expected_envelope_digest,
+            expected_principal,
+            expected_challenge,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_connector_registration(
+        &self,
+        expected_key_id: Ed25519KeyIdV2,
+        verifying_key: [u8; 32],
+        expected_installation_id: Digest32V2,
+        expected_active_state_manifest_digest: Digest32V2,
+        expected_deployment_generation: u64,
+        expected_envelope_digest: Digest32V2,
+        expected_principal: PrincipalIdV2,
+        expected_challenge: Nonce32V2,
+        now: UnixMillisV2,
+    ) -> Result<VerifiedApprovalSettlementV2, ProtocolError> {
+        self.verify_for_purpose(
+            expected_key_id,
+            verifying_key,
+            expected_installation_id,
+            expected_active_state_manifest_digest,
+            expected_deployment_generation,
+            ApprovalPurposeV2::ConnectorRegistration,
             expected_envelope_digest,
             expected_principal,
             expected_challenge,
@@ -2413,7 +2542,7 @@ fn encode_unsigned_approval_envelope_v2(
 ) -> Result<Vec<u8>, ProtocolError> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
     encoder
-        .array(14)
+        .array(16)
         .and_then(|encoder| encoder.u16(2))
         .map_err(ProtocolError::malformed)?;
     encode_fixed(&mut encoder, &value.installation_id)?;
@@ -2428,6 +2557,13 @@ fn encode_unsigned_approval_envelope_v2(
     encode_fixed(&mut encoder, &value.expected_principal)?;
     encode_fixed(&mut encoder, &value.display_projection_digest)?;
     encode_fixed(&mut encoder, &value.display_digest)?;
+    encoder
+        .str(value.display_text.as_str())
+        .map_err(ProtocolError::malformed)?;
+    encode_optional_fixed(
+        &mut encoder,
+        value.display_declassification_provenance_digest,
+    )?;
     encode_fixed(&mut encoder, &value.approvald_endpoint_identity)?;
     encode_fixed(&mut encoder, &value.issued_at)?;
     encode_fixed(&mut encoder, &value.expires_at)?;
@@ -2439,7 +2575,7 @@ fn decode_unsigned_approval_envelope_v2(
 ) -> Result<UnsignedApprovalEnvelopeV2, ProtocolError> {
     scan_single(bytes)?;
     let mut decoder = minicbor::Decoder::new(bytes);
-    expect_array(&mut decoder, 14)?;
+    expect_array(&mut decoder, 16)?;
     expect_schema_two(&mut decoder)?;
     let mut context = V2DecodeContext;
     let value = UnsignedApprovalEnvelopeV2::new(
@@ -2453,6 +2589,10 @@ fn decode_unsigned_approval_envelope_v2(
         decode_fixed(&mut decoder, &mut context)?,
         decode_fixed(&mut decoder, &mut context)?,
         decode_fixed(&mut decoder, &mut context)?,
+        BoundedApprovalDisplayTextV2::new(
+            decoder.str().map_err(ProtocolError::malformed)?.to_owned(),
+        )?,
+        decode_optional_fixed(&mut decoder, &mut context)?,
         decode_fixed(&mut decoder, &mut context)?,
         decode_fixed(&mut decoder, &mut context)?,
         decode_fixed(&mut decoder, &mut context)?,
@@ -2556,6 +2696,17 @@ fn encode_approval_binding(
                 .map_err(ProtocolError::malformed)?;
             encode_fixed(encoder, &binding)?;
         }
+        ApprovalBindingV2::ConnectorRegistration {
+            descriptor_digest,
+            previous_head_digest,
+        } => {
+            encoder
+                .array(3)
+                .and_then(|encoder| encoder.u16(4))
+                .map_err(ProtocolError::malformed)?;
+            encode_fixed(encoder, &descriptor_digest)?;
+            encode_fixed(encoder, &previous_head_digest)?;
+        }
     }
     Ok(())
 }
@@ -2579,6 +2730,10 @@ fn decode_approval_binding(
         }),
         (3, Some(2)) => Ok(ApprovalBindingV2::FinalRelease {
             binding: decode_fixed(decoder, context)?,
+        }),
+        (4, Some(3)) => Ok(ApprovalBindingV2::ConnectorRegistration {
+            descriptor_digest: decode_fixed(decoder, context)?,
+            previous_head_digest: decode_fixed(decoder, context)?,
         }),
         _ => Err(malformed()),
     }
@@ -3301,6 +3456,10 @@ fn approval_binding_is_nonzero(binding: ApprovalBindingV2) -> bool {
             action_intent_id, ..
         } => !is_zero(action_intent_id.as_bytes()),
         ApprovalBindingV2::FinalRelease { .. } => true,
+        ApprovalBindingV2::ConnectorRegistration {
+            descriptor_digest,
+            previous_head_digest,
+        } => !is_zero(descriptor_digest.as_bytes()) && !is_zero(previous_head_digest.as_bytes()),
     }
 }
 
@@ -3355,6 +3514,9 @@ const fn approval_envelope_domain(purpose: ApprovalPurposeV2) -> &'static [u8] {
         ApprovalPurposeV2::Ingress => INGRESS_APPROVAL_ENVELOPE_DOMAIN_V2,
         ApprovalPurposeV2::ToolExecution => TOOL_APPROVAL_ENVELOPE_DOMAIN_V2,
         ApprovalPurposeV2::FinalRelease => RELEASE_APPROVAL_ENVELOPE_DOMAIN_V2,
+        ApprovalPurposeV2::ConnectorRegistration => {
+            CONNECTOR_REGISTRATION_APPROVAL_ENVELOPE_DOMAIN_V2
+        }
     }
 }
 
@@ -3379,6 +3541,9 @@ const fn approval_settlement_domain(purpose: ApprovalPurposeV2) -> &'static [u8]
         ApprovalPurposeV2::Ingress => INGRESS_APPROVAL_SETTLEMENT_DOMAIN_V2,
         ApprovalPurposeV2::ToolExecution => TOOL_APPROVAL_SETTLEMENT_DOMAIN_V2,
         ApprovalPurposeV2::FinalRelease => RELEASE_APPROVAL_SETTLEMENT_DOMAIN_V2,
+        ApprovalPurposeV2::ConnectorRegistration => {
+            CONNECTOR_REGISTRATION_APPROVAL_SETTLEMENT_DOMAIN_V2
+        }
     }
 }
 

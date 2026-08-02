@@ -100,6 +100,13 @@ fn production_units_fix_every_listener_and_required_hardening_control() {
                 }
                 assert!(!body.contains("LoadCredential="));
                 assert!(body.contains("LoadCredentialEncrypted="));
+                if path.file_name().and_then(|value| value.to_str())
+                    == Some("savana-kerneld.service")
+                {
+                    assert!(body
+                        .lines()
+                        .any(|line| line == "LoadCredentialEncrypted=connector-authority-v2.seed"));
+                }
                 if body.contains("StateDirectory=") {
                     assert!(
                         body.lines().any(|line| line == "StateDirectoryMode=0700"),
@@ -168,6 +175,23 @@ fn deployment_recovery_gate_and_private_store_layout_are_fixed() {
                 .lines()
                 .any(|line| line.starts_with(&format!("d {path} 0700 root root "))),
             "missing private tmpfiles entry for {path}"
+        );
+    }
+}
+
+#[test]
+fn live_kernel_clients_expose_only_sighup_reload_to_systemd() {
+    for unit in ["savana-agentd.service", "savana-ingressd.service"] {
+        let body = fs::read_to_string(Path::new(UNIT_DIRECTORY).join(unit)).unwrap();
+        assert!(body
+            .lines()
+            .any(|line| line == "ExecReload=/bin/kill -HUP $MAINPID"));
+        assert_eq!(
+            body.lines()
+                .filter(|line| line.starts_with("ExecReload="))
+                .count(),
+            1,
+            "{unit} must have one closed reload action"
         );
     }
 }

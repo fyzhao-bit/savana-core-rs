@@ -1,7 +1,9 @@
+use ed25519_dalek::SigningKey;
 use savana_kernel_protocol::v2::{
-    Digest32V2, DurableRunIdV2, DurableTaskIdV2, ExecutorIdentityV2, ImplementationIdV2,
-    InternalSlotDigestV2, InternalStepIdV2, Nonce32V2, PlanRevisionDigestV2, PrincipalIdV2,
-    RequestIdV2, RoleIdV2, ToolClassIdV2, ValueInternalIdV2, VersionV2,
+    Digest32V2, DurableReleaseIdV2, DurableRunIdV2, DurableTaskIdV2, ExecutorIdentityV2,
+    FinalReleaseSemanticBindingV2, ImplementationIdV2, InternalSlotDigestV2, InternalStepIdV2,
+    Nonce32V2, PlanRevisionDigestV2, PrincipalIdV2, RequestIdV2, RoleIdV2, ToolClassIdV2,
+    ValueInternalIdV2, VersionV2,
 };
 
 use super::dispatch::{
@@ -15,15 +17,29 @@ use super::ontology::OntologyEvaluationV2;
 use super::{
     activate_internal_validator_registry, tool_approval_binding_digest_v2,
     tool_execution_semantic_binding_digest_v2, ActionIntentResolutionKindV2, ActionIntentStateV2,
-    AttemptKindV2, AuthenticatedEffectDispositionV2, DispatchQuotaMutationKindV2,
-    DispatchQuotaSubjectV2, DurableG4StateV2, G4Error, G5DecisionResolutionKindV2,
-    G5PolicyDispositionV2, InternalValidatorBuildV2, InternalValidatorImplementationKindV2,
-    OntologyExprV2, OntologyOperandV2, OntologyScalarV2, ResolvedExecutionTicketV2,
-    StableActionArgumentBindingV2, ToolExecutionSemanticBindingV2, VerifiedActionIntentMaterialV2,
-    VerifiedEffectGateLeaseV2, VerifiedInternalValidatorRegistryV2, VerifiedOntologyEvaluationV2,
-    VerifiedPolicyDispositionV2, VerifiedQuotaLimitV2, VerifiedToolApprovalSettlementV2,
+    AttemptKindV2, AuthenticatedEffectDispositionV2, ConnectorRegistryStateV2,
+    DispatchQuotaMutationKindV2, DispatchQuotaSubjectV2, DurableG4StateV2, G4Error,
+    G5DecisionResolutionKindV2, G5PolicyDispositionV2, InternalValidatorBuildV2,
+    InternalValidatorImplementationKindV2, OntologyExprV2, OntologyOperandV2, OntologyScalarV2,
+    ResolvedExecutionTicketV2, SharedVerifiedConnectorRegistryV2, StableActionArgumentBindingV2,
+    ToolExecutionSemanticBindingV2, VerifiedActionIntentMaterialV2, VerifiedEffectGateLeaseV2,
+    VerifiedInternalValidatorRegistryV2, VerifiedOntologyEvaluationV2, VerifiedPolicyDispositionV2,
+    VerifiedQuotaLimitV2, VerifiedToolApprovalSettlementV2,
 };
 use crate::v2::ArgumentNameV2;
+
+fn shared_connector_registry(seed: u8) -> SharedVerifiedConnectorRegistryV2 {
+    SharedVerifiedConnectorRegistryV2::from_verified_state(
+        ConnectorRegistryStateV2::from_verified_genesis(
+            Digest32V2::new([seed; 32]),
+            [0; 32],
+            vec![],
+            vec![],
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
 
 #[test]
 fn intent_replay_current_state_and_quota_tombstone_survive_restart() {
@@ -337,6 +353,20 @@ fn g7_prepare_quota_intent_and_wal_commit_atomically_and_replay_after_restart() 
     let (record, stored) =
         super::validator_tests::evaluation_fixture(vec![implementation.declaration()]);
     let subject = DispatchQuotaSubjectV2::tool_attempt(AttemptKindV2::ToolWrite);
+    let connector_genesis = Digest32V2::new([0x84; 32]);
+    let connector_signing_key = SigningKey::from_bytes(&[0x89; 32]);
+    let connector_registry = SharedVerifiedConnectorRegistryV2::from_verified_state(
+        ConnectorRegistryStateV2::from_verified_genesis(
+            connector_genesis,
+            connector_signing_key.verifying_key().to_bytes(),
+            vec![],
+            vec![],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let (connector_delta, _) =
+        super::dispatch_tests::signed_registry_add(connector_genesis, &connector_signing_key);
     let authority = || {
         VerifiedEffectGateLeaseV2::from_authenticated_ledger(
             Digest32V2::new([2; 32]),
@@ -346,7 +376,7 @@ fn g7_prepare_quota_intent_and_wal_commit_atomically_and_replay_after_restart() 
             false,
             ExecutorIdentityV2::new([13; 32]),
             savana_kernel_protocol::v2::HpkeX25519KeyIdV2::new([0x83; 32]),
-            Digest32V2::new([0x84; 32]),
+            &connector_registry,
             savana_kernel_protocol::v2::UnixMillisV2::new(10_000),
         )
         .unwrap()
@@ -374,6 +404,16 @@ fn g7_prepare_quota_intent_and_wal_commit_atomically_and_replay_after_restart() 
                 G5PolicyDispositionV2::permit_for_test(),
             )
             .unwrap();
+        store.set_before_next_commit_hook_for_test({
+            let connector_registry = connector_registry.clone();
+            let connector_delta = connector_delta.clone();
+            move || match connector_registry.try_verify_and_apply_canonical_delta(&connector_delta)
+            {
+                Err(G4Error::StateConflict) => Ok(()),
+                Ok(()) => Err(G4Error::StateConflict),
+                Err(error) => Err(error),
+            }
+        });
         let prepared = store
             .prepare_verified_tool_dispatch(
                 intent.action_intent_id(),
@@ -389,6 +429,10 @@ fn g7_prepare_quota_intent_and_wal_commit_atomically_and_replay_after_restart() 
                 Digest32V2::new([0x87; 32]),
             )
             .unwrap();
+        assert_eq!(
+            connector_registry.current_head_digest().unwrap(),
+            connector_genesis
+        );
         assert_eq!(
             prepared.core().execution_nonce(),
             prepared.preparation().execution_nonce()
@@ -538,7 +582,7 @@ fn g7_approval_dispatch_advances_through_authorized_approval_atomically() {
                 false,
                 ExecutorIdentityV2::new([13; 32]),
                 savana_kernel_protocol::v2::HpkeX25519KeyIdV2::new([0x97; 32]),
-                Digest32V2::new([0x98; 32]),
+                &shared_connector_registry(0x98),
                 savana_kernel_protocol::v2::UnixMillisV2::new(10_000),
             )
             .unwrap(),
@@ -581,6 +625,20 @@ fn g7_final_release_wal_and_quota_survive_restart_without_aliasing_tool_attempts
         binding,
     );
     let subject = DispatchQuotaSubjectV2::final_release(binding.release_quota_subject_digest());
+    let connector_genesis = Digest32V2::new([0x94; 32]);
+    let connector_signing_key = SigningKey::from_bytes(&[0x9d; 32]);
+    let connector_registry = SharedVerifiedConnectorRegistryV2::from_verified_state(
+        ConnectorRegistryStateV2::from_verified_genesis(
+            connector_genesis,
+            connector_signing_key.verifying_key().to_bytes(),
+            vec![],
+            vec![],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let (connector_delta, _) =
+        super::dispatch_tests::signed_registry_add(connector_genesis, &connector_signing_key);
     let authority = || {
         VerifiedEffectGateAuthorityV2::from_authenticated_unfenced_ledger(
             Digest32V2::new([2; 32]),
@@ -590,13 +648,23 @@ fn g7_final_release_wal_and_quota_survive_restart_without_aliasing_tool_attempts
             false,
             ExecutorIdentityV2::new([13; 32]),
             savana_kernel_protocol::v2::HpkeX25519KeyIdV2::new([0x93; 32]),
-            Digest32V2::new([0x94; 32]),
+            &connector_registry,
             savana_kernel_protocol::v2::UnixMillisV2::new(10_000),
         )
         .unwrap()
     };
     let preparation = {
         let mut store = DurableG4StateV2::open_for_test(&path, key, anchor.clone()).unwrap();
+        store.set_before_next_commit_hook_for_test({
+            let connector_registry = connector_registry.clone();
+            let connector_delta = connector_delta.clone();
+            move || match connector_registry.try_verify_and_apply_canonical_delta(&connector_delta)
+            {
+                Err(G4Error::StateConflict) => Ok(()),
+                Ok(()) => Err(G4Error::StateConflict),
+                Err(error) => Err(error),
+            }
+        });
         let prepared = store
             .prepare_final_release_dispatch(
                 &release,
@@ -607,6 +675,10 @@ fn g7_final_release_wal_and_quota_survive_restart_without_aliasing_tool_attempts
                 Digest32V2::new([0x98; 32]),
             )
             .unwrap();
+        assert_eq!(
+            connector_registry.current_head_digest().unwrap(),
+            connector_genesis
+        );
         assert_eq!(
             store
                 .quota_counter(release.durable_run_id(), subject)
@@ -629,6 +701,64 @@ fn g7_final_release_wal_and_quota_survive_restart_without_aliasing_tool_attempts
         )
         .unwrap();
     assert_eq!(replay.execution_nonce(), preparation.execution_nonce());
+
+    assert_eq!(
+        reopened
+            .prepare_final_release_dispatch(
+                &release,
+                VerifiedQuotaLimitV2::new_for_test(1, 0x95, subject),
+                // Replay is exact only when it carries the same consumed
+                // settlement. A second settlement cannot alias the durable
+                // release identifier and inherit the first preparation.
+                VerifiedFinalReleaseApprovalBindingV2::new_for_test(&release, 0x9c),
+                VerifiedFinalReleaseTicketV2::new_for_test(&release, 0x97),
+                authority(),
+                Digest32V2::new([0x98; 32]),
+            )
+            .unwrap_err(),
+        G4Error::StateConflict
+    );
+
+    let other_binding = FinalReleaseSemanticBindingV2::from_nonzero_components(
+        DurableReleaseIdV2::new([7; 32]),
+        Digest32V2::new([0xa0; 32]),
+        Digest32V2::new([0xa1; 32]),
+        Digest32V2::new([0xa2; 32]),
+        Digest32V2::new([0xa3; 32]),
+        Digest32V2::new([0xa4; 32]),
+        Digest32V2::new([0xa5; 32]),
+        Digest32V2::new([0xa6; 32]),
+        Digest32V2::new([0xa7; 32]),
+        Digest32V2::new([13; 32]),
+        Digest32V2::new([0xa8; 32]),
+    )
+    .unwrap();
+    let other_release = VerifiedFinalReleaseDispatchV2::from_verified_release(
+        Digest32V2::new([2; 32]),
+        Digest32V2::new([3; 32]),
+        DurableTaskIdV2::new([4; 32]),
+        DurableRunIdV2::new([5; 32]),
+        DurableReleaseIdV2::new([7; 32]),
+        other_binding,
+    )
+    .unwrap();
+    let other_subject =
+        DispatchQuotaSubjectV2::final_release(other_binding.release_quota_subject_digest());
+    assert_eq!(
+        reopened
+            .prepare_final_release_dispatch(
+                &other_release,
+                VerifiedQuotaLimitV2::new_for_test(1, 0x95, other_subject),
+                // Reusing the same approval settlement digest for a different
+                // exact release must be rejected even after a restart.
+                VerifiedFinalReleaseApprovalBindingV2::new_for_test(&other_release, 0x96),
+                VerifiedFinalReleaseTicketV2::new_for_test(&other_release, 0x9a),
+                authority(),
+                Digest32V2::new([0x9b; 32]),
+            )
+            .unwrap_err(),
+        G4Error::StateConflict
+    );
     reopened
         .reconcile_final_release_dispatch(
             VerifiedExecutorDispositionV2::effect_started_from_preparation_for_test(

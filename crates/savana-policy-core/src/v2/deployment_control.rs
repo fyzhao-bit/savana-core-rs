@@ -94,6 +94,8 @@ pub enum DeploymentControlErrorV2 {
     DeploymentAuxiliaryEvidenceIo,
     #[error("the operational trust-root set is malformed or unauthenticated")]
     InvalidOperationalTrustRootSet,
+    #[error("the declassification rule set is malformed or unauthenticated")]
+    InvalidDeclassificationRuleSet,
     #[error("the deployment plan is malformed, incomplete, or outside the closed vocabulary")]
     InvalidDeploymentPlan,
     #[error("the deployment plan exceeds the compiled hard limits")]

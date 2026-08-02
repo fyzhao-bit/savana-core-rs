@@ -9,7 +9,7 @@ use super::intent::projection_output_digest;
 use super::ontology::OntologyEvaluationV2;
 use super::{
     action_intent_id_v2, tool_execution_semantic_binding_digest_v2, ActionIntentRecordV2,
-    InternalValidatorDeclarationV2, VerifiedStoredBindingsV2,
+    EffectSetV2, IntegrityV2, InternalValidatorDeclarationV2, VerifiedStoredBindingsV2,
 };
 
 const MAX_INTERNAL_VALIDATORS: usize = 32;
@@ -54,6 +54,7 @@ pub enum InternalValidatorImplementationKindV2 {
     RootEvidencePresence,
     ProjectionBindingIntegrity,
     TokenExecutorBinding,
+    IntentFlowConfinement,
 }
 
 impl InternalValidatorImplementationKindV2 {
@@ -64,9 +65,41 @@ impl InternalValidatorImplementationKindV2 {
             Self::RootEvidencePresence => 3,
             Self::ProjectionBindingIntegrity => 4,
             Self::TokenExecutorBinding => 5,
+            Self::IntentFlowConfinement => 6,
         })
     }
+
+    /// The branch this validator yields when its fact does not hold.
+    ///
+    /// A validator that finds a broken binding denies: the call is malformed
+    /// and no human answer can repair it. A validator that finds a well-formed
+    /// but risky flow escalates instead, because the question it raises —
+    /// "should untrusted data steer this effect?" — is one a person can answer.
+    /// The five original validators all check bindings and keep denying.
+    pub(crate) const fn failure_branch(self) -> G5DecisionBranchV2 {
+        match self {
+            Self::ArgumentBindingIntegrity
+            | Self::LabelEffectConfinement
+            | Self::RootEvidencePresence
+            | Self::ProjectionBindingIntegrity
+            | Self::TokenExecutorBinding => G5DecisionBranchV2::Deny,
+            Self::IntentFlowConfinement => G5DecisionBranchV2::RequireApproval,
+        }
+    }
 }
+
+/// Effects that leave the kernel or mutate state outside it. An argument whose
+/// integrity is `ExternalUntrusted` never authorizes one of these: planner
+/// output and tool results carry that integrity, so a value fabricated by the
+/// planner or lifted out of fetched content cannot select the destination of a
+/// state-changing call. `READ` is deliberately absent — untrusted data may be
+/// read and analysed, it just may not authorize an effect.
+pub const EFFECT_AUTHORIZING_V2: EffectSetV2 = EffectSetV2::CREATE
+    .union(EffectSetV2::UPDATE)
+    .union(EffectSetV2::DELETE)
+    .union(EffectSetV2::SEND)
+    .union(EffectSetV2::EXECUTE)
+    .union(EffectSetV2::FINAL_RELEASE);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ValidatorBuildManifestIdentityV2 {
@@ -285,6 +318,7 @@ struct ClosedValidatorFactsV2 {
     root_evidence_presence: bool,
     projection_binding_integrity: bool,
     token_executor_binding: bool,
+    intent_flow_confinement: bool,
 }
 
 impl VerifiedG5EvaluationInputV2 {
@@ -366,12 +400,30 @@ impl VerifiedG5EvaluationInputV2 {
             .tokens()
             .iter()
             .all(|token| token.executor_identity_digest() == binding.executor_identity_digest());
+        // A call carrying an authorizing effect must not be steered by data the
+        // kernel does not trust. `label_effect_confinement` above asks which
+        // effect class a value may participate in; it does not ask where the
+        // value came from, and the session-wide `policy_allowed_effects` grants
+        // planner output and tool results the same effect set as user input.
+        // This fact closes that gap: planner output and tool results are
+        // `ExternalUntrusted`, while values the user supplied through ingress
+        // stay `UserAuthorized` even when the planner selects them by internal
+        // id, so ordinary calls are unaffected and fetched content cannot
+        // choose the destination of a state-changing call.
+        let intent_flow_confinement = intent_flow_is_confined(
+            descriptor.effects(),
+            stored
+                .arguments()
+                .iter()
+                .map(|argument| argument.label().integrity()),
+        );
         let validator_facts = ClosedValidatorFactsV2 {
             argument_binding_integrity,
             label_effect_confinement,
             root_evidence_presence,
             projection_binding_integrity,
             token_executor_binding,
+            intent_flow_confinement,
         };
         let evaluation_input_digest = evaluation_input_digest(
             record,
@@ -404,6 +456,29 @@ impl G5DecisionBranchV2 {
             Self::Permit => 1,
             Self::RequireApproval => 2,
             Self::Deny => 3,
+        }
+    }
+
+    /// Authority order on the branch lattice: `Deny < RequireApproval < Permit`.
+    const fn authority(self) -> u8 {
+        match self {
+            Self::Deny => 0,
+            Self::RequireApproval => 1,
+            Self::Permit => 2,
+        }
+    }
+
+    /// Greatest lower bound: the stricter of two branches.
+    ///
+    /// Every contributor to a decision — the ontology gate, each activated
+    /// validator, and the policy disposition — can only narrow the result.
+    /// `meet(x, y)` is never more permissive than either input, so no
+    /// validator can widen what policy allowed.
+    pub(crate) const fn meet(self, other: Self) -> Self {
+        if self.authority() <= other.authority() {
+            self
+        } else {
+            other
         }
     }
 }
@@ -494,20 +569,22 @@ impl G5DecisionIndexV2 {
             .try_reserve_exact(input.required_validators.len())
             .map_err(|_| G5Error::AllocationFailure)?;
         let exact_set = registry.activate_exact(&input.required_validators);
-        let validators_permit = match exact_set {
+        let validator_branch = match exact_set {
             Ok(set) => {
-                let mut permits = true;
+                let mut branch = G5DecisionBranchV2::Permit;
                 for kind in set.implementation_kinds() {
                     let outcome = evaluate_internal_validator(*kind, input.validator_facts);
-                    permits &= outcome == PrivateValidatorOutcomeV2::Permit;
+                    branch = branch.meet(outcome.branch());
                     validator_decision_digests.push(validator_decision_digest(
                         input.evaluation_input_digest,
                         *kind,
                         outcome,
                     ));
                 }
-                permits
+                branch
             }
+            // A registry that cannot activate the exact required set is not a
+            // risky flow a person can adjudicate — it denies, as before.
             Err(
                 G5Error::MissingImplementation
                 | G5Error::ImplementationIdentityMismatch
@@ -515,18 +592,24 @@ impl G5DecisionIndexV2 {
                 | G5Error::DuplicateImplementation
                 | G5Error::NonCanonicalRegistry
                 | G5Error::ValidatorLimitExceeded,
-            ) => false,
+            ) => G5DecisionBranchV2::Deny,
             Err(error) => return Err(error),
         };
-        let branch = if !input.ontology_evaluation.permits() || !validators_permit {
-            G5DecisionBranchV2::Deny
+        // Every contributor can only narrow: the ontology gate, the activated
+        // validators, and the policy disposition are combined by greatest lower
+        // bound, so the decision is never more permissive than what policy
+        // allowed and no validator can widen it.
+        let ontology_branch = if input.ontology_evaluation.permits() {
+            G5DecisionBranchV2::Permit
         } else {
-            match input.policy_disposition.0 {
-                G5PolicyDispositionKindV2::Permit => G5DecisionBranchV2::Permit,
-                G5PolicyDispositionKindV2::RequireApproval => G5DecisionBranchV2::RequireApproval,
-                G5PolicyDispositionKindV2::Deny => G5DecisionBranchV2::Deny,
-            }
+            G5DecisionBranchV2::Deny
         };
+        let policy_branch = match input.policy_disposition.0 {
+            G5PolicyDispositionKindV2::Permit => G5DecisionBranchV2::Permit,
+            G5PolicyDispositionKindV2::RequireApproval => G5DecisionBranchV2::RequireApproval,
+            G5PolicyDispositionKindV2::Deny => G5DecisionBranchV2::Deny,
+        };
+        let branch = ontology_branch.meet(validator_branch).meet(policy_branch);
         let decision_record_digest = decision_record_digest(
             input.action_intent_id,
             input.evaluation_input_digest,
@@ -560,7 +643,30 @@ impl G5DecisionIndexV2 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PrivateValidatorOutcomeV2 {
     Permit,
+    RequireApproval,
     Deny,
+}
+
+impl PrivateValidatorOutcomeV2 {
+    const fn branch(self) -> G5DecisionBranchV2 {
+        match self {
+            Self::Permit => G5DecisionBranchV2::Permit,
+            Self::RequireApproval => G5DecisionBranchV2::RequireApproval,
+            Self::Deny => G5DecisionBranchV2::Deny,
+        }
+    }
+}
+
+/// `IntentFlowConfinement`: a call that carries an authorizing effect is
+/// confined only when no argument steering it is `ExternalUntrusted`. A call
+/// whose effects are entirely outside [`EFFECT_AUTHORIZING_V2`] — a read — is
+/// confined regardless of argument integrity.
+pub(crate) fn intent_flow_is_confined(
+    descriptor_effects: EffectSetV2,
+    mut argument_integrities: impl Iterator<Item = IntegrityV2>,
+) -> bool {
+    descriptor_effects.intersection(EFFECT_AUTHORIZING_V2) == EffectSetV2::EMPTY
+        || !argument_integrities.any(|integrity| integrity == IntegrityV2::ExternalUntrusted)
 }
 
 fn evaluate_internal_validator(
@@ -579,11 +685,18 @@ fn evaluate_internal_validator(
             facts.projection_binding_integrity
         }
         InternalValidatorImplementationKindV2::TokenExecutorBinding => facts.token_executor_binding,
+        InternalValidatorImplementationKindV2::IntentFlowConfinement => {
+            facts.intent_flow_confinement
+        }
     };
     if permits {
         PrivateValidatorOutcomeV2::Permit
     } else {
-        PrivateValidatorOutcomeV2::Deny
+        match kind.failure_branch() {
+            G5DecisionBranchV2::Permit => PrivateValidatorOutcomeV2::Permit,
+            G5DecisionBranchV2::RequireApproval => PrivateValidatorOutcomeV2::RequireApproval,
+            G5DecisionBranchV2::Deny => PrivateValidatorOutcomeV2::Deny,
+        }
     }
 }
 
@@ -595,7 +708,7 @@ fn evaluation_input_digest(
     facts: ClosedValidatorFactsV2,
 ) -> Result<Digest32V2, G5Error> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
-    encoder.array(14).map_err(|_| G5Error::DigestFailure)?;
+    encoder.array(15).map_err(|_| G5Error::DigestFailure)?;
     record
         .action_intent_id
         .encode(&mut encoder, &mut ())
@@ -633,6 +746,7 @@ fn evaluation_input_digest(
         .and_then(|encoder| encoder.bool(facts.root_evidence_presence))
         .and_then(|encoder| encoder.bool(facts.projection_binding_integrity))
         .and_then(|encoder| encoder.bool(facts.token_executor_binding))
+        .and_then(|encoder| encoder.bool(facts.intent_flow_confinement))
         .map_err(|_| G5Error::DigestFailure)?;
     Ok(domain_hash(EVALUATION_INPUT_DOMAIN, &encoder.into_writer()))
 }
@@ -646,9 +760,12 @@ fn validator_decision_digest(
     canonical.extend_from_slice(evaluation_input_digest.as_bytes());
     canonical.extend_from_slice(&kind.implementation_id().get().to_be_bytes());
     canonical.extend_from_slice(
+        // Permit and Deny keep their original tags so a decision digest over
+        // the five binding validators is unchanged by the third outcome.
         &match outcome {
             PrivateValidatorOutcomeV2::Permit => 1_u16,
             PrivateValidatorOutcomeV2::Deny => 2_u16,
+            PrivateValidatorOutcomeV2::RequireApproval => 3_u16,
         }
         .to_be_bytes(),
     );
