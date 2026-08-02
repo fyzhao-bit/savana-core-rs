@@ -272,6 +272,8 @@ pub struct DurablePlannerCatalogV2 {
     rollback_anchor: Box<dyn PlannerCatalogRollbackAnchorV2>,
     entries: Vec<PlannerCatalogEntryV2>,
     poisoned: bool,
+    #[cfg(test)]
+    fail_next_connector_insert_for_test: bool,
 }
 
 impl core::fmt::Debug for DurablePlannerCatalogV2 {
@@ -338,6 +340,8 @@ impl DurablePlannerCatalogV2 {
                 rollback_anchor,
                 entries,
                 poisoned: false,
+                #[cfg(test)]
+                fail_next_connector_insert_for_test: false,
             });
         }
         if anchored_head != PlannerCatalogStateHeadV2::GENESIS {
@@ -352,6 +356,8 @@ impl DurablePlannerCatalogV2 {
             rollback_anchor,
             entries: Vec::new(),
             poisoned: false,
+            #[cfg(test)]
+            fail_next_connector_insert_for_test: false,
         };
         value.commit(shipped_entries)?;
         Ok(value)
@@ -390,10 +396,19 @@ impl DurablePlannerCatalogV2 {
         &mut self,
         canonical_descriptor: &[u8],
     ) -> Result<(), PlannerCatalogErrorV2> {
+        #[cfg(test)]
+        if core::mem::take(&mut self.fail_next_connector_insert_for_test) {
+            return Err(PlannerCatalogErrorV2::DurableState);
+        }
         let descriptor =
             ConnectorDescriptorV2::from_canonical_bytes_for_local_projection(canonical_descriptor)
                 .map_err(|_| PlannerCatalogErrorV2::Invalid)?;
         self.insert_entries(project_connector_descriptor_v2(&descriptor)?)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_connector_insert_for_test(&mut self) {
+        self.fail_next_connector_insert_for_test = true;
     }
 
     pub fn project_active(

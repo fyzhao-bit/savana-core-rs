@@ -2201,13 +2201,30 @@ mod tests {
         use rustls::server::WebPkiClientVerifier;
         use rustls::{RootCertStore, ServerConfig, ServerConnection, StreamOwned};
         use savana_kernel_protocol::v2::{
-            derive_ed25519_key_id_v2, encode_commit_planner_value_response_v2,
-            encode_prepare_planner_call_response_v2, CommitPlannerValueResponseV2, EndpointRoleV2,
-            KernelAgentOperationV2, KernelServiceHandshakeEdgeV2, KernelServiceOperationV2,
-            MaskedDocumentHandleV2, PeerIdentityBindingV2, PlanRevisionDigestV2, PlanStepHandleV2,
-            PreparePlannerCallResponseV2, ServiceIdentityV2,
+            approval_display_digest_v2, derive_ed25519_key_id_v2,
+            encode_apply_approved_connector_registration_response_v2,
+            encode_approval_settlement_view_v2,
+            encode_authorize_connector_registration_response_v2,
+            encode_commit_planner_value_response_v2,
+            encode_prepare_connector_registration_response_v2,
+            encode_prepare_planner_call_response_v2,
+            encode_propose_connector_registration_response_v2, encode_registered_approval_v2,
+            ApplyApprovedConnectorRegistrationResponseV2, ApprovalBindingV2,
+            ApprovalServiceOperationV2, BoundedApprovalDisplayTextV2, CommitPlannerValueResponseV2,
+            ConnectorUiAuthorizationHandleV2, DurableTaskIdV2, EndpointRoleV2,
+            KernelAgentOperationV2, KernelConnectorControlOperationV2,
+            KernelServiceHandshakeEdgeV2, KernelServiceOperationV2, MaskedDocumentHandleV2,
+            PeerIdentityBindingV2, PlanRevisionDigestV2, PlanStepHandleV2,
+            PrepareConnectorRegistrationResponseV2, PreparePlannerCallResponseV2,
+            ProposeConnectorRegistrationResponseV2, ServiceIdentityV2, SignedApprovalEnvelopeV2,
+            SignedUiAuthenticationEnvelopeV2, UiAuthenticationBindingV2, UiAuthenticationPurposeV2,
+            UnsignedApprovalEnvelopeV2, UnsignedUiAuthenticationEnvelopeV2,
         };
-        use savana_policy_core::v2::{ConnectorStructuralRoleV2, EffectSetV2};
+        use savana_policy_core::v2::{
+            AttemptKindV2, BoundedConnectorRetryPolicyV2, ConnectorDescriptorV2,
+            ConnectorStructuralRoleV2, ConnectorTierV2, EffectSetV2, ExecutorIdempotencyContractV2,
+            IdentifierV2, InternalValidatorDeclarationV2, UnsignedToolDescriptorV2,
+        };
         use sha2::{Digest as _, Sha256};
 
         struct ObservableGuard {
@@ -2882,6 +2899,677 @@ mod tests {
                 ),
                 counts_after_effect
             );
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum ConnectorKernelFailure {
+            None,
+            Prepare,
+            Propose,
+            ApplyOnce,
+        }
+
+        #[derive(Default)]
+        struct ConnectorActCalls {
+            prepare: AtomicUsize,
+            propose: AtomicUsize,
+            authorize: AtomicUsize,
+            apply: AtomicUsize,
+            approval_register: AtomicUsize,
+            approval_get: AtomicUsize,
+        }
+
+        struct ConnectorActFixture {
+            authority: AgentBrowserAuthorityV2,
+            tab: AgentTabSessionCapabilityV2,
+            descriptor: Vec<u8>,
+            expected_entries: Vec<PlannerCatalogEntryV2>,
+            catalog_path: std::path::PathBuf,
+            calls: Arc<ConnectorActCalls>,
+            _directory: tempfile::TempDir,
+        }
+
+        fn connector_descriptor_for_act() -> ConnectorDescriptorV2 {
+            const NAME: &str = "direct-act-connector";
+            let digest = |byte| Digest32V2::new([byte; 32]);
+            let package = digest(0xc1);
+            let mut identity = minicbor::Encoder::new(Vec::new());
+            identity
+                .array(2)
+                .unwrap()
+                .str(NAME)
+                .unwrap()
+                .array(2)
+                .unwrap()
+                .u16(1)
+                .unwrap()
+                .bytes(package.as_bytes())
+                .unwrap();
+            let mut hasher = Sha256::new();
+            hasher.update(b"savana.connector.user.v2\0");
+            hasher.update(identity.into_writer());
+            let connector_id = Digest32V2::new(hasher.finalize().into());
+            let contract = ExecutorIdempotencyContractV2::ConnectorIdempotentByExecutionNonce;
+            let tool = UnsignedToolDescriptorV2::from_verified_manifest(
+                2,
+                savana_kernel_protocol::v2::VersionV2::new(1, 0, 0),
+                digest(0xc2),
+                IdentifierV2::new("direct.act.send").unwrap(),
+                ActionTemplateIdV2::new(778),
+                ToolClassIdV2::new(777),
+                digest(0xc3),
+                digest(0xc4),
+                vec![savana_kernel_protocol::v2::RoleIdV2::new(1)],
+                EffectSetV2::SEND,
+                AttemptKindV2::ToolWrite,
+                BoundedConnectorRetryPolicyV2::new(contract, 2, 1_000).unwrap(),
+                vec![InternalValidatorDeclarationV2::new(
+                    savana_kernel_protocol::v2::ImplementationIdV2::new(779),
+                    savana_kernel_protocol::v2::VersionV2::new(1, 0, 0),
+                    digest(0xc5),
+                )],
+                ExecutorIdentityV2::new([0xc6; 32]),
+                ProjectionIdV2::new(780),
+                digest(0xc7),
+                DisplayProjectionIdV2::new(781),
+                digest(0xc8),
+                contract,
+                UnixMillisV2::new(1),
+                UnixMillisV2::new(10_000),
+            )
+            .unwrap();
+            let mut descriptor = minicbor::Encoder::new(Vec::new());
+            descriptor
+                .array(8)
+                .unwrap()
+                .bytes(connector_id.as_bytes())
+                .unwrap()
+                .str(NAME)
+                .unwrap()
+                .u16(ConnectorTierV2::UserRegistered.tag())
+                .unwrap()
+                .array(2)
+                .unwrap()
+                .u16(1)
+                .unwrap()
+                .bytes(package.as_bytes())
+                .unwrap()
+                .array(1)
+                .unwrap();
+            descriptor
+                .writer_mut()
+                .extend_from_slice(&minicbor::to_vec(&tool).unwrap());
+            descriptor
+                .u16(EffectSetV2::SEND.bits())
+                .unwrap()
+                .u16(ConnectorStructuralRoleV2::Sink.tag())
+                .unwrap()
+                .u64(1)
+                .unwrap();
+            ConnectorDescriptorV2::from_canonical_bytes(&descriptor.into_writer(), &[]).unwrap()
+        }
+
+        fn connector_approval_envelopes(
+            descriptor_digest: Digest32V2,
+        ) -> (SignedApprovalEnvelopeV2, SignedUiAuthenticationEnvelopeV2) {
+            let signing_key = SigningKey::from_bytes(&[0xd1; 32]);
+            let text = BoundedApprovalDisplayTextV2::new("approve direct act connector".to_owned())
+                .unwrap();
+            let display_digest = approval_display_digest_v2(text.as_bytes());
+            let envelope = SignedApprovalEnvelopeV2::sign(
+                UnsignedApprovalEnvelopeV2::new(
+                    Digest32V2::new([0xd2; 32]),
+                    Digest32V2::new([0xd3; 32]),
+                    1,
+                    ApprovalPurposeV2::ConnectorRegistration,
+                    Nonce32V2::new([0xd4; 32]),
+                    Nonce32V2::new([0xd5; 32]),
+                    ApprovalBindingV2::ConnectorRegistration {
+                        descriptor_digest,
+                        previous_head_digest: Digest32V2::new([0xd6; 32]),
+                    },
+                    PrincipalIdV2::new([0xd7; 32]),
+                    Digest32V2::new([0xd8; 32]),
+                    display_digest,
+                    text,
+                    Some(Digest32V2::new([0xd9; 32])),
+                    ServiceIdentityV2::new([0xda; 32]),
+                    UnixMillisV2::new(1),
+                    UnixMillisV2::new(u64::MAX - 1),
+                )
+                .unwrap(),
+                &signing_key,
+            )
+            .unwrap();
+            let display_authentication = SignedUiAuthenticationEnvelopeV2::sign(
+                UnsignedUiAuthenticationEnvelopeV2::new(
+                    Digest32V2::new([0xd2; 32]),
+                    Digest32V2::new([0xd3; 32]),
+                    1,
+                    UiAuthenticationPurposeV2::ApprovalDisplay,
+                    UiAuthenticationBindingV2::ApprovalDisplay {
+                        durable_task_id: DurableTaskIdV2::new([0xdb; 32]),
+                        approval_envelope_digest: envelope.envelope_digest().unwrap(),
+                        approval_purpose: ApprovalPurposeV2::ConnectorRegistration,
+                        display_digest,
+                    },
+                    Some(PrincipalIdV2::new([0xd7; 32])),
+                    FixedOriginV2::Approval8766,
+                    FixedOriginV2::Approval8766,
+                    Nonce32V2::new([0xdc; 32]),
+                    UnixMillisV2::new(1),
+                    UnixMillisV2::new(u64::MAX - 1),
+                )
+                .unwrap(),
+                &signing_key,
+            )
+            .unwrap();
+            (envelope, display_authentication)
+        }
+
+        fn connector_settlement(
+            decision: ApprovalDecisionV2,
+            seed: u8,
+        ) -> SignedApprovalSettlementV2 {
+            SignedApprovalSettlementV2::sign(
+                UnsignedApprovalSettlementV2::new(
+                    Digest32V2::new([seed; 32]),
+                    Digest32V2::new([seed.wrapping_add(1); 32]),
+                    1,
+                    ApprovalPurposeV2::ConnectorRegistration,
+                    Digest32V2::new([seed.wrapping_add(2); 32]),
+                    decision,
+                    PrincipalIdV2::new([seed.wrapping_add(3); 32]),
+                    Digest32V2::new([seed.wrapping_add(4); 32]),
+                    Digest32V2::new([seed.wrapping_add(5); 32]),
+                    true,
+                    true,
+                    false,
+                    false,
+                    1,
+                    Nonce32V2::new([seed.wrapping_add(6); 32]),
+                    Nonce32V2::new([seed.wrapping_add(7); 32]),
+                    UnixMillisV2::new(1),
+                    UnixMillisV2::new(u64::MAX - 1),
+                )
+                .unwrap(),
+                &SigningKey::from_bytes(&[seed.wrapping_add(8); 32]),
+            )
+            .unwrap()
+        }
+
+        fn connector_act_fixture(
+            kernel_failure: ConnectorKernelFailure,
+            approval_registration_fails: bool,
+            settlements: Vec<ApprovalSettlementViewV2>,
+        ) -> ConnectorActFixture {
+            use std::collections::VecDeque;
+
+            let directory = tempfile::tempdir().unwrap();
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let catalog_path = directory.path().join("planner-catalog-state-v2.cbor");
+            let planner_catalog = DurablePlannerCatalogV2::open(
+                &catalog_path,
+                [0xe1; 32],
+                DurablePlannerCatalogNamespaceV2::from_verified_installation(
+                    Digest32V2::new([0xe2; 32]),
+                    Digest32V2::new([0xe3; 32]),
+                )
+                .unwrap(),
+                Box::<TestCatalogAnchor>::default(),
+                vec![],
+            )
+            .unwrap();
+            let descriptor_value = connector_descriptor_for_act();
+            let descriptor = descriptor_value.canonical_bytes().to_vec();
+            let expected_entries =
+                crate::planner_catalog::project_connector_descriptor_v2(&descriptor_value).unwrap();
+            let descriptor_digest = Digest32V2::new(Sha256::digest(&descriptor).into());
+            let (envelope, display_authentication) =
+                connector_approval_envelopes(descriptor_digest);
+            let calls = Arc::new(ConnectorActCalls::default());
+            let apply_failures = Arc::new(AtomicUsize::new(usize::from(
+                kernel_failure == ConnectorKernelFailure::ApplyOnce,
+            )));
+            let expected_descriptor = descriptor.clone();
+            let kernel_calls = Arc::clone(&calls);
+            let apply_failures_for_kernel = Arc::clone(&apply_failures);
+            let kernel_client_key = SigningKey::from_bytes(&[0xe4; 32]);
+            let kernel_server_key = SigningKey::from_bytes(&[0xe5; 32]);
+            let task_authority_key = SigningKey::from_bytes(&[0xe6; 32]);
+            let kernel = SuiteOneAgentKernelClientV2::from_verified_deployment(
+                deployment_edge(
+                    EndpointRoleV2::AgentKernel,
+                    &kernel_client_key,
+                    &kernel_server_key,
+                ),
+                BootIdV2::new([0xe7; 32]),
+                PeerIdentityBindingV2::linux(501, 20, 51, 101, Digest32V2::new([0xe8; 32]))
+                    .unwrap(),
+                kernel_client_key,
+                kernel_server_key.verifying_key().to_bytes(),
+                derive_ed25519_key_id_v2(task_authority_key.verifying_key().to_bytes()),
+                task_authority_key.verifying_key().to_bytes(),
+            )
+            .unwrap()
+            .with_operation_exchange_for_test(move |_, deadline, operation| match operation {
+                KernelServiceOperationV2::Connector(
+                    KernelConnectorControlOperationV2::PrepareRegistration(request),
+                ) => {
+                    kernel_calls.prepare.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(request.canonical_descriptor(), expected_descriptor);
+                    if kernel_failure == ConnectorKernelFailure::Prepare {
+                        return Err(AgentControlKernelClientErrorV2::Unavailable);
+                    }
+                    encode_prepare_connector_registration_response_v2(
+                        PrepareConnectorRegistrationResponseV2::new(
+                            ConnectorUiAuthorizationHandleV2::from_authority_entropy([0xe9; 32])
+                                .unwrap(),
+                            descriptor_digest,
+                            Digest32V2::new([0xea; 32]),
+                            deadline,
+                        )
+                        .unwrap(),
+                    )
+                    .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+                }
+                KernelServiceOperationV2::Connector(
+                    KernelConnectorControlOperationV2::ProposeRegistration(request),
+                ) => {
+                    kernel_calls.propose.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(request.canonical_descriptor(), expected_descriptor);
+                    if kernel_failure == ConnectorKernelFailure::Propose {
+                        return Err(AgentControlKernelClientErrorV2::Unavailable);
+                    }
+                    encode_propose_connector_registration_response_v2(
+                        &ProposeConnectorRegistrationResponseV2::new(
+                            PendingConnectorRegistrationHandleV2::from_authority_entropy(
+                                [0xeb; 32],
+                            )
+                            .unwrap(),
+                            envelope.clone(),
+                            display_authentication.clone(),
+                        ),
+                    )
+                    .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+                }
+                KernelServiceOperationV2::Connector(
+                    KernelConnectorControlOperationV2::AuthorizeRegistration(_),
+                ) => {
+                    kernel_calls.authorize.fetch_add(1, Ordering::SeqCst);
+                    encode_authorize_connector_registration_response_v2(
+                        AuthorizeConnectorRegistrationResponseV2::new(
+                            ApprovedConnectorRegistrationHandleV2::from_authority_entropy(
+                                [0xec; 32],
+                            )
+                            .unwrap(),
+                        ),
+                    )
+                    .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+                }
+                KernelServiceOperationV2::Connector(
+                    KernelConnectorControlOperationV2::ApplyApprovedRegistration(_),
+                ) => {
+                    kernel_calls.apply.fetch_add(1, Ordering::SeqCst);
+                    if apply_failures_for_kernel
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                            count.checked_sub(1)
+                        })
+                        .is_ok()
+                    {
+                        return Err(AgentControlKernelClientErrorV2::Unavailable);
+                    }
+                    encode_apply_approved_connector_registration_response_v2(
+                        &ApplyApprovedConnectorRegistrationResponseV2::new(
+                            Digest32V2::new([0xed; 32]),
+                            Digest32V2::new([0xee; 32]),
+                            1,
+                            descriptor_value.connector_id(),
+                        )
+                        .unwrap(),
+                    )
+                    .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+                }
+                _ => panic!("unexpected direct-act fake-kernel operation"),
+            });
+
+            let settlements = Arc::new(Mutex::new(VecDeque::from(settlements)));
+            let approval_calls = Arc::clone(&calls);
+            let approval_client_key = SigningKey::from_bytes(&[0xf1; 32]);
+            let approval_server_key = SigningKey::from_bytes(&[0xf2; 32]);
+            let approval = ApprovalSuiteOneClientV2::from_verified_deployment(
+                deployment_edge(EndpointRoleV2::AgentApproval, &approval_client_key, &approval_server_key),
+                BootIdV2::new([0xf3; 32]),
+                PeerIdentityBindingV2::linux(501, 20, 52, 102, Digest32V2::new([0xf4; 32])).unwrap(),
+                approval_client_key,
+                approval_server_key.verifying_key().to_bytes(),
+            )
+            .unwrap()
+            .with_operation_exchange_for_test_support(move |_, operation| match operation {
+                ApprovalServiceOperationV2::RegisterAgentApproval { .. } => {
+                    approval_calls.approval_register.fetch_add(1, Ordering::SeqCst);
+                    if approval_registration_fails {
+                        return Err(ApprovalSuiteOneClientErrorV2::Unavailable);
+                    }
+                    encode_registered_approval_v2(RegisteredApprovalV2::Connector {
+                        approval: ConnectorApprovalRecordHandleV2::from_authority_entropy([0xf5; 32]).unwrap(),
+                        display_authentication: savana_kernel_protocol::v2::ApprovalDisplayAuthenticationTransferCapabilityV2::from_authority_entropy([0xf6; 32]).unwrap(),
+                    })
+                    .map_err(|_| ApprovalSuiteOneClientErrorV2::Unavailable)
+                }
+                ApprovalServiceOperationV2::GetAgentApprovalSettlement { .. } => {
+                    approval_calls.approval_get.fetch_add(1, Ordering::SeqCst);
+                    let settlement = settlements
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .unwrap_or(ApprovalSettlementViewV2::Pending);
+                    encode_approval_settlement_view_v2(&settlement)
+                        .map_err(|_| ApprovalSuiteOneClientErrorV2::Unavailable)
+                }
+                _ => panic!("unexpected direct-act fake-approval operation"),
+            });
+
+            let endpoint = "127.0.0.1:9".parse().unwrap();
+            let mapper_endpoint = MapperEndpointDeploymentV2::new(
+                "provider.example".to_owned(),
+                9,
+                vec![endpoint],
+                server_pin(),
+            )
+            .unwrap();
+            let mapper = PinnedMtlsAgentMapperClientV2::from_verified_deployment(
+                IntentTrustDeploymentCeilingV2::UserMayUseThirdParty,
+                mapper_endpoint.clone(),
+                Some(mapper_endpoint),
+                tls_fixture("ca_cert"),
+                tls_fixture("client_cert"),
+                Zeroizing::new(tls_fixture("client_key")),
+            )
+            .unwrap();
+            let planner = PinnedMtlsAgentPlannerClientV2::from_verified_deployment(
+                "provider.example".to_owned(),
+                9,
+                vec![endpoint],
+                server_pin(),
+                tls_fixture("ca_cert"),
+                tls_fixture("client_cert"),
+                Zeroizing::new(tls_fixture("client_key")),
+            )
+            .unwrap();
+            let gate_path = directory.path().join("effect-gate-v2");
+            File::create(&gate_path).unwrap();
+            let effect_gate = EffectGateCoordinatorV2::from_shared_only_descriptor(
+                OpenOptions::new().read(true).open(&gate_path).unwrap(),
+            )
+            .unwrap();
+            let boot = BootIdV2::new([0xf7; 32]);
+            let mut authority = AgentBrowserAuthorityV2::new(
+                effect_gate,
+                kernel,
+                approval,
+                mapper,
+                planner,
+                PlannerRouteIdV2::new(9),
+                StaticTemplateIdV2::new(7),
+                PlannerIntentKindV2::Search,
+                PlannerLimitsV2::new(2, 1, 1, 4096).unwrap(),
+                ExecutorIdentityV2::new([0xf8; 32]),
+                ProjectionIdV2::new(10),
+                DisplayProjectionIdV2::new(11),
+                boot,
+                planner_catalog,
+                StructuralNodeIdIssuerV2::new().unwrap(),
+            );
+            let tab = AgentTabSessionCapabilityV2::from_authority_entropy([0xf9; 32]).unwrap();
+            let mut tab_state = tab_record(tab, boot, FixedOriginV2::Agent8768, None);
+            tab_state.kernel_document =
+                Some(MaskedDocumentHandleV2::from_authority_entropy([0xfa; 32]).unwrap());
+            tab_state.session =
+                Some(AgentSessionHandleV2::from_authority_entropy([0xfb; 32]).unwrap());
+            tab_state.run = Some(RunHandleV2::from_authority_entropy([0xfc; 32]).unwrap());
+            tab_state.initial_value =
+                Some(ValueHandleV2::from_authority_entropy([0xfd; 32]).unwrap());
+            authority.state.get_mut().unwrap().tabs.push(tab_state);
+
+            ConnectorActFixture {
+                authority,
+                tab,
+                descriptor,
+                expected_entries,
+                catalog_path,
+                calls,
+                _directory: directory,
+            }
+        }
+
+        fn connector_register(
+            fixture: &ConnectorActFixture,
+            nonce_seed: u8,
+        ) -> Result<AgentPendingConnectorRegistrationRefV2, AgentBrowserAuthorityErrorV2> {
+            match fixture.authority.act(
+                AgentBrowserRequestV2::Act {
+                    tab: fixture.tab,
+                    client_request_nonce: Nonce32V2::new([nonce_seed; 32]),
+                    action: AgentBrowserActionV2::RegisterConnector(fixture.descriptor.clone()),
+                },
+                deadline_after(Duration::from_secs(5)),
+            )? {
+                AgentBrowserMutationResponseV2::ConnectorOpenApproval { pending, .. } => {
+                    Ok(pending)
+                }
+                _ => Err(AgentBrowserAuthorityErrorV2::StateConflict),
+            }
+        }
+
+        fn connector_finalize(
+            fixture: &ConnectorActFixture,
+            pending: AgentPendingConnectorRegistrationRefV2,
+            nonce_seed: u8,
+        ) -> Result<AgentBrowserMutationResponseV2, AgentBrowserAuthorityErrorV2> {
+            fixture.authority.act(
+                AgentBrowserRequestV2::Act {
+                    tab: fixture.tab,
+                    client_request_nonce: Nonce32V2::new([nonce_seed; 32]),
+                    action: AgentBrowserActionV2::FinalizeConnectorRegistration(pending),
+                },
+                deadline_after(Duration::from_secs(5)),
+            )
+        }
+
+        fn connector_catalog_entries(fixture: &ConnectorActFixture) -> Vec<PlannerCatalogEntryV2> {
+            fixture
+                .authority
+                .planner_catalog
+                .lock()
+                .unwrap()
+                .entries()
+                .to_vec()
+        }
+
+        fn connector_pending_len(fixture: &ConnectorActFixture) -> usize {
+            fixture.authority.state.lock().unwrap().tabs[0]
+                .pending_connectors
+                .len()
+        }
+
+        #[test]
+        fn direct_act_registration_failures_never_prewrite_the_real_catalog() {
+            for failure in [
+                ConnectorKernelFailure::Prepare,
+                ConnectorKernelFailure::Propose,
+            ] {
+                let fixture = connector_act_fixture(failure, false, vec![]);
+                assert_eq!(
+                    connector_register(&fixture, 0x31),
+                    Err(AgentBrowserAuthorityErrorV2::Unavailable)
+                );
+                assert!(connector_catalog_entries(&fixture).is_empty());
+                assert_eq!(connector_pending_len(&fixture), 0);
+                assert_eq!(fixture.calls.approval_register.load(Ordering::SeqCst), 0);
+                assert_eq!(fixture.calls.prepare.load(Ordering::SeqCst), 1);
+                assert_eq!(
+                    fixture.calls.propose.load(Ordering::SeqCst),
+                    usize::from(failure == ConnectorKernelFailure::Propose)
+                );
+            }
+            let fixture = connector_act_fixture(ConnectorKernelFailure::None, true, vec![]);
+            assert_eq!(
+                connector_register(&fixture, 0x32),
+                Err(AgentBrowserAuthorityErrorV2::Unavailable)
+            );
+            assert!(connector_catalog_entries(&fixture).is_empty());
+            assert_eq!(connector_pending_len(&fixture), 0);
+            assert_eq!(fixture.calls.prepare.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.propose.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.approval_register.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn direct_act_terminal_settlements_cleanup_and_same_key_can_later_commit() {
+            let fixture = connector_act_fixture(
+                ConnectorKernelFailure::None,
+                false,
+                vec![
+                    ApprovalSettlementViewV2::Pending,
+                    ApprovalSettlementViewV2::Denied {
+                        settlement: connector_settlement(ApprovalDecisionV2::Deny, 0x41),
+                    },
+                    ApprovalSettlementViewV2::Expired,
+                    ApprovalSettlementViewV2::Approved {
+                        settlement: connector_settlement(ApprovalDecisionV2::Approve, 0x51),
+                    },
+                ],
+            );
+            let first = connector_register(&fixture, 0x61).unwrap();
+            assert!(matches!(
+                connector_finalize(&fixture, first, 0x62),
+                Ok(AgentBrowserMutationResponseV2::ConnectorOpenApproval { pending, .. })
+                    if pending == first
+            ));
+            assert!(connector_catalog_entries(&fixture).is_empty());
+            assert_eq!(connector_pending_len(&fixture), 1);
+            assert_eq!(
+                connector_finalize(&fixture, first, 0x63),
+                Err(AgentBrowserAuthorityErrorV2::StateConflict)
+            );
+            assert_eq!(connector_pending_len(&fixture), 0);
+
+            let second = connector_register(&fixture, 0x64).unwrap();
+            assert_eq!(
+                connector_finalize(&fixture, second, 0x65),
+                Err(AgentBrowserAuthorityErrorV2::StateConflict)
+            );
+            assert_eq!(connector_pending_len(&fixture), 0);
+            assert!(connector_catalog_entries(&fixture).is_empty());
+
+            let third = connector_register(&fixture, 0x66).unwrap();
+            assert!(matches!(
+                connector_finalize(&fixture, third, 0x67),
+                Ok(AgentBrowserMutationResponseV2::ConnectorRegistrationCommitted { pending, .. })
+                    if pending == third
+            ));
+            assert_eq!(
+                connector_catalog_entries(&fixture),
+                fixture.expected_entries
+            );
+            assert_eq!(connector_pending_len(&fixture), 0);
+            assert_eq!(fixture.calls.prepare.load(Ordering::SeqCst), 3);
+            assert_eq!(fixture.calls.propose.load(Ordering::SeqCst), 3);
+            assert_eq!(fixture.calls.approval_register.load(Ordering::SeqCst), 3);
+            assert_eq!(fixture.calls.approval_get.load(Ordering::SeqCst), 4);
+            assert_eq!(fixture.calls.authorize.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.apply.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn direct_act_catalog_failure_fences_nonce_and_fresh_nonce_retries_before_apply() {
+            let fixture = connector_act_fixture(
+                ConnectorKernelFailure::None,
+                false,
+                vec![
+                    ApprovalSettlementViewV2::Approved {
+                        settlement: connector_settlement(ApprovalDecisionV2::Approve, 0x71),
+                    },
+                    ApprovalSettlementViewV2::Approved {
+                        settlement: connector_settlement(ApprovalDecisionV2::Approve, 0x72),
+                    },
+                ],
+            );
+            let pending = connector_register(&fixture, 0x73).unwrap();
+            fixture
+                .authority
+                .planner_catalog
+                .lock()
+                .unwrap()
+                .fail_next_connector_insert_for_test();
+            assert_eq!(
+                connector_finalize(&fixture, pending, 0x74),
+                Err(AgentBrowserAuthorityErrorV2::Unavailable)
+            );
+            assert_eq!(fixture.calls.apply.load(Ordering::SeqCst), 0);
+            assert_eq!(connector_pending_len(&fixture), 1);
+            assert_eq!(
+                connector_finalize(&fixture, pending, 0x74),
+                Err(AgentBrowserAuthorityErrorV2::StateConflict)
+            );
+            assert!(matches!(
+                connector_finalize(&fixture, pending, 0x75),
+                Ok(AgentBrowserMutationResponseV2::ConnectorRegistrationCommitted { .. })
+            ));
+            assert_eq!(
+                connector_catalog_entries(&fixture),
+                fixture.expected_entries
+            );
+            assert_eq!(fixture.calls.prepare.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.propose.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.approval_register.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.approval_get.load(Ordering::SeqCst), 2);
+            assert_eq!(fixture.calls.authorize.load(Ordering::SeqCst), 2);
+            assert_eq!(fixture.calls.apply.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn direct_act_apply_failure_retains_pending_and_catalog_retry_is_idempotent() {
+            let fixture = connector_act_fixture(
+                ConnectorKernelFailure::ApplyOnce,
+                false,
+                vec![
+                    ApprovalSettlementViewV2::Approved {
+                        settlement: connector_settlement(ApprovalDecisionV2::Approve, 0x81),
+                    },
+                    ApprovalSettlementViewV2::Approved {
+                        settlement: connector_settlement(ApprovalDecisionV2::Approve, 0x82),
+                    },
+                ],
+            );
+            let pending = connector_register(&fixture, 0x83).unwrap();
+            assert_eq!(
+                connector_finalize(&fixture, pending, 0x84),
+                Err(AgentBrowserAuthorityErrorV2::Unavailable)
+            );
+            assert_eq!(
+                connector_catalog_entries(&fixture),
+                fixture.expected_entries
+            );
+            let committed_catalog = fs::read(&fixture.catalog_path).unwrap();
+            assert_eq!(connector_pending_len(&fixture), 1);
+            assert_eq!(
+                connector_finalize(&fixture, pending, 0x84),
+                Err(AgentBrowserAuthorityErrorV2::StateConflict)
+            );
+            assert!(matches!(
+                connector_finalize(&fixture, pending, 0x85),
+                Ok(AgentBrowserMutationResponseV2::ConnectorRegistrationCommitted { .. })
+            ));
+            assert_eq!(fs::read(&fixture.catalog_path).unwrap(), committed_catalog);
+            assert_eq!(connector_pending_len(&fixture), 0);
+            assert_eq!(fixture.calls.prepare.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.propose.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.approval_register.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.approval_get.load(Ordering::SeqCst), 2);
+            assert_eq!(fixture.calls.authorize.load(Ordering::SeqCst), 2);
+            assert_eq!(fixture.calls.apply.load(Ordering::SeqCst), 2);
         }
     }
 

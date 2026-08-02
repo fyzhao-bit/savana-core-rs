@@ -9,6 +9,9 @@ crates/savana-agentd/src/planner_client.rs
 crates/savana-agentd/src/planner_privacy.rs
 crates/savana-agentd/src/private_model_transport.rs
 crates/savana-agentd/src/state_owner.rs
+crates/savana-approvald/Cargo.toml
+crates/savana-approvald/src/client.rs
+crates/savana-approvald/src/lib.rs
 crates/savana-approvald/src/protocol_state_owner.rs
 crates/savana-approvald/src/state_owner.rs
 crates/savana-execd/src/connector_registry.rs
