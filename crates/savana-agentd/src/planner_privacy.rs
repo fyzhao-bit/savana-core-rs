@@ -7,11 +7,13 @@ use savana_kernel_protocol::v2::{
     ToolClassIdV2,
 };
 use savana_policy_core::v2::EffectSetV2;
+use sha2::{Digest as _, Sha256};
 
 pub const MAX_STRUCTURAL_NODES_V2: usize = 256;
 pub const MAX_STRUCTURAL_EDGES_V2: usize = 4096;
 const MAX_MODEL_BODY_BYTES_V2: usize = 8 * 1024 * 1024;
 const MAX_FRESH_ID_ATTEMPTS_V2: usize = 32;
+const STRUCTURAL_NODE_ID_DOMAIN_V2: &[u8] = b"SAVANA_STRUCTURAL_NODE_ID_V2\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PlannerPrivacyErrorV2 {
@@ -599,6 +601,123 @@ pub struct MappedWorkflowV2 {
     effective_limits: PlannerLimitsV2,
 }
 
+/// Process-lifetime issuer for planner-visible node IDs.
+///
+/// One long-lived instance must be reused for every planner call. It is
+/// deliberately neither `Clone` nor stateless: the monotonically increasing
+/// call sequence is the cross-call uniqueness boundary.
+pub struct StructuralNodeIdIssuerV2 {
+    permutation_key: [u8; 32],
+    call_sequence: u64,
+}
+
+impl StructuralNodeIdIssuerV2 {
+    pub fn new() -> Result<Self, PlannerPrivacyErrorV2> {
+        let mut permutation_key = [0_u8; 32];
+        for _ in 0..MAX_FRESH_ID_ATTEMPTS_V2 {
+            getrandom::getrandom(&mut permutation_key)
+                .map_err(|_| PlannerPrivacyErrorV2::EntropyUnavailable)?;
+            if permutation_key != [0; 32] {
+                return Ok(Self {
+                    permutation_key,
+                    call_sequence: 0,
+                });
+            }
+        }
+        Err(PlannerPrivacyErrorV2::EntropyUnavailable)
+    }
+
+    #[cfg(test)]
+    fn with_test_key(permutation_key: [u8; 32]) -> Self {
+        assert_ne!(permutation_key, [0; 32]);
+        Self {
+            permutation_key,
+            call_sequence: 0,
+        }
+    }
+
+    fn issue_for_call<F>(
+        &mut self,
+        count: usize,
+        mut draw_call_salt: F,
+    ) -> Result<Vec<StructuralNodeIdV2>, PlannerPrivacyErrorV2>
+    where
+        F: FnMut() -> Result<[u8; 16], PlannerPrivacyErrorV2>,
+    {
+        let call_sequence = self
+            .call_sequence
+            .checked_add(1)
+            .ok_or(PlannerPrivacyErrorV2::EntropyUnavailable)?;
+        let call_salt = draw_call_salt()?;
+        let salt_mask = u64::from_be_bytes(
+            call_salt[..8]
+                .try_into()
+                .map_err(|_| PlannerPrivacyErrorV2::Invalid)?,
+        );
+        self.call_sequence = call_sequence;
+
+        (0..count)
+            .map(|index| {
+                let node_index =
+                    u64::try_from(index).map_err(|_| PlannerPrivacyErrorV2::Invalid)?;
+                let mut unique_input = [0_u8; 16];
+                // The upper half is unique across calls and the lower half is
+                // unique within a call. The fixed-key Feistel permutation is a
+                // bijection, so distinct issuer inputs cannot produce the same
+                // planner-visible ID even when call salts repeat.
+                unique_input[..8].copy_from_slice(&call_sequence.to_be_bytes());
+                unique_input[8..].copy_from_slice(&(node_index ^ salt_mask).to_be_bytes());
+                Ok(StructuralNodeIdV2(self.permute_nonzero(unique_input)))
+            })
+            .collect()
+    }
+
+    fn permute_nonzero(&self, mut block: [u8; 16]) -> [u8; 16] {
+        // Cycle-walking restricts the permutation to the nonzero domain while
+        // preserving its one-to-one property.
+        loop {
+            block = self.permute(block);
+            if block != [0; 16] {
+                return block;
+            }
+        }
+    }
+
+    fn permute(&self, block: [u8; 16]) -> [u8; 16] {
+        let mut left_bytes = [0_u8; 8];
+        left_bytes.copy_from_slice(&block[..8]);
+        let mut right_bytes = [0_u8; 8];
+        right_bytes.copy_from_slice(&block[8..]);
+        let mut left = u64::from_be_bytes(left_bytes);
+        let mut right = u64::from_be_bytes(right_bytes);
+        for round in 0_u8..6 {
+            let mut hasher = Sha256::new();
+            hasher.update(STRUCTURAL_NODE_ID_DOMAIN_V2);
+            hasher.update(self.permutation_key);
+            hasher.update([round]);
+            hasher.update(right.to_be_bytes());
+            let digest = hasher.finalize();
+            let mut round_bytes = [0_u8; 8];
+            round_bytes.copy_from_slice(&digest[..8]);
+            let round_output = u64::from_be_bytes(round_bytes);
+            (left, right) = (right, left ^ round_output);
+        }
+        let mut output = [0_u8; 16];
+        output[..8].copy_from_slice(&left.to_be_bytes());
+        output[8..].copy_from_slice(&right.to_be_bytes());
+        output
+    }
+}
+
+impl std::fmt::Debug for StructuralNodeIdIssuerV2 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StructuralNodeIdIssuerV2")
+            .field("call_sequence", &self.call_sequence)
+            .finish_non_exhaustive()
+    }
+}
+
 impl MappedWorkflowV2 {
     pub fn new(
         request: &MapperIntentRequestV2,
@@ -689,8 +808,9 @@ impl MappedWorkflowV2 {
 
     pub fn relabel(
         self,
+        issuer: &mut StructuralNodeIdIssuerV2,
     ) -> Result<(StructuralPlannerRequestV2, PlannerDecodeTableV2), PlannerPrivacyErrorV2> {
-        self.relabel_from(|| {
+        self.relabel_from(issuer, || {
             let mut bytes = [0_u8; 16];
             getrandom::getrandom(&mut bytes)
                 .map_err(|_| PlannerPrivacyErrorV2::EntropyUnavailable)?;
@@ -701,37 +821,26 @@ impl MappedWorkflowV2 {
     #[cfg(test)]
     fn relabel_with<F>(
         self,
+        issuer: &mut StructuralNodeIdIssuerV2,
         draw: F,
     ) -> Result<(StructuralPlannerRequestV2, PlannerDecodeTableV2), PlannerPrivacyErrorV2>
     where
         F: FnMut() -> Result<[u8; 16], PlannerPrivacyErrorV2>,
     {
-        self.relabel_from(draw)
+        self.relabel_from(issuer, draw)
     }
 
     fn relabel_from<F>(
         self,
-        mut draw: F,
+        issuer: &mut StructuralNodeIdIssuerV2,
+        draw_call_salt: F,
     ) -> Result<(StructuralPlannerRequestV2, PlannerDecodeTableV2), PlannerPrivacyErrorV2>
     where
         F: FnMut() -> Result<[u8; 16], PlannerPrivacyErrorV2>,
     {
+        let issued_ids = issuer.issue_for_call(self.nodes.len(), draw_call_salt)?;
         let mut labels = HashMap::with_capacity(self.nodes.len());
-        let mut used = HashSet::with_capacity(self.nodes.len());
-        for node in &self.nodes {
-            let mut selected = None;
-            for _ in 0..MAX_FRESH_ID_ATTEMPTS_V2 {
-                let bytes = draw()?;
-                if bytes == [0; 16] {
-                    continue;
-                }
-                let candidate = StructuralNodeIdV2(bytes);
-                if used.insert(candidate) {
-                    selected = Some(candidate);
-                    break;
-                }
-            }
-            let id = selected.ok_or(PlannerPrivacyErrorV2::EntropyUnavailable)?;
+        for (node, id) in self.nodes.iter().zip(issued_ids) {
             labels.insert(node.local_ordinal, id);
         }
         let mut incoming = HashMap::<u16, usize>::new();
@@ -1445,6 +1554,10 @@ mod tests {
         .unwrap()
     }
 
+    fn test_issuer() -> StructuralNodeIdIssuerV2 {
+        StructuralNodeIdIssuerV2::with_test_key([0x5a; 32])
+    }
+
     fn mapped_node(
         ordinal: u16,
         action: u32,
@@ -1773,11 +1886,12 @@ mod tests {
         )
         .unwrap();
         let workflow = MappedWorkflowV2::new(&tiny_request, vec![source], vec![]).unwrap();
-        let mut labels = [[0x31; 16]].into_iter();
-        let (_, table) = workflow
-            .relabel_with(|| Ok(labels.next().unwrap()))
+        let mut issuer = test_issuer();
+        let (structural, table) = workflow
+            .relabel_with(&mut issuer, || Ok([0x31; 16]))
             .unwrap();
-        let ordered = OrderedStructuralPlanV2::new(vec![id(0x31)]).unwrap();
+        let ordered =
+            OrderedStructuralPlanV2::new(vec![structural.graph().nodes()[0].id()]).unwrap();
         assert!(decode_ordered_plan_v2(&tiny_envelope, &table, &ordered).is_err());
     }
 
@@ -1810,15 +1924,15 @@ mod tests {
             vec![MappedEdgeV2::new(90, 4).unwrap()],
         )
         .unwrap();
-        let mut labels = [[0x22; 16], [0x11; 16]].into_iter();
+        let mut issuer = test_issuer();
         let (structural, table) = workflow
-            .relabel_with(|| Ok(labels.next().unwrap()))
+            .relabel_with(&mut issuer, || Ok([0x22; 16]))
             .unwrap();
         (envelope, structural, table)
     }
 
     #[test]
-    fn fresh_relabeling_retries_zero_and_colliding_ids() {
+    fn fresh_issuer_makes_nonzero_unique_ids_from_zero_random_bytes() {
         let request = mapper_request();
         let first = mapped_node(
             1,
@@ -1837,12 +1951,101 @@ mod tests {
             EffectSetV2::SEND,
         );
         let workflow = MappedWorkflowV2::new(&request, vec![first, second], vec![]).unwrap();
-        let mut draws = [[0; 16], [0x11; 16], [0x11; 16], [0x22; 16]].into_iter();
+        let mut issuer = test_issuer();
 
-        let (structural, _) = workflow.relabel_with(|| Ok(draws.next().unwrap())).unwrap();
+        let (structural, _) = workflow.relabel_with(&mut issuer, || Ok([0; 16])).unwrap();
 
-        assert_eq!(structural.graph().nodes()[0].id(), id(0x11));
-        assert_eq!(structural.graph().nodes()[1].id(), id(0x22));
+        let ids = structural
+            .graph()
+            .nodes()
+            .iter()
+            .map(StructuralNodeV2::id)
+            .collect::<HashSet<_>>();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.iter().all(|id| id.as_bytes() != &[0; 16]));
+    }
+
+    #[test]
+    fn repeated_random_bytes_cannot_reuse_ids_across_planner_calls() {
+        let request = mapper_request();
+        let workflow = || {
+            MappedWorkflowV2::new(
+                &request,
+                vec![
+                    mapped_node(
+                        1,
+                        10,
+                        100,
+                        ("a", 0xa1),
+                        StructuralRoleV2::Source,
+                        EffectSetV2::READ,
+                    ),
+                    mapped_node(
+                        2,
+                        20,
+                        200,
+                        ("b", 0xb2),
+                        StructuralRoleV2::Sink,
+                        EffectSetV2::SEND,
+                    ),
+                ],
+                vec![],
+            )
+            .unwrap()
+        };
+
+        let mut issuer = test_issuer();
+        let (first, _) = workflow()
+            .relabel_with(&mut issuer, || Ok([0x77; 16]))
+            .unwrap();
+        let (second, _) = workflow()
+            .relabel_with(&mut issuer, || Ok([0x77; 16]))
+            .unwrap();
+        let first_ids = first
+            .graph()
+            .nodes()
+            .iter()
+            .map(StructuralNodeV2::id)
+            .collect::<HashSet<_>>();
+        let second_ids = second
+            .graph()
+            .nodes()
+            .iter()
+            .map(StructuralNodeV2::id)
+            .collect::<HashSet<_>>();
+
+        assert!(first_ids.is_disjoint(&second_ids));
+    }
+
+    #[test]
+    fn id_issuer_fails_closed_on_entropy_error_or_call_sequence_overflow() {
+        let request = mapper_request();
+        let workflow = || {
+            MappedWorkflowV2::new(
+                &request,
+                vec![mapped_node(
+                    1,
+                    10,
+                    100,
+                    ("a", 0xa1),
+                    StructuralRoleV2::Source,
+                    EffectSetV2::READ,
+                )],
+                vec![],
+            )
+            .unwrap()
+        };
+        let mut issuer = test_issuer();
+        assert!(workflow()
+            .relabel_with(&mut issuer, || Err(
+                PlannerPrivacyErrorV2::EntropyUnavailable
+            ))
+            .is_err());
+
+        issuer.call_sequence = u64::MAX;
+        assert!(workflow()
+            .relabel_with(&mut issuer, || Ok([0x44; 16]))
+            .is_err());
     }
 
     #[test]
