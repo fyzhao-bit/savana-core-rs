@@ -102,6 +102,7 @@ enum BrowserObjectBindingV2 {
         reference: AgentMaskedDocumentRefV2,
         kernel: MaskedDocumentHandleV2,
     },
+    #[allow(dead_code)] // Restored by Task 5's structural mapper/planner/decode pipeline.
     PlanStep {
         reference: AgentPlanStepRefV2,
         kernel: PlanStepHandleV2,
@@ -196,10 +197,15 @@ pub struct AgentBrowserAuthorityV2 {
     kernel: SuiteOneAgentKernelClientV2,
     approval: ApprovalSuiteOneClientV2,
     mapper: PinnedMtlsAgentMapperClientV2,
+    #[allow(dead_code)] // Held for Task 5; legacy envelope forwarding is forbidden.
     planner: PinnedMtlsAgentPlannerClientV2,
+    #[allow(dead_code)] // Held for Task 5's local envelope preparation.
     planner_route: PlannerRouteIdV2,
+    #[allow(dead_code)] // Held for Task 5's local envelope preparation.
     planner_template: StaticTemplateIdV2,
+    #[allow(dead_code)] // Held for Task 5's local mapper request.
     planner_intent: PlannerIntentKindV2,
+    #[allow(dead_code)] // Held for Task 5's mapper and decode bounds.
     planner_limits: PlannerLimitsV2,
     release_executor: ExecutorIdentityV2,
     release_destination_projection: ProjectionIdV2,
@@ -596,86 +602,12 @@ impl AgentBrowserAuthorityV2 {
                 }
                 AgentBrowserActionV2::RunPlanner
                 | AgentBrowserActionV2::RunPlannerWithThirdPartyMapper => {
-                    let _effect_guard = self
-                        .effect_gate
-                        .acquire(
-                            EffectGateOperationKindV2::PlannerExchange,
-                            effect_operation_id,
-                            effect_gate_deadline(deadline)?,
-                        )
-                        .map_err(map_effect_gate)?;
-                    let run = required(tab.run)?;
-                    let initial_value = required(tab.initial_value)?;
-                    let prepared = self
-                        .kernel
-                        .prepare_planner_call(
-                            planner_prepare_call_request_v2(
-                                run,
-                                self.planner_route,
-                                self.planner_template,
-                                self.planner_intent,
-                                self.planner_limits,
-                                initial_value,
-                            )?,
-                            request_id,
-                            deadline,
-                        )
-                        .map_err(map_kernel)?;
-                    let plan = self
-                        .planner
-                        .plan(prepared.envelope(), deadline)
-                        .map_err(map_planner)?;
-                    let committed = self
-                        .kernel
-                        .commit_planner_value(
-                            planner_commit_value_request_v2(run, prepared.ticket(), plan.clone()),
-                            request_id,
-                            deadline,
-                        )
-                        .map_err(map_kernel)?;
-                    if committed.steps().len() != plan.steps().len()
-                        || tab.objects.len().saturating_add(committed.steps().len())
-                            > MAX_OBJECTS_PER_TAB_V2
-                    {
-                        return Err(AgentBrowserAuthorityErrorV2::StateConflict);
-                    }
-                    tab.objects
-                        .try_reserve(committed.steps().len())
-                        .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
-                    let mut references = Vec::new();
-                    references
-                        .try_reserve(committed.steps().len())
-                        .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
-                    for (kernel_step, plan_step) in
-                        committed.steps().iter().copied().zip(plan.steps())
-                    {
-                        let tool = tab
-                            .active_tools
-                            .iter()
-                            .copied()
-                            .find(|tool| {
-                                tool.action_template() == plan_step.action_template()
-                                    && tool.tool_class() == plan_step.tool_class()
-                            })
-                            .ok_or(AgentBrowserAuthorityErrorV2::StateConflict)?
-                            .tool();
-                        let arguments = plan_step
-                            .slot_bindings()
-                            .iter()
-                            .map(|(name, _)| {
-                                NamedArgumentValueBindingV2::new(name.clone(), initial_value)
-                            })
-                            .collect::<Vec<_>>();
-                        let reference = mint_step_reference(tab)?;
-                        tab.objects.push(BrowserObjectBindingV2::PlanStep {
-                            reference,
-                            kernel: kernel_step,
-                            tool,
-                            arguments,
-                        });
-                        references.push(reference);
-                    }
-                    AgentBrowserMutationResponseV2::PlannerCommitted { steps: references }
+                    // The legacy envelope exchange is intentionally unavailable.
+                    // Task 5 wires mapper -> structural planner -> local decode as
+                    // one operation; until all three stages are present, fail
+                    // before preparing a kernel planner ticket or contacting a
+                    // remote model.
+                    return Err(AgentBrowserAuthorityErrorV2::Unavailable);
                 }
                 AgentBrowserActionV2::ProposePlanStep(reference) => {
                     let (step, tool, arguments) = tab
@@ -1601,6 +1533,7 @@ fn mint_reference(
     Ok(reference)
 }
 
+#[allow(dead_code)] // Restored by Task 5 after deterministic local decode.
 fn mint_step_reference(
     tab: &mut AgentTabV2,
 ) -> Result<AgentPlanStepRefV2, AgentBrowserAuthorityErrorV2> {
@@ -1869,6 +1802,7 @@ fn map_kernel(_: AgentControlKernelClientErrorV2) -> AgentBrowserAuthorityErrorV
     AgentBrowserAuthorityErrorV2::Unavailable
 }
 
+#[allow(dead_code)] // Restored by Task 5's structural planner call.
 fn map_planner(_: AgentPlannerClientErrorV2) -> AgentBrowserAuthorityErrorV2 {
     AgentBrowserAuthorityErrorV2::Unavailable
 }
@@ -1889,6 +1823,7 @@ fn planner_intent_boundary_for_action_v2(
     }
 }
 
+#[allow(dead_code)] // Restored by Task 5's full one-way planning pipeline.
 fn planner_prepare_call_request_v2(
     run: RunHandleV2,
     planner_route: PlannerRouteIdV2,
@@ -1909,6 +1844,7 @@ fn planner_prepare_call_request_v2(
     .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)
 }
 
+#[allow(dead_code)] // Restored by Task 5 after deterministic local decode.
 fn planner_commit_value_request_v2(
     run: RunHandleV2,
     ticket: PlannerTicketHandleV2,

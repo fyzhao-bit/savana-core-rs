@@ -389,6 +389,54 @@ pub fn decode_ordered_structural_plan_v2(
     Ok(value)
 }
 
+/// Decode a planner response and bind it to the exact request graph.
+///
+/// A syntactically valid ordering is not sufficient: it must be a complete,
+/// duplicate-free permutation of the request node identifiers and preserve
+/// every dataflow edge. Keeping this check at the remote-response boundary
+/// prevents an untrusted planner from substituting or omitting nodes.
+pub fn decode_ordered_structural_plan_for_request_v2(
+    bytes: &[u8],
+    request: &StructuralPlannerRequestV2,
+) -> Result<OrderedStructuralPlanV2, PlannerPrivacyErrorV2> {
+    let plan = decode_ordered_structural_plan_v2(bytes)?;
+    validate_ordered_structural_plan_v2(request, &plan)?;
+    Ok(plan)
+}
+
+pub fn validate_ordered_structural_plan_v2(
+    request: &StructuralPlannerRequestV2,
+    plan: &OrderedStructuralPlanV2,
+) -> Result<(), PlannerPrivacyErrorV2> {
+    if plan.ordered_nodes.len() != request.graph.nodes.len() {
+        return Err(PlannerPrivacyErrorV2::Invalid);
+    }
+    let request_ids = request
+        .graph
+        .nodes
+        .iter()
+        .map(StructuralNodeV2::id)
+        .collect::<HashSet<_>>();
+    let mut positions = HashMap::with_capacity(plan.ordered_nodes.len());
+    for (position, id) in plan.ordered_nodes.iter().copied().enumerate() {
+        if !request_ids.contains(&id) || positions.insert(id, position).is_some() {
+            return Err(PlannerPrivacyErrorV2::Invalid);
+        }
+    }
+    for edge in &request.graph.edges {
+        let from = positions
+            .get(&edge.from)
+            .ok_or(PlannerPrivacyErrorV2::Invalid)?;
+        let to = positions
+            .get(&edge.to)
+            .ok_or(PlannerPrivacyErrorV2::Invalid)?;
+        if from >= to {
+            return Err(PlannerPrivacyErrorV2::Invalid);
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MapperCatalogToolV2 {
     tool_class: ToolClassIdV2,
