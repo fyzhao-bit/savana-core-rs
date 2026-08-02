@@ -849,38 +849,43 @@ impl AgentBrowserAuthorityV2 {
                 self.refresh_release(tab, reference, request_id, deadline)?
             }
             AgentBrowserActionV2::RegisterConnector(canonical_descriptor) => {
-                self.planner_catalog
-                    .lock()
-                    .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)?
-                    .insert_connector_descriptor(&canonical_descriptor)
-                    .map_err(|error| match error {
-                        crate::PlannerCatalogErrorV2::Invalid => {
-                            AgentBrowserAuthorityErrorV2::InvalidReference
+                let prepared = persist_catalog_before_connector_prepare(
+                    || {
+                        self.planner_catalog
+                            .lock()
+                            .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)?
+                            .insert_connector_descriptor(&canonical_descriptor)
+                            .map_err(|error| match error {
+                                crate::PlannerCatalogErrorV2::Invalid => {
+                                    AgentBrowserAuthorityErrorV2::InvalidReference
+                                }
+                                _ => AgentBrowserAuthorityErrorV2::Unavailable,
+                            })
+                    },
+                    || {
+                        if tab
+                            .objects
+                            .len()
+                            .saturating_add(tab.pending_connectors.len())
+                            >= MAX_OBJECTS_PER_TAB_V2
+                        {
+                            return Err(AgentBrowserAuthorityErrorV2::Overloaded);
                         }
-                        _ => AgentBrowserAuthorityErrorV2::Unavailable,
-                    })?;
-                if tab
-                    .objects
-                    .len()
-                    .saturating_add(tab.pending_connectors.len())
-                    >= MAX_OBJECTS_PER_TAB_V2
-                {
-                    return Err(AgentBrowserAuthorityErrorV2::Overloaded);
-                }
-                tab.pending_connectors
-                    .try_reserve(1)
-                    .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
-                let prepared = self
-                    .kernel
-                    .prepare_connector_registration(
-                        PrepareConnectorRegistrationRequestV2::new(
-                            required(tab.session)?,
-                            canonical_descriptor.clone(),
-                        )
-                        .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
+                        tab.pending_connectors
+                            .try_reserve(1)
+                            .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
+                        self.kernel
+                            .prepare_connector_registration(
+                                PrepareConnectorRegistrationRequestV2::new(
+                                    required(tab.session)?,
+                                    canonical_descriptor.clone(),
+                                )
+                                .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
+                                deadline,
+                            )
+                            .map_err(map_kernel)
+                    },
+                )?;
                 let proposed = self
                     .kernel
                     .propose_connector_registration(
@@ -1277,6 +1282,18 @@ impl AgentBrowserAuthorityV2 {
         }
         Ok(())
     }
+}
+
+fn persist_catalog_before_connector_prepare<Persist, Prepare, Prepared>(
+    persist: Persist,
+    prepare: Prepare,
+) -> Result<Prepared, AgentBrowserAuthorityErrorV2>
+where
+    Persist: FnOnce() -> Result<(), AgentBrowserAuthorityErrorV2>,
+    Prepare: FnOnce() -> Result<Prepared, AgentBrowserAuthorityErrorV2>,
+{
+    persist()?;
+    prepare()
 }
 
 fn finalize_connector_registration_settlement<Authorize, Apply>(
@@ -1888,6 +1905,22 @@ mod tests {
             &SigningKey::from_bytes(&[0x4d; 32]),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn planner_catalog_commit_failure_skips_kernel_connector_prepare() {
+        let prepare_calls = Cell::new(0_u8);
+        assert_eq!(
+            persist_catalog_before_connector_prepare(
+                || Err(AgentBrowserAuthorityErrorV2::Unavailable),
+                || {
+                    prepare_calls.set(prepare_calls.get() + 1);
+                    Ok(())
+                },
+            ),
+            Err(AgentBrowserAuthorityErrorV2::Unavailable),
+        );
+        assert_eq!(prepare_calls.get(), 0);
     }
 
     #[test]

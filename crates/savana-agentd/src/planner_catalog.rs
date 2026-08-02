@@ -1,12 +1,18 @@
 use std::collections::HashSet;
-use std::fs::{self, File, OpenOptions};
+use std::ffi::{OsStr, OsString};
+use std::fs::{self, File};
 use std::io::{Read as _, Write as _};
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
 use aes_gcm::aead::{Aead as _, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit as _, Nonce};
 use hmac::{Hmac, Mac as _};
+use rustix::fs::{
+    fchmod, open as rustix_open, openat, renameat, statat, unlinkat, AtFlags, FileType, Mode,
+    OFlags,
+};
+use rustix::io::Errno;
 use savana_kernel_protocol::v2::{ActionTemplateIdV2, ActiveToolViewV2, Digest32V2, ToolClassIdV2};
 use savana_policy_core::v2::{ConnectorDescriptorV2, ConnectorStructuralRoleV2, EffectSetV2};
 use sha2::{Digest as _, Sha256};
@@ -722,7 +728,11 @@ fn is_zero(bytes: &[u8]) -> bool {
 
 struct SecureCatalogPathV2 {
     path: PathBuf,
-    parent: PathBuf,
+    parent: File,
+    parent_path: PathBuf,
+    parent_dev: u64,
+    parent_ino: u64,
+    leaf: OsString,
     owner_uid: u32,
     owner_gid: u32,
 }
@@ -734,36 +744,65 @@ impl SecureCatalogPathV2 {
         {
             return Err(PlannerCatalogErrorV2::DurableState);
         }
-        let parent = path
-            .parent()
+        let parent_path = path.parent().ok_or(PlannerCatalogErrorV2::DurableState)?;
+        let leaf = path
+            .file_name()
             .ok_or(PlannerCatalogErrorV2::DurableState)?
-            .to_owned();
-        let metadata =
-            fs::symlink_metadata(&parent).map_err(|_| PlannerCatalogErrorV2::DurableState)?;
-        if metadata.file_type().is_symlink()
-            || !metadata.is_dir()
-            || metadata.mode() & 0o7777 != 0o700
+            .to_os_string();
+        let before =
+            fs::symlink_metadata(parent_path).map_err(|_| PlannerCatalogErrorV2::DurableState)?;
+        if before.file_type().is_symlink() {
+            return Err(PlannerCatalogErrorV2::DurableState);
+        }
+        let descriptor = rustix_open(
+            parent_path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| PlannerCatalogErrorV2::DurableState)?;
+        let parent = File::from(descriptor);
+        let opened = parent
+            .metadata()
+            .map_err(|_| PlannerCatalogErrorV2::DurableState)?;
+        if !opened.is_dir()
+            || opened.dev() != before.dev()
+            || opened.ino() != before.ino()
+            || opened.uid() != before.uid()
+            || opened.gid() != before.gid()
+            || opened.mode() & 0o7777 != 0o700
         {
             return Err(PlannerCatalogErrorV2::DurableState);
         }
         let value = Self {
             path: path.to_owned(),
             parent,
-            owner_uid: metadata.uid(),
-            owner_gid: metadata.gid(),
+            parent_path: parent_path.to_owned(),
+            parent_dev: opened.dev(),
+            parent_ino: opened.ino(),
+            leaf,
+            owner_uid: opened.uid(),
+            owner_gid: opened.gid(),
         };
-        value.validate_parent()?;
+        value.recheck_parent()?;
         Ok(value)
     }
 
-    fn validate_parent(&self) -> Result<(), PlannerCatalogErrorV2> {
-        let metadata =
-            fs::symlink_metadata(&self.parent).map_err(|_| PlannerCatalogErrorV2::DurableState)?;
-        if metadata.file_type().is_symlink()
-            || !metadata.is_dir()
-            || metadata.mode() & 0o7777 != 0o700
-            || metadata.uid() != self.owner_uid
-            || metadata.gid() != self.owner_gid
+    fn recheck_parent(&self) -> Result<(), PlannerCatalogErrorV2> {
+        let opened = self
+            .parent
+            .metadata()
+            .map_err(|_| PlannerCatalogErrorV2::DurableState)?;
+        let linked = fs::symlink_metadata(&self.parent_path)
+            .map_err(|_| PlannerCatalogErrorV2::DurableState)?;
+        if linked.file_type().is_symlink()
+            || !linked.is_dir()
+            || opened.dev() != self.parent_dev
+            || opened.ino() != self.parent_ino
+            || linked.dev() != self.parent_dev
+            || linked.ino() != self.parent_ino
+            || linked.uid() != self.owner_uid
+            || linked.gid() != self.owner_gid
+            || linked.mode() & 0o7777 != 0o700
         {
             return Err(PlannerCatalogErrorV2::DurableState);
         }
@@ -771,42 +810,86 @@ impl SecureCatalogPathV2 {
     }
 
     fn read_existing(&self) -> Result<Option<Vec<u8>>, PlannerCatalogErrorV2> {
-        self.validate_parent()?;
-        let metadata = match fs::symlink_metadata(&self.path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        self.read_existing_after_stat(|| {}, || {})
+    }
+
+    #[cfg(test)]
+    fn read_existing_with_race_hook(
+        &self,
+        hook: impl FnOnce(),
+    ) -> Result<Option<Vec<u8>>, PlannerCatalogErrorV2> {
+        self.read_existing_after_stat(hook, || {})
+    }
+
+    #[cfg(test)]
+    fn read_existing_with_post_read_race_hook(
+        &self,
+        hook: impl FnOnce(),
+    ) -> Result<Option<Vec<u8>>, PlannerCatalogErrorV2> {
+        self.read_existing_after_stat(|| {}, hook)
+    }
+
+    fn read_existing_after_stat(
+        &self,
+        before_open: impl FnOnce(),
+        after_read: impl FnOnce(),
+    ) -> Result<Option<Vec<u8>>, PlannerCatalogErrorV2> {
+        self.recheck_parent()?;
+        let before = match statat(&self.parent, &self.leaf, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => stat,
+            Err(Errno::NOENT) => return Ok(None),
             Err(_) => return Err(PlannerCatalogErrorV2::DurableState),
         };
-        if metadata.file_type().is_symlink()
-            || !metadata.is_file()
-            || metadata.nlink() != 1
-            || metadata.mode() & 0o7777 != 0o600
-            || metadata.uid() != self.owner_uid
-            || metadata.gid() != self.owner_gid
-            || metadata.len() == 0
-            || metadata.len() > MAX_STATE_BYTES_V2
-        {
+        if FileType::from_raw_mode(before.st_mode) != FileType::RegularFile {
             return Err(PlannerCatalogErrorV2::DurableState);
         }
-        let mut file = OpenOptions::new()
-            .read(true)
-            .open(&self.path)
-            .map_err(|_| PlannerCatalogErrorV2::DurableState)?;
+        before_open();
+        let descriptor = openat(
+            &self.parent,
+            &self.leaf,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| PlannerCatalogErrorV2::DurableState)?;
+        let mut file = File::from(descriptor);
         let opened = file
             .metadata()
             .map_err(|_| PlannerCatalogErrorV2::DurableState)?;
-        if opened.dev() != metadata.dev() || opened.ino() != metadata.ino() {
+        if !opened.is_file()
+            || i128::from(before.st_dev) != i128::from(opened.dev())
+            || before.st_ino != opened.ino()
+            || before.st_uid != self.owner_uid
+            || before.st_gid != self.owner_gid
+            || opened.uid() != self.owner_uid
+            || opened.gid() != self.owner_gid
+            || opened.mode() & 0o7777 != 0o600
+            || opened.nlink() != 1
+            || opened.len() == 0
+            || opened.len() > MAX_STATE_BYTES_V2
+        {
             return Err(PlannerCatalogErrorV2::DurableState);
         }
+        let capacity =
+            usize::try_from(opened.len()).map_err(|_| PlannerCatalogErrorV2::DurableState)?;
         let mut bytes = Vec::new();
         bytes
-            .try_reserve_exact(opened.len() as usize)
+            .try_reserve_exact(capacity)
             .map_err(|_| PlannerCatalogErrorV2::DurableState)?;
         file.read_to_end(&mut bytes)
             .map_err(|_| PlannerCatalogErrorV2::DurableState)?;
-        if bytes.len() as u64 != opened.len() {
+        after_read();
+        if bytes.len() != capacity {
             return Err(PlannerCatalogErrorV2::DurableState);
         }
+        validate_catalog_file_at(
+            &self.parent,
+            &self.leaf,
+            &file,
+            self.owner_uid,
+            self.owner_gid,
+            opened.len(),
+        )?;
+        self.recheck_parent()?;
         Ok(Some(bytes))
     }
 
@@ -814,52 +897,120 @@ impl SecureCatalogPathV2 {
         if bytes.is_empty() || bytes.len() as u64 > MAX_STATE_BYTES_V2 {
             return Err(PlannerCatalogErrorV2::DurableState);
         }
-        self.validate_parent()?;
-        if self.path.exists() {
-            self.read_existing()?;
+        self.recheck_parent()?;
+        let (temporary_leaf, mut temporary) =
+            create_catalog_temporary(&self.parent, &self.leaf, self.owner_uid, self.owner_gid)?;
+        let before_rename = (|| {
+            temporary
+                .write_all(bytes)
+                .map_err(|_| PlannerCatalogErrorV2::DurableState)?;
+            temporary
+                .sync_all()
+                .map_err(|_| PlannerCatalogErrorV2::DurableState)?;
+            validate_catalog_file_at(
+                &self.parent,
+                &temporary_leaf,
+                &temporary,
+                self.owner_uid,
+                self.owner_gid,
+                u64::try_from(bytes.len()).map_err(|_| PlannerCatalogErrorV2::DurableState)?,
+            )?;
+            self.recheck_parent()
+        })();
+        if before_rename.is_err() {
+            let _ = unlinkat(&self.parent, &temporary_leaf, AtFlags::empty());
+            return Err(PlannerCatalogErrorV2::DurableState);
         }
-        for _ in 0..TEMP_ATTEMPTS_V2 {
-            let mut suffix = [0; 8];
-            getrandom::getrandom(&mut suffix).map_err(|_| PlannerCatalogErrorV2::DurableState)?;
-            let temp = self.parent.join(format!(
-                ".planner-catalog-state-v2.cbor.{:016x}.tmp",
-                u64::from_be_bytes(suffix)
-            ));
-            let opened = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&temp);
-            let mut file = match opened {
-                Ok(file) => file,
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(_) => return Err(PlannerCatalogErrorV2::DurableState),
-            };
-            if file.write_all(bytes).is_err() || file.sync_all().is_err() {
-                let _ = fs::remove_file(&temp);
-                return Err(PlannerCatalogErrorV2::DurableState);
-            }
-            if fs::rename(&temp, &self.path).is_err() {
-                let _ = fs::remove_file(&temp);
-                return Err(PlannerCatalogErrorV2::DurableState);
-            }
-            if File::open(&self.parent)
-                .and_then(|parent| parent.sync_all())
-                .is_err()
-                || self.read_existing().ok().flatten().is_none()
-            {
-                return Err(PlannerCatalogErrorV2::CommitUncertain);
-            }
-            return Ok(());
+        if renameat(&self.parent, &temporary_leaf, &self.parent, &self.leaf).is_err() {
+            let _ = unlinkat(&self.parent, &temporary_leaf, AtFlags::empty());
+            return Err(PlannerCatalogErrorV2::DurableState);
         }
-        Err(PlannerCatalogErrorV2::DurableState)
+        validate_catalog_file_at(
+            &self.parent,
+            &self.leaf,
+            &temporary,
+            self.owner_uid,
+            self.owner_gid,
+            u64::try_from(bytes.len()).map_err(|_| PlannerCatalogErrorV2::CommitUncertain)?,
+        )
+        .map_err(|_| PlannerCatalogErrorV2::CommitUncertain)?;
+        self.parent
+            .sync_all()
+            .map_err(|_| PlannerCatalogErrorV2::CommitUncertain)?;
+        self.recheck_parent()
+            .map_err(|_| PlannerCatalogErrorV2::CommitUncertain)
     }
+}
+
+fn create_catalog_temporary(
+    parent: &File,
+    final_leaf: &OsStr,
+    owner_uid: u32,
+    owner_gid: u32,
+) -> Result<(OsString, File), PlannerCatalogErrorV2> {
+    for _ in 0..TEMP_ATTEMPTS_V2 {
+        let mut random = [0; 16];
+        getrandom::getrandom(&mut random).map_err(|_| PlannerCatalogErrorV2::DurableState)?;
+        let mut temporary_leaf = OsString::from(".");
+        temporary_leaf.push(final_leaf);
+        temporary_leaf.push(format!(".tmp-{:032x}", u128::from_be_bytes(random)));
+        match openat(
+            parent,
+            &temporary_leaf,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_bits_truncate(0o600),
+        ) {
+            Ok(descriptor) => {
+                let file = File::from(descriptor);
+                fchmod(&file, Mode::from_bits_truncate(0o600))
+                    .map_err(|_| PlannerCatalogErrorV2::DurableState)?;
+                validate_catalog_file_at(parent, &temporary_leaf, &file, owner_uid, owner_gid, 0)?;
+                return Ok((temporary_leaf, file));
+            }
+            Err(Errno::EXIST) => {}
+            Err(_) => return Err(PlannerCatalogErrorV2::DurableState),
+        }
+    }
+    Err(PlannerCatalogErrorV2::DurableState)
+}
+
+fn validate_catalog_file_at(
+    parent: &File,
+    leaf: &OsStr,
+    file: &File,
+    owner_uid: u32,
+    owner_gid: u32,
+    expected_length: u64,
+) -> Result<(), PlannerCatalogErrorV2> {
+    let opened = file
+        .metadata()
+        .map_err(|_| PlannerCatalogErrorV2::DurableState)?;
+    let linked = statat(parent, leaf, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|_| PlannerCatalogErrorV2::DurableState)?;
+    if !opened.is_file()
+        || opened.uid() != owner_uid
+        || opened.gid() != owner_gid
+        || opened.mode() & 0o7777 != 0o600
+        || opened.nlink() != 1
+        || opened.len() != expected_length
+        || FileType::from_raw_mode(linked.st_mode) != FileType::RegularFile
+        || i128::from(linked.st_dev) != i128::from(opened.dev())
+        || linked.st_ino != opened.ino()
+        || linked.st_uid != owner_uid
+        || linked.st_gid != owner_gid
+        || linked.st_mode & 0o7777 != 0o600
+        || linked.st_nlink != 1
+        || u64::try_from(linked.st_size).ok() != Some(expected_length)
+    {
+        return Err(PlannerCatalogErrorV2::DurableState);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::fs::{symlink, PermissionsExt as _};
     use std::sync::{Arc, Mutex};
 
     use savana_kernel_protocol::v2::{
@@ -878,6 +1029,7 @@ mod tests {
         project_connector_descriptor_v2, BoundedPlannerSemanticTextV2,
         DurablePlannerCatalogNamespaceV2, DurablePlannerCatalogV2, PlannerCatalogEntryV2,
         PlannerCatalogErrorV2, PlannerCatalogRollbackAnchorV2, PlannerCatalogStateHeadV2,
+        SecureCatalogPathV2,
     };
 
     #[derive(Clone, Default)]
@@ -1329,5 +1481,103 @@ mod tests {
             .unwrap_err(),
             PlannerCatalogErrorV2::DurableState,
         );
+
+        let (directory, path) = private_path();
+        let anchor = TestAnchor::default();
+        let catalog = DurablePlannerCatalogV2::open(
+            &path,
+            [0x87; 32],
+            namespace(0x88, 0x89),
+            Box::new(anchor.clone()),
+            vec![],
+        )
+        .unwrap();
+        drop(catalog);
+        let target = directory.path().join("catalog-target");
+        fs::rename(&path, &target).unwrap();
+        symlink(&target, &path).unwrap();
+        assert_eq!(
+            DurablePlannerCatalogV2::open(
+                &path,
+                [0x87; 32],
+                namespace(0x88, 0x89),
+                Box::new(anchor),
+                vec![],
+            )
+            .unwrap_err(),
+            PlannerCatalogErrorV2::DurableState,
+        );
+    }
+
+    #[test]
+    fn leaf_swap_race_and_parent_rebind_are_detected_by_dirfd_identity() {
+        let (_directory, path) = private_path();
+        let catalog = DurablePlannerCatalogV2::open(
+            &path,
+            [0x91; 32],
+            namespace(0x92, 0x93),
+            Box::new(TestAnchor::default()),
+            vec![],
+        )
+        .unwrap();
+        drop(catalog);
+        let anchored = SecureCatalogPathV2::open(&path).unwrap();
+        let displaced = path.with_extension("displaced");
+        assert_eq!(
+            anchored
+                .read_existing_with_race_hook(|| {
+                    fs::rename(&path, &displaced).unwrap();
+                    fs::write(&path, b"replacement").unwrap();
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+                })
+                .unwrap_err(),
+            PlannerCatalogErrorV2::DurableState,
+        );
+
+        let (_directory, path) = private_path();
+        let catalog = DurablePlannerCatalogV2::open(
+            &path,
+            [0x97; 32],
+            namespace(0x98, 0x99),
+            Box::new(TestAnchor::default()),
+            vec![],
+        )
+        .unwrap();
+        drop(catalog);
+        let anchored = SecureCatalogPathV2::open(&path).unwrap();
+        let second_link = path.with_extension("second-link");
+        assert_eq!(
+            anchored
+                .read_existing_with_post_read_race_hook(|| {
+                    fs::hard_link(&path, &second_link).unwrap();
+                })
+                .unwrap_err(),
+            PlannerCatalogErrorV2::DurableState,
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let original_parent = root.path().join("catalog-parent");
+        fs::create_dir(&original_parent).unwrap();
+        fs::set_permissions(&original_parent, fs::Permissions::from_mode(0o700)).unwrap();
+        let rebound_path = original_parent.join("planner-catalog-state-v2.cbor");
+        let mut catalog = DurablePlannerCatalogV2::open(
+            &rebound_path,
+            [0x94; 32],
+            namespace(0x95, 0x96),
+            Box::new(TestAnchor::default()),
+            vec![],
+        )
+        .unwrap();
+        let displaced_parent = root.path().join("catalog-parent-displaced");
+        fs::rename(&original_parent, &displaced_parent).unwrap();
+        fs::create_dir(&original_parent).unwrap();
+        fs::set_permissions(&original_parent, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            catalog
+                .insert_entries(vec![entry(501, 502, "rebound")])
+                .unwrap_err(),
+            PlannerCatalogErrorV2::DurableState,
+        );
+        assert!(!rebound_path.exists());
     }
 }

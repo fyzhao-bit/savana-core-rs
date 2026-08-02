@@ -87,7 +87,7 @@ pub(super) fn signed_registry_add(
     let connector_id = Digest32V2::new(id_hasher.finalize().into());
     let mut descriptor = minicbor::Encoder::new(Vec::new());
     descriptor
-        .array(7)
+        .array(8)
         .unwrap()
         .bytes(connector_id.as_bytes())
         .unwrap()
@@ -108,6 +108,8 @@ pub(super) fn signed_registry_add(
         .extend_from_slice(&minicbor::to_vec(&tool).unwrap());
     descriptor
         .u16(EffectSetV2::SEND.bits())
+        .unwrap()
+        .u16(super::ConnectorStructuralRoleV2::Sink.tag())
         .unwrap()
         .u64(1)
         .unwrap();
