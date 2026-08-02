@@ -705,6 +705,34 @@ mod macos {
         )?;
         set_value(
             &mut exec,
+            &["connector_registry_path"],
+            fixed_path(root, "state/execd/connector-registry-v2.cbor"),
+        )?;
+        set_value(
+            &mut exec,
+            &["connector_registry_anchor_path"],
+            fixed_path(root, "state/execd/connector-registry-anchor-v2.bin"),
+        )?;
+        for (exec_field, kernel_field) in [
+            (
+                "connector_registry_genesis_digest",
+                "connector_registry_genesis_digest",
+            ),
+            ("connector_authority_key_id", "connector_authority_key_id"),
+            (
+                "connector_authority_public_key",
+                "connector_authority_public_key",
+            ),
+            ("user_tier_host_allowlist", "user_tier_host_allowlist"),
+        ] {
+            let value = kernel
+                .pointer(&format!("/policy_runtime/{kernel_field}"))
+                .cloned()
+                .ok_or_else(|| format!("missing policy_runtime.{kernel_field}"))?;
+            set_value(&mut exec, &[exec_field], value)?;
+        }
+        set_value(
+            &mut exec,
             &["effect_gate_path"],
             fixed_path(root, "config/effect-gate-v2"),
         )?;
@@ -767,6 +795,20 @@ mod macos {
             &mut exec,
             &["provider", "server_name"],
             Value::String(PROVIDER_SERVER_NAME.to_owned()),
+        )?;
+        set_value(
+            &mut exec,
+            &["provider", "canonical_url"],
+            Value::String(format!("https://{PROVIDER_SERVER_NAME}:9444/")),
+        )?;
+        let provider_spki = read_bounded(
+            &root.join("config/tls/provider-server-spki-v2.der"),
+            MAX_CERTIFICATE_BYTES,
+        )?;
+        set_hex(
+            &mut exec,
+            &["provider", "server_spki_sha256"],
+            Sha256::digest(provider_spki).into(),
         )?;
         set_value(
             &mut exec,

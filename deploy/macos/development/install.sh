@@ -664,6 +664,10 @@ attestation_root_measurement=$(
   -pubkey -noout \
   | /usr/bin/openssl pkey -pubin -outform DER \
     -out "$temporary_directory/planner-server.spki.der"
+/usr/bin/openssl x509 -in "$temporary_directory/provider-server.cert.pem" \
+  -pubkey -noout \
+  | /usr/bin/openssl pkey -pubin -outform DER \
+    -out "$temporary_directory/provider-server.spki.der"
 
 /usr/bin/install -o root -g wheel -m 0444 \
   "$temporary_directory/runtime-ca.cert.der" \
@@ -671,6 +675,9 @@ attestation_root_measurement=$(
 /usr/bin/install -o root -g wheel -m 0444 \
   "$temporary_directory/planner-server.spki.der" \
   "$install_root/config/tls/planner-server-spki-v2.der"
+/usr/bin/install -o root -g wheel -m 0444 \
+  "$temporary_directory/provider-server.spki.der" \
+  "$install_root/config/tls/provider-server-spki-v2.der"
 /usr/bin/install -o root -g wheel -m 0444 \
   "$temporary_directory/provider-client.cert.der" \
   "$install_root/config/tls/provider-client-v2.der"

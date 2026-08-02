@@ -19,7 +19,7 @@ const NON_KERNEL_ROLES: [EndpointRoleV2; 4] = [
 ];
 
 #[test]
-fn all_49_kernel_operations_have_one_role_and_one_frozen_error_contract() {
+fn all_50_kernel_operations_have_one_role_and_one_frozen_error_contract() {
     let mut routes = BTreeSet::new();
     for role in KERNEL_ROLES {
         let tags = kernel_service_operation_tags_for_role_v2(role).unwrap();
@@ -37,7 +37,16 @@ fn all_49_kernel_operations_have_one_role_and_one_frozen_error_contract() {
             );
         }
     }
-    assert_eq!(routes.len(), 49);
+    assert_eq!(routes.len(), 50);
+    assert!(kernel_service_operation_has_error_contract_v2(
+        EndpointRoleV2::KernelExecutor,
+        64,
+    ));
+    assert!(kernel_service_public_error_is_allowed_v2(
+        EndpointRoleV2::KernelExecutor,
+        64,
+        PublicStableCodeV2::RegistryMismatch,
+    ));
 }
 
 #[test]

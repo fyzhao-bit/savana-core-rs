@@ -77,8 +77,8 @@ pub use binding::{
 };
 pub use commit_attestation::{ClosedCommitDigestFieldV2, CommitAttestationV2};
 pub use connector_registry::{
-    user_tier_host_allowed_v2, BoundedConnectorHostV2, BoundedConnectorNameV2,
-    BoundedConnectorUrlV2, ConnectorDescriptorV2, ConnectorRegistryDeltaV2,
+    connector_host_allowlist_digest_v2, user_tier_host_allowed_v2, BoundedConnectorHostV2,
+    BoundedConnectorNameV2, BoundedConnectorUrlV2, ConnectorDescriptorV2, ConnectorRegistryDeltaV2,
     ConnectorRegistryStateV2, ConnectorTierV2, ConnectorTransportV2,
     PreparedConnectorRegistryDeltaV2,
 };

@@ -34,6 +34,8 @@ const CONNECTOR_DELTA_SIGNED_DOMAIN_V2: &[u8] = b"savana.connector-registry.delt
 const CONNECTOR_DELTA_SIGNATURE_DOMAIN_V2: &[u8] =
     b"savana.connector-registry.delta.v2.signature\0";
 const CONNECTOR_REGISTRY_HEAD_DOMAIN_V2: &[u8] = b"savana.connector-registry.head.v2\0";
+const CONNECTOR_HOST_ALLOWLIST_DIGEST_DOMAIN_V2: &[u8] =
+    b"savana.connector-registry.host-allowlist.v2\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u16)]
@@ -406,6 +408,33 @@ pub fn user_tier_host_allowed_v2(
             }
             _ => false,
         }))
+}
+
+/// Commits the exact canonical standing-policy host list shared by kerneld
+/// and execd. The list must already be the strictly ordered deployment value;
+/// this function never sorts or widens caller input.
+pub fn connector_host_allowlist_digest_v2(
+    allowlist: &[BoundedConnectorHostV2],
+) -> Result<Digest32V2, G4Error> {
+    if allowlist
+        .windows(2)
+        .any(|pair| pair[0].as_str() >= pair[1].as_str())
+    {
+        return Err(G4Error::InvalidDescriptor);
+    }
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder
+        .array(u64::try_from(allowlist.len()).map_err(|_| G4Error::DescriptorLimitExceeded)?)
+        .map_err(|_| G4Error::AllocationFailure)?;
+    for host in allowlist {
+        encoder
+            .str(host.as_str())
+            .map_err(|_| G4Error::AllocationFailure)?;
+    }
+    Ok(domain_hash(
+        CONNECTOR_HOST_ALLOWLIST_DIGEST_DOMAIN_V2,
+        &encoder.into_writer(),
+    ))
 }
 
 fn connector_is_active_under_allowlist(

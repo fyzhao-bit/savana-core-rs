@@ -228,6 +228,7 @@ fn run() -> Result<(), String> {
     let agent_task_store_id = random_unique(&mut issued)?;
     let approval_store_id = random_unique(&mut issued)?;
     let exec_store_id = random_unique(&mut issued)?;
+    let exec_connector_store_id = random_unique(&mut issued)?;
     let placeholder = random_unique(&mut issued)?;
     let placeholder_hex = hex(placeholder);
     let disabled_connector_authority = "00".repeat(32);
@@ -434,6 +435,13 @@ fn run() -> Result<(), String> {
         "effect_receipt_key_id": placeholder_hex,
         "seal_key_id": placeholder_hex,
         "connector_set_digest": hex(connector_set_digest),
+        "connector_registry_path": format!("{INSTALL_ROOT}/state/execd/connector-registry-v2.cbor"),
+        "connector_registry_anchor_path": format!("{INSTALL_ROOT}/state/execd/connector-registry-anchor-v2.bin"),
+        "connector_registry_store_id": hex(exec_connector_store_id),
+        "connector_registry_genesis_digest": hex(connector_set_digest),
+        "connector_authority_key_id": disabled_connector_authority,
+        "connector_authority_public_key": disabled_connector_authority,
+        "user_tier_host_allowlist": [],
         "journal_schema_version": 2,
         "journal_key_epoch": 1,
         "worker": {
@@ -449,6 +457,8 @@ fn run() -> Result<(), String> {
         "provider": {
             "address": "127.0.0.1:9444",
             "server_name": "provider.savana-development.invalid",
+            "canonical_url": "https://provider.savana-development.invalid:9444/",
+            "server_spki_sha256": placeholder_hex,
             "root_certificate_path": format!("{INSTALL_ROOT}/config/tls/runtime-root-v2.der"),
             "root_certificate_digest": placeholder_hex,
             "client_certificate_paths": [format!("{INSTALL_ROOT}/config/tls/provider-client-v2.der")],

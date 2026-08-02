@@ -780,6 +780,10 @@ pub(crate) fn connector_material_digest(bytes: &[u8]) -> Digest32V2 {
     domain_hash(b"SAVANA_CONNECTOR_CODEC_MATERIAL_V2\0", bytes)
 }
 
+pub(crate) fn prepared_provider_request_digest(bytes: &[u8]) -> Digest32V2 {
+    domain_hash(REQUEST_DOMAIN, bytes)
+}
+
 pub(crate) fn connector_response_digest(bytes: &[u8]) -> Digest32V2 {
     domain_hash(RESPONSE_DOMAIN, bytes)
 }
@@ -878,7 +882,7 @@ pub(crate) fn prepared_transcript_material(
     encode_prepared_transcript_material(
         job,
         request,
-        domain_hash(REQUEST_DOMAIN, request),
+        prepared_provider_request_digest(request),
         maximum_response_bytes,
     )
 }
@@ -919,7 +923,7 @@ pub(crate) fn encode_connector_prepared_frame(
     let payload = encode_prepared_payload(
         job,
         request,
-        domain_hash(REQUEST_DOMAIN, request),
+        prepared_provider_request_digest(request),
         maximum_response_bytes,
         transcript_digest,
     )?;
@@ -1041,7 +1045,7 @@ fn decode_prepared_payload(
         || codec_job_ordinal != job.codec_job_ordinal
         || request.is_empty()
         || request.len() > MAX_CONNECTOR_MATERIAL_BYTES
-        || request_digest != domain_hash(REQUEST_DOMAIN, request)
+        || request_digest != prepared_provider_request_digest(request)
         || maximum_response_bytes == 0
         || maximum_response_bytes as usize > MAX_CONNECTOR_RESPONSE_BYTES
     {

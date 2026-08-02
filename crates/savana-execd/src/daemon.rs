@@ -38,8 +38,10 @@ mod implementation {
         verify_native_peer_v2, BoundedIdentityStringV2, NativePeerMeasurementV2,
     };
     use savana_policy_core::v2::{
-        listener_identity_digest_v2, ClosedServiceEdgeIdV2, ClosedServiceIdV2,
-        FilesystemServiceObservationConfigV2, VerifiedDaemonStartupV2,
+        listener_identity_digest_v2, BoundedConnectorHostV2, BoundedConnectorUrlV2,
+        ClosedServiceEdgeIdV2, ClosedServiceIdV2, DurableStateNamespaceV2,
+        FilesystemServiceObservationConfigV2, G4Error, RollbackProtectedStateAnchorV2,
+        RollbackProtectedStateHeadV2, VerifiedDaemonStartupV2,
     };
     use serde::Deserialize;
     use sha2::{Digest as _, Sha256};
@@ -52,9 +54,9 @@ mod implementation {
     use crate::worker_protocol::ConnectorJobDescriptorIssuerV2;
     use crate::worker_supervisor::ConnectorWorkerSupervisorV2;
     use crate::{
-        DurableExecdNamespaceV2, ExecdErrorV2, ExecdProtocolDeploymentV2, ExecdProtocolServiceV2,
-        ExecdRollbackAnchorV2, ExecdStateHeadV2, ExecdStateOwnerV2, ExecdSuiteOneServerV2,
-        VerifiedExecdDeploymentV2,
+        DurableExecdNamespaceV2, ExecdConnectorRegistryTrustV2, ExecdConnectorRegistryV2,
+        ExecdErrorV2, ExecdProtocolDeploymentV2, ExecdProtocolServiceV2, ExecdRollbackAnchorV2,
+        ExecdStateHeadV2, ExecdStateOwnerV2, ExecdSuiteOneServerV2, VerifiedExecdDeploymentV2,
     };
 
     #[cfg(target_os = "linux")]
@@ -62,6 +64,10 @@ mod implementation {
     #[cfg(target_os = "macos")]
     const NATIVE_BOOTSTRAP_PATH_V2: &str =
         "/Library/Application Support/Savana/Development/config/execd-bootstrap-v2.json";
+    const CONNECTOR_STORE_KEY_DERIVATION_DOMAIN_V2: &[u8] =
+        b"SAVANA_EXECD_CONNECTOR_STORE_KEY_DERIVATION_V2\0";
+    const CONNECTOR_ANCHOR_KEY_DERIVATION_DOMAIN_V2: &[u8] =
+        b"SAVANA_EXECD_CONNECTOR_ANCHOR_KEY_DERIVATION_V2\0";
     #[cfg(target_os = "linux")]
     const MANIFEST_ROOT_PATH_V2: &str = "/etc/savana/trust/deployment-manifest-root-v2.json";
     #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
@@ -108,7 +114,7 @@ mod implementation {
     const ANCHOR_MAGIC_V2: [u8; 8] = *b"SE2ANCH\0";
     const AUTHENTICATED_ANCHOR_BYTES_V2: usize = 80;
 
-    #[derive(Deserialize)]
+    #[derive(Clone, Deserialize)]
     #[cfg_attr(
         all(target_os = "macos", not(feature = "macos-development-authority")),
         allow(dead_code)
@@ -126,13 +132,20 @@ mod implementation {
         effect_receipt_key_id: String,
         seal_key_id: String,
         connector_set_digest: String,
+        connector_registry_path: PathBuf,
+        connector_registry_anchor_path: PathBuf,
+        connector_registry_store_id: String,
+        connector_registry_genesis_digest: String,
+        connector_authority_key_id: String,
+        connector_authority_public_key: String,
+        user_tier_host_allowlist: Vec<String>,
         journal_schema_version: u16,
         journal_key_epoch: u64,
         worker: WorkerDtoV2,
         provider: ProviderDtoV2,
     }
 
-    #[derive(Deserialize)]
+    #[derive(Clone, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct WorkerDtoV2 {
         sandbox_program_path: PathBuf,
@@ -145,11 +158,13 @@ mod implementation {
         credential_absence_profile_digest: String,
     }
 
-    #[derive(Deserialize)]
+    #[derive(Clone, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct ProviderDtoV2 {
         address: String,
         server_name: String,
+        canonical_url: String,
+        server_spki_sha256: String,
         root_certificate_path: PathBuf,
         root_certificate_digest: String,
         client_certificate_paths: Vec<PathBuf>,
@@ -267,11 +282,99 @@ mod implementation {
         )
         .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
         verify_runtime_paths(&loaded.bootstrap)?;
+        let journal_store_id = Digest32V2::new(decode_hex_32(&loaded.bootstrap.store_id)?);
         let namespace = DurableExecdNamespaceV2::from_verified_installation(
             loaded.startup.installation_id(),
-            Digest32V2::new(decode_hex_32(&loaded.bootstrap.store_id)?),
+            journal_store_id,
         )
         .map_err(|_| ExecdDaemonErrorV2::DurableStateUnavailable)?;
+        let connector_genesis = Digest32V2::new(decode_hex_32(
+            &loaded.bootstrap.connector_registry_genesis_digest,
+        )?);
+        if connector_genesis
+            != Digest32V2::new(decode_hex_32(&loaded.bootstrap.connector_set_digest)?)
+        {
+            return Err(ExecdDaemonErrorV2::DeploymentUnavailable);
+        }
+        let connector_authority_key_id =
+            Ed25519KeyIdV2::new(decode_hex_32(&loaded.bootstrap.connector_authority_key_id)?);
+        let connector_authority_public_key =
+            decode_hex_32(&loaded.bootstrap.connector_authority_public_key)?;
+        let connector_hosts = loaded
+            .bootstrap
+            .user_tier_host_allowlist
+            .iter()
+            .map(|host| {
+                let canonical = BoundedConnectorHostV2::new(host)
+                    .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
+                if canonical.as_str() != host {
+                    return Err(ExecdDaemonErrorV2::DeploymentUnavailable);
+                }
+                Ok(canonical)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let connector_trust = ExecdConnectorRegistryTrustV2::from_authenticated_deployment(
+            loaded.startup.installation_id(),
+            loaded.startup.active_state_manifest_digest(),
+            loaded.startup.deployment_generation(),
+            connector_genesis,
+            connector_authority_key_id,
+            connector_authority_public_key,
+            connector_hosts,
+            vec![],
+        )
+        .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
+        let connector_store_id = Digest32V2::new(decode_hex_32(
+            &loaded.bootstrap.connector_registry_store_id,
+        )?);
+        if connector_store_id == journal_store_id {
+            return Err(ExecdDaemonErrorV2::DeploymentUnavailable);
+        }
+        let connector_namespace = DurableStateNamespaceV2::from_verified_installation(
+            loaded.startup.installation_id(),
+            connector_store_id,
+        )
+        .map_err(|_| ExecdDaemonErrorV2::DurableStateUnavailable)?;
+        let connector_anchor_namespace = DurableExecdNamespaceV2::from_verified_installation(
+            loaded.startup.installation_id(),
+            connector_store_id,
+        )
+        .map_err(|_| ExecdDaemonErrorV2::DurableStateUnavailable)?;
+        let connector_store_key = derive_connector_runtime_key_v2(
+            &loaded.keys.journal_encryption_key,
+            CONNECTOR_STORE_KEY_DERIVATION_DOMAIN_V2,
+            loaded.startup.installation_id(),
+            connector_store_id,
+        )?;
+        let connector_anchor_key = derive_connector_runtime_key_v2(
+            &loaded.keys.anchor_authentication_key,
+            CONNECTOR_ANCHOR_KEY_DERIVATION_DOMAIN_V2,
+            loaded.startup.installation_id(),
+            connector_store_id,
+        )?;
+        if connector_store_key == connector_anchor_key
+            || connector_store_key == loaded.keys.journal_encryption_key
+            || connector_store_key == loaded.keys.anchor_authentication_key
+            || connector_anchor_key == loaded.keys.journal_encryption_key
+            || connector_anchor_key == loaded.keys.anchor_authentication_key
+        {
+            return Err(ExecdDaemonErrorV2::DeploymentUnavailable);
+        }
+        let connector_anchor = LinuxAuthenticatedExecdAnchorV2::new(
+            loaded.bootstrap.connector_registry_anchor_path.clone(),
+            connector_anchor_namespace,
+            connector_anchor_key,
+        )?;
+        let connector_registry = Arc::new(
+            ExecdConnectorRegistryV2::open(
+                &loaded.bootstrap.connector_registry_path,
+                connector_store_key,
+                connector_namespace,
+                Box::new(connector_anchor),
+                connector_trust,
+            )
+            .map_err(|_| ExecdDaemonErrorV2::DurableStateUnavailable)?,
+        );
         let anchor = LinuxAuthenticatedExecdAnchorV2::new(
             loaded.bootstrap.rollback_anchor_path.clone(),
             namespace,
@@ -298,16 +401,22 @@ mod implementation {
         .map_err(|_| ExecdDaemonErrorV2::DurableStateUnavailable)?;
         let processor = build_connector_runtime(&loaded, executor_identity)?;
         let now = current_unix_millis()?;
-        ExecdProtocolServiceV2::recover_prepared(
+        ExecdProtocolServiceV2::recover_prepared_with_connector_registry(
             &protocol_deployment,
             &owner,
             processor.as_ref(),
+            &connector_registry,
             now,
             recovery_deadline,
         )
         .map_err(|_| ExecdDaemonErrorV2::DurableStateUnavailable)?;
-        let protocol_service = ExecdProtocolServiceV2::new(protocol_deployment, owner, processor)
-            .map_err(|_| ExecdDaemonErrorV2::DurableStateUnavailable)?;
+        let protocol_service = ExecdProtocolServiceV2::new_with_connector_registry(
+            protocol_deployment,
+            owner,
+            processor,
+            connector_registry,
+        )
+        .map_err(|_| ExecdDaemonErrorV2::DurableStateUnavailable)?;
         let server = Arc::new(
             ExecdSuiteOneServerV2::new(
                 handshake_edge,
@@ -391,6 +500,9 @@ mod implementation {
                 .parse::<SocketAddr>()
                 .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?,
             provider.server_name.clone(),
+            BoundedConnectorUrlV2::new(&provider.canonical_url)
+                .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?,
+            Digest32V2::new(decode_hex_32(&provider.server_spki_sha256)?),
             root_certificate,
             client_certificates,
             loaded.keys.provider_tls_private_key.clone(),
@@ -698,6 +810,8 @@ mod implementation {
             &bootstrap.effect_ledger_projection_path,
             &bootstrap.journal_path,
             &bootstrap.rollback_anchor_path,
+            &bootstrap.connector_registry_path,
+            &bootstrap.connector_registry_anchor_path,
             &bootstrap.effect_gate_path,
             &bootstrap.worker.sandbox_program_path,
             &bootstrap.worker.worker_program_path,
@@ -894,6 +1008,27 @@ mod implementation {
     }
 
     fn verify_runtime_paths(bootstrap: &BootstrapDtoV2) -> Result<(), ExecdDaemonErrorV2> {
+        let durable_paths = [
+            bootstrap.journal_path.as_path(),
+            bootstrap.rollback_anchor_path.as_path(),
+            bootstrap.connector_registry_path.as_path(),
+            bootstrap.connector_registry_anchor_path.as_path(),
+        ];
+        let paths_are_normal = durable_paths.iter().all(|path| {
+            path.is_absolute()
+                && path.components().all(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::RootDir | std::path::Component::Normal(_)
+                    )
+                })
+        });
+        let paths_are_pairwise_distinct = durable_paths.iter().enumerate().all(|(index, path)| {
+            durable_paths
+                .iter()
+                .skip(index + 1)
+                .all(|other| path != other)
+        });
         if !bootstrap.journal_path.is_absolute()
             || bootstrap
                 .journal_path
@@ -901,6 +1036,15 @@ mod implementation {
                 .and_then(|name| name.to_str())
                 != Some("execd-journal-v2.cbor")
             || !bootstrap.rollback_anchor_path.is_absolute()
+            || !bootstrap.connector_registry_path.is_absolute()
+            || bootstrap
+                .connector_registry_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                != Some("connector-registry-v2.cbor")
+            || !bootstrap.connector_registry_anchor_path.is_absolute()
+            || !paths_are_normal
+            || !paths_are_pairwise_distinct
             || !bootstrap.effect_gate_path.is_absolute()
             || !bootstrap.effect_ledger_projection_path.is_absolute()
             || bootstrap.journal_schema_version == 0
@@ -909,6 +1053,24 @@ mod implementation {
             return Err(ExecdDaemonErrorV2::DeploymentUnavailable);
         }
         Ok(())
+    }
+
+    fn derive_connector_runtime_key_v2(
+        master_key: &[u8; 32],
+        domain: &[u8],
+        installation_id: Digest32V2,
+        store_id: Digest32V2,
+    ) -> Result<[u8; 32], ExecdDaemonErrorV2> {
+        let mut mac = Hmac::<Sha256>::new_from_slice(master_key)
+            .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
+        mac.update(domain);
+        mac.update(installation_id.as_bytes());
+        mac.update(store_id.as_bytes());
+        let derived: [u8; 32] = mac.finalize().into_bytes().into();
+        if derived == [0; 32] {
+            return Err(ExecdDaemonErrorV2::DeploymentUnavailable);
+        }
+        Ok(derived)
     }
 
     fn open_read_only_single_link(path: &Path) -> Result<File, ExecdDaemonErrorV2> {
@@ -1090,6 +1252,44 @@ mod implementation {
         }
     }
 
+    impl RollbackProtectedStateAnchorV2 for LinuxAuthenticatedExecdAnchorV2 {
+        fn current_head(&self) -> Result<RollbackProtectedStateHeadV2, G4Error> {
+            let (sequence, digest) = self
+                .read_raw_head()
+                .map_err(|_| G4Error::DurableStateRollback)?;
+            RollbackProtectedStateHeadV2::new(sequence, digest)
+        }
+
+        fn compare_and_advance(
+            &mut self,
+            expected: RollbackProtectedStateHeadV2,
+            next: RollbackProtectedStateHeadV2,
+        ) -> Result<(), G4Error> {
+            if self
+                .read_raw_head()
+                .map_err(|_| G4Error::DurableStateRollback)?
+                != (expected.sequence(), expected.state_digest())
+                || next.sequence()
+                    != expected
+                        .sequence()
+                        .checked_add(1)
+                        .ok_or(G4Error::DurableStateRollback)?
+            {
+                return Err(G4Error::DurableStateRollback);
+            }
+            self.write_raw_head(next.sequence(), next.state_digest())
+                .map_err(|_| G4Error::DurableStateIo)?;
+            if self
+                .read_raw_head()
+                .map_err(|_| G4Error::DurableStateRollback)?
+                != (next.sequence(), next.state_digest())
+            {
+                return Err(G4Error::DurableStateRollback);
+            }
+            Ok(())
+        }
+    }
+
     fn decode_hex_32(value: &str) -> Result<[u8; 32], ExecdDaemonErrorV2> {
         decode_hex_bounded(value, 32)?
             .try_into()
@@ -1177,6 +1377,14 @@ mod implementation {
                 effect_receipt_key_id: "13".repeat(32),
                 seal_key_id: "14".repeat(32),
                 connector_set_digest: "15".repeat(32),
+                connector_registry_path: "/var/lib/savana/execd/connector-registry-v2.cbor".into(),
+                connector_registry_anchor_path:
+                    "/var/lib/savana/execd/connector-registry-anchor-v2.bin".into(),
+                connector_registry_store_id: "16".repeat(32),
+                connector_registry_genesis_digest: "15".repeat(32),
+                connector_authority_key_id: "00".repeat(32),
+                connector_authority_public_key: "00".repeat(32),
+                user_tier_host_allowlist: vec![],
                 journal_schema_version: 2,
                 journal_key_epoch: 1,
                 worker: WorkerDtoV2 {
@@ -1192,6 +1400,8 @@ mod implementation {
                 provider: ProviderDtoV2 {
                     address: "127.0.0.1:443".to_owned(),
                     server_name: "provider.invalid".to_owned(),
+                    canonical_url: "https://provider.invalid/".to_owned(),
+                    server_spki_sha256: "30".repeat(32),
                     root_certificate_path: "/root.der".into(),
                     root_certificate_digest: "31".repeat(32),
                     client_certificate_paths: vec!["/client.der".into()],
@@ -1206,6 +1416,121 @@ mod implementation {
             assert_eq!(
                 verify_runtime_paths(&bootstrap),
                 Err(ExecdDaemonErrorV2::DeploymentUnavailable)
+            );
+
+            bootstrap.journal_path = "/var/lib/savana/execd/execd-journal-v2.cbor".into();
+            bootstrap.connector_registry_path =
+                "/var/lib/savana/execd/renamed-registry.cbor".into();
+            assert_eq!(
+                verify_runtime_paths(&bootstrap),
+                Err(ExecdDaemonErrorV2::DeploymentUnavailable)
+            );
+
+            bootstrap.connector_registry_path = bootstrap.journal_path.clone();
+            assert_eq!(
+                verify_runtime_paths(&bootstrap),
+                Err(ExecdDaemonErrorV2::DeploymentUnavailable)
+            );
+
+            bootstrap.connector_registry_path =
+                "/var/lib/savana/execd/connector-registry-v2.cbor".into();
+            bootstrap.connector_registry_anchor_path = bootstrap.rollback_anchor_path.clone();
+            assert_eq!(
+                verify_runtime_paths(&bootstrap),
+                Err(ExecdDaemonErrorV2::DeploymentUnavailable)
+            );
+
+            let original = BootstrapDtoV2 {
+                connector_registry_anchor_path:
+                    "/var/lib/savana/execd/connector-registry-anchor-v2.bin".into(),
+                ..bootstrap.clone()
+            };
+            for (left, right) in [
+                ("journal", "rollback"),
+                ("journal", "connector-anchor"),
+                ("registry", "rollback"),
+                ("registry", "connector-anchor"),
+            ] {
+                let mut aliased = original.clone();
+                let value = match right {
+                    "rollback" => aliased.rollback_anchor_path.clone(),
+                    "connector-anchor" => aliased.connector_registry_anchor_path.clone(),
+                    _ => unreachable!(),
+                };
+                match left {
+                    "journal" => aliased.journal_path = value,
+                    "registry" => aliased.connector_registry_path = value,
+                    _ => unreachable!(),
+                }
+                assert_eq!(
+                    verify_runtime_paths(&aliased),
+                    Err(ExecdDaemonErrorV2::DeploymentUnavailable),
+                    "{left} must not alias {right}"
+                );
+            }
+
+            let mut non_normal = original;
+            non_normal.connector_registry_anchor_path =
+                "/var/lib/savana/execd/../execd/anchor".into();
+            assert_eq!(
+                verify_runtime_paths(&non_normal),
+                Err(ExecdDaemonErrorV2::DeploymentUnavailable)
+            );
+        }
+
+        #[test]
+        fn connector_store_keys_are_domain_installation_and_namespace_separated() {
+            let master = [0x41; 32];
+            let installation = Digest32V2::new([0x42; 32]);
+            let store = Digest32V2::new([0x43; 32]);
+            let key = derive_connector_runtime_key_v2(
+                &master,
+                CONNECTOR_STORE_KEY_DERIVATION_DOMAIN_V2,
+                installation,
+                store,
+            )
+            .unwrap();
+            assert_eq!(
+                key,
+                derive_connector_runtime_key_v2(
+                    &master,
+                    CONNECTOR_STORE_KEY_DERIVATION_DOMAIN_V2,
+                    installation,
+                    store,
+                )
+                .unwrap()
+            );
+            assert_ne!(key, [0; 32]);
+            assert_ne!(key, master);
+            assert_ne!(
+                key,
+                derive_connector_runtime_key_v2(
+                    &master,
+                    CONNECTOR_ANCHOR_KEY_DERIVATION_DOMAIN_V2,
+                    installation,
+                    store,
+                )
+                .unwrap()
+            );
+            assert_ne!(
+                key,
+                derive_connector_runtime_key_v2(
+                    &master,
+                    CONNECTOR_STORE_KEY_DERIVATION_DOMAIN_V2,
+                    Digest32V2::new([0x44; 32]),
+                    store,
+                )
+                .unwrap()
+            );
+            assert_ne!(
+                key,
+                derive_connector_runtime_key_v2(
+                    &master,
+                    CONNECTOR_STORE_KEY_DERIVATION_DOMAIN_V2,
+                    installation,
+                    Digest32V2::new([0x45; 32]),
+                )
+                .unwrap()
             );
         }
 

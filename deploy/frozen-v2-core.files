@@ -1,6 +1,7 @@
 crates/savana-agentd/src/state_owner.rs
 crates/savana-approvald/src/protocol_state_owner.rs
 crates/savana-approvald/src/state_owner.rs
+crates/savana-execd/src/connector_registry.rs
 crates/savana-execd/src/state_owner.rs
 crates/savana-ingressd/src/state_owner.rs
 crates/savana-input-runtime/Cargo.toml

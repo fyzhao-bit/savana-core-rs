@@ -589,7 +589,7 @@ const fn error_set_for(role: EndpointRoleV2, tag: u16) -> Option<ErrorSetV2> {
             Some(ErrorSetV2::Query)
         }
         (EndpointRoleV2::ApprovalAdmin, 100 | 101) => Some(ErrorSetV2::ControlMutation),
-        (EndpointRoleV2::AgentKernel, 29 | 34) | (EndpointRoleV2::KernelExecutor, 60 | 62 | 63) => {
+        (EndpointRoleV2::AgentKernel, 29 | 34) | (EndpointRoleV2::KernelExecutor, 60 | 62..=64) => {
             Some(ErrorSetV2::Execution)
         }
         _ => None,

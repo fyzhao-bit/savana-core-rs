@@ -11,9 +11,11 @@ use savana_kernel_protocol::v2::{
     AgentSessionHandleV2, AgentSessionStatusV2, AgentUiAuthenticationPreparationHandleV2,
     AgentUiAuthorizationHandleV2, ApprovalBindingV2, ApprovalDecisionV2, ApprovalPurposeV2,
     AuthorityHandleKeyV2, AuthorizeToolCallResponseV2, BootIdV2, BoundedApprovalDisplayTextV2,
-    BoundedCiphertextV2, CancelKernelTaskRequestV2, CancelKernelTaskResponseV2,
-    ClaimAgentSessionRequestV2, ClaimAgentSessionResponseV2, CommitPlannerValueRequestV2,
-    CommitPlannerValueResponseV2, ConnectorUiAuthorizationHandleV2, Digest32V2,
+    BoundedCiphertextV2, BoundedConnectorRegistryDeltaV2, CancelKernelTaskRequestV2,
+    CancelKernelTaskResponseV2, ClaimAgentSessionRequestV2, ClaimAgentSessionResponseV2,
+    CommitPlannerValueRequestV2, CommitPlannerValueResponseV2, ConnectorRegistrySyncModeV2,
+    ConnectorRegistrySyncPageV2, ConnectorRegistrySyncRequestV2, ConnectorRegistrySyncScopeV2,
+    ConnectorRegistrySyncStatusV2, ConnectorUiAuthorizationHandleV2, Digest32V2,
     DispatchCoreV2 as ProtocolDispatchCoreV2, DispatchExecutionResponseV2, DispatchRequestV2,
     DispatchSubjectV2 as ProtocolDispatchSubjectV2, DurableRunIdV2, DurableTaskIdV2,
     Ed25519KeyIdV2, EvaluateToolCallRequestV2, EvaluateToolCallResponseV2, ExecutionHandleV2,
@@ -48,19 +50,21 @@ use savana_kernel_protocol::v2::{
     UiAuthenticationBindingV2, UiAuthenticationPurposeV2, UnixMillisV2,
     UnsignedAgentAuthenticationClosureDescriptorV2, UnsignedApprovalEnvelopeV2,
     UnsignedDurableTaskCorrelationV2, UnsignedUiAuthenticationEnvelopeV2, V2DecodeContext,
-    ValueHandleV2,
+    ValueHandleV2, MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTAS_V2,
+    MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTA_BYTES_V2,
 };
 use savana_policy_core::v2::{
-    decode_provenance_record_v2, encode_provenance_record_v2, provenance_digest_v2,
-    value_digest_v2, ActiveToolRegistryV2, ClosedCardinalityV2, ClosedDeclassificationPurposeV2,
-    ConnectorDescriptorV2, ConnectorRegistryDeltaV2, ConnectorTierV2, ConnectorTransportV2,
-    DeclassificationTransitionV2, DispatchQuotaSubjectV2, DurableG4StateV2, EffectSetV2,
-    G5DecisionBranchV2, HandoffJudgmentV2, IdentifierV2, KernelPreparedDispatchV2, KernelValueV2,
-    OntologyExprV2, PlannerSlotConfidentialityV2 as PolicySlotConfidentialityV2,
-    PreparedConnectorRegistryDeltaV2, ProvenanceContextV2, ProvenanceRecordV2,
-    ResolvedExecutionTicketV2, SharedVerifiedConnectorRegistryV2, StoredBindingResolverV2,
-    StoredValueRecordV2, TokenSetDigestEntryV2, VerifiedActionIntentMaterialV2,
-    VerifiedEffectGateLeaseV2, VerifiedInternalSlotMaterialV2, VerifiedInternalValidatorRegistryV2,
+    connector_host_allowlist_digest_v2, decode_provenance_record_v2, encode_provenance_record_v2,
+    provenance_digest_v2, value_digest_v2, ActiveToolRegistryV2, ClosedCardinalityV2,
+    ClosedDeclassificationPurposeV2, ConnectorDescriptorV2, ConnectorRegistryDeltaV2,
+    ConnectorRegistryStateV2, ConnectorTierV2, ConnectorTransportV2, DeclassificationTransitionV2,
+    DispatchQuotaSubjectV2, DurableG4StateV2, EffectSetV2, G5DecisionBranchV2, HandoffJudgmentV2,
+    IdentifierV2, KernelPreparedDispatchV2, KernelValueV2, OntologyExprV2,
+    PlannerSlotConfidentialityV2 as PolicySlotConfidentialityV2, PreparedConnectorRegistryDeltaV2,
+    ProvenanceContextV2, ProvenanceRecordV2, ResolvedExecutionTicketV2,
+    SharedVerifiedConnectorRegistryV2, StoredBindingResolverV2, StoredValueRecordV2,
+    TokenSetDigestEntryV2, VerifiedActionIntentMaterialV2, VerifiedEffectGateLeaseV2,
+    VerifiedInternalSlotMaterialV2, VerifiedInternalValidatorRegistryV2,
     VerifiedOntologyEvaluationV2, VerifiedPlanArgumentV2, VerifiedPolicyDispositionV2,
     VerifiedProjectionOutputsV2, VerifiedQuotaLimitV2, VerifiedResolvedRelationSetV2,
 };
@@ -264,11 +268,32 @@ fn gate_execution_before_durable_prepare<T>(
         ProvenanceRecordV2,
         KernelAgentAuthorityErrorV2,
     >,
+    synchronize_registry: impl FnOnce() -> Result<(), KernelAgentAuthorityErrorV2>,
     prepare_durable_dispatch: impl FnOnce(Digest32V2) -> Result<T, KernelAgentAuthorityErrorV2>,
 ) -> Result<(T, ProvenanceRecordV2), KernelAgentAuthorityErrorV2> {
     let declassification = declassify_and_authorize_handoff()?;
+    synchronize_registry()?;
     let sealed_payload_digest =
         presealed_execution_payload_digest(exact_plaintext, declassification.provenance_digest());
+    let prepared = prepare_durable_dispatch(sealed_payload_digest)?;
+    Ok((prepared, declassification))
+}
+
+fn gate_final_release_before_durable_prepare<T>(
+    exact_plaintext: &[u8],
+    declassify_and_authorize_handoff: impl FnOnce() -> Result<
+        ProvenanceRecordV2,
+        KernelAgentAuthorityErrorV2,
+    >,
+    synchronize_registry: impl FnOnce() -> Result<(), KernelAgentAuthorityErrorV2>,
+    prepare_durable_dispatch: impl FnOnce(Digest32V2) -> Result<T, KernelAgentAuthorityErrorV2>,
+) -> Result<(T, ProvenanceRecordV2), KernelAgentAuthorityErrorV2> {
+    let declassification = declassify_and_authorize_handoff()?;
+    synchronize_registry()?;
+    let sealed_payload_digest = presealed_final_release_payload_digest(
+        exact_plaintext,
+        declassification.provenance_digest(),
+    );
     let prepared = prepare_durable_dispatch(sealed_payload_digest)?;
     Ok((prepared, declassification))
 }
@@ -939,6 +964,220 @@ impl KernelG7RuntimeV2 {
             executor,
         })
     }
+
+    fn synchronize_connector_registry(
+        &self,
+        installation_id: Digest32V2,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        now: UnixMillisV2,
+    ) -> Result<(), KernelAgentAuthorityErrorV2> {
+        let source = self
+            .connector_registry
+            .snapshot()
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        if source.genesis_digest() != self.connector_registry_genesis_digest
+            || source.connector_authority_public_key() != self.connector_authority_public_key
+        {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        let scope = ConnectorRegistrySyncScopeV2::new(
+            installation_id,
+            active_state_manifest_digest,
+            deployment_generation,
+            source.genesis_digest(),
+            self.connector_authority_key_id,
+            FixedBytes32V2::new(self.connector_authority_public_key),
+            connector_host_allowlist_digest_v2(source.user_host_allowlist())
+                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?,
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let deadline = checked_deadline(now, 5_000)?;
+        let probe = ConnectorRegistrySyncRequestV2::new(scope, ConnectorRegistrySyncModeV2::Probe)
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let mut response = self
+            .executor
+            .synchronize_connector_registry(connector_sync_request_id()?, deadline, probe)
+            .map_err(map_executor_client_error)?;
+        validate_connector_registry_sync_observation_v2(&source, response)?;
+
+        if !scope.authority_enabled() {
+            if source.sequence() != 0
+                || source.head_digest() != source.genesis_digest()
+                || response.status() != ConnectorRegistrySyncStatusV2::DisabledGenesisOnly
+                || response.local_sequence() != 0
+                || response.local_head_digest() != source.genesis_digest()
+            {
+                return Err(KernelAgentAuthorityErrorV2::StateConflict);
+            }
+            return Ok(());
+        }
+        if response.status() == ConnectorRegistrySyncStatusV2::DisabledGenesisOnly
+            || response.status() == ConnectorRegistrySyncStatusV2::Diverged
+        {
+            return Err(KernelAgentAuthorityErrorV2::StateConflict);
+        }
+        if response.local_sequence() == source.sequence() {
+            return if response.local_head_digest() == source.head_digest() {
+                Ok(())
+            } else {
+                Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+            };
+        }
+        if response.status() != ConnectorRegistrySyncStatusV2::Behind {
+            return Err(KernelAgentAuthorityErrorV2::StateConflict);
+        }
+
+        let mut page_count = 0usize;
+        while response.local_sequence() < source.sequence() {
+            page_count = page_count
+                .checked_add(1)
+                .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?;
+            if page_count > 4_096 {
+                return Err(KernelAgentAuthorityErrorV2::LimitExceeded);
+            }
+            let page = build_connector_registry_sync_page_v2(
+                &source,
+                response.local_sequence(),
+                response.local_head_digest(),
+            )?;
+            let expected_sequence = page.page_final_sequence();
+            let expected_head = page.page_final_head_digest();
+            let source_complete = expected_sequence == source.sequence();
+            let apply = ConnectorRegistrySyncRequestV2::new(
+                scope,
+                ConnectorRegistrySyncModeV2::ApplyPage(page),
+            )
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+            response = self
+                .executor
+                .synchronize_connector_registry(connector_sync_request_id()?, deadline, apply)
+                .map_err(map_executor_client_error)?;
+            validate_connector_registry_sync_observation_v2(&source, response)?;
+            if response.local_sequence() != expected_sequence
+                || response.local_head_digest() != expected_head
+                || (source_complete
+                    && response.status() != ConnectorRegistrySyncStatusV2::Converged)
+                || (!source_complete && response.status() != ConnectorRegistrySyncStatusV2::Behind)
+            {
+                return Err(KernelAgentAuthorityErrorV2::StateConflict);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn connector_registry_head_at_sequence_v2(
+    source: &ConnectorRegistryStateV2,
+    sequence: u64,
+) -> Result<Digest32V2, KernelAgentAuthorityErrorV2> {
+    if sequence > source.sequence() {
+        return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+    }
+    if sequence == 0 {
+        return Ok(source.genesis_digest());
+    }
+    if sequence == source.sequence() {
+        return Ok(source.head_digest());
+    }
+    let next_delta_index =
+        usize::try_from(sequence).map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+    let next_delta = source
+        .deltas()
+        .get(next_delta_index)
+        .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
+    if next_delta.sequence() != sequence.saturating_add(1) {
+        return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+    }
+    Ok(next_delta.previous_head_digest())
+}
+
+fn validate_connector_registry_sync_observation_v2(
+    source: &ConnectorRegistryStateV2,
+    response: savana_kernel_protocol::v2::ConnectorRegistrySyncResponseV2,
+) -> Result<(), KernelAgentAuthorityErrorV2> {
+    if response.status() == ConnectorRegistrySyncStatusV2::Diverged
+        || response.local_sequence() > source.sequence()
+        || connector_registry_head_at_sequence_v2(source, response.local_sequence())?
+            != response.local_head_digest()
+    {
+        return Err(KernelAgentAuthorityErrorV2::StateConflict);
+    }
+    Ok(())
+}
+
+fn build_connector_registry_sync_page_v2(
+    source: &ConnectorRegistryStateV2,
+    base_sequence: u64,
+    base_head_digest: Digest32V2,
+) -> Result<ConnectorRegistrySyncPageV2, KernelAgentAuthorityErrorV2> {
+    if base_sequence >= source.sequence()
+        || connector_registry_head_at_sequence_v2(source, base_sequence)? != base_head_digest
+    {
+        return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+    }
+    let start =
+        usize::try_from(base_sequence).map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+    let remaining = source
+        .deltas()
+        .get(start..)
+        .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
+    let mut total_bytes = 0usize;
+    let mut deltas = Vec::new();
+    deltas
+        .try_reserve(
+            remaining
+                .len()
+                .min(MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTAS_V2),
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    for delta in remaining {
+        if deltas.len() == MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTAS_V2 {
+            break;
+        }
+        let next_total = total_bytes
+            .checked_add(delta.canonical_bytes().len())
+            .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?;
+        if next_total > MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTA_BYTES_V2 {
+            if deltas.is_empty() {
+                return Err(KernelAgentAuthorityErrorV2::LimitExceeded);
+            }
+            break;
+        }
+        let expected_sequence = base_sequence
+            .checked_add(
+                u64::try_from(deltas.len())
+                    .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?,
+            )
+            .and_then(|sequence| sequence.checked_add(1))
+            .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?;
+        if delta.sequence() != expected_sequence
+            || delta.previous_head_digest()
+                != connector_registry_head_at_sequence_v2(source, expected_sequence - 1)?
+        {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        deltas.push(
+            BoundedConnectorRegistryDeltaV2::new(delta.canonical_bytes().to_vec())
+                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?,
+        );
+        total_bytes = next_total;
+    }
+    let page_final_sequence = base_sequence
+        .checked_add(
+            u64::try_from(deltas.len()).map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?,
+        )
+        .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?;
+    ConnectorRegistrySyncPageV2::new(
+        base_sequence,
+        base_head_digest,
+        page_final_sequence,
+        connector_registry_head_at_sequence_v2(source, page_final_sequence)?,
+        source.sequence(),
+        source.head_digest(),
+        deltas,
+    )
+    .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)
 }
 
 impl KernelG4G5RuntimeV2 {
@@ -3409,6 +3648,14 @@ impl KernelAgentAuthorityV2 {
                 }
                 Ok(declassification)
             },
+            || {
+                g7.synchronize_connector_registry(
+                    self.config.installation_id,
+                    active_state_manifest_digest,
+                    deployment_generation,
+                    now,
+                )
+            },
             |sealed_payload_digest| {
                 policy
                     .durable
@@ -4277,74 +4524,86 @@ impl KernelAgentAuthorityV2 {
             .declassification_rules
             .snapshot()
             .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
-        let release_declassification = ProvenanceRecordV2::declassify(
-            &release_value,
-            release_context,
-            release_transition,
-            &declassification_rules,
-            ClosedDeclassificationPurposeV2::FinalRelease.purpose_digest(),
-            binding.token_set_digest(),
-            Some(settlement),
-            &release_parents,
-            pending.policy_allowed_effects,
-            now.get(),
-        )
-        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
-        if release_declassification.judge_handoff(release_transition, &declassification_rules)
-            != HandoffJudgmentV2::Admits
-        {
-            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
-        }
-        let release =
-            savana_policy_core::v2::VerifiedFinalReleaseRecordV2::from_authorized_vault_release(
-                self.config.installation_id,
-                active_state_manifest_digest,
-                pending.durable_task_id,
-                pending.durable_run_id,
-                binding.durable_release_id(),
-                binding,
-            )
-            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
-        let quota = VerifiedQuotaLimitV2::from_verified_policy(
-            g7.quota_limit,
-            g7.quota_policy_digest,
-            DispatchQuotaSubjectV2::final_release(binding.release_quota_subject_digest()),
-        )
-        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
-        let effect_lease = VerifiedEffectGateLeaseV2::from_verified_ledger_projection(
-            g7.effect_ledger_projection,
-            self.config.installation_id,
-            active_state_manifest_digest,
-            deployment_generation,
-            effect_fence_epoch,
-            g7.executor_identity,
-            g7.executor_key_id,
-            &g7.connector_registry,
-            checked_deadline(now, 30_000)?,
-        )
-        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
-        let resolved_ticket =
-            savana_policy_core::v2::ResolvedFinalReleaseTicketV2::from_resolved_kernel_ticket(
-                ticket.commitment,
-                binding.durable_release_id(),
-                pending.binding_digest,
-            )
-            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
-        let sealed_payload_digest = presealed_final_release_payload_digest(
+        let (prepared, release_declassification) = gate_final_release_before_durable_prepare(
             plaintext.as_slice(),
-            release_declassification.provenance_digest(),
-        );
-        let prepared = policy
-            .durable
-            .prepare_verified_final_release_dispatch(
-                &release,
-                quota,
-                settlement,
-                resolved_ticket,
-                effect_lease,
-                sealed_payload_digest,
-            )
-            .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+            || {
+                let declassification = ProvenanceRecordV2::declassify(
+                    &release_value,
+                    release_context,
+                    release_transition,
+                    &declassification_rules,
+                    ClosedDeclassificationPurposeV2::FinalRelease.purpose_digest(),
+                    binding.token_set_digest(),
+                    Some(settlement),
+                    &release_parents,
+                    pending.policy_allowed_effects,
+                    now.get(),
+                )
+                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+                if declassification.judge_handoff(release_transition, &declassification_rules)
+                    != HandoffJudgmentV2::Admits
+                {
+                    return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+                }
+                Ok(declassification)
+            },
+            || {
+                g7.synchronize_connector_registry(
+                    self.config.installation_id,
+                    active_state_manifest_digest,
+                    deployment_generation,
+                    now,
+                )
+            },
+            |sealed_payload_digest| {
+                let release = savana_policy_core::v2::VerifiedFinalReleaseRecordV2::
+                    from_authorized_vault_release(
+                        self.config.installation_id,
+                        active_state_manifest_digest,
+                        pending.durable_task_id,
+                        pending.durable_run_id,
+                        binding.durable_release_id(),
+                        binding,
+                    )
+                    .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+                let quota = VerifiedQuotaLimitV2::from_verified_policy(
+                    g7.quota_limit,
+                    g7.quota_policy_digest,
+                    DispatchQuotaSubjectV2::final_release(binding.release_quota_subject_digest()),
+                )
+                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+                let effect_lease = VerifiedEffectGateLeaseV2::from_verified_ledger_projection(
+                    g7.effect_ledger_projection,
+                    self.config.installation_id,
+                    active_state_manifest_digest,
+                    deployment_generation,
+                    effect_fence_epoch,
+                    g7.executor_identity,
+                    g7.executor_key_id,
+                    &g7.connector_registry,
+                    checked_deadline(now, 30_000)?,
+                )
+                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+                let resolved_ticket = savana_policy_core::v2::ResolvedFinalReleaseTicketV2::
+                    from_resolved_kernel_ticket(
+                        ticket.commitment,
+                        binding.durable_release_id(),
+                        pending.binding_digest,
+                    )
+                    .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+                policy
+                    .durable
+                    .prepare_verified_final_release_dispatch(
+                        &release,
+                        quota,
+                        settlement,
+                        resolved_ticket,
+                        effect_lease,
+                        sealed_payload_digest,
+                    )
+                    .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)
+            },
+        )?;
         let protocol_core = protocol_dispatch_core(&prepared)?;
         let vault_commit =
             savana_vault::KernelPreparedReleaseDispatchV2::from_verified_kernel_commit(
@@ -5301,6 +5560,25 @@ impl KernelAgentAuthorityV2 {
         })
     }
 
+    pub(crate) fn synchronize_executor_connector_registry(
+        &self,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        now: UnixMillisV2,
+    ) -> Result<(), KernelAgentAuthorityErrorV2> {
+        self.ensure_durable_available()?;
+        self.policy
+            .as_ref()
+            .and_then(|policy| policy.g7.as_ref())
+            .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?
+            .synchronize_connector_registry(
+                self.config.installation_id,
+                active_state_manifest_digest,
+                deployment_generation,
+                now,
+            )
+    }
+
     #[cfg(test)]
     pub(crate) fn connector_authorization_retained_descriptor_bytes_for_test(&self) -> usize {
         0
@@ -5539,6 +5817,19 @@ fn random_bytes() -> Result<[u8; 32], KernelAgentAuthorityErrorV2> {
         return Err(KernelAgentAuthorityErrorV2::Unavailable);
     }
     Ok(bytes)
+}
+
+fn connector_sync_request_id(
+) -> Result<savana_kernel_protocol::v2::RequestIdV2, KernelAgentAuthorityErrorV2> {
+    for _ in 0..4 {
+        let entropy = random_bytes()?;
+        let mut request_id = [0_u8; 16];
+        request_id.copy_from_slice(&entropy[..16]);
+        if request_id != [0; 16] {
+            return Ok(savana_kernel_protocol::v2::RequestIdV2::new(request_id));
+        }
+    }
+    Err(KernelAgentAuthorityErrorV2::Unavailable)
 }
 
 fn claim_digest(
@@ -6122,6 +6413,7 @@ fn decode_prepared_claim_material(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::cell::Cell;
     use std::fs;
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::{Arc, Mutex};
@@ -6137,10 +6429,11 @@ pub(crate) mod tests {
         ActionIntentCurrentStateV2, ActionTemplateIdV2, AgentSessionHandleV2, AgentSessionStatusV2,
         ApprovalBindingV2, ApprovalPurposeV2, ArgumentNameV2, BootIdV2, CancelKernelTaskRequestV2,
         CommitPlannerValueRequestV2, ConnectorUiAuthorizationHandleV2, Digest32V2,
-        DispatchExecutionRequestV2, DisplayProjectionIdV2, DurableRunIdV2, DurableTaskIdV2,
-        Ed25519KeyIdV2, EffectLedgerProjectionBindingV2, EndpointRoleV2, EvaluateToolCallRequestV2,
-        EvaluateToolCallResponseV2, ExecutorIdentityV2, FixedOriginV2,
-        GetKernelTaskStatusRequestV2, ImplementationIdV2, KernelServiceHandshakeEdgeV2,
+        DispatchExecutionRequestV2, DisplayProjectionIdV2, DurableReleaseIdV2, DurableRunIdV2,
+        DurableTaskIdV2, Ed25519KeyIdV2, EffectLedgerProjectionBindingV2, EndpointRoleV2,
+        EvaluateToolCallRequestV2, EvaluateToolCallResponseV2, ExecutorIdentityV2,
+        FinalReleaseSemanticBindingV2, FixedOriginV2, GetKernelTaskStatusRequestV2,
+        HpkeX25519KeyIdV2, ImplementationIdV2, KernelServiceHandshakeEdgeV2,
         MaskedDocumentHandleV2, NamedArgumentValueBindingV2, Nonce32V2, PeerIdentityBindingV2,
         PlannerIntentKindV2, PlannerLimitsV2, PlannerPlanV2, PlannerPurposeV2, PlannerRouteIdV2,
         PlannerSlotRefV2, PlannerStepV2, PrepareConnectorRegistrationRequestV2,
@@ -6162,15 +6455,18 @@ pub(crate) mod tests {
         InternalValidatorDeclarationV2, KernelValueV2, LeakGateDutyV2, OntologyExprV2,
         OntologyOperandV2, OntologyScalarV2, OperationalTrustRootPurposeV2,
         OperationalTrustRootSetItemV2, OperationalTrustRootSetV2, ProvenanceContextV2,
-        ProvenanceRecordV2, RollbackProtectedStateAnchorV2, RollbackProtectedStateHeadV2,
-        SharedVerifiedConnectorRegistryV2, SignedToolDescriptorV2, UnsignedToolDescriptorV2,
-        VerifiedManifestToolConstraintSetV2, VerifiedManifestToolConstraintV2,
-        VerifiedPolicyDispositionV2, VerifiedPolicyToolActivationV2, VerifiedPolicyToolSetV2,
+        ProvenanceRecordV2, ResolvedFinalReleaseTicketV2, RollbackProtectedStateAnchorV2,
+        RollbackProtectedStateHeadV2, SharedVerifiedConnectorRegistryV2, SignedToolDescriptorV2,
+        UnsignedToolDescriptorV2, VerifiedEffectGateLeaseV2, VerifiedFinalReleaseRecordV2,
+        VerifiedFinalReleaseSettlementV2, VerifiedManifestToolConstraintSetV2,
+        VerifiedManifestToolConstraintV2, VerifiedPolicyDispositionV2,
+        VerifiedPolicyToolActivationV2, VerifiedPolicyToolSetV2, VerifiedQuotaLimitV2,
         VerifiedRegistryPublisherV2, VerifiedToolRegistryV2,
     };
     use sha2::{Digest as _, Sha256};
 
     use super::{
+        build_connector_registry_sync_page_v2, gate_final_release_before_durable_prepare,
         hpke_x25519_key_id, intersect_planner_request, presealed_execution_payload_digest,
         presealed_final_release_payload_digest, ExecutionDeclassificationGateTestObservationV2,
         IntentRecordStateV2, KernelAgentAuthorityErrorV2, KernelAgentAuthorityV2,
@@ -6702,6 +6998,37 @@ pub(crate) mod tests {
             .bytes(&signature)
             .unwrap();
         delta.into_writer()
+    }
+
+    #[test]
+    fn registry_sync_page_comes_only_from_the_verified_canonical_chain() {
+        let authority = SigningKey::from_bytes(&[0xd7; 32]);
+        let genesis = Digest32V2::new([0xd8; 32]);
+        let mut registry = ConnectorRegistryStateV2::from_verified_genesis(
+            genesis,
+            authority.verifying_key().to_bytes(),
+            vec![BoundedConnectorHostV2::new("example.com").unwrap()],
+            vec![],
+        )
+        .unwrap();
+        let (descriptor, _) = valid_user_connector_descriptor();
+        let canonical_delta = signed_connector_add_delta(genesis, &descriptor, &authority);
+        registry.apply_canonical_delta(&canonical_delta).unwrap();
+
+        let page = build_connector_registry_sync_page_v2(&registry, 0, genesis).unwrap();
+        assert_eq!(page.base_sequence(), 0);
+        assert_eq!(page.base_head_digest(), genesis);
+        assert_eq!(page.page_final_sequence(), 1);
+        assert_eq!(page.page_final_head_digest(), registry.head_digest());
+        assert_eq!(page.source_final_sequence(), 1);
+        assert_eq!(page.source_final_head_digest(), registry.head_digest());
+        assert_eq!(page.deltas().len(), 1);
+        assert_eq!(page.deltas()[0].as_bytes(), canonical_delta);
+
+        assert_eq!(
+            build_connector_registry_sync_page_v2(&registry, 0, Digest32V2::new([0xd9; 32])),
+            Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+        );
     }
 
     pub(crate) fn install_connector_runtime(
@@ -7717,6 +8044,14 @@ pub(crate) mod tests {
     fn planner_declassification_rules(
         include_approval_display: bool,
     ) -> crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2 {
+        planner_declassification_rules_with_handoffs(include_approval_display, None, None)
+    }
+
+    fn planner_declassification_rules_with_handoffs(
+        include_approval_display: bool,
+        execution_reader: Option<Digest32V2>,
+        final_release_reader: Option<Digest32V2>,
+    ) -> crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2 {
         let installer = SigningKey::from_bytes(&[0x9e; 32]);
         let authority = SigningKey::from_bytes(&[0x9f; 32]);
         let family = Digest32V2::new([0xa0; 32]);
@@ -7759,6 +8094,36 @@ pub(crate) mod tests {
                     LeakGateDutyV2::BlocklistOnly,
                     None,
                     None,
+                    1,
+                    10_000,
+                )
+                .unwrap(),
+            );
+        }
+        if let Some(reader) = execution_reader {
+            rules.push(
+                DeclassificationRuleV2::new_for_test(
+                    4,
+                    ClosedDeclassificationPurposeV2::ExecutionHandoff,
+                    declassification_implementation_digest_v2(4).unwrap(),
+                    LeakGateDutyV2::BlocklistOnly,
+                    Some(vec![reader]),
+                    None,
+                    1,
+                    10_000,
+                )
+                .unwrap(),
+            );
+        }
+        if let Some(reader) = final_release_reader {
+            rules.push(
+                DeclassificationRuleV2::new_for_test(
+                    5,
+                    ClosedDeclassificationPurposeV2::FinalRelease,
+                    declassification_implementation_digest_v2(5).unwrap(),
+                    LeakGateDutyV2::BlocklistOnly,
+                    Some(vec![reader]),
+                    Some(300_000),
                     1,
                     10_000,
                 )
@@ -8435,6 +8800,37 @@ pub(crate) mod tests {
             "the generic public refusal must come from the real execution-handoff declassification gate"
         );
 
+        fixture
+            .authority
+            .policy
+            .as_mut()
+            .unwrap()
+            .declassification_rules = planner_declassification_rules_with_handoffs(
+            false,
+            Some(Digest32V2::new([0xa7; 32])),
+            None,
+        );
+        assert_eq!(
+            fixture.authority.dispatch_execution(
+                RequestIdV2::new([0xc5; 16]),
+                DispatchExecutionRequestV2::new(ticket),
+                fixture.caller_identity,
+                active_state_manifest_digest,
+                deployment_generation,
+                effect_fence_epoch,
+                UnixMillisV2::new(206),
+            ),
+            Err(KernelAgentAuthorityErrorV2::Expired),
+            "after declassification succeeds, sync must fail before durable prepare"
+        );
+        assert_eq!(
+            fixture
+                .authority
+                .execution_declassification_gate_test_observation,
+            None,
+            "a registry-sync refusal must not impersonate the earlier declassification gate"
+        );
+
         let (head_after, journal_after, quota_after) = {
             let durable = &fixture.authority.policy.as_ref().unwrap().durable;
             (
@@ -8452,6 +8848,161 @@ pub(crate) mod tests {
             fixture.authority.intents[0].state,
             IntentRecordStateV2::Authorized
         ));
+    }
+
+    #[test]
+    fn final_release_sync_refusal_precedes_real_durable_prepare_and_quota_reservation() {
+        let installation = Digest32V2::new([0xd1; 32]);
+        let manifest = Digest32V2::new([0xd2; 32]);
+        let run = DurableRunIdV2::new([0xd3; 32]);
+        let release_id = DurableReleaseIdV2::new([0xd4; 32]);
+        let executor = ExecutorIdentityV2::new([0xd5; 32]);
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.path().join("kernel-g4-state-v2.cbor");
+        let mut durable = DurableG4StateV2::open(
+            &path,
+            [0xd6; 32],
+            DurableStateNamespaceV2::from_verified_installation(
+                installation,
+                Digest32V2::new([0xd7; 32]),
+            )
+            .unwrap(),
+            Box::new(TestG4StateAnchorV2::default()),
+        )
+        .unwrap();
+        let binding = FinalReleaseSemanticBindingV2::from_nonzero_components(
+            release_id,
+            Digest32V2::new([0xd8; 32]),
+            Digest32V2::new([0xd9; 32]),
+            Digest32V2::new([0xda; 32]),
+            Digest32V2::new([0xdb; 32]),
+            Digest32V2::new([0xdc; 32]),
+            Digest32V2::new([0xdd; 32]),
+            Digest32V2::new([0xde; 32]),
+            Digest32V2::new([0xdf; 32]),
+            Digest32V2::new(*executor.as_bytes()),
+            Digest32V2::new([0xe0; 32]),
+        )
+        .unwrap();
+        let release = VerifiedFinalReleaseRecordV2::from_authorized_vault_release(
+            installation,
+            manifest,
+            DurableTaskIdV2::new([0xe1; 32]),
+            run,
+            release_id,
+            binding,
+        )
+        .unwrap();
+        let settlement = VerifiedFinalReleaseSettlementV2::from_consumed_exact_settlement(
+            Digest32V2::new([0xe2; 32]),
+            release_id,
+            binding.semantic_digest().unwrap(),
+            binding.destination_digest(),
+            binding.token_set_digest(),
+            manifest,
+            UnixMillisV2::new(10),
+            UnixMillisV2::new(100),
+        )
+        .unwrap();
+        let quota_subject =
+            DispatchQuotaSubjectV2::final_release(binding.release_quota_subject_digest());
+        let quota = VerifiedQuotaLimitV2::from_verified_policy(
+            1,
+            Digest32V2::new([0xe3; 32]),
+            quota_subject,
+        )
+        .unwrap();
+        let registry = SharedVerifiedConnectorRegistryV2::from_verified_state(
+            ConnectorRegistryStateV2::from_verified_genesis(
+                Digest32V2::new([0xe4; 32]),
+                [0; 32],
+                vec![],
+                vec![],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let effect_lease = VerifiedEffectGateLeaseV2::from_authenticated_ledger(
+            installation,
+            manifest,
+            7,
+            9,
+            false,
+            executor,
+            HpkeX25519KeyIdV2::new([0xe5; 32]),
+            &registry,
+            UnixMillisV2::new(10_000),
+        )
+        .unwrap();
+        let resolved_ticket = ResolvedFinalReleaseTicketV2::from_resolved_kernel_ticket(
+            Digest32V2::new([0xe6; 32]),
+            release_id,
+            binding.semantic_digest().unwrap(),
+        )
+        .unwrap();
+        let value = KernelValueV2::bytes(b"authorized release".to_vec()).unwrap();
+        let provenance = ProvenanceRecordV2::from_verified_kernel_input(
+            &value,
+            ProvenanceContextV2::from_authenticated_runtime(
+                ProducerIdentityV2::new([0xe7; 32]),
+                run,
+                manifest,
+                UnixMillisV2::new(20),
+                UnixMillisV2::new(1_000),
+            )
+            .unwrap(),
+            Digest32V2::new([0xe8; 32]),
+            Digest32V2::new([0xe9; 32]),
+            Digest32V2::new([0xea; 32]),
+            Digest32V2::new([0xeb; 32]),
+            EffectSetV2::FINAL_RELEASE,
+        )
+        .unwrap();
+        let head_before = durable.authenticated_state_head().unwrap();
+        let journal_before = durable.recovery_projection().unwrap();
+        let quota_before = durable.quota_counter(run, quota_subject);
+        let bytes_before = fs::read(&path).ok();
+        let declassification_finished = Cell::new(false);
+        let synchronization_attempted = Cell::new(false);
+        let durable_prepare_called = Cell::new(false);
+
+        let result = gate_final_release_before_durable_prepare(
+            b"authorized release",
+            || {
+                declassification_finished.set(true);
+                Ok(provenance)
+            },
+            || {
+                assert!(declassification_finished.get());
+                synchronization_attempted.set(true);
+                Err(KernelAgentAuthorityErrorV2::StateConflict)
+            },
+            |sealed_payload_digest| {
+                durable_prepare_called.set(true);
+                durable
+                    .prepare_verified_final_release_dispatch(
+                        &release,
+                        quota,
+                        &settlement,
+                        resolved_ticket,
+                        effect_lease,
+                        sealed_payload_digest,
+                    )
+                    .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(KernelAgentAuthorityErrorV2::StateConflict)
+        ));
+        assert!(declassification_finished.get());
+        assert!(synchronization_attempted.get());
+        assert!(!durable_prepare_called.get());
+        assert_eq!(durable.authenticated_state_head().unwrap(), head_before);
+        assert_eq!(durable.recovery_projection().unwrap(), journal_before);
+        assert_eq!(durable.quota_counter(run, quota_subject), quota_before);
+        assert_eq!(fs::read(path).ok(), bytes_before);
     }
 
     #[test]

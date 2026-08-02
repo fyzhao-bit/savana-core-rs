@@ -1,14 +1,20 @@
 use std::time::Instant;
 
 use savana_kernel_protocol::v2::{Digest32V2, Nonce32V2, UnixMillisV2};
+use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
+
+use savana_policy_core::v2::{
+    BoundedConnectorHostV2, BoundedConnectorUrlV2, ConnectorTierV2, ConnectorTransportV2,
+};
 
 use crate::worker_protocol::{
     connector_material_digest, connector_response_digest, connector_transcript_begin,
     connector_transcript_step, decode_connector_worker_frame, encode_provider_response_frame,
-    verify_connector_worker_job, ConnectorCodecJobModeV2, ConnectorOutcomeKindV2,
-    ConnectorWorkerFrameV2, ConnectorWorkerProtocolErrorV2, PreparedProviderRequestFrameV2,
-    VerifiedConnectorWorkerJobV2, VerifiedConnectorWorkerTrustV2, MAX_CONNECTOR_FRAME_BYTES,
+    prepared_provider_request_digest, verify_connector_worker_job, ConnectorCodecJobModeV2,
+    ConnectorOutcomeKindV2, ConnectorWorkerFrameV2, ConnectorWorkerProtocolErrorV2,
+    PreparedProviderRequestFrameV2, VerifiedConnectorWorkerJobV2, VerifiedConnectorWorkerTrustV2,
+    MAX_CONNECTOR_FRAME_BYTES,
 };
 use crate::{
     ArmedEffectV2, EffectPermitV2, ExecdJournalStateV2, ExecdQueryV2, ExecdStateOwnerV2,
@@ -91,13 +97,172 @@ pub(crate) trait DurableProviderAttemptV2 {
 /// Credential-bearing transport owned by execd. The codec worker never
 /// receives this object or any credential material.
 pub(crate) trait ProviderTransportV2: Send {
+    /// Returns the manifest-bound provider target used by the pre-existing
+    /// deployment connector/release path.
+    fn verified_deployment_target(
+        &self,
+    ) -> Result<VerifiedProviderTargetV2, ConnectorWorkerSupervisorErrorV2>;
+
+    /// Resolves one active registry descriptor against the provisioned
+    /// transport before the durable attempt can cross EffectStarted.
+    fn verify_connector_target(
+        &self,
+        tier: ConnectorTierV2,
+        transport: &ConnectorTransportV2,
+        active_host_allowlist: &[BoundedConnectorHostV2],
+    ) -> Result<VerifiedProviderTargetV2, ConnectorWorkerSupervisorErrorV2>;
+
     fn execute(
         &mut self,
+        request: &VerifiedProviderRequestV2,
         permit: &EffectPermitV2,
-        credential_free_request: &[u8],
         maximum_response_bytes: u32,
         deadline: Instant,
     ) -> Result<Vec<u8>, ConnectorWorkerSupervisorErrorV2>;
+}
+
+/// An exact registry transport that has already matched measured provider
+/// provisioning and current standing policy. Callers cannot populate it from
+/// a claimed digest or URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedProviderTargetV2 {
+    canonical_url: BoundedConnectorUrlV2,
+    tls_identity_pin: Digest32V2,
+}
+
+impl VerifiedProviderTargetV2 {
+    pub(super) fn https(
+        canonical_url: BoundedConnectorUrlV2,
+        tls_identity_pin: Digest32V2,
+    ) -> Result<Self, ConnectorWorkerSupervisorErrorV2> {
+        if tls_identity_pin.as_bytes() == &[0; 32] {
+            return Err(ConnectorWorkerSupervisorErrorV2::ProviderAttemptFailed);
+        }
+        Ok(Self {
+            canonical_url,
+            tls_identity_pin,
+        })
+    }
+
+    pub(crate) const fn canonical_url(&self) -> &BoundedConnectorUrlV2 {
+        &self.canonical_url
+    }
+
+    pub(crate) const fn tls_identity_pin(&self) -> Digest32V2 {
+        self.tls_identity_pin
+    }
+}
+
+const PROVIDER_REQUEST_PAYLOAD_DOMAIN_V2: &[u8] = b"SAVANA_PROVIDER_REQUEST_PAYLOAD_V2\0";
+const PROVIDER_REQUEST_WIRE_DOMAIN_V2: &[u8] = b"SAVANA_BOUND_PROVIDER_REQUEST_WIRE_V2\0";
+
+/// Execd-owned custom-provider wire request. The networkless codec supplies
+/// only the opaque final field; it cannot choose the authority, route, TLS
+/// identity, or dispatch binding carried by the outer canonical frame.
+pub(crate) struct VerifiedProviderRequestV2 {
+    target: VerifiedProviderTargetV2,
+    execution_nonce: Nonce32V2,
+    dispatch_core_digest: Digest32V2,
+    dispatch_subject_digest: Digest32V2,
+    payload_digest: Digest32V2,
+    digest: Digest32V2,
+    canonical_bytes: Zeroizing<Vec<u8>>,
+}
+
+impl std::fmt::Debug for VerifiedProviderRequestV2 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VerifiedProviderRequestV2")
+            .field("target", &self.target)
+            .field("execution_nonce", &self.execution_nonce)
+            .field("encoded_len", &self.canonical_bytes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl VerifiedProviderRequestV2 {
+    pub(crate) fn bind(
+        target: VerifiedProviderTargetV2,
+        execution_nonce: Nonce32V2,
+        dispatch_core_digest: Digest32V2,
+        dispatch_subject_digest: Digest32V2,
+        credential_free_request_digest: Digest32V2,
+        credential_free_payload: &[u8],
+    ) -> Result<Self, ConnectorWorkerSupervisorErrorV2> {
+        let payload_length = u32::try_from(credential_free_payload.len())
+            .map_err(|_| ConnectorWorkerSupervisorErrorV2::ProviderAttemptFailed)?;
+        let capacity = credential_free_payload
+            .len()
+            .checked_add(target.canonical_url().as_str().len())
+            .and_then(|length| length.checked_add(256))
+            .filter(|length| *length <= MAX_CONNECTOR_FRAME_BYTES)
+            .ok_or(ConnectorWorkerSupervisorErrorV2::ProviderAttemptFailed)?;
+        if credential_free_payload.is_empty()
+            || is_zero(execution_nonce.as_bytes())
+            || is_zero(dispatch_core_digest.as_bytes())
+            || is_zero(dispatch_subject_digest.as_bytes())
+            || credential_free_request_digest
+                != prepared_provider_request_digest(credential_free_payload)
+        {
+            return Err(ConnectorWorkerSupervisorErrorV2::ProviderAttemptFailed);
+        }
+        let payload_digest = provider_request_payload_digest(credential_free_payload);
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(capacity)
+            .map_err(|_| ConnectorWorkerSupervisorErrorV2::ProviderAttemptFailed)?;
+        let mut encoder = minicbor::Encoder::new(bytes);
+        encoder
+            .array(11)
+            .and_then(|encoder| encoder.u16(2))
+            .and_then(|encoder| encoder.u16(1))
+            .and_then(|encoder| encoder.str(target.canonical_url().as_str()))
+            .and_then(|encoder| encoder.bytes(target.tls_identity_pin().as_bytes()))
+            .and_then(|encoder| encoder.bytes(execution_nonce.as_bytes()))
+            .and_then(|encoder| encoder.bytes(dispatch_core_digest.as_bytes()))
+            .and_then(|encoder| encoder.bytes(dispatch_subject_digest.as_bytes()))
+            .and_then(|encoder| encoder.u32(payload_length))
+            .and_then(|encoder| encoder.bytes(credential_free_request_digest.as_bytes()))
+            .and_then(|encoder| encoder.bytes(payload_digest.as_bytes()))
+            .and_then(|encoder| encoder.bytes(credential_free_payload))
+            .map_err(|_| ConnectorWorkerSupervisorErrorV2::ProviderAttemptFailed)?;
+        let canonical_bytes = encoder.into_writer();
+        if canonical_bytes.len() > MAX_CONNECTOR_FRAME_BYTES {
+            return Err(ConnectorWorkerSupervisorErrorV2::ProviderAttemptFailed);
+        }
+        let digest = provider_request_wire_digest(&canonical_bytes);
+        Ok(Self {
+            target,
+            execution_nonce,
+            dispatch_core_digest,
+            dispatch_subject_digest,
+            payload_digest,
+            digest,
+            canonical_bytes: Zeroizing::new(canonical_bytes),
+        })
+    }
+
+    pub(crate) const fn target(&self) -> &VerifiedProviderTargetV2 {
+        &self.target
+    }
+
+    pub(crate) const fn payload_digest(&self) -> Digest32V2 {
+        self.payload_digest
+    }
+
+    pub(crate) const fn digest(&self) -> Digest32V2 {
+        self.digest
+    }
+
+    pub(crate) fn canonical_bytes(&self) -> &[u8] {
+        &self.canonical_bytes
+    }
+
+    pub(crate) fn matches_permit(&self, permit: &EffectPermitV2) -> bool {
+        self.execution_nonce == permit.execution_nonce()
+            && self.dispatch_core_digest == permit.dispatch_core_digest()
+            && self.dispatch_subject_digest == permit.dispatch_subject_digest()
+    }
 }
 
 trait DurableExecdAttemptJournalV2 {
@@ -180,6 +345,7 @@ impl DurableExecdAttemptJournalV2 for ExecdStateOwnerV2 {
 pub(crate) struct OwnerBackedProviderAttemptV2<'a> {
     journal: &'a dyn DurableExecdAttemptJournalV2,
     transport: &'a mut dyn ProviderTransportV2,
+    target: &'a VerifiedProviderTargetV2,
     now: UnixMillisV2,
 }
 
@@ -187,11 +353,13 @@ impl<'a> OwnerBackedProviderAttemptV2<'a> {
     pub(crate) fn new(
         journal: &'a ExecdStateOwnerV2,
         transport: &'a mut dyn ProviderTransportV2,
+        target: &'a VerifiedProviderTargetV2,
         now: UnixMillisV2,
     ) -> Self {
         Self {
             journal,
             transport,
+            target,
             now,
         }
     }
@@ -200,11 +368,13 @@ impl<'a> OwnerBackedProviderAttemptV2<'a> {
     fn from_parts(
         journal: &'a dyn DurableExecdAttemptJournalV2,
         transport: &'a mut dyn ProviderTransportV2,
+        target: &'a VerifiedProviderTargetV2,
         now: UnixMillisV2,
     ) -> Self {
         Self {
             journal,
             transport,
+            target,
             now,
         }
     }
@@ -225,9 +395,17 @@ impl DurableProviderAttemptV2 for OwnerBackedProviderAttemptV2<'_> {
         {
             return Err(ConnectorWorkerSupervisorErrorV2::ProviderAttemptFailed);
         }
+        let request = VerifiedProviderRequestV2::bind(
+            self.target.clone(),
+            job.execution_nonce(),
+            job.dispatch_core_digest(),
+            job.dispatch_subject_digest(),
+            prepared.request_digest(),
+            prepared.request(),
+        )?;
         let predecessor = self.journal.prepare_provider_attempt(
             job.execution_nonce(),
-            prepared.request_digest(),
+            request.digest(),
             self.now,
             deadline,
         )?;
@@ -238,8 +416,8 @@ impl DurableProviderAttemptV2 for OwnerBackedProviderAttemptV2<'_> {
         let permit = armed.into_effect_permit();
         ensure_deadline(deadline)?;
         let response = self.transport.execute(
+            &request,
             &permit,
-            prepared.request(),
             prepared.maximum_response_bytes(),
             deadline,
         )?;
@@ -566,6 +744,22 @@ fn is_zero(bytes: &[u8]) -> bool {
     bytes.iter().all(|byte| *byte == 0)
 }
 
+fn provider_request_payload_digest(bytes: &[u8]) -> Digest32V2 {
+    let mut hasher = Sha256::new();
+    hasher.update(PROVIDER_REQUEST_PAYLOAD_DOMAIN_V2);
+    hasher.update((bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
+    Digest32V2::new(hasher.finalize().into())
+}
+
+fn provider_request_wire_digest(bytes: &[u8]) -> Digest32V2 {
+    let mut hasher = Sha256::new();
+    hasher.update(PROVIDER_REQUEST_WIRE_DOMAIN_V2);
+    hasher.update((bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
+    Digest32V2::new(hasher.finalize().into())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -578,6 +772,9 @@ mod tests {
         derive_ed25519_key_id_v2, Digest32V2, ExecutorIdentityV2,
         SignedExecutorEffectStartedReceiptV2, UnixMillisV2, UnsignedExecutorEffectStartedReceiptV2,
     };
+    use savana_policy_core::v2::{
+        BoundedConnectorHostV2, BoundedConnectorUrlV2, ConnectorTierV2, ConnectorTransportV2,
+    };
     use zeroize::Zeroizing;
 
     use super::{
@@ -585,15 +782,16 @@ mod tests {
         ConnectorWorkerSupervisorErrorV2, ConnectorWorkerSupervisorV2,
         DurableExecdAttemptJournalV2, DurableProviderAttemptV2, DurablyRetainedProviderResponseV2,
         OwnerBackedProviderAttemptV2, ProviderTransportV2, VerifiedConnectorSandboxLauncherV2,
+        VerifiedProviderRequestV2, VerifiedProviderTargetV2,
     };
     use crate::worker_protocol::test_support::{
         fixture, outcome_frame, outcome_transcript_material, prepared_frame,
         prepared_transcript_material, ConnectorFixtureV2,
     };
     use crate::worker_protocol::{
-        connector_transcript_begin, connector_transcript_step, verify_connector_worker_job,
-        ConnectorCodecJobModeV2, ConnectorOutcomeKindV2, ConnectorWorkerFrameV2,
-        PreparedProviderRequestFrameV2, VerifiedConnectorWorkerJobV2,
+        connector_transcript_begin, connector_transcript_step, prepared_provider_request_digest,
+        verify_connector_worker_job, ConnectorCodecJobModeV2, ConnectorOutcomeKindV2,
+        ConnectorWorkerFrameV2, PreparedProviderRequestFrameV2, VerifiedConnectorWorkerJobV2,
         VerifiedConnectorWorkerTrustV2, MAX_CONNECTOR_FRAME_BYTES,
     };
     use crate::{
@@ -701,6 +899,7 @@ mod tests {
 
     struct FakeJournal {
         steps: Arc<Mutex<Vec<&'static str>>>,
+        prepared_digest: Arc<Mutex<Option<Digest32V2>>>,
     }
 
     impl DurableExecdAttemptJournalV2 for FakeJournal {
@@ -726,11 +925,12 @@ mod tests {
         fn prepare_provider_attempt(
             &self,
             nonce: savana_kernel_protocol::v2::Nonce32V2,
-            _prepared_request_digest: Digest32V2,
+            prepared_request_digest: Digest32V2,
             _now: UnixMillisV2,
             _deadline: Instant,
         ) -> Result<ProviderAttemptPredecessorV2, ConnectorWorkerSupervisorErrorV2> {
             self.steps.lock().unwrap().push("prepare");
+            *self.prepared_digest.lock().unwrap() = Some(prepared_request_digest);
             Ok(ProviderAttemptPredecessorV2 {
                 execution_nonce: nonce,
                 predecessor_digest: Digest32V2::new([0x61; 32]),
@@ -794,13 +994,40 @@ mod tests {
 
     struct FakeTransport {
         steps: Arc<Mutex<Vec<&'static str>>>,
+        prepared_digest: Arc<Mutex<Option<Digest32V2>>>,
     }
 
     impl ProviderTransportV2 for FakeTransport {
+        fn verified_deployment_target(
+            &self,
+        ) -> Result<VerifiedProviderTargetV2, ConnectorWorkerSupervisorErrorV2> {
+            VerifiedProviderTargetV2::https(
+                BoundedConnectorUrlV2::new("https://provider.example/mcp").unwrap(),
+                Digest32V2::new([0x70; 32]),
+            )
+        }
+
+        fn verify_connector_target(
+            &self,
+            _tier: ConnectorTierV2,
+            transport: &ConnectorTransportV2,
+            _active_host_allowlist: &[BoundedConnectorHostV2],
+        ) -> Result<VerifiedProviderTargetV2, ConnectorWorkerSupervisorErrorV2> {
+            match transport {
+                ConnectorTransportV2::Https {
+                    canonical_url,
+                    tls_identity_pin,
+                } => VerifiedProviderTargetV2::https(canonical_url.clone(), *tls_identity_pin),
+                ConnectorTransportV2::Stdio { .. } => {
+                    Err(ConnectorWorkerSupervisorErrorV2::ProviderAttemptFailed)
+                }
+            }
+        }
+
         fn execute(
             &mut self,
+            request: &VerifiedProviderRequestV2,
             permit: &EffectPermitV2,
-            request: &[u8],
             maximum_response_bytes: u32,
             _deadline: Instant,
         ) -> Result<Vec<u8>, ConnectorWorkerSupervisorErrorV2> {
@@ -808,7 +1035,15 @@ mod tests {
                 permit.execution_nonce(),
                 savana_kernel_protocol::v2::Nonce32V2::new([5; 32])
             );
-            assert_eq!(request, b"prepared request");
+            assert!(request.matches_permit(permit));
+            assert_eq!(
+                *self.prepared_digest.lock().unwrap(),
+                Some(request.digest())
+            );
+            assert_eq!(
+                request.target().canonical_url().as_str(),
+                "https://provider.example/mcp"
+            );
             assert!(maximum_response_bytes >= b"provider response".len() as u32);
             self.steps.lock().unwrap().push("transport");
             Ok(b"provider response".to_vec())
@@ -972,15 +1207,24 @@ mod tests {
             ConnectorWorkerFrameV2::Outcome(_) => panic!("expected prepared request"),
         };
         let steps = Arc::new(Mutex::new(Vec::new()));
+        let prepared_digest = Arc::new(Mutex::new(None));
         let journal = FakeJournal {
             steps: Arc::clone(&steps),
+            prepared_digest: Arc::clone(&prepared_digest),
         };
         let mut transport = FakeTransport {
             steps: Arc::clone(&steps),
+            prepared_digest,
         };
+        let target = VerifiedProviderTargetV2::https(
+            BoundedConnectorUrlV2::new("https://provider.example/mcp").unwrap(),
+            Digest32V2::new([0x70; 32]),
+        )
+        .unwrap();
         let mut attempt = OwnerBackedProviderAttemptV2::from_parts(
             &journal,
             &mut transport,
+            &target,
             UnixMillisV2::new(110),
         );
 
@@ -994,6 +1238,59 @@ mod tests {
             steps.lock().unwrap().as_slice(),
             ["query", "prepare", "effect-started", "transport", "retain"]
         );
+    }
+
+    #[test]
+    fn provider_request_outer_frame_fixes_target_for_hostile_inner_routing_bytes() {
+        let target = VerifiedProviderTargetV2::https(
+            BoundedConnectorUrlV2::new("https://provider.example:9443/mcp/v2?scope=full").unwrap(),
+            Digest32V2::new([0x70; 32]),
+        )
+        .unwrap();
+        let nonce = savana_kernel_protocol::v2::Nonce32V2::new([5; 32]);
+        let core = Digest32V2::new([6; 32]);
+        let subject = Digest32V2::new([7; 32]);
+
+        for hostile_inner in [
+            b"Host: evil.example\r\n\r\nbody".as_slice(),
+            b"POST /other HTTP/1.1\r\nHost: provider.example\r\n\r\n",
+            b"GET https://evil.example/steal HTTP/1.1\r\n\r\n",
+            b"/other?redirect=https://evil.example\r\nHost: evil.example",
+        ] {
+            let request = VerifiedProviderRequestV2::bind(
+                target.clone(),
+                nonce,
+                core,
+                subject,
+                prepared_provider_request_digest(hostile_inner),
+                hostile_inner,
+            )
+            .unwrap();
+            let mut decoder = minicbor::Decoder::new(request.canonical_bytes());
+            assert_eq!(decoder.array().unwrap(), Some(11));
+            assert_eq!(decoder.u16().unwrap(), 2);
+            assert_eq!(decoder.u16().unwrap(), 1);
+            assert_eq!(
+                decoder.str().unwrap(),
+                "https://provider.example:9443/mcp/v2?scope=full"
+            );
+            assert_eq!(decoder.bytes().unwrap(), &[0x70; 32]);
+            assert_eq!(decoder.bytes().unwrap(), nonce.as_bytes());
+            assert_eq!(decoder.bytes().unwrap(), core.as_bytes());
+            assert_eq!(decoder.bytes().unwrap(), subject.as_bytes());
+            assert_eq!(decoder.u32().unwrap() as usize, hostile_inner.len());
+            assert_eq!(
+                decoder.bytes().unwrap(),
+                prepared_provider_request_digest(hostile_inner).as_bytes()
+            );
+            assert_eq!(
+                decoder.bytes().unwrap(),
+                request.payload_digest().as_bytes()
+            );
+            assert_eq!(decoder.bytes().unwrap(), hostile_inner);
+            assert_eq!(decoder.position(), request.canonical_bytes().len());
+            assert_eq!(request.target().canonical_url(), target.canonical_url());
+        }
     }
 
     #[test]

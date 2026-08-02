@@ -880,9 +880,13 @@ fn development_material_binds_parser_files_to_the_installed_ingress_account() {
         "state/agentd/agent-task-state-v2.cbor",
         "state/approvald/approval-protocol-state-v2.cbor",
         "state/execd/execd-journal-v2.cbor",
+        "state/execd/connector-registry-v2.cbor",
+        "state/execd/connector-registry-anchor-v2.bin",
     ] {
         assert!(source.contains(path), "missing exact durable path: {path}");
     }
+    assert!(source.contains("provider-server-spki-v2.der"));
+    assert!(source.contains("&[\"provider\", \"server_spki_sha256\"]"));
 }
 
 #[test]
@@ -896,6 +900,8 @@ fn installer_requires_connector_authority_private_material_exactly_when_enabled(
         .contains("disabled connector authority unexpectedly materialized a private credential"));
     assert!(source.contains("enabled connector authority has incomplete private material"));
     assert!(source.contains("/usr/bin/stat -f %z \"$connector_authority_credential\""));
+    assert!(source.contains("provider-server.spki.der"));
+    assert!(source.contains("provider-server-spki-v2.der"));
 }
 
 #[test]
@@ -1196,9 +1202,43 @@ fn build_input_generator_emits_cryptographically_bound_runtime_inputs() {
     );
     let execd: serde_json::Value =
         serde_json::from_slice(&fs::read(config.join("execd-bootstrap-v2.json")).unwrap()).unwrap();
+    let zero_digest = "00".repeat(32);
     assert_eq!(
         execd["journal_path"].as_str(),
         Some("/Library/Application Support/Savana/Development/state/execd/execd-journal-v2.cbor")
+    );
+    assert_eq!(
+        execd["connector_registry_path"].as_str(),
+        Some(
+            "/Library/Application Support/Savana/Development/state/execd/connector-registry-v2.cbor"
+        )
+    );
+    assert_eq!(
+        execd["connector_registry_anchor_path"].as_str(),
+        Some(
+            "/Library/Application Support/Savana/Development/state/execd/connector-registry-anchor-v2.bin"
+        )
+    );
+    assert_ne!(execd["store_id"], execd["connector_registry_store_id"]);
+    assert_eq!(
+        execd["connector_set_digest"],
+        execd["connector_registry_genesis_digest"]
+    );
+    assert_eq!(
+        execd["connector_authority_key_id"].as_str(),
+        Some(zero_digest.as_str())
+    );
+    assert_eq!(
+        execd["connector_authority_public_key"].as_str(),
+        Some(zero_digest.as_str())
+    );
+    assert_eq!(
+        execd["provider"]["canonical_url"].as_str(),
+        Some("https://provider.savana-development.invalid:9444/")
+    );
+    assert_ne!(
+        hex_32(execd["provider"]["server_spki_sha256"].as_str().unwrap()),
+        [0; 32]
     );
     assert_eq!(agentd["planner_route_id"].as_u64(), Some(1));
     let jarvis_entitlements = fs::read_to_string(

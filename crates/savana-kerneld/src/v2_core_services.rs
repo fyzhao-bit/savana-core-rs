@@ -562,6 +562,13 @@ impl CoreKernelRuntimeServicesV2 {
                         deployment_generation,
                     )
                     .map_err(|error| map_connector_authority_error_for_tag(73, error))?;
+                agent_authority
+                    .synchronize_executor_connector_registry(
+                        active_state_manifest_digest,
+                        deployment_generation,
+                        now,
+                    )
+                    .map_err(map_agent_authority_error)?;
                 let response = ApplyApprovedConnectorRegistrationResponseV2::new(
                     result.signed_delta_digest(),
                     result.head_digest(),
@@ -612,6 +619,13 @@ impl CoreKernelRuntimeServicesV2 {
                         now,
                     )
                     .map_err(|error| map_connector_authority_error_for_tag(75, error))?;
+                agent_authority
+                    .synchronize_executor_connector_registry(
+                        active_state_manifest_digest,
+                        deployment_generation,
+                        now,
+                    )
+                    .map_err(map_agent_authority_error)?;
                 let response = RemoveConnectorResponseV2::new(
                     result.signed_delta_digest(),
                     result.head_digest(),

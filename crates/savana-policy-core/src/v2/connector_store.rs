@@ -402,6 +402,44 @@ impl DurableConnectorRegistryStoreV2 {
         )
     }
 
+    /// Replays one authenticated executor-sync page and persists the complete
+    /// reconstructed registry in one store revision. No prefix is published or
+    /// durable if any delta fails independent historical verification.
+    pub fn replay_canonical_deltas_atomically(
+        &mut self,
+        expected_registry_head: Digest32V2,
+        expected_revision: ConnectorStoreRevisionV2,
+        canonical_deltas: &[&[u8]],
+    ) -> Result<ConnectorRegistryStateV2, G4Error> {
+        self.ensure_usable()?;
+        if canonical_deltas.is_empty() {
+            return Err(G4Error::InvalidDescriptor);
+        }
+        if expected_revision != self.current_revision()
+            || expected_registry_head != self.registry.head_digest()
+        {
+            return Err(G4Error::StateConflict);
+        }
+        if self
+            .registry
+            .deltas()
+            .len()
+            .checked_add(canonical_deltas.len())
+            .is_none_or(|count| count > MAX_JOURNAL_DELTAS_V2)
+        {
+            return Err(G4Error::DescriptorLimitExceeded);
+        }
+        let mut next_registry = self.registry.clone();
+        for canonical_delta in canonical_deltas {
+            next_registry.replay_canonical_delta(canonical_delta)?;
+        }
+        self.commit_observed(
+            next_registry,
+            self.authority_state.clone(),
+            &mut NoConnectorStoreCrashV2,
+        )
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn append_canonical_delta_with_crash_for_test(
         &mut self,

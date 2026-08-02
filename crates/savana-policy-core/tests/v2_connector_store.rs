@@ -730,3 +730,61 @@ fn invalid_duplicate_unknown_remove_and_capacity_do_not_partially_commit() {
     assert_eq!(after_failure.head_digest(), before_failure.head_digest());
     assert_eq!(high_water.head(), before_high_water);
 }
+
+#[test]
+fn execd_page_replay_is_one_atomic_durable_commit() {
+    // This catches publishing or persisting a prefix of a sync page when a
+    // later delta has a bad signature/gap, and catches replaying historical
+    // state through the current live-add allowlist gate.
+    let directory = private_directory();
+    let authority = SigningKey::from_bytes(&[0xe1; 32]);
+    let high_water = TestHighWater::default();
+    let connector = user_connector("atomic-page", 0xe2);
+    let genesis = genesis(&authority);
+    let add = add_delta(
+        1,
+        genesis.head_digest(),
+        &connector,
+        digest(0xe3),
+        &authority,
+    );
+    let mut staged = genesis.clone();
+    staged.replay_canonical_delta(&add).unwrap();
+    let remove = remove_delta(
+        2,
+        staged.head_digest(),
+        connector.connector_id(),
+        &authority,
+    );
+    let mut invalid_remove = remove.clone();
+    *invalid_remove.last_mut().unwrap() ^= 1;
+
+    let mut store = open_store(directory.path(), genesis.clone(), high_water.clone()).unwrap();
+    let revision = store.revision().unwrap();
+    assert_eq!(
+        store
+            .replay_canonical_deltas_atomically(
+                genesis.head_digest(),
+                revision,
+                &[add.as_slice(), invalid_remove.as_slice()],
+            )
+            .unwrap_err(),
+        G4Error::InvalidDescriptorSignature
+    );
+    let unchanged = store.snapshot().unwrap();
+    assert_eq!(unchanged.sequence(), genesis.sequence());
+    assert_eq!(unchanged.head_digest(), genesis.head_digest());
+    assert_eq!(unchanged.deltas().len(), genesis.deltas().len());
+    assert_eq!(high_water.head().sequence(), 0);
+
+    let committed = store
+        .replay_canonical_deltas_atomically(
+            genesis.head_digest(),
+            revision,
+            &[add.as_slice(), remove.as_slice()],
+        )
+        .unwrap();
+    assert_eq!(committed.sequence(), 2);
+    assert!(!committed.contains_registered_connector(connector.connector_id()));
+    assert_eq!(high_water.head().sequence(), 1);
+}

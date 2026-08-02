@@ -1,26 +1,32 @@
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use chacha20poly1305::aead::{Aead as _, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit as _, Nonce};
 use hkdf::Hkdf;
 use savana_kernel_protocol::v2::{
     decode_executor_completion_payload_v2, encode_acknowledge_committed_completion_response_v2,
-    encode_dispatch_response_v2, encode_executor_health_response_v2,
-    encode_fetch_completion_response_v2, encode_query_by_execution_nonce_response_v2,
-    encode_signed_sealed_execution_envelope_v2, AcknowledgeCommittedCompletionResponseV2,
-    Digest32V2, DispatchResponseV2, ExecutorCompletionDescriptorV2, ExecutorHealthResponseV2,
+    encode_connector_registry_sync_response_v2, encode_dispatch_response_v2,
+    encode_executor_health_response_v2, encode_fetch_completion_response_v2,
+    encode_query_by_execution_nonce_response_v2, encode_signed_sealed_execution_envelope_v2,
+    AcknowledgeCommittedCompletionResponseV2, Digest32V2, DispatchResponseV2, DispatchSubjectV2,
+    ExecutorCompletionDescriptorV2, ExecutorFailureClassV2, ExecutorHealthResponseV2,
     ExecutorStatusV2, FetchCompletionResponseV2, HpkeX25519KeyIdV2, KernelExecutorOperationV2,
     PublicStableCodeV2, QueryByExecutionNonceResponseV2, SignedExecutorEffectStartedReceiptV2,
     UnixMillisV2,
 };
+use savana_policy_core::v2::{BoundedConnectorHostV2, ConnectorDescriptorV2};
 use sha2::{Digest as _, Sha256};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 use crate::{
-    DispatchEnvelopeKindV2, ExecdJournalStateV2, ExecdQueryV2, ExecdStateOwnerErrorV2,
+    DispatchEnvelopeKindV2, ExecdConnectorRegistryErrorV2, ExecdConnectorRegistryGuardV2,
+    ExecdConnectorRegistryV2, ExecdJournalStateV2, ExecdQueryV2, ExecdStateOwnerErrorV2,
     ExecdStateOwnerV2, VerifiedExecdDeploymentV2,
 };
+
+const PRE_EFFECT_TERMINALIZATION_TIMEOUT_V2: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ExecdProtocolServiceErrorV2 {
@@ -86,6 +92,23 @@ pub struct ExecdProtocolServiceV2 {
     deployment: ExecdProtocolDeploymentV2,
     owner: ExecdStateOwnerV2,
     processor: Box<dyn PreparedDispatchProcessorV2>,
+    connector_registry: Option<Arc<ExecdConnectorRegistryV2>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedConnectorDispatchV2 {
+    descriptor: ConnectorDescriptorV2,
+    active_host_allowlist: Vec<BoundedConnectorHostV2>,
+}
+
+impl PreparedConnectorDispatchV2 {
+    pub(crate) const fn descriptor(&self) -> &ConnectorDescriptorV2 {
+        &self.descriptor
+    }
+
+    pub(crate) fn active_host_allowlist(&self) -> &[BoundedConnectorHostV2] {
+        &self.active_host_allowlist
+    }
 }
 
 pub(crate) trait PreparedDispatchProcessorV2: Send + Sync {
@@ -96,6 +119,7 @@ pub(crate) trait PreparedDispatchProcessorV2: Send + Sync {
         owner: &ExecdStateOwnerV2,
         query: ExecdQueryV2,
         payload: Zeroizing<Vec<u8>>,
+        connector: Option<&PreparedConnectorDispatchV2>,
         now: UnixMillisV2,
         deadline: Instant,
     ) -> Result<(), ExecdProtocolServiceErrorV2>;
@@ -127,6 +151,24 @@ impl ExecdProtocolServiceV2 {
         owner: ExecdStateOwnerV2,
         processor: Box<dyn PreparedDispatchProcessorV2>,
     ) -> Result<Self, ExecdProtocolServiceErrorV2> {
+        Self::new_inner(deployment, owner, processor, None)
+    }
+
+    pub(crate) fn new_with_connector_registry(
+        deployment: ExecdProtocolDeploymentV2,
+        owner: ExecdStateOwnerV2,
+        processor: Box<dyn PreparedDispatchProcessorV2>,
+        connector_registry: Arc<ExecdConnectorRegistryV2>,
+    ) -> Result<Self, ExecdProtocolServiceErrorV2> {
+        Self::new_inner(deployment, owner, processor, Some(connector_registry))
+    }
+
+    fn new_inner(
+        deployment: ExecdProtocolDeploymentV2,
+        owner: ExecdStateOwnerV2,
+        processor: Box<dyn PreparedDispatchProcessorV2>,
+        connector_registry: Option<Arc<ExecdConnectorRegistryV2>>,
+    ) -> Result<Self, ExecdProtocolServiceErrorV2> {
         if !processor.is_ready() {
             return Err(ExecdProtocolServiceErrorV2::ResultUnavailable);
         }
@@ -134,6 +176,7 @@ impl ExecdProtocolServiceV2 {
             deployment,
             owner,
             processor,
+            connector_registry,
         };
         let deadline = Instant::now()
             .checked_add(std::time::Duration::from_secs(5))
@@ -158,10 +201,54 @@ impl ExecdProtocolServiceV2 {
         Ok(service)
     }
 
+    #[cfg(test)]
+    pub(crate) fn recovery_projection_for_test(
+        &self,
+        deadline: Instant,
+    ) -> Result<Vec<ExecdQueryV2>, ExecdProtocolServiceErrorV2> {
+        self.owner
+            .recovery_projection(deadline)
+            .map_err(ExecdProtocolServiceErrorV2::Owner)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_effect_guard_count_for_test(&self) -> usize {
+        self.owner.active_guard_count_for_test()
+    }
+
     pub(crate) fn recover_prepared(
         deployment: &ExecdProtocolDeploymentV2,
         owner: &ExecdStateOwnerV2,
         processor: &dyn PreparedDispatchProcessorV2,
+        now: UnixMillisV2,
+        deadline: Instant,
+    ) -> Result<(), ExecdProtocolServiceErrorV2> {
+        Self::recover_prepared_inner(deployment, owner, processor, None, now, deadline)
+    }
+
+    pub(crate) fn recover_prepared_with_connector_registry(
+        deployment: &ExecdProtocolDeploymentV2,
+        owner: &ExecdStateOwnerV2,
+        processor: &dyn PreparedDispatchProcessorV2,
+        connector_registry: &Arc<ExecdConnectorRegistryV2>,
+        now: UnixMillisV2,
+        deadline: Instant,
+    ) -> Result<(), ExecdProtocolServiceErrorV2> {
+        Self::recover_prepared_inner(
+            deployment,
+            owner,
+            processor,
+            Some(connector_registry),
+            now,
+            deadline,
+        )
+    }
+
+    fn recover_prepared_inner(
+        deployment: &ExecdProtocolDeploymentV2,
+        owner: &ExecdStateOwnerV2,
+        processor: &dyn PreparedDispatchProcessorV2,
+        connector_registry: Option<&Arc<ExecdConnectorRegistryV2>>,
         now: UnixMillisV2,
         deadline: Instant,
     ) -> Result<(), ExecdProtocolServiceErrorV2> {
@@ -182,10 +269,60 @@ impl ExecdProtocolServiceV2 {
                             &canonical,
                         )
                         .map_err(|_| ExecdProtocolServiceErrorV2::Protocol)?;
+                    let expected_head = envelope
+                        .payload()
+                        .core()
+                        .executor_connector_registry_digest();
+                    let registry_guard = match connector_registry {
+                        Some(registry) => match registry.admit_head(expected_head) {
+                            Ok(guard) => Some(guard),
+                            Err(ExecdConnectorRegistryErrorV2::HeadMismatch) => {
+                                let observed_head = registry
+                                    .current_head_digest()
+                                    .map_err(|_| ExecdProtocolServiceErrorV2::ResultUnavailable)?;
+                                owner
+                                    .record_failed_no_effect_recovery(
+                                        query.execution_nonce(),
+                                        ExecutorFailureClassV2::ConnectorUnavailableBeforeEffect,
+                                        stale_prepared_registry_head_digest(
+                                            query,
+                                            expected_head,
+                                            observed_head,
+                                        ),
+                                        now,
+                                        deadline,
+                                    )
+                                    .map_err(ExecdProtocolServiceErrorV2::Owner)?;
+                                continue;
+                            }
+                            Err(_) => {
+                                return Err(ExecdProtocolServiceErrorV2::ResultUnavailable);
+                            }
+                        },
+                        None => None,
+                    };
                     let plaintext =
                         open_execution_payload(envelope.payload(), deployment.seal_private_key)
                             .map_err(|()| ExecdProtocolServiceErrorV2::Binding)?;
-                    processor.process(owner, query, plaintext, now, deadline)?;
+                    let connector = registry_guard
+                        .as_ref()
+                        .map(|guard| {
+                            connector_dispatch_for_subject(
+                                guard,
+                                envelope.payload().core().subject(),
+                            )
+                        })
+                        .transpose()?
+                        .flatten();
+                    Self::process_dispatch_with_owner(
+                        owner,
+                        processor,
+                        query,
+                        plaintext,
+                        connector.as_ref(),
+                        now,
+                        deadline,
+                    )?;
                 }
                 ExecdJournalStateV2::ProviderAttemptPrepared
                 | ExecdJournalStateV2::EffectStarted
@@ -218,11 +355,61 @@ impl ExecdProtocolServiceV2 {
         &self,
         query: ExecdQueryV2,
         plaintext: Zeroizing<Vec<u8>>,
+        connector: Option<&PreparedConnectorDispatchV2>,
         now: UnixMillisV2,
         deadline: Instant,
-    ) -> Result<(), ExecdProtocolServiceErrorV2> {
-        self.processor
-            .process(&self.owner, query, plaintext, now, deadline)
+    ) -> Result<Instant, ExecdProtocolServiceErrorV2> {
+        Self::process_dispatch_with_owner(
+            &self.owner,
+            self.processor.as_ref(),
+            query,
+            plaintext,
+            connector,
+            now,
+            deadline,
+        )
+    }
+
+    fn process_dispatch_with_owner(
+        owner: &ExecdStateOwnerV2,
+        processor: &dyn PreparedDispatchProcessorV2,
+        query: ExecdQueryV2,
+        plaintext: Zeroizing<Vec<u8>>,
+        connector: Option<&PreparedConnectorDispatchV2>,
+        now: UnixMillisV2,
+        deadline: Instant,
+    ) -> Result<Instant, ExecdProtocolServiceErrorV2> {
+        match processor.process(owner, query, plaintext, connector, now, deadline) {
+            Ok(()) => Ok(deadline),
+            Err(error) => {
+                // Once the request budget is exhausted, the daemon still owns a
+                // short, bounded budget to make the durable pre-effect record
+                // terminal before releasing the registry read guard.
+                let cleanup_deadline = Instant::now()
+                    .checked_add(PRE_EFFECT_TERMINALIZATION_TIMEOUT_V2)
+                    .ok_or(ExecdProtocolServiceErrorV2::ResultUnavailable)?;
+                let current = owner
+                    .query(query.execution_nonce(), cleanup_deadline)
+                    .map_err(ExecdProtocolServiceErrorV2::Owner)?;
+                if matches!(
+                    current.state(),
+                    ExecdJournalStateV2::Prepared | ExecdJournalStateV2::ProviderAttemptPrepared
+                ) {
+                    owner
+                        .record_failed_no_effect(
+                            query.execution_nonce(),
+                            ExecutorFailureClassV2::ConnectorUnavailableBeforeEffect,
+                            processor_pre_effect_failure_digest(query, connector, error),
+                            now,
+                            cleanup_deadline,
+                        )
+                        .map_err(ExecdProtocolServiceErrorV2::Owner)?;
+                    Ok(cleanup_deadline)
+                } else {
+                    Err(error)
+                }
+            }
+        }
     }
 
     pub fn execute(
@@ -238,19 +425,46 @@ impl ExecdProtocolServiceV2 {
             KernelExecutorOperationV2::Health(_) => self.health(deadline),
             KernelExecutorOperationV2::Dispatch(request) => {
                 self.ensure_ready()?;
+                let core = request.envelope().payload().core();
+                let registry_guard = if let Some(registry) = self.connector_registry.as_ref() {
+                    Some(
+                        registry
+                            .admit_head(core.executor_connector_registry_digest())
+                            .map_err(|_| ExecdProtocolServiceErrorV2::Binding)?,
+                    )
+                } else {
+                    if core.executor_connector_registry_digest()
+                        != self.deployment.connector_set_digest
+                    {
+                        return Err(ExecdProtocolServiceErrorV2::Binding);
+                    }
+                    None
+                };
+                let connector = registry_guard
+                    .as_ref()
+                    .map(|guard| connector_dispatch_for_subject(guard, core.subject()))
+                    .transpose()?
+                    .flatten();
                 let envelope = encode_signed_sealed_execution_envelope_v2(request.envelope())
                     .map_err(|_| ExecdProtocolServiceErrorV2::Protocol)?;
                 let query = self
                     .owner
                     .accept_signed_dispatch(envelope, now, deadline)
                     .map_err(ExecdProtocolServiceErrorV2::Owner)?;
+                let mut response_deadline = deadline;
                 if query.state() == ExecdJournalStateV2::Prepared {
                     match open_execution_payload(
                         request.envelope().payload(),
                         self.deployment.seal_private_key,
                     ) {
                         Ok(plaintext) => {
-                            self.process_dispatch(query, plaintext, now, deadline)?;
+                            response_deadline = self.process_dispatch(
+                                query,
+                                plaintext,
+                                connector.as_ref(),
+                                now,
+                                deadline,
+                            )?;
                         }
                         Err(()) => {
                             let evidence_digest = domain_digest(
@@ -272,9 +486,9 @@ impl ExecdProtocolServiceV2 {
                 }
                 let query = self
                     .owner
-                    .query(query.execution_nonce(), deadline)
+                    .query(query.execution_nonce(), response_deadline)
                     .map_err(ExecdProtocolServiceErrorV2::Owner)?;
-                let status = self.status(query, deadline)?;
+                let status = self.status(query, response_deadline)?;
                 encode_dispatch_response_v2(&DispatchResponseV2::new(status))
                     .map_err(|_| ExecdProtocolServiceErrorV2::Protocol)
             }
@@ -354,6 +568,17 @@ impl ExecdProtocolServiceV2 {
                 encode_fetch_completion_response_v2(&response)
                     .map_err(|_| ExecdProtocolServiceErrorV2::Protocol)
             }
+            KernelExecutorOperationV2::ConnectorRegistrySync(request) => {
+                let registry = self
+                    .connector_registry
+                    .as_ref()
+                    .ok_or(ExecdProtocolServiceErrorV2::Binding)?;
+                let response = registry
+                    .synchronize(&request)
+                    .map_err(|_| ExecdProtocolServiceErrorV2::Binding)?;
+                encode_connector_registry_sync_response_v2(&response)
+                    .map_err(|_| ExecdProtocolServiceErrorV2::Protocol)
+            }
         }
     }
 
@@ -372,6 +597,13 @@ impl ExecdProtocolServiceV2 {
                 )
             })
             .count();
+        let connector_set_digest = self
+            .connector_registry
+            .as_ref()
+            .map(|registry| registry.current_head_digest())
+            .transpose()
+            .map_err(|_| ExecdProtocolServiceErrorV2::ResultUnavailable)?
+            .unwrap_or(self.deployment.connector_set_digest);
         let response = ExecutorHealthResponseV2::new(
             self.processor.is_ready(),
             self.deployment.active_state_manifest_digest,
@@ -381,7 +613,7 @@ impl ExecdProtocolServiceV2 {
             self.deployment.seal_key_id,
             self.deployment.journal_schema_version,
             self.deployment.journal_key_epoch,
-            self.deployment.connector_set_digest,
+            connector_set_digest,
             u32::try_from(backlog).map_err(|_| ExecdProtocolServiceErrorV2::Binding)?,
             (!self.processor.is_ready()).then_some(PublicStableCodeV2::ServiceUnavailable),
         )
@@ -508,6 +740,48 @@ fn domain_digest(domain: &[u8], bytes: &[u8]) -> Digest32V2 {
     Digest32V2::new(hasher.finalize().into())
 }
 
+fn processor_pre_effect_failure_digest(
+    query: ExecdQueryV2,
+    connector: Option<&PreparedConnectorDispatchV2>,
+    error: ExecdProtocolServiceErrorV2,
+) -> Digest32V2 {
+    let error_tag = match error {
+        ExecdProtocolServiceErrorV2::Protocol => 1_u16,
+        ExecdProtocolServiceErrorV2::Binding => 2,
+        ExecdProtocolServiceErrorV2::ResultUnavailable => 3,
+        ExecdProtocolServiceErrorV2::Owner(_) => 4,
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(b"SAVANA_EXECD_PROCESSOR_PRE_EFFECT_FAILURE_V2\0");
+    hasher.update(query.execution_nonce().as_bytes());
+    hasher.update(query.dispatch_core_digest().as_bytes());
+    hasher.update(query.dispatch_subject_digest().as_bytes());
+    hasher.update(error_tag.to_be_bytes());
+    match connector {
+        Some(connector) => {
+            hasher.update([1]);
+            hasher.update(Sha256::digest(connector.descriptor().canonical_bytes()));
+        }
+        None => hasher.update([0]),
+    }
+    Digest32V2::new(hasher.finalize().into())
+}
+
+fn stale_prepared_registry_head_digest(
+    query: ExecdQueryV2,
+    recorded_head: Digest32V2,
+    observed_head: Digest32V2,
+) -> Digest32V2 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"SAVANA_EXECD_STALE_PREPARED_REGISTRY_HEAD_RECOVERY_V2\0");
+    hasher.update(query.execution_nonce().as_bytes());
+    hasher.update(query.dispatch_core_digest().as_bytes());
+    hasher.update(query.dispatch_subject_digest().as_bytes());
+    hasher.update(recorded_head.as_bytes());
+    hasher.update(observed_head.as_bytes());
+    Digest32V2::new(hasher.finalize().into())
+}
+
 fn verify_query_binding(
     query: ExecdQueryV2,
     expected_core: Digest32V2,
@@ -519,6 +793,24 @@ fn verify_query_binding(
         return Err(ExecdProtocolServiceErrorV2::Binding);
     }
     Ok(())
+}
+
+fn connector_dispatch_for_subject(
+    guard: &ExecdConnectorRegistryGuardV2<'_>,
+    subject: DispatchSubjectV2,
+) -> Result<Option<PreparedConnectorDispatchV2>, ExecdProtocolServiceErrorV2> {
+    let DispatchSubjectV2::ToolExecution { binding, .. } = subject else {
+        return Ok(None);
+    };
+    let connector_id = binding.destination_digest();
+    match guard.resolve_active_tool_connector(connector_id, binding.tool_descriptor_digest()) {
+        Ok(descriptor) => Ok(Some(PreparedConnectorDispatchV2 {
+            descriptor,
+            active_host_allowlist: guard.active_host_allowlist().to_vec(),
+        })),
+        Err(_) if !guard.contains_registered_connector(connector_id) => Ok(None),
+        Err(_) => Err(ExecdProtocolServiceErrorV2::Binding),
+    }
 }
 
 fn signed_receipt_digest(
