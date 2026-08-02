@@ -34,12 +34,12 @@ mod implementation {
         derive_ed25519_key_id_v2, encode_agent_browser_mutation_response_v2,
         encode_agent_browser_read_view_response_v2, read_fixed_http_request_v2,
         render_agent_ui_authentication_form_v2, render_agent_workspace_v2,
-        render_ingress_bootstrap_form_v2, write_fixed_http_response_v2,
+        render_ingress_bootstrap_form_v2, write_fixed_http_response_v2, ActionTemplateIdV2,
         AgentUiAuthenticationSettlementTransferCapabilityV2, BootIdV2, BootstrapKindV2, Digest32V2,
         DisplayProjectionIdV2, Ed25519KeyIdV2, EndpointRoleV2, ExecutorIdentityV2,
         FixedHttpErrorV2, FixedHttpRouteV2, FixedHttpServiceV2, PeerIdentityBindingV2,
         PlannerIntentKindV2, PlannerLimitsV2, PlannerRouteIdV2, ProjectionIdV2, ServiceIdentityV2,
-        StaticTemplateIdV2, UnixMillisV2, SAVANA_BROWSER_SCRIPT_V2,
+        StaticTemplateIdV2, ToolClassIdV2, UnixMillisV2, SAVANA_BROWSER_SCRIPT_V2,
     };
     #[cfg(target_os = "linux")]
     use savana_platform_identity::{
@@ -52,8 +52,8 @@ mod implementation {
     };
     use savana_policy_core::v2::{
         decode_hex_32_v2, read_verified_regular_file_v2, AuthenticatedFileAnchorV2,
-        ClosedServiceEdgeIdV2, ClosedServiceIdV2, FilesystemServiceObservationConfigV2,
-        VerifiedDaemonStartupV2,
+        ClosedServiceEdgeIdV2, ClosedServiceIdV2, ConnectorStructuralRoleV2, EffectSetV2,
+        FilesystemServiceObservationConfigV2, VerifiedDaemonStartupV2,
     };
     use serde::Deserialize;
     use sha2::{Digest as _, Sha256};
@@ -65,8 +65,11 @@ mod implementation {
     use crate::{
         AgentBrowserAuthorityV2, AgentControlDeploymentV2, AgentControlDispatcherV2,
         AgentTaskErrorV2, AgentTaskRollbackAnchorV2, AgentTaskServiceV2, AgentTaskStateHeadV2,
-        AgentTaskStateOwnerV2, DurableAgentTaskNamespaceV2, KernelTaskAuthorityVerifierV2,
-        PinnedMtlsAgentPlannerClientV2, SuiteOneAgentKernelClientV2, VerifiedAgentControlPeerV2,
+        AgentTaskStateOwnerV2, BoundedPlannerSemanticTextV2, DurableAgentTaskNamespaceV2,
+        DurablePlannerCatalogNamespaceV2, DurablePlannerCatalogV2, KernelTaskAuthorityVerifierV2,
+        PinnedMtlsAgentPlannerClientV2, PlannerCatalogEntryV2, PlannerCatalogErrorV2,
+        PlannerCatalogRollbackAnchorV2, PlannerCatalogStateHeadV2, SuiteOneAgentKernelClientV2,
+        VerifiedAgentControlPeerV2,
     };
 
     #[cfg(target_os = "linux")]
@@ -130,6 +133,9 @@ mod implementation {
     const SOCKET_PATH_DOMAIN_V2: &[u8] = b"SAVANA_SOCKET_PATH_IDENTITY_V2\0";
     const ANCHOR_DOMAIN_V2: &[u8] = b"SAVANA_AGENTD_TASK_ANCHOR_MAC_V2\0";
     const ANCHOR_MAGIC_V2: [u8; 8] = *b"ST2ANCH\0";
+    const PLANNER_CATALOG_ANCHOR_DOMAIN_V2: &[u8] =
+        b"SAVANA_AGENTD_PLANNER_CATALOG_ANCHOR_MAC_V2\0";
+    const PLANNER_CATALOG_ANCHOR_MAGIC_V2: [u8; 8] = *b"PC2ANCH\0";
     const SHELL_HTML_V2: &[u8] = b"<!doctype html><html><head><meta charset=\"utf-8\"><title>Savana</title></head><body><main><h1>Savana secure kernel</h1><p>Use the task-specific bootstrap URL returned by JARVIS.</p><p id=\"savana-status\"></p></main><script src=\"/v2/savana-ui.js\" defer></script></body></html>";
     const BOOTSTRAP_HTML_V2: &[u8] = b"<!doctype html><html><head><meta charset=\"utf-8\"><title>Savana bootstrap</title></head><body><main data-bootstrap=\"true\"><h1>Secure kernel bootstrap</h1><p id=\"savana-status\">Validating the one-time selector...</p></main><script src=\"/v2/savana-ui.js\" defer></script></body></html>";
 
@@ -147,6 +153,10 @@ mod implementation {
         task_state_path: PathBuf,
         rollback_anchor_path: PathBuf,
         store_id: String,
+        planner_catalog_state_path: PathBuf,
+        planner_catalog_rollback_anchor_path: PathBuf,
+        planner_catalog_store_id: String,
+        planner_shipped_catalog: Vec<PlannerShippedCatalogDtoV2>,
         kernel_task_authority_key_id: String,
         approval_client_key_id: String,
         approval_server_key_id: String,
@@ -173,6 +183,49 @@ mod implementation {
         #[cfg_attr(target_os = "linux", allow(dead_code))]
         #[serde(default)]
         jarvis_code_identity_digest: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PlannerShippedCatalogDtoV2 {
+        tool_class: u32,
+        action_template: u32,
+        structural_role: u16,
+        effects: u16,
+        semantic_name: String,
+        semantic_description: String,
+    }
+
+    fn parse_shipped_catalog(
+        entries: &[PlannerShippedCatalogDtoV2],
+    ) -> Result<Vec<PlannerCatalogEntryV2>, AgentdDaemonErrorV2> {
+        let mut projected = Vec::new();
+        projected
+            .try_reserve_exact(entries.len())
+            .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
+        for entry in entries {
+            let structural_role = match entry.structural_role {
+                1 => ConnectorStructuralRoleV2::Source,
+                2 => ConnectorStructuralRoleV2::Transform,
+                3 => ConnectorStructuralRoleV2::Sink,
+                _ => return Err(AgentdDaemonErrorV2::DeploymentUnavailable),
+            };
+            projected.push(
+                PlannerCatalogEntryV2::new(
+                    ToolClassIdV2::new(entry.tool_class),
+                    ActionTemplateIdV2::new(entry.action_template),
+                    structural_role,
+                    EffectSetV2::from_bits(entry.effects)
+                        .ok_or(AgentdDaemonErrorV2::DeploymentUnavailable)?,
+                    BoundedPlannerSemanticTextV2::new(entry.semantic_name.clone())
+                        .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?,
+                    BoundedPlannerSemanticTextV2::new(entry.semantic_description.clone())
+                        .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?,
+                )
+                .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?,
+            );
+        }
+        Ok(projected)
     }
 
     struct AgentTaskAnchorAdapterV2 {
@@ -207,6 +260,33 @@ mod implementation {
                     }
                     _ => AgentTaskErrorV2::CommitUncertain,
                 })
+        }
+    }
+
+    struct PlannerCatalogAnchorAdapterV2 {
+        inner: AuthenticatedFileAnchorV2,
+    }
+
+    impl PlannerCatalogRollbackAnchorV2 for PlannerCatalogAnchorAdapterV2 {
+        fn current_head(&self) -> Result<PlannerCatalogStateHeadV2, PlannerCatalogErrorV2> {
+            let (sequence, digest) = self
+                .inner
+                .current_head()
+                .map_err(|_| PlannerCatalogErrorV2::Authentication)?;
+            PlannerCatalogStateHeadV2::new(sequence, digest)
+        }
+
+        fn compare_and_advance(
+            &mut self,
+            expected: PlannerCatalogStateHeadV2,
+            next: PlannerCatalogStateHeadV2,
+        ) -> Result<(), PlannerCatalogErrorV2> {
+            self.inner
+                .compare_and_advance(
+                    (expected.sequence(), expected.state_digest()),
+                    (next.sequence(), next.state_digest()),
+                )
+                .map_err(|_| PlannerCatalogErrorV2::RollbackDetected)
         }
     }
 
@@ -413,6 +493,33 @@ mod implementation {
         {
             return Err(AgentdDaemonErrorV2::DeploymentUnavailable);
         }
+        let catalog_namespace = DurablePlannerCatalogNamespaceV2::from_verified_installation(
+            startup.installation_id(),
+            Digest32V2::new(
+                decode_hex_32_v2(&bootstrap.planner_catalog_store_id)
+                    .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?,
+            ),
+        )
+        .map_err(|_| AgentdDaemonErrorV2::DurableStateUnavailable)?;
+        let catalog_anchor = AuthenticatedFileAnchorV2::new(
+            bootstrap.planner_catalog_rollback_anchor_path.clone(),
+            catalog_namespace.installation_id(),
+            catalog_namespace.store_id(),
+            read_credential_32(ANCHOR_AUTHENTICATION_CREDENTIAL_V2)?,
+            PLANNER_CATALOG_ANCHOR_DOMAIN_V2,
+            PLANNER_CATALOG_ANCHOR_MAGIC_V2,
+        )
+        .map_err(|_| AgentdDaemonErrorV2::DurableStateUnavailable)?;
+        let planner_catalog = DurablePlannerCatalogV2::open(
+            &bootstrap.planner_catalog_state_path,
+            read_credential_32(STATE_ENCRYPTION_CREDENTIAL_V2)?,
+            catalog_namespace,
+            Box::new(PlannerCatalogAnchorAdapterV2 {
+                inner: catalog_anchor,
+            }),
+            parse_shipped_catalog(&bootstrap.planner_shipped_catalog)?,
+        )
+        .map_err(|_| AgentdDaemonErrorV2::DurableStateUnavailable)?;
         let browser = Arc::new(AgentBrowserAuthorityV2::new(
             effect_gate,
             browser_kernel,
@@ -441,6 +548,7 @@ mod implementation {
             ProjectionIdV2::new(bootstrap.release_destination_projection),
             DisplayProjectionIdV2::new(bootstrap.release_display_projection),
             agentd_boot_id,
+            planner_catalog,
         ));
         let jarvis_identity = ServiceIdentityV2::new(
             decode_hex_32_v2(&bootstrap.jarvis_control_identity)
@@ -526,6 +634,8 @@ mod implementation {
             || !bootstrap.effect_gate_path.is_absolute()
             || !bootstrap.task_state_path.is_absolute()
             || !bootstrap.rollback_anchor_path.is_absolute()
+            || !bootstrap.planner_catalog_state_path.is_absolute()
+            || !bootstrap.planner_catalog_rollback_anchor_path.is_absolute()
         {
             return Err(AgentdDaemonErrorV2::DeploymentUnavailable);
         }
@@ -572,6 +682,8 @@ mod implementation {
             &bootstrap.effect_gate_path,
             &bootstrap.task_state_path,
             &bootstrap.rollback_anchor_path,
+            &bootstrap.planner_catalog_state_path,
+            &bootstrap.planner_catalog_rollback_anchor_path,
         ];
         if paths
             .into_iter()

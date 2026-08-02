@@ -14,6 +14,7 @@ mod daemon;
 mod durable;
 mod kernel_authority;
 mod kernel_client;
+mod planner_catalog;
 mod planner_client;
 pub mod planner_privacy;
 mod state_owner;
@@ -46,6 +47,11 @@ pub use kernel_authority::{
     KernelTaskAuthorityVerifierV2, KernelTaskStatementV2, SignedKernelTaskStatementV2,
 };
 pub use kernel_client::SuiteOneAgentKernelClientV2;
+pub use planner_catalog::{
+    project_connector_descriptor_v2, BoundedPlannerSemanticTextV2,
+    DurablePlannerCatalogNamespaceV2, DurablePlannerCatalogV2, PlannerCatalogEntryV2,
+    PlannerCatalogErrorV2, PlannerCatalogRollbackAnchorV2, PlannerCatalogStateHeadV2,
+};
 pub use planner_client::{AgentPlannerClientErrorV2, PinnedMtlsAgentPlannerClientV2};
 pub use state_owner::{AgentTaskStateOwnerErrorV2, AgentTaskStateOwnerV2};
 

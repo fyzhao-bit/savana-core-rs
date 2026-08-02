@@ -9,10 +9,11 @@ use savana_kernel_protocol::v2::{
 };
 use savana_policy_core::v2::{
     AttemptKindV2, BoundedConnectorHostV2, BoundedConnectorRetryPolicyV2, ConnectorDescriptorV2,
-    ConnectorRegistryStateV2, ConnectorTierV2, DurableConnectorRegistryStoreV2, EffectSetV2,
-    ExecutorIdempotencyContractV2, G4Error, IdentifierV2, InternalValidatorDeclarationV2,
-    RollbackProtectedStateAnchorV2, RollbackProtectedStateHeadV2, TestConnectorStoreCrashPointV2,
-    UnsignedToolDescriptorV2, MAX_CONNECTOR_AUTHORITY_STATE_BYTES_V2,
+    ConnectorRegistryStateV2, ConnectorStructuralRoleV2, ConnectorTierV2,
+    DurableConnectorRegistryStoreV2, EffectSetV2, ExecutorIdempotencyContractV2, G4Error,
+    IdentifierV2, InternalValidatorDeclarationV2, RollbackProtectedStateAnchorV2,
+    RollbackProtectedStateHeadV2, TestConnectorStoreCrashPointV2, UnsignedToolDescriptorV2,
+    MAX_CONNECTOR_AUTHORITY_STATE_BYTES_V2,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -121,7 +122,7 @@ fn user_connector(name: &str, seed: u8) -> ConnectorDescriptorV2 {
 
     let mut descriptor = minicbor::Encoder::new(Vec::new());
     descriptor
-        .array(7)
+        .array(8)
         .unwrap()
         .bytes(connector_id.as_bytes())
         .unwrap()
@@ -142,6 +143,8 @@ fn user_connector(name: &str, seed: u8) -> ConnectorDescriptorV2 {
         .extend_from_slice(&minicbor::to_vec(tool(seed)).unwrap());
     descriptor
         .u16(EffectSetV2::READ.bits())
+        .unwrap()
+        .u16(ConnectorStructuralRoleV2::Source.tag())
         .unwrap()
         .u64(1)
         .unwrap();
@@ -170,7 +173,7 @@ fn https_user_connector(
 
     let mut descriptor = minicbor::Encoder::new(Vec::new());
     descriptor
-        .array(7)
+        .array(8)
         .unwrap()
         .bytes(connector_id.as_bytes())
         .unwrap()
@@ -193,6 +196,8 @@ fn https_user_connector(
         .extend_from_slice(&minicbor::to_vec(tool(seed)).unwrap());
     descriptor
         .u16(EffectSetV2::READ.bits())
+        .unwrap()
+        .u16(ConnectorStructuralRoleV2::Source.tag())
         .unwrap()
         .u64(1)
         .unwrap();
@@ -434,6 +439,13 @@ fn exact_canonical_journal_commit_restarts_and_replays_idempotently() {
     let recovered = reopened.snapshot().unwrap();
     assert_eq!(recovered.sequence(), 1);
     assert!(recovered.contains_connector(connector.connector_id()));
+    assert_eq!(
+        recovered
+            .active_connector(connector.connector_id())
+            .unwrap()
+            .structural_role(),
+        ConnectorStructuralRoleV2::Source,
+    );
     assert_eq!(recovered.deltas()[0].canonical_bytes(), delta);
     let replay = reopened.append_canonical_delta(&delta).unwrap();
     assert_eq!(replay.sequence(), 1);

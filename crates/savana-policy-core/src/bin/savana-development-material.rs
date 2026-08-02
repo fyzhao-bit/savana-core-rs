@@ -494,6 +494,16 @@ mod macos {
             &["rollback_anchor_path"],
             fixed_path(root, "state/agentd/task-anchor-v2.cbor"),
         )?;
+        set_value(
+            &mut agent,
+            &["planner_catalog_state_path"],
+            fixed_path(root, "state/agentd/planner-catalog-state-v2.cbor"),
+        )?;
+        set_value(
+            &mut agent,
+            &["planner_catalog_rollback_anchor_path"],
+            fixed_path(root, "state/agentd/planner-catalog-anchor-v2.cbor"),
+        )?;
         set_hex(
             &mut agent,
             &["kernel_task_authority_key_id"],

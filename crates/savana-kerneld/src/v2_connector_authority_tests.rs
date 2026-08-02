@@ -674,7 +674,7 @@ fn test_connector_descriptor(name: &str, tool_count: usize) -> Vec<u8> {
     );
     let mut descriptor = minicbor::Encoder::new(Vec::new());
     descriptor
-        .array(7)
+        .array(8)
         .unwrap()
         .bytes(connector_id.as_bytes())
         .unwrap()
@@ -699,6 +699,8 @@ fn test_connector_descriptor(name: &str, tool_count: usize) -> Vec<u8> {
     }
     descriptor
         .u16(EffectSetV2::READ.bits())
+        .unwrap()
+        .u16(savana_policy_core::v2::ConnectorStructuralRoleV2::Source.tag())
         .unwrap()
         .u64(1)
         .unwrap();

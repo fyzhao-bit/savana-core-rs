@@ -41,8 +41,8 @@ use zeroize::Zeroizing;
 
 use crate::{
     effect_gate::{EffectGateCoordinatorV2, EffectGateErrorV2, EffectGateOperationKindV2},
-    AgentControlKernelClientErrorV2, AgentPlannerClientErrorV2, PinnedMtlsAgentPlannerClientV2,
-    SuiteOneAgentKernelClientV2,
+    AgentControlKernelClientErrorV2, AgentPlannerClientErrorV2, DurablePlannerCatalogV2,
+    PinnedMtlsAgentPlannerClientV2, SuiteOneAgentKernelClientV2,
 };
 
 const MAX_AUTHENTICATIONS_V2: usize = 4096;
@@ -202,6 +202,7 @@ pub struct AgentBrowserAuthorityV2 {
     release_destination_projection: ProjectionIdV2,
     release_display_projection: DisplayProjectionIdV2,
     agentd_boot_id: BootIdV2,
+    planner_catalog: Mutex<DurablePlannerCatalogV2>,
     state: Mutex<AuthorityStateV2>,
 }
 
@@ -227,6 +228,7 @@ impl AgentBrowserAuthorityV2 {
         release_destination_projection: ProjectionIdV2,
         release_display_projection: DisplayProjectionIdV2,
         agentd_boot_id: BootIdV2,
+        planner_catalog: DurablePlannerCatalogV2,
     ) -> Self {
         Self {
             effect_gate,
@@ -241,6 +243,7 @@ impl AgentBrowserAuthorityV2 {
             release_destination_projection,
             release_display_projection,
             agentd_boot_id,
+            planner_catalog: Mutex::new(planner_catalog),
             state: Mutex::new(AuthorityStateV2::default()),
         }
     }
@@ -846,6 +849,16 @@ impl AgentBrowserAuthorityV2 {
                 self.refresh_release(tab, reference, request_id, deadline)?
             }
             AgentBrowserActionV2::RegisterConnector(canonical_descriptor) => {
+                self.planner_catalog
+                    .lock()
+                    .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)?
+                    .insert_connector_descriptor(&canonical_descriptor)
+                    .map_err(|error| match error {
+                        crate::PlannerCatalogErrorV2::Invalid => {
+                            AgentBrowserAuthorityErrorV2::InvalidReference
+                        }
+                        _ => AgentBrowserAuthorityErrorV2::Unavailable,
+                    })?;
                 if tab
                     .objects
                     .len()

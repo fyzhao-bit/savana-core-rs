@@ -12,7 +12,7 @@ use super::descriptor::{
 };
 use super::{DeploymentHardLimitsV2, EffectSetV2, G4Error, IdentifierV2, UnsignedToolDescriptorV2};
 
-const CONNECTOR_DESCRIPTOR_FIELDS_V2: u64 = 7;
+const CONNECTOR_DESCRIPTOR_FIELDS_V2: u64 = 8;
 const CONNECTOR_IDENTITY_FIELDS_V2: u64 = 2;
 const CONNECTOR_TRANSPORT_STDIO_FIELDS_V2: u64 = 2;
 const CONNECTOR_TRANSPORT_HTTPS_FIELDS_V2: u64 = 3;
@@ -42,6 +42,29 @@ const CONNECTOR_HOST_ALLOWLIST_DIGEST_DOMAIN_V2: &[u8] =
 pub enum ConnectorTierV2 {
     DeploymentShipped = 1,
     UserRegistered = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u16)]
+pub enum ConnectorStructuralRoleV2 {
+    Source = 1,
+    Transform = 2,
+    Sink = 3,
+}
+
+impl ConnectorStructuralRoleV2 {
+    pub const fn tag(self) -> u16 {
+        self as u16
+    }
+
+    fn from_tag(tag: u16) -> Option<Self> {
+        match tag {
+            1 => Some(Self::Source),
+            2 => Some(Self::Transform),
+            3 => Some(Self::Sink),
+            _ => None,
+        }
+    }
 }
 
 impl ConnectorTierV2 {
@@ -245,6 +268,7 @@ pub struct ConnectorDescriptorV2 {
     transport: ConnectorTransportV2,
     tool_descriptors: Vec<UnsignedToolDescriptorV2>,
     requested_effects: EffectSetV2,
+    structural_role: ConnectorStructuralRoleV2,
     descriptor_version: u64,
 }
 
@@ -258,6 +282,15 @@ impl ConnectorDescriptorV2 {
             return Err(G4Error::InvalidDescriptor);
         }
         Ok(value)
+    }
+
+    /// Parses the exact signed descriptor for an agentd-local projection.
+    ///
+    /// This deliberately performs only intrinsic canonical and descriptor
+    /// validation. Deployment allowlist authorization remains a kerneld
+    /// decision and callers must not treat this projection parser as approval.
+    pub fn from_canonical_bytes_for_local_projection(bytes: &[u8]) -> Result<Self, G4Error> {
+        Self::from_canonical_bytes_intrinsic(bytes)
     }
 
     fn from_canonical_bytes_intrinsic(bytes: &[u8]) -> Result<Self, G4Error> {
@@ -290,6 +323,8 @@ impl ConnectorDescriptorV2 {
         }
         let requested_effects =
             EffectSetV2::from_bits(decode_u16(&mut decoder)?).ok_or(G4Error::InvalidDescriptor)?;
+        let structural_role = ConnectorStructuralRoleV2::from_tag(decode_u16(&mut decoder)?)
+            .ok_or(G4Error::InvalidDescriptor)?;
         let descriptor_version = decode_u64(&mut decoder)?;
         require_eof(&decoder, bytes)?;
 
@@ -300,6 +335,7 @@ impl ConnectorDescriptorV2 {
             transport,
             tool_descriptors,
             requested_effects,
+            structural_role,
             descriptor_version,
         )?;
         if value.canonical_bytes != bytes {
@@ -316,6 +352,7 @@ impl ConnectorDescriptorV2 {
         transport: ConnectorTransportV2,
         tool_descriptors: Vec<UnsignedToolDescriptorV2>,
         requested_effects: EffectSetV2,
+        structural_role: ConnectorStructuralRoleV2,
         descriptor_version: u64,
     ) -> Result<Self, G4Error> {
         if descriptor_version == 0
@@ -347,6 +384,7 @@ impl ConnectorDescriptorV2 {
             transport,
             tool_descriptors,
             requested_effects,
+            structural_role,
             descriptor_version,
         };
         value.canonical_bytes = encode_descriptor(&value)?;
@@ -380,6 +418,10 @@ impl ConnectorDescriptorV2 {
 
     pub const fn requested_effects(&self) -> EffectSetV2 {
         self.requested_effects
+    }
+
+    pub const fn structural_role(&self) -> ConnectorStructuralRoleV2 {
+        self.structural_role
     }
 
     pub const fn descriptor_version(&self) -> u64 {
@@ -1183,6 +1225,7 @@ fn encode_descriptor(value: &ConnectorDescriptorV2) -> Result<Vec<u8>, G4Error> 
     }
     encoder
         .u16(value.requested_effects.bits())
+        .and_then(|encoder| encoder.u16(value.structural_role.tag()))
         .and_then(|encoder| encoder.u64(value.descriptor_version))
         .map_err(|_| G4Error::NonCanonicalDescriptor)?;
     Ok(encoder.into_writer())
@@ -1442,6 +1485,7 @@ mod tests {
             transport,
             vec![test_tool(seed.wrapping_add(2))],
             EffectSetV2::READ,
+            ConnectorStructuralRoleV2::Source,
             1,
         )
         .unwrap()
