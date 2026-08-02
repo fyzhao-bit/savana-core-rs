@@ -1,3 +1,13 @@
+crates/savana-agentd/Cargo.toml
+crates/savana-agentd/src/browser_authority.rs
+crates/savana-agentd/src/daemon.rs
+crates/savana-agentd/src/kernel_client.rs
+crates/savana-agentd/src/lib.rs
+crates/savana-agentd/src/mapper_client.rs
+crates/savana-agentd/src/planner_catalog.rs
+crates/savana-agentd/src/planner_client.rs
+crates/savana-agentd/src/planner_privacy.rs
+crates/savana-agentd/src/private_model_transport.rs
 crates/savana-agentd/src/state_owner.rs
 crates/savana-approvald/src/protocol_state_owner.rs
 crates/savana-approvald/src/state_owner.rs

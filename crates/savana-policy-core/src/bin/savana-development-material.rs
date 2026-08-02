@@ -37,6 +37,7 @@ mod macos {
     const PROVIDER_ALPN: &[u8] = b"savana-provider-v2";
     const PROVIDER_SERVER_NAME: &str = "provider.savana-development.invalid";
     const PLANNER_SERVER_NAME: &str = "planner.savana-development.invalid";
+    const MAPPER_SERVER_NAME: &str = "mapper.savana-development.invalid";
 
     struct Ed25519Material {
         seed: [u8; 32],
@@ -468,6 +469,10 @@ mod macos {
             &root.join("config/tls/planner-server-spki-v2.der"),
             MAX_CERTIFICATE_BYTES,
         )?;
+        let mapper_spki = read_bounded(
+            &root.join("config/tls/mapper-server-spki-v2.der"),
+            MAX_CERTIFICATE_BYTES,
+        )?;
         let mut agent = read_json(&root.join("config/agentd-bootstrap-v2.json"))?;
         set_value(
             &mut agent,
@@ -533,13 +538,13 @@ mod macos {
         set_value(
             &mut agent,
             &["private_mapper_host"],
-            Value::String(PLANNER_SERVER_NAME.to_owned()),
+            Value::String(MAPPER_SERVER_NAME.to_owned()),
         )?;
-        set_value(&mut agent, &["private_mapper_port"], Value::from(9443_u16))?;
+        set_value(&mut agent, &["private_mapper_port"], Value::from(9445_u16))?;
         set_hex(
             &mut agent,
             &["private_mapper_server_spki_sha256"],
-            Sha256::digest(&planner_spki).into(),
+            Sha256::digest(&mapper_spki).into(),
         )?;
         write_json(&root.join("config/agentd-bootstrap-v2.json"), &agent)?;
 

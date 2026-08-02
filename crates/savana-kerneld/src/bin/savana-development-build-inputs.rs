@@ -232,6 +232,8 @@ fn run() -> Result<(), String> {
     let exec_connector_store_id = random_unique(&mut issued)?;
     let placeholder = random_unique(&mut issued)?;
     let placeholder_hex = hex(placeholder);
+    let planner_server_spki_placeholder = hex(random_unique(&mut issued)?);
+    let mapper_server_spki_placeholder = hex(random_unique(&mut issued)?);
     let disabled_connector_authority = "00".repeat(32);
 
     let installed_tool_path = format!("{INSTALL_ROOT}/config/policy/{TOOL_ARTIFACT_LEAF}");
@@ -345,11 +347,11 @@ fn run() -> Result<(), String> {
         "approval_server_key_id": placeholder_hex,
         "planner_host": "planner.savana-development.invalid",
         "planner_port": 9443,
-        "planner_server_spki_sha256": placeholder_hex,
+        "planner_server_spki_sha256": planner_server_spki_placeholder,
         "intent_trust_deployment_ceiling": 1,
-        "private_mapper_host": "planner.savana-development.invalid",
-        "private_mapper_port": 9443,
-        "private_mapper_server_spki_sha256": placeholder_hex,
+        "private_mapper_host": "mapper.savana-development.invalid",
+        "private_mapper_port": 9445,
+        "private_mapper_server_spki_sha256": mapper_server_spki_placeholder,
         "planner_route_id": PLANNER_ROUTE,
         "planner_template_id": 1,
         "planner_intent_tag": 3,

@@ -298,6 +298,37 @@ tab capabilities, document references, and authentication transfers are
 single-purpose opaque capabilities rather than bearer access to a general
 API.
 
+### Private mapper and structural planner
+
+Planner privacy is implemented entirely in `savana-agentd`; the kernel planner
+operations and the canonical `PlannerEnvelopeV2`, `PlannerPlanV2`, and
+`PlannerStepV2` wire encodings are unchanged. The two outbound model
+interfaces are closed mTLS CBOR endpoints:
+
+| Recipient | Exact interface | Receives |
+| --- | --- | --- |
+| private mapper | `POST /savana.mapper.v2/map` | nonce-free intent projection plus the active, local semantic-catalog projection |
+| structural planner | `POST /savana.planner.v2/plan` | freshly relabeled closed structural nodes, edges, and the fixed order-dataflow goal only |
+
+Browser agent action tag `2` is the fail-safe private mapper path. Tag `16` is
+the explicit per-task action that shares intent with a configured third-party
+mapper, and it is rejected unless the measured deployment ceiling permits it.
+The development deployment is `PrivateOnly` and pins distinct mapper and
+planner server identities and agentd-only mTLS credentials.
+
+The semantic catalog is an encrypted, rollback-protected local agentd store at
+`/var/lib/savana/agentd/planner-catalog-state-v2.cbor` in production (under the
+fixed agentd state directory on macOS development). Shipped rows are measured;
+registered rows are projections of approved signed connector descriptors; only
+exact active tool/action pairs enter a mapper request. The decode table and
+kernel envelope nonce remain local, and decode is deterministic.
+
+This privacy boundary has an unavoidable structural-shape floor: the planner
+still learns node count, coarse roles/effects, and dataflow topology because it
+must order that graph. It does not learn business semantics or reusable tool
+identifiers. Hiding topology itself requires local planning or fixed template
+selection, not this remote structural-planning mode.
+
 ### Authenticated service IPC
 
 These endpoints are exposed only to their pinned local service peer. They are

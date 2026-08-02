@@ -919,6 +919,38 @@ fn installer_and_validator_close_over_the_signed_tool_descriptor() {
 }
 
 #[test]
+fn planner_privacy_deployment_provisions_distinct_mapper_identity_and_private_credentials() {
+    let root = deployment_root();
+    let install = fs::read_to_string(root.join("deploy/macos/development/install.sh")).unwrap();
+    let validate = fs::read_to_string(root.join("deploy/macos/development/validate.sh")).unwrap();
+    let systemd = fs::read_to_string(root.join("deploy/systemd/savana-agentd.service")).unwrap();
+
+    assert!(validate.contains("mapper-server.ext"));
+    assert!(install
+        .contains("issue_runtime_certificate mapper-server mapper.savana-development.invalid"));
+    assert!(install
+        .contains("issue_runtime_certificate mapper-client savana-agentd-mapper-development"));
+    assert!(install.contains("mapper-server.spki.der"));
+    assert!(install.contains("mapper-server-spki-v2.der"));
+    assert!(install.contains("credentials/agentd/mapper-root-v2.der"));
+    assert!(install.contains("credentials/agentd/mapper-client-v2.der"));
+    assert!(install.contains("credentials/agentd/mapper-client-v2.pk8"));
+    assert!(install.contains("mapper-server.cert.pem mapper-server.key.pem"));
+
+    for credential in [
+        "mapper-root-v2.der",
+        "mapper-client-v2.der",
+        "mapper-client-v2.pk8",
+    ] {
+        assert!(systemd.contains(&format!("LoadCredentialEncrypted={credential}:")));
+    }
+    assert!(systemd.contains("IPAddressDeny=any"));
+    assert!(systemd.contains("IPAddressAllow=127.0.0.1"));
+    assert!(!systemd.contains("IPAddressAllow=0.0.0.0/0"));
+    assert!(!systemd.contains("IPAddressAllow=::/0"));
+}
+
+#[test]
 fn validator_never_executes_artifacts_from_the_untrusted_build_directory() {
     let validate =
         fs::read_to_string(deployment_root().join("deploy/macos/development/validate.sh")).unwrap();
@@ -984,6 +1016,34 @@ fn validator_accepts_only_a_complete_nonmutating_build_fixture() {
     }
     let zero = "00".repeat(32);
     let genesis = "11".repeat(32);
+    let valid_agentd = serde_json::json!({
+        "planner_catalog_state_path":
+            "/Library/Application Support/Savana/Development/state/agentd/planner-catalog-state-v2.cbor",
+        "planner_catalog_rollback_anchor_path":
+            "/Library/Application Support/Savana/Development/state/agentd/planner-catalog-anchor-v2.cbor",
+        "planner_catalog_store_id": "44".repeat(32),
+        "planner_shipped_catalog": [{
+            "tool_class": 202,
+            "action_template": 102,
+            "structural_role": 3,
+            "effects": 1,
+            "semantic_name": "development.draft_due_diligence_report",
+            "semantic_description":
+                "development shipped due diligence report drafting tool"
+        }],
+        "planner_host": "planner.savana-development.invalid",
+        "planner_port": 9443,
+        "planner_server_spki_sha256": "22".repeat(32),
+        "intent_trust_deployment_ceiling": 1,
+        "private_mapper_host": "mapper.savana-development.invalid",
+        "private_mapper_port": 9445,
+        "private_mapper_server_spki_sha256": "33".repeat(32)
+    });
+    fs::write(
+        fixture.path().join("config/agentd-bootstrap-v2.json"),
+        serde_json::to_vec(&valid_agentd).unwrap(),
+    )
+    .unwrap();
     fs::write(
         fixture.path().join("config/kerneld-bootstrap-v2.json"),
         serde_json::to_vec(&serde_json::json!({
@@ -1137,6 +1197,74 @@ fn validator_accepts_only_a_complete_nonmutating_build_fixture() {
         "validator executed an untrusted build-directory artifact while checking hosts"
     );
 
+    let agentd_path = fixture.path().join("config/agentd-bootstrap-v2.json");
+    for (name, invalid) in [
+        {
+            let mut value = valid_agentd.clone();
+            value
+                .as_object_mut()
+                .unwrap()
+                .remove("intent_trust_deployment_ceiling");
+            ("missing ceiling", value)
+        },
+        {
+            let mut value = valid_agentd.clone();
+            value["intent_trust_deployment_ceiling"] = serde_json::json!(0);
+            ("zero ceiling", value)
+        },
+        {
+            let mut value = valid_agentd.clone();
+            value["intent_trust_deployment_ceiling"] = serde_json::json!(3);
+            ("unknown ceiling", value)
+        },
+        {
+            let mut value = valid_agentd.clone();
+            value["private_mapper_server_spki_sha256"] =
+                value["planner_server_spki_sha256"].clone();
+            ("aliased private mapper pin", value)
+        },
+        {
+            let mut value = valid_agentd.clone();
+            value["planner_catalog_state_path"] =
+                serde_json::json!("/tmp/planner-catalog-state-v2.cbor");
+            ("catalog outside private state", value)
+        },
+        {
+            let mut value = valid_agentd.clone();
+            value["planner_catalog_rollback_anchor_path"] = serde_json::json!(
+                "/Library/Application Support/Savana/Development/state/agentd/../planner-catalog-anchor-v2.cbor"
+            );
+            ("catalog parent traversal", value)
+        },
+        {
+            let mut value = valid_agentd.clone();
+            value["planner_shipped_catalog"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "tool_class": 999,
+                    "action_template": 999,
+                    "structural_role": 1,
+                    "effects": 1,
+                    "semantic_name": "unmeasured",
+                    "semantic_description": "not part of the measured development deployment"
+                }));
+            ("unmeasured catalog row", value)
+        },
+    ] {
+        fs::write(&agentd_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert_eq!(
+            Command::new(deployment_root().join("deploy/macos/development/validate.sh"))
+                .arg(fixture.path())
+                .status()
+                .unwrap()
+                .code(),
+            Some(66),
+            "validator accepted {name}"
+        );
+    }
+    fs::write(&agentd_path, serde_json::to_vec(&valid_agentd).unwrap()).unwrap();
+
     fs::remove_file(fixture.path().join("signing/deployment-manifest-v2.seed")).unwrap();
     assert_eq!(
         Command::new(deployment_root().join("deploy/macos/development/validate.sh"))
@@ -1241,6 +1369,58 @@ fn build_input_generator_emits_cryptographically_bound_runtime_inputs() {
         [0; 32]
     );
     assert_eq!(agentd["planner_route_id"].as_u64(), Some(1));
+    assert_eq!(
+        agentd["planner_catalog_state_path"].as_str(),
+        Some(
+            "/Library/Application Support/Savana/Development/state/agentd/planner-catalog-state-v2.cbor"
+        )
+    );
+    assert_eq!(
+        agentd["planner_catalog_rollback_anchor_path"].as_str(),
+        Some(
+            "/Library/Application Support/Savana/Development/state/agentd/planner-catalog-anchor-v2.cbor"
+        )
+    );
+    assert_ne!(
+        hex_32(agentd["planner_catalog_store_id"].as_str().unwrap()),
+        [0; 32]
+    );
+    assert_eq!(
+        agentd["planner_shipped_catalog"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        agentd["planner_shipped_catalog"][0],
+        serde_json::json!({
+            "tool_class": 202,
+            "action_template": 102,
+            "structural_role": 3,
+            "effects": 1,
+            "semantic_name": "development.draft_due_diligence_report",
+            "semantic_description":
+                "development shipped due diligence report drafting tool"
+        })
+    );
+    assert_eq!(
+        agentd["planner_host"].as_str(),
+        Some("planner.savana-development.invalid")
+    );
+    assert_eq!(agentd["planner_port"].as_u64(), Some(9443));
+    assert_eq!(
+        agentd["private_mapper_host"].as_str(),
+        Some("mapper.savana-development.invalid")
+    );
+    assert_eq!(agentd["private_mapper_port"].as_u64(), Some(9445));
+    assert_eq!(agentd["intent_trust_deployment_ceiling"].as_u64(), Some(1));
+    let planner_pin = hex_32(agentd["planner_server_spki_sha256"].as_str().unwrap());
+    let mapper_pin = hex_32(
+        agentd["private_mapper_server_spki_sha256"]
+            .as_str()
+            .unwrap(),
+    );
+    assert_ne!(planner_pin, [0; 32]);
+    assert_ne!(mapper_pin, [0; 32]);
+    assert_ne!(planner_pin, mapper_pin);
     let jarvis_entitlements = fs::read_to_string(
         fixture
             .path()

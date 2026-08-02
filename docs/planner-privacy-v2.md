@@ -1,9 +1,10 @@
 # Savana V2 Planner Privacy: Value, Shape, and Intent
 
-Status: design proposal, v1.2 (2026-08-01). Specifies how the system withholds
-not just data **values** but the **shape** and **intent** of a workflow from
-an untrusted remote planning model, without touching the kernel. Changes no
-code by itself.
+Status: implemented, v1.2 (2026-08-02). `savana-agentd` withholds data
+**values**, business semantics, reusable tool identifiers, and **intent** from
+an untrusted structural planner without changing the kernel. The remote
+planner necessarily observes the closed graph's structural-shape floor: node
+count, coarse roles/effects, and topology.
 
 v1.1: O2 resolved — the intent trust boundary (§5) is **user-configured,
 within a deployment ceiling, fail-safe to private**.
@@ -391,6 +392,7 @@ as a deployment-shipped one does.
 
 ---
 
-*File:line references verified against the working tree on branch
-`claude/security-capabilities-assessment-06bjbl`. This design changes no code;
-it specifies an agentd-side privacy layer in front of the unchanged kernel.*
+*Implemented on the agentd side with exact mTLS CBOR endpoints
+`POST /savana.mapper.v2/map` and `POST /savana.planner.v2/plan`. Browser tag 2
+is private-by-default; tag 16 is the explicit ceiling-bounded third-party
+opt-out. Kernel planner operations and planner wire schemas remain unchanged.*

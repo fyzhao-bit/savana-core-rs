@@ -90,6 +90,16 @@ require_hex_32() {
   }
 }
 
+require_agent_field() {
+  field=$1
+  type=$2
+  /usr/bin/plutil -extract "$field" raw -expect "$type" \
+    "$build_directory/config/agentd-bootstrap-v2.json" || {
+      echo "agentd planner privacy deployment field is missing or invalid: $field" >&2
+      exit 66
+    }
+}
+
 reject_connector_host() {
   echo "connector host allowlist is invalid or noncanonical" >&2
   exit 66
@@ -198,6 +208,75 @@ while [ "$connector_host_index" -lt "$connector_host_count" ]; do
   connector_host_index=$((connector_host_index + 1))
 done
 
+agentd_configuration="$build_directory/config/agentd-bootstrap-v2.json"
+planner_host=$(require_agent_field planner_host string)
+planner_port=$(require_agent_field planner_port integer)
+planner_pin=$(require_agent_field planner_server_spki_sha256 string)
+intent_ceiling=$(require_agent_field intent_trust_deployment_ceiling integer)
+mapper_host=$(require_agent_field private_mapper_host string)
+mapper_port=$(require_agent_field private_mapper_port integer)
+mapper_pin=$(require_agent_field private_mapper_server_spki_sha256 string)
+catalog_state=$(require_agent_field planner_catalog_state_path string)
+catalog_anchor=$(require_agent_field planner_catalog_rollback_anchor_path string)
+catalog_store_id=$(require_agent_field planner_catalog_store_id string)
+
+[ "$planner_host" = "planner.savana-development.invalid" ] && \
+  [ "$planner_port" = "9443" ] && \
+  [ "$mapper_host" = "mapper.savana-development.invalid" ] && \
+  [ "$mapper_port" = "9445" ] || {
+    echo "planner or private mapper endpoint is not the measured development endpoint" >&2
+    exit 66
+  }
+[ "$intent_ceiling" = "1" ] || {
+  echo "development intent trust deployment ceiling must be explicit PrivateOnly" >&2
+  exit 66
+}
+require_hex_32 "$planner_pin"
+require_hex_32 "$mapper_pin"
+require_hex_32 "$catalog_store_id"
+zero_digest=0000000000000000000000000000000000000000000000000000000000000000
+[ "$planner_pin" != "$zero_digest" ] && \
+  [ "$mapper_pin" != "$zero_digest" ] && \
+  [ "$catalog_store_id" != "$zero_digest" ] && \
+  [ "$planner_pin" != "$mapper_pin" ] || {
+    echo "planner privacy deployment contains zero or aliased measurements" >&2
+    exit 66
+  }
+[ "$catalog_state" = "/Library/Application Support/Savana/Development/state/agentd/planner-catalog-state-v2.cbor" ] && \
+  [ "$catalog_anchor" = "/Library/Application Support/Savana/Development/state/agentd/planner-catalog-anchor-v2.cbor" ] || {
+    echo "planner catalog path is outside the measured private agentd state" >&2
+    exit 66
+  }
+for field in third_party_mapper_host third_party_mapper_port third_party_mapper_server_spki_sha256; do
+  if /usr/bin/plutil -extract "$field" raw "$agentd_configuration" >/dev/null 2>&1; then
+    echo "PrivateOnly development deployment contains a third-party mapper endpoint" >&2
+    exit 66
+  fi
+done
+
+catalog_count=$(require_agent_field planner_shipped_catalog array)
+[ "$catalog_count" = "1" ] || {
+  echo "development shipped planner catalog is not the measured singleton" >&2
+  exit 66
+}
+for specification in \
+  'tool_class integer 202' \
+  'action_template integer 102' \
+  'structural_role integer 3' \
+  'effects integer 1' \
+  'semantic_name string development.draft_due_diligence_report' \
+  'semantic_description string development shipped due diligence report drafting tool'; do
+  field=${specification%% *}
+  remainder=${specification#* }
+  type=${remainder%% *}
+  expected=${remainder#* }
+  observed=$(require_agent_field "planner_shipped_catalog.0.$field" "$type")
+  [ "$observed" = "$expected" ] || {
+    echo "development shipped planner catalog entry is unmeasured: $field" >&2
+    exit 66
+  }
+done
+
 sandbox_files="
 parser-profile-v2.json
 connector-no-network-profile-v2.json
@@ -245,7 +324,7 @@ for helper in savana-development-manifest savana-development-material savana-dev
   }
 done
 
-for input in runtime-ca.cnf planner-server.ext provider-server.ext client.ext; do
+for input in runtime-ca.cnf planner-server.ext mapper-server.ext provider-server.ext client.ext; do
   path="$script_directory/tls/$input"
   [ -s "$path" ] && [ ! -L "$path" ] || {
     echo "missing fixed TLS profile: $path" >&2

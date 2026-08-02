@@ -112,6 +112,9 @@ mod implementation {
     const PLANNER_ROOT_CERTIFICATE_CREDENTIAL_V2: &str = "planner-root-v2.der";
     const PLANNER_CLIENT_CERTIFICATE_CREDENTIAL_V2: &str = "planner-client-v2.der";
     const PLANNER_CLIENT_PRIVATE_KEY_CREDENTIAL_V2: &str = "planner-client-v2.pk8";
+    const MAPPER_ROOT_CERTIFICATE_CREDENTIAL_V2: &str = "mapper-root-v2.der";
+    const MAPPER_CLIENT_CERTIFICATE_CREDENTIAL_V2: &str = "mapper-client-v2.der";
+    const MAPPER_CLIENT_PRIVATE_KEY_CREDENTIAL_V2: &str = "mapper-client-v2.pk8";
     const MACHINE_BOOT_CREDENTIAL_V2: &str = "machine-boot-v2.id";
     const JARVIS_BOOT_CREDENTIAL_V2: &str = "jarvis-boot-v2.id";
     const CONTROL_FD_NAME_V2: &str = "savana-jarvis-agent-control";
@@ -475,13 +478,18 @@ mod implementation {
             approval_public_key,
         )
         .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
+        let planner_server_spki_sha256 = Digest32V2::new(
+            decode_hex_32_v2(&bootstrap.planner_server_spki_sha256)
+                .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?,
+        );
+        let private_mapper_server_spki_sha256 = Digest32V2::new(
+            decode_hex_32_v2(&bootstrap.private_mapper_server_spki_sha256)
+                .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?,
+        );
         let planner = PinnedMtlsAgentPlannerClientV2::from_verified_deployment(
             bootstrap.planner_host.clone(),
             bootstrap.planner_port,
-            Digest32V2::new(
-                decode_hex_32_v2(&bootstrap.planner_server_spki_sha256)
-                    .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?,
-            ),
+            planner_server_spki_sha256,
             read_credential_blob(
                 PLANNER_ROOT_CERTIFICATE_CREDENTIAL_V2,
                 MAX_TLS_CREDENTIAL_BYTES_V2,
@@ -501,13 +509,16 @@ mod implementation {
                 bootstrap.intent_trust_deployment_ceiling,
             )
             .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
+        if intent_trust_ceiling
+            == crate::planner_privacy::IntentTrustDeploymentCeilingV2::PrivateOnly
+            && private_mapper_server_spki_sha256 == planner_server_spki_sha256
+        {
+            return Err(AgentdDaemonErrorV2::DeploymentUnavailable);
+        }
         let private_mapper = MapperEndpointDeploymentV2::new(
             bootstrap.private_mapper_host.clone(),
             bootstrap.private_mapper_port,
-            Digest32V2::new(
-                decode_hex_32_v2(&bootstrap.private_mapper_server_spki_sha256)
-                    .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?,
-            ),
+            private_mapper_server_spki_sha256,
         )
         .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
         let third_party_mapper = match (
@@ -534,15 +545,15 @@ mod implementation {
             private_mapper,
             third_party_mapper,
             read_credential_blob(
-                PLANNER_ROOT_CERTIFICATE_CREDENTIAL_V2,
+                MAPPER_ROOT_CERTIFICATE_CREDENTIAL_V2,
                 MAX_TLS_CREDENTIAL_BYTES_V2,
             )?,
             read_credential_blob(
-                PLANNER_CLIENT_CERTIFICATE_CREDENTIAL_V2,
+                MAPPER_CLIENT_CERTIFICATE_CREDENTIAL_V2,
                 MAX_TLS_CREDENTIAL_BYTES_V2,
             )?,
             Zeroizing::new(read_credential_blob(
-                PLANNER_CLIENT_PRIVATE_KEY_CREDENTIAL_V2,
+                MAPPER_CLIENT_PRIVATE_KEY_CREDENTIAL_V2,
                 MAX_TLS_CREDENTIAL_BYTES_V2,
             )?),
         )
