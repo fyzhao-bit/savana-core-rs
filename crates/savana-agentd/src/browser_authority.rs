@@ -24,12 +24,12 @@ use savana_kernel_protocol::v2::{
     GetReleaseStatusRequestV2, KernelAgentOperationV2, KernelAgentViewCursorV2,
     MaskedDocumentHandleV2, NamedArgumentValueBindingV2, Nonce32V2,
     PendingConnectorRegistrationHandleV2, PendingReleaseHandleV2, PendingToolCallHandleV2,
-    PlanStepHandleV2, PlannerIntentKindV2, PlannerLimitsV2, PlannerPurposeV2, PlannerRouteIdV2,
-    PrepareConnectorRegistrationRequestV2, PrepareConnectorRemovalRequestV2,
-    PrepareConnectorRemovalResponseV2, PrepareFollowupIngressRequestV2,
-    PreparePlannerCallRequestV2, PrepareReleaseRequestV2, ProjectionIdV2,
-    ProposeConnectorRegistrationRequestV2, ProposeToolCallRequestV2, PublicDispatchCompletionV2,
-    PublicExecutionStatusV2, PublicStableCodeV2, RegisteredApprovalV2,
+    PlanStepHandleV2, PlannerIntentKindV2, PlannerLimitsV2, PlannerPlanV2, PlannerPurposeV2,
+    PlannerRouteIdV2, PlannerTicketHandleV2, PrepareConnectorRegistrationRequestV2,
+    PrepareConnectorRemovalRequestV2, PrepareConnectorRemovalResponseV2,
+    PrepareFollowupIngressRequestV2, PreparePlannerCallRequestV2, PrepareReleaseRequestV2,
+    ProjectionIdV2, ProposeConnectorRegistrationRequestV2, ProposeToolCallRequestV2,
+    PublicDispatchCompletionV2, PublicExecutionStatusV2, PublicStableCodeV2, RegisteredApprovalV2,
     RegisteredUiAuthenticationV2, ReleaseApprovalRecordHandleV2, ReleaseHandleV2,
     ReleaseKernelApprovalHandleV2, ReleaseStatusTargetV2, ReleaseTicketHandleV2,
     RemoveConnectorRequestV2, RemoveConnectorResponseV2, RequestIdV2,
@@ -158,7 +158,7 @@ struct PendingConnectorRegistrationV2 {
 struct ActionReplayV2 {
     request_digest: Digest32V2,
     nonce: Nonce32V2,
-    response: AgentBrowserMutationResponseV2,
+    response: Option<AgentBrowserMutationResponseV2>,
 }
 
 #[derive(Debug)]
@@ -571,412 +571,402 @@ impl AgentBrowserAuthorityV2 {
         } else {
             find_action_tab(&mut state, tab)?
         };
-        if let Some(replayed) =
-            resolve_action_replay_v2(&tab.action_replays, client_request_nonce, request_digest)
-        {
-            return replayed;
-        }
-        if tab.action_replays.len() >= MAX_REPLAYS_PER_TAB_V2 {
-            return Err(AgentBrowserAuthorityErrorV2::Overloaded);
-        }
-        tab.action_replays
-            .try_reserve(1)
-            .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
-        self.claim_tab(tab, deadline)?;
-
-        let response = match action {
-            AgentBrowserActionV2::PrepareFollowupIngress => {
-                let response = self
-                    .kernel
-                    .prepare_followup_ingress(
-                        PrepareFollowupIngressRequestV2::new(
-                            required(tab.session)?,
-                            required(tab.run)?,
-                            client_request_nonce,
+        execute_action_nonce_bound_v2(tab, client_request_nonce, request_digest, |tab| {
+            self.claim_tab(tab, deadline)?;
+            let response = match action {
+                AgentBrowserActionV2::PrepareFollowupIngress => {
+                    let response = self
+                        .kernel
+                        .prepare_followup_ingress(
+                            PrepareFollowupIngressRequestV2::new(
+                                required(tab.session)?,
+                                required(tab.run)?,
+                                client_request_nonce,
+                            )
+                            .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
+                            request_id,
+                            deadline,
                         )
-                        .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
-                        request_id,
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
-                AgentBrowserMutationResponseV2::FollowupOpenIngress {
-                    post: FixedBrowserFormPostCarrierV2::AgentFollowupIngress(
-                        response.input_transfer(),
-                    ),
+                        .map_err(map_kernel)?;
+                    AgentBrowserMutationResponseV2::FollowupOpenIngress {
+                        post: FixedBrowserFormPostCarrierV2::AgentFollowupIngress(
+                            response.input_transfer(),
+                        ),
+                    }
                 }
-            }
-            AgentBrowserActionV2::RunPlanner
-            | AgentBrowserActionV2::RunPlannerWithThirdPartyMapper => {
-                let _effect_guard = self
-                    .effect_gate
-                    .acquire(
-                        EffectGateOperationKindV2::PlannerExchange,
-                        effect_operation_id,
-                        effect_gate_deadline(deadline)?,
-                    )
-                    .map_err(map_effect_gate)?;
-                let run = required(tab.run)?;
-                let initial_value = required(tab.initial_value)?;
-                let prepared = self
-                    .kernel
-                    .prepare_planner_call(
-                        PreparePlannerCallRequestV2::new(
-                            run,
-                            self.planner_route,
-                            self.planner_template,
-                            self.planner_intent,
-                            PlannerPurposeV2::PlannerCall,
-                            self.planner_limits,
-                            vec![initial_value],
+                AgentBrowserActionV2::RunPlanner
+                | AgentBrowserActionV2::RunPlannerWithThirdPartyMapper => {
+                    let _effect_guard = self
+                        .effect_gate
+                        .acquire(
+                            EffectGateOperationKindV2::PlannerExchange,
+                            effect_operation_id,
+                            effect_gate_deadline(deadline)?,
                         )
-                        .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
-                        request_id,
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
-                let plan = self
-                    .planner
-                    .plan(prepared.envelope(), deadline)
-                    .map_err(map_planner)?;
-                let committed = self
-                    .kernel
-                    .commit_planner_value(
-                        CommitPlannerValueRequestV2::new(run, prepared.ticket(), plan.clone()),
-                        request_id,
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
-                if committed.steps().len() != plan.steps().len()
-                    || tab.objects.len().saturating_add(committed.steps().len())
-                        > MAX_OBJECTS_PER_TAB_V2
-                {
-                    return Err(AgentBrowserAuthorityErrorV2::StateConflict);
-                }
-                tab.objects
-                    .try_reserve(committed.steps().len())
-                    .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
-                let mut references = Vec::new();
-                references
-                    .try_reserve(committed.steps().len())
-                    .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
-                for (kernel_step, plan_step) in committed.steps().iter().copied().zip(plan.steps())
-                {
-                    let tool = tab
-                        .active_tools
-                        .iter()
-                        .copied()
-                        .find(|tool| {
-                            tool.action_template() == plan_step.action_template()
-                                && tool.tool_class() == plan_step.tool_class()
-                        })
-                        .ok_or(AgentBrowserAuthorityErrorV2::StateConflict)?
-                        .tool();
-                    let arguments = plan_step
-                        .slot_bindings()
-                        .iter()
-                        .map(|(name, _)| {
-                            NamedArgumentValueBindingV2::new(name.clone(), initial_value)
-                        })
-                        .collect::<Vec<_>>();
-                    let reference = mint_step_reference(tab)?;
-                    tab.objects.push(BrowserObjectBindingV2::PlanStep {
-                        reference,
-                        kernel: kernel_step,
-                        tool,
-                        arguments,
-                    });
-                    references.push(reference);
-                }
-                AgentBrowserMutationResponseV2::PlannerCommitted { steps: references }
-            }
-            AgentBrowserActionV2::ProposePlanStep(reference) => {
-                let (step, tool, arguments) = tab
-                    .objects
-                    .iter()
-                    .find_map(|object| match object {
-                        BrowserObjectBindingV2::PlanStep {
-                            reference: candidate,
-                            kernel,
+                        .map_err(map_effect_gate)?;
+                    let run = required(tab.run)?;
+                    let initial_value = required(tab.initial_value)?;
+                    let prepared = self
+                        .kernel
+                        .prepare_planner_call(
+                            planner_prepare_call_request_v2(
+                                run,
+                                self.planner_route,
+                                self.planner_template,
+                                self.planner_intent,
+                                self.planner_limits,
+                                initial_value,
+                            )?,
+                            request_id,
+                            deadline,
+                        )
+                        .map_err(map_kernel)?;
+                    let plan = self
+                        .planner
+                        .plan(prepared.envelope(), deadline)
+                        .map_err(map_planner)?;
+                    let committed = self
+                        .kernel
+                        .commit_planner_value(
+                            planner_commit_value_request_v2(run, prepared.ticket(), plan.clone()),
+                            request_id,
+                            deadline,
+                        )
+                        .map_err(map_kernel)?;
+                    if committed.steps().len() != plan.steps().len()
+                        || tab.objects.len().saturating_add(committed.steps().len())
+                            > MAX_OBJECTS_PER_TAB_V2
+                    {
+                        return Err(AgentBrowserAuthorityErrorV2::StateConflict);
+                    }
+                    tab.objects
+                        .try_reserve(committed.steps().len())
+                        .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
+                    let mut references = Vec::new();
+                    references
+                        .try_reserve(committed.steps().len())
+                        .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
+                    for (kernel_step, plan_step) in
+                        committed.steps().iter().copied().zip(plan.steps())
+                    {
+                        let tool = tab
+                            .active_tools
+                            .iter()
+                            .copied()
+                            .find(|tool| {
+                                tool.action_template() == plan_step.action_template()
+                                    && tool.tool_class() == plan_step.tool_class()
+                            })
+                            .ok_or(AgentBrowserAuthorityErrorV2::StateConflict)?
+                            .tool();
+                        let arguments = plan_step
+                            .slot_bindings()
+                            .iter()
+                            .map(|(name, _)| {
+                                NamedArgumentValueBindingV2::new(name.clone(), initial_value)
+                            })
+                            .collect::<Vec<_>>();
+                        let reference = mint_step_reference(tab)?;
+                        tab.objects.push(BrowserObjectBindingV2::PlanStep {
+                            reference,
+                            kernel: kernel_step,
                             tool,
                             arguments,
-                        } if *candidate == reference => Some((*kernel, *tool, arguments.clone())),
-                        _ => None,
-                    })
-                    .ok_or(AgentBrowserAuthorityErrorV2::InvalidReference)?;
-                let proposed = self
-                    .kernel
-                    .propose_tool_call(
-                        ProposeToolCallRequestV2::new(step, tool, arguments)
-                            .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
-                        request_id,
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
-                let pending = match proposed.current() {
-                    ActionIntentCurrentStateV2::Proposed { pending }
-                    | ActionIntentCurrentStateV2::Evaluating { pending }
-                    | ActionIntentCurrentStateV2::AwaitingApproval { pending } => pending,
-                    _ => return Err(AgentBrowserAuthorityErrorV2::StateConflict),
-                };
-                let pending_reference = mint_pending_reference(tab)?;
-                tab.objects.push(BrowserObjectBindingV2::PendingToolCall {
-                    reference: pending_reference,
-                    kernel: pending,
-                    approval: None,
-                });
-                AgentBrowserMutationResponseV2::ToolProposed {
-                    pending: pending_reference,
+                        });
+                        references.push(reference);
+                    }
+                    AgentBrowserMutationResponseV2::PlannerCommitted { steps: references }
                 }
-            }
-            AgentBrowserActionV2::EvaluatePending(reference) => {
-                self.evaluate_pending(tab, reference, request_id, deadline)?
-            }
-            AgentBrowserActionV2::DispatchTicket(reference) => {
-                let _effect_guard = self
-                    .effect_gate
-                    .acquire(
-                        EffectGateOperationKindV2::ExecutionDispatch,
-                        effect_operation_id,
-                        effect_gate_deadline(deadline)?,
-                    )
-                    .map_err(map_effect_gate)?;
-                let ticket = find_execution_ticket(tab, reference)?;
-                let dispatched = self
-                    .kernel
-                    .dispatch_execution(
-                        DispatchExecutionRequestV2::new(ticket),
-                        request_id,
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
-                let execution_reference = mint_execution_reference(tab)?;
-                tab.objects.push(BrowserObjectBindingV2::Execution {
-                    reference: execution_reference,
-                    kernel: dispatched.execution(),
-                });
-                AgentBrowserMutationResponseV2::ExecutionDispatched {
-                    execution: execution_reference,
-                    state: dispatched.status(),
-                }
-            }
-            AgentBrowserActionV2::PrepareRelease(document) => {
-                let kernel_document = find_document(tab, document)?;
-                let prepared = self
-                    .kernel
-                    .prepare_release(
-                        PrepareReleaseRequestV2::new(
-                            kernel_document,
-                            vec![required(tab.initial_value)?],
-                            self.release_executor,
-                            self.release_destination_projection,
-                            self.release_display_projection,
-                        )
-                        .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
-                        request_id,
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
-                let registered = self
-                    .approval
-                    .register_approval(
-                        prepared.envelope().clone(),
-                        prepared.display_authentication().clone(),
-                        deadline,
-                    )
-                    .map_err(map_approval)?;
-                let RegisteredApprovalV2::Release {
-                    approval,
-                    display_authentication,
-                } = registered
-                else {
-                    return Err(AgentBrowserAuthorityErrorV2::StateConflict);
-                };
-                tab.pending_releases.push(PendingReleaseApprovalV2 {
-                    pending: prepared.pending(),
-                    kernel: prepared.approval(),
-                    approvald: approval,
-                });
-                AgentBrowserMutationResponseV2::ReleaseOpenApproval {
-                    post: FixedBrowserFormPostCarrierV2::AgentApprovalDisplay(
-                        display_authentication,
-                    ),
-                }
-            }
-            AgentBrowserActionV2::DispatchRelease(reference) => {
-                let _effect_guard = self
-                    .effect_gate
-                    .acquire(
-                        EffectGateOperationKindV2::ReleaseDispatch,
-                        effect_operation_id,
-                        effect_gate_deadline(deadline)?,
-                    )
-                    .map_err(map_effect_gate)?;
-                let ticket = find_release_ticket(tab, reference)?;
-                let dispatched = self
-                    .kernel
-                    .dispatch_release(DispatchReleaseRequestV2::new(ticket), request_id, deadline)
-                    .map_err(map_kernel)?;
-                let release_reference = mint_release_reference(tab)?;
-                tab.objects.push(BrowserObjectBindingV2::Release {
-                    reference: release_reference,
-                    kernel: dispatched.release(),
-                });
-                AgentBrowserMutationResponseV2::ReleaseDispatched {
-                    release: release_reference,
-                    state: dispatched.status(),
-                }
-            }
-            AgentBrowserActionV2::RevokeVault(document) => {
-                let response = self
-                    .kernel
-                    .revoke_vault(
-                        savana_kernel_protocol::v2::RevokeVaultRequestV2::new(find_document(
-                            tab, document,
-                        )?),
-                        request_id,
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
-                AgentBrowserMutationResponseV2::VaultRevoked {
-                    state: response.state(),
-                }
-            }
-            AgentBrowserActionV2::CloseSession => {
-                let response = self
-                    .kernel
-                    .close_agent_session(
-                        CloseAgentSessionRequestV2::new(required(tab.session)?),
-                        request_id,
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
-                AgentBrowserMutationResponseV2::SessionClosed {
-                    state: response.state(),
-                }
-            }
-            AgentBrowserActionV2::RefreshExecution(reference) => {
-                self.refresh_execution(tab, reference, request_id, deadline)?
-            }
-            AgentBrowserActionV2::RefreshRelease(reference) => {
-                self.refresh_release(tab, reference, request_id, deadline)?
-            }
-            AgentBrowserActionV2::RegisterConnector(canonical_descriptor) => {
-                let prepared = persist_catalog_before_connector_prepare(
-                    || {
-                        self.planner_catalog
-                            .lock()
-                            .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)?
-                            .insert_connector_descriptor(&canonical_descriptor)
-                            .map_err(|error| match error {
-                                crate::PlannerCatalogErrorV2::Invalid => {
-                                    AgentBrowserAuthorityErrorV2::InvalidReference
-                                }
-                                _ => AgentBrowserAuthorityErrorV2::Unavailable,
-                            })
-                    },
-                    || {
-                        if tab
-                            .objects
-                            .len()
-                            .saturating_add(tab.pending_connectors.len())
-                            >= MAX_OBJECTS_PER_TAB_V2
-                        {
-                            return Err(AgentBrowserAuthorityErrorV2::Overloaded);
-                        }
-                        tab.pending_connectors
-                            .try_reserve(1)
-                            .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
-                        self.kernel
-                            .prepare_connector_registration(
-                                PrepareConnectorRegistrationRequestV2::new(
-                                    required(tab.session)?,
-                                    canonical_descriptor.clone(),
-                                )
+                AgentBrowserActionV2::ProposePlanStep(reference) => {
+                    let (step, tool, arguments) = tab
+                        .objects
+                        .iter()
+                        .find_map(|object| match object {
+                            BrowserObjectBindingV2::PlanStep {
+                                reference: candidate,
+                                kernel,
+                                tool,
+                                arguments,
+                            } if *candidate == reference => {
+                                Some((*kernel, *tool, arguments.clone()))
+                            }
+                            _ => None,
+                        })
+                        .ok_or(AgentBrowserAuthorityErrorV2::InvalidReference)?;
+                    let proposed = self
+                        .kernel
+                        .propose_tool_call(
+                            ProposeToolCallRequestV2::new(step, tool, arguments)
                                 .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
-                                deadline,
-                            )
-                            .map_err(map_kernel)
-                    },
-                )?;
-                let proposed = self
-                    .kernel
-                    .propose_connector_registration(
-                        ProposeConnectorRegistrationRequestV2::new(
-                            prepared.authorization(),
-                            canonical_descriptor,
+                            request_id,
+                            deadline,
                         )
-                        .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
-                let registered = self
-                    .approval
-                    .register_approval(
-                        proposed.envelope().clone(),
-                        proposed.display_authentication().clone(),
-                        deadline,
-                    )
-                    .map_err(map_approval)?;
-                let RegisteredApprovalV2::Connector {
-                    approval,
-                    display_authentication,
-                } = registered
-                else {
-                    return Err(AgentBrowserAuthorityErrorV2::StateConflict);
-                };
-                let pending = mint_pending_connector_reference(tab)?;
-                tab.pending_connectors.push(PendingConnectorRegistrationV2 {
-                    reference: pending,
-                    kernel: proposed.pending(),
-                    approvald: approval,
-                    transfer: display_authentication,
-                });
-                AgentBrowserMutationResponseV2::ConnectorOpenApproval {
-                    pending,
-                    post: FixedBrowserFormPostCarrierV2::AgentApprovalDisplay(
+                        .map_err(map_kernel)?;
+                    let pending = match proposed.current() {
+                        ActionIntentCurrentStateV2::Proposed { pending }
+                        | ActionIntentCurrentStateV2::Evaluating { pending }
+                        | ActionIntentCurrentStateV2::AwaitingApproval { pending } => pending,
+                        _ => return Err(AgentBrowserAuthorityErrorV2::StateConflict),
+                    };
+                    let pending_reference = mint_pending_reference(tab)?;
+                    tab.objects.push(BrowserObjectBindingV2::PendingToolCall {
+                        reference: pending_reference,
+                        kernel: pending,
+                        approval: None,
+                    });
+                    AgentBrowserMutationResponseV2::ToolProposed {
+                        pending: pending_reference,
+                    }
+                }
+                AgentBrowserActionV2::EvaluatePending(reference) => {
+                    self.evaluate_pending(tab, reference, request_id, deadline)?
+                }
+                AgentBrowserActionV2::DispatchTicket(reference) => {
+                    let _effect_guard = self
+                        .effect_gate
+                        .acquire(
+                            EffectGateOperationKindV2::ExecutionDispatch,
+                            effect_operation_id,
+                            effect_gate_deadline(deadline)?,
+                        )
+                        .map_err(map_effect_gate)?;
+                    let ticket = find_execution_ticket(tab, reference)?;
+                    let dispatched = self
+                        .kernel
+                        .dispatch_execution(
+                            DispatchExecutionRequestV2::new(ticket),
+                            request_id,
+                            deadline,
+                        )
+                        .map_err(map_kernel)?;
+                    let execution_reference = mint_execution_reference(tab)?;
+                    tab.objects.push(BrowserObjectBindingV2::Execution {
+                        reference: execution_reference,
+                        kernel: dispatched.execution(),
+                    });
+                    AgentBrowserMutationResponseV2::ExecutionDispatched {
+                        execution: execution_reference,
+                        state: dispatched.status(),
+                    }
+                }
+                AgentBrowserActionV2::PrepareRelease(document) => {
+                    let kernel_document = find_document(tab, document)?;
+                    let prepared = self
+                        .kernel
+                        .prepare_release(
+                            PrepareReleaseRequestV2::new(
+                                kernel_document,
+                                vec![required(tab.initial_value)?],
+                                self.release_executor,
+                                self.release_destination_projection,
+                                self.release_display_projection,
+                            )
+                            .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
+                            request_id,
+                            deadline,
+                        )
+                        .map_err(map_kernel)?;
+                    let registered = self
+                        .approval
+                        .register_approval(
+                            prepared.envelope().clone(),
+                            prepared.display_authentication().clone(),
+                            deadline,
+                        )
+                        .map_err(map_approval)?;
+                    let RegisteredApprovalV2::Release {
+                        approval,
                         display_authentication,
-                    ),
+                    } = registered
+                    else {
+                        return Err(AgentBrowserAuthorityErrorV2::StateConflict);
+                    };
+                    tab.pending_releases.push(PendingReleaseApprovalV2 {
+                        pending: prepared.pending(),
+                        kernel: prepared.approval(),
+                        approvald: approval,
+                    });
+                    AgentBrowserMutationResponseV2::ReleaseOpenApproval {
+                        post: FixedBrowserFormPostCarrierV2::AgentApprovalDisplay(
+                            display_authentication,
+                        ),
+                    }
                 }
-            }
-            AgentBrowserActionV2::FinalizeConnectorRegistration(reference) => {
-                self.finalize_connector_registration(tab, reference, deadline)?
-            }
-            AgentBrowserActionV2::RemoveConnector(connector_id) => {
-                let session = required(tab.session)?;
-                remove_connector_flow(
-                    session,
-                    connector_id,
-                    |request| {
-                        self.kernel
-                            .prepare_connector_removal(request, deadline)
-                            .map_err(map_kernel)
-                    },
-                    |request| {
-                        self.kernel
-                            .remove_connector(request, deadline)
-                            .map_err(map_kernel)
-                    },
-                )?
-            }
-            AgentBrowserActionV2::SnapshotConnectors => {
-                let snapshot = self
-                    .kernel
-                    .connector_registry_snapshot(
-                        ConnectorRegistrySnapshotRequestV2::new(required(tab.session)?),
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
-                AgentBrowserMutationResponseV2::ConnectorRegistrySnapshot {
-                    canonical_snapshot: snapshot.canonical_snapshot().clone(),
+                AgentBrowserActionV2::DispatchRelease(reference) => {
+                    let _effect_guard = self
+                        .effect_gate
+                        .acquire(
+                            EffectGateOperationKindV2::ReleaseDispatch,
+                            effect_operation_id,
+                            effect_gate_deadline(deadline)?,
+                        )
+                        .map_err(map_effect_gate)?;
+                    let ticket = find_release_ticket(tab, reference)?;
+                    let dispatched = self
+                        .kernel
+                        .dispatch_release(
+                            DispatchReleaseRequestV2::new(ticket),
+                            request_id,
+                            deadline,
+                        )
+                        .map_err(map_kernel)?;
+                    let release_reference = mint_release_reference(tab)?;
+                    tab.objects.push(BrowserObjectBindingV2::Release {
+                        reference: release_reference,
+                        kernel: dispatched.release(),
+                    });
+                    AgentBrowserMutationResponseV2::ReleaseDispatched {
+                        release: release_reference,
+                        state: dispatched.status(),
+                    }
                 }
-            }
-        };
-        tab.action_replays.push(ActionReplayV2 {
-            request_digest,
-            nonce: client_request_nonce,
-            response: response.clone(),
-        });
-        Ok(response)
+                AgentBrowserActionV2::RevokeVault(document) => {
+                    let response = self
+                        .kernel
+                        .revoke_vault(
+                            savana_kernel_protocol::v2::RevokeVaultRequestV2::new(find_document(
+                                tab, document,
+                            )?),
+                            request_id,
+                            deadline,
+                        )
+                        .map_err(map_kernel)?;
+                    AgentBrowserMutationResponseV2::VaultRevoked {
+                        state: response.state(),
+                    }
+                }
+                AgentBrowserActionV2::CloseSession => {
+                    let response = self
+                        .kernel
+                        .close_agent_session(
+                            CloseAgentSessionRequestV2::new(required(tab.session)?),
+                            request_id,
+                            deadline,
+                        )
+                        .map_err(map_kernel)?;
+                    AgentBrowserMutationResponseV2::SessionClosed {
+                        state: response.state(),
+                    }
+                }
+                AgentBrowserActionV2::RefreshExecution(reference) => {
+                    self.refresh_execution(tab, reference, request_id, deadline)?
+                }
+                AgentBrowserActionV2::RefreshRelease(reference) => {
+                    self.refresh_release(tab, reference, request_id, deadline)?
+                }
+                AgentBrowserActionV2::RegisterConnector(canonical_descriptor) => {
+                    let prepared = persist_catalog_before_connector_prepare(
+                        || {
+                            self.planner_catalog
+                                .lock()
+                                .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)?
+                                .insert_connector_descriptor(&canonical_descriptor)
+                                .map_err(|error| match error {
+                                    crate::PlannerCatalogErrorV2::Invalid => {
+                                        AgentBrowserAuthorityErrorV2::InvalidReference
+                                    }
+                                    _ => AgentBrowserAuthorityErrorV2::Unavailable,
+                                })
+                        },
+                        || {
+                            if tab
+                                .objects
+                                .len()
+                                .saturating_add(tab.pending_connectors.len())
+                                >= MAX_OBJECTS_PER_TAB_V2
+                            {
+                                return Err(AgentBrowserAuthorityErrorV2::Overloaded);
+                            }
+                            tab.pending_connectors
+                                .try_reserve(1)
+                                .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
+                            self.kernel
+                                .prepare_connector_registration(
+                                    PrepareConnectorRegistrationRequestV2::new(
+                                        required(tab.session)?,
+                                        canonical_descriptor.clone(),
+                                    )
+                                    .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
+                                    deadline,
+                                )
+                                .map_err(map_kernel)
+                        },
+                    )?;
+                    let proposed = self
+                        .kernel
+                        .propose_connector_registration(
+                            ProposeConnectorRegistrationRequestV2::new(
+                                prepared.authorization(),
+                                canonical_descriptor,
+                            )
+                            .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
+                            deadline,
+                        )
+                        .map_err(map_kernel)?;
+                    let registered = self
+                        .approval
+                        .register_approval(
+                            proposed.envelope().clone(),
+                            proposed.display_authentication().clone(),
+                            deadline,
+                        )
+                        .map_err(map_approval)?;
+                    let RegisteredApprovalV2::Connector {
+                        approval,
+                        display_authentication,
+                    } = registered
+                    else {
+                        return Err(AgentBrowserAuthorityErrorV2::StateConflict);
+                    };
+                    let pending = mint_pending_connector_reference(tab)?;
+                    tab.pending_connectors.push(PendingConnectorRegistrationV2 {
+                        reference: pending,
+                        kernel: proposed.pending(),
+                        approvald: approval,
+                        transfer: display_authentication,
+                    });
+                    AgentBrowserMutationResponseV2::ConnectorOpenApproval {
+                        pending,
+                        post: FixedBrowserFormPostCarrierV2::AgentApprovalDisplay(
+                            display_authentication,
+                        ),
+                    }
+                }
+                AgentBrowserActionV2::FinalizeConnectorRegistration(reference) => {
+                    self.finalize_connector_registration(tab, reference, deadline)?
+                }
+                AgentBrowserActionV2::RemoveConnector(connector_id) => {
+                    let session = required(tab.session)?;
+                    remove_connector_flow(
+                        session,
+                        connector_id,
+                        |request| {
+                            self.kernel
+                                .prepare_connector_removal(request, deadline)
+                                .map_err(map_kernel)
+                        },
+                        |request| {
+                            self.kernel
+                                .remove_connector(request, deadline)
+                                .map_err(map_kernel)
+                        },
+                    )?
+                }
+                AgentBrowserActionV2::SnapshotConnectors => {
+                    let snapshot = self
+                        .kernel
+                        .connector_registry_snapshot(
+                            ConnectorRegistrySnapshotRequestV2::new(required(tab.session)?),
+                            deadline,
+                        )
+                        .map_err(map_kernel)?;
+                    AgentBrowserMutationResponseV2::ConnectorRegistrySnapshot {
+                        canonical_snapshot: snapshot.canonical_snapshot().clone(),
+                    }
+                }
+            };
+            Ok(response)
+        })
     }
 
     fn claim_tab(
@@ -1448,12 +1438,54 @@ fn resolve_action_replay_v2(
         .iter()
         .find(|entry| entry.nonce == nonce)
         .map(|existing| {
-            if existing.request_digest == request_digest {
-                Ok(existing.response.clone())
-            } else {
-                Err(AgentBrowserAuthorityErrorV2::StateConflict)
+            if existing.request_digest != request_digest {
+                return Err(AgentBrowserAuthorityErrorV2::StateConflict);
             }
+            existing
+                .response
+                .clone()
+                .ok_or(AgentBrowserAuthorityErrorV2::StateConflict)
         })
+}
+
+fn execute_action_nonce_bound_v2<Execute>(
+    tab: &mut AgentTabV2,
+    nonce: Nonce32V2,
+    request_digest: Digest32V2,
+    execute: Execute,
+) -> Result<AgentBrowserMutationResponseV2, AgentBrowserAuthorityErrorV2>
+where
+    Execute: FnOnce(
+        &mut AgentTabV2,
+    ) -> Result<AgentBrowserMutationResponseV2, AgentBrowserAuthorityErrorV2>,
+{
+    if let Some(replayed) = resolve_action_replay_v2(&tab.action_replays, nonce, request_digest) {
+        return replayed;
+    }
+    if tab.action_replays.len() >= MAX_REPLAYS_PER_TAB_V2 {
+        return Err(AgentBrowserAuthorityErrorV2::Overloaded);
+    }
+    tab.action_replays
+        .try_reserve(1)
+        .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
+    let claim_index = tab.action_replays.len();
+    tab.action_replays.push(ActionReplayV2 {
+        request_digest,
+        nonce,
+        response: None,
+    });
+
+    let response = execute(tab)?;
+    let claim = tab
+        .action_replays
+        .get_mut(claim_index)
+        .filter(|claim| claim.nonce == nonce && claim.request_digest == request_digest)
+        .ok_or(AgentBrowserAuthorityErrorV2::StateConflict)?;
+    if claim.response.is_some() {
+        return Err(AgentBrowserAuthorityErrorV2::StateConflict);
+    }
+    claim.response = Some(response.clone());
+    Ok(response)
 }
 
 fn browser_kernel_request_id(
@@ -1857,6 +1889,34 @@ fn planner_intent_boundary_for_action_v2(
     }
 }
 
+fn planner_prepare_call_request_v2(
+    run: RunHandleV2,
+    planner_route: PlannerRouteIdV2,
+    planner_template: StaticTemplateIdV2,
+    planner_intent: PlannerIntentKindV2,
+    planner_limits: PlannerLimitsV2,
+    initial_value: ValueHandleV2,
+) -> Result<PreparePlannerCallRequestV2, AgentBrowserAuthorityErrorV2> {
+    PreparePlannerCallRequestV2::new(
+        run,
+        planner_route,
+        planner_template,
+        planner_intent,
+        PlannerPurposeV2::PlannerCall,
+        planner_limits,
+        vec![initial_value],
+    )
+    .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)
+}
+
+fn planner_commit_value_request_v2(
+    run: RunHandleV2,
+    ticket: PlannerTicketHandleV2,
+    plan: PlannerPlanV2,
+) -> CommitPlannerValueRequestV2 {
+    CommitPlannerValueRequestV2::new(run, ticket, plan)
+}
+
 fn map_approval(error: ApprovalSuiteOneClientErrorV2) -> AgentBrowserAuthorityErrorV2 {
     match error {
         ApprovalSuiteOneClientErrorV2::Rejected(_) => {
@@ -1874,7 +1934,7 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use savana_kernel_protocol::v2::{
         encode_kernel_agent_operation_v2, ActionTemplateIdV2, ApprovalDecisionV2,
-        ApprovalPurposeV2, ApprovedConnectorRegistrationHandleV2, CommitPlannerValueRequestV2,
+        ApprovalPurposeV2, ApprovedConnectorRegistrationHandleV2,
         ConnectorRemovalAuthorizationHandleV2, KernelAgentOperationV2, PlannerPlanV2,
         PlannerStepV2, PlannerTicketHandleV2, PrincipalIdV2, SignedApprovalSettlementV2,
         ToolClassIdV2, UnsignedApprovalSettlementV2,
@@ -1974,7 +2034,7 @@ mod tests {
         let replays = vec![ActionReplayV2 {
             request_digest: private_digest,
             nonce,
-            response: response.clone(),
+            response: Some(response.clone()),
         }];
 
         assert_eq!(
@@ -1985,6 +2045,57 @@ mod tests {
             resolve_action_replay_v2(&replays, nonce, third_party_digest),
             Some(Err(AgentBrowserAuthorityErrorV2::StateConflict))
         );
+    }
+
+    #[test]
+    fn failed_planner_action_claim_blocks_rebinding_and_retry_before_more_side_effects() {
+        let tab_capability =
+            AgentTabSessionCapabilityV2::from_authority_entropy([0x5d; 32]).unwrap();
+        let mut tab = tab_record(
+            tab_capability,
+            BootIdV2::new([0x5e; 32]),
+            FixedOriginV2::Agent8768,
+            None,
+        );
+        let nonce = Nonce32V2::new([0x5f; 32]);
+        let private_action = AgentBrowserActionV2::RunPlanner;
+        let third_party_action = AgentBrowserActionV2::RunPlannerWithThirdPartyMapper;
+        assert!(IntentTrustDeploymentCeilingV2::UserMayUseThirdParty
+            .permits(planner_intent_boundary_for_action_v2(&private_action).unwrap()));
+        assert!(IntentTrustDeploymentCeilingV2::UserMayUseThirdParty
+            .permits(planner_intent_boundary_for_action_v2(&third_party_action).unwrap()));
+        let private_digest =
+            browser_action_request_digest(tab_capability, private_action.clone()).unwrap();
+        let third_party_digest =
+            browser_action_request_digest(tab_capability, third_party_action).unwrap();
+        let side_effect_calls = Cell::new(0_u8);
+
+        assert_eq!(
+            execute_action_nonce_bound_v2(&mut tab, nonce, private_digest, |_| {
+                side_effect_calls.set(side_effect_calls.get() + 1);
+                Err(AgentBrowserAuthorityErrorV2::Unavailable)
+            }),
+            Err(AgentBrowserAuthorityErrorV2::Unavailable)
+        );
+        assert_eq!(side_effect_calls.get(), 1);
+
+        assert_eq!(
+            execute_action_nonce_bound_v2(&mut tab, nonce, third_party_digest, |_| {
+                side_effect_calls.set(side_effect_calls.get() + 1);
+                Ok(AgentBrowserMutationResponseV2::PlannerCommitted { steps: vec![] })
+            }),
+            Err(AgentBrowserAuthorityErrorV2::StateConflict)
+        );
+        assert_eq!(side_effect_calls.get(), 1);
+
+        assert_eq!(
+            execute_action_nonce_bound_v2(&mut tab, nonce, private_digest, |_| {
+                side_effect_calls.set(side_effect_calls.get() + 1);
+                Ok(AgentBrowserMutationResponseV2::PlannerCommitted { steps: vec![] })
+            }),
+            Err(AgentBrowserAuthorityErrorV2::StateConflict)
+        );
+        assert_eq!(side_effect_calls.get(), 1);
     }
 
     #[test]
@@ -2007,17 +2118,16 @@ mod tests {
         .unwrap();
         let payloads = |boundary| {
             assert!(IntentTrustDeploymentCeilingV2::UserMayUseThirdParty.permits(boundary));
-            let prepare = PreparePlannerCallRequestV2::new(
+            let prepare = planner_prepare_call_request_v2(
                 run,
                 PlannerRouteIdV2::new(7),
                 StaticTemplateIdV2::new(8),
                 PlannerIntentKindV2::Search,
-                PlannerPurposeV2::PlannerCall,
                 limits,
-                vec![initial],
+                initial,
             )
             .unwrap();
-            let commit = CommitPlannerValueRequestV2::new(run, ticket, plan.clone());
+            let commit = planner_commit_value_request_v2(run, ticket, plan.clone());
             (
                 prepare.clone(),
                 commit.clone(),
