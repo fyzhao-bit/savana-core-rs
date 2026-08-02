@@ -41,6 +41,7 @@ rustls = { version = "=0.23.42", default-features = false, features = ["std", "r
 getrandom = "=0.2.17"
 zeroize = { version = "=1.8.1", features = ["derive"] }
 unicode-normalization = "=0.1.22"
+url = "=2.5.8"
 # Backtracking engine, required by the G2 leak gate: Python `re`'s `\b` is
 # rewritten as its literal two-sided definition over the pinned CPython 15.0.0
 # word class, and that rewrite needs lookaround. Backtracking is bounded and

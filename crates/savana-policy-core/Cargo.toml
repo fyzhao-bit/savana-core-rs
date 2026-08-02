@@ -42,6 +42,7 @@ hmac.workspace = true
 aes-gcm.workspace = true
 zeroize.workspace = true
 unicode-normalization.workspace = true
+url.workspace = true
 savana-leak-gate = { path = "../savana-leak-gate" }
 nix.workspace = true
 rustix.workspace = true

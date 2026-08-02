@@ -2,6 +2,7 @@ mod authenticated_anchor;
 #[allow(dead_code)] // Stored binding resolution is consumed by the G4 intent adapter.
 mod binding;
 mod commit_attestation;
+mod connector_registry;
 mod declassification;
 mod deployment_authorization;
 mod deployment_control;
@@ -74,6 +75,11 @@ pub use binding::{
     VerifiedRequiredTokenV2, VerifiedResolvedRelationSetV2, VerifiedStoredBindingsV2,
 };
 pub use commit_attestation::{ClosedCommitDigestFieldV2, CommitAttestationV2};
+pub use connector_registry::{
+    user_tier_host_allowed_v2, BoundedConnectorHostV2, BoundedConnectorNameV2,
+    BoundedConnectorUrlV2, ConnectorDescriptorV2, ConnectorRegistryDeltaV2,
+    ConnectorRegistryStateV2, ConnectorTierV2, ConnectorTransportV2,
+};
 pub use declassification::{
     declassification_implementation_digest_v2, ClosedDeclassificationPurposeV2,
     DeclassificationRuleSetV2, DeclassificationRuleV2,

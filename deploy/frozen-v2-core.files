@@ -63,6 +63,7 @@ crates/savana-policy-core/src/v2/authenticated_anchor.rs
 crates/savana-policy-core/src/v2/binding.rs
 crates/savana-policy-core/src/v2/binding_tests.rs
 crates/savana-policy-core/src/v2/commit_attestation.rs
+crates/savana-policy-core/src/v2/connector_registry.rs
 crates/savana-policy-core/src/v2/declassification.rs
 crates/savana-policy-core/src/v2/deployment_authorization.rs
 crates/savana-policy-core/src/v2/deployment_control.rs
