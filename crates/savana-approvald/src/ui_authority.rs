@@ -842,12 +842,15 @@ impl ApprovalUiAuthorityV2 {
             .state
             .approval_challenge(envelope_digest, now, deadline)
             .map_err(map_owner)?;
+        let display_declassification_provenance_digest = challenge
+            .display_declassification_provenance_digest()
+            .ok_or(ApprovalUiAuthorityErrorV2::Unavailable)?;
         ApprovalDisplayViewV2::new(
             challenge.purpose(),
             challenge.display_projection_digest(),
             challenge.display_digest(),
-            challenge.display_bytes().to_vec(),
-            challenge.display_declassification_provenance_digest(),
+            challenge.display_text().clone(),
+            display_declassification_provenance_digest,
         )
         .map_err(|_| ApprovalUiAuthorityErrorV2::Unavailable)
     }

@@ -13,10 +13,11 @@ use savana_kernel_protocol::v2::{
     AgentAuthenticationSettlementTransferTerminalStateV2,
     AgentAuthenticationTransferTerminalStateV2, ApprovalDecisionV2 as ProtocolApprovalDecisionV2,
     ApprovalPurposeV2 as ProtocolApprovalPurposeV2, ApprovalSettlementViewV2, BootIdV2,
-    ClosedCredentialRevocationReasonV2, CreateEnrollmentCodeResponseV2, CredentialPublicStateV2,
-    Digest32V2, Ed25519KeyIdV2, EndpointRoleV2, EnrollmentHandleV2, EnrollmentProfileIdV2,
-    FixedOriginV2, PrincipalIdV2, ServiceIdentityV2,
-    SignedAgentAuthenticationAttemptClosureProofV2, SignedAgentAuthenticationClosureDescriptorV2,
+    BoundedApprovalDisplayTextV2, ClosedCredentialRevocationReasonV2,
+    CreateEnrollmentCodeResponseV2, CredentialPublicStateV2, Digest32V2, Ed25519KeyIdV2,
+    EndpointRoleV2, EnrollmentHandleV2, EnrollmentProfileIdV2, FixedOriginV2, PrincipalIdV2,
+    ServiceIdentityV2, SignedAgentAuthenticationAttemptClosureProofV2,
+    SignedAgentAuthenticationClosureDescriptorV2,
     SignedApprovalEnvelopeV2 as ProtocolSignedApprovalEnvelopeV2,
     SignedApprovalSettlementV2 as ProtocolSignedApprovalSettlementV2,
     SignedUiAuthenticationEnvelopeV2 as ProtocolSignedUiAuthenticationEnvelopeV2,
@@ -68,7 +69,7 @@ pub struct ApprovalChallengeProjectionV2 {
     challenge: savana_kernel_protocol::v2::Nonce32V2,
     display_projection_digest: Digest32V2,
     display_digest: Digest32V2,
-    display_bytes: Vec<u8>,
+    display_text: BoundedApprovalDisplayTextV2,
     display_declassification_provenance_digest: Option<Digest32V2>,
     expires_at: UnixMillisV2,
 }
@@ -98,8 +99,8 @@ impl ApprovalChallengeProjectionV2 {
         self.display_digest
     }
 
-    pub fn display_bytes(&self) -> &[u8] {
-        &self.display_bytes
+    pub fn display_text(&self) -> &BoundedApprovalDisplayTextV2 {
+        &self.display_text
     }
 
     pub const fn display_declassification_provenance_digest(&self) -> Option<Digest32V2> {
@@ -572,6 +573,12 @@ impl ProtocolApprovalServiceV2 {
             return Err(ApprovalErrorV2::AlreadyConsumed);
         }
         let unsigned = &self.approval_envelopes[record_index].unsigned;
+        if unsigned
+            .display_declassification_provenance_digest()
+            .is_none()
+        {
+            return Err(ApprovalErrorV2::InvalidChallenge);
+        }
         let credential_index = self.credential_index(assertion)?;
         let legacy_purpose = match unsigned.purpose() {
             savana_kernel_protocol::v2::ApprovalPurposeV2::Ingress => ApprovalPurposeV2::Ingress,
@@ -653,7 +660,7 @@ impl ProtocolApprovalServiceV2 {
             challenge: record.unsigned.decision_challenge(),
             display_projection_digest: record.unsigned.display_projection_digest(),
             display_digest: record.unsigned.display_digest(),
-            display_bytes: record.unsigned.display_bytes().to_vec(),
+            display_text: record.unsigned.display_text().clone(),
             display_declassification_provenance_digest: record
                 .unsigned
                 .display_declassification_provenance_digest(),
@@ -1763,12 +1770,12 @@ mod tests {
     use p256::ecdsa::{Signature, SigningKey as P256SigningKey};
     use savana_kernel_protocol::v2::{
         derive_ed25519_key_id_v2, ApprovalBindingV2, ApprovalPurposeV2, BootIdV2,
-        ClosedCredentialRevocationReasonV2, Digest32V2, DurableRunIdV2, DurableTaskIdV2,
-        EnrollmentProfileIdV2, FixedOriginV2, Nonce32V2, PrincipalIdV2, ServiceIdentityV2,
-        SignedAgentAuthenticationClosureDescriptorV2, SignedApprovalEnvelopeV2,
-        SignedUiAuthenticationEnvelopeV2, UiAuthenticationBindingV2, UiAuthenticationPurposeV2,
-        UnixMillisV2, UnsignedAgentAuthenticationClosureDescriptorV2, UnsignedApprovalEnvelopeV2,
-        UnsignedUiAuthenticationEnvelopeV2,
+        BoundedApprovalDisplayTextV2, ClosedCredentialRevocationReasonV2, Digest32V2,
+        DurableRunIdV2, DurableTaskIdV2, EnrollmentProfileIdV2, FixedOriginV2, Nonce32V2,
+        PrincipalIdV2, ServiceIdentityV2, SignedAgentAuthenticationClosureDescriptorV2,
+        SignedApprovalEnvelopeV2, SignedUiAuthenticationEnvelopeV2, UiAuthenticationBindingV2,
+        UiAuthenticationPurposeV2, UnixMillisV2, UnsignedAgentAuthenticationClosureDescriptorV2,
+        UnsignedApprovalEnvelopeV2, UnsignedUiAuthenticationEnvelopeV2,
     };
     use sha2::{Digest as _, Sha256};
 
@@ -1940,6 +1947,11 @@ mod tests {
             .unwrap();
 
         let approval_challenge = Nonce32V2::new([0x21; 32]);
+        let display = BoundedApprovalDisplayTextV2::new(
+            "批准：exact persisted approval artifact — ".repeat(4),
+        )
+        .unwrap();
+        let display_node = Digest32V2::new([0x27; 32]);
         let approval = SignedApprovalEnvelopeV2::sign(
             UnsignedApprovalEnvelopeV2::new(
                 installation,
@@ -1956,9 +1968,9 @@ mod tests {
                 },
                 principal,
                 Digest32V2::new([0x26; 32]),
-                savana_kernel_protocol::v2::approval_display_digest_v2(&[0x81, 0x01]),
-                vec![0x81, 0x01],
-                None,
+                savana_kernel_protocol::v2::approval_display_digest_v2(display.as_bytes()),
+                display.clone(),
+                Some(display_node),
                 approvald_identity,
                 UnixMillisV2::new(100),
                 UnixMillisV2::new(10_000),
@@ -1969,10 +1981,10 @@ mod tests {
         .unwrap();
         let mut tampered_payload = approval.canonical_payload().to_vec();
         let display_offset = tampered_payload
-            .windows(2)
-            .rposition(|window| window == [0x81, 0x01])
+            .windows(display.as_bytes().len())
+            .rposition(|window| window == display.as_bytes())
             .unwrap();
-        tampered_payload[display_offset + 1] ^= 1;
+        tampered_payload[display_offset + display.as_bytes().len() - 1] ^= 1;
         let tampered = SignedApprovalEnvelopeV2::from_canonical_parts(
             tampered_payload,
             approval.key_id(),
@@ -1988,15 +2000,24 @@ mod tests {
         let approval_digest = service
             .register_approval_envelope(&approval, UnixMillisV2::new(200))
             .unwrap();
+        let durable = service.encode_mutable_state().unwrap();
+        assert!(durable
+            .windows(display.as_bytes().len())
+            .any(|window| window == display.as_bytes()));
         let projected = service
             .approval_challenge(approval_digest, UnixMillisV2::new(200))
             .unwrap();
-        assert_eq!(projected.display_bytes(), [0x81, 0x01]);
+        assert_eq!(projected.display_text(), &display);
         assert_eq!(
             projected.display_digest(),
-            savana_kernel_protocol::v2::approval_display_digest_v2(projected.display_bytes())
+            savana_kernel_protocol::v2::approval_display_digest_v2(
+                projected.display_text().as_bytes()
+            )
         );
-        assert_eq!(projected.display_declassification_provenance_digest(), None);
+        assert_eq!(
+            projected.display_declassification_provenance_digest(),
+            Some(display_node)
+        );
         let approval_settlement = service
             .settle_approval(
                 approval_digest,
@@ -2024,6 +2045,55 @@ mod tests {
                 UnixMillisV2::new(301),
             )
             .unwrap();
+
+        let ungated_challenge = Nonce32V2::new([0x28; 32]);
+        let ungated = SignedApprovalEnvelopeV2::sign(
+            UnsignedApprovalEnvelopeV2::new(
+                installation,
+                manifest,
+                7,
+                ApprovalPurposeV2::Ingress,
+                Nonce32V2::new([0x29; 32]),
+                ungated_challenge,
+                ApprovalBindingV2::Ingress {
+                    pending_ingress_id: Digest32V2::new([0x2a; 32]),
+                    ingress_subject_digest: Digest32V2::new([0x2b; 32]),
+                    channel_commitments_digest: Digest32V2::new([0x2c; 32]),
+                    source_provenance_digest: Digest32V2::new([0x2d; 32]),
+                },
+                principal,
+                Digest32V2::new([0x2e; 32]),
+                savana_kernel_protocol::v2::approval_display_digest_v2(display.as_bytes()),
+                display.clone(),
+                None,
+                approvald_identity,
+                UnixMillisV2::new(100),
+                UnixMillisV2::new(10_000),
+            )
+            .unwrap(),
+            &kernel_key,
+        )
+        .unwrap();
+        let ungated_digest = service
+            .register_approval_envelope(&ungated, UnixMillisV2::new(302))
+            .unwrap();
+        assert_eq!(
+            service
+                .settle_approval(
+                    ungated_digest,
+                    savana_kernel_protocol::v2::ApprovalDecisionV2::Approve,
+                    &assertion(
+                        &p256_key,
+                        credential_digest,
+                        principal,
+                        ungated_challenge,
+                        3,
+                    ),
+                    UnixMillisV2::new(303),
+                )
+                .unwrap_err(),
+            ApprovalErrorV2::InvalidChallenge
+        );
 
         let ui_challenge = Nonce32V2::new([0x31; 32]);
         let ui = SignedUiAuthenticationEnvelopeV2::sign(

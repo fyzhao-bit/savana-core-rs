@@ -9,34 +9,34 @@ use savana_kernel_protocol::v2::{
     AgentAuthenticationClosureEvidenceV2, AgentSessionHandleV2, AgentSessionStatusV2,
     AgentUiAuthenticationPreparationHandleV2, AgentUiAuthorizationHandleV2, ApprovalBindingV2,
     ApprovalDecisionV2, ApprovalPurposeV2, AuthorityHandleKeyV2, AuthorizeToolCallResponseV2,
-    BootIdV2, BoundedCiphertextV2, CancelKernelTaskRequestV2, CancelKernelTaskResponseV2,
-    ClaimAgentSessionRequestV2, ClaimAgentSessionResponseV2, CommitPlannerValueRequestV2,
-    CommitPlannerValueResponseV2, Digest32V2, DispatchCoreV2 as ProtocolDispatchCoreV2,
-    DispatchExecutionResponseV2, DispatchRequestV2, DispatchSubjectV2 as ProtocolDispatchSubjectV2,
-    DurableRunIdV2, DurableTaskIdV2, Ed25519KeyIdV2, EvaluateToolCallRequestV2,
-    EvaluateToolCallResponseV2, ExecutionHandleV2, ExecutionStatusTargetV2,
-    ExecutionTicketHandleV2, ExecutorIdentityV2, ExecutorStatusV2, FixedBytes32V2, FixedOriginV2,
-    GetAgentSessionStatusRequestV2, GetAgentSessionStatusResponseV2, GetExecutionStatusRequestV2,
-    GetExecutionStatusResponseV2, GetKernelTaskStatusRequestV2, GetKernelTaskStatusResponseV2,
-    GetReleaseStatusRequestV2, GetReleaseStatusResponseV2, HpkeX25519KeyIdV2,
-    KernelIngressBootstrapTransferCapabilityV2, MaskedDocumentHandleV2, NewTaskPreparationHandleV2,
-    Nonce32V2, PendingReleaseHandleV2, PendingToolCallHandleV2, PlanRevisionDigestV2,
-    PlanStepHandleV2, PlannerAbstractSlotV2, PlannerEnvelopeV2, PlannerIntentKindV2,
-    PlannerLimitsV2, PlannerPlanV2, PlannerPurposeV2, PlannerRouteIdV2, PlannerSlotCardinalityV2,
-    PlannerSlotConfidentialityV2, PlannerSlotRefV2, PlannerTicketHandleV2,
-    PrepareAgentUiAuthenticationRequestV2, PrepareAgentUiAuthenticationResponseV2,
-    PrepareFollowupIngressRequestV2, PrepareFollowupIngressResponseV2, PrepareNewIngressRequestV2,
-    PrepareNewIngressResponseV2, PreparePlannerCallRequestV2, PreparePlannerCallResponseV2,
-    PrepareReleaseRequestV2, PrepareReleaseResponseV2, PrincipalIdV2, ProducerIdentityV2,
-    ProposeToolCallRequestV2, ProposeToolCallResponseV2,
-    PublicDecisionTraceV2 as ProtocolDecisionTraceV2, PublicDispatchAcceptedStateV2,
-    PublicDispatchCompletionV2, PublicExecutionStatusV2, PublicFailureClassV2, PublicStableCodeV2,
-    PublicTaskStatusV2, QueryByExecutionNonceRequestV2, ReadAgentViewRequestV2, ReleaseHandleV2,
-    ReleaseKernelApprovalHandleV2, ReleaseStatusTargetV2, ReleaseTicketHandleV2,
-    ResumeCommittedAgentAuthenticationRequestV2, ResumeCommittedAgentAuthenticationResponseV2,
-    RevokeVaultRequestV2, RoleIdV2, RunRevisionDigestV2, RunRevisionObservationV2,
-    SealedExecutionEnvelopePayloadV2, ServiceIdentityV2,
-    SignedAgentAuthenticationClosureDescriptorV2, SignedApprovalEnvelopeV2,
+    BootIdV2, BoundedApprovalDisplayTextV2, BoundedCiphertextV2, CancelKernelTaskRequestV2,
+    CancelKernelTaskResponseV2, ClaimAgentSessionRequestV2, ClaimAgentSessionResponseV2,
+    CommitPlannerValueRequestV2, CommitPlannerValueResponseV2, Digest32V2,
+    DispatchCoreV2 as ProtocolDispatchCoreV2, DispatchExecutionResponseV2, DispatchRequestV2,
+    DispatchSubjectV2 as ProtocolDispatchSubjectV2, DurableRunIdV2, DurableTaskIdV2,
+    Ed25519KeyIdV2, EvaluateToolCallRequestV2, EvaluateToolCallResponseV2, ExecutionHandleV2,
+    ExecutionStatusTargetV2, ExecutionTicketHandleV2, ExecutorIdentityV2, ExecutorStatusV2,
+    FixedBytes32V2, FixedOriginV2, GetAgentSessionStatusRequestV2, GetAgentSessionStatusResponseV2,
+    GetExecutionStatusRequestV2, GetExecutionStatusResponseV2, GetKernelTaskStatusRequestV2,
+    GetKernelTaskStatusResponseV2, GetReleaseStatusRequestV2, GetReleaseStatusResponseV2,
+    HpkeX25519KeyIdV2, KernelIngressBootstrapTransferCapabilityV2, MaskedDocumentHandleV2,
+    NewTaskPreparationHandleV2, Nonce32V2, PendingReleaseHandleV2, PendingToolCallHandleV2,
+    PlanRevisionDigestV2, PlanStepHandleV2, PlannerAbstractSlotV2, PlannerEnvelopeV2,
+    PlannerIntentKindV2, PlannerLimitsV2, PlannerPlanV2, PlannerPurposeV2, PlannerRouteIdV2,
+    PlannerSlotCardinalityV2, PlannerSlotConfidentialityV2, PlannerSlotRefV2,
+    PlannerTicketHandleV2, PrepareAgentUiAuthenticationRequestV2,
+    PrepareAgentUiAuthenticationResponseV2, PrepareFollowupIngressRequestV2,
+    PrepareFollowupIngressResponseV2, PrepareNewIngressRequestV2, PrepareNewIngressResponseV2,
+    PreparePlannerCallRequestV2, PreparePlannerCallResponseV2, PrepareReleaseRequestV2,
+    PrepareReleaseResponseV2, PrincipalIdV2, ProducerIdentityV2, ProposeToolCallRequestV2,
+    ProposeToolCallResponseV2, PublicDecisionTraceV2 as ProtocolDecisionTraceV2,
+    PublicDispatchAcceptedStateV2, PublicDispatchCompletionV2, PublicExecutionStatusV2,
+    PublicFailureClassV2, PublicStableCodeV2, PublicTaskStatusV2, QueryByExecutionNonceRequestV2,
+    ReadAgentViewRequestV2, ReleaseHandleV2, ReleaseKernelApprovalHandleV2, ReleaseStatusTargetV2,
+    ReleaseTicketHandleV2, ResumeCommittedAgentAuthenticationRequestV2,
+    ResumeCommittedAgentAuthenticationResponseV2, RevokeVaultRequestV2, RoleIdV2,
+    RunRevisionDigestV2, RunRevisionObservationV2, SealedExecutionEnvelopePayloadV2,
+    ServiceIdentityV2, SignedAgentAuthenticationClosureDescriptorV2, SignedApprovalEnvelopeV2,
     SignedDurableTaskCorrelationV2, SignedSealedExecutionEnvelopeV2,
     SignedUiAuthenticationEnvelopeV2, SignedUiAuthenticationSettlementV2, SlotKindV2,
     StaticTemplateIdV2, ToolClassIdV2, ToolHandleV2, ToolKernelApprovalHandleV2,
@@ -2773,7 +2773,10 @@ impl KernelAgentAuthorityV2 {
                     action_intent_id: intent.action_intent_id,
                     binding: intent.semantic_binding,
                 };
-                let display_value = KernelValueV2::bytes(intent.display_plaintext.clone())
+                let display_text =
+                    BoundedApprovalDisplayTextV2::from_binary(&intent.display_plaintext)
+                        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+                let display_value = KernelValueV2::text(display_text.as_str())
                     .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
                 let first_parent = intent
                     .provenance_parents
@@ -2822,8 +2825,8 @@ impl KernelAgentAuthorityV2 {
                     binding,
                     intent.principal,
                     intent.semantic_binding.display_projection_digest(),
-                    approval_display_digest_v2(&intent.display_plaintext),
-                    intent.display_plaintext.clone(),
+                    approval_display_digest_v2(display_text.as_bytes()),
+                    display_text.clone(),
                     Some(display_declassification.provenance_digest()),
                     policy.approval.approvald_identity,
                     now,
@@ -2845,7 +2848,7 @@ impl KernelAgentAuthorityV2 {
                         durable_task_id: intent.durable_task_id,
                         approval_envelope_digest: envelope_digest,
                         approval_purpose: ApprovalPurposeV2::ToolExecution,
-                        display_digest: approval_display_digest_v2(&intent.display_plaintext),
+                        display_digest: approval_display_digest_v2(display_text.as_bytes()),
                     },
                     Some(intent.principal),
                     FixedOriginV2::Approval8766,
@@ -3661,8 +3664,10 @@ impl KernelAgentAuthorityV2 {
             b"SAVANA_FINAL_RELEASE_DISPLAY_PROJECTION_V2\0",
             &[&display_id, &destination_id],
         );
-        let display_digest = approval_display_digest_v2(plaintext.as_slice());
-        let display_value = KernelValueV2::bytes(plaintext.as_slice().to_vec())
+        let display_text = BoundedApprovalDisplayTextV2::from_binary(plaintext.as_slice())
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let display_digest = approval_display_digest_v2(display_text.as_bytes());
+        let display_value = KernelValueV2::text(display_text.as_str())
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
         let first_parent = provenance_parents
             .first()
@@ -3737,7 +3742,7 @@ impl KernelAgentAuthorityV2 {
             session.principal,
             binding.display_projection_digest(),
             binding.display_digest(),
-            plaintext.as_slice().to_vec(),
+            display_text,
             Some(display_declassification.provenance_digest()),
             policy.approval.approvald_identity,
             now,

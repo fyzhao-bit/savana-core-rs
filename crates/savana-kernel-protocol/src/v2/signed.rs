@@ -1,6 +1,8 @@
 use crate::{ProtocolError, StableCode};
+use base64::Engine as _;
 use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
 use sha2::{Digest as _, Sha256};
+use unicode_normalization::UnicodeNormalization as _;
 
 use super::{
     cbor::{scan_single, V2DecodeContext},
@@ -12,7 +14,8 @@ use super::{
 
 const MAX_SIGNED_PAYLOAD_BYTES_V2: usize = 8 * 1024;
 const MAX_APPROVAL_SIGNED_PAYLOAD_BYTES_V2: usize = 1024 * 1024 + 8 * 1024;
-const MAX_APPROVAL_DISPLAY_BYTES_V2: usize = 1024 * 1024;
+pub const MAX_APPROVAL_DISPLAY_BYTES_V2: usize = 1024 * 1024;
+const APPROVAL_BINARY_DISPLAY_PREFIX_V2: &str = "base64:";
 const APPROVAL_DISPLAY_DIGEST_DOMAIN_V2: &[u8] = b"SAVANA_APPROVAL_DISPLAY_BYTES_V2\0";
 const INGRESS_APPROVAL_ENVELOPE_DOMAIN_V2: &[u8] = b"SAVANA_INGRESS_APPROVAL_ENVELOPE_V2\0";
 const TOOL_APPROVAL_ENVELOPE_DOMAIN_V2: &[u8] = b"SAVANA_TOOL_APPROVAL_ENVELOPE_V2\0";
@@ -139,6 +142,63 @@ signed_kernel_envelope_v2!(
 
 pub fn approval_display_digest_v2(display_bytes: &[u8]) -> Digest32V2 {
     domain_hash(APPROVAL_DISPLAY_DIGEST_DOMAIN_V2, display_bytes)
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct BoundedApprovalDisplayTextV2(String);
+
+impl BoundedApprovalDisplayTextV2 {
+    pub fn new(value: String) -> Result<Self, ProtocolError> {
+        if value.is_empty()
+            || value.len() > MAX_APPROVAL_DISPLAY_BYTES_V2
+            || value.chars().any(char::is_control)
+            || !value.nfc().eq(value.chars())
+        {
+            return Err(malformed());
+        }
+        Ok(Self(value))
+    }
+
+    pub fn from_utf8_bytes(value: Vec<u8>) -> Result<Self, ProtocolError> {
+        Self::new(String::from_utf8(value).map_err(ProtocolError::malformed)?)
+    }
+
+    pub fn from_binary(value: &[u8]) -> Result<Self, ProtocolError> {
+        if value.is_empty() {
+            return Err(malformed());
+        }
+        let encoded_length = value
+            .len()
+            .checked_add(2)
+            .and_then(|length| length.checked_div(3))
+            .and_then(|groups| groups.checked_mul(4))
+            .and_then(|length| length.checked_add(APPROVAL_BINARY_DISPLAY_PREFIX_V2.len()))
+            .ok_or_else(malformed)?;
+        if encoded_length > MAX_APPROVAL_DISPLAY_BYTES_V2 {
+            return Err(malformed());
+        }
+        let mut display = String::new();
+        display
+            .try_reserve_exact(encoded_length)
+            .map_err(ProtocolError::malformed)?;
+        display.push_str(APPROVAL_BINARY_DISPLAY_PREFIX_V2);
+        base64::engine::general_purpose::STANDARD.encode_string(value, &mut display);
+        Self::new(display)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl core::fmt::Debug for BoundedApprovalDisplayTextV2 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("BoundedApprovalDisplayTextV2(<redacted>)")
+    }
 }
 
 macro_rules! closed_unit_enum_v2 {
@@ -1012,7 +1072,7 @@ pub struct UnsignedApprovalEnvelopeV2 {
     expected_principal: PrincipalIdV2,
     display_projection_digest: Digest32V2,
     display_digest: Digest32V2,
-    display_bytes: Vec<u8>,
+    display_text: BoundedApprovalDisplayTextV2,
     display_declassification_provenance_digest: Option<Digest32V2>,
     approvald_endpoint_identity: ServiceIdentityV2,
     issued_at: UnixMillisV2,
@@ -1032,7 +1092,7 @@ impl UnsignedApprovalEnvelopeV2 {
         expected_principal: PrincipalIdV2,
         display_projection_digest: Digest32V2,
         display_digest: Digest32V2,
-        display_bytes: Vec<u8>,
+        display_text: BoundedApprovalDisplayTextV2,
         display_declassification_provenance_digest: Option<Digest32V2>,
         approvald_endpoint_identity: ServiceIdentityV2,
         issued_at: UnixMillisV2,
@@ -1047,9 +1107,7 @@ impl UnsignedApprovalEnvelopeV2 {
             || is_zero(expected_principal.as_bytes())
             || is_zero(display_projection_digest.as_bytes())
             || is_zero(display_digest.as_bytes())
-            || display_bytes.is_empty()
-            || display_bytes.len() > MAX_APPROVAL_DISPLAY_BYTES_V2
-            || approval_display_digest_v2(&display_bytes) != display_digest
+            || approval_display_digest_v2(display_text.as_bytes()) != display_digest
             || display_declassification_provenance_digest
                 .is_some_and(|digest| is_zero(digest.as_bytes()))
             || (purpose != ApprovalPurposeV2::Ingress
@@ -1072,7 +1130,7 @@ impl UnsignedApprovalEnvelopeV2 {
             expected_principal,
             display_projection_digest,
             display_digest,
-            display_bytes,
+            display_text,
             display_declassification_provenance_digest,
             approvald_endpoint_identity,
             issued_at,
@@ -1120,8 +1178,8 @@ impl UnsignedApprovalEnvelopeV2 {
         self.display_digest
     }
 
-    pub fn display_bytes(&self) -> &[u8] {
-        &self.display_bytes
+    pub fn display_text(&self) -> &BoundedApprovalDisplayTextV2 {
+        &self.display_text
     }
 
     pub const fn display_declassification_provenance_digest(&self) -> Option<Digest32V2> {
@@ -2463,7 +2521,7 @@ fn encode_unsigned_approval_envelope_v2(
     encode_fixed(&mut encoder, &value.display_projection_digest)?;
     encode_fixed(&mut encoder, &value.display_digest)?;
     encoder
-        .bytes(&value.display_bytes)
+        .str(value.display_text.as_str())
         .map_err(ProtocolError::malformed)?;
     encode_optional_fixed(
         &mut encoder,
@@ -2494,7 +2552,9 @@ fn decode_unsigned_approval_envelope_v2(
         decode_fixed(&mut decoder, &mut context)?,
         decode_fixed(&mut decoder, &mut context)?,
         decode_fixed(&mut decoder, &mut context)?,
-        decoder.bytes().map_err(ProtocolError::malformed)?.to_vec(),
+        BoundedApprovalDisplayTextV2::new(
+            decoder.str().map_err(ProtocolError::malformed)?.to_owned(),
+        )?,
         decode_optional_fixed(&mut decoder, &mut context)?,
         decode_fixed(&mut decoder, &mut context)?,
         decode_fixed(&mut decoder, &mut context)?,

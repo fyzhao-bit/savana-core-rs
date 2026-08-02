@@ -2,13 +2,14 @@ use ed25519_dalek::SigningKey;
 use getrandom::getrandom;
 use savana_kernel_protocol::v2::{
     approval_display_digest_v2, derive_ed25519_key_id_v2, ApprovalBindingV2, ApprovalDecisionV2,
-    ApprovalPurposeV2, AuthorityHandleKeyV2, Digest32V2, DurableTaskIdV2, Ed25519KeyIdV2,
-    IngressKernelApprovalHandleV2, IngressUiAuthenticationPreparationHandleV2,
-    IngressUiAuthorizationHandleV2, KernelIngressBootstrapTransferCapabilityV2, Nonce32V2,
-    PendingIngressHandleV2, PrincipalIdV2, ServiceIdentityV2, SignedApprovalEnvelopeV2,
-    SignedApprovalSettlementV2, SignedUiAuthenticationEnvelopeV2,
-    SignedUiAuthenticationSettlementV2, UiAuthenticationBindingV2, UiAuthenticationPurposeV2,
-    UnixMillisV2, UnsignedApprovalEnvelopeV2, UnsignedUiAuthenticationEnvelopeV2,
+    ApprovalPurposeV2, AuthorityHandleKeyV2, BoundedApprovalDisplayTextV2, Digest32V2,
+    DurableTaskIdV2, Ed25519KeyIdV2, IngressKernelApprovalHandleV2,
+    IngressUiAuthenticationPreparationHandleV2, IngressUiAuthorizationHandleV2,
+    KernelIngressBootstrapTransferCapabilityV2, Nonce32V2, PendingIngressHandleV2, PrincipalIdV2,
+    ServiceIdentityV2, SignedApprovalEnvelopeV2, SignedApprovalSettlementV2,
+    SignedUiAuthenticationEnvelopeV2, SignedUiAuthenticationSettlementV2,
+    UiAuthenticationBindingV2, UiAuthenticationPurposeV2, UnixMillisV2, UnsignedApprovalEnvelopeV2,
+    UnsignedUiAuthenticationEnvelopeV2,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -441,8 +442,10 @@ impl KernelIngressAuthorityV2 {
             .and_then(|encoder| encoder.bytes(principal.as_bytes()))
             .and_then(|encoder| encoder.bytes(durable_task_id.as_bytes()))
             .map_err(|_| KernelIngressAuthorityErrorV2::Unavailable)?;
-        let display_bytes = display_encoder.into_writer();
-        let display_digest = approval_display_digest_v2(&display_bytes);
+        let display_text =
+            BoundedApprovalDisplayTextV2::from_binary(&display_encoder.into_writer())
+                .map_err(|_| KernelIngressAuthorityErrorV2::BindingMismatch)?;
+        let display_digest = approval_display_digest_v2(display_text.as_bytes());
         let decision_challenge = Nonce32V2::new(random_bytes()?);
         let expires_at = bounded_expiry(now, APPROVAL_TTL_MS, authorization.expires_at())?;
         let approval_unsigned = UnsignedApprovalEnvelopeV2::new(
@@ -456,7 +459,7 @@ impl KernelIngressAuthorityV2 {
             principal,
             display_projection_digest,
             display_digest,
-            display_bytes,
+            display_text,
             None,
             self.config.approvald_identity,
             now,
