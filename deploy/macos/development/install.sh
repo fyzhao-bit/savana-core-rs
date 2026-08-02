@@ -763,6 +763,32 @@ harden_generated_public_keys() {
 
 SAVANA_AUTHORITY_CLASS=development \
   "$install_root/libexec/savana-development-material" "$install_root"
+connector_authority_credential="$install_root/credentials/kerneld/connector-authority-v2.seed"
+connector_authority_key_id=$(
+  /usr/bin/plutil -extract policy_runtime.connector_authority_key_id raw -expect string \
+    "$install_root/config/kerneld-bootstrap-v2.json"
+)
+connector_authority_public_key=$(
+  /usr/bin/plutil -extract policy_runtime.connector_authority_public_key raw -expect string \
+    "$install_root/config/kerneld-bootstrap-v2.json"
+)
+zero_connector_authority=0000000000000000000000000000000000000000000000000000000000000000
+if [ "$connector_authority_key_id" = "$zero_connector_authority" ] && \
+   [ "$connector_authority_public_key" = "$zero_connector_authority" ]; then
+  [ ! -e "$connector_authority_credential" ] || {
+    echo "disabled connector authority unexpectedly materialized a private credential" >&2
+    exit 70
+  }
+else
+  [ "$connector_authority_key_id" != "$zero_connector_authority" ] && \
+    [ "$connector_authority_public_key" != "$zero_connector_authority" ] && \
+    [ -f "$connector_authority_credential" ] && \
+    [ ! -L "$connector_authority_credential" ] && \
+    [ "$(/usr/bin/stat -f %z "$connector_authority_credential")" = "32" ] || {
+      echo "enabled connector authority has incomplete private material" >&2
+      exit 70
+    }
+fi
 /usr/sbin/chown _savana_ingress_dev:_savana_ingress_dev \
   "$install_root/sandbox/ingressd/parser-profile-v2.json"
 /bin/chmod 0444 "$install_root/sandbox/ingressd/parser-profile-v2.json"

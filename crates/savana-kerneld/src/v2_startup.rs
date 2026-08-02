@@ -79,14 +79,16 @@ mod native {
     };
     use savana_kernel_protocol::StableCode;
     use savana_policy_core::v2::{
-        activate_internal_validator_registry, ActiveToolRegistryV2, ContextFieldV2,
-        DurableG4StateV2, DurableStateNamespaceV2, FilesystemServiceObservationConfigV2,
-        InstallerOrMdmVerifierV2, InternalValidatorBuildV2, InternalValidatorDeclarationV2,
-        InternalValidatorImplementationKindV2, OntologyExprV2, OntologyOperandV2, OntologyScalarV2,
-        OperationalTrustRootSetV2, SignedToolDescriptorV2, VerifiedInternalValidatorRegistryV2,
-        VerifiedManifestToolConstraintSetV2, VerifiedManifestToolConstraintV2,
-        VerifiedPolicyDispositionV2, VerifiedPolicyToolActivationV2, VerifiedPolicyToolSetV2,
-        VerifiedRegistryPublisherV2, VerifiedToolRegistryV2,
+        activate_internal_validator_registry, ActiveToolRegistryV2, BoundedConnectorHostV2,
+        ConnectorRegistryStateV2, ContextFieldV2, DurableG4StateV2, DurableStateNamespaceV2,
+        FilesystemServiceObservationConfigV2, InstallerOrMdmVerifierV2, InternalValidatorBuildV2,
+        InternalValidatorDeclarationV2, InternalValidatorImplementationKindV2, OntologyExprV2,
+        OntologyOperandV2, OntologyScalarV2, OperationalTrustRootSetV2,
+        SharedVerifiedConnectorRegistryV2, SignedToolDescriptorV2,
+        VerifiedInternalValidatorRegistryV2, VerifiedManifestToolConstraintSetV2,
+        VerifiedManifestToolConstraintV2, VerifiedPolicyDispositionV2,
+        VerifiedPolicyToolActivationV2, VerifiedPolicyToolSetV2, VerifiedRegistryPublisherV2,
+        VerifiedToolRegistryV2,
     };
     #[cfg(feature = "test-support")]
     use savana_policy_core::Clock;
@@ -194,6 +196,7 @@ mod native {
     const G4_STATE_ANCHOR_AUTHENTICATION_KEY_CREDENTIAL_V2: &str =
         "g4-anchor-authentication-v2.key";
     const EXECUTOR_CLIENT_SEED_CREDENTIAL_V2: &str = "executor-kernel-v2.seed";
+    const CONNECTOR_AUTHORITY_SEED_CREDENTIAL_V2: &str = "connector-authority-v2.seed";
     const MAX_BOOTSTRAP_BYTES_V2: usize = 128 * 1024;
     const MAX_ARTIFACT_BYTES_V2: usize = 256 * 1024 * 1024;
     const MAX_DECLASSIFICATION_OBJECT_BYTES_V2: usize = 1024 * 1024;
@@ -284,6 +287,10 @@ mod native {
         executor_seal_key_id: String,
         executor_seal_public_key: String,
         executor_connector_registry_digest: String,
+        connector_registry_genesis_digest: String,
+        connector_authority_key_id: String,
+        connector_authority_public_key: String,
+        user_tier_host_allowlist: Vec<String>,
         executor_receipt_key_id: String,
         executor_receipt_public_key: String,
     }
@@ -357,6 +364,7 @@ mod native {
         g4_anchor_authentication_key: [u8; 32],
         executor_client_signing_key: SigningKey,
         executor_server_public_key: [u8; 32],
+        connector_authority_signing_key: Option<SigningKey>,
     }
 
     struct RuntimeMaterialV2 {
@@ -382,6 +390,7 @@ mod native {
         g4_store_id: Digest32V2,
         policy_allowed_effects: savana_policy_core::v2::EffectSetV2,
         logical_run_ttl_ms: u64,
+        connector_authority_distinct_public_keys: Vec<[u8; 32]>,
         declassification: DeclassificationMaterialV2,
         policy: LoadedPolicyRuntimeV2,
         parser_trust: KernelParserTrustV2,
@@ -390,6 +399,7 @@ mod native {
     struct DeclassificationMaterialV2 {
         canonical_rule_set: Vec<u8>,
         trust_roots: Arc<OperationalTrustRootSetV2>,
+        installer_verifier: InstallerOrMdmVerifierV2,
     }
 
     struct LoadedPolicyRuntimeV2 {
@@ -406,7 +416,10 @@ mod native {
         executor_identity: ExecutorIdentityV2,
         executor_seal_key_id: HpkeX25519KeyIdV2,
         executor_seal_public_key: [u8; 32],
-        executor_connector_registry_digest: Digest32V2,
+        connector_registry_genesis_digest: Digest32V2,
+        connector_authority_key_id: Ed25519KeyIdV2,
+        connector_authority_public_key: [u8; 32],
+        user_tier_host_allowlist: Vec<BoundedConnectorHostV2>,
         executor_receipt_key_id: Ed25519KeyIdV2,
         executor_receipt_public_key: [u8; 32],
     }
@@ -711,13 +724,27 @@ mod native {
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
         let projection = startup.verified_effect_ledger_projection();
+        let connector_registry = SharedVerifiedConnectorRegistryV2::from_verified_state(
+            ConnectorRegistryStateV2::from_verified_genesis(
+                runtime_material.policy.connector_registry_genesis_digest,
+                runtime_material.policy.connector_authority_public_key,
+                runtime_material.policy.user_tier_host_allowlist,
+                vec![],
+            )
+            .map_err(|_| StableCode::KernelUnavailable)?,
+        )
+        .map_err(|_| StableCode::KernelUnavailable)?;
         let g7_runtime = KernelG7RuntimeV2::from_verified_deployment(
             runtime_material.policy.quota_limit,
             runtime_material.policy.quota_policy_digest,
             runtime_material.policy.executor_identity,
             runtime_material.policy.executor_seal_key_id,
             runtime_material.policy.executor_seal_public_key,
-            runtime_material.policy.executor_connector_registry_digest,
+            runtime_material.policy.connector_registry_genesis_digest,
+            runtime_material.policy.connector_authority_key_id,
+            runtime_material.policy.connector_authority_public_key,
+            keys.connector_authority_signing_key,
+            connector_registry,
             projection,
             keys.envelope_signing_key.clone(),
             runtime_material.policy.executor_receipt_key_id,
@@ -2287,8 +2314,10 @@ mod native {
         startup
             .verify_loaded_service_config_v2(ClosedServiceIdV2::Kerneld, &bootstrap_bytes)
             .map_err(|_| StableCode::KernelUnavailable)?;
-        let keys = load_key_material(&startup)?;
-        let runtime = load_runtime_material(&bootstrap)?;
+        let mut keys = load_key_material(&startup)?;
+        let runtime = load_runtime_material(&bootstrap, &startup)?;
+        keys.connector_authority_signing_key =
+            load_connector_authority_signing_key(&keys, &runtime)?;
         Ok((startup, keys, runtime))
     }
 
@@ -2493,10 +2522,80 @@ mod native {
             g4_anchor_authentication_key,
             executor_client_signing_key,
             executor_server_public_key,
+            connector_authority_signing_key: None,
         })
     }
 
-    fn load_runtime_material(bootstrap: &BootstrapDtoV2) -> Result<RuntimeMaterialV2, StableCode> {
+    fn load_connector_authority_signing_key(
+        keys: &KernelKeyMaterialV2,
+        runtime: &RuntimeMaterialV2,
+    ) -> Result<Option<SigningKey>, StableCode> {
+        let key_id = *runtime.policy.connector_authority_key_id.as_bytes();
+        let public_key = runtime.policy.connector_authority_public_key;
+        let authority_disabled = key_id == [0; 32] && public_key == [0; 32];
+        let private_key = load_connector_authority_private_material(
+            authority_disabled,
+            || native_credential_present(CONNECTOR_AUTHORITY_SEED_CREDENTIAL_V2),
+            || read_native_credential(CONNECTOR_AUTHORITY_SEED_CREDENTIAL_V2),
+        )?;
+        let distinct_material = connector_authority_distinct_material(keys, runtime);
+        validate_connector_authority_material(key_id, public_key, private_key, &distinct_material)
+    }
+
+    fn load_connector_authority_private_material(
+        authority_disabled: bool,
+        credential_present: impl FnOnce() -> Result<bool, StableCode>,
+        read_credential: impl FnOnce() -> Result<[u8; 32], StableCode>,
+    ) -> Result<Option<[u8; 32]>, StableCode> {
+        match (authority_disabled, credential_present()?) {
+            (true, false) => Ok(None),
+            (false, true) => read_credential().map(Some),
+            (true, true) | (false, false) => Err(StableCode::KernelUnavailable),
+        }
+    }
+
+    fn connector_authority_distinct_material(
+        keys: &KernelKeyMaterialV2,
+        runtime: &RuntimeMaterialV2,
+    ) -> Vec<[u8; 32]> {
+        let signing_keys = [
+            &keys.agent_server_signing_key,
+            &keys.ingress_server_signing_key,
+            &keys.envelope_signing_key,
+            &keys.authority_envelope_signing_key,
+            &keys.task_correlation_signing_key,
+            &keys.executor_client_signing_key,
+        ];
+        let mut material = Vec::with_capacity(32);
+        for signing_key in signing_keys {
+            material.push(signing_key.to_bytes());
+            material.push(signing_key.verifying_key().to_bytes());
+        }
+        material.extend([
+            keys.agent_client_public_key,
+            keys.ingress_client_public_key,
+            keys.vault_encryption_key,
+            keys.vault_anchor_authentication_key,
+            keys.agent_state_encryption_key,
+            keys.agent_state_anchor_authentication_key,
+            keys.g4_state_encryption_key,
+            keys.g4_anchor_authentication_key,
+            keys.executor_server_public_key,
+            runtime.input_runtime_publisher_public_key,
+            runtime.ui_settlement_public_key,
+            runtime.ingress_settlement_public_key,
+            runtime.policy.tool_settlement_public_key,
+            runtime.policy.executor_seal_public_key,
+            runtime.policy.executor_receipt_public_key,
+        ]);
+        material.extend_from_slice(&runtime.connector_authority_distinct_public_keys);
+        material
+    }
+
+    fn load_runtime_material(
+        bootstrap: &BootstrapDtoV2,
+        startup: &VerifiedDaemonStartupV2,
+    ) -> Result<RuntimeMaterialV2, StableCode> {
         if !bootstrap.vault_state_path.is_absolute()
             || !bootstrap.vault_rollback_anchor_path.is_absolute()
             || !bootstrap.agent_authority_state_path.is_absolute()
@@ -2571,6 +2670,13 @@ mod native {
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
         let policy = load_policy_runtime(&bootstrap.policy_runtime)?;
+        let mut connector_authority_distinct_public_keys = vec![
+            parser_public_key,
+            decode_hex_32(&bootstrap.policy_runtime.registry_publisher_public_key)?,
+        ];
+        connector_authority_distinct_public_keys.extend(
+            authenticated_connector_authority_verification_keys(startup, &declassification)?,
+        );
         Ok(RuntimeMaterialV2 {
             input_runtime_assets,
             input_runtime_publisher_key_id,
@@ -2604,6 +2710,7 @@ mod native {
             .filter(|effects| *effects != savana_policy_core::v2::EffectSetV2::EMPTY)
             .ok_or(StableCode::KernelUnavailable)?,
             logical_run_ttl_ms: bootstrap.logical_run_ttl_ms,
+            connector_authority_distinct_public_keys,
             declassification,
             policy,
             parser_trust,
@@ -2626,10 +2733,11 @@ mod native {
         )?;
         let root_material: DeclassificationInstallerRootDtoV2 =
             serde_json::from_slice(&root_material).map_err(|_| StableCode::KernelUnavailable)?;
+        let installer_public_key = decode_hex_32(&root_material.public_key)?;
         let verifier = InstallerOrMdmVerifierV2::new(
             Ed25519KeyIdV2::new(decode_hex_32(&root_material.key_id)?),
             root_material.key_epoch,
-            decode_hex_32(&root_material.public_key)?,
+            installer_public_key,
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
         let root_bytes = read_regular_file(
@@ -2647,7 +2755,32 @@ mod native {
         Ok(DeclassificationMaterialV2 {
             canonical_rule_set: rule_bytes,
             trust_roots: Arc::new(root_set),
+            installer_verifier: verifier,
         })
+    }
+
+    fn authenticated_connector_authority_verification_keys(
+        startup: &VerifiedDaemonStartupV2,
+        declassification: &DeclassificationMaterialV2,
+    ) -> Result<Vec<[u8; 32]>, StableCode> {
+        let mut keys = Vec::new();
+        keys.try_reserve_exact(3 + declassification.trust_roots.members().len())
+            .map_err(|_| StableCode::KernelUnavailable)?;
+        keys.push(startup.deployment_manifest_signing_public_key());
+        keys.push(
+            startup
+                .effect_ledger_projection_binding()
+                .signing_public_key(),
+        );
+        keys.push(declassification.installer_verifier.public_key());
+        keys.extend(
+            declassification
+                .trust_roots
+                .members()
+                .iter()
+                .map(|member| member.public_key()),
+        );
+        Ok(keys)
     }
 
     fn load_policy_runtime(
@@ -2770,9 +2903,28 @@ mod native {
         let executor_receipt_key_id =
             Ed25519KeyIdV2::new(decode_hex_32(&policy.executor_receipt_key_id)?);
         let executor_receipt_public_key = decode_hex_32(&policy.executor_receipt_public_key)?;
+        let legacy_connector_registry_digest =
+            Digest32V2::new(decode_hex_32(&policy.executor_connector_registry_digest)?);
+        let connector_registry_genesis_digest =
+            Digest32V2::new(decode_hex_32(&policy.connector_registry_genesis_digest)?);
+        let connector_authority_key_id_bytes =
+            decode_hex_32_allow_zero(&policy.connector_authority_key_id)?;
+        let connector_authority_public_key =
+            decode_hex_32_allow_zero(&policy.connector_authority_public_key)?;
+        let connector_authority_key_id = Ed25519KeyIdV2::new(connector_authority_key_id_bytes);
+        let connector_authority_disabled = connector_authority_key_id_bytes == [0; 32]
+            && connector_authority_public_key == [0; 32];
+        let user_tier_host_allowlist =
+            decode_user_tier_host_allowlist(&policy.user_tier_host_allowlist)?;
         if derive_ed25519_key_id_v2(tool_settlement_public_key) != tool_settlement_key_id
             || hpke_x25519_key_id(executor_seal_public_key) != executor_seal_key_id
             || derive_ed25519_key_id_v2(executor_receipt_public_key) != executor_receipt_key_id
+            || legacy_connector_registry_digest != connector_registry_genesis_digest
+            || (!connector_authority_disabled
+                && (connector_authority_key_id_bytes == [0; 32]
+                    || connector_authority_public_key == [0; 32]
+                    || derive_ed25519_key_id_v2(connector_authority_public_key)
+                        != connector_authority_key_id))
         {
             return Err(StableCode::KernelUnavailable);
         }
@@ -2790,9 +2942,10 @@ mod native {
             executor_identity: ExecutorIdentityV2::new(decode_hex_32(&policy.executor_identity)?),
             executor_seal_key_id,
             executor_seal_public_key,
-            executor_connector_registry_digest: Digest32V2::new(decode_hex_32(
-                &policy.executor_connector_registry_digest,
-            )?),
+            connector_registry_genesis_digest,
+            connector_authority_key_id,
+            connector_authority_public_key,
+            user_tier_host_allowlist,
             executor_receipt_key_id,
             executor_receipt_public_key,
         })
@@ -2832,7 +2985,7 @@ mod native {
         }
     }
 
-    fn read_native_credential(name: &str) -> Result<[u8; 32], StableCode> {
+    fn native_credential_path(name: &str) -> Result<PathBuf, StableCode> {
         if name.is_empty()
             || name.contains('/')
             || !name
@@ -2857,11 +3010,25 @@ mod native {
         {
             return Err(StableCode::KernelUnavailable);
         }
+        Ok(directory.join(name))
+    }
+
+    fn native_credential_present(name: &str) -> Result<bool, StableCode> {
+        let path = native_credential_path(name)?;
+        match fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(_) => Err(StableCode::KernelUnavailable),
+        }
+    }
+
+    fn read_native_credential(name: &str) -> Result<[u8; 32], StableCode> {
+        let path = native_credential_path(name)?;
         #[cfg(target_os = "linux")]
         let identity = (0, 0, 0o400);
         #[cfg(target_os = "macos")]
         let identity = (0, nix::unistd::getegid().as_raw(), 0o440);
-        read_regular_file(&directory.join(name), 32, Some(identity))?
+        read_regular_file(&path, 32, Some(identity))?
             .try_into()
             .map_err(|_| StableCode::KernelUnavailable)
     }
@@ -3199,6 +3366,14 @@ mod native {
     }
 
     fn decode_hex_32(value: &str) -> Result<[u8; 32], StableCode> {
+        let output = decode_hex_32_allow_zero(value)?;
+        if output.iter().all(|byte| *byte == 0) {
+            return Err(StableCode::KernelUnavailable);
+        }
+        Ok(output)
+    }
+
+    fn decode_hex_32_allow_zero(value: &str) -> Result<[u8; 32], StableCode> {
         if value.len() != 64 {
             return Err(StableCode::KernelUnavailable);
         }
@@ -3208,10 +3383,64 @@ mod native {
             *slot = u8::from_str_radix(&value[offset..offset + 2], 16)
                 .map_err(|_| StableCode::KernelUnavailable)?;
         }
-        if output.iter().all(|byte| *byte == 0) {
+        Ok(output)
+    }
+
+    fn validate_connector_authority_material(
+        key_id: [u8; 32],
+        public_key: [u8; 32],
+        private_key: Option<[u8; 32]>,
+        distinct_material: &[[u8; 32]],
+    ) -> Result<Option<SigningKey>, StableCode> {
+        let key_id_is_zero = key_id == [0; 32];
+        let public_key_is_zero = public_key == [0; 32];
+        match (key_id_is_zero, public_key_is_zero, private_key) {
+            (true, true, None) => Ok(None),
+            (false, false, Some(private_key)) => {
+                if private_key == [0; 32]
+                    || private_key == public_key
+                    || distinct_material
+                        .iter()
+                        .any(|material| *material == private_key || *material == public_key)
+                {
+                    return Err(StableCode::KernelUnavailable);
+                }
+                let signing_key = SigningKey::from_bytes(&private_key);
+                if signing_key.verifying_key().to_bytes() != public_key
+                    || derive_ed25519_key_id_v2(public_key).as_bytes() != &key_id
+                {
+                    return Err(StableCode::KernelUnavailable);
+                }
+                Ok(Some(signing_key))
+            }
+            _ => Err(StableCode::KernelUnavailable),
+        }
+    }
+
+    fn decode_user_tier_host_allowlist(
+        hosts: &[String],
+    ) -> Result<Vec<BoundedConnectorHostV2>, StableCode> {
+        if hosts.len() > 4_096 {
             return Err(StableCode::KernelUnavailable);
         }
-        Ok(output)
+        let mut parsed = Vec::new();
+        parsed
+            .try_reserve_exact(hosts.len())
+            .map_err(|_| StableCode::KernelUnavailable)?;
+        let mut previous: Option<&str> = None;
+        for host in hosts {
+            if previous.is_some_and(|value| value >= host.as_str()) {
+                return Err(StableCode::KernelUnavailable);
+            }
+            let bounded =
+                BoundedConnectorHostV2::new(host).map_err(|_| StableCode::KernelUnavailable)?;
+            if bounded.as_str() != host {
+                return Err(StableCode::KernelUnavailable);
+            }
+            previous = Some(host);
+            parsed.push(bounded);
+        }
+        Ok(parsed)
     }
 
     fn hpke_x25519_key_id(public_key: [u8; 32]) -> HpkeX25519KeyIdV2 {
@@ -3219,5 +3448,197 @@ mod native {
         hasher.update(b"SAVANA_HPKE_X25519_KEY_ID_V2\0");
         hasher.update(public_key);
         HpkeX25519KeyIdV2::new(hasher.finalize().into())
+    }
+
+    #[cfg(test)]
+    mod connector_authority_tests {
+        use super::*;
+
+        fn enabled_material(seed: u8) -> ([u8; 32], [u8; 32], [u8; 32]) {
+            let private = [seed; 32];
+            let public = SigningKey::from_bytes(&private).verifying_key().to_bytes();
+            let key_id = *derive_ed25519_key_id_v2(public).as_bytes();
+            (key_id, public, private)
+        }
+
+        #[test]
+        fn connector_authority_accepts_only_clean_disabled_or_exact_distinct_key() {
+            let zero = [0_u8; 32];
+            assert!(validate_connector_authority_material(zero, zero, None, &[])
+                .unwrap()
+                .is_none());
+
+            let (key_id, public, private) = enabled_material(0x41);
+            assert_eq!(
+                validate_connector_authority_material(key_id, public, Some(private), &[])
+                    .unwrap()
+                    .unwrap()
+                    .verifying_key()
+                    .to_bytes(),
+                public
+            );
+
+            let wrong_id = enabled_material(0x42).0;
+            assert!(
+                validate_connector_authority_material(wrong_id, public, Some(private), &[])
+                    .is_err()
+            );
+            assert!(
+                validate_connector_authority_material(key_id, public, Some([0x43; 32]), &[])
+                    .is_err()
+            );
+            assert!(
+                validate_connector_authority_material(zero, public, Some(private), &[]).is_err()
+            );
+            assert!(
+                validate_connector_authority_material(key_id, zero, Some(private), &[]).is_err()
+            );
+            assert!(validate_connector_authority_material(key_id, public, None, &[]).is_err());
+            assert!(validate_connector_authority_material(zero, zero, Some(private), &[]).is_err());
+            assert!(validate_connector_authority_material(
+                key_id,
+                public,
+                Some(private),
+                &[private],
+            )
+            .is_err());
+            assert!(validate_connector_authority_material(
+                key_id,
+                public,
+                Some(private),
+                &[public],
+            )
+            .is_err());
+        }
+
+        #[test]
+        fn connector_authority_always_probes_optional_private_credential() {
+            let mut disabled_probes = 0;
+            let mut disabled_reads = 0;
+            assert!(load_connector_authority_private_material(
+                true,
+                || {
+                    disabled_probes += 1;
+                    Ok(true)
+                },
+                || {
+                    disabled_reads += 1;
+                    Ok([0x44; 32])
+                },
+            )
+            .is_err());
+            assert_eq!(disabled_probes, 1);
+            assert_eq!(disabled_reads, 0);
+
+            let mut enabled_probes = 0;
+            let mut enabled_reads = 0;
+            assert!(load_connector_authority_private_material(
+                false,
+                || {
+                    enabled_probes += 1;
+                    Ok(false)
+                },
+                || {
+                    enabled_reads += 1;
+                    Ok([0x45; 32])
+                },
+            )
+            .is_err());
+            assert_eq!(enabled_probes, 1);
+            assert_eq!(enabled_reads, 0);
+        }
+
+        #[cfg(feature = "test-support")]
+        #[test]
+        fn connector_authority_rejects_every_authenticated_verification_key() {
+            use savana_policy_core::v2::{
+                OperationalTrustRootPurposeV2, OperationalTrustRootSetItemV2,
+            };
+
+            let installer = SigningKey::from_bytes(&[0x31; 32]);
+            let declassification_authority = SigningKey::from_bytes(&[0x32; 32]);
+            let installer_verifier = InstallerOrMdmVerifierV2::new(
+                derive_ed25519_key_id_v2(installer.verifying_key().to_bytes()),
+                1,
+                installer.verifying_key().to_bytes(),
+            )
+            .unwrap();
+            let member = OperationalTrustRootSetItemV2::new(
+                OperationalTrustRootPurposeV2::DeclassificationAuthority,
+                declassification_authority.verifying_key().to_bytes(),
+                1,
+                5,
+                100,
+            )
+            .unwrap();
+            let declassification = DeclassificationMaterialV2 {
+                canonical_rule_set: Vec::new(),
+                trust_roots: Arc::new(
+                    OperationalTrustRootSetV2::new_declassification_signed_for_test(
+                        Digest32V2::new([0x33; 32]),
+                        1,
+                        None,
+                        vec![member],
+                        5,
+                        100,
+                        &installer,
+                        1,
+                    )
+                    .unwrap(),
+                ),
+                installer_verifier,
+            };
+            let startup = verified_rollover_startup(1, Digest32V2::new([0x34; 32]));
+            let verification_keys =
+                authenticated_connector_authority_verification_keys(&startup, &declassification)
+                    .unwrap();
+            let expected = vec![
+                startup.deployment_manifest_signing_public_key(),
+                startup
+                    .effect_ledger_projection_binding()
+                    .signing_public_key(),
+                declassification.installer_verifier.public_key(),
+                declassification.trust_roots.members()[0].public_key(),
+            ];
+            assert_eq!(verification_keys, expected);
+
+            for private_key in [[0x95; 32], [0x98; 32], [0x31; 32], [0x32; 32]] {
+                let public_key = SigningKey::from_bytes(&private_key)
+                    .verifying_key()
+                    .to_bytes();
+                let key_id = *derive_ed25519_key_id_v2(public_key).as_bytes();
+                assert!(validate_connector_authority_material(
+                    key_id,
+                    public_key,
+                    Some(private_key),
+                    &verification_keys,
+                )
+                .is_err());
+            }
+        }
+
+        #[test]
+        fn connector_host_allowlist_requires_sorted_unique_canonical_hosts() {
+            let canonical = vec![
+                "192.0.2.1".to_owned(),
+                "example.com".to_owned(),
+                "xn--bcher-kva.example".to_owned(),
+            ];
+            let loaded = decode_user_tier_host_allowlist(&canonical).unwrap();
+            assert_eq!(
+                loaded.iter().map(|host| host.as_str()).collect::<Vec<_>>(),
+                ["192.0.2.1", "example.com", "xn--bcher-kva.example"]
+            );
+
+            for invalid in [
+                vec!["example.com".to_owned(), "192.0.2.1".to_owned()],
+                vec!["example.com".to_owned(), "example.com".to_owned()],
+                vec!["EXAMPLE.com".to_owned()],
+                vec!["example.com.".to_owned()],
+                vec!["bad..example.com".to_owned()],
+            ] {
+                assert!(decode_user_tier_host_allowlist(&invalid).is_err());
+            }
+        }
     }
 }

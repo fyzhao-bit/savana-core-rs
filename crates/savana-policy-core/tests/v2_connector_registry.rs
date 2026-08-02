@@ -8,7 +8,7 @@ use savana_policy_core::v2::{
     BoundedConnectorRetryPolicyV2, BoundedConnectorUrlV2, ConnectorDescriptorV2,
     ConnectorRegistryStateV2, ConnectorTierV2, ConnectorTransportV2, DeploymentHardLimitsV2,
     EffectSetV2, ExecutorIdempotencyContractV2, G4Error, IdentifierV2,
-    InternalValidatorDeclarationV2, UnsignedToolDescriptorV2,
+    InternalValidatorDeclarationV2, SharedVerifiedConnectorRegistryV2, UnsignedToolDescriptorV2,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -949,6 +949,7 @@ fn zero_authority_is_genesis_only_and_narrowed_connectors_are_inert_but_removabl
     broad_state.apply_canonical_delta(&add).unwrap();
     assert!(broad_state.contains_connector(connector.connector_id()));
     assert!(broad_state.contains_registered_connector(connector.connector_id()));
+    let shared = SharedVerifiedConnectorRegistryV2::from_verified_state(broad_state).unwrap();
 
     let mut narrowed_state = ConnectorRegistryStateV2::from_verified_genesis(
         genesis,
@@ -968,6 +969,12 @@ fn zero_authority_is_genesis_only_and_narrowed_connectors_are_inert_but_removabl
     assert_state_unchanged(&narrowed_state, narrowed_head, 1, 0, 0, 1, 1, 0, 1, 1);
     assert!(!narrowed_state.contains_connector(connector.connector_id()));
     assert!(narrowed_state.contains_registered_connector(connector.connector_id()));
+    shared
+        .replace_verified_standing_policy_state(narrowed_state)
+        .unwrap();
+    let narrowed_snapshot = shared.snapshot().unwrap();
+    assert!(!narrowed_snapshot.contains_connector(connector.connector_id()));
+    assert!(narrowed_snapshot.contains_registered_connector(connector.connector_id()));
 
     let remove = signed_delta_bytes(
         2,
@@ -977,7 +984,8 @@ fn zero_authority_is_genesis_only_and_narrowed_connectors_are_inert_but_removabl
         2,
         &authority,
     );
-    narrowed_state.apply_canonical_delta(&remove).unwrap();
+    shared.verify_and_apply_canonical_delta(&remove).unwrap();
+    let narrowed_state = shared.snapshot().unwrap();
     assert_state_unchanged(
         &narrowed_state,
         expected_head(narrowed_head, domain_hash(DELTA_SIGNED_DOMAIN, &remove)),

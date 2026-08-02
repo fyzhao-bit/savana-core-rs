@@ -100,6 +100,13 @@ fn production_units_fix_every_listener_and_required_hardening_control() {
                 }
                 assert!(!body.contains("LoadCredential="));
                 assert!(body.contains("LoadCredentialEncrypted="));
+                if path.file_name().and_then(|value| value.to_str())
+                    == Some("savana-kerneld.service")
+                {
+                    assert!(body
+                        .lines()
+                        .any(|line| line == "LoadCredentialEncrypted=connector-authority-v2.seed"));
+                }
                 if body.contains("StateDirectory=") {
                     assert!(
                         body.lines().any(|line| line == "StateDirectoryMode=0700"),

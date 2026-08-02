@@ -711,12 +711,12 @@ mod tests {
     };
     use savana_policy_core::v2::{
         declassification_implementation_digest_v2, ClosedDeclassificationPurposeV2,
-        DeclassificationRuleSetV2, DeclassificationRuleV2, DispatchQuotaSubjectV2,
-        DurableG4StateV2, DurableStateNamespaceV2, KernelDispatchStateV2, LeakGateDutyV2,
-        OperationalTrustRootPurposeV2, OperationalTrustRootSetItemV2, OperationalTrustRootSetV2,
-        ResolvedFinalReleaseTicketV2, RollbackProtectedStateAnchorV2, RollbackProtectedStateHeadV2,
-        VerifiedEffectGateLeaseV2, VerifiedFinalReleaseRecordV2, VerifiedFinalReleaseSettlementV2,
-        VerifiedQuotaLimitV2,
+        ConnectorRegistryStateV2, DeclassificationRuleSetV2, DeclassificationRuleV2,
+        DispatchQuotaSubjectV2, DurableG4StateV2, DurableStateNamespaceV2, KernelDispatchStateV2,
+        LeakGateDutyV2, OperationalTrustRootPurposeV2, OperationalTrustRootSetItemV2,
+        OperationalTrustRootSetV2, ResolvedFinalReleaseTicketV2, RollbackProtectedStateAnchorV2,
+        RollbackProtectedStateHeadV2, SharedVerifiedConnectorRegistryV2, VerifiedEffectGateLeaseV2,
+        VerifiedFinalReleaseRecordV2, VerifiedFinalReleaseSettlementV2, VerifiedQuotaLimitV2,
     };
     use savana_vault::{
         DurableVaultNamespaceV2, DurableVaultServiceV2, VaultAccessContextV2, VaultErrorV2,
@@ -1275,6 +1275,16 @@ mod tests {
             binding,
         )
         .unwrap();
+        let connector_registry = SharedVerifiedConnectorRegistryV2::from_verified_state(
+            ConnectorRegistryStateV2::from_verified_genesis(
+                Digest32V2::new([0x2a; 32]),
+                [0; 32],
+                vec![],
+                vec![],
+            )
+            .unwrap(),
+        )
+        .unwrap();
         let prepared = policy
             .prepare_verified_final_release_dispatch(
                 &release,
@@ -1309,7 +1319,7 @@ mod tests {
                     false,
                     executor,
                     HpkeX25519KeyIdV2::new([0x29; 32]),
-                    Digest32V2::new([0x2a; 32]),
+                    &connector_registry,
                     UnixMillisV2::new(10_000),
                 )
                 .unwrap(),

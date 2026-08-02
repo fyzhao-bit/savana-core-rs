@@ -325,6 +325,10 @@ impl InstallerOrMdmVerifierV2 {
         self.key_epoch
     }
 
+    pub fn public_key(&self) -> [u8; 32] {
+        self.verifying_key.to_bytes()
+    }
+
     pub(crate) fn verify_operational_root_signature(
         &self,
         signature: ManifestDomainSignatureV2,

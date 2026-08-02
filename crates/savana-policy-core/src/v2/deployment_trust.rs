@@ -175,6 +175,7 @@ pub struct ServiceEdgeLockV2 {
 
 #[derive(Debug)]
 pub struct VerifiedDeploymentManifestV2 {
+    deployment_manifest_signing_public_key: [u8; 32],
     installation_id: Digest32V2,
     active_state_manifest_digest: Digest32V2,
     declassification_rule_set_digest: Digest32V2,
@@ -233,7 +234,8 @@ impl VerifiedDeploymentManifestV2 {
         verifying_key
             .verify_strict(&signature_input, &Ed25519Signature::from_bytes(&signature))
             .map_err(|_| DeploymentTrustErrorV2::InvalidManifestSignature)?;
-        let manifest = decode_manifest_payload(&payload)?;
+        let mut manifest = decode_manifest_payload(&payload)?;
+        manifest.deployment_manifest_signing_public_key = offline_public_key;
         if encode_manifest_payload(&manifest)? != payload {
             return Err(DeploymentTrustErrorV2::NonCanonicalManifest);
         }
@@ -243,6 +245,7 @@ impl VerifiedDeploymentManifestV2 {
 
     fn validate(&self) -> Result<(), DeploymentTrustErrorV2> {
         if [
+            &self.deployment_manifest_signing_public_key,
             self.installation_id.as_bytes(),
             self.active_state_manifest_digest.as_bytes(),
             self.declassification_rule_set_digest.as_bytes(),
@@ -393,6 +396,7 @@ pub trait PlatformDeploymentTrustV2 {
 }
 
 pub struct VerifiedDaemonStartupV2 {
+    deployment_manifest_signing_public_key: [u8; 32],
     installation_id: Digest32V2,
     active_state_manifest_digest: Digest32V2,
     declassification_rule_set_digest: Digest32V2,
@@ -490,6 +494,7 @@ impl VerifiedDaemonStartupV2 {
         let projection = verify_effect_ledger_projection_v2(&projection_bytes, projection_binding)
             .map_err(|_| DeploymentTrustErrorV2::EffectLedgerMismatch)?;
         Ok(Self {
+            deployment_manifest_signing_public_key: manifest.deployment_manifest_signing_public_key,
             installation_id: manifest.installation_id,
             active_state_manifest_digest: manifest.active_state_manifest_digest,
             declassification_rule_set_digest: manifest.declassification_rule_set_digest,
@@ -515,6 +520,10 @@ impl VerifiedDaemonStartupV2 {
 
     pub const fn effect_ledger_projection_binding(&self) -> EffectLedgerProjectionBindingV2 {
         self.effect_ledger_projection_binding
+    }
+
+    pub const fn deployment_manifest_signing_public_key(&self) -> [u8; 32] {
+        self.deployment_manifest_signing_public_key
     }
 
     /// Binds the exact bootstrap bytes already parsed by a daemon to the
@@ -817,6 +826,7 @@ fn decode_manifest_payload(
         return Err(DeploymentTrustErrorV2::NonCanonicalManifest);
     }
     Ok(VerifiedDeploymentManifestV2 {
+        deployment_manifest_signing_public_key: [0; 32],
         installation_id,
         active_state_manifest_digest,
         declassification_rule_set_digest,
@@ -1276,6 +1286,9 @@ mod tests {
     fn unsigned_manifest() -> VerifiedDeploymentManifestV2 {
         let projection_key = SigningKey::from_bytes(&[0x98; 32]);
         VerifiedDeploymentManifestV2 {
+            deployment_manifest_signing_public_key: SigningKey::from_bytes(&[0x95; 32])
+                .verifying_key()
+                .to_bytes(),
             installation_id: Digest32V2::new([0x91; 32]),
             active_state_manifest_digest: Digest32V2::new([0x92; 32]),
             declassification_rule_set_digest: Digest32V2::new([0x90; 32]),

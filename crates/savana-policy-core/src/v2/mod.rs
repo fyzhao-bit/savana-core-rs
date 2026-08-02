@@ -232,9 +232,9 @@ pub use ontology::{
 };
 pub use production::{
     activate_internal_validator_registry, InternalValidatorBuildV2, KernelPreparedDispatchV2,
-    ResolvedExecutionTicketV2, ResolvedFinalReleaseTicketV2, VerifiedEffectGateLeaseV2,
-    VerifiedFinalReleaseRecordV2, VerifiedFinalReleaseSettlementV2, VerifiedOntologyEvaluationV2,
-    VerifiedPolicyDispositionV2, VerifiedToolApprovalSettlementV2,
+    ResolvedExecutionTicketV2, ResolvedFinalReleaseTicketV2, SharedVerifiedConnectorRegistryV2,
+    VerifiedEffectGateLeaseV2, VerifiedFinalReleaseRecordV2, VerifiedFinalReleaseSettlementV2,
+    VerifiedOntologyEvaluationV2, VerifiedPolicyDispositionV2, VerifiedToolApprovalSettlementV2,
 };
 pub use provenance::{
     decode_provenance_record_v2, encode_provenance_record_v2, provenance_digest_v2,

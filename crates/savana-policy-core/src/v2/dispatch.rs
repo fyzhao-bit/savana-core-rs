@@ -9,7 +9,7 @@ use sha2::{Digest as _, Sha256};
 
 use super::{
     ActionIntentRecordV2, AuthenticatedEffectDispositionV2, DispatchQuotaSubjectV2, G4Error,
-    G5DecisionBranchV2, ToolExecutionSemanticBindingV2,
+    G5DecisionBranchV2, SharedVerifiedConnectorRegistryV2, ToolExecutionSemanticBindingV2,
 };
 
 const DISPATCH_SUBJECT_DOMAIN: &[u8] = b"SAVANA_DISPATCH_SUBJECT_V2\0";
@@ -105,7 +105,7 @@ impl VerifiedApprovalSettlementBindingV2 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct VerifiedEffectGateAuthorityV2 {
     installation_id: Digest32V2,
     active_state_manifest_digest: Digest32V2,
@@ -113,6 +113,7 @@ pub(crate) struct VerifiedEffectGateAuthorityV2 {
     effect_fence_epoch: u64,
     executor_identity: ExecutorIdentityV2,
     executor_key_id: HpkeX25519KeyIdV2,
+    connector_registry: SharedVerifiedConnectorRegistryV2,
     executor_connector_registry_digest: Digest32V2,
     expires_at: UnixMillisV2,
 }
@@ -127,9 +128,10 @@ impl VerifiedEffectGateAuthorityV2 {
         effects_fenced: bool,
         executor_identity: ExecutorIdentityV2,
         executor_key_id: HpkeX25519KeyIdV2,
-        executor_connector_registry_digest: Digest32V2,
+        connector_registry: &SharedVerifiedConnectorRegistryV2,
         expires_at: UnixMillisV2,
     ) -> Result<Self, G4Error> {
+        let executor_connector_registry_digest = connector_registry.current_head_digest()?;
         if effects_fenced
             || deployment_generation == 0
             || effect_fence_epoch == 0
@@ -149,9 +151,18 @@ impl VerifiedEffectGateAuthorityV2 {
             effect_fence_epoch,
             executor_identity,
             executor_key_id,
+            connector_registry: connector_registry.clone(),
             executor_connector_registry_digest,
             expires_at,
         })
+    }
+
+    pub(super) fn while_current_connector_registry_head<T>(
+        &self,
+        operation: impl FnOnce(Digest32V2) -> Result<T, G4Error>,
+    ) -> Result<T, G4Error> {
+        self.connector_registry
+            .while_current_head(self.executor_connector_registry_digest, operation)
     }
 }
 
@@ -658,6 +669,32 @@ impl KernelDispatchJournalV2 {
         authority: VerifiedEffectGateAuthorityV2,
         sealed_envelope_digest: Digest32V2,
     ) -> Result<DispatchPreparationV2, G4Error> {
+        let connector_registry = authority.connector_registry.clone();
+        let expected_head = authority.executor_connector_registry_digest;
+        connector_registry.while_current_head(expected_head, |current_head| {
+            self.prepare_tool_or_replay_at_current_head(
+                record,
+                decision,
+                approval,
+                ticket,
+                authority,
+                sealed_envelope_digest,
+                current_head,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_tool_or_replay_at_current_head(
+        &mut self,
+        record: &ActionIntentRecordV2,
+        decision: G5DecisionBranchV2,
+        approval: Option<VerifiedApprovalSettlementBindingV2>,
+        ticket: VerifiedExecutionTicketV2,
+        authority: VerifiedEffectGateAuthorityV2,
+        sealed_envelope_digest: Digest32V2,
+        connector_registry_digest: Digest32V2,
+    ) -> Result<DispatchPreparationV2, G4Error> {
         if let Some(existing) = self.entries.iter().find(|entry| {
             entry.core.subject.tool_action_intent_id() == Some(record.action_intent_id)
         }) {
@@ -670,8 +707,7 @@ impl KernelDispatchJournalV2 {
                 || existing.core.effect_fence_epoch != authority.effect_fence_epoch
                 || existing.core.executor_identity != authority.executor_identity
                 || existing.core.executor_key_id != authority.executor_key_id
-                || existing.core.executor_connector_registry_digest
-                    != authority.executor_connector_registry_digest
+                || existing.core.executor_connector_registry_digest != connector_registry_digest
             {
                 return Err(G4Error::StateConflict);
             }
@@ -737,7 +773,7 @@ impl KernelDispatchJournalV2 {
             dispatch_subject_digest,
             executor_identity: authority.executor_identity,
             executor_key_id: authority.executor_key_id,
-            executor_connector_registry_digest: authority.executor_connector_registry_digest,
+            executor_connector_registry_digest: connector_registry_digest,
             expires_at: authority.expires_at,
         };
         let core_digest = dispatch_core_digest(&core)?;
@@ -768,6 +804,30 @@ impl KernelDispatchJournalV2 {
         authority: VerifiedEffectGateAuthorityV2,
         sealed_envelope_digest: Digest32V2,
     ) -> Result<DispatchPreparationV2, G4Error> {
+        let connector_registry = authority.connector_registry.clone();
+        let expected_head = authority.executor_connector_registry_digest;
+        connector_registry.while_current_head(expected_head, |current_head| {
+            self.prepare_final_release_or_replay_at_current_head(
+                record,
+                approval,
+                ticket,
+                authority,
+                sealed_envelope_digest,
+                current_head,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_final_release_or_replay_at_current_head(
+        &mut self,
+        record: &VerifiedFinalReleaseDispatchV2,
+        approval: VerifiedFinalReleaseApprovalBindingV2,
+        ticket: VerifiedFinalReleaseTicketV2,
+        authority: VerifiedEffectGateAuthorityV2,
+        sealed_envelope_digest: Digest32V2,
+        connector_registry_digest: Digest32V2,
+    ) -> Result<DispatchPreparationV2, G4Error> {
         if let Some(existing) = self.entries.iter().find(|entry| {
             entry.core.subject.durable_release_id() == Some(record.durable_release_id)
         }) {
@@ -787,8 +847,7 @@ impl KernelDispatchJournalV2 {
                 || existing.core.effect_fence_epoch != authority.effect_fence_epoch
                 || existing.core.executor_identity != authority.executor_identity
                 || existing.core.executor_key_id != authority.executor_key_id
-                || existing.core.executor_connector_registry_digest
-                    != authority.executor_connector_registry_digest
+                || existing.core.executor_connector_registry_digest != connector_registry_digest
             {
                 return Err(G4Error::StateConflict);
             }
@@ -848,7 +907,7 @@ impl KernelDispatchJournalV2 {
             dispatch_subject_digest,
             executor_identity: authority.executor_identity,
             executor_key_id: authority.executor_key_id,
-            executor_connector_registry_digest: authority.executor_connector_registry_digest,
+            executor_connector_registry_digest: connector_registry_digest,
             expires_at: authority.expires_at,
         };
         let core_digest = dispatch_core_digest(&core)?;

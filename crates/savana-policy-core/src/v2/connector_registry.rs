@@ -567,7 +567,7 @@ impl ConnectorRegistryStateV2 {
         if is_zero(genesis_digest.as_bytes())
             || user_host_allowlist
                 .windows(2)
-                .any(|pair| pair[0] >= pair[1])
+                .any(|pair| pair[0].as_str() >= pair[1].as_str())
         {
             return Err(G4Error::InvalidDescriptor);
         }
@@ -772,6 +772,12 @@ impl ConnectorRegistryStateV2 {
         self.sequence
     }
 
+    pub fn connector_authority_public_key(&self) -> [u8; 32] {
+        self.authority
+            .as_ref()
+            .map_or([0; 32], VerifyingKey::to_bytes)
+    }
+
     pub fn active_connector_count(&self) -> usize {
         self.active.len()
     }
@@ -816,6 +822,28 @@ impl ConnectorRegistryStateV2 {
 
     pub fn deltas(&self) -> &[ConnectorRegistryDeltaV2] {
         &self.deltas
+    }
+
+    pub(super) fn has_same_verified_registered_chain(&self, other: &Self) -> bool {
+        self.genesis_digest == other.genesis_digest
+            && self.head_digest == other.head_digest
+            && self.sequence == other.sequence
+            && self.authority.as_ref().map(VerifyingKey::to_bytes)
+                == other.authority.as_ref().map(VerifyingKey::to_bytes)
+            && self.registered_user_connectors == other.registered_user_connectors
+            && self.registered_tool_descriptors == other.registered_tool_descriptors
+            && self.registered.len() == other.registered.len()
+            && self.registered.iter().zip(other.registered.iter()).all(
+                |((left_id, left), (right_id, right))| {
+                    left_id == right_id && left.canonical_bytes() == right.canonical_bytes()
+                },
+            )
+            && self.deltas.len() == other.deltas.len()
+            && self
+                .deltas
+                .iter()
+                .zip(other.deltas.iter())
+                .all(|(left, right)| left.canonical_bytes() == right.canonical_bytes())
     }
 }
 

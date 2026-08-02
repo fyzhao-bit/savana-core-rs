@@ -1,3 +1,5 @@
+use std::sync::{Arc, RwLock};
+
 use savana_kernel_protocol::v2::{
     ActionIntentIdV2, Digest32V2, DurableReleaseIdV2, DurableRunIdV2, DurableTaskIdV2, EntityIdV2,
     ExecutorIdentityV2, FinalReleaseSemanticBindingV2, HpkeX25519KeyIdV2, ImplementationIdV2,
@@ -13,10 +15,99 @@ use super::dispatch::{
 };
 use super::ontology::{OntologyEvaluationContextV2, OntologyEvaluationV2};
 use super::{
-    ArgumentNameV2, AttemptKindV2, G3Error, G4Error, G5Error, G5PolicyDispositionV2, KernelValueV2,
-    OntologyExprV2, ValidatorBuildManifestIdentityV2, VerifiedInternalValidatorImplementationV2,
-    VerifiedInternalValidatorRegistryV2, VerifiedOntologySetV2, VerifiedQuotaLimitV2,
+    ArgumentNameV2, AttemptKindV2, ConnectorRegistryStateV2, G3Error, G4Error, G5Error,
+    G5PolicyDispositionV2, KernelValueV2, OntologyExprV2, ValidatorBuildManifestIdentityV2,
+    VerifiedInternalValidatorImplementationV2, VerifiedInternalValidatorRegistryV2,
+    VerifiedOntologySetV2, VerifiedQuotaLimitV2,
 };
+
+/// Shared access to one verified connector chain and its current standing-policy
+/// view. Callers may submit canonical deltas for verification, but cannot set a
+/// raw head digest.
+#[derive(Debug, Clone)]
+pub struct SharedVerifiedConnectorRegistryV2 {
+    inner: Arc<RwLock<ConnectorRegistryStateV2>>,
+}
+
+impl SharedVerifiedConnectorRegistryV2 {
+    pub fn from_verified_state(state: ConnectorRegistryStateV2) -> Result<Self, G4Error> {
+        if state
+            .genesis_digest()
+            .as_bytes()
+            .iter()
+            .all(|byte| *byte == 0)
+            || state.head_digest().as_bytes().iter().all(|byte| *byte == 0)
+        {
+            return Err(G4Error::StateConflict);
+        }
+        Ok(Self {
+            inner: Arc::new(RwLock::new(state)),
+        })
+    }
+
+    pub fn current_head_digest(&self) -> Result<Digest32V2, G4Error> {
+        self.inner
+            .read()
+            .map(|state| state.head_digest())
+            .map_err(|_| G4Error::StateConflict)
+    }
+
+    pub fn snapshot(&self) -> Result<ConnectorRegistryStateV2, G4Error> {
+        self.inner
+            .read()
+            .map(|state| state.clone())
+            .map_err(|_| G4Error::StateConflict)
+    }
+
+    pub fn verify_and_apply_canonical_delta(&self, bytes: &[u8]) -> Result<(), G4Error> {
+        self.inner
+            .write()
+            .map_err(|_| G4Error::StateConflict)?
+            .apply_canonical_delta(bytes)
+    }
+
+    pub fn verify_and_replay_canonical_delta(&self, bytes: &[u8]) -> Result<(), G4Error> {
+        self.inner
+            .write()
+            .map_err(|_| G4Error::StateConflict)?
+            .replay_canonical_delta(bytes)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_verify_and_apply_canonical_delta(&self, bytes: &[u8]) -> Result<(), G4Error> {
+        self.inner
+            .try_write()
+            .map_err(|_| G4Error::StateConflict)?
+            .apply_canonical_delta(bytes)
+    }
+
+    /// Replaces only the standing-policy view of the exact same verified
+    /// registered chain. It cannot advance, fork, or roll back the chain.
+    pub fn replace_verified_standing_policy_state(
+        &self,
+        replacement: ConnectorRegistryStateV2,
+    ) -> Result<(), G4Error> {
+        let mut current = self.inner.write().map_err(|_| G4Error::StateConflict)?;
+        if !current.has_same_verified_registered_chain(&replacement) {
+            return Err(G4Error::StateConflict);
+        }
+        *current = replacement;
+        Ok(())
+    }
+
+    pub(super) fn while_current_head<T>(
+        &self,
+        expected: Digest32V2,
+        operation: impl FnOnce(Digest32V2) -> Result<T, G4Error>,
+    ) -> Result<T, G4Error> {
+        let state = self.inner.read().map_err(|_| G4Error::StateConflict)?;
+        let current = state.head_digest();
+        if current != expected {
+            return Err(G4Error::StateConflict);
+        }
+        operation(current)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifiedOntologyEvaluationV2 {
@@ -192,7 +283,7 @@ impl VerifiedEffectGateLeaseV2 {
         effect_fence_epoch: u64,
         executor_identity: ExecutorIdentityV2,
         executor_key_id: HpkeX25519KeyIdV2,
-        executor_connector_registry_digest: Digest32V2,
+        connector_registry: &SharedVerifiedConnectorRegistryV2,
         expires_at: UnixMillisV2,
     ) -> Result<Self, G4Error> {
         if projection.installation_id() != installation_id
@@ -212,7 +303,7 @@ impl VerifiedEffectGateLeaseV2 {
             false,
             executor_identity,
             executor_key_id,
-            executor_connector_registry_digest,
+            connector_registry,
             expires_at,
         )
     }
@@ -226,7 +317,7 @@ impl VerifiedEffectGateLeaseV2 {
         effects_fenced: bool,
         executor_identity: ExecutorIdentityV2,
         executor_key_id: HpkeX25519KeyIdV2,
-        executor_connector_registry_digest: Digest32V2,
+        connector_registry: &SharedVerifiedConnectorRegistryV2,
         expires_at: UnixMillisV2,
     ) -> Result<Self, G4Error> {
         Ok(Self {
@@ -238,7 +329,7 @@ impl VerifiedEffectGateLeaseV2 {
                 effects_fenced,
                 executor_identity,
                 executor_key_id,
-                executor_connector_registry_digest,
+                connector_registry,
                 expires_at,
             )?,
         })

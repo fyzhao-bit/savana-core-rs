@@ -230,6 +230,7 @@ fn run() -> Result<(), String> {
     let exec_store_id = random_unique(&mut issued)?;
     let placeholder = random_unique(&mut issued)?;
     let placeholder_hex = hex(placeholder);
+    let disabled_connector_authority = "00".repeat(32);
 
     let installed_tool_path = format!("{INSTALL_ROOT}/config/policy/{TOOL_ARTIFACT_LEAF}");
     let policy_runtime = json!({
@@ -262,6 +263,10 @@ fn run() -> Result<(), String> {
         "executor_seal_key_id": placeholder_hex,
         "executor_seal_public_key": placeholder_hex,
         "executor_connector_registry_digest": hex(connector_set_digest),
+        "connector_registry_genesis_digest": hex(connector_set_digest),
+        "connector_authority_key_id": disabled_connector_authority,
+        "connector_authority_public_key": disabled_connector_authority,
+        "user_tier_host_allowlist": [],
         "executor_receipt_key_id": placeholder_hex,
         "executor_receipt_public_key": placeholder_hex
     });

@@ -197,6 +197,8 @@ pub struct DurableG4StateV2 {
     current_head: RollbackProtectedStateHeadV2,
     rollback_anchor: Box<dyn RollbackProtectedStateAnchorV2>,
     poisoned: bool,
+    #[cfg(test)]
+    before_next_commit_hook: Option<Box<dyn FnOnce() -> Result<(), G4Error> + Send>>,
     _lock: LedgerLock,
 }
 
@@ -289,6 +291,8 @@ impl DurableG4StateV2 {
             current_head,
             rollback_anchor,
             poisoned: false,
+            #[cfg(test)]
+            before_next_commit_hook: None,
             _lock: lock,
         })
     }
@@ -318,6 +322,14 @@ impl DurableG4StateV2 {
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
             .map_err(|_| G4Error::DurableStateIo)?;
         Self::open_with_anchor(path, encryption_key, Box::new(rollback_anchor), namespace)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_before_next_commit_hook_for_test(
+        &mut self,
+        hook: impl FnOnce() -> Result<(), G4Error> + Send + 'static,
+    ) {
+        self.before_next_commit_hook = Some(Box::new(hook));
     }
 
     pub(crate) fn create_or_replay_intent(
@@ -508,53 +520,57 @@ impl DurableG4StateV2 {
         sealed_envelope_digest: Digest32V2,
     ) -> Result<DispatchPreparationV2, G4Error> {
         self.ensure_usable()?;
-        let mut next = self.snapshot.clone();
-        let intent = next
-            .intents
-            .intents
-            .iter()
-            .find(|entry| entry.record.action_intent_id == action_intent_id)
-            .cloned()
-            .ok_or(G4Error::IntentNotFound)?;
-        let decision = next
-            .decisions
-            .entries
-            .iter()
-            .find(|entry| entry.action_intent_id == action_intent_id)
-            .map(|entry| entry.branch)
-            .ok_or(G4Error::StateConflict)?;
-        let preparation = next.dispatch.prepare_tool_or_replay(
-            &intent.record,
-            decision,
-            approval,
-            ticket,
-            authority,
-            sealed_envelope_digest,
-        )?;
-        if preparation.kind() == DispatchPreparationKindV2::Replay {
-            return Ok(preparation);
-        }
-        let journal_entry = next
-            .dispatch
-            .entries
-            .last()
-            .cloned()
-            .ok_or(G4Error::StateConflict)?;
-        next.quota.reserve_or_replay(
-            verified_limit,
-            intent.record.durable_run_id,
-            journal_entry.quota_subject,
-            preparation.dispatch_subject_digest(),
-            preparation.execution_nonce(),
-        )?;
-        if decision == G5DecisionBranchV2::RequireApproval {
+        let guard_authority = authority.clone();
+        guard_authority.while_current_connector_registry_head(|connector_registry_digest| {
+            let mut next = self.snapshot.clone();
+            let intent = next
+                .intents
+                .intents
+                .iter()
+                .find(|entry| entry.record.action_intent_id == action_intent_id)
+                .cloned()
+                .ok_or(G4Error::IntentNotFound)?;
+            let decision = next
+                .decisions
+                .entries
+                .iter()
+                .find(|entry| entry.action_intent_id == action_intent_id)
+                .map(|entry| entry.branch)
+                .ok_or(G4Error::StateConflict)?;
+            let preparation = next.dispatch.prepare_tool_or_replay_at_current_head(
+                &intent.record,
+                decision,
+                approval,
+                ticket,
+                authority,
+                sealed_envelope_digest,
+                connector_registry_digest,
+            )?;
+            if preparation.kind() == DispatchPreparationKindV2::Replay {
+                return Ok(preparation);
+            }
+            let journal_entry = next
+                .dispatch
+                .entries
+                .last()
+                .cloned()
+                .ok_or(G4Error::StateConflict)?;
+            next.quota.reserve_or_replay(
+                verified_limit,
+                intent.record.durable_run_id,
+                journal_entry.quota_subject,
+                preparation.dispatch_subject_digest(),
+                preparation.execution_nonce(),
+            )?;
+            if decision == G5DecisionBranchV2::RequireApproval {
+                next.intents
+                    .advance_verified(action_intent_id, ActionIntentStateV2::AuthorizedApproval)?;
+            }
             next.intents
-                .advance_verified(action_intent_id, ActionIntentStateV2::AuthorizedApproval)?;
-        }
-        next.intents
-            .advance_verified(action_intent_id, ActionIntentStateV2::DispatchPrepared)?;
-        self.commit(next)?;
-        Ok(preparation)
+                .advance_verified(action_intent_id, ActionIntentStateV2::DispatchPrepared)?;
+            self.commit(next)?;
+            Ok(preparation)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -598,32 +614,38 @@ impl DurableG4StateV2 {
         sealed_envelope_digest: Digest32V2,
     ) -> Result<DispatchPreparationV2, G4Error> {
         self.ensure_usable()?;
-        let mut next = self.snapshot.clone();
-        let preparation = next.dispatch.prepare_final_release_or_replay(
-            release,
-            approval,
-            ticket,
-            authority,
-            sealed_envelope_digest,
-        )?;
-        if preparation.kind() == DispatchPreparationKindV2::Replay {
-            return Ok(preparation);
-        }
-        let journal_entry = next
-            .dispatch
-            .entries
-            .last()
-            .cloned()
-            .ok_or(G4Error::StateConflict)?;
-        next.quota.reserve_or_replay(
-            verified_limit,
-            release.durable_run_id(),
-            journal_entry.quota_subject,
-            preparation.dispatch_subject_digest(),
-            preparation.execution_nonce(),
-        )?;
-        self.commit(next)?;
-        Ok(preparation)
+        let guard_authority = authority.clone();
+        guard_authority.while_current_connector_registry_head(|connector_registry_digest| {
+            let mut next = self.snapshot.clone();
+            let preparation = next
+                .dispatch
+                .prepare_final_release_or_replay_at_current_head(
+                    release,
+                    approval,
+                    ticket,
+                    authority,
+                    sealed_envelope_digest,
+                    connector_registry_digest,
+                )?;
+            if preparation.kind() == DispatchPreparationKindV2::Replay {
+                return Ok(preparation);
+            }
+            let journal_entry = next
+                .dispatch
+                .entries
+                .last()
+                .cloned()
+                .ok_or(G4Error::StateConflict)?;
+            next.quota.reserve_or_replay(
+                verified_limit,
+                release.durable_run_id(),
+                journal_entry.quota_subject,
+                preparation.dispatch_subject_digest(),
+                preparation.execution_nonce(),
+            )?;
+            self.commit(next)?;
+            Ok(preparation)
+        })
     }
 
     pub fn prepare_verified_final_release_dispatch(
@@ -1128,6 +1150,10 @@ impl DurableG4StateV2 {
             sequence: next.sequence,
             state_digest: state_head_digest(self.namespace, &bytes),
         };
+        #[cfg(test)]
+        if let Some(hook) = self.before_next_commit_hook.take() {
+            hook()?;
+        }
         self._lock.recheck().map_err(|_| G4Error::DurableStateIo)?;
         match self.anchored_path.replace(&bytes) {
             Ok(()) => {

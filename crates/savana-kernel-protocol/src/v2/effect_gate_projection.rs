@@ -102,6 +102,10 @@ impl EffectLedgerProjectionBindingV2 {
     pub const fn signing_key_id(self) -> Ed25519KeyIdV2 {
         self.signing_key_id
     }
+
+    pub const fn signing_public_key(self) -> [u8; 32] {
+        self.signing_public_key
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

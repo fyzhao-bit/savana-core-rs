@@ -51,9 +51,10 @@ use savana_policy_core::v2::{
     DeclassificationTransitionV2, DispatchQuotaSubjectV2, DurableG4StateV2, EffectSetV2,
     G5DecisionBranchV2, HandoffJudgmentV2, IdentifierV2, KernelPreparedDispatchV2, KernelValueV2,
     OntologyExprV2, PlannerSlotConfidentialityV2 as PolicySlotConfidentialityV2,
-    ProvenanceContextV2, ProvenanceRecordV2, ResolvedExecutionTicketV2, StoredBindingResolverV2,
-    StoredValueRecordV2, TokenSetDigestEntryV2, VerifiedActionIntentMaterialV2,
-    VerifiedEffectGateLeaseV2, VerifiedInternalSlotMaterialV2, VerifiedInternalValidatorRegistryV2,
+    ProvenanceContextV2, ProvenanceRecordV2, ResolvedExecutionTicketV2,
+    SharedVerifiedConnectorRegistryV2, StoredBindingResolverV2, StoredValueRecordV2,
+    TokenSetDigestEntryV2, VerifiedActionIntentMaterialV2, VerifiedEffectGateLeaseV2,
+    VerifiedInternalSlotMaterialV2, VerifiedInternalValidatorRegistryV2,
     VerifiedOntologyEvaluationV2, VerifiedPlanArgumentV2, VerifiedPolicyDispositionV2,
     VerifiedProjectionOutputsV2, VerifiedQuotaLimitV2, VerifiedResolvedRelationSetV2,
 };
@@ -661,7 +662,11 @@ pub(crate) struct KernelG7RuntimeV2 {
     executor_identity: ExecutorIdentityV2,
     executor_key_id: HpkeX25519KeyIdV2,
     executor_seal_public_key: [u8; 32],
-    executor_connector_registry_digest: Digest32V2,
+    connector_registry: SharedVerifiedConnectorRegistryV2,
+    _connector_registry_genesis_digest: Digest32V2,
+    _connector_authority_key_id: Ed25519KeyIdV2,
+    _connector_authority_public_key: [u8; 32],
+    _connector_authority_signing_key: Option<SigningKey>,
     effect_ledger_projection: savana_kernel_protocol::v2::VerifiedEffectLedgerProjectionV2,
     envelope_signing_key: SigningKey,
     executor_receipt_key_id: Ed25519KeyIdV2,
@@ -677,19 +682,47 @@ impl KernelG7RuntimeV2 {
         executor_identity: ExecutorIdentityV2,
         executor_key_id: HpkeX25519KeyIdV2,
         executor_seal_public_key: [u8; 32],
-        executor_connector_registry_digest: Digest32V2,
+        connector_registry_genesis_digest: Digest32V2,
+        connector_authority_key_id: Ed25519KeyIdV2,
+        connector_authority_public_key: [u8; 32],
+        connector_authority_signing_key: Option<SigningKey>,
+        connector_registry: SharedVerifiedConnectorRegistryV2,
         effect_ledger_projection: savana_kernel_protocol::v2::VerifiedEffectLedgerProjectionV2,
         envelope_signing_key: SigningKey,
         executor_receipt_key_id: Ed25519KeyIdV2,
         executor_receipt_public_key: [u8; 32],
         executor: SuiteOneKernelExecutorClientV2,
     ) -> Result<Self, KernelAgentAuthorityErrorV2> {
+        let registry = connector_registry
+            .snapshot()
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let authority_disabled = is_zero(connector_authority_key_id.as_bytes())
+            && is_zero(&connector_authority_public_key)
+            && connector_authority_signing_key.is_none();
+        let authority_enabled = !is_zero(connector_authority_key_id.as_bytes())
+            && !is_zero(&connector_authority_public_key)
+            && connector_authority_signing_key
+                .as_ref()
+                .is_some_and(|signing_key| {
+                    let private_key = signing_key.to_bytes();
+                    let envelope_private_key = envelope_signing_key.to_bytes();
+                    let envelope_public_key = envelope_signing_key.verifying_key().to_bytes();
+                    private_key != [0; 32]
+                        && private_key != connector_authority_public_key
+                        && signing_key.verifying_key().to_bytes() == connector_authority_public_key
+                        && derive_ed25519_key_id_v2(connector_authority_public_key)
+                            == connector_authority_key_id
+                        && private_key != envelope_private_key
+                        && private_key != envelope_public_key
+                        && connector_authority_public_key != envelope_private_key
+                        && connector_authority_public_key != envelope_public_key
+                });
         if quota_limit == 0
             || [
                 quota_policy_digest,
                 Digest32V2::new(*executor_identity.as_bytes()),
                 Digest32V2::new(*executor_key_id.as_bytes()),
-                executor_connector_registry_digest,
+                connector_registry_genesis_digest,
                 effect_ledger_projection.authenticated_head_digest(),
                 effect_ledger_projection.projection_identity(),
             ]
@@ -697,6 +730,18 @@ impl KernelG7RuntimeV2 {
             .any(|digest| is_zero(digest.as_bytes()))
             || hpke_x25519_key_id(executor_seal_public_key) != executor_key_id
             || derive_ed25519_key_id_v2(executor_receipt_public_key) != executor_receipt_key_id
+            || (!authority_disabled && !authority_enabled)
+            || registry.genesis_digest() != connector_registry_genesis_digest
+            || registry.connector_authority_public_key() != connector_authority_public_key
+            || connector_authority_signing_key
+                .as_ref()
+                .is_some_and(|signing_key| {
+                    let private_key = signing_key.to_bytes();
+                    private_key == executor_seal_public_key
+                        || private_key == executor_receipt_public_key
+                        || connector_authority_public_key == executor_seal_public_key
+                        || connector_authority_public_key == executor_receipt_public_key
+                })
         {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
@@ -706,7 +751,11 @@ impl KernelG7RuntimeV2 {
             executor_identity,
             executor_key_id,
             executor_seal_public_key,
-            executor_connector_registry_digest,
+            connector_registry,
+            _connector_registry_genesis_digest: connector_registry_genesis_digest,
+            _connector_authority_key_id: connector_authority_key_id,
+            _connector_authority_public_key: connector_authority_public_key,
+            _connector_authority_signing_key: connector_authority_signing_key,
             effect_ledger_projection,
             envelope_signing_key,
             executor_receipt_key_id,
@@ -3107,7 +3156,7 @@ impl KernelAgentAuthorityV2 {
             effect_fence_epoch,
             savana_kernel_protocol::v2::ExecutorIdentityV2::new(*g7.executor_identity.as_bytes()),
             g7.executor_key_id,
-            g7.executor_connector_registry_digest,
+            &g7.connector_registry,
             expires_at,
         )
         .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
@@ -4087,7 +4136,7 @@ impl KernelAgentAuthorityV2 {
             effect_fence_epoch,
             g7.executor_identity,
             g7.executor_key_id,
-            g7.executor_connector_registry_digest,
+            &g7.connector_registry,
             checked_deadline(now, 30_000)?,
         )
         .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
@@ -5265,17 +5314,17 @@ mod tests {
     use savana_policy_core::v2::{
         activate_internal_validator_registry, declassification_implementation_digest_v2,
         descriptor_digest_v2, ActiveToolRegistryV2, AttemptKindV2, BoundedConnectorRetryPolicyV2,
-        ClosedDeclassificationPurposeV2, ContextFieldV2, DeclassificationRuleSetV2,
-        DeclassificationRuleV2, DispatchQuotaSubjectV2, DurableG4StateV2, DurableStateNamespaceV2,
-        EffectSetV2, ExecutorIdempotencyContractV2, G4Error, IdentifierV2,
-        InternalValidatorDeclarationV2, KernelValueV2, LeakGateDutyV2, OntologyExprV2,
-        OntologyOperandV2, OntologyScalarV2, OperationalTrustRootPurposeV2,
+        ClosedDeclassificationPurposeV2, ConnectorRegistryStateV2, ContextFieldV2,
+        DeclassificationRuleSetV2, DeclassificationRuleV2, DispatchQuotaSubjectV2,
+        DurableG4StateV2, DurableStateNamespaceV2, EffectSetV2, ExecutorIdempotencyContractV2,
+        G4Error, IdentifierV2, InternalValidatorDeclarationV2, KernelValueV2, LeakGateDutyV2,
+        OntologyExprV2, OntologyOperandV2, OntologyScalarV2, OperationalTrustRootPurposeV2,
         OperationalTrustRootSetItemV2, OperationalTrustRootSetV2, ProvenanceContextV2,
         ProvenanceRecordV2, RollbackProtectedStateAnchorV2, RollbackProtectedStateHeadV2,
-        SignedToolDescriptorV2, UnsignedToolDescriptorV2, VerifiedManifestToolConstraintSetV2,
-        VerifiedManifestToolConstraintV2, VerifiedPolicyDispositionV2,
-        VerifiedPolicyToolActivationV2, VerifiedPolicyToolSetV2, VerifiedRegistryPublisherV2,
-        VerifiedToolRegistryV2,
+        SharedVerifiedConnectorRegistryV2, SignedToolDescriptorV2, UnsignedToolDescriptorV2,
+        VerifiedManifestToolConstraintSetV2, VerifiedManifestToolConstraintV2,
+        VerifiedPolicyDispositionV2, VerifiedPolicyToolActivationV2, VerifiedPolicyToolSetV2,
+        VerifiedRegistryPublisherV2, VerifiedToolRegistryV2,
     };
     use sha2::{Digest as _, Sha256};
 
@@ -5745,13 +5794,28 @@ mod tests {
         let executor_secret = x25519_dalek::StaticSecret::from([0xbc; 32]);
         let executor_seal_public_key = x25519_dalek::PublicKey::from(&executor_secret).to_bytes();
         let receipt_key = SigningKey::from_bytes(&[0xbd; 32]);
+        let connector_registry_genesis_digest = Digest32V2::new([0xbf; 32]);
+        let connector_registry = SharedVerifiedConnectorRegistryV2::from_verified_state(
+            ConnectorRegistryStateV2::from_verified_genesis(
+                connector_registry_genesis_digest,
+                [0; 32],
+                vec![],
+                vec![],
+            )
+            .unwrap(),
+        )
+        .unwrap();
         KernelG7RuntimeV2::from_verified_deployment(
             2,
             Digest32V2::new([0xbe; 32]),
             ExecutorIdentityV2::new([0xa7; 32]),
             hpke_x25519_key_id(executor_seal_public_key),
             executor_seal_public_key,
-            Digest32V2::new([0xbf; 32]),
+            connector_registry_genesis_digest,
+            Ed25519KeyIdV2::new([0; 32]),
+            [0; 32],
+            None,
+            connector_registry,
             verified_effect_ledger_projection(
                 installation_id,
                 active_state_manifest_digest,
