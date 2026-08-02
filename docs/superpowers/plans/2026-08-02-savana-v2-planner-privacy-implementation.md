@@ -148,6 +148,14 @@
 
   Add measured bootstrap fields for `planner_catalog_state_path`, `planner_catalog_rollback_anchor_path`, `planner_catalog_store_id`, and sorted `planner_shipped_catalog`. The development generator must emit the existing shipped tool’s exact class/template/effects with `Sink` role. On `RegisterConnector`, agentd parses and persists the local projection before asking kerneld to authorize it; a rejected or later-removed connector leaves only an inert catalog row because mapper requests always intersect with kernel-provided `active_tools`.
 
+  **Implementation correction (final security review):** the sentence above
+  captured the original Task 2 intent but is not the final safe ordering.
+  Initial registration performs no catalog write. Agentd retains the exact
+  canonical descriptor privately with the pending approval and, only for an
+  approved settlement, executes kerneld authorize → durable catalog commit →
+  kerneld apply. Pending, denied, expired, prepare-rejected, and
+  propose-rejected descriptors never enter the catalog.
+
 - [ ] **Step 7: Verify and commit**
 
   Run:

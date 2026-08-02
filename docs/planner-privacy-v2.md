@@ -324,8 +324,12 @@ else is new agentd-side components in front of it.
 
 The semantic catalog and decode table are **not maintained by hand** — they
 are a projection of connector registration (*REG*), extending its descriptor
-with structural and semantic fields. Registering an MCP/connector once
-populates every table, split three ways by trust:
+with structural and semantic fields. After kerneld authorizes an approved
+registration, agentd durably projects the exact pending descriptor into the
+local catalog before kerneld applies/activates it. Pending, denied, expired,
+or intrinsically/policy-invalid registrations never consume catalog rows.
+Thus one approved MCP/connector registration populates every table, split
+three ways by trust:
 
 ```text
 RegisterConnector {
@@ -368,12 +372,12 @@ Two judgments justify this split:
   so they are both signed into the descriptor (O3, decided) and sent in the
   structural graph.
 
-This closes the loop with *REG*: register once, and the kernel authorization
+This closes the loop with *REG*: approve once, then the kernel authorization
 table, the mapperd semantic catalog, and the decode table all fall out as
-projections — no separate catalog to drift (the "vocabulary is a projection of
-the registry" principle, made concrete). REG tiers apply unchanged: a
-user-registered connector contributes its structural/semantic fields exactly
-as a deployment-shipped one does.
+projections — no separately authored catalog to drift (the "vocabulary is a
+projection of the registry" principle, made concrete). REG tiers apply
+unchanged: an approved user-registered connector contributes its
+structural/semantic fields exactly as a deployment-shipped one does.
 
 ## 11. Open questions
 

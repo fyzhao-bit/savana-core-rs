@@ -17,8 +17,9 @@ now decided; nothing remains open.
 Companion reading: `docs/declassification-v2.md` (the release-rule surface
 this design composes with, cited below as *DECL*), `docs/protocol-v1.md`, and
 `docs/planner-privacy-v2.md` (which projects its planner semantic catalog and
-decode table from the connector registration specified here — register once,
-both the kernel authorization table and the planner-side catalog fall out).
+decode table from the approved connector registration specified here — after
+authorization and before activation, both the kernel authorization table and
+the planner-side catalog fall out).
 
 ---
 

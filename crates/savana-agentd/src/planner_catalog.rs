@@ -381,9 +381,11 @@ impl DurablePlannerCatalogV2 {
         self.commit(next)
     }
 
-    /// Persists the local semantic projection before the descriptor is sent
-    /// to kerneld for authorization. A later rejection intentionally leaves
-    /// this row inert; `project_active` is the sole activation gate.
+    /// Persists the local semantic projection of a connector that kerneld has
+    /// already authorized from an approved user settlement. Agentd commits
+    /// this projection durably before asking kerneld to apply/activate the
+    /// approved connector; `project_active` remains the runtime activation
+    /// intersection.
     pub fn insert_connector_descriptor(
         &mut self,
         canonical_descriptor: &[u8],
@@ -1208,7 +1210,7 @@ mod tests {
     }
 
     #[test]
-    fn rejected_or_removed_registration_stays_persisted_but_inert_without_kernel_active_pairs() {
+    fn approved_registration_projection_is_durable_but_requires_an_active_kernel_pair() {
         let (_directory, path) = private_path();
         let anchor = TestAnchor::default();
         let descriptor = connector_descriptor();
@@ -1222,8 +1224,8 @@ mod tests {
         )
         .unwrap();
 
-        // Production performs this durable commit before the first kerneld
-        // registration call. A simulated rejection does not delete it.
+        // Production calls this only after kerneld has authorized the exact
+        // approved descriptor and before kerneld applies it.
         catalog
             .insert_connector_descriptor(descriptor.canonical_bytes())
             .unwrap();

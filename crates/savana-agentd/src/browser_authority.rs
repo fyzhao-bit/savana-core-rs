@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use savana_approvald::{ApprovalSuiteOneClientErrorV2, ApprovalSuiteOneClientV2};
@@ -58,6 +58,7 @@ const MAX_COMPLETIONS_V2: usize = 4096;
 const MAX_REPLAYS_PER_TAB_V2: usize = 256;
 const MAX_CURSORS_PER_TAB_V2: usize = 256;
 const MAX_OBJECTS_PER_TAB_V2: usize = 4096;
+const MAX_PENDING_CONNECTOR_DESCRIPTOR_BYTES_PER_TAB_V2: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AgentBrowserAuthorityErrorV2 {
@@ -151,12 +152,26 @@ struct PendingReleaseApprovalV2 {
     approvald: ReleaseApprovalRecordHandleV2,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct PendingConnectorRegistrationV2 {
     reference: AgentPendingConnectorRegistrationRefV2,
     kernel: PendingConnectorRegistrationHandleV2,
     approvald: ConnectorApprovalRecordHandleV2,
     transfer: savana_kernel_protocol::v2::ApprovalDisplayAuthenticationTransferCapabilityV2,
+    canonical_descriptor: Arc<Zeroizing<Vec<u8>>>,
+}
+
+impl core::fmt::Debug for PendingConnectorRegistrationV2 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("PendingConnectorRegistrationV2")
+            .field("reference", &self.reference)
+            .field("kernel", &self.kernel)
+            .field("approvald", &self.approvald)
+            .field("transfer", &self.transfer)
+            .field("canonical_descriptor", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -963,36 +978,28 @@ impl AgentBrowserAuthorityV2 {
                     self.refresh_release(tab, reference, request_id, deadline)?
                 }
                 AgentBrowserActionV2::RegisterConnector(canonical_descriptor) => {
-                    let prepared = persist_catalog_before_connector_prepare(
+                    reserve_pending_connector_registration(tab, canonical_descriptor.len())?;
+                    let pending_descriptor = Arc::new(Zeroizing::new(canonical_descriptor.clone()));
+                    let prepare_descriptor = canonical_descriptor.clone();
+                    let proposed = prepare_and_propose_connector_registration(
                         || {
-                            self.planner_catalog
-                                .lock()
-                                .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)?
-                                .insert_connector_descriptor(&canonical_descriptor)
-                                .map_err(|error| match error {
-                                    crate::PlannerCatalogErrorV2::Invalid => {
-                                        AgentBrowserAuthorityErrorV2::InvalidReference
-                                    }
-                                    _ => AgentBrowserAuthorityErrorV2::Unavailable,
-                                })
-                        },
-                        || {
-                            if tab
-                                .objects
-                                .len()
-                                .saturating_add(tab.pending_connectors.len())
-                                >= MAX_OBJECTS_PER_TAB_V2
-                            {
-                                return Err(AgentBrowserAuthorityErrorV2::Overloaded);
-                            }
-                            tab.pending_connectors
-                                .try_reserve(1)
-                                .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
                             self.kernel
                                 .prepare_connector_registration(
                                     PrepareConnectorRegistrationRequestV2::new(
                                         required(tab.session)?,
-                                        canonical_descriptor.clone(),
+                                        prepare_descriptor,
+                                    )
+                                    .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
+                                    deadline,
+                                )
+                                .map_err(map_kernel)
+                        },
+                        |prepared| {
+                            self.kernel
+                                .propose_connector_registration(
+                                    ProposeConnectorRegistrationRequestV2::new(
+                                        prepared.authorization(),
+                                        canonical_descriptor,
                                     )
                                     .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
                                     deadline,
@@ -1000,17 +1007,6 @@ impl AgentBrowserAuthorityV2 {
                                 .map_err(map_kernel)
                         },
                     )?;
-                    let proposed = self
-                        .kernel
-                        .propose_connector_registration(
-                            ProposeConnectorRegistrationRequestV2::new(
-                                prepared.authorization(),
-                                canonical_descriptor,
-                            )
-                            .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
-                            deadline,
-                        )
-                        .map_err(map_kernel)?;
                     let registered = self
                         .approval
                         .register_approval(
@@ -1032,6 +1028,7 @@ impl AgentBrowserAuthorityV2 {
                         kernel: proposed.pending(),
                         approvald: approval,
                         transfer: display_authentication,
+                        canonical_descriptor: pending_descriptor,
                     });
                     AgentBrowserMutationResponseV2::ConnectorOpenApproval {
                         pending,
@@ -1252,26 +1249,39 @@ impl AgentBrowserAuthorityV2 {
         reference: AgentPendingConnectorRegistrationRefV2,
         deadline: UnixMillisV2,
     ) -> Result<AgentBrowserMutationResponseV2, AgentBrowserAuthorityErrorV2> {
-        let pending = tab
+        let index = tab
             .pending_connectors
             .iter()
-            .find(|candidate| candidate.reference == reference)
-            .cloned()
+            .position(|candidate| candidate.reference == reference)
             .ok_or(AgentBrowserAuthorityErrorV2::InvalidReference)?;
+        let approvald = tab.pending_connectors[index].approvald;
         let settlement = self
             .approval
             .get_agent_approval_settlement(
-                AgentApprovalRecordTargetV2::Connector(pending.approvald),
+                AgentApprovalRecordTargetV2::Connector(approvald),
                 deadline,
             )
             .map_err(map_approval)?;
         finalize_connector_registration_settlement(
-            pending,
+            tab,
+            index,
             settlement,
             |request| {
                 self.kernel
                     .authorize_connector_registration(request, deadline)
                     .map_err(map_kernel)
+            },
+            |canonical_descriptor| {
+                self.planner_catalog
+                    .lock()
+                    .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)?
+                    .insert_connector_descriptor(canonical_descriptor)
+                    .map_err(|error| match error {
+                        crate::PlannerCatalogErrorV2::Invalid => {
+                            AgentBrowserAuthorityErrorV2::InvalidReference
+                        }
+                        _ => AgentBrowserAuthorityErrorV2::Unavailable,
+                    })
             },
             |request| {
                 self.kernel
@@ -1394,22 +1404,55 @@ impl AgentBrowserAuthorityV2 {
     }
 }
 
-fn persist_catalog_before_connector_prepare<Persist, Prepare, Prepared>(
-    persist: Persist,
+fn prepare_and_propose_connector_registration<Prepare, Propose, Prepared, Proposed>(
     prepare: Prepare,
-) -> Result<Prepared, AgentBrowserAuthorityErrorV2>
+    propose: Propose,
+) -> Result<Proposed, AgentBrowserAuthorityErrorV2>
 where
-    Persist: FnOnce() -> Result<(), AgentBrowserAuthorityErrorV2>,
     Prepare: FnOnce() -> Result<Prepared, AgentBrowserAuthorityErrorV2>,
+    Propose: FnOnce(Prepared) -> Result<Proposed, AgentBrowserAuthorityErrorV2>,
 {
-    persist()?;
-    prepare()
+    propose(prepare()?)
 }
 
-fn finalize_connector_registration_settlement<Authorize, Apply>(
-    pending: PendingConnectorRegistrationV2,
+fn reserve_pending_connector_registration(
+    tab: &mut AgentTabV2,
+    descriptor_bytes: usize,
+) -> Result<(), AgentBrowserAuthorityErrorV2> {
+    if tab
+        .objects
+        .len()
+        .saturating_add(tab.pending_connectors.len())
+        >= MAX_OBJECTS_PER_TAB_V2
+    {
+        return Err(AgentBrowserAuthorityErrorV2::Overloaded);
+    }
+    let retained_bytes = tab
+        .pending_connectors
+        .iter()
+        .try_fold(0_usize, |total, pending| {
+            total.checked_add(pending.canonical_descriptor.len())
+        })
+        .ok_or(AgentBrowserAuthorityErrorV2::Overloaded)?;
+    if descriptor_bytes == 0
+        || retained_bytes
+            .checked_add(descriptor_bytes)
+            .filter(|total| *total <= MAX_PENDING_CONNECTOR_DESCRIPTOR_BYTES_PER_TAB_V2)
+            .is_none()
+    {
+        return Err(AgentBrowserAuthorityErrorV2::Overloaded);
+    }
+    tab.pending_connectors
+        .try_reserve(1)
+        .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)
+}
+
+fn finalize_connector_registration_settlement<Authorize, Persist, Apply>(
+    tab: &mut AgentTabV2,
+    pending_index: usize,
     settlement: ApprovalSettlementViewV2,
     authorize: Authorize,
+    persist: Persist,
     apply: Apply,
 ) -> Result<AgentBrowserMutationResponseV2, AgentBrowserAuthorityErrorV2>
 where
@@ -1418,6 +1461,7 @@ where
             AuthorizeConnectorRegistrationRequestV2,
         )
             -> Result<AuthorizeConnectorRegistrationResponseV2, AgentBrowserAuthorityErrorV2>,
+    Persist: FnOnce(&[u8]) -> Result<(), AgentBrowserAuthorityErrorV2>,
     Apply: FnOnce(
         ApplyApprovedConnectorRegistrationRequestV2,
     ) -> Result<
@@ -1425,6 +1469,11 @@ where
         AgentBrowserAuthorityErrorV2,
     >,
 {
+    let pending = tab
+        .pending_connectors
+        .get(pending_index)
+        .cloned()
+        .ok_or(AgentBrowserAuthorityErrorV2::InvalidReference)?;
     match settlement {
         ApprovalSettlementViewV2::Pending => {
             Ok(AgentBrowserMutationResponseV2::ConnectorOpenApproval {
@@ -1437,9 +1486,11 @@ where
                 AuthorizeConnectorRegistrationRequestV2::new(pending.kernel, settlement)
                     .map_err(|_| AgentBrowserAuthorityErrorV2::StateConflict)?,
             )?;
+            persist(pending.canonical_descriptor.as_slice())?;
             let committed = apply(ApplyApprovedConnectorRegistrationRequestV2::new(
                 authorized.approved(),
             ))?;
+            tab.pending_connectors.swap_remove(pending_index);
             Ok(
                 AgentBrowserMutationResponseV2::ConnectorRegistrationCommitted {
                     pending: pending.reference,
@@ -1451,6 +1502,7 @@ where
             )
         }
         ApprovalSettlementViewV2::Denied { .. } | ApprovalSettlementViewV2::Expired => {
+            tab.pending_connectors.swap_remove(pending_index);
             Err(AgentBrowserAuthorityErrorV2::StateConflict)
         }
     }
@@ -2038,7 +2090,10 @@ fn map_approval(error: ApprovalSuiteOneClientErrorV2) -> AgentBrowserAuthorityEr
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
     use std::rc::Rc;
+    use std::sync::Arc;
 
     use ed25519_dalek::SigningKey;
     use savana_kernel_protocol::v2::{
@@ -2050,15 +2105,83 @@ mod tests {
     };
 
     use crate::planner_privacy::IntentTrustDeploymentCeilingV2;
+    use crate::{
+        BoundedPlannerSemanticTextV2, DurablePlannerCatalogNamespaceV2, PlannerCatalogErrorV2,
+        PlannerCatalogRollbackAnchorV2, PlannerCatalogStateHeadV2,
+    };
+    use savana_policy_core::v2::{ConnectorStructuralRoleV2, EffectSetV2};
 
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct ConnectorTestCatalogAnchor(Arc<Mutex<PlannerCatalogStateHeadV2>>);
+
+    impl PlannerCatalogRollbackAnchorV2 for ConnectorTestCatalogAnchor {
+        fn current_head(&self) -> Result<PlannerCatalogStateHeadV2, PlannerCatalogErrorV2> {
+            Ok(*self.0.lock().unwrap())
+        }
+
+        fn compare_and_advance(
+            &mut self,
+            expected: PlannerCatalogStateHeadV2,
+            next: PlannerCatalogStateHeadV2,
+        ) -> Result<(), PlannerCatalogErrorV2> {
+            let mut head = self.0.lock().unwrap();
+            if *head != expected || next.sequence() != expected.sequence() + 1 {
+                return Err(PlannerCatalogErrorV2::RollbackDetected);
+            }
+            *head = next;
+            Ok(())
+        }
+    }
+
+    fn empty_connector_test_catalog() -> (tempfile::TempDir, DurablePlannerCatalogV2) {
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let catalog = DurablePlannerCatalogV2::open(
+            &directory.path().join("planner-catalog-state-v2.cbor"),
+            [0x91; 32],
+            DurablePlannerCatalogNamespaceV2::from_verified_installation(
+                Digest32V2::new([0x92; 32]),
+                Digest32V2::new([0x93; 32]),
+            )
+            .unwrap(),
+            Box::new(ConnectorTestCatalogAnchor::default()),
+            vec![],
+        )
+        .unwrap();
+        (directory, catalog)
+    }
+
+    fn connector_test_catalog_entry() -> PlannerCatalogEntryV2 {
+        PlannerCatalogEntryV2::new(
+            ToolClassIdV2::new(777),
+            ActionTemplateIdV2::new(778),
+            ConnectorStructuralRoleV2::Sink,
+            EffectSetV2::SEND,
+            BoundedPlannerSemanticTextV2::new("approved.connector").unwrap(),
+            BoundedPlannerSemanticTextV2::new("approved connector description").unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn connector_test_catalog_conflict_entry() -> PlannerCatalogEntryV2 {
+        PlannerCatalogEntryV2::new(
+            ToolClassIdV2::new(777),
+            ActionTemplateIdV2::new(778),
+            ConnectorStructuralRoleV2::Sink,
+            EffectSetV2::SEND,
+            BoundedPlannerSemanticTextV2::new("unapproved.connector").unwrap(),
+            BoundedPlannerSemanticTextV2::new("unapproved conflicting description").unwrap(),
+        )
+        .unwrap()
+    }
 
     mod planner_privacy {
         use super::*;
         use std::fs::{File, OpenOptions};
         use std::io::{Read as _, Write as _};
         use std::net::TcpListener;
-        use std::os::unix::fs::PermissionsExt as _;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
         use std::thread;
@@ -2803,6 +2926,9 @@ mod tests {
                 [0x44; 32],
             )
             .unwrap(),
+            canonical_descriptor: Arc::new(Zeroizing::new(
+                b"private canonical connector descriptor".to_vec(),
+            )),
         }
     }
 
@@ -3000,28 +3126,48 @@ mod tests {
     }
 
     #[test]
-    fn planner_catalog_commit_failure_skips_kernel_connector_prepare() {
-        let prepare_calls = Cell::new(0_u8);
+    fn rejected_connector_prepare_or_propose_never_changes_the_real_catalog() {
+        let (_directory, catalog) = empty_connector_test_catalog();
+        for _ in 0..4_097 {
+            assert_eq!(
+                prepare_and_propose_connector_registration(
+                    || Err::<(), _>(AgentBrowserAuthorityErrorV2::InvalidReference),
+                    |_: ()| -> Result<(), AgentBrowserAuthorityErrorV2> { unreachable!() },
+                ),
+                Err(AgentBrowserAuthorityErrorV2::InvalidReference),
+            );
+        }
+        assert!(catalog.entries().is_empty());
+
         assert_eq!(
-            persist_catalog_before_connector_prepare(
-                || Err(AgentBrowserAuthorityErrorV2::Unavailable),
-                || {
-                    prepare_calls.set(prepare_calls.get() + 1);
-                    Ok(())
-                },
+            prepare_and_propose_connector_registration(
+                || Ok(7_u8),
+                |_| Err::<(), _>(AgentBrowserAuthorityErrorV2::StateConflict),
             ),
-            Err(AgentBrowserAuthorityErrorV2::Unavailable),
+            Err(AgentBrowserAuthorityErrorV2::StateConflict),
         );
-        assert_eq!(prepare_calls.get(), 0);
+        assert!(catalog.entries().is_empty());
     }
 
     #[test]
     fn connector_finalize_reopens_pending_and_rejects_terminal_nonapproval_without_kernel_calls() {
         let pending = pending_connector_record();
         let calls = Cell::new(0_u8);
+        let mut tab = tab_record(
+            AgentTabSessionCapabilityV2::from_authority_entropy([0x71; 32]).unwrap(),
+            BootIdV2::new([0x72; 32]),
+            FixedOriginV2::Agent8768,
+            None,
+        );
+        tab.pending_connectors.push(pending.clone());
         let reopened = finalize_connector_registration_settlement(
-            pending.clone(),
+            &mut tab,
+            0,
             ApprovalSettlementViewV2::Pending,
+            |_| {
+                calls.set(calls.get() + 1);
+                unreachable!()
+            },
             |_| {
                 calls.set(calls.get() + 1);
                 unreachable!()
@@ -3040,6 +3186,7 @@ mod tests {
                 post: FixedBrowserFormPostCarrierV2::AgentApprovalDisplay(pending.transfer),
             }
         );
+        assert_eq!(tab.pending_connectors.len(), 1);
 
         for settlement in [
             ApprovalSettlementViewV2::Denied {
@@ -3047,10 +3194,22 @@ mod tests {
             },
             ApprovalSettlementViewV2::Expired,
         ] {
+            let mut tab = tab_record(
+                AgentTabSessionCapabilityV2::from_authority_entropy([0x73; 32]).unwrap(),
+                BootIdV2::new([0x74; 32]),
+                FixedOriginV2::Agent8768,
+                None,
+            );
+            tab.pending_connectors.push(pending.clone());
             assert_eq!(
                 finalize_connector_registration_settlement(
-                    pending.clone(),
+                    &mut tab,
+                    0,
                     settlement,
+                    |_| {
+                        calls.set(calls.get() + 1);
+                        unreachable!()
+                    },
                     |_| {
                         calls.set(calls.get() + 1);
                         unreachable!()
@@ -3062,6 +3221,7 @@ mod tests {
                 ),
                 Err(AgentBrowserAuthorityErrorV2::StateConflict)
             );
+            assert!(tab.pending_connectors.is_empty());
         }
         assert_eq!(calls.get(), 0);
     }
@@ -3077,8 +3237,16 @@ mod tests {
         let head_digest = Digest32V2::new([0x52; 32]);
         let connector_id = Digest32V2::new([0x53; 32]);
         let stage = Cell::new(0_u8);
+        let mut tab = tab_record(
+            AgentTabSessionCapabilityV2::from_authority_entropy([0x75; 32]).unwrap(),
+            BootIdV2::new([0x76; 32]),
+            FixedOriginV2::Agent8768,
+            None,
+        );
+        tab.pending_connectors.push(pending.clone());
         let response = finalize_connector_registration_settlement(
-            pending.clone(),
+            &mut tab,
+            0,
             ApprovalSettlementViewV2::Approved { settlement },
             |request| {
                 assert_eq!(stage.get(), 0);
@@ -3087,9 +3255,15 @@ mod tests {
                 assert_eq!(request.settlement(), &expected_settlement);
                 Ok(AuthorizeConnectorRegistrationResponseV2::new(approved))
             },
-            |request| {
+            |descriptor| {
                 assert_eq!(stage.get(), 1);
                 stage.set(2);
+                assert_eq!(descriptor, pending.canonical_descriptor.as_slice());
+                Ok(())
+            },
+            |request| {
+                assert_eq!(stage.get(), 2);
+                stage.set(3);
                 assert_eq!(request.approved(), approved);
                 ApplyApprovedConnectorRegistrationResponseV2::new(
                     signed_delta_digest,
@@ -3101,7 +3275,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(stage.get(), 2);
+        assert_eq!(stage.get(), 3);
+        assert!(tab.pending_connectors.is_empty());
         assert_eq!(
             response,
             AgentBrowserMutationResponseV2::ConnectorRegistrationCommitted {
@@ -3111,6 +3286,148 @@ mod tests {
                 sequence: 9,
                 connector_id,
             }
+        );
+    }
+
+    #[test]
+    fn approved_catalog_failure_skips_apply_and_retains_pending_for_new_nonce_retry() {
+        let pending = pending_connector_record();
+        let settlement = connector_settlement(ApprovalDecisionV2::Approve);
+        let approved =
+            ApprovedConnectorRegistrationHandleV2::from_authority_entropy([0x77; 32]).unwrap();
+        let apply_calls = Cell::new(0_u8);
+        let mut tab = tab_record(
+            AgentTabSessionCapabilityV2::from_authority_entropy([0x78; 32]).unwrap(),
+            BootIdV2::new([0x79; 32]),
+            FixedOriginV2::Agent8768,
+            None,
+        );
+        tab.pending_connectors.push(pending);
+
+        assert_eq!(
+            finalize_connector_registration_settlement(
+                &mut tab,
+                0,
+                ApprovalSettlementViewV2::Approved { settlement },
+                |_| Ok(AuthorizeConnectorRegistrationResponseV2::new(approved)),
+                |_| Err(AgentBrowserAuthorityErrorV2::Unavailable),
+                |_| {
+                    apply_calls.set(apply_calls.get() + 1);
+                    unreachable!()
+                },
+            ),
+            Err(AgentBrowserAuthorityErrorV2::Unavailable),
+        );
+        assert_eq!(apply_calls.get(), 0);
+        assert_eq!(tab.pending_connectors.len(), 1);
+    }
+
+    #[test]
+    fn more_than_catalog_capacity_unapproved_requests_leave_room_for_same_key_approval() {
+        let (_directory, mut catalog) = empty_connector_test_catalog();
+        let pending = pending_connector_record();
+        for index in 0..4_097_u32 {
+            let mut tab = tab_record(
+                AgentTabSessionCapabilityV2::from_authority_entropy(
+                    (index + 1).to_be_bytes().repeat(8).try_into().unwrap(),
+                )
+                .unwrap(),
+                BootIdV2::new([0x7a; 32]),
+                FixedOriginV2::Agent8768,
+                None,
+            );
+            tab.pending_connectors.push(pending.clone());
+            assert_eq!(
+                finalize_connector_registration_settlement(
+                    &mut tab,
+                    0,
+                    ApprovalSettlementViewV2::Expired,
+                    |_| unreachable!(),
+                    |_| {
+                        catalog
+                            .insert_entries(vec![connector_test_catalog_conflict_entry()])
+                            .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)?;
+                        Ok(())
+                    },
+                    |_| unreachable!(),
+                ),
+                Err(AgentBrowserAuthorityErrorV2::StateConflict),
+            );
+            assert!(tab.pending_connectors.is_empty());
+        }
+        assert!(catalog.entries().is_empty());
+
+        let settlement = connector_settlement(ApprovalDecisionV2::Approve);
+        let approved =
+            ApprovedConnectorRegistrationHandleV2::from_authority_entropy([0x7b; 32]).unwrap();
+        let mut tab = tab_record(
+            AgentTabSessionCapabilityV2::from_authority_entropy([0x7c; 32]).unwrap(),
+            BootIdV2::new([0x7d; 32]),
+            FixedOriginV2::Agent8768,
+            None,
+        );
+        tab.pending_connectors.push(pending);
+        finalize_connector_registration_settlement(
+            &mut tab,
+            0,
+            ApprovalSettlementViewV2::Approved { settlement },
+            |_| Ok(AuthorizeConnectorRegistrationResponseV2::new(approved)),
+            |_| {
+                catalog
+                    .insert_entries(vec![connector_test_catalog_entry()])
+                    .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)
+            },
+            |_| {
+                ApplyApprovedConnectorRegistrationResponseV2::new(
+                    Digest32V2::new([0x7e; 32]),
+                    Digest32V2::new([0x7f; 32]),
+                    1,
+                    Digest32V2::new([0x80; 32]),
+                )
+                .map_err(|_| AgentBrowserAuthorityErrorV2::StateConflict)
+            },
+        )
+        .unwrap();
+        assert_eq!(catalog.entries(), &[connector_test_catalog_entry()]);
+    }
+
+    #[test]
+    fn pending_connector_debug_redacts_the_canonical_descriptor() {
+        let pending = pending_connector_record();
+        let debug = format!("{pending:?}");
+        assert!(!debug.contains("private canonical connector descriptor"));
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn pending_connector_descriptor_budget_bounds_retained_private_bytes() {
+        let mut tab = tab_record(
+            AgentTabSessionCapabilityV2::from_authority_entropy([0x81; 32]).unwrap(),
+            BootIdV2::new([0x82; 32]),
+            FixedOriginV2::Agent8768,
+            None,
+        );
+        tab.pending_connectors.push(pending_connector_record());
+        assert_eq!(
+            reserve_pending_connector_registration(
+                &mut tab,
+                MAX_PENDING_CONNECTOR_DESCRIPTOR_BYTES_PER_TAB_V2,
+            ),
+            Err(AgentBrowserAuthorityErrorV2::Overloaded),
+        );
+        assert_eq!(tab.pending_connectors.len(), 1);
+
+        tab.pending_connectors.clear();
+        assert_eq!(
+            reserve_pending_connector_registration(
+                &mut tab,
+                MAX_PENDING_CONNECTOR_DESCRIPTOR_BYTES_PER_TAB_V2,
+            ),
+            Ok(()),
+        );
+        assert_eq!(
+            reserve_pending_connector_registration(&mut tab, 0),
+            Err(AgentBrowserAuthorityErrorV2::Overloaded),
         );
     }
 

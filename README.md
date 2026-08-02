@@ -347,6 +347,10 @@ fixed agentd state directory on macOS development). Shipped rows are measured;
 registered rows are projections of approved signed connector descriptors; only
 exact active tool/action pairs enter a mapper request. The decode table and
 kernel envelope nonce remain local, and decode is deterministic.
+For user registration the exact fail-closed order is kerneld authorization of
+the approved pending descriptor, durable catalog commit, then kerneld apply;
+pending, denied, expired, and rejected descriptors never consume catalog
+capacity.
 
 This privacy boundary has an unavoidable structural-shape floor: the planner
 still learns node count, coarse roles/effects, and dataflow topology because it

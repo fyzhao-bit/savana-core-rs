@@ -183,6 +183,9 @@ semantic catalog 是 agentd 本机的加密、反回滚存储；Linux 生产路�
 由已批准的签名 connector descriptor 投影而来；只有与内核 active
 tool/action 精确匹配的 row 能进入 mapper request。decode table 与内核
 envelope nonce 始终留在本机，decode 只做确定性表查找。
+用户注册的精确 fail-closed 顺序是：内核授权已批准的 pending descriptor →
+目录持久化提交 → 内核 apply。pending、denied、expired 以及被拒绝的
+descriptor 都不会占用目录容量。
 
 这里有不可回避的结构形状下限：planner 为了排序，仍会看到节点数量、
 粗粒度 role/effect 和 dataflow topology；它看不到业务语义或可跨任务复用
