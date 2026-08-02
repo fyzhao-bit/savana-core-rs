@@ -3,37 +3,43 @@ use std::sync::Arc;
 
 use savana_kernel_protocol::v2::{
     encode_abort_input_response_v2, encode_append_input_chunk_response_v2,
-    encode_append_parser_worker_page_frame_response_v2, encode_authenticate_agent_ui_response_v2,
-    encode_authenticate_ingress_ui_response_v2, encode_authorize_release_response_v2,
+    encode_append_parser_worker_page_frame_response_v2,
+    encode_apply_approved_connector_registration_response_v2,
+    encode_authenticate_agent_ui_response_v2, encode_authenticate_ingress_ui_response_v2,
+    encode_authorize_connector_registration_response_v2, encode_authorize_release_response_v2,
     encode_authorize_tool_call_response_v2, encode_begin_input_response_v2,
     encode_cancel_kernel_task_response_v2, encode_claim_agent_session_response_v2,
     encode_close_agent_session_response_v2, encode_commit_input_settlement_response_v2,
     encode_commit_parser_worker_result_response_v2, encode_commit_planner_value_response_v2,
-    encode_derive_value_response_v2, encode_dispatch_execution_response_v2,
-    encode_dispatch_release_response_v2, encode_evaluate_tool_call_response_v2,
-    encode_finalize_input_response_v2, encode_get_agent_session_status_response_v2,
-    encode_get_execution_status_response_v2, encode_get_input_status_response_v2,
-    encode_get_kernel_task_status_response_v2, encode_get_release_status_response_v2,
-    encode_kernel_agent_health_response_v2, encode_kernel_agent_operation_v2,
-    encode_kernel_ingress_health_response_v2, encode_kernel_ingress_operation_v2,
-    encode_prepare_agent_ui_authentication_response_v2,
-    encode_prepare_connector_registration_response_v2, encode_prepare_followup_ingress_response_v2,
+    encode_connector_registry_snapshot_response_v2, encode_derive_value_response_v2,
+    encode_dispatch_execution_response_v2, encode_dispatch_release_response_v2,
+    encode_evaluate_tool_call_response_v2, encode_finalize_input_response_v2,
+    encode_get_agent_session_status_response_v2, encode_get_execution_status_response_v2,
+    encode_get_input_status_response_v2, encode_get_kernel_task_status_response_v2,
+    encode_get_release_status_response_v2, encode_kernel_agent_health_response_v2,
+    encode_kernel_agent_operation_v2, encode_kernel_ingress_health_response_v2,
+    encode_kernel_ingress_operation_v2, encode_prepare_agent_ui_authentication_response_v2,
+    encode_prepare_connector_registration_response_v2,
+    encode_prepare_connector_removal_response_v2, encode_prepare_followup_ingress_response_v2,
     encode_prepare_ingress_ui_authentication_response_v2, encode_prepare_new_ingress_response_v2,
     encode_prepare_planner_call_response_v2, encode_prepare_release_response_v2,
     encode_propose_connector_registration_response_v2, encode_propose_tool_call_response_v2,
     encode_read_agent_view_response_v2, encode_register_parser_worker_job_response_v2,
-    encode_resume_committed_agent_authentication_response_v2, encode_revoke_vault_response_v2,
-    AbortInputResponseV2, AppendInputChunkResponseV2, AppendParserWorkerPageFrameResponseV2,
-    AuthenticateAgentUiResponseV2, AuthenticateIngressUiResponseV2, BeginInputResponseV2, BootIdV2,
-    CloseAgentSessionResponseV2, CommitInputSettlementResponseV2,
-    CommitParserWorkerResultResponseV2, DeriveValueResponseV2, Digest32V2, DurableTaskIdV2,
+    encode_remove_connector_response_v2, encode_resume_committed_agent_authentication_response_v2,
+    encode_revoke_vault_response_v2, AbortInputResponseV2, AppendInputChunkResponseV2,
+    AppendParserWorkerPageFrameResponseV2, ApplyApprovedConnectorRegistrationResponseV2,
+    AuthenticateAgentUiResponseV2, AuthenticateIngressUiResponseV2,
+    AuthorizeConnectorRegistrationResponseV2, BeginInputResponseV2, BootIdV2,
+    BoundedConnectorRegistrySnapshotV2, CloseAgentSessionResponseV2,
+    CommitInputSettlementResponseV2, CommitParserWorkerResultResponseV2,
+    ConnectorRegistrySnapshotResponseV2, DeriveValueResponseV2, Digest32V2, DurableTaskIdV2,
     FinalizeInputResponseV2, GetInputStatusResponseV2, InputNextSequenceV2, InputPublicStateV2,
     InputStatusTargetV2, KernelAgentHealthResponseV2, KernelAgentOperationV2,
     KernelConnectorControlOperationV2, KernelIngressHealthResponseV2, KernelIngressOperationV2,
     KernelServiceOperationV2, MaskedDocumentHandleV2, PeerIdentityBindingV2,
-    PrepareIngressUiAuthenticationResponseV2, PrincipalIdV2, PublicServiceStateV2,
-    ReadAgentViewResponseV2, RegisterParserWorkerJobResponseV2, RequestIdV2, ServiceIdentityV2,
-    UnixMillisV2, VaultPublicStateV2,
+    PrepareConnectorRemovalResponseV2, PrepareIngressUiAuthenticationResponseV2, PrincipalIdV2,
+    PublicServiceStateV2, ReadAgentViewResponseV2, RegisterParserWorkerJobResponseV2,
+    RemoveConnectorResponseV2, RequestIdV2, ServiceIdentityV2, UnixMillisV2, VaultPublicStateV2,
 };
 use savana_kernel_protocol::StableCode;
 use sha2::{Digest as _, Sha256};
@@ -41,6 +47,7 @@ use sha2::{Digest as _, Sha256};
 use crate::v2_agent_authority::{
     KernelAgentAuthorityErrorV2, KernelAgentAuthorityV2, PreparedAgentClaimMaterialV2,
 };
+use crate::v2_connector_authority::{KernelConnectorAuthorityErrorV2, KernelConnectorAuthorityV2};
 use crate::v2_dispatch::{
     KernelRuntimeResponseBuilderV2, KernelRuntimeResponsePreparationErrorV2,
     KernelServiceResponseBodyV2, PreparedKernelServiceResponseV2,
@@ -163,6 +170,7 @@ pub(crate) struct CoreKernelRuntimeServicesV2 {
     input: KernelInputOwnerV2,
     values: KernelValueOwnerV2,
     agent_authority: Option<KernelAgentAuthorityV2>,
+    connector_authority: Option<KernelConnectorAuthorityV2>,
     ingress_authority: Option<KernelIngressAuthorityV2>,
     ingress_commit_sink: Option<Box<dyn KernelIngressCommitSinkV2>>,
     parser_trust: Option<KernelParserTrustV2>,
@@ -283,6 +291,7 @@ impl CoreKernelRuntimeServicesV2 {
                 values: KernelValueOwnerV2::new(maximum_runs, maximum_values)
                     .map_err(map_value_error)?,
                 agent_authority: None,
+                connector_authority: None,
                 ingress_authority: None,
                 ingress_commit_sink: None,
                 parser_trust: None,
@@ -327,11 +336,22 @@ impl CoreKernelRuntimeServicesV2 {
         Ok(())
     }
 
+    pub(crate) fn install_connector_authority(
+        &mut self,
+        authority: KernelConnectorAuthorityV2,
+    ) -> Result<(), StableCode> {
+        if self.connector_authority.replace(authority).is_some() {
+            return Err(StableCode::PolicyDenied);
+        }
+        Ok(())
+    }
+
     pub(crate) fn verify_production_complete(&self) -> Result<(), StableCode> {
         if !self
             .agent_authority
             .as_ref()
             .is_some_and(KernelAgentAuthorityV2::production_ready)
+            || self.connector_authority.is_none()
             || self.ingress_authority.is_none()
             || self.ingress_commit_sink.is_none()
             || self.parser_trust.is_none()
@@ -476,13 +496,13 @@ impl CoreKernelRuntimeServicesV2 {
         deployment_generation: u64,
         caller_identity: ServiceIdentityV2,
     ) -> Result<KernelServiceResponseBodyV2, StableCode> {
-        let authority = self
+        let agent_authority = self
             .agent_authority
             .as_mut()
             .ok_or(StableCode::KernelUnavailable)?;
         let canonical = match operation {
             KernelConnectorControlOperationV2::PrepareRegistration(request) => {
-                let response = authority
+                let response = agent_authority
                     .prepare_connector_registration(
                         &request,
                         caller_boot_id,
@@ -495,9 +515,13 @@ impl CoreKernelRuntimeServicesV2 {
                 encode_prepare_connector_registration_response_v2(response)
             }
             KernelConnectorControlOperationV2::ProposeRegistration(request) => {
-                let response = authority
-                    .propose_connector_registration(
+                let response = self
+                    .connector_authority
+                    .as_mut()
+                    .ok_or(StableCode::KernelUnavailable)?
+                    .propose_add(
                         &request,
+                        agent_authority,
                         &self.values,
                         caller_boot_id,
                         caller_identity,
@@ -505,8 +529,118 @@ impl CoreKernelRuntimeServicesV2 {
                         deployment_generation,
                         now,
                     )
-                    .map_err(map_agent_authority_error)?;
+                    .map_err(|error| map_connector_authority_error_for_tag(71, error))?;
                 encode_propose_connector_registration_response_v2(&response)
+            }
+            KernelConnectorControlOperationV2::AuthorizeRegistration(request) => {
+                let approved = self
+                    .connector_authority
+                    .as_mut()
+                    .ok_or(StableCode::KernelUnavailable)?
+                    .authorize_add(
+                        request.pending(),
+                        request.settlement(),
+                        agent_authority,
+                        active_state_manifest_digest,
+                        deployment_generation,
+                        now,
+                    )
+                    .map_err(|error| map_connector_authority_error_for_tag(72, error))?;
+                encode_authorize_connector_registration_response_v2(
+                    AuthorizeConnectorRegistrationResponseV2::new(approved),
+                )
+            }
+            KernelConnectorControlOperationV2::ApplyApprovedRegistration(request) => {
+                let result = self
+                    .connector_authority
+                    .as_mut()
+                    .ok_or(StableCode::KernelUnavailable)?
+                    .apply_approved_add(
+                        request.approved(),
+                        agent_authority,
+                        active_state_manifest_digest,
+                        deployment_generation,
+                    )
+                    .map_err(|error| map_connector_authority_error_for_tag(73, error))?;
+                let response = ApplyApprovedConnectorRegistrationResponseV2::new(
+                    result.signed_delta_digest(),
+                    result.head_digest(),
+                    result.sequence(),
+                    result.connector_id(),
+                )
+                .map_err(|_| StableCode::KernelUnavailable)?;
+                encode_apply_approved_connector_registration_response_v2(&response)
+            }
+            KernelConnectorControlOperationV2::PrepareRemoval(request) => {
+                let prepared = self
+                    .connector_authority
+                    .as_mut()
+                    .ok_or(StableCode::KernelUnavailable)?
+                    .prepare_remove(
+                        request.session(),
+                        request.connector_id(),
+                        agent_authority,
+                        caller_boot_id,
+                        caller_identity,
+                        active_state_manifest_digest,
+                        deployment_generation,
+                        now,
+                    )
+                    .map_err(|error| map_connector_authority_error_for_tag(74, error))?;
+                let response = PrepareConnectorRemovalResponseV2::new(
+                    prepared.authorization(),
+                    prepared.previous_head_digest(),
+                    prepared.expires_at(),
+                )
+                .map_err(|_| StableCode::KernelUnavailable)?;
+                encode_prepare_connector_removal_response_v2(response)
+            }
+            KernelConnectorControlOperationV2::Remove(request) => {
+                let result = self
+                    .connector_authority
+                    .as_mut()
+                    .ok_or(StableCode::KernelUnavailable)?
+                    .remove(
+                        request.session(),
+                        request.authorization(),
+                        request.connector_id(),
+                        agent_authority,
+                        caller_boot_id,
+                        caller_identity,
+                        active_state_manifest_digest,
+                        deployment_generation,
+                        now,
+                    )
+                    .map_err(|error| map_connector_authority_error_for_tag(75, error))?;
+                let response = RemoveConnectorResponseV2::new(
+                    result.signed_delta_digest(),
+                    result.head_digest(),
+                    result.sequence(),
+                    result.connector_id(),
+                )
+                .map_err(|_| StableCode::KernelUnavailable)?;
+                encode_remove_connector_response_v2(&response)
+            }
+            KernelConnectorControlOperationV2::Snapshot(request) => {
+                let snapshot = self
+                    .connector_authority
+                    .as_ref()
+                    .ok_or(StableCode::KernelUnavailable)?
+                    .snapshot(
+                        request.session(),
+                        agent_authority,
+                        caller_boot_id,
+                        caller_identity,
+                        active_state_manifest_digest,
+                        deployment_generation,
+                        now,
+                    )
+                    .map_err(|error| map_connector_authority_error_for_tag(76, error))?;
+                let response = ConnectorRegistrySnapshotResponseV2::new(
+                    BoundedConnectorRegistrySnapshotV2::new(snapshot.canonical_bytes().to_vec())
+                        .map_err(|_| StableCode::KernelUnavailable)?,
+                );
+                encode_connector_registry_snapshot_response_v2(&response)
             }
         }
         .map_err(|_| StableCode::KernelUnavailable)?;
@@ -1478,6 +1612,48 @@ const fn map_agent_authority_error(error: KernelAgentAuthorityErrorV2) -> Stable
     }
 }
 
+const fn map_connector_authority_error_for_tag(
+    operation_tag: u16,
+    error: KernelConnectorAuthorityErrorV2,
+) -> StableCode {
+    match operation_tag {
+        71 | 72 => match error {
+            KernelConnectorAuthorityErrorV2::InvalidReference => StableCode::HandleUnknown,
+            KernelConnectorAuthorityErrorV2::AlreadyConsumed => StableCode::HandleAlreadyConsumed,
+            KernelConnectorAuthorityErrorV2::BindingMismatch
+            | KernelConnectorAuthorityErrorV2::Denied => StableCode::ApprovalBindingMismatch,
+            KernelConnectorAuthorityErrorV2::Expired => StableCode::ApprovalReplayed,
+            KernelConnectorAuthorityErrorV2::StateConflict => StableCode::RegistryEquivocation,
+            KernelConnectorAuthorityErrorV2::LimitExceeded => StableCode::PolicyLimitExceeded,
+            KernelConnectorAuthorityErrorV2::Durable
+            | KernelConnectorAuthorityErrorV2::Unavailable => StableCode::KernelUnavailable,
+        },
+        73..=75 => match error {
+            KernelConnectorAuthorityErrorV2::InvalidReference
+            | KernelConnectorAuthorityErrorV2::AlreadyConsumed
+            | KernelConnectorAuthorityErrorV2::BindingMismatch
+            | KernelConnectorAuthorityErrorV2::Denied
+            | KernelConnectorAuthorityErrorV2::Expired
+            | KernelConnectorAuthorityErrorV2::StateConflict => StableCode::HandleUnknown,
+            KernelConnectorAuthorityErrorV2::LimitExceeded => StableCode::PolicyLimitExceeded,
+            KernelConnectorAuthorityErrorV2::Durable
+            | KernelConnectorAuthorityErrorV2::Unavailable => StableCode::KernelUnavailable,
+        },
+        76 => match error {
+            KernelConnectorAuthorityErrorV2::InvalidReference
+            | KernelConnectorAuthorityErrorV2::AlreadyConsumed
+            | KernelConnectorAuthorityErrorV2::BindingMismatch
+            | KernelConnectorAuthorityErrorV2::Denied
+            | KernelConnectorAuthorityErrorV2::Expired => StableCode::HandleUnknown,
+            KernelConnectorAuthorityErrorV2::StateConflict
+            | KernelConnectorAuthorityErrorV2::LimitExceeded
+            | KernelConnectorAuthorityErrorV2::Durable
+            | KernelConnectorAuthorityErrorV2::Unavailable => StableCode::KernelUnavailable,
+        },
+        _ => StableCode::KernelUnavailable,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::net::UnixStream;
@@ -1493,16 +1669,17 @@ mod tests {
         decode_kernel_ingress_health_response_v2, derive_ed25519_key_id_v2,
         encode_kernel_ingress_operation_v2, encode_kernel_service_application_request_v2,
         encode_kernel_service_request_envelope_v2, input_channel_begin_digest_v2,
-        input_channel_step_digest_v2, input_chunk_digest_v2, AbortInputRequestV2,
-        AppendInputChunkRequestV2, BeginInputRequestV2, BootIdV2, ContentKindV2, Digest32V2,
-        DirectInputChannelV2, EndpointRoleV2, FinalizeInputRequestV2,
-        IngressUiAuthorizationHandleV2, InputChannelCommitmentV2, InputChannelV2,
-        InputSessionHandleV2, InputSourceKindV2, InputSourceProvenanceV2, InputStatusTargetV2,
-        KernelAgentHealthRequestV2, KernelAgentOperationV2, KernelIngressHealthRequestV2,
-        KernelIngressOperationV2, KernelServiceApplicationRequestV2,
-        KernelServiceApplicationResponseBodyV2, KernelServiceHandshakeEdgeV2,
-        KernelServiceOperationV2, KernelServiceRequestEnvelopeV2, Nonce32V2, PeerIdentityBindingV2,
-        PublicServiceStateV2, RequestIdV2, ServiceIdentityV2, UnixMillisV2, V2ClientHandshake,
+        input_channel_step_digest_v2, input_chunk_digest_v2,
+        kernel_service_public_error_is_allowed_v2, AbortInputRequestV2, AppendInputChunkRequestV2,
+        BeginInputRequestV2, BootIdV2, ContentKindV2, Digest32V2, DirectInputChannelV2,
+        EndpointRoleV2, FinalizeInputRequestV2, IngressUiAuthorizationHandleV2,
+        InputChannelCommitmentV2, InputChannelV2, InputSessionHandleV2, InputSourceKindV2,
+        InputSourceProvenanceV2, InputStatusTargetV2, KernelAgentHealthRequestV2,
+        KernelAgentOperationV2, KernelIngressHealthRequestV2, KernelIngressOperationV2,
+        KernelServiceApplicationRequestV2, KernelServiceApplicationResponseBodyV2,
+        KernelServiceApplicationResponseV2, KernelServiceHandshakeEdgeV2, KernelServiceOperationV2,
+        KernelServiceRequestEnvelopeV2, Nonce32V2, PeerIdentityBindingV2, PublicServiceStateV2,
+        PublicStableCodeV2, RequestIdV2, ServiceIdentityV2, UnixMillisV2, V2ClientHandshake,
         V2ClientTransportSession, V2ServerHandshake, VersionV2, ZeroizingBytesV2,
     };
     use savana_policy_core::v2::{
@@ -1513,11 +1690,13 @@ mod tests {
     use sha2::{Digest as _, Sha256};
     use x25519_dalek::StaticSecret;
 
-    use super::CoreKernelRuntimeServicesV2;
+    use super::{map_connector_authority_error_for_tag, CoreKernelRuntimeServicesV2};
     use crate::policy_runtime::V2GenerationLease;
     use crate::v2_channel::{ChannelErrorV2, UnixV2FrameChannel, V2FrameChannel};
     use crate::v2_connection::serve_one_suite_one_v2_channel;
+    use crate::v2_connector_authority::KernelConnectorAuthorityErrorV2;
     use crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2;
+    use crate::v2_dispatch::public_error_code;
     use crate::v2_dispatch::{
         KernelResponseFailurePointV2, KernelRuntimeResponsePreparationErrorV2,
         KernelServiceDeploymentV2, KernelServiceDispatcherV2, KernelServiceResponseBodyV2,
@@ -1533,6 +1712,58 @@ mod tests {
     use crate::v2_transport_owner::KernelV2HandshakeOwner;
 
     struct SharedCoreServicesV2(Arc<Mutex<CoreKernelRuntimeServicesV2>>);
+
+    #[test]
+    fn connector_error_mapping_is_closed_under_frozen_per_tag_contracts() {
+        let errors = [
+            KernelConnectorAuthorityErrorV2::InvalidReference,
+            KernelConnectorAuthorityErrorV2::AlreadyConsumed,
+            KernelConnectorAuthorityErrorV2::BindingMismatch,
+            KernelConnectorAuthorityErrorV2::Denied,
+            KernelConnectorAuthorityErrorV2::Expired,
+            KernelConnectorAuthorityErrorV2::StateConflict,
+            KernelConnectorAuthorityErrorV2::LimitExceeded,
+            KernelConnectorAuthorityErrorV2::Durable,
+            KernelConnectorAuthorityErrorV2::Unavailable,
+        ];
+        for tag in 70..=76 {
+            for error in errors {
+                let public = public_error_code(map_connector_authority_error_for_tag(tag, error));
+                assert!(
+                    kernel_service_public_error_is_allowed_v2(
+                        EndpointRoleV2::AgentKernel,
+                        tag,
+                        public,
+                    ),
+                    "tag {tag} rejected mapped {error:?} as {public:?}",
+                );
+                KernelServiceApplicationResponseV2::error(
+                    EndpointRoleV2::AgentKernel,
+                    RequestIdV2::new([tag as u8; 16]),
+                    tag,
+                    public,
+                )
+                .unwrap();
+            }
+        }
+
+        assert_eq!(
+            public_error_code(map_connector_authority_error_for_tag(
+                72,
+                KernelConnectorAuthorityErrorV2::Denied,
+            )),
+            PublicStableCodeV2::ApprovalBindingMismatch,
+        );
+        for tag in 73..=76 {
+            assert_eq!(
+                public_error_code(map_connector_authority_error_for_tag(
+                    tag,
+                    KernelConnectorAuthorityErrorV2::BindingMismatch,
+                )),
+                PublicStableCodeV2::InvalidReference,
+            );
+        }
+    }
 
     impl KernelRuntimeServicesV2 for SharedCoreServicesV2 {
         fn execute(

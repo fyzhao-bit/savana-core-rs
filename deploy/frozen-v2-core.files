@@ -37,6 +37,7 @@ crates/savana-kerneld/src/v2_agent_authority.rs
 crates/savana-kerneld/src/v2_agent_durable.rs
 crates/savana-kerneld/src/v2_channel.rs
 crates/savana-kerneld/src/v2_connection.rs
+crates/savana-kerneld/src/v2_connector_authority.rs
 crates/savana-kerneld/src/v2_core_services.rs
 crates/savana-kerneld/src/v2_data_plane.rs
 crates/savana-kerneld/src/v2_declassification_policy.rs
@@ -65,6 +66,7 @@ crates/savana-policy-core/src/v2/binding.rs
 crates/savana-policy-core/src/v2/binding_tests.rs
 crates/savana-policy-core/src/v2/commit_attestation.rs
 crates/savana-policy-core/src/v2/connector_registry.rs
+crates/savana-policy-core/src/v2/connector_store.rs
 crates/savana-policy-core/src/v2/declassification.rs
 crates/savana-policy-core/src/v2/deployment_authorization.rs
 crates/savana-policy-core/src/v2/deployment_control.rs

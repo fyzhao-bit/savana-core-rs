@@ -572,14 +572,16 @@ const fn error_set_for(role: EndpointRoleV2, tag: u16) -> Option<ErrorSetV2> {
             | EndpointRoleV2::ApprovalAdmin,
             0,
         ) => Some(ErrorSetV2::Health),
-        (EndpointRoleV2::AgentKernel, 22 | 30 | 35 | 41)
+        (EndpointRoleV2::AgentKernel, 22 | 30 | 35 | 41 | 76)
         | (EndpointRoleV2::IngressKernel, 45)
         | (EndpointRoleV2::KernelExecutor, 61) => Some(ErrorSetV2::Query),
-        (EndpointRoleV2::AgentKernel, 31 | 36 | 37 | 42) => Some(ErrorSetV2::ControlMutation),
+        (EndpointRoleV2::AgentKernel, 31 | 36 | 37 | 42 | 73..=75) => {
+            Some(ErrorSetV2::ControlMutation)
+        }
         (EndpointRoleV2::AgentKernel, 21 | 38)
         | (EndpointRoleV2::IngressKernel, 40..=42 | 44 | 48..=50) => Some(ErrorSetV2::Input),
         (EndpointRoleV2::AgentKernel, 23..=27 | 32) => Some(ErrorSetV2::Policy),
-        (EndpointRoleV2::AgentKernel, 20 | 28 | 33 | 39 | 40 | 43 | 70 | 71)
+        (EndpointRoleV2::AgentKernel, 20 | 28 | 33 | 39 | 40 | 43 | 70..=72)
         | (EndpointRoleV2::IngressKernel, 43 | 46 | 47) => Some(ErrorSetV2::Approval),
         (EndpointRoleV2::AgentApproval, 20 | 22..=24)
         | (EndpointRoleV2::IngressApproval, 20 | 22..=23) => Some(ErrorSetV2::Approval),

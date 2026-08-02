@@ -7,25 +7,32 @@ use savana_kernel_protocol::v2::{
     AgentBrowserActionV2, AgentBrowserExecutionStateV2, AgentBrowserMutationResponseV2,
     AgentBrowserObjectRefV2, AgentBrowserReadViewResponseV2, AgentBrowserReleaseStateV2,
     AgentBrowserRequestV2, AgentBrowserViewCursorCapabilityV2, AgentExecutionRefV2,
-    AgentExecutionTicketRefV2, AgentMaskedDocumentRefV2, AgentPendingToolCallRefV2,
-    AgentPlanStepRefV2, AgentReleaseRefV2, AgentReleaseTicketRefV2, AgentSessionHandleV2,
-    AgentTabSessionCapabilityV2, AgentUiAuthenticationPreparationHandleV2,
+    AgentExecutionTicketRefV2, AgentMaskedDocumentRefV2, AgentPendingConnectorRegistrationRefV2,
+    AgentPendingToolCallRefV2, AgentPlanStepRefV2, AgentReleaseRefV2, AgentReleaseTicketRefV2,
+    AgentSessionHandleV2, AgentTabSessionCapabilityV2, AgentUiAuthenticationPreparationHandleV2,
     AgentUiAuthenticationSettlementTransferCapabilityV2, AgentUiAuthenticationTransferCapabilityV2,
-    AgentUiAuthorizationHandleV2, ApprovalSettlementViewV2, ApprovalUiRecordHandleV2,
-    AuthorizeReleaseRequestV2, AuthorizeToolCallRequestV2, BootIdV2, CloseAgentSessionRequestV2,
-    CommitPlannerValueRequestV2, Digest32V2, DispatchExecutionRequestV2, DispatchReleaseRequestV2,
-    DisplayProjectionIdV2, EvaluateToolCallRequestV2, EvaluateToolCallResponseV2,
-    ExecutionHandleV2, ExecutionStatusTargetV2, ExecutionTicketHandleV2, ExecutorIdentityV2,
+    AgentUiAuthorizationHandleV2, ApplyApprovedConnectorRegistrationRequestV2,
+    ApplyApprovedConnectorRegistrationResponseV2, ApprovalSettlementViewV2,
+    ApprovalUiRecordHandleV2, AuthorizeConnectorRegistrationRequestV2,
+    AuthorizeConnectorRegistrationResponseV2, AuthorizeReleaseRequestV2,
+    AuthorizeToolCallRequestV2, BootIdV2, CloseAgentSessionRequestV2, CommitPlannerValueRequestV2,
+    ConnectorApprovalRecordHandleV2, ConnectorRegistrySnapshotRequestV2, Digest32V2,
+    DispatchExecutionRequestV2, DispatchReleaseRequestV2, DisplayProjectionIdV2,
+    EvaluateToolCallRequestV2, EvaluateToolCallResponseV2, ExecutionHandleV2,
+    ExecutionStatusTargetV2, ExecutionTicketHandleV2, ExecutorIdentityV2,
     FixedBrowserFormPostCarrierV2, FixedOriginV2, GetExecutionStatusRequestV2,
     GetReleaseStatusRequestV2, KernelAgentOperationV2, KernelAgentViewCursorV2,
-    MaskedDocumentHandleV2, NamedArgumentValueBindingV2, Nonce32V2, PendingReleaseHandleV2,
-    PendingToolCallHandleV2, PlanStepHandleV2, PlannerIntentKindV2, PlannerLimitsV2,
-    PlannerPurposeV2, PlannerRouteIdV2, PrepareConnectorRegistrationRequestV2,
-    PrepareFollowupIngressRequestV2, PreparePlannerCallRequestV2, PrepareReleaseRequestV2,
-    ProjectionIdV2, ProposeConnectorRegistrationRequestV2, ProposeToolCallRequestV2,
-    PublicDispatchCompletionV2, PublicExecutionStatusV2, PublicStableCodeV2, RegisteredApprovalV2,
+    MaskedDocumentHandleV2, NamedArgumentValueBindingV2, Nonce32V2,
+    PendingConnectorRegistrationHandleV2, PendingReleaseHandleV2, PendingToolCallHandleV2,
+    PlanStepHandleV2, PlannerIntentKindV2, PlannerLimitsV2, PlannerPurposeV2, PlannerRouteIdV2,
+    PrepareConnectorRegistrationRequestV2, PrepareConnectorRemovalRequestV2,
+    PrepareConnectorRemovalResponseV2, PrepareFollowupIngressRequestV2,
+    PreparePlannerCallRequestV2, PrepareReleaseRequestV2, ProjectionIdV2,
+    ProposeConnectorRegistrationRequestV2, ProposeToolCallRequestV2, PublicDispatchCompletionV2,
+    PublicExecutionStatusV2, PublicStableCodeV2, RegisteredApprovalV2,
     RegisteredUiAuthenticationV2, ReleaseApprovalRecordHandleV2, ReleaseHandleV2,
-    ReleaseKernelApprovalHandleV2, ReleaseStatusTargetV2, ReleaseTicketHandleV2, RequestIdV2,
+    ReleaseKernelApprovalHandleV2, ReleaseStatusTargetV2, ReleaseTicketHandleV2,
+    RemoveConnectorRequestV2, RemoveConnectorResponseV2, RequestIdV2,
     ResumeCommittedAgentAuthenticationResponseV2, RunHandleV2, SignedDurableTaskCorrelationV2,
     SignedUiAuthenticationSettlementV2, StaticTemplateIdV2, ToolApprovalRecordHandleV2,
     ToolHandleV2, ToolKernelApprovalHandleV2, UnixMillisV2, ValueHandleV2,
@@ -138,6 +145,14 @@ struct PendingReleaseApprovalV2 {
 }
 
 #[derive(Debug, Clone)]
+struct PendingConnectorRegistrationV2 {
+    reference: AgentPendingConnectorRegistrationRefV2,
+    kernel: PendingConnectorRegistrationHandleV2,
+    approvald: ConnectorApprovalRecordHandleV2,
+    transfer: savana_kernel_protocol::v2::ApprovalDisplayAuthenticationTransferCapabilityV2,
+}
+
+#[derive(Debug, Clone)]
 struct ActionReplayV2 {
     request_digest: Digest32V2,
     nonce: Nonce32V2,
@@ -161,6 +176,7 @@ struct AgentTabV2 {
     next_reference_revision: u64,
     objects: Vec<BrowserObjectBindingV2>,
     pending_releases: Vec<PendingReleaseApprovalV2>,
+    pending_connectors: Vec<PendingConnectorRegistrationV2>,
     cursors: Vec<BrowserCursorV2>,
     replays: Vec<ViewReplayV2>,
     action_replays: Vec<ActionReplayV2>,
@@ -395,6 +411,7 @@ impl AgentBrowserAuthorityV2 {
             next_reference_revision: 1,
             objects: Vec::new(),
             pending_releases: Vec::new(),
+            pending_connectors: Vec::new(),
             cursors: Vec::new(),
             replays: Vec::new(),
             action_replays: Vec::new(),
@@ -529,7 +546,7 @@ impl AgentBrowserAuthorityV2 {
             .state
             .lock()
             .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)?;
-        let tab = if matches!(&action, AgentBrowserActionV2::RegisterConnector(_)) {
+        let tab = if connector_action_requires_authenticated_tab(&action) {
             authenticated_connector_tab(&mut state, tab, self.agentd_boot_id)?
         } else {
             find_action_tab(&mut state, tab)?
@@ -829,6 +846,17 @@ impl AgentBrowserAuthorityV2 {
                 self.refresh_release(tab, reference, request_id, deadline)?
             }
             AgentBrowserActionV2::RegisterConnector(canonical_descriptor) => {
+                if tab
+                    .objects
+                    .len()
+                    .saturating_add(tab.pending_connectors.len())
+                    >= MAX_OBJECTS_PER_TAB_V2
+                {
+                    return Err(AgentBrowserAuthorityErrorV2::Overloaded);
+                }
+                tab.pending_connectors
+                    .try_reserve(1)
+                    .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
                 let prepared = self
                     .kernel
                     .prepare_connector_registration(
@@ -860,16 +888,56 @@ impl AgentBrowserAuthorityV2 {
                     )
                     .map_err(map_approval)?;
                 let RegisteredApprovalV2::Connector {
+                    approval,
                     display_authentication,
-                    ..
                 } = registered
                 else {
                     return Err(AgentBrowserAuthorityErrorV2::StateConflict);
                 };
+                let pending = mint_pending_connector_reference(tab)?;
+                tab.pending_connectors.push(PendingConnectorRegistrationV2 {
+                    reference: pending,
+                    kernel: proposed.pending(),
+                    approvald: approval,
+                    transfer: display_authentication,
+                });
                 AgentBrowserMutationResponseV2::ConnectorOpenApproval {
+                    pending,
                     post: FixedBrowserFormPostCarrierV2::AgentApprovalDisplay(
                         display_authentication,
                     ),
+                }
+            }
+            AgentBrowserActionV2::FinalizeConnectorRegistration(reference) => {
+                self.finalize_connector_registration(tab, reference, deadline)?
+            }
+            AgentBrowserActionV2::RemoveConnector(connector_id) => {
+                let session = required(tab.session)?;
+                remove_connector_flow(
+                    session,
+                    connector_id,
+                    |request| {
+                        self.kernel
+                            .prepare_connector_removal(request, deadline)
+                            .map_err(map_kernel)
+                    },
+                    |request| {
+                        self.kernel
+                            .remove_connector(request, deadline)
+                            .map_err(map_kernel)
+                    },
+                )?
+            }
+            AgentBrowserActionV2::SnapshotConnectors => {
+                let snapshot = self
+                    .kernel
+                    .connector_registry_snapshot(
+                        ConnectorRegistrySnapshotRequestV2::new(required(tab.session)?),
+                        deadline,
+                    )
+                    .map_err(map_kernel)?;
+                AgentBrowserMutationResponseV2::ConnectorRegistrySnapshot {
+                    canonical_snapshot: snapshot.canonical_snapshot().clone(),
                 }
             }
         };
@@ -1050,6 +1118,41 @@ impl AgentBrowserAuthorityV2 {
         }
     }
 
+    fn finalize_connector_registration(
+        &self,
+        tab: &mut AgentTabV2,
+        reference: AgentPendingConnectorRegistrationRefV2,
+        deadline: UnixMillisV2,
+    ) -> Result<AgentBrowserMutationResponseV2, AgentBrowserAuthorityErrorV2> {
+        let pending = tab
+            .pending_connectors
+            .iter()
+            .find(|candidate| candidate.reference == reference)
+            .cloned()
+            .ok_or(AgentBrowserAuthorityErrorV2::InvalidReference)?;
+        let settlement = self
+            .approval
+            .get_agent_approval_settlement(
+                AgentApprovalRecordTargetV2::Connector(pending.approvald),
+                deadline,
+            )
+            .map_err(map_approval)?;
+        finalize_connector_registration_settlement(
+            pending,
+            settlement,
+            |request| {
+                self.kernel
+                    .authorize_connector_registration(request, deadline)
+                    .map_err(map_kernel)
+            },
+            |request| {
+                self.kernel
+                    .apply_approved_connector_registration(request, deadline)
+                    .map_err(map_kernel)
+            },
+        )
+    }
+
     fn refresh_execution(
         &self,
         tab: &mut AgentTabV2,
@@ -1161,6 +1264,89 @@ impl AgentBrowserAuthorityV2 {
         }
         Ok(())
     }
+}
+
+fn finalize_connector_registration_settlement<Authorize, Apply>(
+    pending: PendingConnectorRegistrationV2,
+    settlement: ApprovalSettlementViewV2,
+    authorize: Authorize,
+    apply: Apply,
+) -> Result<AgentBrowserMutationResponseV2, AgentBrowserAuthorityErrorV2>
+where
+    Authorize:
+        FnOnce(
+            AuthorizeConnectorRegistrationRequestV2,
+        )
+            -> Result<AuthorizeConnectorRegistrationResponseV2, AgentBrowserAuthorityErrorV2>,
+    Apply: FnOnce(
+        ApplyApprovedConnectorRegistrationRequestV2,
+    ) -> Result<
+        ApplyApprovedConnectorRegistrationResponseV2,
+        AgentBrowserAuthorityErrorV2,
+    >,
+{
+    match settlement {
+        ApprovalSettlementViewV2::Pending => {
+            Ok(AgentBrowserMutationResponseV2::ConnectorOpenApproval {
+                pending: pending.reference,
+                post: FixedBrowserFormPostCarrierV2::AgentApprovalDisplay(pending.transfer),
+            })
+        }
+        ApprovalSettlementViewV2::Approved { settlement } => {
+            let authorized = authorize(
+                AuthorizeConnectorRegistrationRequestV2::new(pending.kernel, settlement)
+                    .map_err(|_| AgentBrowserAuthorityErrorV2::StateConflict)?,
+            )?;
+            let committed = apply(ApplyApprovedConnectorRegistrationRequestV2::new(
+                authorized.approved(),
+            ))?;
+            Ok(
+                AgentBrowserMutationResponseV2::ConnectorRegistrationCommitted {
+                    pending: pending.reference,
+                    signed_delta_digest: committed.signed_delta_digest(),
+                    head_digest: committed.head_digest(),
+                    sequence: committed.sequence(),
+                    connector_id: committed.connector_id(),
+                },
+            )
+        }
+        ApprovalSettlementViewV2::Denied { .. } | ApprovalSettlementViewV2::Expired => {
+            Err(AgentBrowserAuthorityErrorV2::StateConflict)
+        }
+    }
+}
+
+fn remove_connector_flow<Prepare, Remove>(
+    session: AgentSessionHandleV2,
+    connector_id: Digest32V2,
+    prepare: Prepare,
+    remove: Remove,
+) -> Result<AgentBrowserMutationResponseV2, AgentBrowserAuthorityErrorV2>
+where
+    Prepare: FnOnce(
+        PrepareConnectorRemovalRequestV2,
+    ) -> Result<PrepareConnectorRemovalResponseV2, AgentBrowserAuthorityErrorV2>,
+    Remove: FnOnce(
+        RemoveConnectorRequestV2,
+    ) -> Result<RemoveConnectorResponseV2, AgentBrowserAuthorityErrorV2>,
+{
+    let prepared = prepare(
+        PrepareConnectorRemovalRequestV2::new(session, connector_id)
+            .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
+    )?;
+    let removed = remove(
+        RemoveConnectorRequestV2::new(session, prepared.authorization(), connector_id)
+            .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
+    )?;
+    if removed.connector_id() != connector_id {
+        return Err(AgentBrowserAuthorityErrorV2::StateConflict);
+    }
+    Ok(AgentBrowserMutationResponseV2::ConnectorRemovalCommitted {
+        signed_delta_digest: removed.signed_delta_digest(),
+        head_digest: removed.head_digest(),
+        sequence: removed.sequence(),
+        connector_id,
+    })
 }
 
 fn required<T: Copy>(value: Option<T>) -> Result<T, AgentBrowserAuthorityErrorV2> {
@@ -1366,6 +1552,13 @@ fn mint_release_reference(
         .ok_or(AgentBrowserAuthorityErrorV2::Unavailable)
 }
 
+fn mint_pending_connector_reference(
+    tab: &mut AgentTabV2,
+) -> Result<AgentPendingConnectorRegistrationRefV2, AgentBrowserAuthorityErrorV2> {
+    AgentPendingConnectorRegistrationRefV2::from_authority_entropy(mint_reference(tab, 8)?)
+        .ok_or(AgentBrowserAuthorityErrorV2::Unavailable)
+}
+
 fn mint_document_reference(
     tab: &mut AgentTabV2,
 ) -> Result<AgentMaskedDocumentRefV2, AgentBrowserAuthorityErrorV2> {
@@ -1520,6 +1713,16 @@ fn find_action_tab(
         .ok_or(AgentBrowserAuthorityErrorV2::InvalidReference)
 }
 
+const fn connector_action_requires_authenticated_tab(action: &AgentBrowserActionV2) -> bool {
+    matches!(
+        action,
+        AgentBrowserActionV2::RegisterConnector(_)
+            | AgentBrowserActionV2::FinalizeConnectorRegistration(_)
+            | AgentBrowserActionV2::RemoveConnector(_)
+            | AgentBrowserActionV2::SnapshotConnectors
+    )
+}
+
 fn authenticated_connector_tab(
     state: &mut AuthorityStateV2,
     requested: AgentTabSessionCapabilityV2,
@@ -1591,6 +1794,15 @@ fn map_approval(error: ApprovalSuiteOneClientErrorV2) -> AgentBrowserAuthorityEr
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
+    use ed25519_dalek::SigningKey;
+    use savana_kernel_protocol::v2::{
+        ApprovalDecisionV2, ApprovalPurposeV2, ApprovedConnectorRegistrationHandleV2,
+        ConnectorRemovalAuthorizationHandleV2, PrincipalIdV2, SignedApprovalSettlementV2,
+        UnsignedApprovalSettlementV2,
+    };
+
     use super::*;
 
     fn tab_record(
@@ -1615,16 +1827,207 @@ mod tests {
             next_reference_revision: 1,
             objects: Vec::new(),
             pending_releases: Vec::new(),
+            pending_connectors: Vec::new(),
             cursors: Vec::new(),
             replays: Vec::new(),
             action_replays: Vec::new(),
         }
     }
 
+    fn pending_connector_record() -> PendingConnectorRegistrationV2 {
+        PendingConnectorRegistrationV2 {
+            reference: AgentPendingConnectorRegistrationRefV2::from_authority_entropy([0x41; 16])
+                .unwrap(),
+            kernel: PendingConnectorRegistrationHandleV2::from_authority_entropy([0x42; 32])
+                .unwrap(),
+            approvald: ConnectorApprovalRecordHandleV2::from_authority_entropy([0x43; 32])
+                .unwrap(),
+            transfer: savana_kernel_protocol::v2::ApprovalDisplayAuthenticationTransferCapabilityV2::from_authority_entropy(
+                [0x44; 32],
+            )
+            .unwrap(),
+        }
+    }
+
+    fn connector_settlement(decision: ApprovalDecisionV2) -> SignedApprovalSettlementV2 {
+        SignedApprovalSettlementV2::sign(
+            UnsignedApprovalSettlementV2::new(
+                Digest32V2::new([0x45; 32]),
+                Digest32V2::new([0x46; 32]),
+                7,
+                ApprovalPurposeV2::ConnectorRegistration,
+                Digest32V2::new([0x47; 32]),
+                decision,
+                PrincipalIdV2::new([0x48; 32]),
+                Digest32V2::new([0x49; 32]),
+                Digest32V2::new([0x4a; 32]),
+                true,
+                true,
+                false,
+                false,
+                1,
+                Nonce32V2::new([0x4b; 32]),
+                Nonce32V2::new([0x4c; 32]),
+                UnixMillisV2::new(100),
+                UnixMillisV2::new(200),
+            )
+            .unwrap(),
+            &SigningKey::from_bytes(&[0x4d; 32]),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn connector_finalize_reopens_pending_and_rejects_terminal_nonapproval_without_kernel_calls() {
+        let pending = pending_connector_record();
+        let calls = Cell::new(0_u8);
+        let reopened = finalize_connector_registration_settlement(
+            pending.clone(),
+            ApprovalSettlementViewV2::Pending,
+            |_| {
+                calls.set(calls.get() + 1);
+                unreachable!()
+            },
+            |_| {
+                calls.set(calls.get() + 1);
+                unreachable!()
+            },
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 0);
+        assert_eq!(
+            reopened,
+            AgentBrowserMutationResponseV2::ConnectorOpenApproval {
+                pending: pending.reference,
+                post: FixedBrowserFormPostCarrierV2::AgentApprovalDisplay(pending.transfer),
+            }
+        );
+
+        for settlement in [
+            ApprovalSettlementViewV2::Denied {
+                settlement: connector_settlement(ApprovalDecisionV2::Deny),
+            },
+            ApprovalSettlementViewV2::Expired,
+        ] {
+            assert_eq!(
+                finalize_connector_registration_settlement(
+                    pending.clone(),
+                    settlement,
+                    |_| {
+                        calls.set(calls.get() + 1);
+                        unreachable!()
+                    },
+                    |_| {
+                        calls.set(calls.get() + 1);
+                        unreachable!()
+                    },
+                ),
+                Err(AgentBrowserAuthorityErrorV2::StateConflict)
+            );
+        }
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn approved_connector_finalize_authorizes_then_applies_exact_commit_evidence() {
+        let pending = pending_connector_record();
+        let settlement = connector_settlement(ApprovalDecisionV2::Approve);
+        let expected_settlement = settlement.clone();
+        let approved =
+            ApprovedConnectorRegistrationHandleV2::from_authority_entropy([0x51; 32]).unwrap();
+        let signed_delta_digest = Digest32V2::new([0x54; 32]);
+        let head_digest = Digest32V2::new([0x52; 32]);
+        let connector_id = Digest32V2::new([0x53; 32]);
+        let stage = Cell::new(0_u8);
+        let response = finalize_connector_registration_settlement(
+            pending.clone(),
+            ApprovalSettlementViewV2::Approved { settlement },
+            |request| {
+                assert_eq!(stage.get(), 0);
+                stage.set(1);
+                assert_eq!(request.pending(), pending.kernel);
+                assert_eq!(request.settlement(), &expected_settlement);
+                Ok(AuthorizeConnectorRegistrationResponseV2::new(approved))
+            },
+            |request| {
+                assert_eq!(stage.get(), 1);
+                stage.set(2);
+                assert_eq!(request.approved(), approved);
+                ApplyApprovedConnectorRegistrationResponseV2::new(
+                    signed_delta_digest,
+                    head_digest,
+                    9,
+                    connector_id,
+                )
+                .map_err(|_| AgentBrowserAuthorityErrorV2::StateConflict)
+            },
+        )
+        .unwrap();
+        assert_eq!(stage.get(), 2);
+        assert_eq!(
+            response,
+            AgentBrowserMutationResponseV2::ConnectorRegistrationCommitted {
+                pending: pending.reference,
+                signed_delta_digest,
+                head_digest,
+                sequence: 9,
+                connector_id,
+            }
+        );
+    }
+
+    #[test]
+    fn connector_removal_prepares_then_commits_without_an_approval_step() {
+        let session = AgentSessionHandleV2::from_authority_entropy([0x61; 32]).unwrap();
+        let connector_id = Digest32V2::new([0x62; 32]);
+        let authorization =
+            ConnectorRemovalAuthorizationHandleV2::from_authority_entropy([0x63; 32]).unwrap();
+        let signed_delta_digest = Digest32V2::new([0x66; 32]);
+        let head_digest = Digest32V2::new([0x64; 32]);
+        let stage = Cell::new(0_u8);
+        let response = remove_connector_flow(
+            session,
+            connector_id,
+            |request| {
+                assert_eq!(stage.get(), 0);
+                stage.set(1);
+                assert_eq!(request.session(), session);
+                assert_eq!(request.connector_id(), connector_id);
+                PrepareConnectorRemovalResponseV2::new(
+                    authorization,
+                    Digest32V2::new([0x65; 32]),
+                    UnixMillisV2::new(900),
+                )
+                .map_err(|_| AgentBrowserAuthorityErrorV2::StateConflict)
+            },
+            |request| {
+                assert_eq!(stage.get(), 1);
+                stage.set(2);
+                assert_eq!(request.session(), session);
+                assert_eq!(request.authorization(), authorization);
+                assert_eq!(request.connector_id(), connector_id);
+                RemoveConnectorResponseV2::new(signed_delta_digest, head_digest, 10, connector_id)
+                    .map_err(|_| AgentBrowserAuthorityErrorV2::StateConflict)
+            },
+        )
+        .unwrap();
+        assert_eq!(stage.get(), 2);
+        assert_eq!(
+            response,
+            AgentBrowserMutationResponseV2::ConnectorRemovalCommitted {
+                signed_delta_digest,
+                head_digest,
+                sequence: 10,
+                connector_id,
+            }
+        );
+    }
+
     #[test]
     fn connector_dispatch_requires_an_exact_authenticated_agent_origin_tab() {
         let current_boot = BootIdV2::new([0x21; 32]);
         let valid_tab = AgentTabSessionCapabilityV2::from_authority_entropy([0x22; 32]).unwrap();
+        let claimed_tab = AgentTabSessionCapabilityV2::from_authority_entropy([0x2c; 32]).unwrap();
         let forged_tab = AgentTabSessionCapabilityV2::from_authority_entropy([0x23; 32]).unwrap();
         let absent_tab = AgentTabSessionCapabilityV2::from_authority_entropy([0x2b; 32]).unwrap();
         let unauthenticated_tab =
@@ -1641,6 +2044,13 @@ mod tests {
             FixedOriginV2::Agent8768,
             Some(authorization),
         ));
+        let mut claimed = tab_record(claimed_tab, current_boot, FixedOriginV2::Agent8768, None);
+        claimed.kernel_document =
+            Some(MaskedDocumentHandleV2::from_authority_entropy([0x2d; 32]).unwrap());
+        claimed.session = Some(AgentSessionHandleV2::from_authority_entropy([0x2e; 32]).unwrap());
+        claimed.run = Some(RunHandleV2::from_authority_entropy([0x2f; 32]).unwrap());
+        claimed.initial_value = Some(ValueHandleV2::from_authority_entropy([0x30; 32]).unwrap());
+        state.tabs.push(claimed);
         state.tabs.push(tab_record(
             unauthenticated_tab,
             current_boot,
@@ -1682,6 +2092,42 @@ mod tests {
                 kernel_client_dispatches += 1;
             })
             .unwrap();
-        assert_eq!(kernel_client_dispatches, 1);
+        authenticated_connector_tab(&mut state, claimed_tab, current_boot)
+            .map(|_| {
+                kernel_client_dispatches += 1;
+            })
+            .unwrap();
+        assert_eq!(kernel_client_dispatches, 2);
+    }
+
+    #[test]
+    fn all_connector_actions_share_the_closed_authenticated_tab_gate() {
+        let pending =
+            AgentPendingConnectorRegistrationRefV2::from_authority_entropy([0x31; 16]).unwrap();
+        for action in [
+            AgentBrowserActionV2::RegisterConnector(vec![0x81, 0x01]),
+            AgentBrowserActionV2::FinalizeConnectorRegistration(pending),
+            AgentBrowserActionV2::RemoveConnector(Digest32V2::new([0x32; 32])),
+            AgentBrowserActionV2::SnapshotConnectors,
+        ] {
+            assert!(connector_action_requires_authenticated_tab(&action));
+        }
+        assert!(!connector_action_requires_authenticated_tab(
+            &AgentBrowserActionV2::PrepareFollowupIngress
+        ));
+    }
+
+    #[test]
+    fn pending_connector_references_are_browser_local_and_distinct() {
+        let tab = AgentTabSessionCapabilityV2::from_authority_entropy([0x33; 32]).unwrap();
+        let mut tab = tab_record(
+            tab,
+            BootIdV2::new([0x34; 32]),
+            FixedOriginV2::Agent8768,
+            AgentUiAuthorizationHandleV2::from_authority_entropy([0x35; 32]),
+        );
+        let first = mint_pending_connector_reference(&mut tab).unwrap();
+        let second = mint_pending_connector_reference(&mut tab).unwrap();
+        assert_ne!(first, second);
     }
 }

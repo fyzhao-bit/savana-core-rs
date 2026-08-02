@@ -439,6 +439,82 @@ pub struct ConnectorRegistryDeltaV2 {
     signed_digest: Digest32V2,
 }
 
+/// A registry delta whose complete semantic payload has already cleared the
+/// current registry's chain, tier, allowlist, and compiled-limit checks.
+///
+/// The only operation left to the kerneld-held connector authority is signing
+/// [`Self::signature_digest`]. Callers cannot construct this type directly and
+/// [`Self::finalize`] verifies the supplied signature before producing a
+/// canonical delta.
+#[derive(Debug, Clone)]
+pub struct PreparedConnectorRegistryDeltaV2 {
+    sequence: u64,
+    previous_head_digest: Digest32V2,
+    operation: ConnectorRegistryOperationV2,
+    settlement_digest: Digest32V2,
+    issued_at_unix_ms: u64,
+    payload_digest: Digest32V2,
+    signature_digest: Digest32V2,
+    authority: VerifyingKey,
+}
+
+impl PreparedConnectorRegistryDeltaV2 {
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    pub const fn previous_head_digest(&self) -> Digest32V2 {
+        self.previous_head_digest
+    }
+
+    pub const fn settlement_digest(&self) -> Digest32V2 {
+        self.settlement_digest
+    }
+
+    pub const fn issued_at_unix_ms(&self) -> u64 {
+        self.issued_at_unix_ms
+    }
+
+    pub const fn signature_digest(&self) -> Digest32V2 {
+        self.signature_digest
+    }
+
+    pub fn connector_id(&self) -> Digest32V2 {
+        match &self.operation {
+            ConnectorRegistryOperationV2::Add(descriptor) => descriptor.connector_id(),
+            ConnectorRegistryOperationV2::Remove(connector_id) => *connector_id,
+        }
+    }
+
+    pub const fn is_add(&self) -> bool {
+        matches!(self.operation, ConnectorRegistryOperationV2::Add(_))
+    }
+
+    pub fn finalize(
+        self,
+        authority_signature: [u8; 64],
+    ) -> Result<ConnectorRegistryDeltaV2, G4Error> {
+        let mut delta = ConnectorRegistryDeltaV2 {
+            canonical_bytes: Vec::new(),
+            sequence: self.sequence,
+            previous_head_digest: self.previous_head_digest,
+            operation: self.operation,
+            settlement_digest: self.settlement_digest,
+            issued_at_unix_ms: self.issued_at_unix_ms,
+            payload_digest: self.payload_digest,
+            authority_signature,
+            signed_digest: Digest32V2::new([0; 32]),
+        };
+        delta.canonical_bytes = encode_delta(&delta)?;
+        ConnectorRegistryDeltaV2::from_canonical_bytes_for_state(
+            &delta.canonical_bytes,
+            &self.authority,
+            self.sequence,
+            self.previous_head_digest,
+        )
+    }
+}
+
 impl ConnectorRegistryDeltaV2 {
     fn from_canonical_bytes_for_state(
         bytes: &[u8],
@@ -526,6 +602,24 @@ impl ConnectorRegistryDeltaV2 {
 
     pub const fn signed_digest(&self) -> Digest32V2 {
         self.signed_digest
+    }
+
+    pub fn connector_id(&self) -> Digest32V2 {
+        match &self.operation {
+            ConnectorRegistryOperationV2::Add(descriptor) => descriptor.connector_id(),
+            ConnectorRegistryOperationV2::Remove(connector_id) => *connector_id,
+        }
+    }
+
+    pub const fn is_add(&self) -> bool {
+        matches!(self.operation, ConnectorRegistryOperationV2::Add(_))
+    }
+
+    pub fn added_descriptor(&self) -> Option<&ConnectorDescriptorV2> {
+        match &self.operation {
+            ConnectorRegistryOperationV2::Add(descriptor) => Some(descriptor.as_ref()),
+            ConnectorRegistryOperationV2::Remove(_) => None,
+        }
     }
 }
 
@@ -633,6 +727,94 @@ impl ConnectorRegistryStateV2 {
         self.apply_canonical_delta_with_policy(bytes, false)
     }
 
+    /// Validates and freezes a new user-tier Add payload before the
+    /// connector-authority key is allowed to sign it.
+    pub fn prepare_add_delta(
+        &self,
+        canonical_descriptor: &[u8],
+        settlement_digest: Digest32V2,
+        issued_at_unix_ms: u64,
+    ) -> Result<PreparedConnectorRegistryDeltaV2, G4Error> {
+        if is_zero(settlement_digest.as_bytes()) || issued_at_unix_ms == 0 {
+            return Err(G4Error::InvalidDescriptor);
+        }
+        let descriptor = ConnectorDescriptorV2::from_canonical_bytes(
+            canonical_descriptor,
+            &self.user_host_allowlist,
+        )?;
+        if descriptor.tier() != ConnectorTierV2::UserRegistered {
+            return Err(G4Error::InvalidDescriptor);
+        }
+        self.prepare_delta(
+            ConnectorRegistryOperationV2::Add(Arc::new(descriptor)),
+            settlement_digest,
+            issued_at_unix_ms,
+        )
+    }
+
+    /// Validates and freezes a shrinking Remove payload. Removal deliberately
+    /// carries the all-zero settlement digest because it requires an exact
+    /// UI-authenticated session but no approvald decision.
+    pub fn prepare_remove_delta(
+        &self,
+        connector_id: Digest32V2,
+        issued_at_unix_ms: u64,
+    ) -> Result<PreparedConnectorRegistryDeltaV2, G4Error> {
+        if is_zero(connector_id.as_bytes()) || issued_at_unix_ms == 0 {
+            return Err(G4Error::InvalidDescriptor);
+        }
+        self.prepare_delta(
+            ConnectorRegistryOperationV2::Remove(connector_id),
+            Digest32V2::new([0; 32]),
+            issued_at_unix_ms,
+        )
+    }
+
+    fn prepare_delta(
+        &self,
+        operation: ConnectorRegistryOperationV2,
+        settlement_digest: Digest32V2,
+        issued_at_unix_ms: u64,
+    ) -> Result<PreparedConnectorRegistryDeltaV2, G4Error> {
+        let authority = self
+            .authority
+            .as_ref()
+            .ok_or(G4Error::InvalidRegistryPublisher)?
+            .to_owned();
+        self.validate_operation(&operation, true, MAX_ACTIVE_TOOL_DESCRIPTORS)?;
+        let sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or(G4Error::InvalidDescriptor)?;
+        let prototype = ConnectorRegistryDeltaV2 {
+            canonical_bytes: Vec::new(),
+            sequence,
+            previous_head_digest: self.head_digest,
+            operation: operation.clone(),
+            settlement_digest,
+            issued_at_unix_ms,
+            payload_digest: Digest32V2::new([0; 32]),
+            authority_signature: [0; 64],
+            signed_digest: Digest32V2::new([0; 32]),
+        };
+        let payload = encode_delta_payload(&prototype)?;
+        let payload_digest = domain_hash(CONNECTOR_DELTA_PAYLOAD_DOMAIN_V2, &payload);
+        let signature_digest = domain_hash(
+            CONNECTOR_DELTA_SIGNATURE_DOMAIN_V2,
+            payload_digest.as_bytes(),
+        );
+        Ok(PreparedConnectorRegistryDeltaV2 {
+            sequence,
+            previous_head_digest: self.head_digest,
+            operation,
+            settlement_digest,
+            issued_at_unix_ms,
+            payload_digest,
+            signature_digest,
+            authority,
+        })
+    }
+
     fn apply_canonical_delta_with_policy(
         &mut self,
         bytes: &[u8],
@@ -675,50 +857,8 @@ impl ConnectorRegistryStateV2 {
             self.head_digest,
         )?;
 
-        let maximum_users =
-            usize::try_from(DeploymentHardLimitsV2::compiled().max_user_connectors())
-                .map_err(|_| G4Error::DescriptorLimitExceeded)?;
-        let add_is_active = match &delta.operation {
-            ConnectorRegistryOperationV2::Add(descriptor) => {
-                if descriptor.tier != ConnectorTierV2::UserRegistered
-                    || self
-                        .registered
-                        .contains_key(descriptor.connector_id.as_bytes())
-                {
-                    return Err(G4Error::InvalidDescriptor);
-                }
-                if self.registered_user_connectors >= maximum_users {
-                    return Err(G4Error::DescriptorLimitExceeded);
-                }
-                if self
-                    .registered_tool_descriptors
-                    .checked_add(descriptor.tool_descriptors.len())
-                    .is_none_or(|count| count > maximum_tools)
-                {
-                    return Err(G4Error::DescriptorLimitExceeded);
-                }
-                let is_active =
-                    connector_is_active_under_allowlist(descriptor, &self.user_host_allowlist)?;
-                if require_active_add && !is_active {
-                    return Err(G4Error::InvalidDescriptor);
-                }
-                if is_active
-                    && self
-                        .active_tool_descriptors
-                        .checked_add(descriptor.tool_descriptors.len())
-                        .is_none_or(|count| count > maximum_tools)
-                {
-                    return Err(G4Error::DescriptorLimitExceeded);
-                }
-                is_active
-            }
-            ConnectorRegistryOperationV2::Remove(connector_id) => {
-                if !self.registered.contains_key(connector_id.as_bytes()) {
-                    return Err(G4Error::InvalidDescriptor);
-                }
-                false
-            }
-        };
+        let add_is_active =
+            self.validate_operation(&delta.operation, require_active_add, maximum_tools)?;
 
         self.deltas
             .try_reserve(1)
@@ -758,6 +898,58 @@ impl ConnectorRegistryStateV2 {
         self.head_digest = next_head;
         self.deltas.push(delta);
         Ok(())
+    }
+
+    fn validate_operation(
+        &self,
+        operation: &ConnectorRegistryOperationV2,
+        require_active_add: bool,
+        maximum_tools: usize,
+    ) -> Result<bool, G4Error> {
+        let maximum_users =
+            usize::try_from(DeploymentHardLimitsV2::compiled().max_user_connectors())
+                .map_err(|_| G4Error::DescriptorLimitExceeded)?;
+        match operation {
+            ConnectorRegistryOperationV2::Add(descriptor) => {
+                if descriptor.tier != ConnectorTierV2::UserRegistered
+                    || self
+                        .registered
+                        .contains_key(descriptor.connector_id.as_bytes())
+                {
+                    return Err(G4Error::InvalidDescriptor);
+                }
+                if self.registered_user_connectors >= maximum_users {
+                    return Err(G4Error::DescriptorLimitExceeded);
+                }
+                if self
+                    .registered_tool_descriptors
+                    .checked_add(descriptor.tool_descriptors.len())
+                    .is_none_or(|count| count > maximum_tools)
+                {
+                    return Err(G4Error::DescriptorLimitExceeded);
+                }
+                let is_active =
+                    connector_is_active_under_allowlist(descriptor, &self.user_host_allowlist)?;
+                if require_active_add && !is_active {
+                    return Err(G4Error::InvalidDescriptor);
+                }
+                if is_active
+                    && self
+                        .active_tool_descriptors
+                        .checked_add(descriptor.tool_descriptors.len())
+                        .is_none_or(|count| count > maximum_tools)
+                {
+                    return Err(G4Error::DescriptorLimitExceeded);
+                }
+                Ok(is_active)
+            }
+            ConnectorRegistryOperationV2::Remove(connector_id) => {
+                if !self.registered.contains_key(connector_id.as_bytes()) {
+                    return Err(G4Error::InvalidDescriptor);
+                }
+                Ok(false)
+            }
+        }
     }
 
     pub const fn genesis_digest(&self) -> Digest32V2 {
@@ -822,6 +1014,12 @@ impl ConnectorRegistryStateV2 {
         self.registered
             .get(connector_id.as_bytes())
             .map(Arc::as_ref)
+    }
+
+    pub fn registered_connectors(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &ConnectorDescriptorV2> + '_ {
+        self.registered.values().map(Arc::as_ref)
     }
 
     pub fn deltas(&self) -> &[ConnectorRegistryDeltaV2] {

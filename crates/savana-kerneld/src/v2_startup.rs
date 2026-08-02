@@ -42,6 +42,7 @@ pub(crate) fn probe_declassification_rollover(
 mod native {
     use std::fs;
     use std::io::Write as _;
+    use std::os::unix::fs::DirBuilderExt as _;
     use std::os::unix::fs::MetadataExt as _;
     use std::os::unix::fs::OpenOptionsExt as _;
     #[cfg(feature = "test-support")]
@@ -80,11 +81,11 @@ mod native {
     use savana_kernel_protocol::StableCode;
     use savana_policy_core::v2::{
         activate_internal_validator_registry, ActiveToolRegistryV2, BoundedConnectorHostV2,
-        ConnectorRegistryStateV2, ContextFieldV2, DurableG4StateV2, DurableStateNamespaceV2,
-        FilesystemServiceObservationConfigV2, InstallerOrMdmVerifierV2, InternalValidatorBuildV2,
-        InternalValidatorDeclarationV2, InternalValidatorImplementationKindV2, OntologyExprV2,
-        OntologyOperandV2, OntologyScalarV2, OperationalTrustRootSetV2,
-        SharedVerifiedConnectorRegistryV2, SignedToolDescriptorV2,
+        ConnectorRegistryStateV2, ContextFieldV2, DurableConnectorRegistryStoreV2,
+        DurableG4StateV2, DurableStateNamespaceV2, FilesystemServiceObservationConfigV2,
+        InstallerOrMdmVerifierV2, InternalValidatorBuildV2, InternalValidatorDeclarationV2,
+        InternalValidatorImplementationKindV2, OntologyExprV2, OntologyOperandV2, OntologyScalarV2,
+        OperationalTrustRootSetV2, SharedVerifiedConnectorRegistryV2, SignedToolDescriptorV2,
         VerifiedInternalValidatorRegistryV2, VerifiedManifestToolConstraintSetV2,
         VerifiedManifestToolConstraintV2, VerifiedPolicyDispositionV2,
         VerifiedPolicyToolActivationV2, VerifiedPolicyToolSetV2, VerifiedRegistryPublisherV2,
@@ -120,6 +121,7 @@ mod native {
         KernelAgentAuthorityV2, KernelAgentSecurityConfigV2, KernelG4G5RuntimeV2,
         KernelG7RuntimeV2, KernelToolApprovalConfigV2,
     };
+    use crate::v2_connector_authority::KernelConnectorAuthorityV2;
     use crate::v2_core_services::CoreKernelRuntimeServicesV2;
     use crate::v2_data_plane::ProductionKernelDataPlaneV2;
     use crate::v2_declassification_policy::{
@@ -204,9 +206,20 @@ mod native {
     const VAULT_ANCHOR_MAC_DOMAIN_V2: &[u8] = b"SAVANA_VAULT_ANCHOR_MAC_V2\0";
     const AGENT_ANCHOR_MAC_DOMAIN_V2: &[u8] = b"SAVANA_AGENT_AUTHORITY_ANCHOR_MAC_V2\0";
     const G4_ANCHOR_MAC_DOMAIN_V2: &[u8] = b"SAVANA_G4_ANCHOR_MAC_V2\0";
+    const CONNECTOR_ANCHOR_MAC_DOMAIN_V2: &[u8] = b"SAVANA_CONNECTOR_REGISTRY_ANCHOR_MAC_V2\0";
+    const CONNECTOR_STORE_ID_DOMAIN_V2: &[u8] = b"SAVANA_CONNECTOR_REGISTRY_STORE_ID_V2\0";
+    const CONNECTOR_STORE_ENCRYPTION_DERIVATION_DOMAIN_V2: &[u8] =
+        b"SAVANA_CONNECTOR_REGISTRY_STORE_ENCRYPTION_DERIVATION_V2\0";
+    const CONNECTOR_STORE_ANCHOR_DERIVATION_DOMAIN_V2: &[u8] =
+        b"SAVANA_CONNECTOR_REGISTRY_STORE_ANCHOR_DERIVATION_V2\0";
+    const CONNECTOR_HANDLE_DERIVATION_DOMAIN_V2: &[u8] =
+        b"SAVANA_CONNECTOR_REGISTRY_HANDLE_DERIVATION_V2\0";
+    const CONNECTOR_DISABLED_HANDLE_DERIVATION_DOMAIN_V2: &[u8] =
+        b"SAVANA_DISABLED_CONNECTOR_HANDLE_DERIVATION_V2\0";
     const VAULT_ANCHOR_MAGIC_V2: [u8; 8] = *b"SV2ANCH\0";
     const AGENT_ANCHOR_MAGIC_V2: [u8; 8] = *b"SA2ANCH\0";
     const G4_ANCHOR_MAGIC_V2: [u8; 8] = *b"SG2ANCH\0";
+    const CONNECTOR_ANCHOR_MAGIC_V2: [u8; 8] = *b"SC2ANCH\0";
     const AUTHENTICATED_ANCHOR_BYTES_V2: usize = 80;
 
     #[derive(Deserialize)]
@@ -724,16 +737,101 @@ mod native {
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
         let projection = startup.verified_effect_ledger_projection();
-        let connector_registry = SharedVerifiedConnectorRegistryV2::from_verified_state(
-            ConnectorRegistryStateV2::from_verified_genesis(
-                runtime_material.policy.connector_registry_genesis_digest,
-                runtime_material.policy.connector_authority_public_key,
-                runtime_material.policy.user_tier_host_allowlist,
-                vec![],
-            )
-            .map_err(|_| StableCode::KernelUnavailable)?,
+        let connector_genesis = ConnectorRegistryStateV2::from_verified_genesis(
+            runtime_material.policy.connector_registry_genesis_digest,
+            runtime_material.policy.connector_authority_public_key,
+            runtime_material.policy.user_tier_host_allowlist,
+            vec![],
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
+        let connector_store_id = connector_store_id_v2(
+            startup.installation_id(),
+            connector_genesis.genesis_digest(),
+            connector_genesis.connector_authority_public_key(),
+        );
+        let (connector_registry, connector_authority) = if let Some(signing_key) =
+            keys.connector_authority_signing_key.as_ref()
+        {
+            let signing_seed = Zeroizing::new(signing_key.to_bytes());
+            let encryption_key = derive_connector_runtime_secret_v2(
+                &signing_seed,
+                CONNECTOR_STORE_ENCRYPTION_DERIVATION_DOMAIN_V2,
+                startup.installation_id(),
+                connector_genesis.genesis_digest(),
+                connector_store_id,
+            )?;
+            let anchor_key = derive_connector_runtime_secret_v2(
+                &signing_seed,
+                CONNECTOR_STORE_ANCHOR_DERIVATION_DOMAIN_V2,
+                startup.installation_id(),
+                connector_genesis.genesis_digest(),
+                connector_store_id,
+            )?;
+            let handle_key = derive_connector_runtime_secret_v2(
+                &signing_seed,
+                CONNECTOR_HANDLE_DERIVATION_DOMAIN_V2,
+                startup.installation_id(),
+                connector_genesis.genesis_digest(),
+                connector_store_id,
+            )?;
+            if encryption_key == anchor_key
+                || encryption_key == handle_key
+                || anchor_key == handle_key
+                || encryption_key.as_slice() == signing_seed.as_slice()
+                || anchor_key.as_slice() == signing_seed.as_slice()
+                || handle_key.as_slice() == signing_seed.as_slice()
+            {
+                return Err(StableCode::KernelUnavailable);
+            }
+            let (state_path, anchor_path) = connector_store_paths_v2(
+                &runtime_material.agent_authority_state_path,
+                connector_genesis.genesis_digest(),
+            )?;
+            let namespace = DurableStateNamespaceV2::from_verified_installation(
+                startup.installation_id(),
+                connector_store_id,
+            )
+            .map_err(|_| StableCode::KernelUnavailable)?;
+            let anchor = PosixAuthenticatedAnchorFileV2::new(
+                anchor_path,
+                startup.installation_id(),
+                connector_store_id,
+                anchor_key,
+                CONNECTOR_ANCHOR_MAC_DOMAIN_V2,
+                CONNECTOR_ANCHOR_MAGIC_V2,
+            )?;
+            let store = DurableConnectorRegistryStoreV2::open(
+                &state_path,
+                encryption_key,
+                namespace,
+                Box::new(anchor),
+                connector_genesis,
+            )
+            .map_err(|_| StableCode::KernelUnavailable)?;
+            let recovered = store
+                .snapshot()
+                .map_err(|_| StableCode::KernelUnavailable)?;
+            let shared = SharedVerifiedConnectorRegistryV2::from_verified_state(recovered)
+                .map_err(|_| StableCode::KernelUnavailable)?;
+            let authority =
+                KernelConnectorAuthorityV2::from_durable_store(store, shared.clone(), handle_key)
+                    .map_err(|_| StableCode::KernelUnavailable)?;
+            (shared, authority)
+        } else {
+            let disabled_seed = Zeroizing::new(keys.envelope_signing_key.to_bytes());
+            let handle_key = derive_connector_runtime_secret_v2(
+                &disabled_seed,
+                CONNECTOR_DISABLED_HANDLE_DERIVATION_DOMAIN_V2,
+                startup.installation_id(),
+                connector_genesis.genesis_digest(),
+                connector_store_id,
+            )?;
+            let shared = SharedVerifiedConnectorRegistryV2::from_verified_state(connector_genesis)
+                .map_err(|_| StableCode::KernelUnavailable)?;
+            let authority = KernelConnectorAuthorityV2::disabled(shared.clone(), handle_key)
+                .map_err(|_| StableCode::KernelUnavailable)?;
+            (shared, authority)
+        };
         let g7_runtime = KernelG7RuntimeV2::from_verified_deployment(
             runtime_material.policy.quota_limit,
             runtime_material.policy.quota_policy_digest,
@@ -784,6 +882,7 @@ mod native {
             runtime_material.logical_run_ttl_ms,
         )?;
         services.install_agent_security(agent_authority)?;
+        services.install_connector_authority(connector_authority)?;
         services.install_ingress_security(
             KernelIngressAuthorityV2::new(ingress_security, 65_536)
                 .map_err(|_| StableCode::KernelUnavailable)?,
@@ -3046,6 +3145,93 @@ mod native {
         bytes.try_into().map_err(|_| StableCode::KernelUnavailable)
     }
 
+    fn connector_store_id_v2(
+        installation_id: Digest32V2,
+        genesis_digest: Digest32V2,
+        authority_public_key: [u8; 32],
+    ) -> Digest32V2 {
+        let mut hasher = Sha256::new();
+        hasher.update(CONNECTOR_STORE_ID_DOMAIN_V2);
+        hasher.update(installation_id.as_bytes());
+        hasher.update(genesis_digest.as_bytes());
+        hasher.update(authority_public_key);
+        Digest32V2::new(hasher.finalize().into())
+    }
+
+    fn derive_connector_runtime_secret_v2(
+        source_secret: &[u8; 32],
+        domain: &[u8],
+        installation_id: Digest32V2,
+        genesis_digest: Digest32V2,
+        store_id: Digest32V2,
+    ) -> Result<[u8; 32], StableCode> {
+        if source_secret.iter().all(|byte| *byte == 0) || domain.is_empty() {
+            return Err(StableCode::KernelUnavailable);
+        }
+        let mut mac = Hmac::<Sha256>::new_from_slice(source_secret)
+            .map_err(|_| StableCode::KernelUnavailable)?;
+        mac.update(domain);
+        mac.update(installation_id.as_bytes());
+        mac.update(genesis_digest.as_bytes());
+        mac.update(store_id.as_bytes());
+        let derived: [u8; 32] = mac.finalize().into_bytes().into();
+        if derived == [0; 32] || derived == *source_secret {
+            return Err(StableCode::KernelUnavailable);
+        }
+        Ok(derived)
+    }
+
+    fn connector_store_paths_v2(
+        neighboring_state_path: &Path,
+        genesis_digest: Digest32V2,
+    ) -> Result<(PathBuf, PathBuf), StableCode> {
+        if !neighboring_state_path.is_absolute() {
+            return Err(StableCode::KernelUnavailable);
+        }
+        let base = neighboring_state_path
+            .parent()
+            .ok_or(StableCode::KernelUnavailable)?;
+        let base_metadata =
+            fs::symlink_metadata(base).map_err(|_| StableCode::KernelUnavailable)?;
+        if base_metadata.file_type().is_symlink()
+            || !base_metadata.is_dir()
+            || base_metadata.mode() & 0o7777 != 0o700
+        {
+            return Err(StableCode::KernelUnavailable);
+        }
+        let mut suffix = String::with_capacity(64);
+        for byte in genesis_digest.as_bytes() {
+            use std::fmt::Write as _;
+            write!(&mut suffix, "{byte:02x}").map_err(|_| StableCode::KernelUnavailable)?;
+        }
+        let directory = base.join(format!("connector-registry-{suffix}"));
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700);
+        match builder.create(&directory) {
+            Ok(()) => {
+                fs::File::open(base)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|_| StableCode::KernelUnavailable)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(StableCode::KernelUnavailable),
+        }
+        let metadata =
+            fs::symlink_metadata(&directory).map_err(|_| StableCode::KernelUnavailable)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || metadata.mode() & 0o7777 != 0o700
+            || metadata.uid() != base_metadata.uid()
+            || metadata.gid() != base_metadata.gid()
+        {
+            return Err(StableCode::KernelUnavailable);
+        }
+        Ok((
+            directory.join("connector-registry-v2.cbor"),
+            directory.join("connector-registry-anchor-v2.bin"),
+        ))
+    }
+
     struct PosixAuthenticatedAnchorFileV2 {
         path: PathBuf,
         installation_id: Digest32V2,
@@ -3091,10 +3277,17 @@ mod native {
                 }
                 Err(_) => return Err(()),
             };
-            if metadata.file_type().is_symlink()
+            let parent = self.path.parent().ok_or(())?;
+            let parent_metadata = fs::symlink_metadata(parent).map_err(|_| ())?;
+            if parent_metadata.file_type().is_symlink()
+                || !parent_metadata.is_dir()
+                || parent_metadata.mode() & 0o7777 != 0o700
+                || metadata.file_type().is_symlink()
                 || !metadata.is_file()
                 || metadata.nlink() != 1
                 || metadata.mode() & 0o7777 != 0o600
+                || metadata.uid() != parent_metadata.uid()
+                || metadata.gid() != parent_metadata.gid()
                 || usize::try_from(metadata.len()).ok() != Some(AUTHENTICATED_ANCHOR_BYTES_V2)
             {
                 return Err(());
@@ -3154,7 +3347,7 @@ mod native {
             let parent_metadata = fs::symlink_metadata(parent).map_err(|_| ())?;
             if parent_metadata.file_type().is_symlink()
                 || !parent_metadata.is_dir()
-                || parent_metadata.mode() & 0o022 != 0
+                || parent_metadata.mode() & 0o7777 != 0o700
             {
                 return Err(());
             }
@@ -3452,7 +3645,33 @@ mod native {
 
     #[cfg(test)]
     mod connector_authority_tests {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::fs::PermissionsExt as _;
+
         use super::*;
+
+        fn test_connector_anchor(path: PathBuf) -> PosixAuthenticatedAnchorFileV2 {
+            PosixAuthenticatedAnchorFileV2::new(
+                path,
+                Digest32V2::new([0x61; 32]),
+                Digest32V2::new([0x62; 32]),
+                [0x63; 32],
+                CONNECTOR_ANCHOR_MAC_DOMAIN_V2,
+                CONNECTOR_ANCHOR_MAGIC_V2,
+            )
+            .unwrap()
+        }
+
+        fn connector_anchor_head(
+            sequence: u64,
+            byte: u8,
+        ) -> savana_policy_core::v2::RollbackProtectedStateHeadV2 {
+            savana_policy_core::v2::RollbackProtectedStateHeadV2::new(
+                sequence,
+                Digest32V2::new(if sequence == 0 { [0; 32] } else { [byte; 32] }),
+            )
+            .unwrap()
+        }
 
         fn enabled_material(seed: u8) -> ([u8; 32], [u8; 32], [u8; 32]) {
             let private = [seed; 32];
@@ -3546,6 +3765,171 @@ mod native {
             .is_err());
             assert_eq!(enabled_probes, 1);
             assert_eq!(enabled_reads, 0);
+        }
+
+        #[test]
+        fn connector_store_secrets_are_domain_and_deployment_separated() {
+            let source = [0x51; 32];
+            let installation = Digest32V2::new([0x52; 32]);
+            let genesis = Digest32V2::new([0x53; 32]);
+            let store = connector_store_id_v2(
+                installation,
+                genesis,
+                SigningKey::from_bytes(&source).verifying_key().to_bytes(),
+            );
+            let encryption = derive_connector_runtime_secret_v2(
+                &source,
+                CONNECTOR_STORE_ENCRYPTION_DERIVATION_DOMAIN_V2,
+                installation,
+                genesis,
+                store,
+            )
+            .unwrap();
+            let anchor = derive_connector_runtime_secret_v2(
+                &source,
+                CONNECTOR_STORE_ANCHOR_DERIVATION_DOMAIN_V2,
+                installation,
+                genesis,
+                store,
+            )
+            .unwrap();
+            let handle = derive_connector_runtime_secret_v2(
+                &source,
+                CONNECTOR_HANDLE_DERIVATION_DOMAIN_V2,
+                installation,
+                genesis,
+                store,
+            )
+            .unwrap();
+            assert_ne!(encryption, anchor);
+            assert_ne!(encryption, handle);
+            assert_ne!(anchor, handle);
+            assert_ne!(encryption, source);
+            assert_ne!(anchor, source);
+            assert_ne!(handle, source);
+            assert_ne!(
+                encryption,
+                derive_connector_runtime_secret_v2(
+                    &source,
+                    CONNECTOR_STORE_ENCRYPTION_DERIVATION_DOMAIN_V2,
+                    Digest32V2::new([0x54; 32]),
+                    genesis,
+                    store,
+                )
+                .unwrap()
+            );
+            assert!(derive_connector_runtime_secret_v2(
+                &[0; 32],
+                CONNECTOR_STORE_ENCRYPTION_DERIVATION_DOMAIN_V2,
+                installation,
+                genesis,
+                store,
+            )
+            .is_err());
+        }
+
+        #[test]
+        fn connector_store_paths_are_private_canonical_and_idempotent() {
+            let directory = tempfile::tempdir().unwrap();
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let neighboring = directory.path().join("agent-authority-state-v2.cbor");
+            let genesis = Digest32V2::new([0x5a; 32]);
+            let expected_directory = directory
+                .path()
+                .join(format!("connector-registry-{}", "5a".repeat(32)));
+
+            let first = connector_store_paths_v2(&neighboring, genesis).unwrap();
+            let second = connector_store_paths_v2(&neighboring, genesis).unwrap();
+            assert_eq!(first, second);
+            assert_eq!(
+                first.0,
+                expected_directory.join("connector-registry-v2.cbor")
+            );
+            assert_eq!(
+                first.1,
+                expected_directory.join("connector-registry-anchor-v2.bin")
+            );
+            assert_eq!(
+                fs::symlink_metadata(&expected_directory)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                0o700
+            );
+            assert!(connector_store_paths_v2(Path::new("relative-state"), genesis).is_err());
+
+            fs::set_permissions(&expected_directory, fs::Permissions::from_mode(0o750)).unwrap();
+            assert!(connector_store_paths_v2(&neighboring, genesis).is_err());
+        }
+
+        #[test]
+        fn connector_posix_anchor_rejects_permissions_links_and_partial_files() {
+            use savana_policy_core::v2::RollbackProtectedStateAnchorV2 as _;
+
+            let permissions = tempfile::tempdir().unwrap();
+            fs::set_permissions(permissions.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let mut anchor = test_connector_anchor(permissions.path().join("anchor.bin"));
+            anchor
+                .compare_and_advance(connector_anchor_head(0, 0), connector_anchor_head(1, 0x71))
+                .unwrap();
+            fs::set_permissions(
+                permissions.path().join("anchor.bin"),
+                fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
+            assert!(anchor.current_head().is_err());
+
+            let links = tempfile::tempdir().unwrap();
+            fs::set_permissions(links.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let mut original = test_connector_anchor(links.path().join("original.bin"));
+            original
+                .compare_and_advance(connector_anchor_head(0, 0), connector_anchor_head(1, 0x72))
+                .unwrap();
+            fs::hard_link(
+                links.path().join("original.bin"),
+                links.path().join("hard-link.bin"),
+            )
+            .unwrap();
+            assert!(original.current_head().is_err());
+            let hard_link = test_connector_anchor(links.path().join("hard-link.bin"));
+            assert!(hard_link.current_head().is_err());
+
+            let symlink_anchor = test_connector_anchor(links.path().join("symlink.bin"));
+            symlink(
+                links.path().join("original.bin"),
+                links.path().join("symlink.bin"),
+            )
+            .unwrap();
+            assert!(symlink_anchor.current_head().is_err());
+
+            let partial = tempfile::tempdir().unwrap();
+            fs::set_permissions(partial.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let partial_path = partial.path().join("anchor.bin");
+            fs::write(&partial_path, [0_u8; 17]).unwrap();
+            fs::set_permissions(&partial_path, fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(test_connector_anchor(partial_path).current_head().is_err());
+        }
+
+        #[test]
+        fn connector_posix_anchor_accepts_valid_old_file_crash_outcome_before_rename() {
+            use savana_policy_core::v2::RollbackProtectedStateAnchorV2 as _;
+
+            let directory = tempfile::tempdir().unwrap();
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let path = directory.path().join("anchor.bin");
+            let mut anchor = test_connector_anchor(path.clone());
+            let first = connector_anchor_head(1, 0x73);
+            anchor
+                .compare_and_advance(connector_anchor_head(0, 0), first)
+                .unwrap();
+            let old_file = fs::read(&path).unwrap();
+            let second = connector_anchor_head(2, 0x74);
+            anchor.compare_and_advance(first, second).unwrap();
+
+            fs::write(&path, old_file).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(anchor.current_head().unwrap(), first);
         }
 
         #[cfg(feature = "test-support")]

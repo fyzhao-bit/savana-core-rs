@@ -3,6 +3,7 @@ mod authenticated_anchor;
 mod binding;
 mod commit_attestation;
 mod connector_registry;
+mod connector_store;
 mod declassification;
 mod deployment_authorization;
 mod deployment_control;
@@ -79,6 +80,13 @@ pub use connector_registry::{
     user_tier_host_allowed_v2, BoundedConnectorHostV2, BoundedConnectorNameV2,
     BoundedConnectorUrlV2, ConnectorDescriptorV2, ConnectorRegistryDeltaV2,
     ConnectorRegistryStateV2, ConnectorTierV2, ConnectorTransportV2,
+    PreparedConnectorRegistryDeltaV2,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use connector_store::TestConnectorStoreCrashPointV2;
+pub use connector_store::{
+    ConnectorStoreRevisionV2, DurableConnectorRegistryStoreV2,
+    MAX_CONNECTOR_AUTHORITY_STATE_BYTES_V2,
 };
 pub use declassification::{
     declassification_implementation_digest_v2, ClosedDeclassificationPurposeV2,

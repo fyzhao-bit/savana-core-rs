@@ -44,6 +44,11 @@ pub(crate) enum KernelRuntimeHandlerV2 {
     ResumeCommittedAgentAuthentication,
     PrepareConnectorRegistration,
     ProposeConnectorRegistration,
+    AuthorizeConnectorRegistration,
+    ApplyApprovedConnectorRegistration,
+    PrepareConnectorRemoval,
+    RemoveConnector,
+    SnapshotConnectorRegistry,
     IngressHealth,
     BeginInput,
     AppendInputChunk,
@@ -86,9 +91,13 @@ impl KernelRuntimeHandlerV2 {
             | Self::GetKernelTaskStatus
             | Self::CancelKernelTask
             | Self::ResumeCommittedAgentAuthentication => EndpointRoleV2::AgentKernel,
-            Self::PrepareConnectorRegistration | Self::ProposeConnectorRegistration => {
-                EndpointRoleV2::AgentKernel
-            }
+            Self::PrepareConnectorRegistration
+            | Self::ProposeConnectorRegistration
+            | Self::AuthorizeConnectorRegistration
+            | Self::ApplyApprovedConnectorRegistration
+            | Self::PrepareConnectorRemoval
+            | Self::RemoveConnector
+            | Self::SnapshotConnectorRegistry => EndpointRoleV2::AgentKernel,
             Self::IngressHealth
             | Self::BeginInput
             | Self::AppendInputChunk
@@ -133,6 +142,11 @@ impl KernelRuntimeHandlerV2 {
             Self::ResumeCommittedAgentAuthentication | Self::CommitInputSettlement => 43,
             Self::PrepareConnectorRegistration => 70,
             Self::ProposeConnectorRegistration => 71,
+            Self::AuthorizeConnectorRegistration => 72,
+            Self::ApplyApprovedConnectorRegistration => 73,
+            Self::PrepareConnectorRemoval => 74,
+            Self::RemoveConnector => 75,
+            Self::SnapshotConnectorRegistry => 76,
             Self::AbortInput => 44,
             Self::GetInputStatus => 45,
             Self::PrepareIngressUiAuthentication => 46,
@@ -145,7 +159,7 @@ impl KernelRuntimeHandlerV2 {
 }
 
 #[cfg(test)]
-pub(crate) const ALL_KERNEL_RUNTIME_HANDLERS_V2: [KernelRuntimeHandlerV2; 39] = [
+pub(crate) const ALL_KERNEL_RUNTIME_HANDLERS_V2: [KernelRuntimeHandlerV2; 44] = [
     KernelRuntimeHandlerV2::AgentHealth,
     KernelRuntimeHandlerV2::ClaimAgentSession,
     KernelRuntimeHandlerV2::PrepareFollowupIngress,
@@ -173,6 +187,11 @@ pub(crate) const ALL_KERNEL_RUNTIME_HANDLERS_V2: [KernelRuntimeHandlerV2; 39] = 
     KernelRuntimeHandlerV2::ResumeCommittedAgentAuthentication,
     KernelRuntimeHandlerV2::PrepareConnectorRegistration,
     KernelRuntimeHandlerV2::ProposeConnectorRegistration,
+    KernelRuntimeHandlerV2::AuthorizeConnectorRegistration,
+    KernelRuntimeHandlerV2::ApplyApprovedConnectorRegistration,
+    KernelRuntimeHandlerV2::PrepareConnectorRemoval,
+    KernelRuntimeHandlerV2::RemoveConnector,
+    KernelRuntimeHandlerV2::SnapshotConnectorRegistry,
     KernelRuntimeHandlerV2::IngressHealth,
     KernelRuntimeHandlerV2::BeginInput,
     KernelRuntimeHandlerV2::AppendInputChunk,
@@ -280,6 +299,19 @@ pub(crate) fn handler_for_operation_v2(
             }
             KernelConnectorControlOperationV2::ProposeRegistration(_) => {
                 KernelRuntimeHandlerV2::ProposeConnectorRegistration
+            }
+            KernelConnectorControlOperationV2::AuthorizeRegistration(_) => {
+                KernelRuntimeHandlerV2::AuthorizeConnectorRegistration
+            }
+            KernelConnectorControlOperationV2::ApplyApprovedRegistration(_) => {
+                KernelRuntimeHandlerV2::ApplyApprovedConnectorRegistration
+            }
+            KernelConnectorControlOperationV2::PrepareRemoval(_) => {
+                KernelRuntimeHandlerV2::PrepareConnectorRemoval
+            }
+            KernelConnectorControlOperationV2::Remove(_) => KernelRuntimeHandlerV2::RemoveConnector,
+            KernelConnectorControlOperationV2::Snapshot(_) => {
+                KernelRuntimeHandlerV2::SnapshotConnectorRegistry
             }
         }),
         KernelServiceOperationV2::Executor(_) => Err(StableCode::IdentityPeerRejected),
@@ -614,13 +646,13 @@ mod tests {
     use super::{handler_for_operation_v2, ALL_KERNEL_RUNTIME_HANDLERS_V2};
 
     #[test]
-    fn exhaustive_handler_table_covers_all_39_kerneld_operations_once() {
-        assert_eq!(ALL_KERNEL_RUNTIME_HANDLERS_V2.len(), 39);
+    fn exhaustive_handler_table_covers_all_44_kerneld_operations_once() {
+        assert_eq!(ALL_KERNEL_RUNTIME_HANDLERS_V2.len(), 44);
         let actual = ALL_KERNEL_RUNTIME_HANDLERS_V2
             .into_iter()
             .map(|handler| (role_tag(handler.role()), handler.tag()))
             .collect::<BTreeSet<_>>();
-        assert_eq!(actual.len(), 39);
+        assert_eq!(actual.len(), 44);
 
         let expected = kernel_agent_operation_tags_v2()
             .iter()

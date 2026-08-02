@@ -3022,7 +3022,7 @@ fn provenance_entry_cmp(
         .cmp(&minicbor::to_vec(right).unwrap_or_default())
 }
 
-struct DurableAnchoredPathV2 {
+pub(crate) struct DurableAnchoredPathV2 {
     parent: File,
     parent_path: PathBuf,
     parent_dev: u64,
@@ -3033,7 +3033,7 @@ struct DurableAnchoredPathV2 {
 }
 
 impl DurableAnchoredPathV2 {
-    fn open(path: &Path) -> Result<Self, G4Error> {
+    pub(crate) fn open(path: &Path) -> Result<Self, G4Error> {
         if !path.is_absolute() {
             return Err(G4Error::DurableStateIo);
         }
@@ -3076,7 +3076,7 @@ impl DurableAnchoredPathV2 {
         Ok(anchored)
     }
 
-    fn recheck_parent(&self) -> Result<(), G4Error> {
+    pub(crate) fn recheck_parent(&self) -> Result<(), G4Error> {
         let opened = self
             .parent
             .metadata()
@@ -3098,7 +3098,7 @@ impl DurableAnchoredPathV2 {
         Ok(())
     }
 
-    fn read_existing(&self) -> Result<Option<Vec<u8>>, G4Error> {
+    pub(crate) fn read_existing(&self) -> Result<Option<Vec<u8>>, G4Error> {
         let before = match statat(&self.parent, &self.leaf, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(stat) => stat,
             Err(Errno::NOENT) => return Ok(None),
@@ -3169,6 +3169,45 @@ impl DurableAnchoredPathV2 {
                 "durable parent identity changed",
             ))
         })
+    }
+
+    pub(crate) fn replace_observed<O>(
+        &self,
+        bytes: &[u8],
+        observe: O,
+    ) -> Result<(), atomic_file::ReplaceError>
+    where
+        O: FnMut(atomic_file::AtomicReplaceBoundary) -> Result<(), crate::PolicyError>,
+    {
+        atomic_file::replace_at_observed(
+            &self.parent,
+            &self.leaf,
+            bytes,
+            self.owner_uid,
+            self.owner_gid,
+            || {
+                self.recheck_parent()
+                    .map_err(|_| crate::PolicyError::io("durable parent identity changed"))
+            },
+            observe,
+        )?;
+        self.recheck_parent().map_err(|_| {
+            atomic_file::ReplaceError::after_rename(crate::PolicyError::io(
+                "durable parent identity changed",
+            ))
+        })
+    }
+
+    pub(crate) const fn parent(&self) -> &File {
+        &self.parent
+    }
+
+    pub(crate) fn owner_uid(&self) -> u32 {
+        self.owner_uid
+    }
+
+    pub(crate) fn owner_gid(&self) -> u32 {
+        self.owner_gid
     }
 }
 

@@ -248,6 +248,10 @@ mod v2_channel;
 #[allow(dead_code)] // Activated after V2 mutual authentication completes.
 mod v2_connection;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod v2_connector_authority;
+#[cfg(test)]
+mod v2_connector_authority_tests;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod v2_core_services;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod v2_data_plane;

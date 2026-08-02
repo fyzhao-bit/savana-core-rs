@@ -621,7 +621,7 @@ fn operation_body(full: &[u8], expected_tag: u16) -> Result<Vec<u8>, ProtocolErr
 const fn tag_allowed(role: EndpointRoleV2, tag: u16) -> bool {
     match role {
         EndpointRoleV2::AgentKernel => {
-            tag == 0 || (tag >= 20 && tag <= 43) || tag == 70 || tag == 71
+            tag == 0 || (tag >= 20 && tag <= 43) || (tag >= 70 && tag <= 76)
         }
         EndpointRoleV2::IngressKernel => tag == 0 || (tag >= 40 && tag <= 50),
         EndpointRoleV2::KernelExecutor => tag == 0 || (tag >= 60 && tag <= 63),
@@ -638,7 +638,7 @@ pub const fn kernel_service_operation_tags_for_role_v2(
     match role {
         EndpointRoleV2::AgentKernel => Some(&[
             0, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
-            41, 42, 43, 70, 71,
+            41, 42, 43, 70, 71, 72, 73, 74, 75, 76,
         ]),
         EndpointRoleV2::IngressKernel => Some(super::kernel_ingress_operation_tags_v2()),
         EndpointRoleV2::KernelExecutor => Some(super::kernel_executor_operation_tags_v2()),

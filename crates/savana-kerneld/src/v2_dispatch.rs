@@ -896,7 +896,7 @@ impl KernelServiceDispatcherV2 {
     }
 }
 
-const fn public_error_code(error: StableCode) -> PublicStableCodeV2 {
+pub(crate) const fn public_error_code(error: StableCode) -> PublicStableCodeV2 {
     match error {
         StableCode::DeadlineExceeded => PublicStableCodeV2::DeadlineExceeded,
         StableCode::KernelOverloaded => PublicStableCodeV2::Overloaded,
