@@ -884,6 +884,7 @@ fn complete_security_state_manifest_round_trips_and_rejects_signature_mutation()
             expected.deployment_trust_root_set_digest(),
             expected.activation_trust_root_set_digest(),
             expected.release_trust_root_set_digest(),
+            expected.declassification_trust_root_set_digest(),
         )
         .expect("authenticated transaction pre-state");
     assert!(signed_transaction
@@ -892,6 +893,7 @@ fn complete_security_state_manifest_round_trips_and_rejects_signature_mutation()
             digest(99),
             expected.activation_trust_root_set_digest(),
             expected.release_trust_root_set_digest(),
+            expected.declassification_trust_root_set_digest(),
         )
         .is_err());
     core.validate_selected_ledger_pre_state(&selected_ledger)

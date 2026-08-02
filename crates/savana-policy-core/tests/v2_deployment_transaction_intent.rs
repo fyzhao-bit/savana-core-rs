@@ -3,9 +3,10 @@ use savana_kernel_protocol::v2::{derive_ed25519_key_id_v2, Digest32V2, Nonce32V2
 use savana_policy_core::v2::{
     ActiveActivationV2, ArtifactIdentityV2, ClosedArtifactTypeV2, ClosedTargetArchitectureV2,
     ClosedTargetOsV2, DeploymentAuthorizationKeyRefsV2, DeploymentAuthorizationVerifierV2,
-    DeploymentControlErrorV2, DeploymentPhaseV2, DeploymentRecoveryTargetV2,
-    DeploymentTransactionIntentMaterialV2, DeploymentTransactionIntentV2, DeploymentTransactionV2,
-    ExpectedPreStateV2, PlatformLockV2, RecoveryPhaseHighWaterV2, RollbackGrantV2,
+    DeploymentControlErrorV2, DeploymentLedgerRecordV2, DeploymentPhaseV2,
+    DeploymentRecoveryTargetV2, DeploymentTransactionIntentMaterialV2,
+    DeploymentTransactionIntentV2, DeploymentTransactionV2, ExpectedPreStateV2, PlatformLockV2,
+    RecoveryPhaseHighWaterV2, RollbackGrantStateV2, RollbackGrantV2,
 };
 
 fn digest(byte: u8) -> Digest32V2 {
@@ -258,6 +259,107 @@ fn rollback_grant_and_transaction_authorization_are_distinct_exact_signatures() 
         .unwrap_err(),
         DeploymentControlErrorV2::InvalidDeploymentTransaction
     );
+}
+
+#[test]
+fn authenticated_pre_state_requires_the_exact_declassification_root_digest() {
+    let mut material = fixture_material();
+    let activation_signing_key = SigningKey::from_bytes(&[0x95; 32]);
+    let selected_ledger = DeploymentLedgerRecordV2::new_signed_for_test(
+        material.installation_id,
+        material.expected_pre_state.installation_epoch(),
+        material.expected_pre_state.ledger_generation(),
+        Digest32V2::new([0; 32]),
+        DeploymentPhaseV2::Idle,
+        None,
+        false,
+        material.expected_pre_state.effect_fence_epoch(),
+        RollbackGrantStateV2::None,
+        None,
+        9,
+        57,
+        &activation_signing_key,
+    )
+    .expect("selected ledger");
+    let expected = ExpectedPreStateV2::new(
+        selected_ledger.projection().generation(),
+        selected_ledger.projection().record_payload_digest(),
+        selected_ledger.projection().phase(),
+        selected_ledger.active_activation().clone(),
+        selected_ledger.projection().effects_fenced(),
+        selected_ledger.active_manifest_digest(),
+        selected_ledger.highest_ever().digest().expect("high water"),
+        selected_ledger.install_identity_profile_signed_digest(),
+        material.expected_pre_state.deploy_helper_identity().clone(),
+        material
+            .expected_pre_state
+            .deploy_watchdog_identity()
+            .clone(),
+        digest(0x51),
+        digest(0x52),
+        digest(0x53),
+        digest(0x54),
+        material.expected_pre_state.bootstrap_slot_closure_digest(),
+        material.expected_pre_state.installation_epoch(),
+        selected_ledger.projection().effect_fence_epoch(),
+    )
+    .expect("expected pre-state");
+    material.expected_pre_state = expected.clone();
+    let intent = DeploymentTransactionIntentV2::new(material).expect("transaction intent");
+    let grant_key = SigningKey::from_bytes(&[0x96; 32]);
+    let grant_verifier = DeploymentAuthorizationVerifierV2::new(
+        derive_ed25519_key_id_v2(grant_key.verifying_key().to_bytes()),
+        7,
+        grant_key.verifying_key().to_bytes(),
+    )
+    .expect("grant verifier");
+    let grant = RollbackGrantV2::new_signed_for_test(
+        &intent,
+        RecoveryPhaseHighWaterV2::normal(std::array::from_fn(|index| {
+            digest(u8::try_from(index).expect("index").wrapping_add(0x70))
+        }))
+        .expect("high water"),
+        intent.material().expires_at_unix_ms + 10_000_000,
+        &grant_key,
+        7,
+    )
+    .expect("rollback grant");
+    let transaction_key = SigningKey::from_bytes(&[0x97; 32]);
+    let transaction = DeploymentTransactionV2::new_signed_for_test(
+        intent,
+        grant,
+        &transaction_key,
+        8,
+        &grant_verifier,
+    )
+    .expect("signed transaction");
+
+    assert_eq!(
+        transaction.validate_authenticated_pre_state(
+            &selected_ledger,
+            expected.deployment_trust_root_set_digest(),
+            expected.activation_trust_root_set_digest(),
+            expected.release_trust_root_set_digest(),
+            expected.declassification_trust_root_set_digest(),
+        ),
+        Ok(())
+    );
+    for invalid_declassification_root in [
+        Digest32V2::new([0; 32]),
+        expected.release_trust_root_set_digest(),
+        digest(0x55),
+    ] {
+        assert_eq!(
+            transaction.validate_authenticated_pre_state(
+                &selected_ledger,
+                expected.deployment_trust_root_set_digest(),
+                expected.activation_trust_root_set_digest(),
+                expected.release_trust_root_set_digest(),
+                invalid_declassification_root,
+            ),
+            Err(DeploymentControlErrorV2::TransactionBindingMismatch)
+        );
+    }
 }
 
 #[test]

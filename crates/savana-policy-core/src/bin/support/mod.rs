@@ -80,6 +80,10 @@ pub fn run_apply(
             trust
                 .release_trust_root_set()
                 .release_trust_root_set_digest(),
+            trust
+                .declassification_trust_root_set()
+                .binding()
+                .member_set_digest(),
         )
         .map_err(map_deployment_control_error)?;
     let expected_selector = staging_selector_v2(

@@ -413,6 +413,7 @@ impl DurableDeploymentTransactionCoreV2 {
                 expected.deployment_trust_root_set_digest(),
                 expected.activation_trust_root_set_digest(),
                 expected.release_trust_root_set_digest(),
+                expected.declassification_trust_root_set_digest(),
             )?;
         if selected.bootstrap_tcb_lock_digest()
             != self
