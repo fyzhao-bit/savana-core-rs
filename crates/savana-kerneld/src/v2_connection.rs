@@ -4,15 +4,15 @@ use std::os::unix::net::UnixStream;
 use std::time::Instant;
 
 use savana_kernel_protocol::v2::{
-    decode_kernel_service_application_request_v2, encode_kernel_service_application_response_v2,
-    peek_kernel_service_application_request_v2, PeerIdentityBindingV2, PublicStableCodeV2,
-    UnixMillisV2,
+    decode_kernel_service_application_request_v2, peek_kernel_service_application_request_v2,
+    PeerIdentityBindingV2, PublicStableCodeV2, UnixMillisV2,
 };
 
 use crate::policy_runtime::V2GenerationLease;
 use crate::v2_channel::{ChannelErrorV2, UnixV2FrameChannel, V2FrameChannel};
 use crate::v2_dispatch::{
-    KernelServiceDispatchErrorV2, KernelServiceDispatcherV2, VerifiedKernelServicePeerV2,
+    KernelServiceDispatchErrorV2, KernelServiceDispatcherV2, SuiteOneResponseSessionSlotV2,
+    VerifiedKernelServicePeerV2,
 };
 use crate::v2_transport_owner::{KernelV2HandshakeError, KernelV2HandshakeOwner};
 
@@ -127,51 +127,42 @@ pub(crate) fn serve_one_suite_one_v2_channel(
         }
         let request = decode_kernel_service_application_request_v2(opened.plaintext())
             .map_err(|_| KernelServiceDispatchErrorV2::Malformed)?;
-        let response =
-            match dispatcher.dispatch_one_application(peer, lease, request, now, deadline) {
-                Ok(response) => response,
-                Err(KernelServiceDispatchErrorV2::Busy) => {
-                    savana_kernel_protocol::v2::KernelServiceApplicationResponseV2::error(
-                        routing.role(),
-                        routing.request_id(),
-                        routing.operation_tag(),
-                        PublicStableCodeV2::Overloaded,
-                    )
-                    .map_err(|_| KernelServiceDispatchErrorV2::Unavailable)?
-                }
-                Err(KernelServiceDispatchErrorV2::DeadlineExceeded) => {
-                    savana_kernel_protocol::v2::KernelServiceApplicationResponseV2::error(
-                        routing.role(),
-                        routing.request_id(),
-                        routing.operation_tag(),
-                        PublicStableCodeV2::DeadlineExceeded,
-                    )
-                    .map_err(|_| KernelServiceDispatchErrorV2::DeadlineExceeded)?
-                }
-                Err(KernelServiceDispatchErrorV2::Unavailable) => {
-                    savana_kernel_protocol::v2::KernelServiceApplicationResponseV2::error(
-                        routing.role(),
-                        routing.request_id(),
-                        routing.operation_tag(),
-                        PublicStableCodeV2::ServiceUnavailable,
-                    )
-                    .map_err(|_| KernelServiceDispatchErrorV2::Unavailable)?
-                }
-                Err(
-                    KernelServiceDispatchErrorV2::Malformed
-                    | KernelServiceDispatchErrorV2::IdentityRejected
-                    | KernelServiceDispatchErrorV2::Operation(_),
-                ) => return Err(KernelServiceDispatchErrorV2::IdentityRejected),
-            };
-        let response_plaintext = encode_kernel_service_application_response_v2(&response)
-            .map_err(|_| KernelServiceDispatchErrorV2::Unavailable)?;
-        let response_record = session
-            .seal_application_response(
+        let response_session = SuiteOneResponseSessionSlotV2::new(session);
+        let response_record = match dispatcher.dispatch_one_suite_one(
+            peer,
+            lease,
+            request,
+            response_session.clone(),
+            now,
+            deadline,
+        ) {
+            Ok(record) => record,
+            Err(KernelServiceDispatchErrorV2::Busy) => response_session.seal_public_error(
+                routing.role(),
                 routing.request_id(),
                 routing.operation_tag(),
-                &response_plaintext,
-            )
-            .map_err(|_| KernelServiceDispatchErrorV2::Unavailable)?;
+                PublicStableCodeV2::Overloaded,
+            )?,
+            Err(KernelServiceDispatchErrorV2::DeadlineExceeded) => response_session
+                .seal_public_error(
+                    routing.role(),
+                    routing.request_id(),
+                    routing.operation_tag(),
+                    PublicStableCodeV2::DeadlineExceeded,
+                )
+                .map_err(|_| KernelServiceDispatchErrorV2::DeadlineExceeded)?,
+            Err(KernelServiceDispatchErrorV2::Unavailable) => response_session.seal_public_error(
+                routing.role(),
+                routing.request_id(),
+                routing.operation_tag(),
+                PublicStableCodeV2::ServiceUnavailable,
+            )?,
+            Err(
+                KernelServiceDispatchErrorV2::Malformed
+                | KernelServiceDispatchErrorV2::IdentityRejected
+                | KernelServiceDispatchErrorV2::Operation(_),
+            ) => return Err(KernelServiceDispatchErrorV2::IdentityRejected),
+        };
 
         channel
             .write_record_frame(&response_record, deadline)

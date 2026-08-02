@@ -7,7 +7,12 @@ use savana_kernel_protocol::v2::{
 use savana_kernel_protocol::StableCode;
 
 use crate::policy_runtime::V2GenerationLease;
-use crate::v2_dispatch::{KernelServiceResponseBodyV2, VerifiedKernelServicePeerV2};
+#[cfg(any(test, feature = "test-support"))]
+use crate::v2_dispatch::KernelServiceResponseBodyV2;
+use crate::v2_dispatch::{
+    KernelRuntimeResponseBuilderV2, KernelRuntimeResponsePreparationErrorV2,
+    PreparedKernelServiceResponseV2, VerifiedKernelServicePeerV2,
+};
 use crate::v2_state_owner::{StateOwnerErrorV2, StateOwnerV2};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,6 +270,11 @@ pub(crate) fn handler_for_operation_v2(
 }
 
 pub(crate) struct KernelRuntimeRequestV2 {
+    context: KernelRuntimeRequestContextV2,
+    response_builder: KernelRuntimeResponseBuilderV2,
+}
+
+pub(crate) struct KernelRuntimeRequestContextV2 {
     peer: VerifiedKernelServicePeerV2,
     lease: V2GenerationLease,
     request_id: RequestIdV2,
@@ -274,6 +284,21 @@ pub(crate) struct KernelRuntimeRequestV2 {
 }
 
 impl KernelRuntimeRequestV2 {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        KernelRuntimeRequestContextV2,
+        KernelRuntimeResponseBuilderV2,
+    ) {
+        (self.context, self.response_builder)
+    }
+
+    fn validate(&self) -> Result<(), StableCode> {
+        self.context.validate()
+    }
+}
+
+impl KernelRuntimeRequestContextV2 {
     #[cfg(test)]
     pub(crate) const fn peer(&self) -> VerifiedKernelServicePeerV2 {
         self.peer
@@ -333,7 +358,7 @@ pub(crate) trait KernelRuntimeServicesV2: Send + 'static {
     fn execute(
         &mut self,
         request: KernelRuntimeRequestV2,
-    ) -> Result<KernelServiceResponseBodyV2, StableCode>;
+    ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,7 +370,10 @@ pub(crate) enum KernelRuntimeOwnerErrorV2 {
 }
 
 pub(crate) struct KernelRuntimeOwnerV2 {
-    owner: StateOwnerV2<KernelRuntimeRequestV2, Result<KernelServiceResponseBodyV2, StableCode>>,
+    owner: StateOwnerV2<
+        KernelRuntimeRequestV2,
+        Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2>,
+    >,
 }
 
 impl std::fmt::Debug for KernelRuntimeOwnerV2 {
@@ -365,7 +393,10 @@ impl KernelRuntimeOwnerV2 {
             move |request: KernelRuntimeRequestV2| {
                 Ok(match request.validate() {
                     Ok(()) => services.execute(request),
-                    Err(error) => Err(error),
+                    Err(error) => {
+                        let (_, builder) = request.into_parts();
+                        builder.prepare(Err(error))
+                    }
                 })
             },
         )
@@ -376,7 +407,7 @@ impl KernelRuntimeOwnerV2 {
     #[cfg(test)]
     pub(crate) fn spawn_for_test(
         capacity: usize,
-        handler: impl FnMut(KernelRuntimeRequestV2) -> Result<KernelServiceResponseBodyV2, StableCode>
+        handler: impl FnMut(KernelRuntimeRequestContextV2) -> Result<KernelServiceResponseBodyV2, StableCode>
             + Send
             + 'static,
     ) -> Result<Self, KernelRuntimeOwnerErrorV2> {
@@ -384,15 +415,19 @@ impl KernelRuntimeOwnerV2 {
 
         impl<Handler> KernelRuntimeServicesV2 for TestServicesV2<Handler>
         where
-            Handler: FnMut(KernelRuntimeRequestV2) -> Result<KernelServiceResponseBodyV2, StableCode>
+            Handler: FnMut(
+                    KernelRuntimeRequestContextV2,
+                ) -> Result<KernelServiceResponseBodyV2, StableCode>
                 + Send
                 + 'static,
         {
             fn execute(
                 &mut self,
                 request: KernelRuntimeRequestV2,
-            ) -> Result<KernelServiceResponseBodyV2, StableCode> {
-                (self.0)(request)
+            ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2>
+            {
+                let (context, builder) = request.into_parts();
+                builder.prepare((self.0)(context))
             }
         }
 
@@ -402,7 +437,7 @@ impl KernelRuntimeOwnerV2 {
     #[cfg(feature = "test-support")]
     pub(crate) fn spawn_for_test_support(
         capacity: usize,
-        handler: impl FnMut(KernelRuntimeRequestV2) -> Result<KernelServiceResponseBodyV2, StableCode>
+        handler: impl FnMut(KernelRuntimeRequestContextV2) -> Result<KernelServiceResponseBodyV2, StableCode>
             + Send
             + 'static,
     ) -> Result<Self, KernelRuntimeOwnerErrorV2> {
@@ -410,21 +445,26 @@ impl KernelRuntimeOwnerV2 {
 
         impl<Handler> KernelRuntimeServicesV2 for TestSupportServicesV2<Handler>
         where
-            Handler: FnMut(KernelRuntimeRequestV2) -> Result<KernelServiceResponseBodyV2, StableCode>
+            Handler: FnMut(
+                    KernelRuntimeRequestContextV2,
+                ) -> Result<KernelServiceResponseBodyV2, StableCode>
                 + Send
                 + 'static,
         {
             fn execute(
                 &mut self,
                 request: KernelRuntimeRequestV2,
-            ) -> Result<KernelServiceResponseBodyV2, StableCode> {
-                (self.0)(request)
+            ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2>
+            {
+                let (context, builder) = request.into_parts();
+                builder.prepare((self.0)(context))
             }
         }
 
         Self::spawn(capacity, TestSupportServicesV2(handler))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn dispatch(
         &self,
         peer: VerifiedKernelServicePeerV2,
@@ -433,7 +473,8 @@ impl KernelRuntimeOwnerV2 {
         operation: KernelServiceOperationV2,
         now: UnixMillisV2,
         deadline: Instant,
-    ) -> Result<KernelServiceResponseBodyV2, KernelRuntimeOwnerErrorV2> {
+        response_builder: KernelRuntimeResponseBuilderV2,
+    ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeOwnerErrorV2> {
         if Instant::now() >= deadline {
             return Err(KernelRuntimeOwnerErrorV2::DeadlineExceeded);
         }
@@ -455,17 +496,22 @@ impl KernelRuntimeOwnerV2 {
         self.owner
             .request(
                 KernelRuntimeRequestV2 {
-                    peer,
-                    lease,
-                    request_id,
-                    now,
-                    handler,
-                    operation,
+                    context: KernelRuntimeRequestContextV2 {
+                        peer,
+                        lease,
+                        request_id,
+                        now,
+                        handler,
+                        operation,
+                    },
+                    response_builder,
                 },
                 deadline,
             )
             .map_err(map_owner_error)?
-            .map_err(KernelRuntimeOwnerErrorV2::Operation)
+            .map_err(|KernelRuntimeResponsePreparationErrorV2::Unavailable| {
+                KernelRuntimeOwnerErrorV2::Unavailable
+            })
     }
 }
 

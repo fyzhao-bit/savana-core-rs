@@ -38,7 +38,10 @@ use savana_kernel_protocol::StableCode;
 use crate::v2_agent_authority::{
     KernelAgentAuthorityErrorV2, KernelAgentAuthorityV2, PreparedAgentClaimMaterialV2,
 };
-use crate::v2_dispatch::KernelServiceResponseBodyV2;
+use crate::v2_dispatch::{
+    KernelRuntimeResponseBuilderV2, KernelRuntimeResponsePreparationErrorV2,
+    KernelServiceResponseBodyV2, PreparedKernelServiceResponseV2,
+};
 use crate::v2_ingress_authority::{
     KernelIngressAuthorityErrorV2, KernelIngressAuthorityV2, KernelPendingIngressStateV2,
     VerifiedIngressSettlementDecisionV2,
@@ -309,6 +312,69 @@ impl CoreKernelRuntimeServicesV2 {
         effect_fence_epoch: u64,
         caller_identity: ServiceIdentityV2,
     ) -> Result<KernelServiceResponseBodyV2, StableCode> {
+        match self.execute_operation_prepared(
+            request_id,
+            operation,
+            now,
+            active_state_manifest_digest,
+            deployment_generation,
+            effect_fence_epoch,
+            caller_identity,
+            KernelRuntimeResponseBuilderV2::Body,
+        ) {
+            Ok(PreparedKernelServiceResponseV2::Body(outcome)) => outcome,
+            Ok(_) => unreachable!("closed body response builder returned another variant"),
+            Err(KernelRuntimeResponsePreparationErrorV2::Unavailable) => {
+                Err(StableCode::KernelUnavailable)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_operation_prepared(
+        &mut self,
+        request_id: RequestIdV2,
+        operation: KernelServiceOperationV2,
+        now: UnixMillisV2,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        effect_fence_epoch: u64,
+        caller_identity: ServiceIdentityV2,
+        response_builder: KernelRuntimeResponseBuilderV2,
+    ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2> {
+        if let KernelServiceOperationV2::Ingress(KernelIngressOperationV2::FinalizeInput(request)) =
+            operation
+        {
+            return self.execute_finalize_input_prepared(
+                request,
+                now,
+                active_state_manifest_digest,
+                deployment_generation,
+                response_builder,
+            );
+        }
+        response_builder.prepare(self.execute_operation_body(
+            request_id,
+            operation,
+            now,
+            active_state_manifest_digest,
+            deployment_generation,
+            effect_fence_epoch,
+            caller_identity,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_operation_body(
+        &mut self,
+        request_id: RequestIdV2,
+        operation: KernelServiceOperationV2,
+        now: UnixMillisV2,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        effect_fence_epoch: u64,
+        caller_identity: ServiceIdentityV2,
+    ) -> Result<KernelServiceResponseBodyV2, StableCode> {
         match operation {
             KernelServiceOperationV2::Agent(operation) => self.execute_agent(
                 request_id,
@@ -327,6 +393,74 @@ impl CoreKernelRuntimeServicesV2 {
                 caller_identity,
             ),
             KernelServiceOperationV2::Executor(_) => Err(StableCode::IdentityPeerRejected),
+        }
+    }
+
+    fn execute_finalize_input_prepared(
+        &mut self,
+        request: savana_kernel_protocol::v2::FinalizeInputRequestV2,
+        now: UnixMillisV2,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        response_builder: KernelRuntimeResponseBuilderV2,
+    ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2> {
+        enum PreparationErrorV2 {
+            Authority(KernelIngressAuthorityErrorV2),
+            Response,
+        }
+
+        let authority = match self.ingress_authority.as_mut() {
+            Some(authority) => authority,
+            None => {
+                return response_builder.prepare(Err(StableCode::KernelUnavailable));
+            }
+        };
+        let mut response_builder = Some(response_builder);
+        let transaction = self.input.finalize_with(request, |finalized| {
+            let candidate = authority
+                .prepare_pending_approval(
+                    finalized,
+                    active_state_manifest_digest,
+                    deployment_generation,
+                    now,
+                )
+                .map_err(PreparationErrorV2::Authority)?;
+            let material = candidate.response();
+            let canonical = encode_finalize_input_response_v2(&FinalizeInputResponseV2::new(
+                material.pending,
+                material.approval,
+                material.envelope.clone(),
+                material.display_authentication.clone(),
+            ))
+            .map_err(|_| PreparationErrorV2::Response)?;
+            let response = response_builder
+                .take()
+                .ok_or(PreparationErrorV2::Response)?
+                .prepare_canonical_success(canonical)
+                .map_err(|_| PreparationErrorV2::Response)?;
+            Ok((candidate, response))
+        });
+        match transaction {
+            Ok((finalized, (candidate, response))) => {
+                let _ = authority.publish_pending_approval(candidate, finalized);
+                Ok(response)
+            }
+            Err(KernelInputFinalizeTransactionErrorV2::Input(error)) => response_builder
+                .take()
+                .ok_or(KernelRuntimeResponsePreparationErrorV2::Unavailable)?
+                .prepare(Err(map_input_error(error))),
+            Err(KernelInputFinalizeTransactionErrorV2::Preparation(
+                PreparationErrorV2::Authority(error),
+            )) => response_builder
+                .take()
+                .ok_or(KernelRuntimeResponsePreparationErrorV2::Unavailable)?
+                .prepare(Err(map_ingress_authority_error(error))),
+            Err(KernelInputFinalizeTransactionErrorV2::Preparation(
+                PreparationErrorV2::Response,
+            )) => match response_builder.take() {
+                Some(builder) => builder.prepare(Err(StableCode::KernelUnavailable)),
+                None => Err(KernelRuntimeResponsePreparationErrorV2::Unavailable),
+            },
         }
     }
 
@@ -797,36 +931,8 @@ impl CoreKernelRuntimeServicesV2 {
                     .map_err(|_| StableCode::KernelUnavailable)?,
                 )
             }
-            KernelIngressOperationV2::FinalizeInput(request) => {
-                let authority = self
-                    .ingress_authority
-                    .as_mut()
-                    .ok_or(StableCode::KernelUnavailable)?;
-                let (finalized, prepared) = self
-                    .input
-                    .finalize_with(request, |finalized| {
-                        authority.prepare_pending_approval(
-                            finalized,
-                            active_state_manifest_digest,
-                            deployment_generation,
-                            now,
-                        )
-                    })
-                    .map_err(|error| match error {
-                        KernelInputFinalizeTransactionErrorV2::Input(error) => {
-                            map_input_error(error)
-                        }
-                        KernelInputFinalizeTransactionErrorV2::Preparation(error) => {
-                            map_ingress_authority_error(error)
-                        }
-                    })?;
-                let prepared = authority.publish_pending_approval(prepared, finalized);
-                encode_finalize_input_response_v2(&FinalizeInputResponseV2::new(
-                    prepared.pending,
-                    prepared.approval,
-                    prepared.envelope,
-                    prepared.display_authentication,
-                ))
+            KernelIngressOperationV2::FinalizeInput(_) => {
+                unreachable!("FinalizeInput must use the prepared-response transaction")
             }
             KernelIngressOperationV2::CommitInputSettlement(request) => {
                 let decision = self
@@ -976,9 +1082,10 @@ impl KernelRuntimeServicesV2 for CoreKernelRuntimeServicesV2 {
     fn execute(
         &mut self,
         request: KernelRuntimeRequestV2,
-    ) -> Result<KernelServiceResponseBodyV2, StableCode> {
-        let (peer, lease, request_id, now, _, operation) = request.into_parts();
-        self.execute_operation(
+    ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2> {
+        let (context, response_builder) = request.into_parts();
+        let (peer, lease, request_id, now, _, operation) = context.into_parts();
+        self.execute_operation_prepared(
             request_id,
             operation,
             now,
@@ -986,6 +1093,7 @@ impl KernelRuntimeServicesV2 for CoreKernelRuntimeServicesV2 {
             lease.deployment_generation(),
             lease.effect_fence_epoch(),
             peer.caller_identity(),
+            response_builder,
         )
     }
 }
@@ -1062,7 +1170,7 @@ const fn map_agent_authority_error(error: KernelAgentAuthorityErrorV2) -> Stable
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use ed25519_dalek::SigningKey;
@@ -1070,15 +1178,18 @@ mod tests {
         decode_append_input_chunk_response_v2, decode_begin_input_response_v2,
         decode_finalize_input_response_v2, decode_kernel_agent_health_response_v2,
         decode_kernel_ingress_health_response_v2, derive_ed25519_key_id_v2,
-        encode_kernel_ingress_operation_v2, input_channel_begin_digest_v2,
+        encode_kernel_ingress_operation_v2, encode_kernel_service_application_request_v2,
+        encode_kernel_service_request_envelope_v2, input_channel_begin_digest_v2,
         input_channel_step_digest_v2, input_chunk_digest_v2, AppendInputChunkRequestV2,
         BeginInputRequestV2, BootIdV2, ContentKindV2, Digest32V2, DirectInputChannelV2,
         EndpointRoleV2, FinalizeInputRequestV2, IngressUiAuthorizationHandleV2,
         InputChannelCommitmentV2, InputChannelV2, InputSourceKindV2, InputSourceProvenanceV2,
         InputStatusTargetV2, KernelAgentHealthRequestV2, KernelAgentOperationV2,
         KernelIngressHealthRequestV2, KernelIngressOperationV2, KernelServiceApplicationRequestV2,
-        KernelServiceApplicationResponseBodyV2, KernelServiceOperationV2, PublicServiceStateV2,
-        RequestIdV2, ServiceIdentityV2, UnixMillisV2, VersionV2, ZeroizingBytesV2,
+        KernelServiceApplicationResponseBodyV2, KernelServiceHandshakeEdgeV2,
+        KernelServiceOperationV2, KernelServiceRequestEnvelopeV2, Nonce32V2, PeerIdentityBindingV2,
+        PublicServiceStateV2, RequestIdV2, ServiceIdentityV2, UnixMillisV2, V2ClientHandshake,
+        V2ClientTransportSession, V2ServerHandshake, VersionV2, ZeroizingBytesV2,
     };
     use savana_policy_core::v2::{
         declassification_implementation_digest_v2, ClosedDeclassificationPurposeV2,
@@ -1086,16 +1197,102 @@ mod tests {
         OperationalTrustRootPurposeV2, OperationalTrustRootSetItemV2, OperationalTrustRootSetV2,
     };
     use sha2::{Digest as _, Sha256};
+    use x25519_dalek::StaticSecret;
 
     use super::CoreKernelRuntimeServicesV2;
     use crate::policy_runtime::V2GenerationLease;
     use crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2;
     use crate::v2_dispatch::{
-        KernelServiceDeploymentV2, KernelServiceDispatcherV2, VerifiedKernelServicePeerV2,
+        KernelResponseFailurePointV2, KernelRuntimeResponsePreparationErrorV2,
+        KernelServiceDeploymentV2, KernelServiceDispatcherV2, PreparedKernelServiceResponseV2,
+        SuiteOneResponseSessionSlotV2, VerifiedKernelServicePeerV2,
     };
     use crate::v2_ingress_authority::{KernelIngressAuthorityV2, KernelIngressSecurityConfigV2};
     use crate::v2_input_owner::{KernelInputPublicStateV2, KernelVerifiedUiAuthorizationV2};
-    use crate::v2_kernel_owner::KernelRuntimeOwnerV2;
+    use crate::v2_kernel_owner::{
+        KernelRuntimeOwnerV2, KernelRuntimeRequestV2, KernelRuntimeServicesV2,
+    };
+
+    struct SharedCoreServicesV2(Arc<Mutex<CoreKernelRuntimeServicesV2>>);
+
+    impl KernelRuntimeServicesV2 for SharedCoreServicesV2 {
+        fn execute(
+            &mut self,
+            request: KernelRuntimeRequestV2,
+        ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2>
+        {
+            self.0.lock().unwrap().execute(request)
+        }
+    }
+
+    fn suite_one_response_session(
+        request: &KernelServiceApplicationRequestV2,
+    ) -> (SuiteOneResponseSessionSlotV2, V2ClientTransportSession) {
+        let client_key = SigningKey::from_bytes(&[0xf1; 32]);
+        let server_key = SigningKey::from_bytes(&[0xf2; 32]);
+        let observed =
+            PeerIdentityBindingV2::linux(501, 502, 503, 504, Digest32V2::new([0xf3; 32])).unwrap();
+        let edge = KernelServiceHandshakeEdgeV2::from_verified_deployment(
+            EndpointRoleV2::IngressKernel,
+            Digest32V2::new([0xf4; 32]),
+            ServiceIdentityV2::new([0xe2; 32]),
+            ServiceIdentityV2::new([0xe7; 32]),
+            derive_ed25519_key_id_v2(client_key.verifying_key().to_bytes()),
+            derive_ed25519_key_id_v2(server_key.verifying_key().to_bytes()),
+            BootIdV2::new([0xe6; 32]),
+            5,
+            Digest32V2::new([0x35; 32]),
+            7,
+            8,
+            Digest32V2::new([0xf5; 32]),
+            Digest32V2::new([0xf6; 32]),
+            Digest32V2::new([0xf7; 32]),
+            Digest32V2::new([0xf8; 32]),
+            Digest32V2::new([0xf9; 32]),
+            Digest32V2::new([0xfa; 32]),
+        )
+        .unwrap();
+        let (client, hello) = V2ClientHandshake::start(
+            edge,
+            BootIdV2::new([0xe8; 32]),
+            Nonce32V2::new([0xfb; 32]),
+            observed.clone(),
+            StaticSecret::from([0xfc; 32]),
+            &client_key,
+        )
+        .unwrap();
+        let (server, server_hello) = V2ServerHandshake::accept_client_hello(
+            edge,
+            observed,
+            &hello,
+            Nonce32V2::new([0xfd; 32]),
+            StaticSecret::from([0xfe; 32]),
+            client_key.verifying_key().to_bytes(),
+            &server_key,
+        )
+        .unwrap();
+        let (finish, mut client_session) = client
+            .accept_server_hello(
+                &server_hello,
+                server_key.verifying_key().to_bytes(),
+                &client_key,
+            )
+            .unwrap();
+        let (accepted, mut server_session, _) = server.accept_client_finish(&finish).unwrap();
+        client_session
+            .accept_server_confirmation(&accepted)
+            .unwrap();
+        let plaintext = encode_kernel_service_application_request_v2(request).unwrap();
+        let record = client_session
+            .seal_application_request(request.request_id(), request.operation().tag(), &plaintext)
+            .unwrap();
+        let opened = server_session.open_application_request(&record).unwrap();
+        assert_eq!(opened.plaintext(), plaintext);
+        (
+            SuiteOneResponseSessionSlotV2::new(server_session),
+            client_session,
+        )
+    }
 
     #[derive(Clone, Copy)]
     enum ApprovalRuleModeV2 {
@@ -1502,6 +1699,277 @@ mod tests {
                     caller,
                 ),
                 Err(savana_kernel_protocol::StableCode::PolicyDenied),
+            );
+        }
+    }
+
+    #[test]
+    fn finalize_response_construction_failure_is_atomic_across_real_dispatch() {
+        for failure in [
+            KernelResponseFailurePointV2::TypedWrapper,
+            KernelResponseFailurePointV2::ApplicationWrapper,
+            KernelResponseFailurePointV2::SignedEnvelope,
+            KernelResponseFailurePointV2::SuiteOneSeal,
+        ] {
+            let mut services = CoreKernelRuntimeServicesV2::new(4, 4096, 4, 32).unwrap();
+            services.ingress_authority = Some(approval_authority(ApprovalRuleModeV2::Admit));
+            let authorization =
+                IngressUiAuthorizationHandleV2::from_authority_entropy([0xe1; 32]).unwrap();
+            services
+                .input
+                .register_verified_ui_authorization(
+                    authorization,
+                    KernelVerifiedUiAuthorizationV2::for_test(),
+                )
+                .unwrap();
+            let manifest = Digest32V2::new([0x35; 32]);
+            let caller = ServiceIdentityV2::new([0xe2; 32]);
+            let bytes = b"response construction remains transactional";
+            let begin = services
+                .execute_operation(
+                    RequestIdV2::new([0xe3; 16]),
+                    KernelServiceOperationV2::ingress(KernelIngressOperationV2::BeginInput(
+                        BeginInputRequestV2::new(
+                            authorization,
+                            ContentKindV2::ChatText,
+                            bytes.len() as u64,
+                            Some(Digest32V2::new(Sha256::digest(bytes).into())),
+                        )
+                        .unwrap(),
+                    )),
+                    UnixMillisV2::new(100),
+                    manifest,
+                    7,
+                    9,
+                    caller,
+                )
+                .unwrap();
+            let begun = decode_begin_input_response_v2(begin.as_bytes()).unwrap();
+            let initial = input_channel_begin_digest_v2(begun.session(), InputChannelV2::ChatText);
+            let chunk =
+                input_chunk_digest_v2(begun.session(), InputChannelV2::ChatText, 0, bytes).unwrap();
+            let cumulative = input_channel_step_digest_v2(initial, 0, chunk).unwrap();
+            let append_request = || {
+                AppendInputChunkRequestV2::new(
+                    begun.writer(),
+                    DirectInputChannelV2::ChatText,
+                    0,
+                    initial,
+                    ZeroizingBytesV2::new(bytes.to_vec()).unwrap(),
+                    chunk,
+                    cumulative,
+                )
+                .unwrap()
+            };
+            let append = services
+                .execute_operation(
+                    RequestIdV2::new([0xe4; 16]),
+                    KernelServiceOperationV2::ingress(KernelIngressOperationV2::AppendInputChunk(
+                        append_request(),
+                    )),
+                    UnixMillisV2::new(110),
+                    manifest,
+                    7,
+                    9,
+                    caller,
+                )
+                .unwrap();
+            let accepted = decode_append_input_chunk_response_v2(append.as_bytes()).unwrap();
+            let finalize_request = FinalizeInputRequestV2::new(
+                begun.session(),
+                vec![InputChannelCommitmentV2::new(
+                    InputChannelV2::ChatText,
+                    1,
+                    0,
+                    bytes.len() as u64,
+                    accepted.cumulative_digest(),
+                )
+                .unwrap()],
+                InputSourceProvenanceV2::direct(
+                    InputSourceKindV2::Chat,
+                    bytes.len() as u64,
+                    Digest32V2::new(Sha256::digest(bytes).into()),
+                    VersionV2::new(1, 0, 0),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+            let shared = Arc::new(Mutex::new(services));
+            let owner =
+                KernelRuntimeOwnerV2::spawn(4, SharedCoreServicesV2(Arc::clone(&shared))).unwrap();
+            let signing_key = SigningKey::from_bytes(&[0xe5; 32]);
+            let dispatcher = KernelServiceDispatcherV2::spawn(
+                KernelServiceDeploymentV2::from_verified_startup(
+                    BootIdV2::new([0xe6; 32]),
+                    ServiceIdentityV2::new([0xe7; 32]),
+                    manifest,
+                    7,
+                )
+                .unwrap(),
+                derive_ed25519_key_id_v2(signing_key.verifying_key().to_bytes()),
+                signing_key,
+                owner,
+            )
+            .unwrap();
+            let peer = VerifiedKernelServicePeerV2::from_mutual_authentication(
+                EndpointRoleV2::IngressKernel,
+                BootIdV2::new([0xe8; 32]),
+                caller,
+            )
+            .unwrap();
+            let application_request = |request_id| {
+                KernelServiceApplicationRequestV2::new(
+                    EndpointRoleV2::IngressKernel,
+                    request_id,
+                    UnixMillisV2::new(1_000),
+                    KernelServiceOperationV2::ingress(KernelIngressOperationV2::FinalizeInput(
+                        finalize_request.clone(),
+                    )),
+                )
+                .unwrap()
+            };
+
+            let failure_result = if failure == KernelResponseFailurePointV2::SignedEnvelope {
+                let canonical = encode_kernel_service_request_envelope_v2(
+                    &KernelServiceRequestEnvelopeV2::from_authenticated_connection(
+                        EndpointRoleV2::IngressKernel,
+                        RequestIdV2::new([0xe9; 16]),
+                        BootIdV2::new([0xe8; 32]),
+                        BootIdV2::new([0xe6; 32]),
+                        caller,
+                        ServiceIdentityV2::new([0xe7; 32]),
+                        manifest,
+                        7,
+                        UnixMillisV2::new(1_000),
+                        KernelServiceOperationV2::ingress(KernelIngressOperationV2::FinalizeInput(
+                            finalize_request.clone(),
+                        )),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                dispatcher
+                    .dispatch_one_signed_with_failure_for_test(
+                        peer,
+                        V2GenerationLease::for_dispatch_test(manifest, 7),
+                        &canonical,
+                        UnixMillisV2::new(120),
+                        Instant::now() + Duration::from_secs(1),
+                        failure,
+                    )
+                    .map(|_| ())
+            } else if failure == KernelResponseFailurePointV2::SuiteOneSeal {
+                let request = application_request(RequestIdV2::new([0xe9; 16]));
+                let (response_session, mut client_session) = suite_one_response_session(&request);
+                let result = dispatcher
+                    .dispatch_one_suite_one_with_failure_for_test(
+                        peer,
+                        V2GenerationLease::for_dispatch_test(manifest, 7),
+                        request,
+                        response_session.clone(),
+                        UnixMillisV2::new(120),
+                        Instant::now() + Duration::from_secs(1),
+                        failure,
+                    )
+                    .map(|_| ());
+                let closed_error = response_session
+                    .seal_public_error(
+                        EndpointRoleV2::IngressKernel,
+                        RequestIdV2::new([0xe9; 16]),
+                        42,
+                        savana_kernel_protocol::v2::PublicStableCodeV2::ServiceUnavailable,
+                    )
+                    .unwrap();
+                client_session
+                    .open_application_response(&closed_error)
+                    .unwrap();
+                result
+            } else {
+                dispatcher
+                    .dispatch_one_application_with_failure_for_test(
+                        peer,
+                        V2GenerationLease::for_dispatch_test(manifest, 7),
+                        application_request(RequestIdV2::new([0xe9; 16])),
+                        UnixMillisV2::new(120),
+                        Instant::now() + Duration::from_secs(1),
+                        failure,
+                    )
+                    .map(|_| ())
+            };
+            assert_eq!(
+                failure_result,
+                Err(crate::v2_dispatch::KernelServiceDispatchErrorV2::Unavailable),
+            );
+            {
+                let mut services = shared.lock().unwrap();
+                assert_eq!(
+                    services
+                        .input
+                        .status(InputStatusTargetV2::Session(begun.session()))
+                        .unwrap(),
+                    KernelInputPublicStateV2::Receiving,
+                );
+                assert_eq!(
+                    services
+                        .ingress_authority
+                        .as_ref()
+                        .unwrap()
+                        .pending_record_count(),
+                    0,
+                );
+                let replay = services
+                    .execute_operation(
+                        RequestIdV2::new([0xea; 16]),
+                        KernelServiceOperationV2::ingress(
+                            KernelIngressOperationV2::AppendInputChunk(append_request()),
+                        ),
+                        UnixMillisV2::new(121),
+                        manifest,
+                        7,
+                        9,
+                        caller,
+                    )
+                    .unwrap();
+                assert_eq!(replay.as_bytes(), append.as_bytes());
+            }
+
+            let success = dispatcher
+                .dispatch_one_application(
+                    peer,
+                    V2GenerationLease::for_dispatch_test(manifest, 7),
+                    application_request(RequestIdV2::new([0xeb; 16])),
+                    UnixMillisV2::new(130),
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .unwrap();
+            let KernelServiceApplicationResponseBodyV2::Success(body) = success.body() else {
+                panic!("retry must return success")
+            };
+            decode_finalize_input_response_v2(body).unwrap();
+            let duplicate = dispatcher
+                .dispatch_one_application(
+                    peer,
+                    V2GenerationLease::for_dispatch_test(manifest, 7),
+                    application_request(RequestIdV2::new([0xec; 16])),
+                    UnixMillisV2::new(131),
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .unwrap();
+            assert_eq!(
+                duplicate.body(),
+                &KernelServiceApplicationResponseBodyV2::Error(
+                    savana_kernel_protocol::v2::PublicStableCodeV2::PolicyDenied,
+                ),
+            );
+            let services = shared.lock().unwrap();
+            assert_eq!(
+                services
+                    .ingress_authority
+                    .as_ref()
+                    .unwrap()
+                    .pending_record_count(),
+                1,
             );
         }
     }

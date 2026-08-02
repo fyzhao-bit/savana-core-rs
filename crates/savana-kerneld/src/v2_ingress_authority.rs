@@ -157,6 +157,12 @@ pub(crate) struct PreparedPendingIngressPublicationV2 {
     record: PendingIngressRecordV2,
 }
 
+impl PreparedPendingIngressPublicationV2 {
+    pub(crate) const fn response(&self) -> &PreparedPendingIngressV2 {
+        &self.response
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VerifiedIngressSettlementDecisionV2 {
     Denied,
