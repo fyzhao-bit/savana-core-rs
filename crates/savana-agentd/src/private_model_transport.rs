@@ -1,8 +1,11 @@
 use std::io::{Read as _, Write as _};
 #[cfg(test)]
 use std::net::SocketAddr;
+use std::net::SocketAddr as ResolvedSocketAddr;
 use std::net::{Shutdown, TcpStream, ToSocketAddrs as _};
-use std::sync::Arc;
+use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::{Arc, OnceLock};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
@@ -12,6 +15,8 @@ use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
 const MAX_HEADER_BYTES_V2: usize = 32 * 1024;
+const RESOLVER_QUEUE_CAPACITY_V2: usize = 8;
+const HTTP_1_1_ALPN_V2: &[u8] = b"http/1.1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PrivateModelTransportErrorV2 {
@@ -51,8 +56,91 @@ impl VerifiedMtlsClientCredentialsV2 {
             .map_err(|_| PrivateModelTransportErrorV2::InvalidDeployment)?;
         tls.enable_early_data = false;
         tls.resumption = rustls::client::Resumption::disabled();
+        tls.alpn_protocols = vec![HTTP_1_1_ALPN_V2.to_vec()];
         Ok(Self { tls: Arc::new(tls) })
     }
+}
+
+type ResolverResultV2 = Result<Vec<ResolvedSocketAddr>, PrivateModelTransportErrorV2>;
+pub(crate) type ResolverFunctionV2 =
+    dyn Fn(String, u16) -> ResolverResultV2 + Send + Sync + 'static;
+pub(crate) type ConnectorFunctionV2 =
+    dyn Fn(ResolvedSocketAddr, Duration) -> std::io::Result<TcpStream> + Send + Sync + 'static;
+
+struct ResolverRequestV2 {
+    host: String,
+    port: u16,
+    deadline: Instant,
+    response: SyncSender<ResolverResultV2>,
+}
+
+/// A single bounded resolver worker prevents one native DNS stall from
+/// creating an unbounded thread-per-request leak. If native resolution stalls,
+/// callers time out independently and the fixed queue fails closed once full.
+struct BoundedResolverV2 {
+    requests: SyncSender<ResolverRequestV2>,
+}
+
+impl BoundedResolverV2 {
+    fn new(resolve: Arc<ResolverFunctionV2>) -> Result<Self, PrivateModelTransportErrorV2> {
+        let (requests, receiver) =
+            mpsc::sync_channel::<ResolverRequestV2>(RESOLVER_QUEUE_CAPACITY_V2);
+        thread::Builder::new()
+            .name("savana-model-dns-v2".to_owned())
+            .spawn(move || {
+                while let Ok(request) = receiver.recv() {
+                    if Instant::now() >= request.deadline {
+                        let _ = request
+                            .response
+                            .send(Err(PrivateModelTransportErrorV2::DeadlineExceeded));
+                        continue;
+                    }
+                    let result = resolve(request.host, request.port);
+                    let _ = request.response.send(result);
+                }
+            })
+            .map_err(|_| PrivateModelTransportErrorV2::Unavailable)?;
+        Ok(Self { requests })
+    }
+
+    fn resolve(&self, host: &str, port: u16, deadline: Instant) -> ResolverResultV2 {
+        let (response, receiver) = mpsc::sync_channel(1);
+        let request = ResolverRequestV2 {
+            host: host.to_owned(),
+            port,
+            deadline,
+            response,
+        };
+        self.requests
+            .try_send(request)
+            .map_err(|error| match error {
+                TrySendError::Full(_) | TrySendError::Disconnected(_) => {
+                    PrivateModelTransportErrorV2::Unavailable
+                }
+            })?;
+        receiver
+            .recv_timeout(remaining_until(deadline)?)
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => PrivateModelTransportErrorV2::DeadlineExceeded,
+                mpsc::RecvTimeoutError::Disconnected => PrivateModelTransportErrorV2::Unavailable,
+            })?
+    }
+}
+
+fn shared_resolver_v2() -> Result<Arc<BoundedResolverV2>, PrivateModelTransportErrorV2> {
+    static RESOLVER: OnceLock<Option<Arc<BoundedResolverV2>>> = OnceLock::new();
+    RESOLVER
+        .get_or_init(|| {
+            let resolve: Arc<ResolverFunctionV2> = Arc::new(|host, port| {
+                (host.as_str(), port)
+                    .to_socket_addrs()
+                    .map(|addresses| addresses.collect::<Vec<_>>())
+                    .map_err(|_| PrivateModelTransportErrorV2::Unavailable)
+            });
+            BoundedResolverV2::new(resolve).ok().map(Arc::new)
+        })
+        .clone()
+        .ok_or(PrivateModelTransportErrorV2::Unavailable)
 }
 
 pub(crate) struct PinnedMtlsCborEndpointV2 {
@@ -60,8 +148,8 @@ pub(crate) struct PinnedMtlsCborEndpointV2 {
     port: u16,
     server_spki_sha256: Digest32V2,
     credentials: VerifiedMtlsClientCredentialsV2,
-    #[cfg(test)]
-    test_address: Option<SocketAddr>,
+    resolver: Arc<BoundedResolverV2>,
+    connector: Arc<ConnectorFunctionV2>,
 }
 
 impl core::fmt::Debug for PinnedMtlsCborEndpointV2 {
@@ -91,14 +179,29 @@ impl PinnedMtlsCborEndpointV2 {
             port,
             server_spki_sha256,
             credentials,
-            #[cfg(test)]
-            test_address: None,
+            resolver: shared_resolver_v2()?,
+            connector: Arc::new(|address, timeout| TcpStream::connect_timeout(&address, timeout)),
         })
     }
 
     #[cfg(test)]
     pub(crate) fn set_test_address(&mut self, address: SocketAddr) {
-        self.test_address = Some(address);
+        self.set_test_resolver(Arc::new(move |_, _| Ok(vec![address])))
+            .expect("test resolver worker must start");
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_resolver(
+        &mut self,
+        resolve: Arc<ResolverFunctionV2>,
+    ) -> Result<(), PrivateModelTransportErrorV2> {
+        self.resolver = Arc::new(BoundedResolverV2::new(resolve)?);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_connector(&mut self, connect: Arc<ConnectorFunctionV2>) {
+        self.connector = connect;
     }
 
     pub(crate) fn post_canonical_cbor(
@@ -138,19 +241,25 @@ impl PinnedMtlsCborEndpointV2 {
     }
 
     fn connect(&self, deadline: Instant) -> Result<TcpStream, PrivateModelTransportErrorV2> {
-        #[cfg(test)]
-        if let Some(address) = self.test_address {
-            return TcpStream::connect_timeout(&address, remaining_until(deadline)?)
-                .map_err(|_| io_failure(deadline));
+        let addresses = self.resolver.resolve(&self.host, self.port, deadline)?;
+        if addresses.is_empty() {
+            return Err(PrivateModelTransportErrorV2::Unavailable);
         }
-        let mut addresses = (self.host.as_str(), self.port)
-            .to_socket_addrs()
-            .map_err(|_| PrivateModelTransportErrorV2::Unavailable)?;
-        let address = addresses
-            .next()
-            .ok_or(PrivateModelTransportErrorV2::Unavailable)?;
-        TcpStream::connect_timeout(&address, remaining_until(deadline)?)
-            .map_err(|_| io_failure(deadline))
+        let candidate_count = addresses.len();
+        for (index, address) in addresses.into_iter().enumerate() {
+            let remaining = remaining_until(deadline)?;
+            let remaining_candidates = candidate_count
+                .checked_sub(index)
+                .ok_or(PrivateModelTransportErrorV2::Unavailable)?;
+            let divisor = u32::try_from(remaining_candidates)
+                .map_err(|_| PrivateModelTransportErrorV2::Unavailable)?;
+            let fair_share = remaining / divisor;
+            let timeout = fair_share.max(Duration::from_nanos(1)).min(remaining);
+            if let Ok(socket) = (self.connector)(address, timeout) {
+                return Ok(socket);
+            }
+        }
+        Err(io_failure(deadline))
     }
 
     fn exchange(
@@ -178,6 +287,9 @@ impl PinnedMtlsCborEndpointV2 {
         if Digest32V2::new(Sha256::digest(spki).into()) != self.server_spki_sha256 {
             return Err(PrivateModelTransportErrorV2::InvalidDeployment);
         }
+        if stream.conn.alpn_protocol() != Some(HTTP_1_1_ALPN_V2) {
+            return Err(PrivateModelTransportErrorV2::InvalidDeployment);
+        }
         let host = if self.port == 443 {
             self.host.clone()
         } else {
@@ -197,7 +309,22 @@ impl PinnedMtlsCborEndpointV2 {
         let content_length = validate_response_header(&header, maximum_response_body_bytes)?;
         let mut response = vec![0_u8; content_length];
         read_exact_deadline(stream, &mut response, deadline)?;
+        require_clean_eof(stream, deadline)?;
         Ok(response)
+    }
+}
+
+fn require_clean_eof(
+    stream: &mut StreamOwned<ClientConnection, TcpStream>,
+    deadline: Instant,
+) -> Result<(), PrivateModelTransportErrorV2> {
+    refresh_io_timeout(&stream.sock, deadline)?;
+    let mut trailing = [0_u8; 1];
+    match stream.read(&mut trailing) {
+        Ok(0) => Ok(()),
+        Ok(_) => Err(PrivateModelTransportErrorV2::InvalidResponse),
+        Err(_) if Instant::now() >= deadline => Err(PrivateModelTransportErrorV2::DeadlineExceeded),
+        Err(_) => Err(PrivateModelTransportErrorV2::InvalidResponse),
     }
 }
 

@@ -5,6 +5,8 @@ use crate::planner_privacy::{
     decode_mapped_workflow_v2, encode_mapper_intent_request_v2, IntentTrustBoundaryV2,
     IntentTrustDeploymentCeilingV2, MappedWorkflowV2, MapperIntentRequestV2,
 };
+#[cfg(test)]
+use crate::private_model_transport::{ConnectorFunctionV2, ResolverFunctionV2};
 use crate::private_model_transport::{
     PinnedMtlsCborEndpointV2, PrivateModelTransportErrorV2, VerifiedMtlsClientCredentialsV2,
 };
@@ -26,13 +28,27 @@ pub enum AgentMapperClientErrorV2 {
     InvalidWorkflow,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MapperEndpointDeploymentV2 {
     host: String,
     port: u16,
     server_spki_sha256: Digest32V2,
     #[cfg(test)]
     test_address: Option<std::net::SocketAddr>,
+    #[cfg(test)]
+    test_resolver: Option<std::sync::Arc<ResolverFunctionV2>>,
+    #[cfg(test)]
+    test_connector: Option<std::sync::Arc<ConnectorFunctionV2>>,
+}
+
+impl core::fmt::Debug for MapperEndpointDeploymentV2 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("MapperEndpointDeploymentV2")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .finish_non_exhaustive()
+    }
 }
 
 impl MapperEndpointDeploymentV2 {
@@ -55,6 +71,10 @@ impl MapperEndpointDeploymentV2 {
             server_spki_sha256,
             #[cfg(test)]
             test_address: None,
+            #[cfg(test)]
+            test_resolver: None,
+            #[cfg(test)]
+            test_connector: None,
         })
     }
 
@@ -67,6 +87,35 @@ impl MapperEndpointDeploymentV2 {
         let mut deployment = Self::new(host, address.port(), server_spki_sha256)?;
         deployment.test_address = Some(address);
         Ok(deployment)
+    }
+
+    #[cfg(test)]
+    fn for_test_resolver<F>(
+        host: String,
+        port: u16,
+        server_spki_sha256: Digest32V2,
+        resolve: F,
+    ) -> Result<Self, AgentMapperClientErrorV2>
+    where
+        F: Fn(&str, u16) -> std::io::Result<Vec<std::net::SocketAddr>> + Send + Sync + 'static,
+    {
+        let mut deployment = Self::new(host, port, server_spki_sha256)?;
+        deployment.test_resolver = Some(std::sync::Arc::new(move |host, port| {
+            resolve(&host, port).map_err(|_| PrivateModelTransportErrorV2::Unavailable)
+        }));
+        Ok(deployment)
+    }
+
+    #[cfg(test)]
+    fn with_test_connector<F>(mut self, connect: F) -> Self
+    where
+        F: Fn(std::net::SocketAddr, std::time::Duration) -> std::io::Result<std::net::TcpStream>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.test_connector = Some(std::sync::Arc::new(connect));
+        self
     }
 }
 
@@ -167,8 +216,13 @@ fn build_endpoint(
     #[cfg(test)]
     let endpoint = {
         let mut endpoint = endpoint;
-        if let Some(address) = deployment.test_address {
+        if let Some(resolve) = deployment.test_resolver {
+            endpoint.set_test_resolver(resolve).map_err(map_transport)?;
+        } else if let Some(address) = deployment.test_address {
             endpoint.set_test_address(address);
+        }
+        if let Some(connect) = deployment.test_connector {
+            endpoint.set_test_connector(connect);
         }
         endpoint
     };
@@ -391,6 +445,13 @@ mod tests {
     }
 
     fn spawn_pin_observer(listener: TcpListener) -> thread::JoinHandle<bool> {
+        spawn_alpn_observer(listener, None)
+    }
+
+    fn spawn_alpn_observer(
+        listener: TcpListener,
+        negotiated_alpn: Option<Vec<u8>>,
+    ) -> thread::JoinHandle<bool> {
         thread::spawn(move || {
             let mut client_roots = RootCertStore::empty();
             client_roots
@@ -399,7 +460,7 @@ mod tests {
             let client_verifier = WebPkiClientVerifier::builder(Arc::new(client_roots))
                 .build()
                 .unwrap();
-            let config = ServerConfig::builder_with_provider(Arc::new(
+            let mut config = ServerConfig::builder_with_provider(Arc::new(
                 rustls::crypto::ring::default_provider(),
             ))
             .with_protocol_versions(&[&rustls::version::TLS13])
@@ -410,6 +471,7 @@ mod tests {
                 PrivateKeyDer::try_from(tls_fixture("server_key")).unwrap(),
             )
             .unwrap();
+            config.alpn_protocols = negotiated_alpn.into_iter().collect();
             let (socket, _) = listener.accept().unwrap();
             socket
                 .set_read_timeout(Some(Duration::from_secs(2)))
@@ -433,7 +495,7 @@ mod tests {
             let client_verifier = WebPkiClientVerifier::builder(Arc::new(client_roots))
                 .build()
                 .unwrap();
-            let config = ServerConfig::builder_with_provider(Arc::new(
+            let mut config = ServerConfig::builder_with_provider(Arc::new(
                 rustls::crypto::ring::default_provider(),
             ))
             .with_protocol_versions(&[&rustls::version::TLS13])
@@ -444,6 +506,7 @@ mod tests {
                 PrivateKeyDer::try_from(tls_fixture("server_key")).unwrap(),
             )
             .unwrap();
+            config.alpn_protocols = vec![b"http/1.1".to_vec()];
             let (socket, _) = listener.accept().unwrap();
             socket
                 .set_read_timeout(Some(Duration::from_secs(2)))
@@ -471,6 +534,7 @@ mod tests {
         listener: TcpListener,
         expected_body: Vec<u8>,
         raw_response: Vec<u8>,
+        clean_close: bool,
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             let mut client_roots = RootCertStore::empty();
@@ -480,7 +544,7 @@ mod tests {
             let client_verifier = WebPkiClientVerifier::builder(Arc::new(client_roots))
                 .build()
                 .unwrap();
-            let config = ServerConfig::builder_with_provider(Arc::new(
+            let mut config = ServerConfig::builder_with_provider(Arc::new(
                 rustls::crypto::ring::default_provider(),
             ))
             .with_protocol_versions(&[&rustls::version::TLS13])
@@ -491,6 +555,7 @@ mod tests {
                 PrivateKeyDer::try_from(tls_fixture("server_key")).unwrap(),
             )
             .unwrap();
+            config.alpn_protocols = vec![b"http/1.1".to_vec()];
             let (socket, _) = listener.accept().unwrap();
             socket
                 .set_read_timeout(Some(Duration::from_secs(2)))
@@ -504,8 +569,10 @@ mod tests {
             assert_eq!(body, expected_body);
             tls.write_all(&raw_response).unwrap();
             tls.flush().unwrap();
-            tls.conn.send_close_notify();
-            let _ = tls.conn.complete_io(&mut tls.sock);
+            if clean_close {
+                tls.conn.send_close_notify();
+                let _ = tls.conn.complete_io(&mut tls.sock);
+            }
         })
     }
 
@@ -632,6 +699,74 @@ mod tests {
     }
 
     #[test]
+    fn resolver_tries_all_addresses_with_the_same_absolute_deadline() {
+        let request = mapper_request();
+        let server_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let good = server_listener.local_addr().unwrap();
+        let unused = TcpListener::bind("127.0.0.1:0").unwrap();
+        let bad = unused.local_addr().unwrap();
+        drop(unused);
+        let server = spawn_mapper_server(
+            server_listener,
+            encode_mapper_intent_request_v2(&request).unwrap(),
+            mapped_response(&request),
+        );
+        let endpoint = MapperEndpointDeploymentV2::for_test_resolver(
+            "provider.example".to_owned(),
+            good.port(),
+            server_pin(),
+            move |_, _| Ok(vec![bad, good]),
+        )
+        .unwrap()
+        .with_test_connector(move |address, timeout| {
+            if address == bad {
+                thread::sleep(timeout);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "simulated black-hole address",
+                ));
+            }
+            std::net::TcpStream::connect(address)
+        });
+        let client =
+            mapper_client(IntentTrustDeploymentCeilingV2::PrivateOnly, endpoint, None).unwrap();
+        client
+            .map(
+                &request,
+                IntentTrustBoundaryV2::Private,
+                deadline_after(Duration::from_millis(800)),
+            )
+            .unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn blocked_resolver_is_bounded_by_the_absolute_deadline() {
+        let endpoint = MapperEndpointDeploymentV2::for_test_resolver(
+            "provider.example".to_owned(),
+            443,
+            server_pin(),
+            |_, _| {
+                thread::sleep(Duration::from_millis(250));
+                Ok(vec![])
+            },
+        )
+        .unwrap();
+        let client =
+            mapper_client(IntentTrustDeploymentCeilingV2::PrivateOnly, endpoint, None).unwrap();
+        let started = Instant::now();
+        assert_eq!(
+            client.map(
+                &mapper_request(),
+                IntentTrustBoundaryV2::Private,
+                deadline_after(Duration::from_millis(75)),
+            ),
+            Err(super::AgentMapperClientErrorV2::DeadlineExceeded)
+        );
+        assert!(started.elapsed() < Duration::from_millis(200));
+    }
+
+    #[test]
     fn private_ceiling_rejects_a_configured_third_party_at_construction() {
         let private = MapperEndpointDeploymentV2::new(
             "private.example".to_owned(),
@@ -677,6 +812,31 @@ mod tests {
             Err(super::AgentMapperClientErrorV2::InvalidDeployment)
         );
         assert!(!observer.join().unwrap());
+    }
+
+    #[test]
+    fn absent_or_wrong_alpn_is_rejected_before_first_application_byte() {
+        for negotiated_alpn in [None, Some(b"h2".to_vec())] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let observer = spawn_alpn_observer(listener, negotiated_alpn);
+            let endpoint = MapperEndpointDeploymentV2::for_test(
+                "provider.example".to_owned(),
+                address,
+                server_pin(),
+            )
+            .unwrap();
+            let client =
+                mapper_client(IntentTrustDeploymentCeilingV2::PrivateOnly, endpoint, None).unwrap();
+            assert!(client
+                .map(
+                    &mapper_request(),
+                    IntentTrustBoundaryV2::Private,
+                    deadline_after(Duration::from_secs(2)),
+                )
+                .is_err());
+            assert!(!observer.join().unwrap());
+        }
     }
 
     #[test]
@@ -772,7 +932,7 @@ mod tests {
         for response in forbidden_responses {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap();
-            let server = spawn_raw_mapper_server(listener, expected_body.clone(), response);
+            let server = spawn_raw_mapper_server(listener, expected_body.clone(), response, true);
             let endpoint = MapperEndpointDeploymentV2::for_test(
                 "provider.example".to_owned(),
                 address,
@@ -791,5 +951,65 @@ mod tests {
             );
             server.join().unwrap();
         }
+    }
+
+    #[test]
+    fn trailing_application_byte_and_unclean_tls_eof_are_rejected() {
+        let request = mapper_request();
+        let expected_body = encode_mapper_intent_request_v2(&request).unwrap();
+        let mapped = mapped_response(&request);
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut raw = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/cbor\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            mapped.len()
+        )
+        .into_bytes();
+        raw.extend_from_slice(&mapped);
+        raw.push(0xff);
+        let server = spawn_raw_mapper_server(listener, expected_body.clone(), raw, true);
+        let endpoint = MapperEndpointDeploymentV2::for_test(
+            "provider.example".to_owned(),
+            address,
+            server_pin(),
+        )
+        .unwrap();
+        let client =
+            mapper_client(IntentTrustDeploymentCeilingV2::PrivateOnly, endpoint, None).unwrap();
+        assert!(client
+            .map(
+                &request,
+                IntentTrustBoundaryV2::Private,
+                deadline_after(Duration::from_secs(2)),
+            )
+            .is_err());
+        server.join().unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut raw = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/cbor\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            mapped.len()
+        )
+        .into_bytes();
+        raw.extend_from_slice(&mapped);
+        let server = spawn_raw_mapper_server(listener, expected_body, raw, false);
+        let endpoint = MapperEndpointDeploymentV2::for_test(
+            "provider.example".to_owned(),
+            address,
+            server_pin(),
+        )
+        .unwrap();
+        let client =
+            mapper_client(IntentTrustDeploymentCeilingV2::PrivateOnly, endpoint, None).unwrap();
+        assert!(client
+            .map(
+                &request,
+                IntentTrustBoundaryV2::Private,
+                deadline_after(Duration::from_secs(2)),
+            )
+            .is_err());
+        server.join().unwrap();
     }
 }

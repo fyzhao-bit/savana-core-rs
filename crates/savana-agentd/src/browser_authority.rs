@@ -571,16 +571,10 @@ impl AgentBrowserAuthorityV2 {
         } else {
             find_action_tab(&mut state, tab)?
         };
-        if let Some(existing) = tab
-            .action_replays
-            .iter()
-            .find(|entry| entry.nonce == client_request_nonce)
+        if let Some(replayed) =
+            resolve_action_replay_v2(&tab.action_replays, client_request_nonce, request_digest)
         {
-            return if existing.request_digest == request_digest {
-                Ok(existing.response.clone())
-            } else {
-                Err(AgentBrowserAuthorityErrorV2::StateConflict)
-            };
+            return replayed;
         }
         if tab.action_replays.len() >= MAX_REPLAYS_PER_TAB_V2 {
             return Err(AgentBrowserAuthorityErrorV2::Overloaded);
@@ -1445,6 +1439,23 @@ fn browser_action_request_digest(
     Ok(Digest32V2::new(hasher.finalize().into()))
 }
 
+fn resolve_action_replay_v2(
+    replays: &[ActionReplayV2],
+    nonce: Nonce32V2,
+    request_digest: Digest32V2,
+) -> Option<Result<AgentBrowserMutationResponseV2, AgentBrowserAuthorityErrorV2>> {
+    replays
+        .iter()
+        .find(|entry| entry.nonce == nonce)
+        .map(|existing| {
+            if existing.request_digest == request_digest {
+                Ok(existing.response.clone())
+            } else {
+                Err(AgentBrowserAuthorityErrorV2::StateConflict)
+            }
+        })
+}
+
 fn browser_kernel_request_id(
     tab: AgentTabSessionCapabilityV2,
     nonce: Nonce32V2,
@@ -1862,9 +1873,11 @@ mod tests {
 
     use ed25519_dalek::SigningKey;
     use savana_kernel_protocol::v2::{
-        ApprovalDecisionV2, ApprovalPurposeV2, ApprovedConnectorRegistrationHandleV2,
-        ConnectorRemovalAuthorizationHandleV2, PrincipalIdV2, SignedApprovalSettlementV2,
-        UnsignedApprovalSettlementV2,
+        encode_kernel_agent_operation_v2, ActionTemplateIdV2, ApprovalDecisionV2,
+        ApprovalPurposeV2, ApprovedConnectorRegistrationHandleV2, CommitPlannerValueRequestV2,
+        ConnectorRemovalAuthorizationHandleV2, KernelAgentOperationV2, PlannerPlanV2,
+        PlannerStepV2, PlannerTicketHandleV2, PrincipalIdV2, SignedApprovalSettlementV2,
+        ToolClassIdV2, UnsignedApprovalSettlementV2,
     };
 
     use crate::planner_privacy::IntentTrustDeploymentCeilingV2;
@@ -1944,6 +1957,90 @@ mod tests {
             )
             .unwrap()
         );
+    }
+
+    #[test]
+    fn planner_action_nonce_replay_cannot_rebind_private_to_third_party() {
+        let tab = AgentTabSessionCapabilityV2::from_authority_entropy([0x5b; 32]).unwrap();
+        let nonce = Nonce32V2::new([0x5c; 32]);
+        let private_digest =
+            browser_action_request_digest(tab, AgentBrowserActionV2::RunPlanner).unwrap();
+        let third_party_digest = browser_action_request_digest(
+            tab,
+            AgentBrowserActionV2::RunPlannerWithThirdPartyMapper,
+        )
+        .unwrap();
+        let response = AgentBrowserMutationResponseV2::PlannerCommitted { steps: vec![] };
+        let replays = vec![ActionReplayV2 {
+            request_digest: private_digest,
+            nonce,
+            response: response.clone(),
+        }];
+
+        assert_eq!(
+            resolve_action_replay_v2(&replays, nonce, private_digest),
+            Some(Ok(response))
+        );
+        assert_eq!(
+            resolve_action_replay_v2(&replays, nonce, third_party_digest),
+            Some(Err(AgentBrowserAuthorityErrorV2::StateConflict))
+        );
+    }
+
+    #[test]
+    fn mapper_boundary_choice_cannot_change_kernel_planner_payloads() {
+        let run = RunHandleV2::from_authority_entropy([0x61; 32]).unwrap();
+        let initial = ValueHandleV2::from_authority_entropy([0x62; 32]).unwrap();
+        let ticket = PlannerTicketHandleV2::from_authority_entropy([0x63; 32]).unwrap();
+        let limits = PlannerLimitsV2::new(4, 3, 2, 4096).unwrap();
+        let plan = PlannerPlanV2::new(
+            Nonce32V2::new([0x64; 32]),
+            vec![PlannerStepV2::new(
+                1,
+                ActionTemplateIdV2::new(10),
+                ToolClassIdV2::new(100),
+                vec![],
+                vec![],
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let payloads = |boundary| {
+            assert!(IntentTrustDeploymentCeilingV2::UserMayUseThirdParty.permits(boundary));
+            let prepare = PreparePlannerCallRequestV2::new(
+                run,
+                PlannerRouteIdV2::new(7),
+                StaticTemplateIdV2::new(8),
+                PlannerIntentKindV2::Search,
+                PlannerPurposeV2::PlannerCall,
+                limits,
+                vec![initial],
+            )
+            .unwrap();
+            let commit = CommitPlannerValueRequestV2::new(run, ticket, plan.clone());
+            (
+                prepare.clone(),
+                commit.clone(),
+                encode_kernel_agent_operation_v2(&KernelAgentOperationV2::PreparePlannerCall(
+                    prepare,
+                ))
+                .unwrap(),
+                encode_kernel_agent_operation_v2(&KernelAgentOperationV2::CommitPlannerValue(
+                    commit,
+                ))
+                .unwrap(),
+            )
+        };
+        let private = payloads(
+            planner_intent_boundary_for_action_v2(&AgentBrowserActionV2::RunPlanner).unwrap(),
+        );
+        let third_party = payloads(
+            planner_intent_boundary_for_action_v2(
+                &AgentBrowserActionV2::RunPlannerWithThirdPartyMapper,
+            )
+            .unwrap(),
+        );
+        assert_eq!(private, third_party);
     }
 
     fn connector_settlement(decision: ApprovalDecisionV2) -> SignedApprovalSettlementV2 {
