@@ -630,14 +630,9 @@ fn non_topological_planner_order_is_rejected_before_commit() {
             let request =
                 savana_agentd::planner_privacy::decode_structural_planner_request_v2(&body)
                     .unwrap();
-            let ids = request
-                .graph()
-                .nodes()
-                .iter()
-                .map(|node| node.id())
-                .collect::<Vec<_>>();
+            let edge = request.graph().edges()[0];
             encode_ordered_structural_plan_v2(
-                &OrderedStructuralPlanV2::new(vec![ids[1], ids[0]]).unwrap(),
+                &OrderedStructuralPlanV2::new(vec![edge.to(), edge.from()]).unwrap(),
             )
             .unwrap()
         }

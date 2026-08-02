@@ -4,7 +4,7 @@ use savana_kernel_protocol::v2::{
     encode_planner_plan_v2, ActionTemplateIdV2, ActiveToolViewV2, ArgumentNameV2,
     PlannerAbstractRelationV2, PlannerAbstractSlotV2, PlannerEnvelopeV2, PlannerIntentKindV2,
     PlannerLimitsV2, PlannerPlanV2, PlannerSlotRefV2, PlannerStepV2, StaticTemplateIdV2,
-    ToolClassIdV2,
+    ToolClassIdV2, V2DecodeContext,
 };
 use savana_policy_core::v2::EffectSetV2;
 use sha2::{Digest as _, Sha256};
@@ -14,6 +14,9 @@ use crate::planner_catalog::{BoundedPlannerSemanticTextV2, PlannerCatalogEntryV2
 pub const MAX_STRUCTURAL_NODES_V2: usize = 256;
 pub const MAX_STRUCTURAL_EDGES_V2: usize = 4096;
 const MAX_MODEL_BODY_BYTES_V2: usize = 8 * 1024 * 1024;
+const MAX_MAPPER_CATALOG_TOOLS_V2: usize = 4096;
+const MAX_MAPPER_RELATIONS_V2: usize = 512;
+const MAX_MAPPER_SEMANTIC_TEXT_BYTES_V2: usize = 1024;
 const MAX_FRESH_ID_ATTEMPTS_V2: usize = 32;
 const STRUCTURAL_NODE_ID_DOMAIN_V2: &[u8] = b"SAVANA_STRUCTURAL_NODE_ID_V2\0";
 
@@ -639,6 +642,147 @@ pub fn encode_mapper_intent_request_v2(
     Ok(bytes)
 }
 
+/// Decode the mapper-only intent projection at the private model boundary.
+///
+/// This deliberately does not decode a `PlannerEnvelopeV2`: route, nonce, and
+/// expiry are not members of this schema and cannot be smuggled through it.
+/// Every attacker-controlled collection is bounded before allocation and the
+/// final re-encode check rejects alternate CBOR spellings.
+pub fn decode_mapper_intent_request_v2(
+    bytes: &[u8],
+) -> Result<MapperIntentRequestV2, PlannerPrivacyErrorV2> {
+    if bytes.is_empty() || bytes.len() > MAX_MODEL_BODY_BYTES_V2 {
+        return Err(PlannerPrivacyErrorV2::Invalid);
+    }
+    let mut decoder = minicbor::Decoder::new(bytes);
+    if decoder.array().map_err(decode_failure)? != Some(8)
+        || decoder.u16().map_err(decode_failure)? != 2
+    {
+        return Err(PlannerPrivacyErrorV2::Invalid);
+    }
+
+    let task_template = StaticTemplateIdV2::new(decoder.u32().map_err(decode_failure)?);
+    if task_template.get() == 0 {
+        return Err(PlannerPrivacyErrorV2::Invalid);
+    }
+    let intent = match decoder.u16().map_err(decode_failure)? {
+        1 => PlannerIntentKindV2::SendMessage,
+        2 => PlannerIntentKindV2::Search,
+        3 => PlannerIntentKindV2::SummarizeDocument,
+        4 => PlannerIntentKindV2::StoreRecord,
+        _ => return Err(PlannerPrivacyErrorV2::Invalid),
+    };
+
+    let action_count = definite_length(&mut decoder, MAX_STRUCTURAL_NODES_V2)?;
+    let mut allowed_action_templates = Vec::with_capacity(action_count);
+    for _ in 0..action_count {
+        let action = ActionTemplateIdV2::new(decoder.u32().map_err(decode_failure)?);
+        if action.get() == 0
+            || allowed_action_templates
+                .last()
+                .is_some_and(|previous| previous >= &action)
+        {
+            return Err(PlannerPrivacyErrorV2::Invalid);
+        }
+        allowed_action_templates.push(action);
+    }
+
+    let slot_count = definite_length(&mut decoder, MAX_STRUCTURAL_NODES_V2)?;
+    let mut slots = Vec::with_capacity(slot_count);
+    let mut previous_slot_wire: Option<&[u8]> = None;
+    let mut context = V2DecodeContext;
+    for _ in 0..slot_count {
+        let start = decoder.position();
+        let slot = minicbor::Decode::decode(&mut decoder, &mut context).map_err(decode_failure)?;
+        let wire = &bytes[start..decoder.position()];
+        if previous_slot_wire.is_some_and(|previous| previous >= wire) {
+            return Err(PlannerPrivacyErrorV2::Invalid);
+        }
+        previous_slot_wire = Some(wire);
+        slots.push(slot);
+    }
+
+    let relation_count = definite_length(&mut decoder, MAX_MAPPER_RELATIONS_V2)?;
+    let mut relations = Vec::with_capacity(relation_count);
+    let mut previous_relation_wire: Option<&[u8]> = None;
+    for _ in 0..relation_count {
+        let start = decoder.position();
+        let relation =
+            minicbor::Decode::decode(&mut decoder, &mut context).map_err(decode_failure)?;
+        let wire = &bytes[start..decoder.position()];
+        if previous_relation_wire.is_some_and(|previous| previous >= wire) {
+            return Err(PlannerPrivacyErrorV2::Invalid);
+        }
+        previous_relation_wire = Some(wire);
+        relations.push(relation);
+    }
+
+    let effective_limits =
+        minicbor::Decode::decode(&mut decoder, &mut context).map_err(decode_failure)?;
+    let tool_count = definite_length(&mut decoder, MAX_MAPPER_CATALOG_TOOLS_V2)?;
+    let mut available_tools = Vec::with_capacity(tool_count);
+    for _ in 0..tool_count {
+        if decoder.array().map_err(decode_failure)? != Some(6) {
+            return Err(PlannerPrivacyErrorV2::Invalid);
+        }
+        let tool_class = ToolClassIdV2::new(decoder.u32().map_err(decode_failure)?);
+        let action_template = ActionTemplateIdV2::new(decoder.u32().map_err(decode_failure)?);
+        let structural_role = StructuralRoleV2::from_tag(decoder.u16().map_err(decode_failure)?)?;
+        let effect_class = EffectSetV2::from_bits(decoder.u16().map_err(decode_failure)?)
+            .ok_or(PlannerPrivacyErrorV2::Invalid)?;
+        let semantic_name = decoder.str().map_err(decode_failure)?;
+        if semantic_name.is_empty() || semantic_name.len() > MAX_MAPPER_SEMANTIC_TEXT_BYTES_V2 {
+            return Err(PlannerPrivacyErrorV2::Invalid);
+        }
+        let semantic_name = BoundedPlannerSemanticTextV2::new(semantic_name.to_owned())
+            .map_err(|_| PlannerPrivacyErrorV2::Invalid)?;
+        let semantic_description = decoder.str().map_err(decode_failure)?;
+        if semantic_description.is_empty()
+            || semantic_description.len() > MAX_MAPPER_SEMANTIC_TEXT_BYTES_V2
+        {
+            return Err(PlannerPrivacyErrorV2::Invalid);
+        }
+        let semantic_description =
+            BoundedPlannerSemanticTextV2::new(semantic_description.to_owned())
+                .map_err(|_| PlannerPrivacyErrorV2::Invalid)?;
+        let tool = MapperCatalogToolV2::new(
+            tool_class,
+            action_template,
+            structural_role,
+            effect_class,
+            semantic_name,
+            semantic_description,
+        )?;
+        if available_tools
+            .last()
+            .is_some_and(|previous: &MapperCatalogToolV2| {
+                (previous.tool_class, previous.action_template)
+                    >= (tool.tool_class, tool.action_template)
+            })
+        {
+            return Err(PlannerPrivacyErrorV2::Invalid);
+        }
+        available_tools.push(tool);
+    }
+    if decoder.position() != bytes.len() {
+        return Err(PlannerPrivacyErrorV2::Invalid);
+    }
+
+    let request = MapperIntentRequestV2 {
+        task_template,
+        intent,
+        allowed_action_templates,
+        slots,
+        relations,
+        effective_limits,
+        available_tools,
+    };
+    if encode_mapper_intent_request_v2(&request)? != bytes {
+        return Err(PlannerPrivacyErrorV2::NonCanonical);
+    }
+    Ok(request)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MappedNodeV2 {
     local_ordinal: u16,
@@ -723,7 +867,7 @@ pub struct MappedWorkflowV2 {
 pub struct StructuralNodeIdIssuerV2 {
     permutation_key: [u8; 32],
     call_sequence: u64,
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
     fixed_test_call_salt: Option<[u8; 16]>,
 }
 
@@ -737,7 +881,7 @@ impl StructuralNodeIdIssuerV2 {
                 return Ok(Self {
                     permutation_key,
                     call_sequence: 0,
-                    #[cfg(any(test, feature = "test-support"))]
+                    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
                     fixed_test_call_salt: None,
                 });
             }
@@ -755,7 +899,7 @@ impl StructuralNodeIdIssuerV2 {
         }
     }
 
-    #[cfg(feature = "test-support")]
+    #[cfg(all(feature = "test-support", debug_assertions))]
     #[doc(hidden)]
     pub fn for_test(
         permutation_key: [u8; 32],
@@ -856,8 +1000,8 @@ impl std::fmt::Debug for StructuralNodeIdIssuerV2 {
 impl MappedWorkflowV2 {
     pub fn new(
         request: &MapperIntentRequestV2,
-        nodes: Vec<MappedNodeV2>,
-        edges: Vec<MappedEdgeV2>,
+        mut nodes: Vec<MappedNodeV2>,
+        mut edges: Vec<MappedEdgeV2>,
     ) -> Result<Self, PlannerPrivacyErrorV2> {
         let limits = request.effective_limits;
         if nodes.is_empty()
@@ -867,6 +1011,11 @@ impl MappedWorkflowV2 {
         {
             return Err(PlannerPrivacyErrorV2::Invalid);
         }
+        // Mapper-local ordinals remain opaque labels, never execution order.
+        // Sorting only removes response-array enumeration as a downstream
+        // planner side channel and fixes one canonical serialization.
+        nodes.sort_by_key(|node| node.local_ordinal);
+        edges.sort_by_key(|edge| (edge.from, edge.to));
         let allowed_actions = request
             .allowed_action_templates
             .iter()
@@ -945,7 +1094,7 @@ impl MappedWorkflowV2 {
         self,
         issuer: &mut StructuralNodeIdIssuerV2,
     ) -> Result<(StructuralPlannerRequestV2, PlannerDecodeTableV2), PlannerPrivacyErrorV2> {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
         if let Some(call_salt) = issuer.fixed_test_call_salt {
             return self.relabel_from(issuer, || Ok(call_salt));
         }
@@ -988,7 +1137,7 @@ impl MappedWorkflowV2 {
             *outgoing.entry(edge.from).or_default() += 1;
             *incoming.entry(edge.to).or_default() += 1;
         }
-        let structural_nodes = self
+        let mut structural_nodes = self
             .nodes
             .iter()
             .map(|node| {
@@ -1001,11 +1150,13 @@ impl MappedWorkflowV2 {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let structural_edges = self
+        structural_nodes.sort_by_key(StructuralNodeV2::id);
+        let mut structural_edges = self
             .edges
             .iter()
             .map(|edge| StructuralEdgeV2::new(labels[&edge.from], labels[&edge.to]))
             .collect::<Result<Vec<_>, _>>()?;
+        structural_edges.sort_by_key(|edge| (edge.from(), edge.to()));
         let graph = StructuralGraphV2::new(structural_nodes, structural_edges)?;
         let entries = self
             .nodes
@@ -1739,6 +1890,127 @@ mod tests {
     }
 
     #[test]
+    fn mapper_request_decoder_accepts_only_the_canonical_six_field_schema() {
+        let request = mapper_request();
+        let encoded = encode_mapper_intent_request_v2(&request).unwrap();
+        assert_eq!(decode_mapper_intent_request_v2(&encoded).unwrap(), request);
+
+        let mut old_four_field_tool = encoded.clone();
+        let row = old_four_field_tool
+            .windows(3)
+            .position(|window| window == [0x86, 0x18, 0x64])
+            .expect("canonical six-field tool row");
+        old_four_field_tool[row] = 0x84;
+        assert_eq!(
+            decode_mapper_intent_request_v2(&old_four_field_tool),
+            Err(PlannerPrivacyErrorV2::Invalid)
+        );
+
+        let mut wrong_field_type = encoded.clone();
+        wrong_field_type[2] = 0x60;
+        assert_eq!(
+            decode_mapper_intent_request_v2(&wrong_field_type),
+            Err(PlannerPrivacyErrorV2::Invalid)
+        );
+
+        let mut unknown_intent = encoded.clone();
+        unknown_intent[3] = 5;
+        assert_eq!(
+            decode_mapper_intent_request_v2(&unknown_intent),
+            Err(PlannerPrivacyErrorV2::Invalid)
+        );
+
+        let mut noncanonical_version = encoded.clone();
+        noncanonical_version.splice(1..2, [0x18, 0x02]);
+        assert_eq!(
+            decode_mapper_intent_request_v2(&noncanonical_version),
+            Err(PlannerPrivacyErrorV2::NonCanonical)
+        );
+
+        let mut unsafe_semantic = encoded.clone();
+        let semantic = unsafe_semantic
+            .windows(b"source_tool".len())
+            .position(|window| window == b"source_tool")
+            .unwrap();
+        unsafe_semantic[semantic] = b'\n';
+        assert_eq!(
+            decode_mapper_intent_request_v2(&unsafe_semantic),
+            Err(PlannerPrivacyErrorV2::Invalid)
+        );
+
+        let mut oversize_semantic = encoded.clone();
+        let semantic = oversize_semantic
+            .windows(b"source_tool".len())
+            .position(|window| window == b"source_tool")
+            .unwrap();
+        let mut encoded_text = minicbor::Encoder::new(Vec::new());
+        encoded_text
+            .str(&"a".repeat(MAX_MAPPER_SEMANTIC_TEXT_BYTES_V2 + 1))
+            .unwrap();
+        oversize_semantic.splice(
+            semantic - 1..semantic + b"source_tool".len(),
+            encoded_text.into_writer(),
+        );
+        assert_eq!(
+            decode_mapper_intent_request_v2(&oversize_semantic),
+            Err(PlannerPrivacyErrorV2::Invalid)
+        );
+
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert_eq!(
+            decode_mapper_intent_request_v2(&trailing),
+            Err(PlannerPrivacyErrorV2::Invalid)
+        );
+    }
+
+    #[test]
+    fn mapper_request_decoder_rejects_unsorted_duplicate_and_oversize_collections() {
+        let mut unsorted_actions = mapper_request();
+        unsorted_actions.allowed_action_templates.swap(0, 1);
+        assert_eq!(
+            decode_mapper_intent_request_v2(
+                &encode_mapper_intent_request_v2(&unsorted_actions).unwrap()
+            ),
+            Err(PlannerPrivacyErrorV2::Invalid)
+        );
+
+        let mut duplicate_tools = mapper_request();
+        duplicate_tools.available_tools[1] = duplicate_tools.available_tools[0].clone();
+        assert_eq!(
+            decode_mapper_intent_request_v2(
+                &encode_mapper_intent_request_v2(&duplicate_tools).unwrap()
+            ),
+            Err(PlannerPrivacyErrorV2::Invalid)
+        );
+
+        let seed = mapper_request().available_tools[0].clone();
+        let mut oversize = mapper_request();
+        oversize.available_tools = (1..=MAX_MAPPER_CATALOG_TOOLS_V2 + 1)
+            .map(|class| {
+                MapperCatalogToolV2::new(
+                    ToolClassIdV2::new(u32::try_from(class).unwrap()),
+                    seed.action_template,
+                    seed.structural_role,
+                    seed.effect_class,
+                    seed.semantic_name.clone(),
+                    seed.semantic_description.clone(),
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            decode_mapper_intent_request_v2(&encode_mapper_intent_request_v2(&oversize).unwrap()),
+            Err(PlannerPrivacyErrorV2::Invalid)
+        );
+
+        assert_eq!(
+            decode_mapper_intent_request_v2(&vec![0; MAX_MODEL_BODY_BYTES_V2 + 1]),
+            Err(PlannerPrivacyErrorV2::Invalid)
+        );
+    }
+
+    #[test]
     fn mapper_projection_carries_bounded_rich_semantics_only_to_mapper_wire() {
         let entry = PlannerCatalogEntryV2::new(
             ToolClassIdV2::new(100),
@@ -2202,6 +2474,76 @@ mod tests {
     }
 
     #[test]
+    fn mapper_array_order_cannot_change_the_canonical_structural_request() {
+        let request = mapper_request();
+        let nodes = vec![
+            mapped_node(
+                10,
+                10,
+                100,
+                ("a", 0xa1),
+                StructuralRoleV2::Source,
+                EffectSetV2::READ,
+            ),
+            mapped_node(
+                20,
+                10,
+                100,
+                ("a", 0xa1),
+                StructuralRoleV2::Source,
+                EffectSetV2::READ,
+            ),
+            mapped_node(
+                30,
+                20,
+                200,
+                ("b", 0xb2),
+                StructuralRoleV2::Sink,
+                EffectSetV2::SEND,
+            ),
+            mapped_node(
+                40,
+                20,
+                200,
+                ("b", 0xb2),
+                StructuralRoleV2::Sink,
+                EffectSetV2::SEND,
+            ),
+        ];
+        let edges = vec![
+            MappedEdgeV2::new(10, 30).unwrap(),
+            MappedEdgeV2::new(20, 30).unwrap(),
+            MappedEdgeV2::new(30, 40).unwrap(),
+        ];
+        let first = MappedWorkflowV2::new(&request, nodes.clone(), edges.clone()).unwrap();
+        let second = MappedWorkflowV2::new(
+            &request,
+            vec![
+                nodes[3].clone(),
+                nodes[1].clone(),
+                nodes[0].clone(),
+                nodes[2].clone(),
+            ],
+            vec![edges[2], edges[1], edges[0]],
+        )
+        .unwrap();
+        let mut first_issuer = StructuralNodeIdIssuerV2::with_test_key([0x91; 32]);
+        let mut second_issuer = StructuralNodeIdIssuerV2::with_test_key([0x91; 32]);
+
+        let (first_request, _) = first
+            .relabel_with(&mut first_issuer, || Ok([0xa2; 16]))
+            .unwrap();
+        let (second_request, _) = second
+            .relabel_with(&mut second_issuer, || Ok([0xa2; 16]))
+            .unwrap();
+
+        assert_eq!(
+            encode_structural_planner_request_v2(&first_request).unwrap(),
+            encode_structural_planner_request_v2(&second_request).unwrap()
+        );
+    }
+
+    #[test]
     fn id_issuer_fails_closed_on_entropy_error_or_call_sequence_overflow() {
         let request = mapper_request();
         let workflow = || {
@@ -2235,8 +2577,8 @@ mod tests {
     #[test]
     fn deterministic_decode_uses_remote_permutation_and_local_concrete_bindings() {
         let (envelope, structural, table) = relabeled_fixture();
-        let ids = structural.graph().nodes();
-        let ordered = OrderedStructuralPlanV2::new(vec![ids[1].id(), ids[0].id()]).unwrap();
+        let edge = structural.graph().edges()[0];
+        let ordered = OrderedStructuralPlanV2::new(vec![edge.from(), edge.to()]).unwrap();
 
         let decoded = decode_ordered_plan_v2(&envelope, &table, &ordered).unwrap();
 
@@ -2263,13 +2605,13 @@ mod tests {
     #[test]
     fn deterministic_decode_rejects_missing_duplicate_unknown_and_non_topological_orders() {
         let (envelope, structural, table) = relabeled_fixture();
-        let ids = structural.graph().nodes();
+        let edge = structural.graph().edges()[0];
         let unknown = StructuralNodeIdV2::new([0xee; 16]).unwrap();
         let cases = [
-            ("missing", vec![ids[1].id()]),
-            ("duplicate", vec![ids[1].id(), ids[1].id()]),
-            ("unknown", vec![ids[1].id(), unknown]),
-            ("violates edge", vec![ids[0].id(), ids[1].id()]),
+            ("missing", vec![edge.from()]),
+            ("duplicate", vec![edge.from(), edge.from()]),
+            ("unknown", vec![edge.from(), unknown]),
+            ("violates edge", vec![edge.to(), edge.from()]),
         ];
         for (name, order) in cases {
             let ordered = OrderedStructuralPlanV2::new(order).unwrap();

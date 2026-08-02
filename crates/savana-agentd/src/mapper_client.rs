@@ -1,5 +1,5 @@
 use savana_kernel_protocol::v2::{Digest32V2, UnixMillisV2};
-#[cfg(feature = "test-support")]
+#[cfg(all(feature = "test-support", debug_assertions))]
 use sha2::Digest as _;
 use zeroize::Zeroizing;
 
@@ -7,7 +7,7 @@ use crate::planner_privacy::{
     decode_mapped_workflow_v2, encode_mapper_intent_request_v2, IntentTrustBoundaryV2,
     IntentTrustDeploymentCeilingV2, MappedWorkflowV2, MapperIntentRequestV2,
 };
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, all(feature = "test-support", debug_assertions)))]
 use crate::private_model_transport::{ConnectorFunctionV2, ResolverFunctionV2};
 use crate::private_model_transport::{
     PinnedMtlsCborEndpointV2, PrivateModelTransportErrorV2, VerifiedMtlsClientCredentialsV2,
@@ -16,7 +16,7 @@ use crate::private_model_transport::{
 const MAPPER_PATH_V2: &str = "/savana.mapper.v2/map";
 const MAX_MAPPER_BODY_BYTES_V2: usize = 8 * 1024 * 1024;
 
-#[cfg(feature = "test-support")]
+#[cfg(all(feature = "test-support", debug_assertions))]
 #[doc(hidden)]
 pub fn test_certificate_spki_sha256_v2(
     certificate: &[u8],
@@ -45,11 +45,11 @@ pub struct MapperEndpointDeploymentV2 {
     host: String,
     port: u16,
     server_spki_sha256: Digest32V2,
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
     test_address: Option<std::net::SocketAddr>,
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
     test_resolver: Option<std::sync::Arc<ResolverFunctionV2>>,
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
     test_connector: Option<std::sync::Arc<ConnectorFunctionV2>>,
 }
 
@@ -81,16 +81,16 @@ impl MapperEndpointDeploymentV2 {
             host,
             port,
             server_spki_sha256,
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
             test_address: None,
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
             test_resolver: None,
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
             test_connector: None,
         })
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
     #[doc(hidden)]
     pub fn for_test(
         host: String,
@@ -102,7 +102,7 @@ impl MapperEndpointDeploymentV2 {
         Ok(deployment)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
     #[allow(dead_code)]
     fn for_test_resolver<F>(
         host: String,
@@ -120,7 +120,7 @@ impl MapperEndpointDeploymentV2 {
         Ok(deployment)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
     #[allow(dead_code)]
     fn with_test_connector<F>(mut self, connect: F) -> Self
     where
@@ -228,7 +228,7 @@ fn build_endpoint(
         credentials,
     )
     .map_err(map_transport)?;
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
     let endpoint = {
         let mut endpoint = endpoint;
         if let Some(resolve) = deployment.test_resolver {
@@ -280,9 +280,10 @@ mod tests {
 
     use super::{MapperEndpointDeploymentV2, PinnedMtlsAgentMapperClientV2};
     use crate::planner_privacy::{
-        encode_mapped_workflow_v2, encode_mapper_intent_request_v2, IntentTrustBoundaryV2,
-        IntentTrustDeploymentCeilingV2, MappedNodeV2, MappedWorkflowV2, MapperCatalogToolV2,
-        MapperIntentRequestV2, StructuralRoleV2,
+        decode_mapper_intent_request_v2, encode_mapped_workflow_v2,
+        encode_mapper_intent_request_v2, IntentTrustBoundaryV2, IntentTrustDeploymentCeilingV2,
+        MappedNodeV2, MappedWorkflowV2, MapperCatalogToolV2, MapperIntentRequestV2,
+        StructuralRoleV2,
     };
 
     fn tls_fixture(name: &str) -> Vec<u8> {
@@ -440,6 +441,11 @@ mod tests {
                 .as_bytes()
             );
             assert_eq!(body, expected_body);
+            let decoded = decode_mapper_intent_request_v2(&body)
+                .expect("live mapper request must pass the independent boundary decoder");
+            let expected = decode_mapper_intent_request_v2(&expected_body)
+                .expect("test expectation must itself be a valid mapper request");
+            assert_eq!(decoded, expected);
             assert!(!body.windows(32).any(|window| window == [0xcc; 32]));
             assert!(!body
                 .windows(4)

@@ -100,7 +100,18 @@ struct AgentKernelClientSharedV2 {
     startup_loader: Option<Arc<VerifiedAgentKernelStartupLoaderV2>>,
     #[cfg(test)]
     successor_edge_for_test: Option<KernelServiceHandshakeEdgeV2>,
+    #[cfg(test)]
+    operation_exchange_for_test: Option<Arc<TestKernelOperationExchangeV2>>,
 }
+
+#[cfg(test)]
+type TestKernelOperationExchangeV2 = dyn Fn(
+        RequestIdV2,
+        UnixMillisV2,
+        KernelServiceOperationV2,
+    ) -> Result<Vec<u8>, AgentControlKernelClientErrorV2>
+    + Send
+    + Sync;
 
 type VerifiedAgentKernelStartupLoaderV2 =
     dyn Fn() -> Result<VerifiedDaemonStartupV2, ()> + Send + Sync;
@@ -239,6 +250,8 @@ impl SuiteOneAgentKernelClientV2 {
                 startup_loader: None,
                 #[cfg(test)]
                 successor_edge_for_test: None,
+                #[cfg(test)]
+                operation_exchange_for_test: None,
             }),
         })
     }
@@ -293,7 +306,7 @@ impl SuiteOneAgentKernelClientV2 {
         Ok(client)
     }
 
-    #[cfg(feature = "test-support")]
+    #[cfg(all(feature = "test-support", debug_assertions))]
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn from_verified_startup_for_test_support<F>(
@@ -345,6 +358,24 @@ impl SuiteOneAgentKernelClientV2 {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_operation_exchange_for_test<F>(mut self, exchange: F) -> Self
+    where
+        F: Fn(
+                RequestIdV2,
+                UnixMillisV2,
+                KernelServiceOperationV2,
+            ) -> Result<Vec<u8>, AgentControlKernelClientErrorV2>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Arc::get_mut(&mut self.shared)
+            .unwrap()
+            .operation_exchange_for_test = Some(Arc::new(exchange));
+        self
+    }
+
     fn authority(
         &self,
     ) -> Result<Arc<AgentKernelGenerationAuthorityV2>, AgentControlKernelClientErrorV2> {
@@ -360,7 +391,7 @@ impl SuiteOneAgentKernelClientV2 {
         self.reload_after_handshake_rejection(&current)
     }
 
-    #[cfg(feature = "test-support")]
+    #[cfg(all(feature = "test-support", debug_assertions))]
     #[doc(hidden)]
     pub fn reload_verified_authority_for_test_support(
         &self,
@@ -368,7 +399,7 @@ impl SuiteOneAgentKernelClientV2 {
         self.reload_verified_authority()
     }
 
-    #[cfg(feature = "test-support")]
+    #[cfg(all(feature = "test-support", debug_assertions))]
     #[doc(hidden)]
     pub fn active_generation_for_test_support(&self) -> Option<u64> {
         self.authority().ok().and_then(|authority| {
@@ -379,7 +410,7 @@ impl SuiteOneAgentKernelClientV2 {
         })
     }
 
-    #[cfg(feature = "test-support")]
+    #[cfg(all(feature = "test-support", debug_assertions))]
     #[doc(hidden)]
     pub fn prepare_ingress_for_test_support(
         &self,
@@ -545,6 +576,14 @@ impl SuiteOneAgentKernelClientV2 {
         deadline: UnixMillisV2,
         operation: KernelServiceOperationV2,
     ) -> Result<AgentKernelOperationResultV2, AgentControlKernelClientErrorV2> {
+        #[cfg(test)]
+        if let Some(exchange) = &self.shared.operation_exchange_for_test {
+            let body = exchange(request_id, deadline, operation)?;
+            return Ok(AgentKernelOperationResultV2 {
+                body,
+                authority: self.authority()?,
+            });
+        }
         let io_deadline = io_deadline(deadline)?;
         let stream = UnixStream::connect(&self.shared.socket_path)
             .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)?;

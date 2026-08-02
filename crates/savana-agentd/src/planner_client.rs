@@ -59,7 +59,7 @@ impl PinnedMtlsAgentPlannerClientV2 {
         Ok(Self { endpoint })
     }
 
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn from_verified_deployment_for_test(

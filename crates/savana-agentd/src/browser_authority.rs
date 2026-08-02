@@ -2055,14 +2055,34 @@ mod tests {
 
     mod planner_privacy {
         use super::*;
+        use std::fs::{File, OpenOptions};
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
         use crate::planner_privacy::{
-            MappedNodeV2, MappedWorkflowV2, OrderedStructuralPlanV2, StructuralNodeIdIssuerV2,
-            StructuralRoleV2,
+            decode_mapper_intent_request_v2, decode_structural_planner_request_v2,
+            encode_mapped_workflow_v2, encode_ordered_structural_plan_v2, MappedNodeV2,
+            MappedWorkflowV2, OrderedStructuralPlanV2, StructuralNodeIdIssuerV2, StructuralRoleV2,
         };
-        use crate::{BoundedPlannerSemanticTextV2, PlannerCatalogEntryV2};
+        use crate::{
+            BoundedPlannerSemanticTextV2, DurablePlannerCatalogNamespaceV2,
+            MapperEndpointDeploymentV2, PlannerCatalogEntryV2, PlannerCatalogErrorV2,
+            PlannerCatalogRollbackAnchorV2, PlannerCatalogStateHeadV2,
+        };
+        use ed25519_dalek::SigningKey;
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+        use rustls::server::WebPkiClientVerifier;
+        use rustls::{RootCertStore, ServerConfig, ServerConnection, StreamOwned};
         use savana_kernel_protocol::v2::{
-            CommitPlannerValueResponseV2, PlanRevisionDigestV2, PlanStepHandleV2,
-            PreparePlannerCallResponseV2,
+            derive_ed25519_key_id_v2, encode_commit_planner_value_response_v2,
+            encode_prepare_planner_call_response_v2, CommitPlannerValueResponseV2, EndpointRoleV2,
+            KernelAgentOperationV2, KernelServiceHandshakeEdgeV2, KernelServiceOperationV2,
+            MaskedDocumentHandleV2, PeerIdentityBindingV2, PlanRevisionDigestV2, PlanStepHandleV2,
+            PreparePlannerCallResponseV2, ServiceIdentityV2,
         };
         use savana_policy_core::v2::{ConnectorStructuralRoleV2, EffectSetV2};
         use sha2::{Digest as _, Sha256};
@@ -2076,6 +2096,448 @@ mod tests {
             fn drop(&mut self) {
                 self.held.set(false);
                 self.events.borrow_mut().push("guard_drop");
+            }
+        }
+
+        #[derive(Default)]
+        struct TestCatalogAnchor(Mutex<PlannerCatalogStateHeadV2>);
+
+        impl PlannerCatalogRollbackAnchorV2 for TestCatalogAnchor {
+            fn current_head(&self) -> Result<PlannerCatalogStateHeadV2, PlannerCatalogErrorV2> {
+                Ok(*self.0.lock().unwrap())
+            }
+
+            fn compare_and_advance(
+                &mut self,
+                expected: PlannerCatalogStateHeadV2,
+                next: PlannerCatalogStateHeadV2,
+            ) -> Result<(), PlannerCatalogErrorV2> {
+                let mut head = self.0.lock().unwrap();
+                if *head != expected || next.sequence() != expected.sequence() + 1 {
+                    return Err(PlannerCatalogErrorV2::RollbackDetected);
+                }
+                *head = next;
+                Ok(())
+            }
+        }
+
+        fn tls_fixture(name: &str) -> Vec<u8> {
+            let prefix = format!("{name}=");
+            let encoded = include_str!("../../savana-execd/tests/fixtures/provider-tls-v2.hex")
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .unwrap();
+            encoded
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    let digit = |byte: u8| match byte {
+                        b'0'..=b'9' => byte - b'0',
+                        b'a'..=b'f' => byte - b'a' + 10,
+                        _ => panic!("non-hex TLS fixture"),
+                    };
+                    (digit(pair[0]) << 4) | digit(pair[1])
+                })
+                .collect()
+        }
+
+        fn server_pin() -> Digest32V2 {
+            let certificate = tls_fixture("server_cert");
+            Digest32V2::new(
+                Sha256::digest(
+                    crate::private_model_transport::certificate_spki_der(&certificate).unwrap(),
+                )
+                .into(),
+            )
+        }
+
+        fn deadline_after(duration: Duration) -> UnixMillisV2 {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+            UnixMillisV2::new(u64::try_from((now + duration).as_millis()).unwrap())
+        }
+
+        fn model_server_config() -> ServerConfig {
+            let mut client_roots = RootCertStore::empty();
+            client_roots
+                .add(CertificateDer::from(tls_fixture("ca_cert")))
+                .unwrap();
+            let verifier = WebPkiClientVerifier::builder(Arc::new(client_roots))
+                .build()
+                .unwrap();
+            let mut config = ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(
+                vec![CertificateDer::from(tls_fixture("server_cert"))],
+                PrivateKeyDer::try_from(tls_fixture("server_key")).unwrap(),
+            )
+            .unwrap();
+            config.alpn_protocols = vec![b"http/1.1".to_vec()];
+            config
+        }
+
+        fn spawn_model_server<F>(
+            listener: TcpListener,
+            expected_path: &'static str,
+            calls: Arc<AtomicUsize>,
+            respond: F,
+        ) -> thread::JoinHandle<()>
+        where
+            F: FnOnce(Vec<u8>) -> Vec<u8> + Send + 'static,
+        {
+            thread::spawn(move || {
+                listener.set_nonblocking(true).unwrap();
+                let accept_deadline = Instant::now() + Duration::from_secs(3);
+                let (socket, _) = loop {
+                    match listener.accept() {
+                        Ok(accepted) => break accepted,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if Instant::now() >= accept_deadline {
+                                return;
+                            }
+                            thread::yield_now();
+                        }
+                        Err(error) => panic!("model listener failed: {error}"),
+                    }
+                };
+                socket.set_nonblocking(false).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut tls = StreamOwned::new(
+                    ServerConnection::new(Arc::new(model_server_config())).unwrap(),
+                    socket,
+                );
+                let mut header = Vec::new();
+                while !header.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0_u8; 1];
+                    tls.read_exact(&mut byte).unwrap();
+                    header.push(byte[0]);
+                }
+                let header_text = std::str::from_utf8(&header).unwrap();
+                assert!(header_text.starts_with(&format!("POST {expected_path} HTTP/1.1\r\n")));
+                let length = header_text
+                    .split("\r\n")
+                    .find_map(|line| line.strip_prefix("Content-Length: "))
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                let mut body = vec![0_u8; length];
+                tls.read_exact(&mut body).unwrap();
+                assert!(tls
+                    .conn
+                    .peer_certificates()
+                    .is_some_and(|certificates| !certificates.is_empty()));
+                calls.fetch_add(1, Ordering::SeqCst);
+                let response = respond(body);
+                write!(
+                    tls,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/cbor\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response.len()
+                )
+                .unwrap();
+                tls.write_all(&response).unwrap();
+                tls.flush().unwrap();
+                tls.conn.send_close_notify();
+                let _ = tls.conn.complete_io(&mut tls.sock);
+            })
+        }
+
+        fn deployment_edge(
+            role: EndpointRoleV2,
+            client_key: &SigningKey,
+            server_key: &SigningKey,
+        ) -> KernelServiceHandshakeEdgeV2 {
+            KernelServiceHandshakeEdgeV2::from_verified_deployment(
+                role,
+                Digest32V2::new([0x81; 32]),
+                ServiceIdentityV2::new([0x82; 32]),
+                ServiceIdentityV2::new([0x83; 32]),
+                derive_ed25519_key_id_v2(client_key.verifying_key().to_bytes()),
+                derive_ed25519_key_id_v2(server_key.verifying_key().to_bytes()),
+                BootIdV2::new([0x84; 32]),
+                1,
+                Digest32V2::new([0x85; 32]),
+                1,
+                1,
+                Digest32V2::new([0x86; 32]),
+                Digest32V2::new([0x87; 32]),
+                Digest32V2::new([0x88; 32]),
+                Digest32V2::new([0x89; 32]),
+                Digest32V2::new([0x8a; 32]),
+                Digest32V2::new([0x8b; 32]),
+            )
+            .unwrap()
+        }
+
+        #[derive(Default)]
+        struct PipelineCalls {
+            prepare: AtomicUsize,
+            commit: AtomicUsize,
+            mapper: AtomicUsize,
+            planner: AtomicUsize,
+        }
+
+        struct ActFixture {
+            authority: AgentBrowserAuthorityV2,
+            tab: AgentTabSessionCapabilityV2,
+            calls: Arc<PipelineCalls>,
+            mapper_server: thread::JoinHandle<()>,
+            planner_server: thread::JoinHandle<()>,
+            _directory: tempfile::TempDir,
+        }
+
+        fn act_fixture(commit_fails: bool) -> ActFixture {
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            let calls = Arc::new(PipelineCalls::default());
+            let active = ActiveToolViewV2::new(
+                ToolHandleV2::from_authority_entropy([0x91; 32]).unwrap(),
+                ActionTemplateIdV2::new(10),
+                ToolClassIdV2::new(100),
+                StaticTemplateIdV2::new(7),
+            )
+            .unwrap();
+
+            let mapper_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mapper_address = mapper_listener.local_addr().unwrap();
+            let mapper_calls = Arc::clone(&calls);
+            let mapper_server = spawn_model_server(
+                mapper_listener,
+                "/savana.mapper.v2/map",
+                Arc::new(AtomicUsize::new(0)),
+                move |body| {
+                    mapper_calls.mapper.fetch_add(1, Ordering::SeqCst);
+                    let request = decode_mapper_intent_request_v2(&body).unwrap();
+                    assert_eq!(request.available_tools().len(), 1);
+                    assert_eq!(
+                        request.available_tools()[0].semantic_name(),
+                        "customer_lookup"
+                    );
+                    let node = MappedNodeV2::new(
+                        1,
+                        ToolClassIdV2::new(100),
+                        ActionTemplateIdV2::new(10),
+                        vec![],
+                        StructuralRoleV2::Source,
+                        EffectSetV2::READ,
+                    )
+                    .unwrap();
+                    encode_mapped_workflow_v2(
+                        &MappedWorkflowV2::new(&request, vec![node], vec![]).unwrap(),
+                    )
+                    .unwrap()
+                },
+            );
+
+            let planner_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let planner_address = planner_listener.local_addr().unwrap();
+            let planner_calls = Arc::clone(&calls);
+            let planner_server = spawn_model_server(
+                planner_listener,
+                "/savana.planner.v2/plan",
+                Arc::new(AtomicUsize::new(0)),
+                move |body| {
+                    planner_calls.planner.fetch_add(1, Ordering::SeqCst);
+                    let request = decode_structural_planner_request_v2(&body).unwrap();
+                    assert_eq!(request.graph().nodes().len(), 1);
+                    encode_ordered_structural_plan_v2(
+                        &OrderedStructuralPlanV2::new(vec![request.graph().nodes()[0].id()])
+                            .unwrap(),
+                    )
+                    .unwrap()
+                },
+            );
+
+            let mapper = PinnedMtlsAgentMapperClientV2::from_verified_deployment(
+                IntentTrustDeploymentCeilingV2::UserMayUseThirdParty,
+                MapperEndpointDeploymentV2::for_test(
+                    "provider.example".to_owned(),
+                    mapper_address,
+                    server_pin(),
+                )
+                .unwrap(),
+                Some(
+                    MapperEndpointDeploymentV2::for_test(
+                        "provider.example".to_owned(),
+                        mapper_address,
+                        server_pin(),
+                    )
+                    .unwrap(),
+                ),
+                tls_fixture("ca_cert"),
+                tls_fixture("client_cert"),
+                Zeroizing::new(tls_fixture("client_key")),
+            )
+            .unwrap();
+            let planner = PinnedMtlsAgentPlannerClientV2::from_verified_deployment_for_test(
+                "provider.example".to_owned(),
+                planner_address,
+                server_pin(),
+                tls_fixture("ca_cert"),
+                tls_fixture("client_cert"),
+                Zeroizing::new(tls_fixture("client_key")),
+            )
+            .unwrap();
+
+            let kernel_client_key = SigningKey::from_bytes(&[0x92; 32]);
+            let kernel_server_key = SigningKey::from_bytes(&[0x93; 32]);
+            let task_authority_key = SigningKey::from_bytes(&[0x94; 32]);
+            let kernel_calls = Arc::clone(&calls);
+            let kernel = SuiteOneAgentKernelClientV2::from_verified_deployment(
+                deployment_edge(
+                    EndpointRoleV2::AgentKernel,
+                    &kernel_client_key,
+                    &kernel_server_key,
+                ),
+                BootIdV2::new([0x95; 32]),
+                PeerIdentityBindingV2::linux(501, 20, 42, 99, Digest32V2::new([0x96; 32])).unwrap(),
+                kernel_client_key,
+                kernel_server_key.verifying_key().to_bytes(),
+                derive_ed25519_key_id_v2(task_authority_key.verifying_key().to_bytes()),
+                task_authority_key.verifying_key().to_bytes(),
+            )
+            .unwrap()
+            .with_operation_exchange_for_test(move |_, deadline, operation| match operation {
+                KernelServiceOperationV2::Agent(KernelAgentOperationV2::PreparePlannerCall(
+                    request,
+                )) => {
+                    kernel_calls.prepare.fetch_add(1, Ordering::SeqCst);
+                    let envelope = savana_kernel_protocol::v2::PlannerEnvelopeV2::new(
+                        request.planner_route(),
+                        request.task_template(),
+                        request.intent(),
+                        vec![ActionTemplateIdV2::new(10)],
+                        vec![],
+                        vec![],
+                        request.limits(),
+                        Nonce32V2::new([0x97; 32]),
+                        deadline,
+                    )
+                    .unwrap();
+                    let digest = Digest32V2::new(
+                        Sha256::digest(minicbor::to_vec(&envelope).unwrap()).into(),
+                    );
+                    encode_prepare_planner_call_response_v2(
+                        &PreparePlannerCallResponseV2::new(
+                            PlannerTicketHandleV2::from_authority_entropy([0x98; 32]).unwrap(),
+                            envelope,
+                            digest,
+                            Digest32V2::new([0x99; 32]),
+                            deadline,
+                        )
+                        .unwrap(),
+                    )
+                    .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+                }
+                KernelServiceOperationV2::Agent(KernelAgentOperationV2::CommitPlannerValue(
+                    request,
+                )) => {
+                    kernel_calls.commit.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(request.plan().steps().len(), 1);
+                    if commit_fails {
+                        return Err(AgentControlKernelClientErrorV2::Unavailable);
+                    }
+                    encode_commit_planner_value_response_v2(
+                        &CommitPlannerValueResponseV2::new(
+                            ValueHandleV2::from_authority_entropy([0x9a; 32]).unwrap(),
+                            Digest32V2::new([0x9b; 32]),
+                            PlanRevisionDigestV2::new([0x9c; 32]),
+                            vec![PlanStepHandleV2::from_authority_entropy([0x9d; 32]).unwrap()],
+                        )
+                        .unwrap(),
+                    )
+                    .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+                }
+                _ => panic!("unexpected fake-kernel operation"),
+            });
+
+            let approval_client_key = SigningKey::from_bytes(&[0xa1; 32]);
+            let approval_server_key = SigningKey::from_bytes(&[0xa2; 32]);
+            let approval = ApprovalSuiteOneClientV2::from_verified_deployment(
+                deployment_edge(
+                    EndpointRoleV2::AgentApproval,
+                    &approval_client_key,
+                    &approval_server_key,
+                ),
+                BootIdV2::new([0xa3; 32]),
+                PeerIdentityBindingV2::linux(501, 20, 43, 100, Digest32V2::new([0xa4; 32]))
+                    .unwrap(),
+                approval_client_key,
+                approval_server_key.verifying_key().to_bytes(),
+            )
+            .unwrap();
+
+            let gate_path = directory.path().join("effect-gate-v2");
+            File::create(&gate_path).unwrap();
+            let gate_file = OpenOptions::new().read(true).open(&gate_path).unwrap();
+            let effect_gate =
+                EffectGateCoordinatorV2::from_shared_only_descriptor(gate_file).unwrap();
+            let catalog_entry = PlannerCatalogEntryV2::new(
+                ToolClassIdV2::new(100),
+                ActionTemplateIdV2::new(10),
+                ConnectorStructuralRoleV2::Source,
+                EffectSetV2::READ,
+                BoundedPlannerSemanticTextV2::new("customer_lookup").unwrap(),
+                BoundedPlannerSemanticTextV2::new("query private customer records").unwrap(),
+            )
+            .unwrap();
+            let planner_catalog = DurablePlannerCatalogV2::open(
+                &directory.path().join("planner-catalog-state-v2.cbor"),
+                [0xa5; 32],
+                DurablePlannerCatalogNamespaceV2::from_verified_installation(
+                    Digest32V2::new([0xa6; 32]),
+                    Digest32V2::new([0xa7; 32]),
+                )
+                .unwrap(),
+                Box::<TestCatalogAnchor>::default(),
+                vec![catalog_entry],
+            )
+            .unwrap();
+            let boot = BootIdV2::new([0xa8; 32]);
+            let mut authority = AgentBrowserAuthorityV2::new(
+                effect_gate,
+                kernel,
+                approval,
+                mapper,
+                planner,
+                PlannerRouteIdV2::new(9),
+                StaticTemplateIdV2::new(7),
+                PlannerIntentKindV2::Search,
+                PlannerLimitsV2::new(2, 1, 1, 4096).unwrap(),
+                ExecutorIdentityV2::new([0xa9; 32]),
+                ProjectionIdV2::new(10),
+                DisplayProjectionIdV2::new(11),
+                boot,
+                planner_catalog,
+                StructuralNodeIdIssuerV2::new().unwrap(),
+            );
+            let tab = AgentTabSessionCapabilityV2::from_authority_entropy([0xaa; 32]).unwrap();
+            let mut tab_state = tab_record(tab, boot, FixedOriginV2::Agent8768, None);
+            tab_state.kernel_document =
+                Some(MaskedDocumentHandleV2::from_authority_entropy([0xab; 32]).unwrap());
+            tab_state.session =
+                Some(AgentSessionHandleV2::from_authority_entropy([0xac; 32]).unwrap());
+            tab_state.run = Some(RunHandleV2::from_authority_entropy([0xad; 32]).unwrap());
+            tab_state.initial_value =
+                Some(ValueHandleV2::from_authority_entropy([0xae; 32]).unwrap());
+            tab_state.active_tools = vec![active];
+            authority.state.get_mut().unwrap().tabs.push(tab_state);
+
+            ActFixture {
+                authority,
+                tab,
+                calls,
+                mapper_server,
+                planner_server,
+                _directory: directory,
             }
         }
 
@@ -2212,6 +2674,87 @@ mod tests {
                     "commit",
                     "guard_drop"
                 ]
+            );
+        }
+
+        #[test]
+        fn real_act_run_planner_caches_success_without_repeating_any_effect() {
+            let fixture = act_fixture(false);
+            let nonce = Nonce32V2::new([0xb1; 32]);
+            let request = || AgentBrowserRequestV2::Act {
+                tab: fixture.tab,
+                client_request_nonce: nonce,
+                action: AgentBrowserActionV2::RunPlanner,
+            };
+            let deadline = deadline_after(Duration::from_secs(5));
+
+            let first_result = fixture.authority.act(request(), deadline);
+            fixture.mapper_server.join().unwrap();
+            fixture.planner_server.join().unwrap();
+            let first = first_result.unwrap_or_else(|error| {
+                panic!(
+                    "first act failed at counts prepare={} mapper={} planner={} commit={}: {error:?}",
+                    fixture.calls.prepare.load(Ordering::SeqCst),
+                    fixture.calls.mapper.load(Ordering::SeqCst),
+                    fixture.calls.planner.load(Ordering::SeqCst),
+                    fixture.calls.commit.load(Ordering::SeqCst),
+                )
+            });
+            let replay = fixture.authority.act(request(), deadline).unwrap();
+
+            assert_eq!(replay, first);
+            assert_eq!(fixture.calls.prepare.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.mapper.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.planner.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.commit.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn real_act_failed_effect_claim_fences_same_nonce_and_boundary_rebinding() {
+            let fixture = act_fixture(true);
+            let nonce = Nonce32V2::new([0xb2; 32]);
+            let request = |action| AgentBrowserRequestV2::Act {
+                tab: fixture.tab,
+                client_request_nonce: nonce,
+                action,
+            };
+            let deadline = deadline_after(Duration::from_secs(5));
+
+            let first = fixture
+                .authority
+                .act(request(AgentBrowserActionV2::RunPlanner), deadline);
+            fixture.mapper_server.join().unwrap();
+            fixture.planner_server.join().unwrap();
+            assert_eq!(first, Err(AgentBrowserAuthorityErrorV2::Unavailable));
+            let counts_after_effect = (
+                fixture.calls.prepare.load(Ordering::SeqCst),
+                fixture.calls.mapper.load(Ordering::SeqCst),
+                fixture.calls.planner.load(Ordering::SeqCst),
+                fixture.calls.commit.load(Ordering::SeqCst),
+            );
+            assert_eq!(counts_after_effect, (1, 1, 1, 1));
+
+            assert_eq!(
+                fixture
+                    .authority
+                    .act(request(AgentBrowserActionV2::RunPlanner), deadline),
+                Err(AgentBrowserAuthorityErrorV2::StateConflict)
+            );
+            assert_eq!(
+                fixture.authority.act(
+                    request(AgentBrowserActionV2::RunPlannerWithThirdPartyMapper),
+                    deadline,
+                ),
+                Err(AgentBrowserAuthorityErrorV2::StateConflict)
+            );
+            assert_eq!(
+                (
+                    fixture.calls.prepare.load(Ordering::SeqCst),
+                    fixture.calls.mapper.load(Ordering::SeqCst),
+                    fixture.calls.planner.load(Ordering::SeqCst),
+                    fixture.calls.commit.load(Ordering::SeqCst),
+                ),
+                counts_after_effect
             );
         }
     }
