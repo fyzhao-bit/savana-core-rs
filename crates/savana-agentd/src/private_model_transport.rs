@@ -1,5 +1,5 @@
 use std::io::{Read as _, Write as _};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use std::net::SocketAddr;
 use std::net::SocketAddr as ResolvedSocketAddr;
 use std::net::{Shutdown, TcpStream, ToSocketAddrs as _};
@@ -184,13 +184,13 @@ impl PinnedMtlsCborEndpointV2 {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn set_test_address(&mut self, address: SocketAddr) {
         self.set_test_resolver(Arc::new(move |_, _| Ok(vec![address])))
             .expect("test resolver worker must start");
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn set_test_resolver(
         &mut self,
         resolve: Arc<ResolverFunctionV2>,
@@ -199,7 +199,7 @@ impl PinnedMtlsCborEndpointV2 {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn set_test_connector(&mut self, connect: Arc<ConnectorFunctionV2>) {
         self.connector = connect;
     }

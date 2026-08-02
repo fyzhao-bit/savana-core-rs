@@ -16,35 +16,40 @@ use savana_kernel_protocol::v2::{
     ApprovalUiRecordHandleV2, AuthorizeConnectorRegistrationRequestV2,
     AuthorizeConnectorRegistrationResponseV2, AuthorizeReleaseRequestV2,
     AuthorizeToolCallRequestV2, BootIdV2, CloseAgentSessionRequestV2, CommitPlannerValueRequestV2,
-    ConnectorApprovalRecordHandleV2, ConnectorRegistrySnapshotRequestV2, Digest32V2,
-    DispatchExecutionRequestV2, DispatchReleaseRequestV2, DisplayProjectionIdV2,
-    EvaluateToolCallRequestV2, EvaluateToolCallResponseV2, ExecutionHandleV2,
-    ExecutionStatusTargetV2, ExecutionTicketHandleV2, ExecutorIdentityV2,
-    FixedBrowserFormPostCarrierV2, FixedOriginV2, GetExecutionStatusRequestV2,
-    GetReleaseStatusRequestV2, KernelAgentOperationV2, KernelAgentViewCursorV2,
-    MaskedDocumentHandleV2, NamedArgumentValueBindingV2, Nonce32V2,
+    CommitPlannerValueResponseV2, ConnectorApprovalRecordHandleV2,
+    ConnectorRegistrySnapshotRequestV2, Digest32V2, DispatchExecutionRequestV2,
+    DispatchReleaseRequestV2, DisplayProjectionIdV2, EvaluateToolCallRequestV2,
+    EvaluateToolCallResponseV2, ExecutionHandleV2, ExecutionStatusTargetV2,
+    ExecutionTicketHandleV2, ExecutorIdentityV2, FixedBrowserFormPostCarrierV2, FixedOriginV2,
+    GetExecutionStatusRequestV2, GetReleaseStatusRequestV2, KernelAgentOperationV2,
+    KernelAgentViewCursorV2, MaskedDocumentHandleV2, NamedArgumentValueBindingV2, Nonce32V2,
     PendingConnectorRegistrationHandleV2, PendingReleaseHandleV2, PendingToolCallHandleV2,
     PlanStepHandleV2, PlannerIntentKindV2, PlannerLimitsV2, PlannerPlanV2, PlannerPurposeV2,
     PlannerRouteIdV2, PlannerTicketHandleV2, PrepareConnectorRegistrationRequestV2,
     PrepareConnectorRemovalRequestV2, PrepareConnectorRemovalResponseV2,
-    PrepareFollowupIngressRequestV2, PreparePlannerCallRequestV2, PrepareReleaseRequestV2,
-    ProjectionIdV2, ProposeConnectorRegistrationRequestV2, ProposeToolCallRequestV2,
-    PublicDispatchCompletionV2, PublicExecutionStatusV2, PublicStableCodeV2, RegisteredApprovalV2,
-    RegisteredUiAuthenticationV2, ReleaseApprovalRecordHandleV2, ReleaseHandleV2,
-    ReleaseKernelApprovalHandleV2, ReleaseStatusTargetV2, ReleaseTicketHandleV2,
-    RemoveConnectorRequestV2, RemoveConnectorResponseV2, RequestIdV2,
-    ResumeCommittedAgentAuthenticationResponseV2, RunHandleV2, SignedDurableTaskCorrelationV2,
-    SignedUiAuthenticationSettlementV2, StaticTemplateIdV2, ToolApprovalRecordHandleV2,
-    ToolHandleV2, ToolKernelApprovalHandleV2, UnixMillisV2, ValueHandleV2,
+    PrepareFollowupIngressRequestV2, PreparePlannerCallRequestV2, PreparePlannerCallResponseV2,
+    PrepareReleaseRequestV2, ProjectionIdV2, ProposeConnectorRegistrationRequestV2,
+    ProposeToolCallRequestV2, PublicDispatchCompletionV2, PublicExecutionStatusV2,
+    PublicStableCodeV2, RegisteredApprovalV2, RegisteredUiAuthenticationV2,
+    ReleaseApprovalRecordHandleV2, ReleaseHandleV2, ReleaseKernelApprovalHandleV2,
+    ReleaseStatusTargetV2, ReleaseTicketHandleV2, RemoveConnectorRequestV2,
+    RemoveConnectorResponseV2, RequestIdV2, ResumeCommittedAgentAuthenticationResponseV2,
+    RunHandleV2, SignedDurableTaskCorrelationV2, SignedUiAuthenticationSettlementV2,
+    StaticTemplateIdV2, ToolApprovalRecordHandleV2, ToolHandleV2, ToolKernelApprovalHandleV2,
+    UnixMillisV2, ValueHandleV2,
 };
 use zeroize::Zeroizing;
 
 use crate::{
     effect_gate::{EffectGateCoordinatorV2, EffectGateErrorV2, EffectGateOperationKindV2},
-    planner_privacy::IntentTrustBoundaryV2,
+    planner_privacy::{
+        decode_ordered_plan_v2, IntentTrustBoundaryV2, MappedWorkflowV2, MapperCatalogToolV2,
+        MapperIntentRequestV2, OrderedStructuralPlanV2, StructuralNodeIdIssuerV2,
+        StructuralPlannerRequestV2,
+    },
     AgentControlKernelClientErrorV2, AgentMapperClientErrorV2, AgentPlannerClientErrorV2,
     DurablePlannerCatalogV2, PinnedMtlsAgentMapperClientV2, PinnedMtlsAgentPlannerClientV2,
-    SuiteOneAgentKernelClientV2,
+    PlannerCatalogEntryV2, SuiteOneAgentKernelClientV2,
 };
 
 const MAX_AUTHENTICATIONS_V2: usize = 4096;
@@ -102,7 +107,6 @@ enum BrowserObjectBindingV2 {
         reference: AgentMaskedDocumentRefV2,
         kernel: MaskedDocumentHandleV2,
     },
-    #[allow(dead_code)] // Restored by Task 5's structural mapper/planner/decode pipeline.
     PlanStep {
         reference: AgentPlanStepRefV2,
         kernel: PlanStepHandleV2,
@@ -192,26 +196,99 @@ struct AuthorityStateV2 {
     tabs: Vec<AgentTabV2>,
 }
 
+pub struct PrivatePlanningResultV2 {
+    committed: CommitPlannerValueResponseV2,
+    plan: PlannerPlanV2,
+}
+
+impl PrivatePlanningResultV2 {
+    pub const fn committed(&self) -> &CommitPlannerValueResponseV2 {
+        &self.committed
+    }
+
+    pub const fn plan(&self) -> &PlannerPlanV2 {
+        &self.plan
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_private_planning_pipeline_v2<Guard, Prepare, ProjectCatalog, Map, Plan, Commit>(
+    _effect_guard: Guard,
+    run: RunHandleV2,
+    active_tools: &[ActiveToolViewV2],
+    issuer: &Mutex<StructuralNodeIdIssuerV2>,
+    boundary: IntentTrustBoundaryV2,
+    prepare: Prepare,
+    project_catalog: ProjectCatalog,
+    map: Map,
+    plan: Plan,
+    commit: Commit,
+) -> Result<PrivatePlanningResultV2, AgentBrowserAuthorityErrorV2>
+where
+    Prepare: FnOnce() -> Result<PreparePlannerCallResponseV2, AgentBrowserAuthorityErrorV2>,
+    ProjectCatalog: FnOnce(
+        &[ActiveToolViewV2],
+    ) -> Result<Vec<PlannerCatalogEntryV2>, AgentBrowserAuthorityErrorV2>,
+    Map: FnOnce(
+        &MapperIntentRequestV2,
+        IntentTrustBoundaryV2,
+    ) -> Result<MappedWorkflowV2, AgentBrowserAuthorityErrorV2>,
+    Plan: FnOnce(
+        &StructuralPlannerRequestV2,
+    ) -> Result<OrderedStructuralPlanV2, AgentBrowserAuthorityErrorV2>,
+    Commit: FnOnce(
+        CommitPlannerValueRequestV2,
+    ) -> Result<CommitPlannerValueResponseV2, AgentBrowserAuthorityErrorV2>,
+{
+    let prepared = prepare()?;
+    let projected = project_catalog(active_tools)?;
+    let mapper_tools = projected
+        .iter()
+        .map(MapperCatalogToolV2::from_catalog_entry)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?;
+    let mapper_request =
+        MapperIntentRequestV2::new(prepared.envelope(), active_tools, mapper_tools)
+            .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?;
+    let mapped = map(&mapper_request, boundary)?;
+    let (structural_request, decode_table) = {
+        let mut issuer = issuer
+            .lock()
+            .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)?;
+        mapped
+            .relabel(&mut issuer)
+            .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)?
+    };
+    let ordered = plan(&structural_request)?;
+    let decoded = decode_ordered_plan_v2(prepared.envelope(), &decode_table, &ordered)
+        .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?;
+    let committed = commit(planner_commit_value_request_v2(
+        run,
+        prepared.ticket(),
+        decoded.clone(),
+    ))?;
+    Ok(PrivatePlanningResultV2 {
+        committed,
+        plan: decoded,
+    })
+}
+
 pub struct AgentBrowserAuthorityV2 {
     effect_gate: EffectGateCoordinatorV2,
     kernel: SuiteOneAgentKernelClientV2,
     approval: ApprovalSuiteOneClientV2,
     mapper: PinnedMtlsAgentMapperClientV2,
-    #[allow(dead_code)] // Held for Task 5; legacy envelope forwarding is forbidden.
     planner: PinnedMtlsAgentPlannerClientV2,
-    #[allow(dead_code)] // Held for Task 5's local envelope preparation.
     planner_route: PlannerRouteIdV2,
-    #[allow(dead_code)] // Held for Task 5's local envelope preparation.
     planner_template: StaticTemplateIdV2,
-    #[allow(dead_code)] // Held for Task 5's local mapper request.
     planner_intent: PlannerIntentKindV2,
-    #[allow(dead_code)] // Held for Task 5's mapper and decode bounds.
     planner_limits: PlannerLimitsV2,
     release_executor: ExecutorIdentityV2,
     release_destination_projection: ProjectionIdV2,
     release_display_projection: DisplayProjectionIdV2,
     agentd_boot_id: BootIdV2,
     planner_catalog: Mutex<DurablePlannerCatalogV2>,
+    structural_node_id_issuer: Mutex<StructuralNodeIdIssuerV2>,
     state: Mutex<AuthorityStateV2>,
 }
 
@@ -239,6 +316,7 @@ impl AgentBrowserAuthorityV2 {
         release_display_projection: DisplayProjectionIdV2,
         agentd_boot_id: BootIdV2,
         planner_catalog: DurablePlannerCatalogV2,
+        structural_node_id_issuer: StructuralNodeIdIssuerV2,
     ) -> Self {
         Self {
             effect_gate,
@@ -255,6 +333,7 @@ impl AgentBrowserAuthorityV2 {
             release_display_projection,
             agentd_boot_id,
             planner_catalog: Mutex::new(planner_catalog),
+            structural_node_id_issuer: Mutex::new(structural_node_id_issuer),
             state: Mutex::new(AuthorityStateV2::default()),
         }
     }
@@ -602,12 +681,109 @@ impl AgentBrowserAuthorityV2 {
                 }
                 AgentBrowserActionV2::RunPlanner
                 | AgentBrowserActionV2::RunPlannerWithThirdPartyMapper => {
-                    // The legacy envelope exchange is intentionally unavailable.
-                    // Task 5 wires mapper -> structural planner -> local decode as
-                    // one operation; until all three stages are present, fail
-                    // before preparing a kernel planner ticket or contacting a
-                    // remote model.
-                    return Err(AgentBrowserAuthorityErrorV2::Unavailable);
+                    let effect_guard = self
+                        .effect_gate
+                        .acquire(
+                            EffectGateOperationKindV2::PlannerExchange,
+                            effect_operation_id,
+                            effect_gate_deadline(deadline)?,
+                        )
+                        .map_err(map_effect_gate)?;
+                    let run = required(tab.run)?;
+                    let initial_value = required(tab.initial_value)?;
+                    let boundary =
+                        planner_boundary.ok_or(AgentBrowserAuthorityErrorV2::InvalidReference)?;
+                    let pipeline = execute_private_planning_pipeline_v2(
+                        effect_guard,
+                        run,
+                        &tab.active_tools,
+                        &self.structural_node_id_issuer,
+                        boundary,
+                        || {
+                            self.kernel
+                                .prepare_planner_call(
+                                    planner_prepare_call_request_v2(
+                                        run,
+                                        self.planner_route,
+                                        self.planner_template,
+                                        self.planner_intent,
+                                        self.planner_limits,
+                                        initial_value,
+                                    )?,
+                                    request_id,
+                                    deadline,
+                                )
+                                .map_err(map_kernel)
+                        },
+                        |active_tools| {
+                            self.planner_catalog
+                                .lock()
+                                .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)?
+                                .project_active(active_tools)
+                                .map_err(|error| match error {
+                                    crate::PlannerCatalogErrorV2::Invalid => {
+                                        AgentBrowserAuthorityErrorV2::InvalidReference
+                                    }
+                                    _ => AgentBrowserAuthorityErrorV2::Unavailable,
+                                })
+                        },
+                        |request, selected_boundary| {
+                            self.mapper
+                                .map(request, selected_boundary, deadline)
+                                .map_err(map_mapper)
+                        },
+                        |request| self.planner.plan(request, deadline).map_err(map_planner),
+                        |request| {
+                            self.kernel
+                                .commit_planner_value(request, request_id, deadline)
+                                .map_err(map_kernel)
+                        },
+                    )?;
+                    let committed = pipeline.committed();
+                    let plan = pipeline.plan();
+                    if committed.steps().len() != plan.steps().len()
+                        || tab.objects.len().saturating_add(committed.steps().len())
+                            > MAX_OBJECTS_PER_TAB_V2
+                    {
+                        return Err(AgentBrowserAuthorityErrorV2::StateConflict);
+                    }
+                    tab.objects
+                        .try_reserve(committed.steps().len())
+                        .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
+                    let mut references = Vec::new();
+                    references
+                        .try_reserve(committed.steps().len())
+                        .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
+                    for (kernel_step, plan_step) in
+                        committed.steps().iter().copied().zip(plan.steps())
+                    {
+                        let tool = tab
+                            .active_tools
+                            .iter()
+                            .copied()
+                            .find(|tool| {
+                                tool.action_template() == plan_step.action_template()
+                                    && tool.tool_class() == plan_step.tool_class()
+                            })
+                            .ok_or(AgentBrowserAuthorityErrorV2::StateConflict)?
+                            .tool();
+                        let arguments = plan_step
+                            .slot_bindings()
+                            .iter()
+                            .map(|(name, _)| {
+                                NamedArgumentValueBindingV2::new(name.clone(), initial_value)
+                            })
+                            .collect::<Vec<_>>();
+                        let reference = mint_step_reference(tab)?;
+                        tab.objects.push(BrowserObjectBindingV2::PlanStep {
+                            reference,
+                            kernel: kernel_step,
+                            tool,
+                            arguments,
+                        });
+                        references.push(reference);
+                    }
+                    AgentBrowserMutationResponseV2::PlannerCommitted { steps: references }
                 }
                 AgentBrowserActionV2::ProposePlanStep(reference) => {
                     let (step, tool, arguments) = tab
@@ -1533,7 +1709,6 @@ fn mint_reference(
     Ok(reference)
 }
 
-#[allow(dead_code)] // Restored by Task 5 after deterministic local decode.
 fn mint_step_reference(
     tab: &mut AgentTabV2,
 ) -> Result<AgentPlanStepRefV2, AgentBrowserAuthorityErrorV2> {
@@ -1802,7 +1977,6 @@ fn map_kernel(_: AgentControlKernelClientErrorV2) -> AgentBrowserAuthorityErrorV
     AgentBrowserAuthorityErrorV2::Unavailable
 }
 
-#[allow(dead_code)] // Restored by Task 5's structural planner call.
 fn map_planner(_: AgentPlannerClientErrorV2) -> AgentBrowserAuthorityErrorV2 {
     AgentBrowserAuthorityErrorV2::Unavailable
 }
@@ -1823,7 +1997,6 @@ fn planner_intent_boundary_for_action_v2(
     }
 }
 
-#[allow(dead_code)] // Restored by Task 5's full one-way planning pipeline.
 fn planner_prepare_call_request_v2(
     run: RunHandleV2,
     planner_route: PlannerRouteIdV2,
@@ -1844,7 +2017,6 @@ fn planner_prepare_call_request_v2(
     .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)
 }
 
-#[allow(dead_code)] // Restored by Task 5 after deterministic local decode.
 fn planner_commit_value_request_v2(
     run: RunHandleV2,
     ticket: PlannerTicketHandleV2,
@@ -1865,7 +2037,8 @@ fn map_approval(error: ApprovalSuiteOneClientErrorV2) -> AgentBrowserAuthorityEr
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
 
     use ed25519_dalek::SigningKey;
     use savana_kernel_protocol::v2::{
@@ -1879,6 +2052,169 @@ mod tests {
     use crate::planner_privacy::IntentTrustDeploymentCeilingV2;
 
     use super::*;
+
+    mod planner_privacy {
+        use super::*;
+        use crate::planner_privacy::{
+            MappedNodeV2, MappedWorkflowV2, OrderedStructuralPlanV2, StructuralNodeIdIssuerV2,
+            StructuralRoleV2,
+        };
+        use crate::{BoundedPlannerSemanticTextV2, PlannerCatalogEntryV2};
+        use savana_kernel_protocol::v2::{
+            CommitPlannerValueResponseV2, PlanRevisionDigestV2, PlanStepHandleV2,
+            PreparePlannerCallResponseV2,
+        };
+        use savana_policy_core::v2::{ConnectorStructuralRoleV2, EffectSetV2};
+        use sha2::{Digest as _, Sha256};
+
+        struct ObservableGuard {
+            held: Rc<Cell<bool>>,
+            events: Rc<RefCell<Vec<&'static str>>>,
+        }
+
+        impl Drop for ObservableGuard {
+            fn drop(&mut self) {
+                self.held.set(false);
+                self.events.borrow_mut().push("guard_drop");
+            }
+        }
+
+        #[test]
+        fn planner_privacy_pipeline_orders_and_holds_guard_through_commit() {
+            let events = Rc::new(RefCell::new(vec!["guard_acquire"]));
+            let held = Rc::new(Cell::new(true));
+            let guard = ObservableGuard {
+                held: Rc::clone(&held),
+                events: Rc::clone(&events),
+            };
+            let run = RunHandleV2::from_authority_entropy([0x31; 32]).unwrap();
+            let ticket = PlannerTicketHandleV2::from_authority_entropy([0x32; 32]).unwrap();
+            let active = ActiveToolViewV2::new(
+                ToolHandleV2::from_authority_entropy([0x33; 32]).unwrap(),
+                ActionTemplateIdV2::new(10),
+                ToolClassIdV2::new(100),
+                StaticTemplateIdV2::new(7),
+            )
+            .unwrap();
+            let envelope = savana_kernel_protocol::v2::PlannerEnvelopeV2::new(
+                PlannerRouteIdV2::new(9),
+                StaticTemplateIdV2::new(7),
+                PlannerIntentKindV2::Search,
+                vec![ActionTemplateIdV2::new(10)],
+                vec![],
+                vec![],
+                PlannerLimitsV2::new(2, 1, 1, 4096).unwrap(),
+                Nonce32V2::new([0x34; 32]),
+                UnixMillisV2::new(99_999),
+            )
+            .unwrap();
+            let envelope_digest =
+                Digest32V2::new(Sha256::digest(minicbor::to_vec(&envelope).unwrap()).into());
+            let prepared = PreparePlannerCallResponseV2::new(
+                ticket,
+                envelope,
+                envelope_digest,
+                Digest32V2::new([0x35; 32]),
+                UnixMillisV2::new(99_999),
+            )
+            .unwrap();
+            let catalog_entry = PlannerCatalogEntryV2::new(
+                ToolClassIdV2::new(100),
+                ActionTemplateIdV2::new(10),
+                ConnectorStructuralRoleV2::Source,
+                EffectSetV2::READ,
+                BoundedPlannerSemanticTextV2::new("customer_lookup").unwrap(),
+                BoundedPlannerSemanticTextV2::new("query private customer records").unwrap(),
+            )
+            .unwrap();
+            let issuer = Mutex::new(StructuralNodeIdIssuerV2::new().unwrap());
+
+            let result = execute_private_planning_pipeline_v2(
+                guard,
+                run,
+                &[active],
+                &issuer,
+                IntentTrustBoundaryV2::Private,
+                {
+                    let events = Rc::clone(&events);
+                    move || {
+                        events.borrow_mut().push("prepare");
+                        Ok(prepared)
+                    }
+                },
+                {
+                    let events = Rc::clone(&events);
+                    move |_| {
+                        events.borrow_mut().push("catalog");
+                        Ok(vec![catalog_entry])
+                    }
+                },
+                {
+                    let events = Rc::clone(&events);
+                    move |request, boundary| {
+                        events.borrow_mut().push("mapper");
+                        assert_eq!(boundary, IntentTrustBoundaryV2::Private);
+                        assert_eq!(
+                            request.available_tools()[0].semantic_name(),
+                            "customer_lookup"
+                        );
+                        let node = MappedNodeV2::new(
+                            1,
+                            ToolClassIdV2::new(100),
+                            ActionTemplateIdV2::new(10),
+                            vec![],
+                            StructuralRoleV2::Source,
+                            EffectSetV2::READ,
+                        )
+                        .unwrap();
+                        Ok(MappedWorkflowV2::new(request, vec![node], vec![]).unwrap())
+                    }
+                },
+                {
+                    let events = Rc::clone(&events);
+                    move |request| {
+                        events.borrow_mut().push("planner");
+                        Ok(
+                            OrderedStructuralPlanV2::new(vec![request.graph().nodes()[0].id()])
+                                .unwrap(),
+                        )
+                    }
+                },
+                {
+                    let events = Rc::clone(&events);
+                    let held = Rc::clone(&held);
+                    move |request| {
+                        events.borrow_mut().push("commit");
+                        assert!(held.get());
+                        assert_eq!(request.plan().envelope_nonce(), Nonce32V2::new([0x34; 32]));
+                        CommitPlannerValueResponseV2::new(
+                            ValueHandleV2::from_authority_entropy([0x36; 32]).unwrap(),
+                            Digest32V2::new([0x37; 32]),
+                            PlanRevisionDigestV2::new([0x38; 32]),
+                            vec![PlanStepHandleV2::from_authority_entropy([0x39; 32]).unwrap()],
+                        )
+                        .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)
+                    }
+                },
+            )
+            .unwrap();
+
+            assert_eq!(result.plan().steps().len(), 1);
+            assert_eq!(result.committed().steps().len(), 1);
+            assert_eq!(
+                events.borrow().as_slice(),
+                [
+                    "guard_acquire",
+                    "prepare",
+                    "catalog",
+                    "mapper",
+                    "planner",
+                    "commit",
+                    "guard_drop"
+                ]
+            );
+        }
+    }
 
     fn tab_record(
         tab: AgentTabSessionCapabilityV2,

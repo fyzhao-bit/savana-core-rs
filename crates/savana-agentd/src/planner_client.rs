@@ -59,6 +59,29 @@ impl PinnedMtlsAgentPlannerClientV2 {
         Ok(Self { endpoint })
     }
 
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_verified_deployment_for_test(
+        host: String,
+        address: std::net::SocketAddr,
+        server_spki_sha256: Digest32V2,
+        root_certificate_der: Vec<u8>,
+        client_certificate_der: Vec<u8>,
+        client_private_key_pkcs8_der: Zeroizing<Vec<u8>>,
+    ) -> Result<Self, AgentPlannerClientErrorV2> {
+        let mut client = Self::from_verified_deployment(
+            host,
+            address.port(),
+            server_spki_sha256,
+            root_certificate_der,
+            client_certificate_der,
+            client_private_key_pkcs8_der,
+        )?;
+        client.endpoint.set_test_address(address);
+        Ok(client)
+    }
+
     pub fn plan(
         &self,
         request: &StructuralPlannerRequestV2,
@@ -455,46 +478,6 @@ mod tests {
             UnixMillisV2,
         ) -> Result<OrderedStructuralPlanV2, AgentPlannerClientErrorV2> =
             PinnedMtlsAgentPlannerClientV2::plan;
-    }
-
-    #[test]
-    fn envelope_only_secret_changes_cannot_change_structural_request_bytes() {
-        #[derive(Debug, PartialEq, Eq)]
-        struct EnvelopeOnlySecrets<'a> {
-            intent: &'a [u8],
-            tool_class: u32,
-            action_template: u32,
-            semantic_name: &'a [u8],
-            semantic_description: &'a [u8],
-            nonce: [u8; 32],
-            slot_reference: [u8; 16],
-        }
-
-        let first = EnvelopeOnlySecrets {
-            intent: b"retain-customers",
-            tool_class: 0xf1e2_d3c4,
-            action_template: 0xa5b6_c7d8,
-            semantic_name: b"send_to_private_crm",
-            semantic_description: b"send to private Salesforce tenant",
-            nonce: [0xcc; 32],
-            slot_reference: [0xee; 16],
-        };
-        let second = EnvelopeOnlySecrets {
-            intent: b"investigate-merger",
-            tool_class: 0x1020_3040,
-            action_template: 0x5060_7080,
-            semantic_name: b"query_private_dataroom",
-            semantic_description: b"read confidential acquisition documents",
-            nonce: [0xdd; 32],
-            slot_reference: [0xff; 16],
-        };
-        assert_ne!(first, second);
-
-        let graph = structural_request();
-        let before = encode_structural_planner_request_v2(&graph).unwrap();
-        let _changed_envelope_only_values = second;
-        let after = encode_structural_planner_request_v2(&graph).unwrap();
-        assert_eq!(before, after);
     }
 
     #[test]

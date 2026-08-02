@@ -581,6 +581,8 @@ mod implementation {
             parse_shipped_catalog(&bootstrap.planner_shipped_catalog)?,
         )
         .map_err(|_| AgentdDaemonErrorV2::DurableStateUnavailable)?;
+        let structural_node_id_issuer = crate::planner_privacy::StructuralNodeIdIssuerV2::new()
+            .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
         let browser = Arc::new(AgentBrowserAuthorityV2::new(
             effect_gate,
             browser_kernel,
@@ -611,6 +613,7 @@ mod implementation {
             DisplayProjectionIdV2::new(bootstrap.release_display_projection),
             agentd_boot_id,
             planner_catalog,
+            structural_node_id_issuer,
         ));
         let jarvis_identity = ServiceIdentityV2::new(
             decode_hex_32_v2(&bootstrap.jarvis_control_identity)

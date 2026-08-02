@@ -9,6 +9,8 @@ use savana_kernel_protocol::v2::{
 use savana_policy_core::v2::EffectSetV2;
 use sha2::{Digest as _, Sha256};
 
+use crate::planner_catalog::{BoundedPlannerSemanticTextV2, PlannerCatalogEntryV2};
+
 pub const MAX_STRUCTURAL_NODES_V2: usize = 256;
 pub const MAX_STRUCTURAL_EDGES_V2: usize = 4096;
 const MAX_MODEL_BODY_BYTES_V2: usize = 8 * 1024 * 1024;
@@ -437,12 +439,14 @@ pub fn validate_ordered_structural_plan_v2(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MapperCatalogToolV2 {
     tool_class: ToolClassIdV2,
     action_template: ActionTemplateIdV2,
     structural_role: StructuralRoleV2,
     effect_class: EffectSetV2,
+    semantic_name: BoundedPlannerSemanticTextV2,
+    semantic_description: BoundedPlannerSemanticTextV2,
 }
 
 impl MapperCatalogToolV2 {
@@ -451,6 +455,8 @@ impl MapperCatalogToolV2 {
         action_template: ActionTemplateIdV2,
         structural_role: StructuralRoleV2,
         effect_class: EffectSetV2,
+        semantic_name: BoundedPlannerSemanticTextV2,
+        semantic_description: BoundedPlannerSemanticTextV2,
     ) -> Result<Self, PlannerPrivacyErrorV2> {
         if tool_class.get() == 0 || action_template.get() == 0 {
             return Err(PlannerPrivacyErrorV2::Invalid);
@@ -461,7 +467,29 @@ impl MapperCatalogToolV2 {
             action_template,
             structural_role,
             effect_class,
+            semantic_name,
+            semantic_description,
         })
+    }
+
+    pub fn from_catalog_entry(
+        entry: &PlannerCatalogEntryV2,
+    ) -> Result<Self, PlannerPrivacyErrorV2> {
+        let structural_role = match entry.structural_role() {
+            savana_policy_core::v2::ConnectorStructuralRoleV2::Source => StructuralRoleV2::Source,
+            savana_policy_core::v2::ConnectorStructuralRoleV2::Transform => {
+                StructuralRoleV2::Transform
+            }
+            savana_policy_core::v2::ConnectorStructuralRoleV2::Sink => StructuralRoleV2::Sink,
+        };
+        Self::new(
+            entry.tool_class(),
+            entry.action_template(),
+            structural_role,
+            entry.effects(),
+            entry.semantic_name().clone(),
+            entry.semantic_description().clone(),
+        )
     }
 
     pub const fn tool_class(&self) -> ToolClassIdV2 {
@@ -478,6 +506,14 @@ impl MapperCatalogToolV2 {
 
     pub const fn effect_class(&self) -> EffectSetV2 {
         self.effect_class
+    }
+
+    pub fn semantic_name(&self) -> &str {
+        self.semantic_name.as_str()
+    }
+
+    pub fn semantic_description(&self) -> &str {
+        self.semantic_description.as_str()
     }
 }
 
@@ -587,11 +623,13 @@ pub fn encode_mapper_intent_request_v2(
         .map_err(|_| PlannerPrivacyErrorV2::Invalid)?;
     for tool in &request.available_tools {
         encoder
-            .array(4)
+            .array(6)
             .and_then(|encoder| encoder.u32(tool.tool_class.get()))
             .and_then(|encoder| encoder.u32(tool.action_template.get()))
             .and_then(|encoder| encoder.u16(tool.structural_role.tag()))
             .and_then(|encoder| encoder.u16(tool.effect_class.bits()))
+            .and_then(|encoder| encoder.str(tool.semantic_name.as_str()))
+            .and_then(|encoder| encoder.str(tool.semantic_description.as_str()))
             .map_err(|_| PlannerPrivacyErrorV2::Invalid)?;
     }
     let bytes = encoder.into_writer();
@@ -685,6 +723,8 @@ pub struct MappedWorkflowV2 {
 pub struct StructuralNodeIdIssuerV2 {
     permutation_key: [u8; 32],
     call_sequence: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    fixed_test_call_salt: Option<[u8; 16]>,
 }
 
 impl StructuralNodeIdIssuerV2 {
@@ -697,6 +737,8 @@ impl StructuralNodeIdIssuerV2 {
                 return Ok(Self {
                     permutation_key,
                     call_sequence: 0,
+                    #[cfg(any(test, feature = "test-support"))]
+                    fixed_test_call_salt: None,
                 });
             }
         }
@@ -709,7 +751,24 @@ impl StructuralNodeIdIssuerV2 {
         Self {
             permutation_key,
             call_sequence: 0,
+            fixed_test_call_salt: None,
         }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn for_test(
+        permutation_key: [u8; 32],
+        fixed_call_salt: [u8; 16],
+    ) -> Result<Self, PlannerPrivacyErrorV2> {
+        if permutation_key == [0; 32] {
+            return Err(PlannerPrivacyErrorV2::Invalid);
+        }
+        Ok(Self {
+            permutation_key,
+            call_sequence: 0,
+            fixed_test_call_salt: Some(fixed_call_salt),
+        })
     }
 
     fn issue_for_call<F>(
@@ -886,6 +945,10 @@ impl MappedWorkflowV2 {
         self,
         issuer: &mut StructuralNodeIdIssuerV2,
     ) -> Result<(StructuralPlannerRequestV2, PlannerDecodeTableV2), PlannerPrivacyErrorV2> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(call_salt) = issuer.fixed_test_call_salt {
+            return self.relabel_from(issuer, || Ok(call_salt));
+        }
         self.relabel_from(issuer, || {
             let mut bytes = [0_u8; 16];
             getrandom::getrandom(&mut bytes)
@@ -1323,6 +1386,7 @@ fn encode_minicbor_values<T: minicbor::Encode<()>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{BoundedPlannerSemanticTextV2, PlannerCatalogEntryV2};
     use savana_kernel_protocol::v2::{
         ActionTemplateIdV2, ActiveToolViewV2, ArgumentNameV2, Nonce32V2, PlannerAbstractRelationV2,
         PlannerAbstractSlotV2, PlannerEnvelopeV2, PlannerIntentKindV2, PlannerLimitsV2,
@@ -1616,6 +1680,8 @@ mod tests {
                     ActionTemplateIdV2::new(10),
                     StructuralRoleV2::Source,
                     EffectSetV2::READ,
+                    BoundedPlannerSemanticTextV2::new("source_tool").unwrap(),
+                    BoundedPlannerSemanticTextV2::new("read source records").unwrap(),
                 )
                 .unwrap(),
                 MapperCatalogToolV2::new(
@@ -1623,6 +1689,8 @@ mod tests {
                     ActionTemplateIdV2::new(20),
                     StructuralRoleV2::Sink,
                     EffectSetV2::SEND,
+                    BoundedPlannerSemanticTextV2::new("sink_tool").unwrap(),
+                    BoundedPlannerSemanticTextV2::new("send transformed records").unwrap(),
                 )
                 .unwrap(),
             ],
@@ -1668,6 +1736,42 @@ mod tests {
             .windows(5)
             .any(|bytes| bytes == [0x1a, 0, 1, 0xe2, 0x40]));
         assert!(!encoded.windows(2).any(|bytes| bytes == [0x18, 99]));
+    }
+
+    #[test]
+    fn mapper_projection_carries_bounded_rich_semantics_only_to_mapper_wire() {
+        let entry = PlannerCatalogEntryV2::new(
+            ToolClassIdV2::new(100),
+            ActionTemplateIdV2::new(10),
+            savana_policy_core::v2::ConnectorStructuralRoleV2::Source,
+            EffectSetV2::READ,
+            BoundedPlannerSemanticTextV2::new("customer_lookup").unwrap(),
+            BoundedPlannerSemanticTextV2::new("query the private customer database").unwrap(),
+        )
+        .unwrap();
+        let tool = MapperCatalogToolV2::from_catalog_entry(&entry).unwrap();
+        let request =
+            MapperIntentRequestV2::new(&envelope(), &[active(1, 10, 100)], vec![tool]).unwrap();
+
+        let bytes = encode_mapper_intent_request_v2(&request).unwrap();
+
+        assert!(bytes
+            .windows(b"customer_lookup".len())
+            .any(|window| window == b"customer_lookup"));
+        assert!(bytes
+            .windows(b"query the private customer database".len())
+            .any(|window| window == b"query the private customer database"));
+        assert_eq!(
+            request.available_tools()[0].semantic_name(),
+            "customer_lookup"
+        );
+        assert_eq!(
+            request.available_tools()[0].semantic_description(),
+            "query the private customer database"
+        );
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("customer_lookup"));
+        assert!(!debug.contains("private customer database"));
     }
 
     #[test]
@@ -1873,6 +1977,8 @@ mod tests {
                     ActionTemplateIdV2::new(10),
                     StructuralRoleV2::Source,
                     EffectSetV2::READ,
+                    BoundedPlannerSemanticTextV2::new("source_tool").unwrap(),
+                    BoundedPlannerSemanticTextV2::new("read source records").unwrap(),
                 )
                 .unwrap(),
                 MapperCatalogToolV2::new(
@@ -1880,6 +1986,8 @@ mod tests {
                     ActionTemplateIdV2::new(20),
                     StructuralRoleV2::Sink,
                     EffectSetV2::SEND,
+                    BoundedPlannerSemanticTextV2::new("sink_tool").unwrap(),
+                    BoundedPlannerSemanticTextV2::new("send transformed records").unwrap(),
                 )
                 .unwrap(),
             ],
@@ -1958,7 +2066,7 @@ mod tests {
         let tiny_request = MapperIntentRequestV2::new(
             &tiny_envelope,
             &[active(1, 10, 100)],
-            vec![limited_request.available_tools()[0]],
+            vec![limited_request.available_tools()[0].clone()],
         )
         .unwrap();
         let workflow = MappedWorkflowV2::new(&tiny_request, vec![source], vec![]).unwrap();

@@ -41,6 +41,9 @@ pub use agent_control::{
     AgentControlKernelClientErrorV2, AgentControlKernelClientV2, KernelTaskCancellationRequestV2,
     KernelTaskPreparationRequestV2, KernelTaskStatusRequestV2, VerifiedAgentControlPeerV2,
 };
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use browser_authority::{execute_private_planning_pipeline_v2, PrivatePlanningResultV2};
 pub use browser_authority::{AgentBrowserAuthorityErrorV2, AgentBrowserAuthorityV2};
 pub use daemon::AgentdDaemonErrorV2;
 use durable::DurableAgentTaskServiceV2;
@@ -49,6 +52,9 @@ pub use kernel_authority::{
     KernelTaskAuthorityVerifierV2, KernelTaskStatementV2, SignedKernelTaskStatementV2,
 };
 pub use kernel_client::SuiteOneAgentKernelClientV2;
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use mapper_client::test_certificate_spki_sha256_v2;
 pub use mapper_client::{
     AgentMapperClientErrorV2, MapperEndpointDeploymentV2, PinnedMtlsAgentMapperClientV2,
 };

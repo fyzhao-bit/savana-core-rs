@@ -1,11 +1,13 @@
 use savana_kernel_protocol::v2::{Digest32V2, UnixMillisV2};
+#[cfg(feature = "test-support")]
+use sha2::Digest as _;
 use zeroize::Zeroizing;
 
 use crate::planner_privacy::{
     decode_mapped_workflow_v2, encode_mapper_intent_request_v2, IntentTrustBoundaryV2,
     IntentTrustDeploymentCeilingV2, MappedWorkflowV2, MapperIntentRequestV2,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use crate::private_model_transport::{ConnectorFunctionV2, ResolverFunctionV2};
 use crate::private_model_transport::{
     PinnedMtlsCborEndpointV2, PrivateModelTransportErrorV2, VerifiedMtlsClientCredentialsV2,
@@ -13,6 +15,16 @@ use crate::private_model_transport::{
 
 const MAPPER_PATH_V2: &str = "/savana.mapper.v2/map";
 const MAX_MAPPER_BODY_BYTES_V2: usize = 8 * 1024 * 1024;
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_certificate_spki_sha256_v2(
+    certificate: &[u8],
+) -> Result<Digest32V2, AgentMapperClientErrorV2> {
+    let spki = crate::private_model_transport::certificate_spki_der(certificate)
+        .ok_or(AgentMapperClientErrorV2::InvalidDeployment)?;
+    Ok(Digest32V2::new(sha2::Sha256::digest(spki).into()))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AgentMapperClientErrorV2 {
@@ -33,11 +45,11 @@ pub struct MapperEndpointDeploymentV2 {
     host: String,
     port: u16,
     server_spki_sha256: Digest32V2,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_address: Option<std::net::SocketAddr>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_resolver: Option<std::sync::Arc<ResolverFunctionV2>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_connector: Option<std::sync::Arc<ConnectorFunctionV2>>,
 }
 
@@ -69,17 +81,18 @@ impl MapperEndpointDeploymentV2 {
             host,
             port,
             server_spki_sha256,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             test_address: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             test_resolver: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             test_connector: None,
         })
     }
 
-    #[cfg(test)]
-    fn for_test(
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn for_test(
         host: String,
         address: std::net::SocketAddr,
         server_spki_sha256: Digest32V2,
@@ -89,7 +102,8 @@ impl MapperEndpointDeploymentV2 {
         Ok(deployment)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
     fn for_test_resolver<F>(
         host: String,
         port: u16,
@@ -106,7 +120,8 @@ impl MapperEndpointDeploymentV2 {
         Ok(deployment)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
     fn with_test_connector<F>(mut self, connect: F) -> Self
     where
         F: Fn(std::net::SocketAddr, std::time::Duration) -> std::io::Result<std::net::TcpStream>
@@ -213,7 +228,7 @@ fn build_endpoint(
         credentials,
     )
     .map_err(map_transport)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let endpoint = {
         let mut endpoint = endpoint;
         if let Some(resolve) = deployment.test_resolver {
@@ -329,6 +344,9 @@ mod tests {
                 ActionTemplateIdV2::new(10),
                 StructuralRoleV2::Source,
                 EffectSetV2::READ,
+                crate::BoundedPlannerSemanticTextV2::new("customer_lookup").unwrap(),
+                crate::BoundedPlannerSemanticTextV2::new("query the private customer database")
+                    .unwrap(),
             )
             .unwrap()],
         )
@@ -607,6 +625,12 @@ mod tests {
     fn live_mutual_tls_mapper_receives_only_nonce_free_canonical_intent_projection() {
         let request = mapper_request();
         let request_bytes = encode_mapper_intent_request_v2(&request).unwrap();
+        assert!(request_bytes
+            .windows(b"customer_lookup".len())
+            .any(|window| window == b"customer_lookup"));
+        assert!(request_bytes
+            .windows(b"query the private customer database".len())
+            .any(|window| window == b"query the private customer database"));
         let response = mapped_response(&request);
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address: SocketAddr = listener.local_addr().unwrap();
