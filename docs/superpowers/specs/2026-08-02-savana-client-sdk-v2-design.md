@@ -70,14 +70,14 @@ ticket, fabricate a connector reference, or skip an intermediate state.
 
 ## 4. Public SDK surface and counts
 
-The network boundary is three services. The ergonomic SDK has fourteen business
+The network boundary is three services. The ergonomic SDK has fifteen business
 methods after adding the chat and autonomous-loop operations required by the
 frontend:
 
 - `Identity.load`;
 - `Client.session` and `Client.enroll`;
 - `Session.ingest_text`, `ingest_file`, `read_view`, `run_planner`,
-  `execute`, `run_agent`, `register_connector`, `remove_connector`,
+  `execute`, `run_agent`, `release`, `register_connector`, `remove_connector`,
   `list_connectors`, `revoke`, and `close`.
 
 The eighteen core public types are:
@@ -129,6 +129,12 @@ versa. A deployment refusal becomes `PolicyRefused`.
 dispatch, and refresh actions for each plan step. The SDK never treats an HTTP
 success status as a policy success until the canonical CBOR response has been
 decoded and matched to the expected workflow state.
+
+`release` explicitly folds `PrepareRelease`, the approval ceremony,
+`DispatchRelease`, and `RefreshRelease` for a selected document handle. It is
+separate from `execute` because the existing planner response exposes only
+opaque step references and contains no trustworthy marker that lets a client
+infer which output should be publicly released.
 
 Connector registration folds prepare/propose/authorize/apply through the
 existing Agent and Approval surfaces. Removal and snapshots use their existing
@@ -212,7 +218,7 @@ public state machine against a scripted in-memory transport and prove:
 - callbacks and events never receive capability bytes or unmasked values
   except the approval display fields already intended for the human.
 
-PyO3 and Python tests prove the eighteen-type surface, fourteen business
+PyO3 and Python tests prove the eighteen-type surface, fifteen business
 methods, async event-loop behavior, exception mapping, and absence of public
 wire-type constructors. Integration tests use the existing daemon fixtures
 where practical; they do not modify daemon production behavior.
