@@ -1,5 +1,4 @@
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from pathlib import Path
 
@@ -41,8 +40,8 @@ def _bridge(callback, loop):
     runs on ``loop`` while the worker thread blocks on its result; the wrapper
     returns exactly what the coroutine returns (a ``bool`` for approvals). The
     event loop stays free to run that coroutine because it is only awaiting the
-    executor future, so there is no deadlock. Sync callbacks (and ``None``) pass
-    through unchanged.
+    ``to_thread`` future, so there is no deadlock. Sync callbacks (and ``None``)
+    pass through unchanged, so existing callers are unaffected.
     """
     if callback is None or not asyncio.iscoroutinefunction(callback):
         return callback
@@ -76,48 +75,25 @@ class Identity:
 
 
 class Client:
-    __slots__ = ("_inner", "_executor", "_owns_executor")
+    __slots__ = ("_inner",)
 
-    def __init__(self, *, max_workers=None, executor=None):
-        # Blocking core calls are offloaded to a thread so the event loop is not
-        # blocked. By default that is asyncio's shared executor (``to_thread``,
-        # capped at ~min(32, cpu+4) workers). A server fronting many concurrent
-        # sessions can pass ``max_workers`` for a dedicated pool, or its own
-        # ``executor``; each session is single-flight in the core, so the useful
-        # pool size tracks the number of concurrently active sessions.
+    def __init__(self):
         self._inner = _core._Client()
-        if executor is not None:
-            self._executor = executor
-            self._owns_executor = False
-        elif max_workers is not None:
-            self._executor = ThreadPoolExecutor(
-                max_workers=max_workers, thread_name_prefix="savana-client"
-            )
-            self._owns_executor = True
-        else:
-            self._executor = None
-            self._owns_executor = False
-
-    async def _run(self, fn, *args):
-        if self._executor is None:
-            return await asyncio.to_thread(fn, *args)
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._executor, lambda: fn(*args))
 
     async def session(self, identity, bootstrap, webauthn, approval):
         loop = asyncio.get_running_loop()
-        inner = await self._run(
+        inner = await asyncio.to_thread(
             self._inner.session,
             identity._inner,
             bootstrap,
             _bridge(webauthn, loop),
             _bridge(approval, loop),
         )
-        return Session._from_core(inner, self)
+        return Session._from_core(inner)
 
     async def enroll(self, enrollment_token, code, webauthn, identity_path):
         loop = asyncio.get_running_loop()
-        inner = await self._run(
+        inner = await asyncio.to_thread(
             self._inner.enroll,
             enrollment_token,
             code,
@@ -126,38 +102,20 @@ class Client:
         )
         return Identity._from_core(inner)
 
-    def close(self):
-        # Only a pool this client created is ours to shut down; a caller-supplied
-        # executor stays the caller's responsibility. After close the runner
-        # falls back to the shared executor, so an accidental late call still
-        # works rather than raising.
-        if self._owns_executor and self._executor is not None:
-            self._executor.shutdown(wait=False)
-        self._executor = None
-        self._owns_executor = False
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, traceback):
-        self.close()
-        return False
-
     def __repr__(self):
         return "Client(<fixed-loopback>)"
 
 
 class Session:
-    __slots__ = ("_inner", "_client", "_close_lock", "_closed")
+    __slots__ = ("_inner", "_close_lock", "_closed")
 
     def __init__(self, inner=None):
         raise TypeError("Session values are returned by Client.session")
 
     @classmethod
-    def _from_core(cls, inner, client):
+    def _from_core(cls, inner):
         self = object.__new__(cls)
         self._inner = inner
-        self._client = client
         self._close_lock = asyncio.Lock()
         self._closed = False
         return self
@@ -167,38 +125,38 @@ class Session:
         return self._inner.initial_document
 
     async def ingest_text(self, text, content_kind):
-        return await self._client._run(
+        return await asyncio.to_thread(
             self._inner.ingest_text,
             text,
             content_kind.value,
         )
 
     async def ingest_file(self, path, content_kind):
-        return await self._client._run(
+        return await asyncio.to_thread(
             self._inner.ingest_file,
             str(Path(path)),
             content_kind.value,
         )
 
     async def read_view(self, handle):
-        return await self._client._run(self._inner.read_view, handle)
+        return await asyncio.to_thread(self._inner.read_view, handle)
 
     async def run_planner(self, intent_privacy):
-        return await self._client._run(
+        return await asyncio.to_thread(
             self._inner.run_planner,
             intent_privacy.value,
         )
 
     async def execute(self, plan, approval):
         loop = asyncio.get_running_loop()
-        return await self._client._run(
+        return await asyncio.to_thread(
             self._inner.execute, plan, _bridge(approval, loop)
         )
 
     async def run_agent(self, intent_privacy, limits, approval, events):
         loop = asyncio.get_running_loop()
         task = asyncio.ensure_future(
-            self._client._run(
+            asyncio.to_thread(
                 self._inner.run_agent,
                 intent_privacy.value,
                 limits,
@@ -211,11 +169,10 @@ class Session:
         except asyncio.CancelledError:
             # The autonomous loop is the one call that can run long, so honor
             # task cancellation: trip the RunLimits cancel flag the core already
-            # polls before each request, then drain the worker thread so the
-            # session mutex is released and the session stays reusable/closeable.
-            # A blocking op with no cancel token (execute/ingest/release) is left
-            # to its bounded IO timeouts; a cancel token there would also gate
-            # close() and cannot interrupt a pending approval callback anyway.
+            # polls before every request, then drain the worker thread so the
+            # session stays reusable/closeable before the cancellation
+            # propagates. Single-shot ops have no cancel token and are left to
+            # their bounded IO timeouts.
             try:
                 limits.cancel()
             except AttributeError:
@@ -225,31 +182,31 @@ class Session:
 
     async def release(self, document, approval):
         loop = asyncio.get_running_loop()
-        return await self._client._run(
+        return await asyncio.to_thread(
             self._inner.release, document, _bridge(approval, loop)
         )
 
     async def register_connector(self, descriptor, approval):
         loop = asyncio.get_running_loop()
-        return await self._client._run(
+        return await asyncio.to_thread(
             self._inner.register_connector, descriptor, _bridge(approval, loop)
         )
 
     async def remove_connector(self, connector):
-        return await self._client._run(self._inner.remove_connector, connector)
+        return await asyncio.to_thread(self._inner.remove_connector, connector)
 
     async def list_connectors(self):
-        return await self._client._run(self._inner.list_connectors)
+        return await asyncio.to_thread(self._inner.list_connectors)
 
     async def revoke(self, document):
-        return await self._client._run(self._inner.revoke, document)
+        return await asyncio.to_thread(self._inner.revoke, document)
 
     async def close(self):
         async with self._close_lock:
             if self._closed:
                 return None
             self._closed = True
-            return await self._client._run(self._inner.close)
+            return await asyncio.to_thread(self._inner.close)
 
     async def __aenter__(self):
         return self
