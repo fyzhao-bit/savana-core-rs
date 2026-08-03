@@ -255,6 +255,29 @@ pub fn encode_agent_ui_authentication_complete_browser_response_v2(
     Ok(encoder.into_writer())
 }
 
+pub fn decode_agent_ui_authentication_complete_browser_response_v2(
+    bytes: &[u8],
+) -> Result<AgentUiAuthenticationCompleteBrowserResponseV2, ProtocolError> {
+    validate_body(bytes)?;
+    let mut decoder = minicbor::Decoder::new(bytes);
+    if decoder.array().map_err(ProtocolError::malformed)? != Some(2) {
+        return Err(malformed());
+    }
+    let mut context = V2DecodeContext;
+    let value = AgentUiAuthenticationCompleteBrowserResponseV2::new(
+        minicbor::Decode::decode(&mut decoder, &mut context)
+            .map_err(ProtocolError::from_typed_decode)?,
+        minicbor::Decode::decode(&mut decoder, &mut context)
+            .map_err(ProtocolError::from_typed_decode)?,
+    );
+    if decoder.position() != bytes.len()
+        || encode_agent_ui_authentication_complete_browser_response_v2(value)? != bytes
+    {
+        return Err(noncanonical());
+    }
+    Ok(value)
+}
+
 pub fn encode_agent_browser_request_v2(
     value: AgentBrowserRequestV2,
 ) -> Result<Vec<u8>, ProtocolError> {
@@ -371,6 +394,38 @@ pub fn encode_agent_browser_read_view_response_v2(
         return Err(malformed());
     }
     Ok(bytes)
+}
+
+pub fn decode_agent_browser_read_view_response_v2(
+    bytes: &[u8],
+) -> Result<AgentBrowserReadViewResponseV2, ProtocolError> {
+    validate_body(bytes)?;
+    let mut decoder = minicbor::Decoder::new(bytes);
+    if decoder.array().map_err(ProtocolError::malformed)? != Some(3) {
+        return Err(malformed());
+    }
+    let mut context = V2DecodeContext;
+    let view = minicbor::Decode::decode(&mut decoder, &mut context)
+        .map_err(ProtocolError::from_typed_decode)?;
+    let object_count = decoder
+        .array()
+        .map_err(ProtocolError::malformed)?
+        .ok_or_else(malformed)?;
+    if object_count > MAX_AGENT_BROWSER_OBJECTS_V2 as u64 {
+        return Err(malformed());
+    }
+    let mut objects = Vec::with_capacity(usize::try_from(object_count).map_err(|_| malformed())?);
+    for _ in 0..object_count {
+        objects.push(decode_object(&mut decoder, &mut context)?);
+    }
+    let next = decode_optional(&mut decoder, &mut context)?;
+    let value = AgentBrowserReadViewResponseV2::new(view, objects, next)?;
+    if decoder.position() != bytes.len()
+        || encode_agent_browser_read_view_response_v2(&value)? != bytes
+    {
+        return Err(noncanonical());
+    }
+    Ok(value)
 }
 
 pub fn encode_agent_browser_mutation_response_v2(
@@ -801,6 +856,34 @@ fn encode_object(
     Ok(())
 }
 
+fn decode_object(
+    decoder: &mut minicbor::Decoder<'_>,
+    context: &mut V2DecodeContext,
+) -> Result<AgentBrowserObjectRefV2, ProtocolError> {
+    if decoder.array().map_err(ProtocolError::malformed)? != Some(2) {
+        return Err(malformed());
+    }
+    let tag = decoder.u16().map_err(ProtocolError::malformed)?;
+    macro_rules! decode_variant {
+        ($variant:ident) => {
+            AgentBrowserObjectRefV2::$variant(
+                minicbor::Decode::decode(decoder, context)
+                    .map_err(ProtocolError::from_typed_decode)?,
+            )
+        };
+    }
+    match tag {
+        1 => Ok(decode_variant!(Document)),
+        2 => Ok(decode_variant!(PlanStep)),
+        3 => Ok(decode_variant!(PendingToolCall)),
+        4 => Ok(decode_variant!(ExecutionTicket)),
+        5 => Ok(decode_variant!(ReleaseTicket)),
+        6 => Ok(decode_variant!(Execution)),
+        7 => Ok(decode_variant!(Release)),
+        _ => Err(malformed()),
+    }
+}
+
 fn encode_execution_state(
     encoder: &mut minicbor::Encoder<Vec<u8>>,
     state: AgentBrowserExecutionStateV2,
@@ -1127,6 +1210,14 @@ fn is_zero(bytes: &[u8]) -> bool {
     bytes.iter().all(|byte| *byte == 0)
 }
 
+fn validate_body(bytes: &[u8]) -> Result<(), ProtocolError> {
+    if bytes.is_empty() || bytes.len() > MAX_AGENT_BROWSER_BODY_BYTES_V2 {
+        Err(malformed())
+    } else {
+        Ok(())
+    }
+}
+
 fn malformed() -> ProtocolError {
     ProtocolError::stable(StableCode::ProtocolMalformedCbor)
 }
@@ -1182,5 +1273,46 @@ mod tests {
             action: AgentBrowserActionV2::RegisterConnector(Vec::new()),
         })
         .is_err());
+    }
+
+    #[test]
+    fn agent_browser_responses_round_trip_canonically_and_reject_trailing_data() {
+        let authentication = AgentUiAuthenticationCompleteBrowserResponseV2::new(
+            AgentTabSessionCapabilityV2::from_authority_entropy([6; 32]).unwrap(),
+            AgentMaskedDocumentRefV2::from_authority_entropy([7; 16]).unwrap(),
+        );
+        let bytes =
+            encode_agent_ui_authentication_complete_browser_response_v2(authentication).unwrap();
+        let decoded = decode_agent_ui_authentication_complete_browser_response_v2(&bytes).unwrap();
+        assert_eq!(
+            encode_agent_ui_authentication_complete_browser_response_v2(decoded).unwrap(),
+            bytes
+        );
+        let mut noncanonical = vec![0x98, 0x02];
+        noncanonical.extend_from_slice(&bytes[1..]);
+        assert!(
+            decode_agent_ui_authentication_complete_browser_response_v2(&noncanonical).is_err()
+        );
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(decode_agent_ui_authentication_complete_browser_response_v2(&trailing).is_err());
+
+        let view = AgentBrowserReadViewResponseV2::new(
+            AgentViewV2::ContentState(super::super::AgentContentStateV2::Ready),
+            vec![AgentBrowserObjectRefV2::Document(
+                AgentMaskedDocumentRefV2::from_authority_entropy([8; 16]).unwrap(),
+            )],
+            Some(AgentBrowserViewCursorCapabilityV2::from_authority_entropy([9; 16]).unwrap()),
+        )
+        .unwrap();
+        let bytes = encode_agent_browser_read_view_response_v2(&view).unwrap();
+        let decoded = decode_agent_browser_read_view_response_v2(&bytes).unwrap();
+        assert_eq!(
+            encode_agent_browser_read_view_response_v2(&decoded).unwrap(),
+            bytes
+        );
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(decode_agent_browser_read_view_response_v2(&trailing).is_err());
     }
 }

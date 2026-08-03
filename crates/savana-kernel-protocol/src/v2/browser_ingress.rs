@@ -287,6 +287,24 @@ pub fn encode_ingress_ui_authentication_complete_browser_response_v2(
     minicbor::to_vec(value.tab).map_err(ProtocolError::malformed)
 }
 
+pub fn decode_ingress_ui_authentication_complete_browser_response_v2(
+    bytes: &[u8],
+) -> Result<IngressUiAuthenticationCompleteBrowserResponseV2, ProtocolError> {
+    validate_body(bytes)?;
+    let mut decoder = minicbor::Decoder::new(bytes);
+    let mut context = V2DecodeContext;
+    let value = IngressUiAuthenticationCompleteBrowserResponseV2::new(
+        minicbor::Decode::decode(&mut decoder, &mut context)
+            .map_err(ProtocolError::from_typed_decode)?,
+    );
+    if decoder.position() != bytes.len()
+        || encode_ingress_ui_authentication_complete_browser_response_v2(value)? != bytes
+    {
+        return Err(noncanonical());
+    }
+    Ok(value)
+}
+
 pub fn encode_ingress_browser_mutation_response_v2(
     value: IngressBrowserMutationResponseV2,
 ) -> Result<Vec<u8>, ProtocolError> {
@@ -349,6 +367,46 @@ pub fn encode_ingress_browser_mutation_response_v2(
     Ok(encoder.into_writer())
 }
 
+pub fn decode_ingress_browser_mutation_response_v2(
+    bytes: &[u8],
+) -> Result<IngressBrowserMutationResponseV2, ProtocolError> {
+    validate_body(bytes)?;
+    let mut decoder = minicbor::Decoder::new(bytes);
+    let count = decoder.array().map_err(ProtocolError::malformed)?;
+    let tag = decoder.u16().map_err(ProtocolError::malformed)?;
+    let mut context = V2DecodeContext;
+    let value = match (tag, count) {
+        (1, Some(2)) => IngressBrowserMutationResponseV2::Begun {
+            next_sequence: decoder.u32().map_err(ProtocolError::malformed)?,
+        },
+        (2, Some(3)) => IngressBrowserMutationResponseV2::ChunkAccepted {
+            acknowledged_sequence: decoder.u32().map_err(ProtocolError::malformed)?,
+            cumulative_digest: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        },
+        (3, Some(2)) => IngressBrowserMutationResponseV2::FinalizeOpenApproval {
+            transfer: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        },
+        (4, Some(1)) => IngressBrowserMutationResponseV2::Aborted,
+        (5, Some(2)) => IngressBrowserMutationResponseV2::FinalizeCommitted {
+            state: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        },
+        (6, Some(2)) => IngressBrowserMutationResponseV2::FinalizeRejected {
+            state: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        },
+        _ => return Err(malformed()),
+    };
+    if decoder.position() != bytes.len()
+        || encode_ingress_browser_mutation_response_v2(value)? != bytes
+    {
+        return Err(noncanonical());
+    }
+    Ok(value)
+}
+
 fn encode_optional_digest<W: minicbor::encode::Write>(
     encoder: &mut minicbor::Encoder<W>,
     value: Option<Digest32V2>,
@@ -378,8 +436,20 @@ fn decode_optional_digest(
     }
 }
 
+fn validate_body(bytes: &[u8]) -> Result<(), ProtocolError> {
+    if bytes.is_empty() || bytes.len() > MAX_INGRESS_BROWSER_BODY_BYTES_V2 {
+        Err(malformed())
+    } else {
+        Ok(())
+    }
+}
+
 fn malformed() -> ProtocolError {
     ProtocolError::stable(StableCode::ProtocolMalformedCbor)
+}
+
+fn noncanonical() -> ProtocolError {
+    ProtocolError::stable(StableCode::ProtocolNonCanonicalCbor)
 }
 
 #[cfg(test)]
@@ -418,5 +488,37 @@ mod tests {
         assert_eq!(committed[1], 5);
         assert_eq!(rejected[1], 6);
         assert_ne!(committed, rejected);
+    }
+
+    #[test]
+    fn ingress_browser_responses_round_trip_canonically_and_reject_trailing_data() {
+        let authentication = IngressUiAuthenticationCompleteBrowserResponseV2::new(
+            IngressTabSessionCapabilityV2::from_authority_entropy([3; 32]).unwrap(),
+        );
+        let bytes =
+            encode_ingress_ui_authentication_complete_browser_response_v2(authentication).unwrap();
+        let decoded =
+            decode_ingress_ui_authentication_complete_browser_response_v2(&bytes).unwrap();
+        assert_eq!(
+            encode_ingress_ui_authentication_complete_browser_response_v2(decoded).unwrap(),
+            bytes
+        );
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(decode_ingress_ui_authentication_complete_browser_response_v2(&trailing).is_err());
+
+        let bytes =
+            encode_ingress_browser_mutation_response_v2(IngressBrowserMutationResponseV2::Aborted)
+                .unwrap();
+        let decoded = decode_ingress_browser_mutation_response_v2(&bytes).unwrap();
+        assert_eq!(
+            encode_ingress_browser_mutation_response_v2(decoded).unwrap(),
+            bytes
+        );
+        let noncanonical = [0x81, 0x18, 0x04];
+        assert!(decode_ingress_browser_mutation_response_v2(&noncanonical).is_err());
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(decode_ingress_browser_mutation_response_v2(&trailing).is_err());
     }
 }

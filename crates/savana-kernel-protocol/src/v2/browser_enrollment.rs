@@ -81,6 +81,10 @@ impl BeginEnrollmentBrowserResponseV2 {
             creation_options_json: Zeroizing::new(creation_options_json),
         })
     }
+
+    pub fn into_parts(self) -> (EnrollmentCeremonyCapabilityV2, Zeroizing<Vec<u8>>) {
+        (self.ceremony, self.creation_options_json)
+    }
 }
 
 pub struct FinishEnrollmentBrowserRequestV2 {
@@ -222,6 +226,28 @@ pub fn encode_begin_enrollment_browser_response_v2(
     Ok(encoder.into_writer())
 }
 
+pub fn decode_begin_enrollment_browser_response_v2(
+    bytes: &[u8],
+) -> Result<BeginEnrollmentBrowserResponseV2, ProtocolError> {
+    validate(bytes)?;
+    let mut decoder = minicbor::Decoder::new(bytes);
+    if decoder.array().map_err(ProtocolError::malformed)? != Some(2) {
+        return Err(malformed());
+    }
+    let mut context = V2DecodeContext;
+    let value = BeginEnrollmentBrowserResponseV2::new(
+        minicbor::Decode::decode(&mut decoder, &mut context)
+            .map_err(ProtocolError::from_typed_decode)?,
+        decoder.bytes().map_err(ProtocolError::malformed)?.to_vec(),
+    )?;
+    if decoder.position() != bytes.len()
+        || encode_begin_enrollment_browser_response_v2(&value)? != bytes
+    {
+        return Err(noncanonical());
+    }
+    Ok(value)
+}
+
 pub fn encode_finish_enrollment_browser_request_v2(
     value: &FinishEnrollmentBrowserRequestV2,
 ) -> Result<Vec<u8>, ProtocolError> {
@@ -281,6 +307,29 @@ pub fn encode_finish_enrollment_browser_response_v2(
     Ok(encoder.into_writer())
 }
 
+pub fn decode_finish_enrollment_browser_response_v2(
+    bytes: &[u8],
+) -> Result<FinishEnrollmentBrowserResponseV2, ProtocolError> {
+    validate(bytes)?;
+    let mut decoder = minicbor::Decoder::new(bytes);
+    if decoder.array().map_err(ProtocolError::malformed)? != Some(2) {
+        return Err(malformed());
+    }
+    let mut context = V2DecodeContext;
+    let value = FinishEnrollmentBrowserResponseV2::new(
+        minicbor::Decode::decode(&mut decoder, &mut context)
+            .map_err(ProtocolError::from_typed_decode)?,
+        minicbor::Decode::decode(&mut decoder, &mut context)
+            .map_err(ProtocolError::from_typed_decode)?,
+    )?;
+    if decoder.position() != bytes.len()
+        || encode_finish_enrollment_browser_response_v2(value)? != bytes
+    {
+        return Err(noncanonical());
+    }
+    Ok(value)
+}
+
 fn validate(bytes: &[u8]) -> Result<(), ProtocolError> {
     if bytes.is_empty() || bytes.len() > MAX_ENROLLMENT_BROWSER_BODY_BYTES_V2 {
         Err(malformed())
@@ -291,6 +340,10 @@ fn validate(bytes: &[u8]) -> Result<(), ProtocolError> {
 
 fn malformed() -> ProtocolError {
     ProtocolError::stable(StableCode::ProtocolMalformedCbor)
+}
+
+fn noncanonical() -> ProtocolError {
+    ProtocolError::stable(StableCode::ProtocolNonCanonicalCbor)
 }
 
 #[cfg(test)]
@@ -329,5 +382,43 @@ mod tests {
         let mut trailing = bytes;
         trailing.push(0);
         assert!(decode_finish_enrollment_browser_request_v2(&trailing).is_err());
+    }
+
+    #[test]
+    fn enrollment_browser_responses_round_trip_canonically_and_reject_trailing_data() {
+        let begin = BeginEnrollmentBrowserResponseV2::new(
+            EnrollmentCeremonyCapabilityV2::from_authority_entropy([7; 32]).unwrap(),
+            br#"{"challenge":"BwgJ"}"#.to_vec(),
+        )
+        .unwrap();
+        let bytes = encode_begin_enrollment_browser_response_v2(&begin).unwrap();
+        let decoded = decode_begin_enrollment_browser_response_v2(&bytes).unwrap();
+        assert_eq!(
+            encode_begin_enrollment_browser_response_v2(&decoded).unwrap(),
+            bytes
+        );
+        let (_, creation_options_json) = decoded.into_parts();
+        assert_eq!(creation_options_json.as_slice(), br#"{"challenge":"BwgJ"}"#);
+        let mut noncanonical = vec![0x98, 0x02];
+        noncanonical.extend_from_slice(&bytes[1..]);
+        assert!(decode_begin_enrollment_browser_response_v2(&noncanonical).is_err());
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(decode_begin_enrollment_browser_response_v2(&trailing).is_err());
+
+        let finish = FinishEnrollmentBrowserResponseV2::new(
+            Digest32V2::new([8; 32]),
+            CredentialPublicStateV2::Active,
+        )
+        .unwrap();
+        let bytes = encode_finish_enrollment_browser_response_v2(finish).unwrap();
+        let decoded = decode_finish_enrollment_browser_response_v2(&bytes).unwrap();
+        assert_eq!(
+            encode_finish_enrollment_browser_response_v2(decoded).unwrap(),
+            bytes
+        );
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(decode_finish_enrollment_browser_response_v2(&trailing).is_err());
     }
 }
