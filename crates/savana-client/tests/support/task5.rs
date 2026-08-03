@@ -206,7 +206,12 @@ pub fn authenticated_session(
     let mut bootstrap =
         SessionBootstrap::from_control_plane_token(&URL_SAFE_NO_PAD.encode([0x21; 32])).unwrap();
     let session = client
-        .session(&identity, &mut bootstrap, provider.clone())
+        .session(
+            &identity,
+            &mut bootstrap,
+            provider.clone(),
+            Arc::new(RecordingDecision::new(true)),
+        )
         .unwrap();
     (session, transport, provider)
 }

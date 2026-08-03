@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use minicbor::Encode as _;
 use savana_client::{
-    AuthError, BrowserContentType, BrowserOrigin, BrowserResponse, BrowserRoute, Client,
-    ClientEndpoints, HandleKind, Identity, NonceSource, SavanaError, SessionBootstrap,
-    WebAuthnAssertion, WebAuthnAttestation, WebAuthnProvider,
+    ApprovalCallback, ApprovalRequest, AuthError, BrowserContentType, BrowserOrigin,
+    BrowserResponse, BrowserRoute, Client, ClientEndpoints, HandleKind, Identity, NonceSource,
+    SavanaError, SessionBootstrap, WebAuthnAssertion, WebAuthnAttestation, WebAuthnProvider,
 };
 use savana_kernel_protocol::v2::{
     decode_begin_enrollment_browser_request_v2, decode_finish_enrollment_browser_request_v2,
@@ -94,6 +94,18 @@ impl WebAuthnProvider for RecordingWebAuthn {
             vec![0x65; 128],
         )
     }
+}
+
+struct AllowApproval;
+
+impl ApprovalCallback for AllowApproval {
+    fn decide(&self, _request: &ApprovalRequest) -> Result<bool, SavanaError> {
+        Ok(true)
+    }
+}
+
+fn approval() -> Arc<dyn ApprovalCallback> {
+    Arc::new(AllowApproval)
 }
 
 fn endpoints() -> ClientEndpoints {
@@ -204,7 +216,7 @@ fn session_uses_the_exact_agent_authentication_sequence_and_keeps_capabilities_o
     let mut bootstrap = bootstrap();
 
     let session = client
-        .session(&identity, &mut bootstrap, provider.clone())
+        .session(&identity, &mut bootstrap, provider.clone(), approval())
         .unwrap();
 
     assert_eq!(session.initial_document().kind(), HandleKind::Document);
@@ -318,6 +330,7 @@ fn authentication_html_rejects_comment_wrapped_or_truncated_main_carriers() {
                 &identity,
                 &mut bootstrap(),
                 Arc::new(RecordingWebAuthn::default()),
+                approval(),
             )
             .is_err());
         assert_eq!(transport.take_requests().len(), 1);
@@ -355,6 +368,7 @@ fn authentication_html_rejects_duplicate_unbounded_or_unexpected_data_attributes
                 &identity,
                 &mut bootstrap(),
                 Arc::new(RecordingWebAuthn::default()),
+                approval(),
             )
             .is_err());
         assert_eq!(transport.take_requests().len(), 1);
@@ -401,6 +415,7 @@ fn completion_html_rejects_malformed_envelopes_and_zero_capabilities() {
                 &identity,
                 &mut bootstrap(),
                 Arc::new(RecordingWebAuthn::default()),
+                approval(),
             )
             .is_err());
         assert_eq!(transport.take_requests().len(), 4);
@@ -430,6 +445,7 @@ fn session_fails_closed_on_wrong_variant_malformed_carrier_and_callback_rejectio
             &identity,
             &mut bootstrap(),
             Arc::new(RecordingWebAuthn::default()),
+            approval(),
         )
         .is_err());
     assert_eq!(transport.take_requests().len(), 2);
@@ -443,6 +459,7 @@ fn session_fails_closed_on_wrong_variant_malformed_carrier_and_callback_rejectio
             &identity,
             &mut bootstrap(),
             Arc::new(RecordingWebAuthn::default()),
+            approval(),
         )
         .is_err());
     assert_eq!(transport.take_requests().len(), 1);
@@ -454,6 +471,7 @@ fn session_fails_closed_on_wrong_variant_malformed_carrier_and_callback_rejectio
             &identity,
             &mut one_shot,
             Arc::new(RecordingWebAuthn::rejecting_assertion()),
+            approval(),
         )
         .is_err());
     assert!(matches!(
@@ -461,6 +479,7 @@ fn session_fails_closed_on_wrong_variant_malformed_carrier_and_callback_rejectio
             &identity,
             &mut one_shot,
             Arc::new(RecordingWebAuthn::default()),
+            approval(),
         ),
         Err(AuthError::InvalidBootstrap)
     ));
@@ -489,6 +508,7 @@ fn session_rejects_zero_transfer_and_a_mismatched_return_origin() {
             &identity,
             &mut bootstrap(),
             Arc::new(RecordingWebAuthn::default()),
+            approval(),
         )
         .is_err());
     assert_eq!(transport.take_requests().len(), 3);
@@ -510,6 +530,7 @@ fn session_rejects_zero_transfer_and_a_mismatched_return_origin() {
             &identity,
             &mut bootstrap(),
             Arc::new(RecordingWebAuthn::default()),
+            approval(),
         )
         .is_err());
     assert_eq!(transport.take_requests().len(), 3);
@@ -541,6 +562,7 @@ fn session_rejects_a_wrong_finish_response_variant() {
             &identity,
             &mut bootstrap(),
             Arc::new(RecordingWebAuthn::default()),
+            approval(),
         )
         .is_err());
     assert_eq!(transport.take_requests().len(), 3);
@@ -659,6 +681,7 @@ fn a_revoked_identity_is_loaded_for_inspection_but_cannot_start_a_session() {
             &identity,
             &mut one_shot,
             Arc::new(RecordingWebAuthn::default()),
+            approval(),
         ),
         Err(AuthError::AuthenticationFailed)
     ));
@@ -667,6 +690,7 @@ fn a_revoked_identity_is_loaded_for_inspection_but_cannot_start_a_session() {
             &identity,
             &mut one_shot,
             Arc::new(RecordingWebAuthn::default()),
+            approval(),
         ),
         Err(AuthError::InvalidBootstrap)
     ));

@@ -29,9 +29,12 @@ wire responses, sign approval settlements, or select kernel operations.
 
 `Identity.load(path)` reads the non-secret enrollment identity used to select
 an existing public credential. The identity file contains no signing key.
-`Client.session(identity, bootstrap, webauthn)` consumes a canonical base64url
-one-time bootstrap token supplied by JARVIS and completes the existing
-Approval/Agent WebAuthn flow. A bootstrap cannot be reused.
+`Client.session(identity, bootstrap, webauthn, approval)` consumes a canonical
+base64url one-time bootstrap token supplied by JARVIS and completes the
+existing Approval/Agent WebAuthn flow. A bootstrap cannot be reused. The
+session stores `approval` as the mandatory human decision callback for every
+later ingress display; ingestion never supplies a default decision or
+auto-approves.
 
 The Python `webauthn` object is called synchronously by the Rust worker with
 these exact methods:
@@ -78,11 +81,11 @@ There are exactly fifteen business methods:
 | # | Method | Result and implemented meaning |
 | ---: | --- | --- |
 | 1 | `Identity.load(path)` | Load a public enrollment identity from its protected local file. |
-| 2 | `Client.session(identity, bootstrap, webauthn)` | Asynchronously consume the out-of-band bootstrap and return an authenticated `Session`. |
+| 2 | `Client.session(identity, bootstrap, webauthn, approval)` | Asynchronously consume the out-of-band bootstrap, bind the default ingress decision callback, and return an authenticated `Session`. |
 | 3 | `Client.enroll(enrollment_token, code, webauthn, identity_path)` | Asynchronously complete WebAuthn enrollment and persist an `Identity`. |
 | 4 | `Session.ingest_text(text, content_kind)` | Commit bounded UTF-8 input; returns `None`. |
 | 5 | `Session.ingest_file(path, content_kind)` | Stream and commit a bounded file; returns `None`. |
-| 6 | `Session.read_view(document)` | Return the kernel-approved `MaskedView` projection for a document handle. |
+| 6 | `Session.read_view(handle)` | Return the next kernel-approved `MaskedView` page for the exact initial document or one of its opaque continuation handles. |
 | 7 | `Session.run_planner(intent_privacy)` | Plan over the current committed session state and return a `Plan`. |
 | 8 | `Session.execute(plan, approval)` | Evaluate and execute every opaque step, returning an `ExecutionResult`. |
 | 9 | `Session.run_agent(intent_privacy, limits, approval, events)` | Run the bounded plan/execute/replan loop. |
@@ -118,9 +121,20 @@ or `effect` projection because the Agent response does not provide those
 fields. The SDK never synthesizes them. `Plan.steps` preserves this opacity.
 
 `MaskedView` exposes only the existing masked-text, structured, document-page,
-or content-state projections. `ApprovalRequest` exposes exactly `display` and
-`purpose`; it has no `recipients` field. The display is the protocol-produced
-human text, while its `repr` remains redacted.
+or content-state projections plus an optional opaque `continuation` `Handle`.
+The cursor bytes are never exposed. Agentd accepts views only for the session's
+exact initial document, so ordinary output-document handles are rejected
+locally before transport. Pagination keeps the same one-argument method:
+
+```python
+page = await session.read_view(session.initial_document)
+while page.continuation is not None:
+    page = await session.read_view(page.continuation)
+```
+
+`ApprovalRequest` exposes exactly `display` and `purpose`; it has no
+`recipients` field. The display is the protocol-produced human text, while its
+`repr` remains redacted.
 
 ## Ingestion, planning, execution, and release
 
@@ -128,6 +142,12 @@ human text, while its `repr` remains redacted.
 begin/append/finalize/approval/commit sequence. The committed response contains
 public input state, not a new document reference, so both methods return
 successful completion (`None` in Python). They never fabricate a `Handle`.
+After Approvald returns the truthful ingress display, the session's mandatory
+`approval` callback receives `ApprovalRequest(display=..., purpose="ingress")`
+before any decision ceremony begins. Its exact `bool` selects Approve or Deny;
+a denial is signed, completes the second `FinalizeRejected`, and raises
+`ApprovalDenied` without committing input. A callback exception fails closed
+without retry or an `ApprovalDecisionBegin` request.
 
 `run_planner` accepts only `IntentPrivacy.PRIVATE` or
 `IntentPrivacy.THIRD_PARTY`. It has no `goal` or `inputs` parameters because
@@ -191,9 +211,10 @@ an external effect that already completed.
 
 The example receives `bootstrap_token` from a trusted JARVIS control
 integration; it does not obtain the token from a fourth HTTP service. The
-`webauthn` object implements the exact callback contract above. The two other
-callbacks are ordinary synchronous Python callables with the signatures
-checked by the binding.
+`webauthn` object implements the exact callback contract above. `approve` is
+passed to `Client.session` for ingress and explicitly to later execution,
+release, or connector workflows. It and `on_event` are ordinary synchronous
+Python callables with signatures checked by the binding.
 
 ```python
 from collections.abc import Callable, Sequence
@@ -228,7 +249,7 @@ async def run_task(
 ) -> ExecutionResult:
     identity = Identity.load(Path("/var/lib/jarvis/savana-identity.json"))
     client = Client()
-    session = await client.session(identity, bootstrap_token, webauthn)
+    session = await client.session(identity, bootstrap_token, webauthn, approve)
 
     async with session:
         # The planner has no goal/inputs arguments. Commit them first.

@@ -7,15 +7,31 @@ use savana_kernel_protocol::v2::{
 use crate::session::LocalSessionState;
 use crate::{
     BrowserContentType, BrowserOrigin, BrowserRequest, BrowserRoute, BrowserService, Handle,
-    IntentPrivacy, MaskedView, Plan, PlanStep, SavanaError, Session,
+    HandleKind, IntentPrivacy, MaskedView, Plan, PlanStep, SavanaError, Session,
 };
 
 const MAXIMUM_VIEW_BYTES: u32 = 8 * 1024 * 1024 - 512;
 
 impl Session {
-    pub fn read_view(&mut self, document: &Handle) -> Result<MaskedView, SavanaError> {
+    pub fn read_view(&mut self, handle: &Handle) -> Result<MaskedView, SavanaError> {
         self.require_open()?;
-        let document = document.expect_document(&self.binding)?;
+        let initial_document = self.initial_document().expect_document(&self.binding)?;
+        let (document, cursor) = match handle.kind() {
+            HandleKind::Document => (handle.expect_document(&self.binding)?, None),
+            HandleKind::ViewCursor => {
+                let (document, cursor) = handle.expect_view_cursor(&self.binding)?;
+                (document, Some(cursor))
+            }
+            actual => {
+                return Err(SavanaError::WrongHandleKind {
+                    expected: HandleKind::Document,
+                    actual,
+                })
+            }
+        };
+        if document != initial_document {
+            return Err(SavanaError::InvalidState);
+        }
         if self.revoked_documents.contains(&document) {
             return Err(SavanaError::InvalidState);
         }
@@ -23,20 +39,39 @@ impl Session {
             tab: self.agent.tab,
             client_request_nonce: self.nonces.nonce()?,
             document,
-            cursor: None,
+            cursor,
             maximum_encoded_bytes: MAXIMUM_VIEW_BYTES,
         };
-        let response = self.send_browser_request(BrowserRequest {
+        let response = match self.send_browser_request(BrowserRequest {
             service: BrowserService::Agent,
             route: BrowserRoute::AgentView,
             origin: BrowserOrigin::Agent,
             content_type: BrowserContentType::CanonicalCbor,
             body: encode_agent_browser_request_v2(request)
                 .map_err(|_| SavanaError::InvalidRequest)?,
-        })?;
-        let decoded = decode_agent_browser_read_view_response_v2(response.body())
-            .map_err(|_| SavanaError::InvalidResponse)?;
-        Ok(MaskedView::from_protocol(decoded.view().clone()))
+        }) {
+            Ok(response) => response,
+            Err(error) => {
+                if !self.take_request_guard_rejection() {
+                    self.state = LocalSessionState::Closed;
+                }
+                return Err(error);
+            }
+        };
+        let decoded = match decode_agent_browser_read_view_response_v2(response.body()) {
+            Ok(decoded) => decoded,
+            Err(_) => {
+                self.state = LocalSessionState::Closed;
+                return Err(SavanaError::InvalidResponse);
+            }
+        };
+        let continuation = decoded
+            .next()
+            .map(|cursor| Handle::view_cursor(&self.binding, document, cursor));
+        Ok(MaskedView::from_protocol(
+            decoded.view().clone(),
+            continuation,
+        ))
     }
 
     pub fn run_planner(&mut self, privacy: IntentPrivacy) -> Result<Plan, SavanaError> {

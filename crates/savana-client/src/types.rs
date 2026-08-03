@@ -24,11 +24,19 @@ pub enum ContentKind {
 pub struct MaskedView {
     #[allow(dead_code)] // Populated and projected by read_view in Task 4.
     pub(crate) value: AgentViewV2,
+    pub(crate) continuation: Option<Handle>,
 }
 
 impl MaskedView {
-    pub(crate) const fn from_protocol(value: AgentViewV2) -> Self {
-        Self { value }
+    pub(crate) const fn from_protocol(value: AgentViewV2, continuation: Option<Handle>) -> Self {
+        Self {
+            value,
+            continuation,
+        }
+    }
+
+    pub const fn continuation(&self) -> Option<&Handle> {
+        self.continuation.as_ref()
     }
 
     pub fn masked_text(&self) -> Option<(&str, &[PlaceholderViewV2])> {

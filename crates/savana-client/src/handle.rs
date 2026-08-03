@@ -27,10 +27,10 @@ mod tests {
 }
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use savana_kernel_protocol::v2::{
-    AgentExecutionRefV2, AgentExecutionTicketRefV2, AgentMaskedDocumentRefV2,
-    AgentPendingConnectorRegistrationRefV2, AgentPendingToolCallRefV2, AgentPlanStepRefV2,
-    AgentReleaseRefV2, AgentReleaseTicketRefV2, AgentUiAuthenticationTransferCapabilityV2,
-    Digest32V2, Nonce32V2,
+    AgentBrowserViewCursorCapabilityV2, AgentExecutionRefV2, AgentExecutionTicketRefV2,
+    AgentMaskedDocumentRefV2, AgentPendingConnectorRegistrationRefV2, AgentPendingToolCallRefV2,
+    AgentPlanStepRefV2, AgentReleaseRefV2, AgentReleaseTicketRefV2,
+    AgentUiAuthenticationTransferCapabilityV2, Digest32V2, Nonce32V2,
 };
 use zeroize::Zeroize as _;
 
@@ -39,6 +39,7 @@ use crate::{AuthError, SavanaError};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandleKind {
     Document,
+    ViewCursor,
     PlanStep,
     PendingToolCall,
     ExecutionTicket,
@@ -53,6 +54,7 @@ impl HandleKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Document => "document",
+            Self::ViewCursor => "view-cursor",
             Self::PlanStep => "plan-step",
             Self::PendingToolCall => "pending-tool-call",
             Self::ExecutionTicket => "execution-ticket",
@@ -103,6 +105,10 @@ impl PartialEq for SessionBinding {
 #[derive(Clone)]
 enum Capability {
     Document(AgentMaskedDocumentRefV2),
+    ViewCursor {
+        document: AgentMaskedDocumentRefV2,
+        cursor: AgentBrowserViewCursorCapabilityV2,
+    },
     PlanStep(AgentPlanStepRefV2),
     PendingToolCall(AgentPendingToolCallRefV2),
     ExecutionTicket(AgentExecutionTicketRefV2),
@@ -117,6 +123,7 @@ impl Capability {
     const fn kind(&self) -> HandleKind {
         match self {
             Self::Document(_) => HandleKind::Document,
+            Self::ViewCursor { .. } => HandleKind::ViewCursor,
             Self::PlanStep(_) => HandleKind::PlanStep,
             Self::PendingToolCall(_) => HandleKind::PendingToolCall,
             Self::ExecutionTicket(_) => HandleKind::ExecutionTicket,
@@ -157,6 +164,17 @@ impl Handle {
         }
     }
 
+    pub(crate) fn view_cursor(
+        session: &SessionBinding,
+        document: AgentMaskedDocumentRefV2,
+        cursor: AgentBrowserViewCursorCapabilityV2,
+    ) -> Self {
+        Self {
+            session: session.clone(),
+            capability: Capability::ViewCursor { document, cursor },
+        }
+    }
+
     pub(crate) fn connector(session: &SessionBinding, capability: Digest32V2) -> Self {
         Self {
             session: session.clone(),
@@ -188,6 +206,20 @@ impl Handle {
             Capability::PlanStep(capability) => Ok(*capability),
             _ => Err(SavanaError::WrongHandleKind {
                 expected: HandleKind::PlanStep,
+                actual: self.kind(),
+            }),
+        }
+    }
+
+    pub(crate) fn expect_view_cursor(
+        &self,
+        session: &SessionBinding,
+    ) -> Result<(AgentMaskedDocumentRefV2, AgentBrowserViewCursorCapabilityV2), SavanaError> {
+        self.require_session(session)?;
+        match &self.capability {
+            Capability::ViewCursor { document, cursor } => Ok((*document, *cursor)),
+            _ => Err(SavanaError::WrongHandleKind {
+                expected: HandleKind::ViewCursor,
                 actual: self.kind(),
             }),
         }

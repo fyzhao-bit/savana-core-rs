@@ -10,9 +10,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use savana_client::{
-    AuthError, BrowserContentType, BrowserResponse, BrowserRoute, Client, ClientEndpoints,
-    ContentKind, HandleKind, Identity, IntentPrivacy, NonceSource, SavanaError, Session,
-    SessionBootstrap, WebAuthnAssertion, WebAuthnAttestation, WebAuthnProvider,
+    ApprovalCallback, ApprovalPurpose, ApprovalRequest, AuthError, BrowserContentType,
+    BrowserResponse, BrowserRoute, Client, ClientEndpoints, ContentKind, HandleKind, Identity,
+    IntentPrivacy, NonceSource, SavanaError, Session, SessionBootstrap, WebAuthnAssertion,
+    WebAuthnAttestation, WebAuthnProvider,
 };
 use savana_kernel_protocol::v2::{
     approval_display_digest_v2, decode_agent_browser_request_v2,
@@ -25,10 +26,11 @@ use savana_kernel_protocol::v2::{
     encode_ui_authentication_browser_finish_response_v2, render_agent_workspace_v2,
     render_ingress_ui_authentication_form_v2, render_ingress_workspace_v2, AgentBrowserActionV2,
     AgentBrowserMutationResponseV2, AgentBrowserReadViewResponseV2, AgentBrowserRequestV2,
-    AgentContentStateV2, AgentMaskedDocumentRefV2, AgentPlanStepRefV2, AgentSessionStatusV2,
-    AgentTabSessionCapabilityV2, AgentViewV2, ApprovalDecisionBrowserBeginResponseV2,
-    ApprovalDecisionBrowserFinishResponseV2, ApprovalDecisionCeremonyCapabilityV2,
-    ApprovalDecisionV2, ApprovalDisplayAuthenticationTransferCapabilityV2,
+    AgentBrowserViewCursorCapabilityV2, AgentContentStateV2, AgentMaskedDocumentRefV2,
+    AgentPlanStepRefV2, AgentSessionStatusV2, AgentTabSessionCapabilityV2, AgentViewV2,
+    ApprovalDecisionBrowserBeginResponseV2, ApprovalDecisionBrowserFinishResponseV2,
+    ApprovalDecisionCeremonyCapabilityV2, ApprovalDecisionV2,
+    ApprovalDisplayAuthenticationTransferCapabilityV2,
     ApprovalDisplayUiAuthenticationBrowserCeremonyCapabilityV2,
     ApprovalDisplayUiPreAuthenticationTabCapabilityV2, ApprovalDisplayViewV2, ApprovalPurposeV2,
     ApprovalTabSessionCapabilityV2, BoundedAgentTextV2, BoundedApprovalDisplayTextV2,
@@ -126,6 +128,44 @@ impl WebAuthnProvider for RecordingWebAuthn {
 
     fn create_credential(&self, _options_json: &[u8]) -> Result<WebAuthnAttestation, AuthError> {
         Err(AuthError::EnrollmentFailed)
+    }
+}
+
+struct RecordingApproval {
+    decision: Result<bool, ()>,
+    requests: Mutex<Vec<(String, ApprovalPurpose)>>,
+}
+
+impl RecordingApproval {
+    fn approving() -> Self {
+        Self {
+            decision: Ok(true),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn denying() -> Self {
+        Self {
+            decision: Ok(false),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn failing() -> Self {
+        Self {
+            decision: Err(()),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl ApprovalCallback for RecordingApproval {
+    fn decide(&self, request: &ApprovalRequest) -> Result<bool, SavanaError> {
+        self.requests
+            .lock()
+            .map_err(|_| SavanaError::InvalidState)?
+            .push((request.display().to_owned(), request.purpose()));
+        self.decision.map_err(|()| SavanaError::CallbackFailed)
     }
 }
 
@@ -233,9 +273,35 @@ fn authenticated_session_with_provider(
 }
 
 fn authenticated_session_with_dependencies(
+    responses: Vec<Result<BrowserResponse, SavanaError>>,
+    webauthn: Arc<RecordingWebAuthn>,
+    nonces: Arc<dyn NonceSource>,
+) -> (Session, Arc<ScriptedTransport>, Arc<RecordingWebAuthn>) {
+    authenticated_session_with_all(
+        responses,
+        webauthn,
+        nonces,
+        Arc::new(RecordingApproval::approving()),
+    )
+}
+
+fn authenticated_session_with_approval(
+    responses: Vec<Result<BrowserResponse, SavanaError>>,
+    approval: Arc<RecordingApproval>,
+) -> (Session, Arc<ScriptedTransport>, Arc<RecordingWebAuthn>) {
+    authenticated_session_with_all(
+        responses,
+        Arc::new(RecordingWebAuthn::default()),
+        Arc::new(FixedNonces::new()),
+        approval,
+    )
+}
+
+fn authenticated_session_with_all(
     mut responses: Vec<Result<BrowserResponse, SavanaError>>,
     webauthn: Arc<RecordingWebAuthn>,
     nonces: Arc<dyn NonceSource>,
+    approval: Arc<RecordingApproval>,
 ) -> (Session, Arc<ScriptedTransport>, Arc<RecordingWebAuthn>) {
     let mut scripted = initial_authentication_responses();
     scripted.append(&mut responses);
@@ -246,7 +312,7 @@ fn authenticated_session_with_dependencies(
     let mut bootstrap =
         SessionBootstrap::from_control_plane_token(&URL_SAFE_NO_PAD.encode([0x21; 32])).unwrap();
     let session = client
-        .session(&identity, &mut bootstrap, webauthn.clone())
+        .session(&identity, &mut bootstrap, webauthn.clone(), approval)
         .unwrap();
     (session, transport, webauthn)
 }
@@ -403,10 +469,16 @@ fn ingest_text_drives_exact_chunk_digest_authentication_and_approval_sequence() 
     let mut text = "x".repeat(CHUNK_BYTES * 2);
     text.push_str("end");
     let expected_digest = Digest32V2::new(Sha256::digest(text.as_bytes()).into());
-    let (mut session, transport, webauthn) = authenticated_session(successful_ingress_responses(3));
+    let approval = Arc::new(RecordingApproval::approving());
+    let (mut session, transport, webauthn) =
+        authenticated_session_with_approval(successful_ingress_responses(3), approval.clone());
 
     session.ingest_text(&text, ContentKind::ChatText).unwrap();
 
+    assert_eq!(
+        approval.requests.lock().unwrap().as_slice(),
+        [("Commit masked ingress".to_owned(), ApprovalPurpose::Ingress)]
+    );
     assert_eq!(
         webauthn.options.lock().unwrap().as_slice(),
         [
@@ -533,6 +605,123 @@ fn read_view_preserves_each_protocol_variant_without_flattening() {
     for request in &transport.take_requests()[4..] {
         assert_eq!(request.route, BrowserRoute::AgentView);
     }
+}
+
+#[test]
+fn read_view_continuation_is_an_opaque_session_bound_cursor() {
+    let cursor = AgentBrowserViewCursorCapabilityV2::from_authority_entropy([0x69; 16]).unwrap();
+    let responses = vec![
+        cbor_response(
+            encode_agent_browser_read_view_response_v2(
+                &AgentBrowserReadViewResponseV2::new(
+                    AgentViewV2::DocumentPage {
+                        page_index: 0,
+                        text: BoundedAgentTextV2::new("first").unwrap(),
+                        placeholders: vec![],
+                    },
+                    vec![],
+                    Some(cursor),
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        ),
+        cbor_response(
+            encode_agent_browser_read_view_response_v2(
+                &AgentBrowserReadViewResponseV2::new(
+                    AgentViewV2::DocumentPage {
+                        page_index: 1,
+                        text: BoundedAgentTextV2::new("second").unwrap(),
+                        placeholders: vec![],
+                    },
+                    vec![],
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        ),
+    ];
+    let (mut session, transport, _) = authenticated_session(responses);
+    let initial = session.initial_document().clone();
+
+    let first = session.read_view(&initial).unwrap();
+    let continuation = first.continuation().unwrap().clone();
+    assert_eq!(continuation.kind(), HandleKind::ViewCursor);
+    assert_eq!(format!("{continuation:?}"), "Handle(<opaque:view-cursor>)");
+    let second = session.read_view(&continuation).unwrap();
+    assert_eq!(second.document_page().unwrap().0, 1);
+    assert!(second.continuation().is_none());
+
+    let requests = transport.take_requests();
+    let first_request = decode_agent_browser_request_v2(&requests[4].body).unwrap();
+    let second_request = decode_agent_browser_request_v2(&requests[5].body).unwrap();
+    match (first_request, second_request) {
+        (
+            AgentBrowserRequestV2::ReadView {
+                document: first_document,
+                cursor: None,
+                ..
+            },
+            AgentBrowserRequestV2::ReadView {
+                document: second_document,
+                cursor: Some(second_cursor),
+                ..
+            },
+        ) => {
+            assert_eq!(first_document, second_document);
+            assert_eq!(second_cursor, cursor);
+        }
+        _ => panic!("read_view must preserve the initial document across cursor pages"),
+    }
+}
+
+#[test]
+fn read_view_rejects_a_cursor_from_another_session_before_transport() {
+    let cursor = AgentBrowserViewCursorCapabilityV2::from_authority_entropy([0x6a; 16]).unwrap();
+    let first_response = cbor_response(
+        encode_agent_browser_read_view_response_v2(
+            &AgentBrowserReadViewResponseV2::new(
+                AgentViewV2::ContentState(AgentContentStateV2::Ready),
+                vec![],
+                Some(cursor),
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    let (mut first, first_transport, _) = authenticated_session(vec![first_response]);
+    let (mut second, second_transport, _) = authenticated_session(vec![]);
+    let initial = first.initial_document().clone();
+    let continuation = first
+        .read_view(&initial)
+        .unwrap()
+        .continuation()
+        .unwrap()
+        .clone();
+
+    assert!(matches!(
+        second.read_view(&continuation),
+        Err(SavanaError::WrongSession)
+    ));
+    assert_eq!(first_transport.take_requests().len(), 5);
+    assert_eq!(second_transport.take_requests().len(), 4);
+}
+
+#[test]
+fn malformed_read_view_response_closes_the_session() {
+    let (mut session, transport, _) = authenticated_session(vec![cbor_response(vec![0xff])]);
+    let initial = session.initial_document().clone();
+
+    assert!(matches!(
+        session.read_view(&initial),
+        Err(SavanaError::InvalidResponse)
+    ));
+    assert!(matches!(
+        session.run_planner(IntentPrivacy::Private),
+        Err(SavanaError::InvalidState)
+    ));
+    assert_eq!(transport.take_requests().len(), 5);
 }
 
 #[test]
@@ -935,16 +1124,54 @@ fn approval_denial_is_settled_by_second_finalize_and_returns_typed_error() {
         )
         .unwrap(),
     );
-    let (mut session, transport, _) = authenticated_session(responses);
+    let approval = Arc::new(RecordingApproval::denying());
+    let (mut session, transport, _) =
+        authenticated_session_with_approval(responses, approval.clone());
 
     assert!(matches!(
         session.ingest_text("deny me", ContentKind::PlainText),
         Err(SavanaError::ApprovalDenied(_))
     ));
     assert_eq!(
-        transport.take_requests().last().unwrap().route,
+        approval.requests.lock().unwrap().as_slice(),
+        [("Commit masked ingress".to_owned(), ApprovalPurpose::Ingress)]
+    );
+    let requests = transport.take_requests();
+    assert_eq!(
+        requests.last().unwrap().route,
         BrowserRoute::IngressInputFinalize
     );
+    let decision = requests
+        .iter()
+        .find(|request| request.route == BrowserRoute::ApprovalDecisionBegin)
+        .map(|request| decode_approval_decision_browser_begin_request_v2(&request.body).unwrap())
+        .unwrap();
+    assert_eq!(decision.decision(), ApprovalDecisionV2::Deny);
+}
+
+#[test]
+fn ingress_approval_callback_failure_closes_without_a_decision_or_retry() {
+    let approval = Arc::new(RecordingApproval::failing());
+    let (mut session, transport, _) =
+        authenticated_session_with_approval(successful_ingress_responses(1), approval.clone());
+
+    assert!(matches!(
+        session.ingest_text("callback failure", ContentKind::PlainText),
+        Err(SavanaError::CallbackFailed)
+    ));
+    assert_eq!(approval.requests.lock().unwrap().len(), 1);
+    assert!(matches!(
+        session.run_planner(IntentPrivacy::Private),
+        Err(SavanaError::InvalidState)
+    ));
+    let requests = transport.take_requests();
+    assert_eq!(
+        requests.last().unwrap().route,
+        BrowserRoute::ApprovalDisplay
+    );
+    assert!(!requests
+        .iter()
+        .any(|request| request.route == BrowserRoute::ApprovalDecisionBegin));
 }
 
 #[test]

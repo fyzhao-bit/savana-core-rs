@@ -258,7 +258,7 @@ owners:
 | Owner | Business methods |
 | --- | --- |
 | `Identity` | `load(path)` |
-| `Client` | `session(identity, bootstrap, webauthn)`, `enroll(enrollment_token, code, webauthn, identity_path)` |
+| `Client` | `session(identity, bootstrap, webauthn, approval)`, `enroll(enrollment_token, code, webauthn, identity_path)` |
 | `Session` | `ingest_text`, `ingest_file`, `read_view`, `run_planner`, `execute`, `run_agent`, `release`, `register_connector`, `remove_connector`, `list_connectors`, `revoke`, `close` |
 
 The eighteen product types are:
@@ -279,6 +279,12 @@ completion (`None` in Python), not a fabricated document handle. Consequently
 `run_planner(intent_privacy)` has no `goal` or `inputs` arguments: commit the
 goal with `ingest_text` and files with `ingest_file` before planning or calling
 `run_agent`.
+
+The callback supplied to `Client.session` receives every truthful ingress
+approval display and must return an exact `bool`; ingress never auto-approves.
+`read_view` accepts only the exact initial document or an opaque
+`MaskedView.continuation` handle, preserving pagination without exposing cursor
+bytes or adding a business method.
 
 Release is an explicit `release(document, approval)` workflow. An
 `ApprovalRequest` contains only `display` and `purpose`. Connector registration

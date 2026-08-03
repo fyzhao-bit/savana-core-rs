@@ -85,8 +85,9 @@ fn direct_authorization_dispatches_once_and_returns_only_the_terminal_document()
     assert_eq!(result.failure_class(), None);
     assert_eq!(result.outputs().len(), 1);
     assert_eq!(result.outputs()[0].kind(), HandleKind::Document);
+    let requests = transport.take_requests();
     assert_eq!(
-        actions_after_authentication(&transport.take_requests()),
+        actions_after_authentication(&requests),
         vec![
             AgentBrowserActionV2::RunPlanner,
             AgentBrowserActionV2::ProposePlanStep(step),
@@ -94,6 +95,14 @@ fn direct_authorization_dispatches_once_and_returns_only_the_terminal_document()
             AgentBrowserActionV2::DispatchTicket(ticket),
             AgentBrowserActionV2::RefreshExecution(execution),
         ]
+    );
+    assert!(matches!(
+        session.read_view(&result.outputs()[0]),
+        Err(SavanaError::InvalidState)
+    ));
+    assert!(
+        transport.take_requests().is_empty(),
+        "ordinary output documents must be rejected before transport"
     );
 }
 

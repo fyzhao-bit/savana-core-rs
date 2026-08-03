@@ -57,12 +57,13 @@ class Client:
     def __init__(self):
         self._inner = _core._Client()
 
-    async def session(self, identity, bootstrap, webauthn):
+    async def session(self, identity, bootstrap, webauthn, approval):
         inner = await asyncio.to_thread(
             self._inner.session,
             identity._inner,
             bootstrap,
             webauthn,
+            approval,
         )
         return Session._from_core(inner)
 
@@ -112,8 +113,8 @@ class Session:
             content_kind.value,
         )
 
-    async def read_view(self, document):
-        return await asyncio.to_thread(self._inner.read_view, document)
+    async def read_view(self, handle):
+        return await asyncio.to_thread(self._inner.read_view, handle)
 
     async def run_planner(self, intent_privacy):
         return await asyncio.to_thread(

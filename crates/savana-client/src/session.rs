@@ -8,7 +8,9 @@ use savana_kernel_protocol::v2::{
 };
 
 use crate::handle::SessionBinding;
-use crate::{BrowserTransport, Handle, NonceSource, SavanaError, WebAuthnProvider};
+use crate::{
+    ApprovalCallback, BrowserTransport, Handle, NonceSource, SavanaError, WebAuthnProvider,
+};
 
 #[allow(dead_code)] // Read by authenticated Agent workflows added in Task 4.
 pub(crate) struct AuthenticatedAgentTab {
@@ -69,6 +71,7 @@ pub struct Session {
     #[allow(dead_code)] // Populated by authenticated approval workflows added in Task 4.
     pub(crate) approval: Option<AuthenticatedApprovalTab>,
     pub(crate) webauthn: Arc<dyn WebAuthnProvider>,
+    pub(crate) ingress_approval: Arc<dyn ApprovalCallback>,
     pub(crate) state: LocalSessionState,
     pub(crate) revoked_documents: Vec<AgentMaskedDocumentRefV2>,
     pub(crate) observed_release_tickets: Vec<AgentReleaseTicketRefV2>,
@@ -86,6 +89,7 @@ impl Session {
         tab: AgentTabSessionCapabilityV2,
         document: AgentMaskedDocumentRefV2,
         webauthn: Arc<dyn WebAuthnProvider>,
+        ingress_approval: Arc<dyn ApprovalCallback>,
     ) -> Self {
         let initial_document = Handle::document(&binding, document);
         Self {
@@ -96,6 +100,7 @@ impl Session {
             ingress: None,
             approval: None,
             webauthn,
+            ingress_approval,
             state: LocalSessionState::Open,
             revoked_documents: Vec::new(),
             observed_release_tickets: Vec::new(),

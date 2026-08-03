@@ -99,6 +99,17 @@ def test_public_surface_is_exactly_the_approved_types_and_business_methods():
         "document",
         "approval",
     ]
+    assert list(inspect.signature(savana.Session.read_view).parameters) == [
+        "self",
+        "handle",
+    ]
+    assert list(inspect.signature(savana.Client.session).parameters) == [
+        "self",
+        "identity",
+        "bootstrap",
+        "webauthn",
+        "approval",
+    ]
 
 
 def test_choices_and_exception_inheritance_are_stable():
@@ -174,6 +185,28 @@ async def test_every_session_business_method_is_async_and_ingest_returns_none():
 
     session = scripted_session()
     assert await session.ingest_text("hello", savana.ContentKind.CHAT_TEXT) is None
+
+
+@pytest.mark.asyncio
+async def test_masked_view_projects_only_an_opaque_continuation_handle():
+    session = savana.Session._from_core(savana_core._debug_view_session())
+
+    first = await session.read_view(session.initial_document)
+    assert first.variant == "document_page"
+    assert first.page_index == 0
+    assert first.text == "first"
+    assert isinstance(first.continuation, savana.Handle)
+    assert first.continuation.kind == "view-cursor"
+    assert repr(first.continuation) == "Handle(<opaque:view-cursor>)"
+    for forbidden in ("bytes", "raw", "canonical", "cbor", "base64", "to_bytes"):
+        assert not hasattr(first.continuation, forbidden)
+
+    second = await session.read_view(first.continuation)
+    assert second.variant == "document_page"
+    assert second.page_index == 1
+    assert second.text == "second"
+    assert second.continuation is None
+    await session.close()
 
 
 @pytest.mark.asyncio

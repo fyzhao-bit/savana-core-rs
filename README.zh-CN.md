@@ -89,7 +89,7 @@ JARVIS 仍是可信控制集成，并通过带外方式提供一次性 session b
 | Owner | Business method |
 | --- | --- |
 | `Identity` | `load(path)` |
-| `Client` | `session(identity, bootstrap, webauthn)`、`enroll(enrollment_token, code, webauthn, identity_path)` |
+| `Client` | `session(identity, bootstrap, webauthn, approval)`、`enroll(enrollment_token, code, webauthn, identity_path)` |
 | `Session` | `ingest_text`、`ingest_file`、`read_view`、`run_planner`、`execute`、`run_agent`、`release`、`register_connector`、`remove_connector`、`list_connectors`、`revoke`、`close` |
 
 十八个产品类型如下：
@@ -109,6 +109,11 @@ retag；`PlanStep` 只暴露 opaque step handle，不虚构 `kind`、`reads` 或
 不会伪造 document handle。因此 `run_planner(intent_privacy)` 没有 `goal`
 或 `inputs` 参数；调用 planning 或 `run_agent` 之前，必须先用
 `ingest_text` 提交 goal，并用 `ingest_file` 提交文件。
+
+传给 `Client.session` 的 callback 会收到每一个真实的 ingress 审批 display，
+并且必须返回严格的 `bool`；ingress 永远不会自动批准。`read_view` 只接受
+精确的初始 document 或 opaque 的 `MaskedView.continuation` handle，在不暴露
+cursor bytes、也不增加 business method 的前提下保留分页。
 
 公开发布必须显式调用 `release(document, approval)`。`ApprovalRequest` 只有
 `display` 与 `purpose`。Connector 注册先加载 canonical、unsigned 的部署

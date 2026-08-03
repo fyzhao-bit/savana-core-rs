@@ -136,12 +136,13 @@ impl Session {
         &mut self,
         transfer: ApprovalDisplayAuthenticationTransferCapabilityV2,
     ) -> Result<ApprovalOutcome, SavanaError> {
+        let callback = self.ingress_approval.clone();
         self.run_approval(
             transfer,
             BrowserOrigin::Ingress,
             ApprovalPurposeV2::Ingress,
             ApprovalPurpose::Ingress,
-            None,
+            callback.as_ref(),
         )
     }
 
@@ -157,7 +158,7 @@ impl Session {
             BrowserOrigin::Agent,
             expected_protocol_purpose,
             public_purpose,
-            Some(callback),
+            callback,
         )
     }
 
@@ -167,7 +168,7 @@ impl Session {
         source_origin: BrowserOrigin,
         expected_protocol_purpose: ApprovalPurposeV2,
         public_purpose: ApprovalPurpose,
-        callback: Option<&dyn ApprovalCallback>,
+        callback: &dyn ApprovalCallback,
     ) -> Result<ApprovalOutcome, SavanaError> {
         let accepted = self.send_browser_request(BrowserRequest {
             service: BrowserService::Approval,
@@ -250,13 +251,10 @@ impl Session {
             return Err(SavanaError::InvalidResponse);
         }
 
-        let approve = match callback {
-            Some(callback) => callback.decide(&ApprovalRequest {
-                display: view.display_text().as_str().to_owned(),
-                purpose: public_purpose,
-            })?,
-            None => true,
-        };
+        let approve = callback.decide(&ApprovalRequest {
+            display: view.display_text().as_str().to_owned(),
+            purpose: public_purpose,
+        })?;
 
         let decision_nonce = self.nonces.nonce()?;
         let decision = ApprovalDecisionBrowserBeginRequestV2::new(

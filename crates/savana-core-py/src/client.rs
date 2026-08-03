@@ -37,13 +37,15 @@ use savana_client::{
 };
 #[cfg(debug_assertions)]
 use savana_kernel_protocol::v2::{
-    encode_agent_browser_mutation_response_v2, encode_ui_authentication_browser_begin_response_v2,
+    encode_agent_browser_mutation_response_v2, encode_agent_browser_read_view_response_v2,
+    encode_ui_authentication_browser_begin_response_v2,
     encode_ui_authentication_browser_finish_response_v2, render_agent_workspace_v2,
-    AgentBrowserMutationResponseV2, AgentMaskedDocumentRefV2, AgentSessionStatusV2,
+    AgentBrowserMutationResponseV2, AgentBrowserReadViewResponseV2,
+    AgentBrowserViewCursorCapabilityV2, AgentMaskedDocumentRefV2, AgentSessionStatusV2,
     AgentTabSessionCapabilityV2, AgentUiAuthenticationBrowserCeremonyCapabilityV2,
     AgentUiAuthenticationSettlementTransferCapabilityV2, AgentUiPreAuthenticationTabCapabilityV2,
-    FixedOriginV2, Nonce32V2, UiAuthenticationBrowserBeginResponseV2,
-    UiAuthenticationBrowserFinishResponseV2,
+    AgentViewV2, BoundedAgentTextV2, FixedOriginV2, Nonce32V2,
+    UiAuthenticationBrowserBeginResponseV2, UiAuthenticationBrowserFinishResponseV2,
 };
 #[cfg(debug_assertions)]
 use zeroize::Zeroizing;
@@ -327,10 +329,15 @@ impl PyClient {
         identity: &PyIdentity,
         bootstrap: &str,
         webauthn: Py<PyAny>,
+        approval: Py<PyAny>,
     ) -> PyResult<PySession> {
         let callback_errors = Arc::new(CallbackErrors::default());
         let provider = Arc::new(PythonWebAuthn {
             provider: webauthn,
+            errors: callback_errors.clone(),
+        });
+        let approval = Arc::new(PythonApproval {
+            callback: approval,
             errors: callback_errors.clone(),
         });
         let client = self.inner.clone();
@@ -339,7 +346,12 @@ impl PyClient {
             SessionBootstrap::from_control_plane_token(bootstrap).map_err(map_auth_error)?;
         let provider_for_session = provider.clone();
         let result = py.allow_threads(move || {
-            client.session(identity.as_ref(), &mut bootstrap, provider_for_session)
+            client.session(
+                identity.as_ref(),
+                &mut bootstrap,
+                provider_for_session,
+                approval,
+            )
         });
         if let Some(error) = callback_errors.take() {
             return Err(error);
@@ -584,6 +596,11 @@ struct PyMaskedView {
 
 #[pymethods]
 impl PyMaskedView {
+    #[getter]
+    fn continuation(&self) -> Option<PyHandle> {
+        self.inner.continuation().cloned().map(PyHandle::live)
+    }
+
     #[getter]
     fn variant(&self) -> &'static str {
         if self.inner.masked_text().is_some() {
@@ -898,6 +915,16 @@ impl WebAuthnProvider for DebugWebAuthn {
 }
 
 #[cfg(debug_assertions)]
+struct DebugApproval;
+
+#[cfg(debug_assertions)]
+impl ApprovalCallback for DebugApproval {
+    fn decide(&self, _request: &ClientApprovalRequest) -> Result<bool, ClientError> {
+        Ok(true)
+    }
+}
+
+#[cfg(debug_assertions)]
 fn debug_response(
     content_type: BrowserContentType,
     body: Vec<u8>,
@@ -968,6 +995,52 @@ fn debug_transport_responses() -> PyResult<Vec<Result<BrowserResponse, ClientErr
             .map_err(|_| PyValueError::new_err("invalid fixture response"))?,
         ),
     ])
+}
+
+#[cfg(debug_assertions)]
+fn debug_view_transport_responses() -> PyResult<Vec<Result<BrowserResponse, ClientError>>> {
+    let mut responses = debug_transport_responses()?;
+    let close_response = responses
+        .pop()
+        .ok_or_else(|| PyValueError::new_err("missing close fixture response"))?;
+    let cursor = AgentBrowserViewCursorCapabilityV2::from_authority_entropy([0x36; 16])
+        .ok_or_else(|| PyValueError::new_err("invalid fixture cursor"))?;
+    responses.push(debug_response(
+        BrowserContentType::CanonicalCbor,
+        encode_agent_browser_read_view_response_v2(
+            &AgentBrowserReadViewResponseV2::new(
+                AgentViewV2::DocumentPage {
+                    page_index: 0,
+                    text: BoundedAgentTextV2::new("first")
+                        .map_err(|_| PyValueError::new_err("invalid fixture view"))?,
+                    placeholders: vec![],
+                },
+                vec![],
+                Some(cursor),
+            )
+            .map_err(|_| PyValueError::new_err("invalid fixture view"))?,
+        )
+        .map_err(|_| PyValueError::new_err("invalid fixture response"))?,
+    ));
+    responses.push(debug_response(
+        BrowserContentType::CanonicalCbor,
+        encode_agent_browser_read_view_response_v2(
+            &AgentBrowserReadViewResponseV2::new(
+                AgentViewV2::DocumentPage {
+                    page_index: 1,
+                    text: BoundedAgentTextV2::new("second")
+                        .map_err(|_| PyValueError::new_err("invalid fixture view"))?,
+                    placeholders: vec![],
+                },
+                vec![],
+                None,
+            )
+            .map_err(|_| PyValueError::new_err("invalid fixture view"))?,
+        )
+        .map_err(|_| PyValueError::new_err("invalid fixture response"))?,
+    ));
+    responses.push(close_response);
+    Ok(responses)
 }
 
 #[cfg(debug_assertions)]
@@ -1107,14 +1180,14 @@ impl PySession {
         self.finish(result)
     }
 
-    fn read_view(&self, py: Python<'_>, document: &PyHandle) -> PyResult<PyMaskedView> {
-        let document = document.live_arc()?;
+    fn read_view(&self, py: Python<'_>, handle: &PyHandle) -> PyResult<PyMaskedView> {
+        let handle = handle.live_arc()?;
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {
             let mut state = Self::try_state(inner.as_ref())?;
             match &mut *state {
                 SessionState::Live(session) => session
-                    .read_view(document.as_ref())
+                    .read_view(handle.as_ref())
                     .map(|inner| PyMaskedView { inner }),
                 #[cfg(debug_assertions)]
                 SessionState::Debug(_) => Err(ClientError::InvalidState),
@@ -1395,7 +1468,51 @@ fn _debug_transport_session(delay_seconds: f64) -> PyResult<PySession> {
         SessionBootstrap::from_control_plane_token(&URL_SAFE_NO_PAD.encode([0x21; 32]))
             .map_err(map_auth_error)?;
     let session = client
-        .session(&identity, &mut bootstrap, Arc::new(DebugWebAuthn))
+        .session(
+            &identity,
+            &mut bootstrap,
+            Arc::new(DebugWebAuthn),
+            Arc::new(DebugApproval),
+        )
+        .map_err(map_auth_error)?;
+    Ok(PySession {
+        inner: Arc::new(Mutex::new(SessionState::Live(Box::new(session)))),
+        callback_errors: Arc::new(CallbackErrors::default()),
+        debug_transport: Some(transport),
+    })
+}
+
+#[cfg(debug_assertions)]
+#[pyfunction]
+fn _debug_view_session() -> PyResult<PySession> {
+    let transport = Arc::new(DebugScriptedTransport::new(
+        debug_view_transport_responses()?,
+        Duration::ZERO,
+    ));
+    let endpoints = ClientEndpoints::new(AGENT_ENDPOINT, INGRESS_ENDPOINT, APPROVAL_ENDPOINT)
+        .map_err(map_client_error)?;
+    let client = RustClient::with_transport_and_nonce_source(
+        endpoints,
+        transport.clone(),
+        Arc::new(DebugFixedNonces(Mutex::new(1))),
+    );
+    let identity_path = debug_identity_path()?;
+    let identity = ClientIdentity::load(&identity_path).map_err(map_auth_error);
+    let _ = fs::remove_file(&identity_path);
+    if let Some(parent) = identity_path.parent() {
+        let _ = fs::remove_dir(parent);
+    }
+    let identity = identity?;
+    let mut bootstrap =
+        SessionBootstrap::from_control_plane_token(&URL_SAFE_NO_PAD.encode([0x21; 32]))
+            .map_err(map_auth_error)?;
+    let session = client
+        .session(
+            &identity,
+            &mut bootstrap,
+            Arc::new(DebugWebAuthn),
+            Arc::new(DebugApproval),
+        )
         .map_err(map_auth_error)?;
     Ok(PySession {
         inner: Arc::new(Mutex::new(SessionState::Live(Box::new(session)))),
@@ -1481,6 +1598,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     {
         m.add_function(wrap_pyfunction!(_debug_scripted_session, m)?)?;
         m.add_function(wrap_pyfunction!(_debug_transport_session, m)?)?;
+        m.add_function(wrap_pyfunction!(_debug_view_session, m)?)?;
         m.add_function(wrap_pyfunction!(_debug_handle, m)?)?;
         m.add_function(wrap_pyfunction!(_debug_plan, m)?)?;
         m.add_function(wrap_pyfunction!(_debug_approval_request, m)?)?;

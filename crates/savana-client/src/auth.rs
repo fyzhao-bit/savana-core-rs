@@ -23,8 +23,8 @@ use zeroize::Zeroizing;
 use crate::handle::SessionBinding;
 use crate::identity::PublicCredentialState;
 use crate::{
-    AuthError, BrowserContentType, BrowserOrigin, BrowserRequest, BrowserResponse, BrowserRoute,
-    BrowserService, Client, Identity, Session, SessionBootstrap,
+    ApprovalCallback, AuthError, BrowserContentType, BrowserOrigin, BrowserRequest,
+    BrowserResponse, BrowserRoute, BrowserService, Client, Identity, Session, SessionBootstrap,
 };
 
 const MAX_AUTHENTICATION_HTML_BYTES: usize = 64 * 1024;
@@ -129,6 +129,7 @@ impl Client {
         identity: &Identity,
         bootstrap: &mut SessionBootstrap,
         webauthn: Arc<dyn WebAuthnProvider>,
+        approval: Arc<dyn ApprovalCallback>,
     ) -> Result<Session, AuthError> {
         let transfer = bootstrap.take_transfer()?;
         if !identity.is_active() {
@@ -238,6 +239,7 @@ impl Client {
             tab,
             document,
             webauthn,
+            approval,
         ))
     }
 
