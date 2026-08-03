@@ -186,11 +186,11 @@ impl Session {
         let transfer = match first_finalize {
             Ok(IngressBrowserMutationResponseV2::FinalizeOpenApproval { transfer }) => transfer,
             Ok(_) => {
-                self.abort_after_error(tab);
+                self.state = LocalSessionState::Closed;
                 return Err(SavanaError::InvalidResponse);
             }
             Err(error) => {
-                self.abort_after_error(tab);
+                self.state = LocalSessionState::Closed;
                 return Err(error);
             }
         };

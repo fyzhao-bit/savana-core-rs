@@ -613,6 +613,12 @@ fn revoke_and_close_require_exact_terminal_states_and_close_locally() {
         ),
         cbor_response(
             encode_agent_browser_mutation_response_v2(
+                &AgentBrowserMutationResponseV2::PlannerCommitted { steps: vec![] },
+            )
+            .unwrap(),
+        ),
+        cbor_response(
+            encode_agent_browser_mutation_response_v2(
                 &AgentBrowserMutationResponseV2::SessionClosed {
                     state: AgentSessionStatusV2::Closed,
                 },
@@ -628,6 +634,11 @@ fn revoke_and_close_require_exact_terminal_states_and_close_locally() {
         session.read_view(&document),
         Err(SavanaError::InvalidState)
     ));
+    assert!(session
+        .run_planner(IntentPrivacy::Private)
+        .unwrap()
+        .steps()
+        .is_empty());
     session.close().unwrap();
     assert!(matches!(
         session.run_planner(IntentPrivacy::Private),
@@ -638,7 +649,7 @@ fn revoke_and_close_require_exact_terminal_states_and_close_locally() {
     let requests = transport.take_requests();
     assert_eq!(
         requests.len(),
-        6,
+        7,
         "second close must be local and idempotent"
     );
     assert!(matches!(
@@ -650,6 +661,13 @@ fn revoke_and_close_require_exact_terminal_states_and_close_locally() {
     ));
     assert!(matches!(
         decode_agent_browser_request_v2(&requests[5].body).unwrap(),
+        AgentBrowserRequestV2::Act {
+            action: AgentBrowserActionV2::RunPlanner,
+            ..
+        }
+    ));
+    assert!(matches!(
+        decode_agent_browser_request_v2(&requests[6].body).unwrap(),
         AgentBrowserRequestV2::Act {
             action: AgentBrowserActionV2::CloseSession,
             ..
@@ -674,6 +692,10 @@ fn revoke_and_close_reject_nonterminal_states_and_remain_locally_fail_closed() {
         revoke_session.read_view(&document),
         Err(SavanaError::InvalidState)
     ));
+    assert!(matches!(
+        revoke_session.run_planner(IntentPrivacy::Private),
+        Err(SavanaError::InvalidState)
+    ));
     assert_eq!(revoke_transport.take_requests().len(), 5);
 
     let (mut close_session, close_transport, _) = authenticated_session(vec![cbor_response(
@@ -691,6 +713,53 @@ fn revoke_and_close_reject_nonterminal_states_and_remain_locally_fail_closed() {
         Err(SavanaError::InvalidState)
     ));
     assert_eq!(close_transport.take_requests().len(), 5);
+}
+
+fn assert_revoke_failure_closes_locally(
+    revoke_response: Result<BrowserResponse, SavanaError>,
+) -> SavanaError {
+    let (mut session, transport, _) = authenticated_session(vec![revoke_response]);
+    let document = session.initial_document().clone();
+
+    let error = session.revoke(&document).unwrap_err();
+    assert!(matches!(
+        session.run_planner(IntentPrivacy::Private),
+        Err(SavanaError::InvalidState)
+    ));
+    let requests = transport.take_requests();
+    assert_eq!(requests.len(), 5);
+    assert!(matches!(
+        decode_agent_browser_request_v2(&requests[4].body).unwrap(),
+        AgentBrowserRequestV2::Act {
+            action: AgentBrowserActionV2::RevokeVault(_),
+            ..
+        }
+    ));
+    error
+}
+
+#[test]
+fn lost_revoke_response_closes_locally_without_later_transport() {
+    assert!(matches!(
+        assert_revoke_failure_closes_locally(Err(SavanaError::Transport)),
+        SavanaError::Transport
+    ));
+}
+
+#[test]
+fn malformed_revoke_response_closes_locally_without_later_transport() {
+    assert!(matches!(
+        assert_revoke_failure_closes_locally(cbor_response(vec![0xff])),
+        SavanaError::InvalidResponse
+    ));
+}
+
+#[test]
+fn wrong_content_type_revoke_response_closes_locally_without_later_transport() {
+    assert!(matches!(
+        assert_revoke_failure_closes_locally(html_response(b"wrong type".to_vec())),
+        SavanaError::InvalidResponse
+    ));
 }
 
 #[test]
@@ -1003,4 +1072,67 @@ fn approval_failure_after_finalize_closes_locally_without_illegal_abort() {
     assert!(!requests
         .iter()
         .any(|request| request.route == BrowserRoute::IngressInputAbort));
+}
+
+fn assert_first_finalize_failure_closes_without_abort(
+    first_finalize_response: Result<BrowserResponse, SavanaError>,
+) -> SavanaError {
+    let mut responses = successful_ingress_responses(1);
+    responses.truncate(9);
+    responses[8] = first_finalize_response;
+    let (mut session, transport, _) = authenticated_session(responses);
+
+    let error = session
+        .ingest_text("ambiguous first finalize", ContentKind::PlainText)
+        .unwrap_err();
+    assert!(matches!(
+        session.run_planner(IntentPrivacy::Private),
+        Err(SavanaError::InvalidState)
+    ));
+    let requests = transport.take_requests();
+    assert_eq!(
+        requests.last().unwrap().route,
+        BrowserRoute::IngressInputFinalize
+    );
+    assert!(!requests
+        .iter()
+        .any(|request| request.route == BrowserRoute::IngressInputAbort));
+    error
+}
+
+#[test]
+fn lost_first_finalize_response_closes_locally_without_abort() {
+    assert!(matches!(
+        assert_first_finalize_failure_closes_without_abort(Err(SavanaError::Transport)),
+        SavanaError::Transport
+    ));
+}
+
+#[test]
+fn malformed_first_finalize_response_closes_locally_without_abort() {
+    assert!(matches!(
+        assert_first_finalize_failure_closes_without_abort(cbor_response(vec![0xff])),
+        SavanaError::InvalidResponse
+    ));
+}
+
+#[test]
+fn wrong_content_type_for_first_finalize_closes_locally_without_abort() {
+    assert!(matches!(
+        assert_first_finalize_failure_closes_without_abort(html_response(b"wrong type".to_vec())),
+        SavanaError::InvalidResponse
+    ));
+}
+
+#[test]
+fn unexpected_first_finalize_response_closes_locally_without_abort() {
+    assert!(matches!(
+        assert_first_finalize_failure_closes_without_abort(cbor_response(
+            encode_ingress_browser_mutation_response_v2(IngressBrowserMutationResponseV2::Begun {
+                next_sequence: 0
+            },)
+            .unwrap(),
+        )),
+        SavanaError::InvalidResponse
+    ));
 }

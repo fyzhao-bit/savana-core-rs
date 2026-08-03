@@ -74,11 +74,22 @@ impl Session {
             return Err(SavanaError::InvalidState);
         }
         self.revoked_documents.push(document);
-        match self.agent_action_unchecked(AgentBrowserActionV2::RevokeVault(document))? {
+        let response =
+            match self.agent_action_unchecked(AgentBrowserActionV2::RevokeVault(document)) {
+                Ok(response) => response,
+                Err(error) => {
+                    self.state = LocalSessionState::Closed;
+                    return Err(error);
+                }
+            };
+        match response {
             AgentBrowserMutationResponseV2::VaultRevoked {
                 state: VaultPublicStateV2::Revoked,
             } => Ok(()),
-            _ => Err(SavanaError::InvalidResponse),
+            _ => {
+                self.state = LocalSessionState::Closed;
+                Err(SavanaError::InvalidResponse)
+            }
         }
     }
 
