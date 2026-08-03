@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::Read as _;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 #[cfg(debug_assertions)]
@@ -1056,16 +1056,20 @@ impl PySession {
     fn lock_error() -> ClientError {
         ClientError::InvalidState
     }
+
+    fn try_state(inner: &Mutex<SessionState>) -> Result<MutexGuard<'_, SessionState>, ClientError> {
+        // A Rust workflow may invoke Python while it owns mutable session state.
+        // Reentrant or concurrent access must fail closed instead of blocking the
+        // callback on the same non-reentrant mutex.
+        inner.try_lock().map_err(|_| Self::lock_error())
+    }
 }
 
 #[pymethods]
 impl PySession {
     #[getter]
     fn initial_document(&self) -> PyResult<PyHandle> {
-        let state = self
-            .inner
-            .lock()
-            .map_err(|_| map_client_error(Self::lock_error()))?;
+        let state = Self::try_state(self.inner.as_ref()).map_err(map_client_error)?;
         match &*state {
             SessionState::Live(session) => Ok(PyHandle::live(session.initial_document().clone())),
             #[cfg(debug_assertions)]
@@ -1079,7 +1083,7 @@ impl PySession {
         let kind = parse_content_kind(content_kind)?;
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {
-            let mut state = inner.lock().map_err(|_| Self::lock_error())?;
+            let mut state = Self::try_state(inner.as_ref())?;
             match &mut *state {
                 SessionState::Live(session) => session.ingest_text(&text, kind),
                 #[cfg(debug_assertions)]
@@ -1093,7 +1097,7 @@ impl PySession {
         let kind = parse_content_kind(content_kind)?;
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {
-            let mut state = inner.lock().map_err(|_| Self::lock_error())?;
+            let mut state = Self::try_state(inner.as_ref())?;
             match &mut *state {
                 SessionState::Live(session) => session.ingest_file(&path, kind),
                 #[cfg(debug_assertions)]
@@ -1107,7 +1111,7 @@ impl PySession {
         let document = document.live_arc()?;
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {
-            let mut state = inner.lock().map_err(|_| Self::lock_error())?;
+            let mut state = Self::try_state(inner.as_ref())?;
             match &mut *state {
                 SessionState::Live(session) => session
                     .read_view(document.as_ref())
@@ -1123,7 +1127,7 @@ impl PySession {
         let privacy = parse_intent_privacy(intent_privacy)?;
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {
-            let mut state = inner.lock().map_err(|_| Self::lock_error())?;
+            let mut state = Self::try_state(inner.as_ref())?;
             match &mut *state {
                 SessionState::Live(session) => session.run_planner(privacy).map(PyPlan::live),
                 #[cfg(debug_assertions)]
@@ -1154,7 +1158,7 @@ impl PySession {
         };
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {
-            let mut state = inner.lock().map_err(|_| Self::lock_error())?;
+            let mut state = Self::try_state(inner.as_ref())?;
             match &mut *state {
                 SessionState::Live(session) => session
                     .execute(
@@ -1195,7 +1199,7 @@ impl PySession {
         };
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {
-            let mut state = inner.lock().map_err(|_| Self::lock_error())?;
+            let mut state = Self::try_state(inner.as_ref())?;
             match &mut *state {
                 SessionState::Live(session) => session
                     .run_agent(privacy, limits, &approval, &events)
@@ -1225,7 +1229,7 @@ impl PySession {
         };
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {
-            let mut state = inner.lock().map_err(|_| Self::lock_error())?;
+            let mut state = Self::try_state(inner.as_ref())?;
             match &mut *state {
                 SessionState::Live(session) => session
                     .release(document.as_ref(), &callback)
@@ -1250,7 +1254,7 @@ impl PySession {
         };
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {
-            let mut state = inner.lock().map_err(|_| Self::lock_error())?;
+            let mut state = Self::try_state(inner.as_ref())?;
             match &mut *state {
                 SessionState::Live(session) => session
                     .register_connector(descriptor.as_ref(), &callback)
@@ -1266,7 +1270,7 @@ impl PySession {
         let connector = connector.live_arc()?;
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {
-            let mut state = inner.lock().map_err(|_| Self::lock_error())?;
+            let mut state = Self::try_state(inner.as_ref())?;
             match &mut *state {
                 SessionState::Live(session) => session.remove_connector(connector.as_ref()),
                 #[cfg(debug_assertions)]
@@ -1279,7 +1283,7 @@ impl PySession {
     fn list_connectors(&self, py: Python<'_>) -> PyResult<Vec<PyHandle>> {
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {
-            let mut state = inner.lock().map_err(|_| Self::lock_error())?;
+            let mut state = Self::try_state(inner.as_ref())?;
             match &mut *state {
                 SessionState::Live(session) => session
                     .list_connectors()
@@ -1298,7 +1302,7 @@ impl PySession {
         let document = document.live_arc()?;
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {
-            let mut state = inner.lock().map_err(|_| Self::lock_error())?;
+            let mut state = Self::try_state(inner.as_ref())?;
             match &mut *state {
                 SessionState::Live(session) => session.revoke(document.as_ref()),
                 #[cfg(debug_assertions)]
@@ -1311,7 +1315,7 @@ impl PySession {
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {
-            let mut state = inner.lock().map_err(|_| Self::lock_error())?;
+            let mut state = Self::try_state(inner.as_ref())?;
             match &mut *state {
                 SessionState::Live(session) => session.close(),
                 #[cfg(debug_assertions)]
@@ -1432,10 +1436,7 @@ fn _debug_close_count(session: &PySession) -> PyResult<usize> {
     if let Some(transport) = &session.debug_transport {
         return Ok(transport.close_count.load(Ordering::SeqCst));
     }
-    let state = session
-        .inner
-        .lock()
-        .map_err(|_| map_client_error(ClientError::InvalidState))?;
+    let state = PySession::try_state(session.inner.as_ref()).map_err(map_client_error)?;
     match &*state {
         SessionState::Debug(session) => Ok(session.close_count),
         SessionState::Live(_) => Err(PyValueError::new_err("session is not scripted")),
@@ -1452,10 +1453,7 @@ fn _debug_last_worker_thread(session: &PySession) -> PyResult<Option<i64>> {
             .map(|worker| *worker)
             .map_err(|_| map_client_error(ClientError::InvalidState));
     }
-    let state = session
-        .inner
-        .lock()
-        .map_err(|_| map_client_error(ClientError::InvalidState))?;
+    let state = PySession::try_state(session.inner.as_ref()).map_err(map_client_error)?;
     match &*state {
         SessionState::Debug(session) => Ok(session.last_worker_thread),
         SessionState::Live(_) => Err(PyValueError::new_err("session is not scripted")),

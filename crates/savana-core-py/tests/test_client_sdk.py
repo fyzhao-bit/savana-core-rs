@@ -1,6 +1,9 @@
 import asyncio
 import inspect
+import subprocess
+import sys
 import threading
+import textwrap
 import time
 
 import pytest
@@ -45,6 +48,13 @@ SESSION_METHODS = {
     "close",
 }
 
+# These are value construction/control helpers, not Identity/Client/Session
+# business workflows, so they are inventoried separately from the fixed 15.
+SUPPORTING_VALUE_METHODS = {
+    savana.ConnectorDescriptor: {"load"},
+    savana.RunLimits: {"cancel"},
+}
+
 
 def public_methods(cls):
     return {
@@ -71,6 +81,9 @@ def test_public_surface_is_exactly_the_approved_types_and_business_methods():
     assert public_methods(savana.Identity) == {"load"}
     assert public_methods(savana.Client) == {"session", "enroll"}
     assert public_methods(savana.Session) == SESSION_METHODS
+    assert 1 + 2 + len(SESSION_METHODS) == 15
+    for value_type, methods in SUPPORTING_VALUE_METHODS.items():
+        assert public_methods(value_type) == methods
     assert "fetch" not in vars(savana.Session)
     assert list(inspect.signature(savana.Session.run_planner).parameters) == [
         "self",
@@ -97,6 +110,11 @@ def test_choices_and_exception_inheritance_are_stable():
     assert issubclass(savana.AuthError, savana.SavanaError)
     assert issubclass(savana.ApprovalDenied, savana.SavanaError)
     assert issubclass(savana.PolicyRefused, savana.SavanaError)
+
+    limits = savana.RunLimits(2, 1, 1.0)
+    assert limits.cancelled is False
+    limits.cancel()
+    assert limits.cancelled is True
 
 
 def test_errors_expose_stable_codes_without_paths(tmp_path):
@@ -141,6 +159,8 @@ def test_approval_request_and_connector_projection_are_truthful_and_opaque():
     assert not hasattr(request, "recipients")
 
     assert not hasattr(savana.ConnectorDescriptor, "from_bytes")
+    with pytest.raises(TypeError):
+        savana.ConnectorDescriptor(b"editable descriptor bytes")
     descriptor_names = set(vars(savana.ConnectorDescriptor))
     assert not descriptor_names.intersection(
         {"bytes", "raw", "canonical", "cbor", "base64", "to_bytes"}
@@ -186,6 +206,112 @@ async def test_callback_exception_propagates_once_without_retry():
     with pytest.raises(CallbackBoom, match="application callback failed"):
         await session.execute(plan, approval)
     assert attempts == 1
+
+
+def test_callback_reentrancy_fails_promptly_once_and_session_can_close():
+    # Run the regression in a child process so a blocking-lock mutation fails by
+    # timeout without wedging the pytest interpreter itself.
+    script = textwrap.dedent(
+        """
+        import asyncio
+        import time
+
+        import savana
+        import savana_core
+
+
+        async def main():
+            approval_session = savana.Session._from_core(
+                savana_core._debug_scripted_session()
+            )
+            approval_attempts = 0
+            approval_error = None
+            operation_error = None
+
+            def approval(_request):
+                nonlocal approval_attempts, approval_error, operation_error
+                approval_attempts += 1
+                try:
+                    approval_session.initial_document
+                except savana.SavanaError as error:
+                    approval_error = error
+                else:
+                    raise AssertionError("reentrant property access succeeded")
+
+                try:
+                    asyncio.run(approval_session.list_connectors())
+                except savana.SavanaError as error:
+                    operation_error = error
+                else:
+                    raise AssertionError("reentrant session operation succeeded")
+                raise approval_error
+
+            started = time.monotonic()
+            try:
+                await asyncio.wait_for(
+                    approval_session.execute(savana_core._debug_plan(), approval),
+                    timeout=0.75,
+                )
+            except savana.SavanaError as outer_error:
+                assert outer_error is approval_error
+                assert outer_error.code == "invalid_state"
+            else:
+                raise AssertionError("approval callback unexpectedly succeeded")
+            assert time.monotonic() - started < 0.75
+            assert operation_error.code == "invalid_state"
+            assert approval_attempts == 1
+            await asyncio.wait_for(approval_session.close(), timeout=0.75)
+            assert savana_core._debug_close_count(approval_session._inner) == 1
+
+            event_session = savana.Session._from_core(
+                savana_core._debug_scripted_session()
+            )
+            event_attempts = 0
+            event_error = None
+
+            def events(_event):
+                nonlocal event_attempts, event_error
+                event_attempts += 1
+                try:
+                    event_session.initial_document
+                except savana.SavanaError as error:
+                    event_error = error
+                    raise
+                raise AssertionError("reentrant event property access succeeded")
+
+            started = time.monotonic()
+            try:
+                await asyncio.wait_for(
+                    event_session.run_agent(
+                        savana.IntentPrivacy.PRIVATE,
+                        savana.RunLimits(2, 1, 1.0),
+                        lambda _request: True,
+                        events,
+                    ),
+                    timeout=0.75,
+                )
+            except savana.SavanaError as outer_error:
+                assert outer_error is event_error
+                assert outer_error.code == "invalid_state"
+            else:
+                raise AssertionError("event callback unexpectedly succeeded")
+            assert time.monotonic() - started < 0.75
+            assert event_attempts == 1
+            await asyncio.wait_for(event_session.close(), timeout=0.75)
+            assert savana_core._debug_close_count(event_session._inner) == 1
+
+
+        asyncio.run(main())
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=3.0,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 @pytest.mark.asyncio
