@@ -197,13 +197,31 @@ class Session:
 
     async def run_agent(self, intent_privacy, limits, approval, events):
         loop = asyncio.get_running_loop()
-        return await self._client._run(
-            self._inner.run_agent,
-            intent_privacy.value,
-            limits,
-            _bridge(approval, loop),
-            _bridge(events, loop),
+        task = asyncio.ensure_future(
+            self._client._run(
+                self._inner.run_agent,
+                intent_privacy.value,
+                limits,
+                _bridge(approval, loop),
+                _bridge(events, loop),
+            )
         )
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # The autonomous loop is the one call that can run long, so honor
+            # task cancellation: trip the RunLimits cancel flag the core already
+            # polls before each request, then drain the worker thread so the
+            # session mutex is released and the session stays reusable/closeable.
+            # A blocking op with no cancel token (execute/ingest/release) is left
+            # to its bounded IO timeouts; a cancel token there would also gate
+            # close() and cannot interrupt a pending approval callback anyway.
+            try:
+                limits.cancel()
+            except AttributeError:
+                pass
+            await asyncio.gather(task, return_exceptions=True)
+            raise
 
     async def release(self, document, approval):
         loop = asyncio.get_running_loop()
