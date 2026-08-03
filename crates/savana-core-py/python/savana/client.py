@@ -31,6 +31,29 @@ class ContentKind(str, Enum):
     PARSED_DOCUMENT = "parsed_document"
 
 
+def _bridge(callback, loop):
+    """Let an async callback be invoked from the blocking worker thread.
+
+    The core invokes approval / webauthn / event callbacks synchronously on the
+    thread that runs the blocking operation, so a coroutine function cannot be
+    called there directly. If ``callback`` is async, wrap it so the coroutine
+    runs on ``loop`` while the worker thread blocks on its result; the wrapper
+    returns exactly what the coroutine returns (a ``bool`` for approvals). The
+    event loop stays free to run that coroutine because it is only awaiting the
+    ``to_thread`` future, so there is no deadlock. Sync callbacks (and ``None``)
+    pass through unchanged, so existing callers are unaffected.
+    """
+    if callback is None or not asyncio.iscoroutinefunction(callback):
+        return callback
+
+    def _sync(*args, **kwargs):
+        return asyncio.run_coroutine_threadsafe(
+            callback(*args, **kwargs), loop
+        ).result()
+
+    return _sync
+
+
 class Identity:
     __slots__ = ("_inner",)
 
@@ -58,21 +81,23 @@ class Client:
         self._inner = _core._Client()
 
     async def session(self, identity, bootstrap, webauthn, approval):
+        loop = asyncio.get_running_loop()
         inner = await asyncio.to_thread(
             self._inner.session,
             identity._inner,
             bootstrap,
-            webauthn,
-            approval,
+            _bridge(webauthn, loop),
+            _bridge(approval, loop),
         )
         return Session._from_core(inner)
 
     async def enroll(self, enrollment_token, code, webauthn, identity_path):
+        loop = asyncio.get_running_loop()
         inner = await asyncio.to_thread(
             self._inner.enroll,
             enrollment_token,
             code,
-            webauthn,
+            _bridge(webauthn, loop),
             str(Path(identity_path)),
         )
         return Identity._from_core(inner)
@@ -123,25 +148,48 @@ class Session:
         )
 
     async def execute(self, plan, approval):
-        return await asyncio.to_thread(self._inner.execute, plan, approval)
-
-    async def run_agent(self, intent_privacy, limits, approval, events):
+        loop = asyncio.get_running_loop()
         return await asyncio.to_thread(
-            self._inner.run_agent,
-            intent_privacy.value,
-            limits,
-            approval,
-            events,
+            self._inner.execute, plan, _bridge(approval, loop)
         )
 
+    async def run_agent(self, intent_privacy, limits, approval, events):
+        loop = asyncio.get_running_loop()
+        task = asyncio.ensure_future(
+            asyncio.to_thread(
+                self._inner.run_agent,
+                intent_privacy.value,
+                limits,
+                _bridge(approval, loop),
+                _bridge(events, loop),
+            )
+        )
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # The autonomous loop is the one call that can run long, so honor
+            # task cancellation: trip the RunLimits cancel flag the core already
+            # polls before every request, then drain the worker thread so the
+            # session stays reusable/closeable before the cancellation
+            # propagates. Single-shot ops have no cancel token and are left to
+            # their bounded IO timeouts.
+            try:
+                limits.cancel()
+            except AttributeError:
+                pass
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+
     async def release(self, document, approval):
-        return await asyncio.to_thread(self._inner.release, document, approval)
+        loop = asyncio.get_running_loop()
+        return await asyncio.to_thread(
+            self._inner.release, document, _bridge(approval, loop)
+        )
 
     async def register_connector(self, descriptor, approval):
+        loop = asyncio.get_running_loop()
         return await asyncio.to_thread(
-            self._inner.register_connector,
-            descriptor,
-            approval,
+            self._inner.register_connector, descriptor, _bridge(approval, loop)
         )
 
     async def remove_connector(self, connector):
