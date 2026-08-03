@@ -64,13 +64,6 @@ impl SavanaError {
     pub const fn transport() -> Self {
         Self::Transport
     }
-
-    pub(crate) const fn is_local_run_stop(&self) -> bool {
-        matches!(
-            self,
-            Self::DeadlineExceeded | Self::Cancelled | Self::CallbackFailed
-        )
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

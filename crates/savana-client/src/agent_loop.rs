@@ -44,9 +44,11 @@ impl Session {
         let deadline = Instant::now()
             .checked_add(limits.deadline())
             .ok_or(SavanaError::InvalidRequest)?;
+        self.clear_request_guard_rejection();
         self.agent_run_guard = Some(AgentRunGuard::new(deadline, limits.cancellation_flag()));
         let result = self.run_agent_inner(privacy, &limits, approval, events);
         self.agent_run_guard = None;
+        self.clear_request_guard_rejection();
         result
     }
 

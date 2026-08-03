@@ -74,6 +74,7 @@ pub struct Session {
     pub(crate) observed_release_tickets: Vec<AgentReleaseTicketRefV2>,
     pub(crate) removed_connectors: Vec<Digest32V2>,
     pub(crate) agent_run_guard: Option<AgentRunGuard>,
+    request_guard_rejected: AtomicBool,
     initial_document: Handle,
 }
 
@@ -100,6 +101,7 @@ impl Session {
             observed_release_tickets: Vec::new(),
             removed_connectors: Vec::new(),
             agent_run_guard: None,
+            request_guard_rejected: AtomicBool::new(false),
             initial_document,
         }
     }
@@ -114,6 +116,25 @@ impl Session {
         } else {
             Err(SavanaError::InvalidState)
         }
+    }
+
+    pub(crate) fn take_request_guard_rejection(&self) -> bool {
+        self.request_guard_rejected.swap(false, Ordering::SeqCst)
+    }
+
+    pub(crate) fn clear_request_guard_rejection(&self) {
+        self.request_guard_rejected.store(false, Ordering::SeqCst);
+    }
+
+    pub(crate) fn check_request_guard(&self) -> Result<(), SavanaError> {
+        self.clear_request_guard_rejection();
+        if let Some(guard) = &self.agent_run_guard {
+            if let Err(error) = guard.check() {
+                self.request_guard_rejected.store(true, Ordering::SeqCst);
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 }
 

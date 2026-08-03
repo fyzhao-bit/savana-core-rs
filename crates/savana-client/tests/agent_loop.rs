@@ -397,7 +397,15 @@ fn cancellation_and_deadline_stop_before_the_next_service_request() {
         ),
         Err(SavanaError::Cancelled)
     ));
-    assert!(actions(&cancelled_transport.take_requests()).is_empty());
+    assert!(cancelled_session
+        .run_planner(IntentPrivacy::Private)
+        .is_ok());
+    let cancelled_requests = cancelled_transport.take_requests();
+    assert_eq!(cancelled_requests.len(), 5);
+    assert_eq!(
+        actions(&cancelled_requests),
+        [AgentBrowserActionV2::RunPlanner]
+    );
 
     let (mut expired_session, expired_transport, _) = authenticated_session(vec![plan(vec![])]);
     assert!(matches!(
@@ -409,7 +417,13 @@ fn cancellation_and_deadline_stop_before_the_next_service_request() {
         ),
         Err(SavanaError::DeadlineExceeded)
     ));
-    assert!(actions(&expired_transport.take_requests()).is_empty());
+    assert!(expired_session.run_planner(IntentPrivacy::Private).is_ok());
+    let expired_requests = expired_transport.take_requests();
+    assert_eq!(expired_requests.len(), 5);
+    assert_eq!(
+        actions(&expired_requests),
+        [AgentBrowserActionV2::RunPlanner]
+    );
 }
 
 #[test]
@@ -427,10 +441,13 @@ fn cancellation_inside_approval_blocks_its_next_nested_request() {
             trace: trace(0x84),
         }),
     ];
-    responses.extend(approval_responses(
+    let mut nested_approval_responses = approval_responses(
         ApprovalPurposeV2::ToolExecution,
         ApprovalDecisionBrowserFinishResponseV2::Approved,
-    ));
+    );
+    nested_approval_responses.truncate(4);
+    responses.extend(nested_approval_responses);
+    responses.push(plan(vec![]));
     let (mut session, transport, _) = authenticated_session(responses);
     let limits = RunLimits::new(1, 1, Duration::from_secs(1)).unwrap();
     let approval = CancellingApproval {
@@ -444,10 +461,18 @@ fn cancellation_inside_approval_blocks_its_next_nested_request() {
         Err(SavanaError::Cancelled)
     ));
     assert!(approval.called.load(Ordering::SeqCst));
+    assert!(session.run_planner(IntentPrivacy::Private).is_ok());
     let requests = transport.take_requests();
     assert!(!requests
         .iter()
         .any(|request| request.route == savana_client::BrowserRoute::ApprovalDecisionBegin));
+    assert_eq!(
+        actions(&requests)
+            .iter()
+            .filter(|action| matches!(action, AgentBrowserActionV2::RunPlanner))
+            .count(),
+        2
+    );
     let event_debug = format!("{:?}", events.take());
     assert!(event_debug.contains("ApprovalRequired"));
     assert!(!event_debug.contains("Approve exact operation"));
@@ -521,7 +546,6 @@ fn approval_denial_and_callback_failure_are_terminal_without_dispatch_or_replan(
     );
     callback_approval_responses.truncate(4);
     callback_responses.extend(callback_approval_responses);
-    callback_responses.push(plan(vec![]));
     let (mut callback_session, callback_transport, _) = authenticated_session(callback_responses);
     assert!(matches!(
         callback_session.run_agent(
@@ -532,11 +556,15 @@ fn approval_denial_and_callback_failure_are_terminal_without_dispatch_or_replan(
         ),
         Err(SavanaError::CallbackFailed)
     ));
-    assert!(callback_session.run_planner(IntentPrivacy::Private).is_ok());
     let callback_requests = callback_transport.take_requests();
     assert!(!callback_requests
         .iter()
         .any(|request| request.route == savana_client::BrowserRoute::ApprovalDecisionBegin));
+    assert!(matches!(
+        callback_session.run_planner(IntentPrivacy::Private),
+        Err(SavanaError::InvalidState)
+    ));
+    assert!(callback_transport.take_requests().is_empty());
 }
 
 #[test]
@@ -669,4 +697,119 @@ fn ambiguous_transport_failure_is_terminal_and_never_replanned() {
             .count(),
         1
     );
+}
+
+#[test]
+fn transport_lookalike_guard_errors_close_after_a_planner_request() {
+    let cases: [fn() -> SavanaError; 3] = [
+        || SavanaError::Cancelled,
+        || SavanaError::DeadlineExceeded,
+        || SavanaError::CallbackFailed,
+    ];
+    for make_error in cases {
+        let expected_code = make_error().code();
+        let (mut session, transport, _) =
+            authenticated_session(vec![Err(make_error()), plan(vec![])]);
+
+        let error = session
+            .run_agent(
+                IntentPrivacy::Private,
+                RunLimits::new(1, 1, Duration::from_secs(1)).unwrap(),
+                &RecordingDecision::new(true),
+                &RecordingEvents::default(),
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), expected_code);
+        let requests = transport.take_requests();
+        assert_eq!(actions(&requests), [AgentBrowserActionV2::RunPlanner]);
+        assert!(matches!(
+            session.run_planner(IntentPrivacy::Private),
+            Err(SavanaError::InvalidState)
+        ));
+        assert!(transport.take_requests().is_empty());
+    }
+}
+
+#[test]
+fn transport_lookalike_guard_errors_close_after_an_execution_request() {
+    let cases: [fn() -> SavanaError; 3] = [
+        || SavanaError::Cancelled,
+        || SavanaError::DeadlineExceeded,
+        || SavanaError::CallbackFailed,
+    ];
+    for (index, make_error) in cases.into_iter().enumerate() {
+        let expected_code = make_error().code();
+        let planned = step(0xe2 + index as u8);
+        let (mut session, transport, _) =
+            authenticated_session(vec![plan(vec![planned]), Err(make_error()), plan(vec![])]);
+
+        let error = session
+            .run_agent(
+                IntentPrivacy::Private,
+                RunLimits::new(1, 1, Duration::from_secs(1)).unwrap(),
+                &RecordingDecision::new(true),
+                &RecordingEvents::default(),
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), expected_code);
+        let requests = transport.take_requests();
+        let observed = actions(&requests);
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|action| matches!(action, AgentBrowserActionV2::RunPlanner))
+                .count(),
+            1
+        );
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|action| matches!(action, AgentBrowserActionV2::ProposePlanStep(_)))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            session.run_planner(IntentPrivacy::Private),
+            Err(SavanaError::InvalidState)
+        ));
+        assert!(transport.take_requests().is_empty());
+    }
+}
+
+#[test]
+fn transport_callback_failure_during_remote_approval_closes_the_session() {
+    let planned = step(0xe6);
+    let pending = AgentPendingToolCallRefV2::from_authority_entropy([0xe7; 16]).unwrap();
+    let transfer =
+        ApprovalDisplayAuthenticationTransferCapabilityV2::from_authority_entropy([0xe8; 32])
+            .unwrap();
+    let (mut session, transport, _) = authenticated_session(vec![
+        plan(vec![planned]),
+        mutation(AgentBrowserMutationResponseV2::ToolProposed { pending }),
+        mutation(AgentBrowserMutationResponseV2::ToolOpenApproval {
+            post: FixedBrowserFormPostCarrierV2::AgentApprovalDisplay(transfer),
+            trace: trace(0xe9),
+        }),
+        Err(SavanaError::CallbackFailed),
+        plan(vec![]),
+    ]);
+
+    assert!(matches!(
+        session.run_agent(
+            IntentPrivacy::Private,
+            RunLimits::new(1, 1, Duration::from_secs(1)).unwrap(),
+            &RecordingDecision::new(true),
+            &RecordingEvents::default(),
+        ),
+        Err(SavanaError::CallbackFailed)
+    ));
+    let requests = transport.take_requests();
+    assert!(requests.iter().any(|request| {
+        request.route == savana_client::BrowserRoute::ApprovalUiAuthenticationAccept
+    }));
+    assert!(matches!(
+        session.run_planner(IntentPrivacy::Private),
+        Err(SavanaError::InvalidState)
+    ));
+    assert!(transport.take_requests().is_empty());
 }

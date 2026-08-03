@@ -46,9 +46,10 @@ impl Session {
         };
         let response = match self.agent_action(action) {
             Ok(response) => response,
-            Err(error) if error.is_local_run_stop() => return Err(error),
             Err(error) => {
-                self.state = LocalSessionState::Closed;
+                if !self.take_request_guard_rejection() {
+                    self.state = LocalSessionState::Closed;
+                }
                 return Err(error);
             }
         };
@@ -140,9 +141,7 @@ impl Session {
         &self,
         request: BrowserRequest,
     ) -> Result<crate::BrowserResponse, SavanaError> {
-        if let Some(guard) = &self.agent_run_guard {
-            guard.check()?;
-        }
+        self.check_request_guard()?;
         request.validate()?;
         let expected = request.route.response_content_type();
         let response = self.transport.send(request)?;
