@@ -15,6 +15,8 @@ use pyo3::types::PyDict;
 use std::collections::BTreeSet;
 use std::path::Path;
 
+mod client;
+
 /// Report the crate version. Retained as a trivial import-sanity probe.
 #[pyfunction]
 fn version() -> &'static str {
@@ -545,6 +547,7 @@ fn mask_pages(
 
 #[pymodule]
 fn savana_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    client::register(m)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(detect_strict, m)?)?;
     m.add_function(wrap_pyfunction!(leak_gate, m)?)?;

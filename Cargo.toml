@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/libsavana-ner",
   "crates/savana-client",
   "crates/savana-agentd",
   "crates/savana-approvald",
@@ -10,6 +11,7 @@ members = [
   "crates/savana-input-runtime",
   "crates/savana-kernel-protocol",
   "crates/savana-kerneld",
+  "crates/savana-core-py",
   "crates/savana-policy-core",
   "crates/savana-platform-identity",
   "crates/savana-vault",

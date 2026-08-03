@@ -19,10 +19,12 @@ const FROZEN_CORE_MEMBERS: [&str; 11] = [
     "savana-vault",
 ];
 
-const ALLOWED_WORKSPACE_MEMBERS: [&str; 12] = [
+const ALLOWED_WORKSPACE_MEMBERS: [&str; 14] = [
+    "libsavana-ner",
     "savana-agentd",
     "savana-approvald",
     "savana-client",
+    "savana-core-py",
     "savana-execd",
     "savana-ingressd",
     "savana-input-runtime",
@@ -111,6 +113,8 @@ fn workspace_boundary_rejects_duplicate_package_names() {
         "savana-approvald",
         "savana-client",
         "savana-client",
+        "libsavana-ner",
+        "savana-core-py",
         "savana-execd",
         "savana-ingressd",
         "savana-input-runtime",

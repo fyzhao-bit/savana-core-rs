@@ -13,7 +13,12 @@ name = "savana_core"
 crate-type = ["cdylib"]
 
 [dependencies]
+base64.workspace = true
 libsavana-ner = { path = "../libsavana-ner" }
+minicbor.workspace = true
+savana-client = { path = "../savana-client" }
+savana-kernel-protocol = { path = "../savana-kernel-protocol" }
+zeroize.workspace = true
 # abi3-py312: build ONE stable-ABI wheel (cp312-abi3) per platform — forward-
 # compatible with 3.13+, and (crucially) needs no per-interpreter match, so the
 # manylinux container build doesn't have to locate a specific `python3`.
