@@ -374,6 +374,40 @@ pub fn encode_ui_authentication_browser_begin_response_v2(
     Ok(encoder.into_writer())
 }
 
+pub fn decode_ui_authentication_browser_begin_response_v2(
+    bytes: &[u8],
+) -> Result<UiAuthenticationBrowserBeginResponseV2, ProtocolError> {
+    validate_body(bytes)?;
+    let mut decoder = minicbor::Decoder::new(bytes);
+    require_array(&mut decoder, 3)?;
+    let tag = decoder.u16().map_err(ProtocolError::malformed)?;
+    let mut context = V2DecodeContext;
+    let value = match tag {
+        1 => UiAuthenticationBrowserBeginResponseV2::Ingress {
+            ceremony: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+            public_key_options_json: decode_options(&mut decoder)?,
+        },
+        2 => UiAuthenticationBrowserBeginResponseV2::ApprovalDisplay {
+            ceremony: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+            public_key_options_json: decode_options(&mut decoder)?,
+        },
+        3 => UiAuthenticationBrowserBeginResponseV2::Agent {
+            ceremony: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+            public_key_options_json: decode_options(&mut decoder)?,
+        },
+        _ => return Err(malformed()),
+    };
+    if decoder.position() != bytes.len()
+        || encode_ui_authentication_browser_begin_response_v2(&value)? != bytes
+    {
+        return Err(noncanonical());
+    }
+    Ok(value)
+}
+
 pub fn encode_ui_authentication_browser_finish_request_v2(
     value: &UiAuthenticationBrowserFinishRequestV2,
 ) -> Result<Vec<u8>, ProtocolError> {
@@ -527,6 +561,41 @@ pub fn encode_ui_authentication_browser_finish_response_v2(
     Ok(encoder.into_writer())
 }
 
+pub fn decode_ui_authentication_browser_finish_response_v2(
+    bytes: &[u8],
+) -> Result<UiAuthenticationBrowserFinishResponseV2, ProtocolError> {
+    validate_body(bytes)?;
+    let mut decoder = minicbor::Decoder::new(bytes);
+    let count = decoder.array().map_err(ProtocolError::malformed)?;
+    let tag = decoder.u16().map_err(ProtocolError::malformed)?;
+    let mut context = V2DecodeContext;
+    let value = match (tag, count) {
+        (1, Some(3)) => UiAuthenticationBrowserFinishResponseV2::TransferToIngress {
+            return_origin: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+            transfer: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        },
+        (2, Some(2)) => UiAuthenticationBrowserFinishResponseV2::ApprovalDisplayReady {
+            tab: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        },
+        (3, Some(3)) => UiAuthenticationBrowserFinishResponseV2::TransferToAgent {
+            return_origin: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+            transfer: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        },
+        _ => return Err(malformed()),
+    };
+    if decoder.position() != bytes.len()
+        || encode_ui_authentication_browser_finish_response_v2(value)? != bytes
+    {
+        return Err(noncanonical());
+    }
+    Ok(value)
+}
+
 fn encode_options<W: minicbor::encode::Write>(
     encoder: &mut minicbor::Encoder<W>,
     bytes: &[u8],
@@ -536,6 +605,16 @@ fn encode_options<W: minicbor::encode::Write>(
     }
     encoder.bytes(bytes).map_err(ProtocolError::malformed)?;
     Ok(())
+}
+
+fn decode_options(
+    decoder: &mut minicbor::Decoder<'_>,
+) -> Result<Zeroizing<Vec<u8>>, ProtocolError> {
+    let bytes = decoder.bytes().map_err(ProtocolError::malformed)?;
+    if bytes.is_empty() || bytes.len() > MAX_CLIENT_DATA_JSON_BYTES_V2 {
+        return Err(malformed());
+    }
+    Ok(Zeroizing::new(bytes.to_vec()))
 }
 
 fn encode_assertion<W: minicbor::encode::Write>(
@@ -588,6 +667,10 @@ fn malformed() -> ProtocolError {
     ProtocolError::stable(crate::StableCode::ProtocolMalformedCbor)
 }
 
+fn noncanonical() -> ProtocolError {
+    ProtocolError::stable(crate::StableCode::ProtocolNonCanonicalCbor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -634,5 +717,41 @@ mod tests {
             encode_ui_authentication_browser_finish_request_v2(&decoded).unwrap(),
             bytes
         );
+    }
+
+    #[test]
+    fn ui_authentication_responses_round_trip_canonically_and_reject_trailing_data() {
+        let begin = UiAuthenticationBrowserBeginResponseV2::Ingress {
+            ceremony: IngressUiAuthenticationBrowserCeremonyCapabilityV2::from_authority_entropy(
+                [9; 32],
+            )
+            .unwrap(),
+            public_key_options_json: Zeroizing::new(br#"{"challenge":"AQID"}"#.to_vec()),
+        };
+        let bytes = encode_ui_authentication_browser_begin_response_v2(&begin).unwrap();
+        let decoded = decode_ui_authentication_browser_begin_response_v2(&bytes).unwrap();
+        assert_eq!(
+            encode_ui_authentication_browser_begin_response_v2(&decoded).unwrap(),
+            bytes
+        );
+        let mut noncanonical = vec![bytes[0], 0x18, bytes[1]];
+        noncanonical.extend_from_slice(&bytes[2..]);
+        assert!(decode_ui_authentication_browser_begin_response_v2(&noncanonical).is_err());
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(decode_ui_authentication_browser_begin_response_v2(&trailing).is_err());
+
+        let finish = UiAuthenticationBrowserFinishResponseV2::ApprovalDisplayReady {
+            tab: ApprovalTabSessionCapabilityV2::from_authority_entropy([10; 32]).unwrap(),
+        };
+        let bytes = encode_ui_authentication_browser_finish_response_v2(finish).unwrap();
+        let decoded = decode_ui_authentication_browser_finish_response_v2(&bytes).unwrap();
+        assert_eq!(
+            encode_ui_authentication_browser_finish_response_v2(decoded).unwrap(),
+            bytes
+        );
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(decode_ui_authentication_browser_finish_response_v2(&trailing).is_err());
     }
 }

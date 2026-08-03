@@ -50,7 +50,9 @@ pub use approval_service::{
 pub use bindings::FinalReleaseSemanticBindingV2;
 pub use browser::{
     decode_ui_authentication_browser_begin_request_v2,
+    decode_ui_authentication_browser_begin_response_v2,
     decode_ui_authentication_browser_finish_request_v2,
+    decode_ui_authentication_browser_finish_response_v2,
     encode_ui_authentication_browser_begin_request_v2,
     encode_ui_authentication_browser_begin_response_v2,
     encode_ui_authentication_browser_finish_request_v2,
@@ -59,7 +61,8 @@ pub use browser::{
     UiAuthenticationBrowserFinishRequestV2, UiAuthenticationBrowserFinishResponseV2,
 };
 pub use browser_agent::{
-    decode_agent_browser_mutation_response_v2, decode_agent_browser_request_v2,
+    decode_agent_browser_mutation_response_v2, decode_agent_browser_read_view_response_v2,
+    decode_agent_browser_request_v2, decode_agent_ui_authentication_complete_browser_response_v2,
     encode_agent_browser_mutation_response_v2, encode_agent_browser_read_view_response_v2,
     encode_agent_browser_request_v2, encode_agent_ui_authentication_complete_browser_response_v2,
     AgentBrowserActionV2, AgentBrowserExecutionStateV2, AgentBrowserMutationResponseV2,
@@ -69,7 +72,10 @@ pub use browser_agent::{
 };
 pub use browser_approval::{
     decode_approval_decision_browser_begin_request_v2,
-    decode_approval_decision_browser_finish_request_v2, decode_approval_display_browser_request_v2,
+    decode_approval_decision_browser_begin_response_v2,
+    decode_approval_decision_browser_finish_request_v2,
+    decode_approval_decision_browser_finish_response_v2,
+    decode_approval_display_browser_request_v2, decode_approval_display_view_v2,
     encode_approval_decision_browser_begin_request_v2,
     encode_approval_decision_browser_begin_response_v2,
     encode_approval_decision_browser_finish_request_v2,
@@ -81,15 +87,17 @@ pub use browser_approval::{
 };
 pub use browser_assets::SAVANA_BROWSER_SCRIPT_V2;
 pub use browser_enrollment::{
-    decode_begin_enrollment_browser_request_v2, decode_finish_enrollment_browser_request_v2,
+    decode_begin_enrollment_browser_request_v2, decode_begin_enrollment_browser_response_v2,
+    decode_finish_enrollment_browser_request_v2, decode_finish_enrollment_browser_response_v2,
     encode_begin_enrollment_browser_request_v2, encode_begin_enrollment_browser_response_v2,
     encode_finish_enrollment_browser_request_v2, encode_finish_enrollment_browser_response_v2,
     BeginEnrollmentBrowserRequestV2, BeginEnrollmentBrowserResponseV2,
     FinishEnrollmentBrowserRequestV2, FinishEnrollmentBrowserResponseV2,
 };
 pub use browser_ingress::{
-    decode_ingress_browser_request_v2, encode_ingress_browser_mutation_response_v2,
-    encode_ingress_browser_request_v2,
+    decode_ingress_browser_mutation_response_v2, decode_ingress_browser_request_v2,
+    decode_ingress_ui_authentication_complete_browser_response_v2,
+    encode_ingress_browser_mutation_response_v2, encode_ingress_browser_request_v2,
     encode_ingress_ui_authentication_complete_browser_response_v2,
     IngressBrowserMutationResponseV2, IngressBrowserRequestV2,
     IngressUiAuthenticationCompleteBrowserResponseV2,

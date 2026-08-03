@@ -28,8 +28,10 @@ seccomp、macOS CoreFoundation / Security.framework 和 Seatbelt 原生边界
 - `savana-approvald`：WebAuthn、审批、身份验证和管理员边界；
 - `savana-execd`：隔离、带 fence 的执行器边界。
 
-`libsavana-ner` 和 `savana-core-py` 仍保留在仓库中，但不是生产工作区
-成员，也不位于 V2 安全路径上。
+客户端 SDK 将 `savana-client` 和 `savana-core-py` 加入工作区，使 Rust
+实现和 Python binding 能一起检查；它们没有加入冻结的生产部署核心。
+旧的 `libsavana-ner` 也作为 Python wheel 的依赖加入工作区，但仍不位于
+V2 安全路径上。
 
 ## V2 安全模型
 
@@ -66,16 +68,62 @@ HKDF-SHA-256、双向 HMAC confirmation 和 ChaCha20-Poly1305。每条连接
 
 ## 对外接口
 
-V2 只有一个产品集成边界：
+JARVIS 仍是可信控制集成，并通过带外方式提供一次性 session bootstrap。
+随后 V2 客户端 SDK 只使用三个面向应用的 loopback 服务：Agent、Ingress
+和 Approval。JARVIS 不是第四个 SDK 服务。Python 应用和 SDK 都不直接
+连接 `kerneld`、`execd`、vault 或某个 G1-G7 状态机。
 
-```text
-JARVIS / Python → agentd → Rust 内核服务图
-```
+### V2 客户端 SDK
 
-Python server 不直接连接 `kerneld`、`ingressd`、`approvald`、`execd`、
-vault 或某个 G1-G7 状态机。Python 包可以封装 agent-control 协议，
-无需修改 Rust 内核，但 Python 进程必须通过本机进程身份和部署 manifest
-校验。
+异步 Python facade 由 Rust 持有的 `savana-client` 状态机及
+`savana-core-py` binding 实现。固定网络拓扑如下：
+
+| 服务 | 固定 endpoint | SDK 职责 |
+| --- | --- | --- |
+| Agent | `http://localhost:8768` | 已认证 session 操作、masked view、planning、execution、release 和 connector workflow |
+| Ingress | `http://localhost:8767` | 有界文本/文件输入以及 committed completion |
+| Approval | `http://localhost:8766` | WebAuthn 和人工审批 ceremony |
+
+十五个 business method 只统计三个 workflow owner：
+
+| Owner | Business method |
+| --- | --- |
+| `Identity` | `load(path)` |
+| `Client` | `session(identity, bootstrap, webauthn, approval)`、`enroll(enrollment_token, code, webauthn, identity_path)` |
+| `Session` | `ingest_text`、`ingest_file`、`read_view`、`run_planner`、`execute`、`run_agent`、`release`、`register_connector`、`remove_connector`、`list_connectors`、`revoke`、`close` |
+
+十八个产品类型如下：
+
+| 分类 | 类型 |
+| --- | --- |
+| 连接和生命周期 | `Identity`、`Client`、`Session` |
+| opaque 及投影值 | `Handle`、`MaskedView`、`Plan`、`PlanStep`、`ApprovalRequest`、`ExecutionResult`、`ConnectorDescriptor` |
+| 选择项 | `IntentPrivacy`、`ContentKind` |
+| loop 控制 | `RunLimits`、`AgentEvent` |
+| 错误 | `SavanaError`、`AuthError`、`ApprovalDenied`、`PolicyRefused` |
+
+`ConnectorDescriptor.load(path)` 和 `RunLimits.cancel()` 是 supporting value
+operation，不是额外 business workflow。`Handle` 不暴露原始 bytes，也不能
+retag；`PlanStep` 只暴露 opaque step handle，不虚构 `kind`、`reads` 或
+`effect`。输入方法只返回 committed completion（Python 中为 `None`），
+不会伪造 document handle。因此 `run_planner(intent_privacy)` 没有 `goal`
+或 `inputs` 参数；调用 planning 或 `run_agent` 之前，必须先用
+`ingest_text` 提交 goal，并用 `ingest_file` 提交文件。
+
+传给 `Client.session` 的 callback 会收到每一个真实的 ingress 审批 display，
+并且必须返回严格的 `bool`；ingress 永远不会自动批准。`read_view` 只接受
+精确的初始 document 或 opaque 的 `MaskedView.continuation` handle，在不暴露
+cursor bytes、也不增加 business method 的前提下保留分页。
+
+公开发布必须显式调用 `release(document, approval)`。`ApprovalRequest` 只有
+`display` 与 `purpose`。Connector 注册先加载 canonical、unsigned 的部署
+artifact 并在 Rust 中校验，再经过 approval 和 kernel authorization 生成
+已签名 registry delta。有界 agent loop 只会在精确的
+`failed_no_effect` 结果后重新 planning；不确定 effect 或
+`effect_succeeded_output_quarantined` 结果绝不会自动重试。
+
+bootstrap、WebAuthn callback contract、完整方法表、经检查的异步示例、
+错误语义和验证命令见 [`docs/client-sdk-v2.md`](docs/client-sdk-v2.md)。
 
 ### JARVIS / Python 控制 IPC
 

@@ -144,6 +144,10 @@ impl ApprovalDecisionBrowserBeginResponseV2 {
             public_key_options_json: Zeroizing::new(public_key_options_json),
         })
     }
+
+    pub fn into_parts(self) -> (ApprovalDecisionCeremonyCapabilityV2, Zeroizing<Vec<u8>>) {
+        (self.ceremony, self.public_key_options_json)
+    }
 }
 
 pub struct ApprovalDecisionBrowserFinishRequestV2 {
@@ -244,6 +248,34 @@ pub fn encode_approval_display_view_v2(
     Ok(encoder.into_writer())
 }
 
+pub fn decode_approval_display_view_v2(
+    bytes: &[u8],
+) -> Result<ApprovalDisplayViewV2, ProtocolError> {
+    validate(bytes)?;
+    let mut decoder = minicbor::Decoder::new(bytes);
+    if decoder.array().map_err(ProtocolError::malformed)? != Some(5) {
+        return Err(malformed());
+    }
+    let mut context = V2DecodeContext;
+    let value = ApprovalDisplayViewV2::new(
+        minicbor::Decode::decode(&mut decoder, &mut context)
+            .map_err(ProtocolError::from_typed_decode)?,
+        minicbor::Decode::decode(&mut decoder, &mut context)
+            .map_err(ProtocolError::from_typed_decode)?,
+        minicbor::Decode::decode(&mut decoder, &mut context)
+            .map_err(ProtocolError::from_typed_decode)?,
+        BoundedApprovalDisplayTextV2::new(
+            decoder.str().map_err(ProtocolError::malformed)?.to_owned(),
+        )?,
+        minicbor::Decode::decode(&mut decoder, &mut context)
+            .map_err(ProtocolError::from_typed_decode)?,
+    )?;
+    if decoder.position() != bytes.len() || encode_approval_display_view_v2(&value)? != bytes {
+        return Err(noncanonical());
+    }
+    Ok(value)
+}
+
 pub fn encode_approval_decision_browser_begin_request_v2(
     value: ApprovalDecisionBrowserBeginRequestV2,
 ) -> Result<Vec<u8>, ProtocolError> {
@@ -298,6 +330,28 @@ pub fn encode_approval_decision_browser_begin_response_v2(
     Ok(encoder.into_writer())
 }
 
+pub fn decode_approval_decision_browser_begin_response_v2(
+    bytes: &[u8],
+) -> Result<ApprovalDecisionBrowserBeginResponseV2, ProtocolError> {
+    validate(bytes)?;
+    let mut decoder = minicbor::Decoder::new(bytes);
+    if decoder.array().map_err(ProtocolError::malformed)? != Some(2) {
+        return Err(malformed());
+    }
+    let mut context = V2DecodeContext;
+    let value = ApprovalDecisionBrowserBeginResponseV2::new(
+        minicbor::Decode::decode(&mut decoder, &mut context)
+            .map_err(ProtocolError::from_typed_decode)?,
+        decoder.bytes().map_err(ProtocolError::malformed)?.to_vec(),
+    )?;
+    if decoder.position() != bytes.len()
+        || encode_approval_decision_browser_begin_response_v2(&value)? != bytes
+    {
+        return Err(noncanonical());
+    }
+    Ok(value)
+}
+
 pub fn encode_approval_decision_browser_finish_request_v2(
     value: &ApprovalDecisionBrowserFinishRequestV2,
 ) -> Result<Vec<u8>, ProtocolError> {
@@ -345,6 +399,27 @@ pub fn encode_approval_decision_browser_finish_response_v2(
     .map_err(ProtocolError::malformed)
 }
 
+pub fn decode_approval_decision_browser_finish_response_v2(
+    bytes: &[u8],
+) -> Result<ApprovalDecisionBrowserFinishResponseV2, ProtocolError> {
+    validate(bytes)?;
+    let mut decoder = minicbor::Decoder::new(bytes);
+    let mut context = V2DecodeContext;
+    let tag: u16 = minicbor::Decode::decode(&mut decoder, &mut context)
+        .map_err(ProtocolError::from_typed_decode)?;
+    let value = match tag {
+        1 => ApprovalDecisionBrowserFinishResponseV2::Denied,
+        2 => ApprovalDecisionBrowserFinishResponseV2::Approved,
+        _ => return Err(malformed()),
+    };
+    if decoder.position() != bytes.len()
+        || encode_approval_decision_browser_finish_response_v2(value)? != bytes
+    {
+        return Err(noncanonical());
+    }
+    Ok(value)
+}
+
 fn encode_assertion<W: minicbor::encode::Write>(
     encoder: &mut minicbor::Encoder<W>,
     assertion: &BrowserWebAuthnAssertionV2,
@@ -387,6 +462,10 @@ fn validate(bytes: &[u8]) -> Result<(), ProtocolError> {
 
 fn malformed() -> ProtocolError {
     ProtocolError::stable(StableCode::ProtocolMalformedCbor)
+}
+
+fn noncanonical() -> ProtocolError {
+    ProtocolError::stable(StableCode::ProtocolNonCanonicalCbor)
 }
 
 #[cfg(test)]
@@ -463,5 +542,59 @@ mod tests {
         assert!(BoundedApprovalDisplayTextV2::from_binary(&largest_binary).is_ok());
         let oversized_binary = vec![0x5a; 786_427];
         assert!(BoundedApprovalDisplayTextV2::from_binary(&oversized_binary).is_err());
+    }
+
+    #[test]
+    fn approval_browser_responses_round_trip_canonically_and_reject_trailing_data() {
+        let display =
+            BoundedApprovalDisplayTextV2::new("approve tool execution".to_owned()).unwrap();
+        let view = ApprovalDisplayViewV2::new(
+            ApprovalPurposeV2::ToolExecution,
+            Digest32V2::new([0x51; 32]),
+            approval_display_digest_v2(display.as_bytes()),
+            display,
+            Digest32V2::new([0x52; 32]),
+        )
+        .unwrap();
+        let bytes = encode_approval_display_view_v2(&view).unwrap();
+        let decoded = decode_approval_display_view_v2(&bytes).unwrap();
+        assert_eq!(encode_approval_display_view_v2(&decoded).unwrap(), bytes);
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(decode_approval_display_view_v2(&trailing).is_err());
+
+        let begin = ApprovalDecisionBrowserBeginResponseV2::new(
+            ApprovalDecisionCeremonyCapabilityV2::from_authority_entropy([0x53; 32]).unwrap(),
+            br#"{"challenge":"BAUG"}"#.to_vec(),
+        )
+        .unwrap();
+        let bytes = encode_approval_decision_browser_begin_response_v2(&begin).unwrap();
+        let decoded = decode_approval_decision_browser_begin_response_v2(&bytes).unwrap();
+        assert_eq!(
+            encode_approval_decision_browser_begin_response_v2(&decoded).unwrap(),
+            bytes
+        );
+        let (_, public_key_options_json) = decoded.into_parts();
+        assert_eq!(
+            public_key_options_json.as_slice(),
+            br#"{"challenge":"BAUG"}"#
+        );
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(decode_approval_decision_browser_begin_response_v2(&trailing).is_err());
+
+        let bytes = encode_approval_decision_browser_finish_response_v2(
+            ApprovalDecisionBrowserFinishResponseV2::Approved,
+        )
+        .unwrap();
+        let decoded = decode_approval_decision_browser_finish_response_v2(&bytes).unwrap();
+        assert_eq!(
+            encode_approval_decision_browser_finish_response_v2(decoded).unwrap(),
+            bytes
+        );
+        assert!(decode_approval_decision_browser_finish_response_v2(&[0x18, 0x02]).is_err());
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(decode_approval_decision_browser_finish_response_v2(&trailing).is_err());
     }
 }

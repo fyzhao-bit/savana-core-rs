@@ -5,6 +5,37 @@ use std::{
     process::Command,
 };
 
+const FROZEN_CORE_MEMBERS: [&str; 11] = [
+    "savana-agentd",
+    "savana-approvald",
+    "savana-execd",
+    "savana-ingressd",
+    "savana-input-runtime",
+    "savana-kernel-protocol",
+    "savana-kerneld",
+    "savana-leak-gate",
+    "savana-platform-identity",
+    "savana-policy-core",
+    "savana-vault",
+];
+
+const ALLOWED_WORKSPACE_MEMBERS: [&str; 14] = [
+    "libsavana-ner",
+    "savana-agentd",
+    "savana-approvald",
+    "savana-client",
+    "savana-core-py",
+    "savana-execd",
+    "savana-ingressd",
+    "savana-input-runtime",
+    "savana-kernel-protocol",
+    "savana-kerneld",
+    "savana-leak-gate",
+    "savana-platform-identity",
+    "savana-policy-core",
+    "savana-vault",
+];
+
 fn workspace_metadata(workspace_root: &Path) -> serde_json::Value {
     let output = Command::new(env!("CARGO"))
         .args(["metadata", "--locked", "--no-deps", "--format-version", "1"])
@@ -30,8 +61,25 @@ fn rust_sources_below(directory: &Path, output: &mut Vec<PathBuf>) {
     }
 }
 
+fn assert_exact_workspace_members(mut members: Vec<&str>) {
+    members.sort_unstable();
+    let frozen_members = members
+        .iter()
+        .copied()
+        .filter(|member| FROZEN_CORE_MEMBERS.contains(member))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        frozen_members, FROZEN_CORE_MEMBERS,
+        "the frozen production-core crate multiset changed"
+    );
+    assert_eq!(
+        members, ALLOWED_WORKSPACE_MEMBERS,
+        "full allowed workspace member multiset changed"
+    );
+}
+
 #[test]
-fn production_workspace_contains_exactly_the_eleven_frozen_crates() {
+fn workspace_keeps_the_frozen_core_exact_and_allows_only_declared_non_core_members() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -48,30 +96,36 @@ fn production_workspace_contains_exactly_the_eleven_frozen_crates() {
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let mut members = metadata["workspace_members"]
+    let members = metadata["workspace_members"]
         .as_array()
         .unwrap()
         .iter()
         .map(|member| packages[member.as_str().unwrap()])
         .collect::<Vec<_>>();
-    members.sort_unstable();
+    assert_exact_workspace_members(members);
+}
 
-    assert_eq!(
-        members,
-        [
-            "savana-agentd",
-            "savana-approvald",
-            "savana-execd",
-            "savana-ingressd",
-            "savana-input-runtime",
-            "savana-kernel-protocol",
-            "savana-kerneld",
-            "savana-leak-gate",
-            "savana-platform-identity",
-            "savana-policy-core",
-            "savana-vault",
-        ]
-    );
+#[test]
+#[should_panic(expected = "full allowed workspace member multiset changed")]
+fn workspace_boundary_rejects_duplicate_package_names() {
+    let members = vec![
+        "savana-agentd",
+        "savana-approvald",
+        "savana-client",
+        "savana-client",
+        "libsavana-ner",
+        "savana-core-py",
+        "savana-execd",
+        "savana-ingressd",
+        "savana-input-runtime",
+        "savana-kernel-protocol",
+        "savana-kerneld",
+        "savana-leak-gate",
+        "savana-platform-identity",
+        "savana-policy-core",
+        "savana-vault",
+    ];
+    assert_exact_workspace_members(members);
 }
 
 #[test]

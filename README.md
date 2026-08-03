@@ -32,9 +32,11 @@ The production workspace is frozen to these eleven crates:
 - `savana-execd`: fenced executor boundary.
 
 The separated V2 service/runtime crates now contain Rust-owned G1-G7, ingress,
-approval, task-resolution, vault, and execution state machines. The legacy
-`libsavana-ner` and `savana-core-py` directories remain in the repository but
-are not production workspace members and are not on the V2 security path.
+approval, task-resolution, vault, and execution state machines. The client
+SDK adds `savana-client` and `savana-core-py` as workspace members so Rust and
+Python bindings are checked together; they are not added to the frozen
+production deployment core. The legacy `libsavana-ner` crate is also a
+workspace member for the Python wheel and remains off the V2 security path.
 
 Protocol `1.0` is retained only as frozen compatibility and regression
 evidence under debug `test-support`. Its test-only daemon accepts exactly one
@@ -232,12 +234,69 @@ handles; it does not select a role or receive a Rust capability.
 
 ## Exposed interfaces
 
-V2 has one product integration boundary: JARVIS, including a Python server,
-connects to `agentd`; it does not connect directly to `kerneld`, `ingressd`,
-`approvald`, `execd`, the vault, or a G1-G7 state machine. A Python package can
-wrap the agent-control protocol without changing the Rust kernel, provided the
-Python process satisfies the pinned local process identity and deployment
-manifest.
+JARVIS remains the trusted control integration and supplies a one-time session
+bootstrap out of band. The V2 client SDK then uses exactly three
+application-facing loopback services: Agent, Ingress, and Approval. JARVIS is
+not a fourth SDK service. Neither the Python application nor the SDK connects
+directly to `kerneld`, `execd`, the vault, or a G1-G7 state machine.
+
+### V2 client SDK
+
+The asynchronous Python facade is implemented by the Rust-owned
+`savana-client` state machine and the `savana-core-py` bindings. Its fixed
+network topology is:
+
+| Service | Fixed endpoint | SDK responsibility |
+| --- | --- | --- |
+| Agent | `http://localhost:8768` | authenticated session actions, masked views, planning, execution, release, and connector workflows |
+| Ingress | `http://localhost:8767` | bounded text/file ingestion and committed completion |
+| Approval | `http://localhost:8766` | WebAuthn and human approval ceremonies |
+
+The fifteen business methods are counted only across the three workflow
+owners:
+
+| Owner | Business methods |
+| --- | --- |
+| `Identity` | `load(path)` |
+| `Client` | `session(identity, bootstrap, webauthn, approval)`, `enroll(enrollment_token, code, webauthn, identity_path)` |
+| `Session` | `ingest_text`, `ingest_file`, `read_view`, `run_planner`, `execute`, `run_agent`, `release`, `register_connector`, `remove_connector`, `list_connectors`, `revoke`, `close` |
+
+The eighteen product types are:
+
+| Category | Types |
+| --- | --- |
+| connection and lifetime | `Identity`, `Client`, `Session` |
+| opaque and projected values | `Handle`, `MaskedView`, `Plan`, `PlanStep`, `ApprovalRequest`, `ExecutionResult`, `ConnectorDescriptor` |
+| choices | `IntentPrivacy`, `ContentKind` |
+| loop control | `RunLimits`, `AgentEvent` |
+| errors | `SavanaError`, `AuthError`, `ApprovalDenied`, `PolicyRefused` |
+
+`ConnectorDescriptor.load(path)` and `RunLimits.cancel()` are supporting value
+operations, not additional business workflows. Handles expose no raw bytes or
+retagging operation, and `PlanStep` exposes only an opaque step handle, not
+invented `kind`, `reads`, or `effect` fields. Ingestion returns committed
+completion (`None` in Python), not a fabricated document handle. Consequently
+`run_planner(intent_privacy)` has no `goal` or `inputs` arguments: commit the
+goal with `ingest_text` and files with `ingest_file` before planning or calling
+`run_agent`.
+
+The callback supplied to `Client.session` receives every truthful ingress
+approval display and must return an exact `bool`; ingress never auto-approves.
+`read_view` accepts only the exact initial document or an opaque
+`MaskedView.continuation` handle, preserving pagination without exposing cursor
+bytes or adding a business method.
+
+Release is an explicit `release(document, approval)` workflow. An
+`ApprovalRequest` contains only `display` and `purpose`. Connector registration
+loads a canonical unsigned deployment artifact, validates it in Rust, and then
+runs approval and kernel authorization to produce the signed registry delta.
+The bounded agent loop replans only after the exact `failed_no_effect` result;
+it never retries an indeterminate effect or an
+`effect_succeeded_output_quarantined` result.
+
+See [`docs/client-sdk-v2.md`](docs/client-sdk-v2.md) for bootstrap and WebAuthn
+callback contracts, the complete method table, a checked async example, error
+semantics, and verification commands.
 
 ### JARVIS / Python control IPC
 
