@@ -7,3 +7,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .DS_Store
+
+# maturin / PyO3 build artifacts placed into the source tree
+*.so
+*.pyd
