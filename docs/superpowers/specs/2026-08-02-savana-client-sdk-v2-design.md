@@ -112,8 +112,10 @@ stub or changing a daemon implicitly.
 For chat input, `Session.ingest_text` streams UTF-8 bytes through ingressd's
 existing `Begin -> Append -> Finalize` protocol. `ingest_file` uses the same
 flow with bounded chunks and backpressure. Parsing and masking remain on the
-existing ingress/kernel path. The SDK receives and stores only the returned
-opaque reference.
+existing ingress/kernel path. The existing `FinalizeCommitted` response
+contains `InputPublicStateV2`, not a document reference, so both methods return
+successful completion with no fabricated `Handle`. The committed input becomes
+part of the agent session state and is consumed by the next planner run.
 
 `run_planner` selects the existing `RunPlanner` or
 `RunPlannerWithThirdPartyMapper` agent action over the current committed
@@ -130,8 +132,10 @@ decoded and matched to the expected workflow state.
 
 Connector registration folds prepare/propose/authorize/apply through the
 existing Agent and Approval surfaces. Removal and snapshots use their existing
-agent actions. Connector descriptors are encoded in Rust and are never accepted
-as caller-provided CBOR.
+agent actions. `ConnectorDescriptor` is an opaque, Rust-validated, already
+signed deployment artifact; the SDK does not construct one from editable
+`name`, transport, and effect fields because it owns no deployment signing key.
+Descriptor CBOR is parsed and canonicality-checked in Rust before it is sent.
 
 ## 6. Autonomous loop agent
 
@@ -199,7 +203,7 @@ public state machine against a scripted in-memory transport and prove:
 - requests target only the three approved services and fixed routes;
 - canonical request/response CBOR comes from `savana-kernel-protocol`;
 - handles are opaque, kind checked, redacted, and non-forgeable through Python;
-- ingest chunking, planner privacy selection, per-step evaluation, approval,
+- ingest chunking and public commit state, planner privacy selection, per-step evaluation, approval,
   dispatch, refresh, connector workflows, close, and revoke preserve order;
 - every refusal and malformed transition fails closed;
 - loop step/replan/deadline limits stop deterministically;
