@@ -70,13 +70,13 @@ ticket, fabricate a connector reference, or skip an intermediate state.
 
 ## 4. Public SDK surface and counts
 
-The network boundary is three services. The ergonomic SDK has fifteen business
+The network boundary is three services. The ergonomic SDK has fourteen business
 methods after adding the chat and autonomous-loop operations required by the
 frontend:
 
 - `Identity.load`;
 - `Client.session` and `Client.enroll`;
-- `Session.ingest_text`, `ingest_file`, `fetch`, `read_view`, `run_planner`,
+- `Session.ingest_text`, `ingest_file`, `read_view`, `run_planner`,
   `execute`, `run_agent`, `register_connector`, `remove_connector`,
   `list_connectors`, `revoke`, and `close`.
 
@@ -93,6 +93,14 @@ Transport descriptor variants, placeholder records, WebAuthn assertion
 carriers, and callback protocols are supporting types and are not included in
 the eighteen-type product count.
 
+`PlanStep` contains an opaque step `Handle`; it does not expose `kind`, `reads`,
+or `effect`. The existing Agent HTTP response returns only
+`AgentPlanStepRefV2`, so synthesizing those fields would misrepresent the
+protocol. Likewise, there is no `fetch(url)` browser action: the existing
+`PrepareFollowupIngress` action only opens a new ingress workflow. The SDK
+therefore does not claim a direct-fetch method that the three services cannot
+perform deterministically.
+
 Every listed method must drive its corresponding existing service workflow.
 There are no successful placeholder implementations. If implementation proves
 that a listed workflow is not reachable through the existing authenticated
@@ -108,9 +116,12 @@ existing ingress/kernel path. The SDK receives and stores only the returned
 opaque reference.
 
 `run_planner` selects the existing `RunPlanner` or
-`RunPlannerWithThirdPartyMapper` agent action. `IntentPrivacy.THIRD_PARTY`
-never falls back to private or vice versa. A deployment refusal becomes
-`PolicyRefused`.
+`RunPlannerWithThirdPartyMapper` agent action over the current committed
+session state. It does not accept or silently ignore `goal` and `inputs`
+arguments because neither browser action carries those fields. The caller
+first commits the goal with `ingest_text` and commits any files with
+`ingest_file`. `IntentPrivacy.THIRD_PARTY` never falls back to private or vice
+versa. A deployment refusal becomes `PolicyRefused`.
 
 `execute` folds the existing propose, evaluate, optional approval, authorize,
 dispatch, and refresh actions for each plan step. The SDK never treats an HTTP
@@ -125,15 +136,17 @@ as caller-provided CBOR.
 ## 6. Autonomous loop agent
 
 `Session.run_agent` is an orchestration convenience, not a new daemon or kernel
-operation. Rust repeatedly reads the current masked view, runs the planner,
-executes the returned plan steps, incorporates new output handles, and replans
-until completion or a stop condition.
+operation. Rust repeatedly runs the planner over current committed session
+state, executes the returned opaque plan-step handles, incorporates new output
+handles, and replans until completion or a stop condition. Callers commit the
+goal and inputs before starting the loop.
 
 `RunLimits` requires finite positive `max_steps`, `max_replans`, and deadline
 values. The SDK emits redacted `AgentEvent` values for planning, step start,
 step completion, approval requirement, replanning, refusal, and completion so
 the Python server can stream progress to the frontend without exposing wire
-objects or secrets.
+objects or secrets. Events do not claim a step effect before an existing
+service response provides that information.
 
 Every proposed step is independently evaluated by the kernel. A previous
 approval cannot authorize a later step. Policy refusal stops the loop and is
@@ -195,7 +208,7 @@ public state machine against a scripted in-memory transport and prove:
 - callbacks and events never receive capability bytes or unmasked values
   except the approval display fields already intended for the human.
 
-PyO3 and Python tests prove the eighteen-type surface, fifteen business
+PyO3 and Python tests prove the eighteen-type surface, fourteen business
 methods, async event-loop behavior, exception mapping, and absence of public
 wire-type constructors. Integration tests use the existing daemon fixtures
 where practical; they do not modify daemon production behavior.
