@@ -21,6 +21,8 @@ pub enum SavanaError {
     InvalidState,
     #[error("client deadline exceeded")]
     DeadlineExceeded,
+    #[error("effect outcome is indeterminate")]
+    IndeterminateEffect,
     #[error(transparent)]
     Auth(#[from] AuthError),
     #[error(transparent)]
@@ -40,6 +42,7 @@ impl SavanaError {
             Self::WrongSession => "wrong_session",
             Self::InvalidState => "invalid_state",
             Self::DeadlineExceeded => "deadline_exceeded",
+            Self::IndeterminateEffect => "effect_indeterminate",
             Self::Auth(error) => error.code(),
             Self::ApprovalDenied(error) => error.code(),
             Self::PolicyRefused(error) => error.code(),

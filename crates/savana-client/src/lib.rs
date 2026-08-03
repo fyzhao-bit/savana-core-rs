@@ -1,7 +1,9 @@
 mod agent;
 mod approval;
 mod auth;
+mod connectors;
 mod error;
+mod execution;
 mod handle;
 mod http;
 mod identity;
@@ -13,6 +15,7 @@ use std::sync::Arc;
 
 use savana_kernel_protocol::v2::Nonce32V2;
 
+pub use approval::ApprovalCallback;
 pub use auth::{WebAuthnAssertion, WebAuthnAttestation, WebAuthnProvider};
 pub use error::{ApprovalDenied, AuthError, PolicyRefused, SavanaError};
 pub use handle::{Handle, HandleKind, SessionBootstrap};

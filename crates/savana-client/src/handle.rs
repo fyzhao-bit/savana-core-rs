@@ -157,6 +157,13 @@ impl Handle {
         }
     }
 
+    pub(crate) fn connector(session: &SessionBinding, capability: Digest32V2) -> Self {
+        Self {
+            session: session.clone(),
+            capability: Capability::Connector(capability),
+        }
+    }
+
     pub(crate) fn expect_document(
         &self,
         session: &SessionBinding,
@@ -181,6 +188,20 @@ impl Handle {
             Capability::PlanStep(capability) => Ok(*capability),
             _ => Err(SavanaError::WrongHandleKind {
                 expected: HandleKind::PlanStep,
+                actual: self.kind(),
+            }),
+        }
+    }
+
+    pub(crate) fn expect_connector(
+        &self,
+        session: &SessionBinding,
+    ) -> Result<Digest32V2, SavanaError> {
+        self.require_session(session)?;
+        match &self.capability {
+            Capability::Connector(capability) => Ok(*capability),
+            _ => Err(SavanaError::WrongHandleKind {
+                expected: HandleKind::Connector,
                 actual: self.kind(),
             }),
         }

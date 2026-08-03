@@ -834,6 +834,7 @@ dependencies = [
  "minicbor",
  "rustix",
  "savana-kernel-protocol",
+ "savana-policy-core",
  "serde",
  "serde_json",
  "sha2",

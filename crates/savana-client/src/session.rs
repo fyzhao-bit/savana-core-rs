@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use savana_kernel_protocol::v2::{
-    AgentMaskedDocumentRefV2, AgentTabSessionCapabilityV2, ApprovalTabSessionCapabilityV2,
-    IngressTabSessionCapabilityV2,
+    AgentMaskedDocumentRefV2, AgentReleaseTicketRefV2, AgentTabSessionCapabilityV2,
+    ApprovalTabSessionCapabilityV2, Digest32V2, IngressTabSessionCapabilityV2,
 };
 
 use crate::handle::SessionBinding;
@@ -45,6 +45,8 @@ pub struct Session {
     pub(crate) webauthn: Arc<dyn WebAuthnProvider>,
     pub(crate) state: LocalSessionState,
     pub(crate) revoked_documents: Vec<AgentMaskedDocumentRefV2>,
+    pub(crate) observed_release_tickets: Vec<AgentReleaseTicketRefV2>,
+    pub(crate) removed_connectors: Vec<Digest32V2>,
     initial_document: Handle,
 }
 
@@ -68,6 +70,8 @@ impl Session {
             webauthn,
             state: LocalSessionState::Open,
             revoked_documents: Vec::new(),
+            observed_release_tickets: Vec::new(),
+            removed_connectors: Vec::new(),
             initial_document,
         }
     }

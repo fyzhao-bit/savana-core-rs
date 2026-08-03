@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod task5;
+
 use std::collections::VecDeque;
 use std::sync::Mutex;
 

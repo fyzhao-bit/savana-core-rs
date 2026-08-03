@@ -70,6 +70,7 @@ impl core::fmt::Debug for MaskedView {
     }
 }
 
+#[derive(Clone)]
 pub struct PlanStep {
     pub(crate) handle: Handle,
 }
@@ -144,12 +145,14 @@ impl core::fmt::Debug for ApprovalRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionStatus {
     Succeeded,
+    EffectSucceededOutputQuarantined,
     FailedNoEffect,
 }
 
 pub struct ExecutionResult {
     pub(crate) status: ExecutionStatus,
     pub(crate) outputs: Vec<Handle>,
+    pub(crate) failure_class: Option<savana_kernel_protocol::v2::PublicFailureClassV2>,
 }
 
 impl ExecutionResult {
@@ -159,6 +162,26 @@ impl ExecutionResult {
 
     pub fn outputs(&self) -> &[Handle] {
         &self.outputs
+    }
+
+    pub const fn failure_class(&self) -> Option<&'static str> {
+        match self.failure_class {
+            Some(savana_kernel_protocol::v2::PublicFailureClassV2::Policy) => Some("policy"),
+            Some(savana_kernel_protocol::v2::PublicFailureClassV2::Input) => Some("input"),
+            Some(savana_kernel_protocol::v2::PublicFailureClassV2::Approval) => Some("approval"),
+            Some(savana_kernel_protocol::v2::PublicFailureClassV2::Connector) => Some("connector"),
+            Some(savana_kernel_protocol::v2::PublicFailureClassV2::Infrastructure) => {
+                Some("infrastructure")
+            }
+            Some(savana_kernel_protocol::v2::PublicFailureClassV2::ResultGate) => {
+                Some("result_gate")
+            }
+            Some(savana_kernel_protocol::v2::PublicFailureClassV2::Audit) => Some("audit"),
+            Some(savana_kernel_protocol::v2::PublicFailureClassV2::ReleaseEvidence) => {
+                Some("release_evidence")
+            }
+            None => None,
+        }
     }
 }
 
@@ -173,8 +196,8 @@ impl core::fmt::Debug for ExecutionResult {
 }
 
 pub struct ConnectorDescriptor {
-    #[allow(dead_code)] // Canonical artifact loading is implemented in Task 5.
     pub(crate) canonical: Vec<u8>,
+    pub(crate) connector_id: savana_kernel_protocol::v2::Digest32V2,
 }
 
 impl core::fmt::Debug for ConnectorDescriptor {

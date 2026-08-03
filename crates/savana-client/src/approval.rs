@@ -21,8 +21,8 @@ use savana_kernel_protocol::v2::{
 use crate::auth::{decode_capability_attribute, extract_main_data_attributes, form_transfer};
 use crate::session::{AuthenticatedApprovalTab, AuthenticatedIngressTab};
 use crate::{
-    BrowserContentType, BrowserOrigin, BrowserRequest, BrowserRoute, BrowserService, SavanaError,
-    Session,
+    ApprovalPurpose, ApprovalRequest, BrowserContentType, BrowserOrigin, BrowserRequest,
+    BrowserRoute, BrowserService, SavanaError, Session,
 };
 
 const MAX_CAPABILITY_ATTRIBUTE_BYTES: usize = 128;
@@ -34,6 +34,10 @@ const MAX_WORKSPACE_BYTES: usize = 4096;
 pub(crate) enum ApprovalOutcome {
     Approved,
     Denied,
+}
+
+pub trait ApprovalCallback: Send + Sync {
+    fn decide(&self, request: &ApprovalRequest) -> Result<bool, SavanaError>;
 }
 
 impl Session {
@@ -132,10 +136,43 @@ impl Session {
         &mut self,
         transfer: ApprovalDisplayAuthenticationTransferCapabilityV2,
     ) -> Result<ApprovalOutcome, SavanaError> {
+        self.run_approval(
+            transfer,
+            BrowserOrigin::Ingress,
+            ApprovalPurposeV2::Ingress,
+            ApprovalPurpose::Ingress,
+            None,
+        )
+    }
+
+    pub(crate) fn approve_agent(
+        &mut self,
+        transfer: ApprovalDisplayAuthenticationTransferCapabilityV2,
+        expected_protocol_purpose: ApprovalPurposeV2,
+        public_purpose: ApprovalPurpose,
+        callback: &dyn ApprovalCallback,
+    ) -> Result<ApprovalOutcome, SavanaError> {
+        self.run_approval(
+            transfer,
+            BrowserOrigin::Agent,
+            expected_protocol_purpose,
+            public_purpose,
+            Some(callback),
+        )
+    }
+
+    fn run_approval(
+        &mut self,
+        transfer: ApprovalDisplayAuthenticationTransferCapabilityV2,
+        source_origin: BrowserOrigin,
+        expected_protocol_purpose: ApprovalPurposeV2,
+        public_purpose: ApprovalPurpose,
+        callback: Option<&dyn ApprovalCallback>,
+    ) -> Result<ApprovalOutcome, SavanaError> {
         let accepted = self.send_browser_request(BrowserRequest {
             service: BrowserService::Approval,
             route: BrowserRoute::ApprovalUiAuthenticationAccept,
-            origin: BrowserOrigin::Ingress,
+            origin: source_origin,
             content_type: BrowserContentType::FormUrlEncoded,
             body: form_transfer(transfer)?,
         })?;
@@ -209,15 +246,27 @@ impl Session {
         })?;
         let view = decode_approval_display_view_v2(displayed.body())
             .map_err(|_| SavanaError::InvalidResponse)?;
-        if view.purpose() != ApprovalPurposeV2::Ingress {
+        if view.purpose() != expected_protocol_purpose {
             return Err(SavanaError::InvalidResponse);
         }
+
+        let approve = match callback {
+            Some(callback) => callback.decide(&ApprovalRequest {
+                display: view.display_text().as_str().to_owned(),
+                purpose: public_purpose,
+            })?,
+            None => true,
+        };
 
         let decision_nonce = self.nonces.nonce()?;
         let decision = ApprovalDecisionBrowserBeginRequestV2::new(
             tab,
             decision_nonce,
-            ApprovalDecisionV2::Approve,
+            if approve {
+                ApprovalDecisionV2::Approve
+            } else {
+                ApprovalDecisionV2::Deny
+            },
         )
         .map_err(|_| SavanaError::InvalidRequest)?;
         let begun = self.send_browser_request(BrowserRequest {
@@ -246,12 +295,16 @@ impl Session {
             body: encode_approval_decision_browser_finish_request_v2(&finish)
                 .map_err(|_| SavanaError::InvalidRequest)?,
         })?;
-        match decode_approval_decision_browser_finish_response_v2(finished.body())
+        let outcome = match decode_approval_decision_browser_finish_response_v2(finished.body())
             .map_err(|_| SavanaError::InvalidResponse)?
         {
-            ApprovalDecisionBrowserFinishResponseV2::Approved => Ok(ApprovalOutcome::Approved),
-            ApprovalDecisionBrowserFinishResponseV2::Denied => Ok(ApprovalOutcome::Denied),
-        }
+            ApprovalDecisionBrowserFinishResponseV2::Approved if approve => {
+                ApprovalOutcome::Approved
+            }
+            ApprovalDecisionBrowserFinishResponseV2::Denied => ApprovalOutcome::Denied,
+            _ => return Err(SavanaError::InvalidResponse),
+        };
+        Ok(outcome)
     }
 }
 
