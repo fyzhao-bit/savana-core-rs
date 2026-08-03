@@ -322,6 +322,18 @@ impl core::fmt::Debug for ClientEndpoints {
 }
 
 fn validate_endpoint(value: &str, service: BrowserService) -> Result<Url, SavanaError> {
+    let lexically_allowed = match service {
+        BrowserService::Agent => matches!(value, "http://localhost:8768" | "http://127.0.0.1:8768"),
+        BrowserService::Ingress => {
+            matches!(value, "http://localhost:8767" | "http://127.0.0.1:8767")
+        }
+        BrowserService::Approval => {
+            matches!(value, "http://localhost:8766" | "http://127.0.0.1:8766")
+        }
+    };
+    if !lexically_allowed {
+        return Err(SavanaError::InvalidEndpoint);
+    }
     let endpoint = Url::parse(value).map_err(|_| SavanaError::InvalidEndpoint)?;
     if endpoint.scheme() != "http"
         || !endpoint.username().is_empty()

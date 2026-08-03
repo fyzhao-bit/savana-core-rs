@@ -1,9 +1,38 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::Command,
 };
+
+const FROZEN_CORE_MEMBERS: [&str; 11] = [
+    "savana-agentd",
+    "savana-approvald",
+    "savana-execd",
+    "savana-ingressd",
+    "savana-input-runtime",
+    "savana-kernel-protocol",
+    "savana-kerneld",
+    "savana-leak-gate",
+    "savana-platform-identity",
+    "savana-policy-core",
+    "savana-vault",
+];
+
+const ALLOWED_WORKSPACE_MEMBERS: [&str; 12] = [
+    "savana-agentd",
+    "savana-approvald",
+    "savana-client",
+    "savana-execd",
+    "savana-ingressd",
+    "savana-input-runtime",
+    "savana-kernel-protocol",
+    "savana-kerneld",
+    "savana-leak-gate",
+    "savana-platform-identity",
+    "savana-policy-core",
+    "savana-vault",
+];
 
 fn workspace_metadata(workspace_root: &Path) -> serde_json::Value {
     let output = Command::new(env!("CARGO"))
@@ -30,6 +59,23 @@ fn rust_sources_below(directory: &Path, output: &mut Vec<PathBuf>) {
     }
 }
 
+fn assert_exact_workspace_members(mut members: Vec<&str>) {
+    members.sort_unstable();
+    let frozen_members = members
+        .iter()
+        .copied()
+        .filter(|member| FROZEN_CORE_MEMBERS.contains(member))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        frozen_members, FROZEN_CORE_MEMBERS,
+        "the frozen production-core crate multiset changed"
+    );
+    assert_eq!(
+        members, ALLOWED_WORKSPACE_MEMBERS,
+        "full allowed workspace member multiset changed"
+    );
+}
+
 #[test]
 fn workspace_keeps_the_frozen_core_exact_and_allows_only_declared_non_core_members() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -53,10 +99,18 @@ fn workspace_keeps_the_frozen_core_exact_and_allows_only_declared_non_core_membe
         .unwrap()
         .iter()
         .map(|member| packages[member.as_str().unwrap()])
-        .collect::<BTreeSet<_>>();
-    let frozen_core = BTreeSet::from([
+        .collect::<Vec<_>>();
+    assert_exact_workspace_members(members);
+}
+
+#[test]
+#[should_panic(expected = "full allowed workspace member multiset changed")]
+fn workspace_boundary_rejects_duplicate_package_names() {
+    let members = vec![
         "savana-agentd",
         "savana-approvald",
+        "savana-client",
+        "savana-client",
         "savana-execd",
         "savana-ingressd",
         "savana-input-runtime",
@@ -66,25 +120,8 @@ fn workspace_keeps_the_frozen_core_exact_and_allows_only_declared_non_core_membe
         "savana-platform-identity",
         "savana-policy-core",
         "savana-vault",
-    ]);
-    let declared_non_core = BTreeSet::from(["savana-client"]);
-
-    assert_eq!(
-        members
-            .intersection(&frozen_core)
-            .copied()
-            .collect::<BTreeSet<_>>(),
-        frozen_core,
-        "the frozen production-core crate set changed"
-    );
-    assert_eq!(
-        members
-            .difference(&frozen_core)
-            .copied()
-            .collect::<BTreeSet<_>>(),
-        declared_non_core,
-        "an undeclared non-core workspace member was added or removed"
-    );
+    ];
+    assert_exact_workspace_members(members);
 }
 
 #[test]

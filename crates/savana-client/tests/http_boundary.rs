@@ -49,15 +49,23 @@ fn endpoint_set_accepts_only_the_three_fixed_loopback_http_services() {
         "https://localhost:8768",
         "http://localhost:8767",
         "http://localhost:8768/extra",
+        "http://127.1:8768",
+        "http://0x7f000001:8768",
+        "http://0177.0.0.1:8768",
+        "http://2130706433:8768",
+        "http://localhost:8768/",
         "http://localhost:8768?query",
         "http://user@localhost:8768",
     ] {
-        assert!(ClientEndpoints::new(
-            invalid_agent,
-            "http://localhost:8767",
-            "http://localhost:8766",
-        )
-        .is_err());
+        assert!(
+            ClientEndpoints::new(
+                invalid_agent,
+                "http://localhost:8767",
+                "http://localhost:8766",
+            )
+            .is_err(),
+            "accepted non-allowlisted endpoint: {invalid_agent}"
+        );
     }
 }
 
