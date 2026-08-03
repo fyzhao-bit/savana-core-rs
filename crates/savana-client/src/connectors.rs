@@ -2,7 +2,7 @@ use savana_kernel_protocol::v2::{
     AgentBrowserActionV2, AgentBrowserMutationResponseV2, ApprovalPurposeV2, Digest32V2,
     FixedBrowserFormPostCarrierV2,
 };
-use savana_policy_core::v2::ConnectorDescriptorV2;
+use savana_policy_core::v2::{ConnectorDescriptorV2, DeploymentHardLimitsV2};
 
 use crate::approval::ApprovalOutcome;
 use crate::session::LocalSessionState;
@@ -10,8 +10,6 @@ use crate::{
     ApprovalCallback, ApprovalDenied, ApprovalPurpose, ConnectorDescriptor, Handle, SavanaError,
     Session,
 };
-
-const MAX_SNAPSHOT_CONNECTORS: usize = 16;
 
 impl ConnectorDescriptor {
     pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, SavanaError> {
@@ -74,12 +72,17 @@ impl Session {
                 && sequence != 0
                 && connector_id == descriptor.connector_id =>
             {
+                self.removed_connectors
+                    .retain(|removed| *removed != connector_id);
                 Ok(Handle::connector(&self.binding, connector_id))
             }
             _ => self.invalid_connector_transition(),
         }
     }
 
+    /// Connector handles bind a session and connector ID, not a registry
+    /// generation. Removal makes that ID stale locally until an authoritative
+    /// successful registration or snapshot shows the ID registered again.
     pub fn remove_connector(&mut self, connector: &Handle) -> Result<(), SavanaError> {
         self.require_open()?;
         let connector_id = connector.expect_connector(&self.binding)?;
@@ -117,11 +120,9 @@ impl Session {
                 return Err(error);
             }
         };
-        if connector_ids
-            .iter()
-            .any(|connector_id| self.removed_connectors.contains(connector_id))
-        {
-            return self.invalid_connector_transition();
+        for connector_id in &connector_ids {
+            self.removed_connectors
+                .retain(|removed| removed != connector_id);
         }
         Ok(connector_ids
             .into_iter()
@@ -166,7 +167,11 @@ fn decode_registry_snapshot(bytes: &[u8]) -> Result<Vec<Digest32V2>, SavanaError
         .array()
         .map_err(|_| SavanaError::InvalidResponse)?
         .and_then(|count| usize::try_from(count).ok())
-        .filter(|count| *count <= MAX_SNAPSHOT_CONNECTORS)
+        .filter(|count| {
+            u64::try_from(*count).is_ok_and(|count| {
+                count <= DeploymentHardLimitsV2::compiled().max_active_tool_descriptors()
+            })
+        })
         .ok_or(SavanaError::InvalidResponse)?;
     let mut entries = Vec::with_capacity(count);
     let mut previous = None;
@@ -228,4 +233,55 @@ fn encode_registry_snapshot(
             .map_err(|_| SavanaError::InvalidResponse)?;
     }
     Ok(encoder.into_writer())
+}
+
+#[cfg(test)]
+mod tests {
+    use savana_kernel_protocol::v2::Digest32V2;
+    use savana_policy_core::v2::DeploymentHardLimitsV2;
+
+    use super::decode_registry_snapshot;
+
+    fn registry_snapshot(count: usize) -> Vec<u8> {
+        let mut encoder = minicbor::Encoder::new(Vec::new());
+        encoder
+            .array(6)
+            .unwrap()
+            .u16(1)
+            .unwrap()
+            .bytes(&[0x31; 32])
+            .unwrap()
+            .bytes(&[0x32; 32])
+            .unwrap()
+            .u64(7)
+            .unwrap()
+            .bytes(&[0x33; 32])
+            .unwrap()
+            .array(count as u64)
+            .unwrap();
+        for suffix in 1..=count {
+            let mut bytes = [0_u8; 32];
+            bytes[24..].copy_from_slice(&(suffix as u64).to_be_bytes());
+            encoder
+                .array(2)
+                .unwrap()
+                .bytes(Digest32V2::new(bytes).as_bytes())
+                .unwrap()
+                .bool(true)
+                .unwrap();
+        }
+        encoder.into_writer()
+    }
+
+    #[test]
+    fn snapshot_connector_count_uses_the_authoritative_registry_limit() {
+        let limit =
+            usize::try_from(DeploymentHardLimitsV2::compiled().max_active_tool_descriptors())
+                .unwrap();
+        let exact = decode_registry_snapshot(&registry_snapshot(limit));
+        let overflow = decode_registry_snapshot(&registry_snapshot(limit + 1));
+
+        assert_eq!(exact.unwrap().len(), limit);
+        assert!(overflow.is_err());
+    }
 }

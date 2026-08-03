@@ -365,6 +365,37 @@ fn snapshot_returns_only_session_bound_connector_id_handles() {
 }
 
 #[test]
+fn snapshot_accepts_more_than_the_user_connector_limit() {
+    let connector_ids = (1_u16..=17)
+        .map(|suffix| {
+            let mut bytes = [0_u8; 32];
+            bytes[30..].copy_from_slice(&suffix.to_be_bytes());
+            (Digest32V2::new(bytes), true)
+        })
+        .collect::<Vec<_>>();
+    let snapshot = registry_snapshot(&connector_ids);
+    let responses = vec![mutation(
+        AgentBrowserMutationResponseV2::ConnectorRegistrySnapshot {
+            canonical_snapshot:
+                savana_kernel_protocol::v2::BoundedConnectorRegistrySnapshotV2::new(snapshot)
+                    .unwrap(),
+        },
+    )];
+    let (mut session, transport, _) = authenticated_session(responses);
+
+    let connectors = session.list_connectors().unwrap();
+
+    assert_eq!(connectors.len(), 17);
+    assert!(connectors
+        .iter()
+        .all(|connector| connector.kind() == HandleKind::Connector));
+    assert_eq!(
+        actions_after_authentication(&transport.take_requests()),
+        vec![AgentBrowserActionV2::SnapshotConnectors]
+    );
+}
+
+#[test]
 fn malformed_ambiguous_or_noncanonical_snapshot_fails_without_retry() {
     let id = Digest32V2::new([0x71; 32]);
     let malformed = [
@@ -465,6 +496,97 @@ fn removal_mismatch_fails_closed_and_never_retries() {
         vec![
             AgentBrowserActionV2::SnapshotConnectors,
             AgentBrowserActionV2::RemoveConnector(connector_id),
+        ]
+    );
+}
+
+#[test]
+fn remove_reregister_list_and_remove_again_preserves_the_open_session() {
+    let (canonical, connector_id) = valid_descriptor();
+    let descriptor = ConnectorDescriptor::from_canonical_bytes(&canonical).unwrap();
+    let pending =
+        AgentPendingConnectorRegistrationRefV2::from_authority_entropy([0xa1; 16]).unwrap();
+    let transfer =
+        ApprovalDisplayAuthenticationTransferCapabilityV2::from_authority_entropy([0xa2; 32])
+            .unwrap();
+    let mut responses = vec![
+        mutation(AgentBrowserMutationResponseV2::ConnectorRegistrySnapshot {
+            canonical_snapshot:
+                savana_kernel_protocol::v2::BoundedConnectorRegistrySnapshotV2::new(
+                    registry_snapshot(&[(connector_id, true)]),
+                )
+                .unwrap(),
+        }),
+        mutation(AgentBrowserMutationResponseV2::ConnectorRemovalCommitted {
+            signed_delta_digest: Digest32V2::new([0xa3; 32]),
+            head_digest: Digest32V2::new([0xa4; 32]),
+            sequence: 2,
+            connector_id,
+        }),
+        mutation(AgentBrowserMutationResponseV2::ConnectorOpenApproval {
+            pending,
+            post: FixedBrowserFormPostCarrierV2::AgentApprovalDisplay(transfer),
+        }),
+    ];
+    responses.extend(approval_responses(
+        ApprovalPurposeV2::ConnectorRegistration,
+        ApprovalDecisionBrowserFinishResponseV2::Approved,
+    ));
+    responses.extend([
+        mutation(
+            AgentBrowserMutationResponseV2::ConnectorRegistrationCommitted {
+                pending,
+                signed_delta_digest: Digest32V2::new([0xa5; 32]),
+                head_digest: Digest32V2::new([0xa6; 32]),
+                sequence: 3,
+                connector_id,
+            },
+        ),
+        mutation(AgentBrowserMutationResponseV2::ConnectorRegistrySnapshot {
+            canonical_snapshot:
+                savana_kernel_protocol::v2::BoundedConnectorRegistrySnapshotV2::new(
+                    registry_snapshot(&[(connector_id, true)]),
+                )
+                .unwrap(),
+        }),
+        mutation(AgentBrowserMutationResponseV2::ConnectorRemovalCommitted {
+            signed_delta_digest: Digest32V2::new([0xa7; 32]),
+            head_digest: Digest32V2::new([0xa8; 32]),
+            sequence: 4,
+            connector_id,
+        }),
+        mutation(AgentBrowserMutationResponseV2::ConnectorRegistrySnapshot {
+            canonical_snapshot:
+                savana_kernel_protocol::v2::BoundedConnectorRegistrySnapshotV2::new(
+                    registry_snapshot(&[]),
+                )
+                .unwrap(),
+        }),
+    ]);
+    let (mut session, transport, _) = authenticated_session(responses);
+    let approval = RecordingDecision::new(true);
+
+    let stale = session.list_connectors().unwrap().remove(0);
+    session.remove_connector(&stale).unwrap();
+    assert!(matches!(
+        session.remove_connector(&stale),
+        Err(SavanaError::InvalidState)
+    ));
+    session.register_connector(&descriptor, &approval).unwrap();
+    let current = session.list_connectors().unwrap().remove(0);
+    session.remove_connector(&current).unwrap();
+    assert!(session.list_connectors().unwrap().is_empty());
+
+    assert_eq!(
+        actions_after_authentication(&transport.take_requests()),
+        vec![
+            AgentBrowserActionV2::SnapshotConnectors,
+            AgentBrowserActionV2::RemoveConnector(connector_id),
+            AgentBrowserActionV2::RegisterConnector(canonical),
+            AgentBrowserActionV2::FinalizeConnectorRegistration(pending),
+            AgentBrowserActionV2::SnapshotConnectors,
+            AgentBrowserActionV2::RemoveConnector(connector_id),
+            AgentBrowserActionV2::SnapshotConnectors,
         ]
     );
 }
