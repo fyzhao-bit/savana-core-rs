@@ -136,12 +136,18 @@ separate from `execute` because the existing planner response exposes only
 opaque step references and contains no trustworthy marker that lets a client
 infer which output should be publicly released.
 
+`ApprovalRequest` exposes the existing approval display text and protocol
+purpose. It does not expose a separately parsed `recipients` list because
+`ApprovalDisplayViewV2` contains no such field; any recipient is part of the
+human-readable, unmasked display produced by approvald.
+
 Connector registration folds prepare/propose/authorize/apply through the
 existing Agent and Approval surfaces. Removal and snapshots use their existing
-agent actions. `ConnectorDescriptor` is an opaque, Rust-validated, already
-signed deployment artifact; the SDK does not construct one from editable
+agent actions. `ConnectorDescriptor` is an opaque, Rust-validated canonical
+deployment artifact; the SDK does not construct one from the incomplete editable
 `name`, transport, and effect fields because it owns no deployment signing key.
 Descriptor CBOR is parsed and canonicality-checked in Rust before it is sent.
+Approval and kernel authorization produce the signed registry delta afterward.
 
 ## 6. Autonomous loop agent
 
