@@ -54,6 +54,7 @@ impl Session {
                         approval,
                     ) {
                         Ok(outcome) => outcome,
+                        Err(error) if error.is_local_run_stop() => return Err(error),
                         Err(error) => {
                             self.state = LocalSessionState::Closed;
                             return Err(error);
@@ -262,6 +263,7 @@ impl Session {
     ) -> Result<AgentBrowserMutationResponseV2, SavanaError> {
         match self.agent_action(action) {
             Ok(response) => Ok(response),
+            Err(error) if error.is_local_run_stop() => Err(error),
             Err(error) => {
                 self.state = LocalSessionState::Closed;
                 Err(error)

@@ -1,4 +1,5 @@
 mod agent;
+mod agent_loop;
 mod approval;
 mod auth;
 mod connectors;
@@ -15,6 +16,7 @@ use std::sync::Arc;
 
 use savana_kernel_protocol::v2::Nonce32V2;
 
+pub use agent_loop::EventCallback;
 pub use approval::ApprovalCallback;
 pub use auth::{WebAuthnAssertion, WebAuthnAttestation, WebAuthnProvider};
 pub use error::{ApprovalDenied, AuthError, PolicyRefused, SavanaError};

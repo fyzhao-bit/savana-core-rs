@@ -1,4 +1,6 @@
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use savana_kernel_protocol::v2::{
     AgentContentStateV2, AgentViewFieldV2, AgentViewV2, PlaceholderViewV2, StaticTemplateIdV2,
@@ -206,35 +208,65 @@ impl core::fmt::Debug for ConnectorDescriptor {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct RunLimits {
     max_steps: u32,
     max_replans: u32,
     deadline: Duration,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl RunLimits {
     pub fn new(max_steps: u32, max_replans: u32, deadline: Duration) -> Result<Self, SavanaError> {
-        if max_steps == 0 || max_replans == 0 || deadline.is_zero() {
+        if max_steps == 0
+            || max_replans == 0
+            || deadline.is_zero()
+            || Instant::now().checked_add(deadline).is_none()
+        {
             return Err(SavanaError::InvalidRequest);
         }
         Ok(Self {
             max_steps,
             max_replans,
             deadline,
+            cancelled: Arc::new(AtomicBool::new(false)),
         })
     }
 
-    pub const fn max_steps(self) -> u32 {
+    pub const fn max_steps(&self) -> u32 {
         self.max_steps
     }
 
-    pub const fn max_replans(self) -> u32 {
+    pub const fn max_replans(&self) -> u32 {
         self.max_replans
     }
 
-    pub const fn deadline(self) -> Duration {
+    pub const fn deadline(&self) -> Duration {
         self.deadline
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn cancellation_flag(&self) -> Arc<AtomicBool> {
+        self.cancelled.clone()
+    }
+}
+
+impl core::fmt::Debug for RunLimits {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("RunLimits")
+            .field("max_steps", &self.max_steps)
+            .field("max_replans", &self.max_replans)
+            .field("deadline", &self.deadline)
+            .field("cancelled", &self.is_cancelled())
+            .finish()
     }
 }
 
@@ -242,7 +274,7 @@ impl RunLimits {
 pub enum AgentEvent {
     Planning,
     StepStarted { index: u32 },
-    StepCompleted { index: u32 },
+    StepCompleted { index: u32, status: ExecutionStatus },
     ApprovalRequired { purpose: ApprovalPurpose },
     Replanning { count: u32 },
     Refused,

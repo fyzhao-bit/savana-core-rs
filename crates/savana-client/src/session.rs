@@ -1,4 +1,6 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use savana_kernel_protocol::v2::{
     AgentMaskedDocumentRefV2, AgentReleaseTicketRefV2, AgentTabSessionCapabilityV2,
@@ -29,6 +31,30 @@ pub(crate) enum LocalSessionState {
     Closed,
 }
 
+pub(crate) struct AgentRunGuard {
+    deadline: Instant,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl AgentRunGuard {
+    pub(crate) const fn new(deadline: Instant, cancelled: Arc<AtomicBool>) -> Self {
+        Self {
+            deadline,
+            cancelled,
+        }
+    }
+
+    pub(crate) fn check(&self) -> Result<(), SavanaError> {
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(SavanaError::Cancelled);
+        }
+        if Instant::now() >= self.deadline {
+            return Err(SavanaError::DeadlineExceeded);
+        }
+        Ok(())
+    }
+}
+
 pub struct Session {
     #[allow(dead_code)] // Shared transport for workflows added in Task 4.
     pub(crate) transport: Arc<dyn BrowserTransport>,
@@ -47,6 +73,7 @@ pub struct Session {
     pub(crate) revoked_documents: Vec<AgentMaskedDocumentRefV2>,
     pub(crate) observed_release_tickets: Vec<AgentReleaseTicketRefV2>,
     pub(crate) removed_connectors: Vec<Digest32V2>,
+    pub(crate) agent_run_guard: Option<AgentRunGuard>,
     initial_document: Handle,
 }
 
@@ -72,6 +99,7 @@ impl Session {
             revoked_documents: Vec::new(),
             observed_release_tickets: Vec::new(),
             removed_connectors: Vec::new(),
+            agent_run_guard: None,
             initial_document,
         }
     }

@@ -21,6 +21,14 @@ pub enum SavanaError {
     InvalidState,
     #[error("client deadline exceeded")]
     DeadlineExceeded,
+    #[error("client operation was cancelled")]
+    Cancelled,
+    #[error("agent step limit exceeded")]
+    StepLimitExceeded,
+    #[error("agent replan limit exceeded")]
+    ReplanLimitExceeded,
+    #[error("client callback failed")]
+    CallbackFailed,
     #[error("effect outcome is indeterminate")]
     IndeterminateEffect,
     #[error(transparent)]
@@ -42,6 +50,10 @@ impl SavanaError {
             Self::WrongSession => "wrong_session",
             Self::InvalidState => "invalid_state",
             Self::DeadlineExceeded => "deadline_exceeded",
+            Self::Cancelled => "cancelled",
+            Self::StepLimitExceeded => "step_limit_exceeded",
+            Self::ReplanLimitExceeded => "replan_limit_exceeded",
+            Self::CallbackFailed => "callback_failed",
             Self::IndeterminateEffect => "effect_indeterminate",
             Self::Auth(error) => error.code(),
             Self::ApprovalDenied(error) => error.code(),
@@ -51,6 +63,13 @@ impl SavanaError {
 
     pub const fn transport() -> Self {
         Self::Transport
+    }
+
+    pub(crate) const fn is_local_run_stop(&self) -> bool {
+        matches!(
+            self,
+            Self::DeadlineExceeded | Self::Cancelled | Self::CallbackFailed
+        )
     }
 }
 
