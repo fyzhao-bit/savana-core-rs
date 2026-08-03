@@ -19,11 +19,13 @@ use savana_kernel_protocol::v2::{
     decode_ui_authentication_browser_finish_request_v2,
     encode_begin_enrollment_browser_response_v2, encode_finish_enrollment_browser_response_v2,
     encode_ui_authentication_browser_begin_response_v2,
-    encode_ui_authentication_browser_finish_response_v2, AgentMaskedDocumentRefV2,
-    AgentTabSessionCapabilityV2, AgentUiAuthenticationBrowserCeremonyCapabilityV2,
+    encode_ui_authentication_browser_finish_response_v2, render_agent_workspace_v2,
+    AgentMaskedDocumentRefV2, AgentTabSessionCapabilityV2,
+    AgentUiAuthenticationBrowserCeremonyCapabilityV2,
     AgentUiAuthenticationSettlementTransferCapabilityV2, AgentUiPreAuthenticationTabCapabilityV2,
     BeginEnrollmentBrowserResponseV2, CredentialPublicStateV2, Digest32V2,
-    EnrollmentCeremonyCapabilityV2, FinishEnrollmentBrowserResponseV2, FixedOriginV2, Nonce32V2,
+    EnrollmentCeremonyCapabilityV2, FinishEnrollmentBrowserResponseV2, FixedOriginV2,
+    IngressUiAuthenticationSettlementTransferCapabilityV2, Nonce32V2,
     UiAuthenticationBrowserBeginRequestV2, UiAuthenticationBrowserBeginResponseV2,
     UiAuthenticationBrowserFinishRequestV2, UiAuthenticationBrowserFinishResponseV2,
 };
@@ -125,18 +127,13 @@ fn encoded_capability<T: minicbor::Encode<()>>(capability: T) -> String {
 
 fn authentication_html(purpose: &str, pre_authentication: &str) -> Vec<u8> {
     format!(
-        "<!doctype html><html><body><main data-purpose=\"{purpose}\" data-pre-authentication=\"{pre_authentication}\"></main></body></html>"
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Savana authentication</title></head><body><main data-purpose=\"{purpose}\" data-pre-authentication=\"{pre_authentication}\"><h1>Hardware authentication required</h1><button id=\"savana-authenticate\" type=\"button\">Use security key</button><p id=\"savana-status\">The opaque capability is held only in this page.</p></main><script src=\"/v2/savana-ui.js\" defer></script></body></html>"
     )
     .into_bytes()
 }
 
 fn agent_html(tab: AgentTabSessionCapabilityV2, document: AgentMaskedDocumentRefV2) -> Vec<u8> {
-    format!(
-        "<!doctype html><html><body><main data-agent-tab=\"{}\" data-agent-document=\"{}\"></main></body></html>",
-        encoded_capability(tab),
-        encoded_capability(document),
-    )
-    .into_bytes()
+    render_agent_workspace_v2(tab, document)
 }
 
 fn identity_file(root: &Path) -> PathBuf {
@@ -222,6 +219,18 @@ fn session_uses_the_exact_agent_authentication_sequence_and_keeps_capabilities_o
     assert_eq!(
         requests
             .iter()
+            .map(|request| request.service)
+            .collect::<Vec<_>>(),
+        vec![
+            savana_client::BrowserService::Approval,
+            savana_client::BrowserService::Approval,
+            savana_client::BrowserService::Approval,
+            savana_client::BrowserService::Agent,
+        ]
+    );
+    assert_eq!(
+        requests
+            .iter()
             .map(|request| (request.route, request.origin, request.content_type))
             .collect::<Vec<_>>(),
         vec![
@@ -247,16 +256,143 @@ fn session_uses_the_exact_agent_authentication_sequence_and_keeps_capabilities_o
             ),
         ]
     );
-    assert!(requests[0].body.starts_with(b"transfer="));
-    assert!(matches!(
-        decode_ui_authentication_browser_begin_request_v2(&requests[1].body).unwrap(),
-        UiAuthenticationBrowserBeginRequestV2::Agent { .. }
-    ));
-    assert!(matches!(
-        decode_ui_authentication_browser_finish_request_v2(&requests[2].body).unwrap(),
-        UiAuthenticationBrowserFinishRequestV2::Agent { .. }
-    ));
-    assert!(requests[3].body.starts_with(b"transfer="));
+    assert_eq!(decode_form_transfer(&requests[0].body), [0x21; 32]);
+    match decode_ui_authentication_browser_begin_request_v2(&requests[1].body).unwrap() {
+        UiAuthenticationBrowserBeginRequestV2::Agent {
+            pre_authentication,
+            client_request_nonce,
+        } => {
+            assert_eq!(
+                pre_authentication,
+                AgentUiPreAuthenticationTabCapabilityV2::from_authority_entropy([0x31; 32])
+                    .unwrap()
+            );
+            assert_eq!(client_request_nonce, Nonce32V2::new([1; 32]));
+        }
+        _ => panic!("wrong begin request variant"),
+    }
+    match decode_ui_authentication_browser_finish_request_v2(&requests[2].body).unwrap() {
+        UiAuthenticationBrowserFinishRequestV2::Agent {
+            ceremony,
+            client_request_nonce,
+            assertion,
+        } => {
+            assert_eq!(
+                ceremony,
+                AgentUiAuthenticationBrowserCeremonyCapabilityV2::from_authority_entropy(
+                    [0x32; 32]
+                )
+                .unwrap()
+            );
+            assert_eq!(client_request_nonce, Nonce32V2::new([1; 32]));
+            assert_eq!(assertion.credential_id(), &[0x61; 16]);
+            assert_eq!(assertion.authenticator_data(), &[0x62; 32]);
+            assert_eq!(assertion.signature(), &[0x63; 64]);
+        }
+        _ => panic!("wrong finish request variant"),
+    }
+    assert_eq!(decode_form_transfer(&requests[3].body), [0x33; 32]);
+}
+
+#[test]
+fn authentication_html_rejects_comment_wrapped_or_truncated_main_carriers() {
+    let root = temporary_directory("ambiguous-auth-html");
+    let identity = Identity::load(&identity_file(&root)).unwrap();
+    let pre_authentication = encoded_capability(
+        AgentUiPreAuthenticationTabCapabilityV2::from_authority_entropy([0x31; 32]).unwrap(),
+    );
+    let fake_main = format!(
+        "<!doctype html><html><head><title>Savana</title></head><body><!--<main data-purpose=\"agent\" data-pre-authentication=\"{pre_authentication}\"></main>--><script src=\"/v2/savana-ui.js\" defer></script></body></html>"
+    )
+    .into_bytes();
+    let truncated = format!(
+        "<!doctype html><html><head><title>Savana</title></head><body><main data-purpose=\"agent\" data-pre-authentication=\"{pre_authentication}\">"
+    )
+    .into_bytes();
+
+    for html in [fake_main, truncated] {
+        let (client, transport) =
+            scripted_client(vec![Ok(response(BrowserContentType::Html, html))]);
+        assert!(client
+            .session(&identity, &mut bootstrap(), &RecordingWebAuthn::default())
+            .is_err());
+        assert_eq!(transport.take_requests().len(), 1);
+    }
+}
+
+#[test]
+fn authentication_html_rejects_duplicate_unbounded_or_unexpected_data_attributes() {
+    let root = temporary_directory("invalid-auth-attributes");
+    let identity = Identity::load(&identity_file(&root)).unwrap();
+    let capability = encoded_capability(
+        AgentUiPreAuthenticationTabCapabilityV2::from_authority_entropy([0x31; 32]).unwrap(),
+    );
+    let invalid_openings = [
+        format!(
+            "data-purpose=\"agent\" data-purpose=\"agent\" data-pre-authentication=\"{capability}\""
+        ),
+        format!(
+            "data-purpose=\"agent\" data-pre-authentication=\"{}\"",
+            "A".repeat(129)
+        ),
+        format!(
+            "data-purpose=\"agent\" data-pre-authentication=\"{capability}\" data-extra=\"no\""
+        ),
+    ];
+    for opening in invalid_openings {
+        let html = format!(
+            "<!doctype html><html><head><title>Savana</title></head><body><main {opening}></main><script src=\"/v2/savana-ui.js\" defer></script></body></html>"
+        )
+        .into_bytes();
+        let (client, transport) =
+            scripted_client(vec![Ok(response(BrowserContentType::Html, html))]);
+        assert!(client
+            .session(&identity, &mut bootstrap(), &RecordingWebAuthn::default())
+            .is_err());
+        assert_eq!(transport.take_requests().len(), 1);
+    }
+}
+
+#[test]
+fn completion_html_rejects_malformed_envelopes_and_zero_capabilities() {
+    let root = temporary_directory("invalid-completion-html");
+    let identity = Identity::load(&identity_file(&root)).unwrap();
+    let tab = AgentTabSessionCapabilityV2::from_authority_entropy([0x34; 32]).unwrap();
+    let document = AgentMaskedDocumentRefV2::from_authority_entropy([0x35; 16]).unwrap();
+    let malformed = format!(
+        "<!doctype html><html><head><title>Savana</title></head><body><!--<main data-agent-tab=\"{}\" data-agent-document=\"{}\"></main>--><script src=\"/v2/savana-ui.js\" defer></script></body></html>",
+        encoded_capability(tab),
+        encoded_capability(document),
+    )
+    .into_bytes();
+    let zero_tab = format!(
+        "<!doctype html><html><head><title>Savana</title></head><body><main data-agent-tab=\"{}\" data-agent-document=\"{}\"></main><script src=\"/v2/savana-ui.js\" defer></script></body></html>",
+        encoded_raw_capability(&[0; 32]),
+        encoded_capability(document),
+    )
+    .into_bytes();
+    let zero_document = format!(
+        "<!doctype html><html><head><title>Savana</title></head><body><main data-agent-tab=\"{}\" data-agent-document=\"{}\"></main><script src=\"/v2/savana-ui.js\" defer></script></body></html>",
+        encoded_capability(tab),
+        encoded_raw_capability(&[0; 16]),
+    )
+    .into_bytes();
+    let extra_markup = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Savana agent</title></head><body><main data-agent-tab=\"{}\" data-agent-document=\"{}\"><aside>ambiguous</aside></main><script src=\"/v2/savana-ui.js\" defer></script></body></html>",
+        encoded_capability(tab),
+        encoded_capability(document),
+    )
+    .into_bytes();
+
+    for completion in [malformed, zero_tab, zero_document, extra_markup] {
+        let mut responses = successful_auth_responses();
+        responses[3] = Ok(response(BrowserContentType::Html, completion));
+        let (client, transport) = scripted_client(responses);
+        assert!(client
+            .session(&identity, &mut bootstrap(), &RecordingWebAuthn::default())
+            .is_err());
+        assert_eq!(transport.take_requests().len(), 4);
+    }
 }
 
 #[test]
@@ -341,6 +477,33 @@ fn session_rejects_zero_transfer_and_a_mismatched_return_origin() {
         encoder.into_writer(),
     ));
     let (client, transport) = scripted_client(wrong_origin);
+    assert!(client
+        .session(&identity, &mut bootstrap(), &RecordingWebAuthn::default())
+        .is_err());
+    assert_eq!(transport.take_requests().len(), 3);
+}
+
+#[test]
+fn session_rejects_a_wrong_finish_response_variant() {
+    let root = temporary_directory("wrong-finish-variant");
+    let identity = Identity::load(&identity_file(&root)).unwrap();
+    let mut responses = successful_auth_responses();
+    responses[2] = Ok(response(
+        BrowserContentType::CanonicalCbor,
+        encode_ui_authentication_browser_finish_response_v2(
+            UiAuthenticationBrowserFinishResponseV2::TransferToIngress {
+                return_origin: FixedOriginV2::Ingress8767,
+                transfer:
+                    IngressUiAuthenticationSettlementTransferCapabilityV2::from_authority_entropy(
+                        [0x53; 32],
+                    )
+                    .unwrap(),
+            },
+        )
+        .unwrap(),
+    ));
+    let (client, transport) = scripted_client(responses);
+
     assert!(client
         .session(&identity, &mut bootstrap(), &RecordingWebAuthn::default())
         .is_err());
@@ -435,6 +598,12 @@ fn identity_load_rejects_partial_noncanonical_or_permissive_files() {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(Identity::load(&path).is_err());
     }
+
+    let oversized = root.join("oversized.json");
+    fs::write(&oversized, vec![b'a'; 32 * 1024 + 1]).unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(&oversized, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(Identity::load(&oversized).is_err());
 }
 
 #[test]
@@ -493,4 +662,15 @@ fn temporary_directory(label: &str) -> PathBuf {
     ));
     fs::create_dir(&path).unwrap();
     path
+}
+
+fn decode_form_transfer(body: &[u8]) -> [u8; 32] {
+    let token = body.strip_prefix(b"transfer=").unwrap();
+    URL_SAFE_NO_PAD.decode(token).unwrap().try_into().unwrap()
+}
+
+fn encoded_raw_capability(bytes: &[u8]) -> String {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder.bytes(bytes).unwrap();
+    URL_SAFE_NO_PAD.encode(encoder.into_writer())
 }

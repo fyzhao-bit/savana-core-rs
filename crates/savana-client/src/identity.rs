@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read as _, Write as _};
+use std::io::{Read, Write as _};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
@@ -43,15 +43,9 @@ impl Identity {
         let metadata = file
             .metadata()
             .map_err(|_| AuthError::AuthenticationFailed)?;
-        if metadata.len() == 0 || metadata.len() > MAX_IDENTITY_BYTES {
-            return Err(AuthError::AuthenticationFailed);
-        }
-        let mut bytes = Vec::with_capacity(
-            usize::try_from(metadata.len()).map_err(|_| AuthError::AuthenticationFailed)?,
-        );
-        file.read_to_end(&mut bytes)
-            .map_err(|_| AuthError::AuthenticationFailed)?;
-        validate_open_identity(path, &file)?;
+        let observed_length = metadata.len();
+        let bytes = read_bounded_identity(&mut file, observed_length)?;
+        validate_open_identity(path, &file, Some(observed_length))?;
         let document: IdentityDocument =
             serde_json::from_slice(&bytes).map_err(|_| AuthError::AuthenticationFailed)?;
         if document.version != IDENTITY_VERSION
@@ -213,7 +207,7 @@ fn open_private_identity(path: &Path) -> Result<File, AuthError> {
         )
         .map_err(|_| AuthError::AuthenticationFailed)?;
         let file = File::from(descriptor);
-        validate_open_identity(path, &file)?;
+        validate_open_identity(path, &file, None)?;
         Ok(file)
     }
     #[cfg(not(unix))]
@@ -222,7 +216,11 @@ fn open_private_identity(path: &Path) -> Result<File, AuthError> {
     }
 }
 
-fn validate_open_identity(path: &Path, file: &File) -> Result<(), AuthError> {
+fn validate_open_identity(
+    path: &Path,
+    file: &File,
+    expected_length: Option<u64>,
+) -> Result<(), AuthError> {
     let opened = file
         .metadata()
         .map_err(|_| AuthError::AuthenticationFailed)?;
@@ -237,14 +235,37 @@ fn validate_open_identity(path: &Path, file: &File) -> Result<(), AuthError> {
         || linked.ino() != opened.ino()
         || linked.mode() & 0o7777 != 0o600
         || linked.nlink() != 1
+        || expected_length.is_some_and(|length| opened.len() != length || linked.len() != length)
     {
         return Err(AuthError::AuthenticationFailed);
     }
     #[cfg(not(unix))]
-    if !opened.is_file() || !linked.is_file() {
+    if !opened.is_file()
+        || !linked.is_file()
+        || expected_length.is_some_and(|length| opened.len() != length || linked.len() != length)
+    {
         return Err(AuthError::AuthenticationFailed);
     }
     Ok(())
+}
+
+fn read_bounded_identity(
+    reader: &mut impl Read,
+    observed_length: u64,
+) -> Result<Vec<u8>, AuthError> {
+    if observed_length == 0 || observed_length > MAX_IDENTITY_BYTES {
+        return Err(AuthError::AuthenticationFailed);
+    }
+    let capacity = usize::try_from(observed_length).map_err(|_| AuthError::AuthenticationFailed)?;
+    let mut bytes = Vec::with_capacity(capacity);
+    reader
+        .take(MAX_IDENTITY_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| AuthError::AuthenticationFailed)?;
+    if u64::try_from(bytes.len()).map_err(|_| AuthError::AuthenticationFailed)? != observed_length {
+        return Err(AuthError::AuthenticationFailed);
+    }
+    Ok(bytes)
 }
 
 fn validate_temporary(path: &Path, file: &File, expected_length: usize) -> Result<(), AuthError> {
@@ -275,4 +296,24 @@ fn hex(bytes: &[u8]) -> String {
         encoded.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
     }
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::{read_bounded_identity, MAX_IDENTITY_BYTES};
+
+    #[test]
+    fn bounded_identity_reader_rejects_growth_past_observed_length_and_limit() {
+        let oversized_length = usize::try_from(MAX_IDENTITY_BYTES + 1).unwrap();
+        let mut oversized = Cursor::new(vec![0x61; oversized_length]);
+        assert!(read_bounded_identity(&mut oversized, MAX_IDENTITY_BYTES + 1).is_err());
+
+        let mut grew_after_metadata = Cursor::new(vec![0x61; 2]);
+        assert!(read_bounded_identity(&mut grew_after_metadata, 1).is_err());
+
+        let mut stable = Cursor::new(vec![0x61]);
+        assert_eq!(read_bounded_identity(&mut stable, 1).unwrap(), vec![0x61]);
+    }
 }

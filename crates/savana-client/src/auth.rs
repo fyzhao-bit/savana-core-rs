@@ -432,49 +432,85 @@ fn extract_main_data_attributes(
         return Err(AuthError::AuthenticationFailed);
     }
     let html = core::str::from_utf8(html).map_err(|_| AuthError::AuthenticationFailed)?;
-    let mut matches = html.match_indices("<main");
-    let (start, _) = matches.next().ok_or(AuthError::AuthenticationFailed)?;
-    if matches.next().is_some() {
+    const DOCUMENT_PREFIX: &str = "<!doctype html><html><head>";
+    const HEAD_END: &str = "</head><body>";
+    const MAIN_PREFIX: &str = "<main ";
+    const DOCUMENT_SUFFIX: &str =
+        "</main><script src=\"/v2/savana-ui.js\" defer></script></body></html>";
+    const AUTHENTICATION_HEAD: &str =
+        "<meta charset=\"utf-8\"><title>Savana authentication</title>";
+    const AUTHENTICATION_CONTENT: &str = "<h1>Hardware authentication required</h1><button id=\"savana-authenticate\" type=\"button\">Use security key</button><p id=\"savana-status\">The opaque capability is held only in this page.</p>";
+    const AGENT_HEAD: &str = "<meta charset=\"utf-8\"><title>Savana agent</title>";
+    const AGENT_CONTENT: &str = "<h1>Authenticated Savana agent</h1><pre id=\"savana-agent-view\"></pre><section id=\"savana-agent-actions\"></section><pre id=\"savana-agent-result\"></pre><p id=\"savana-status\">Loading kernel view…</p>";
+    let (expected_head, expected_content) = match required {
+        [("data-purpose", _), ("data-pre-authentication", _)] => {
+            (AUTHENTICATION_HEAD, AUTHENTICATION_CONTENT)
+        }
+        [("data-agent-tab", _), ("data-agent-document", _)] => (AGENT_HEAD, AGENT_CONTENT),
+        _ => return Err(AuthError::AuthenticationFailed),
+    };
+    if !html.starts_with(DOCUMENT_PREFIX)
+        || html.contains("<!--")
+        || html.contains("-->")
+        || html.matches(HEAD_END).count() != 1
+        || !html.ends_with(DOCUMENT_SUFFIX)
+    {
         return Err(AuthError::AuthenticationFailed);
     }
-    let after_name = start + "<main".len();
-    let boundary = html
-        .as_bytes()
-        .get(after_name)
-        .copied()
+    let after_prefix = &html[DOCUMENT_PREFIX.len()..];
+    let head_end = after_prefix
+        .find(HEAD_END)
         .ok_or(AuthError::AuthenticationFailed)?;
-    if boundary != b'>' && !boundary.is_ascii_whitespace() {
+    let head = &after_prefix[..head_end];
+    if head != expected_head {
         return Err(AuthError::AuthenticationFailed);
     }
-    let relative_end = html[after_name..]
+    let body = &after_prefix[head_end + HEAD_END.len()..];
+    if !body.starts_with(MAIN_PREFIX) || body.matches("<main").count() != 1 {
+        return Err(AuthError::AuthenticationFailed);
+    }
+    let after_main = &body[MAIN_PREFIX.len()..];
+    let relative_end = after_main
         .find('>')
         .ok_or(AuthError::AuthenticationFailed)?;
     if relative_end > MAX_MAIN_TAG_BYTES {
         return Err(AuthError::AuthenticationFailed);
     }
-    let attributes = &html[after_name..after_name + relative_end];
+    let attributes = &after_main[..relative_end];
+    let values = parse_exact_attributes(attributes, required)?;
+    let main_content_and_suffix = &after_main[relative_end + 1..];
+    let content_length = main_content_and_suffix
+        .len()
+        .checked_sub(DOCUMENT_SUFFIX.len())
+        .ok_or(AuthError::AuthenticationFailed)?;
+    let content = &main_content_and_suffix[..content_length];
+    if content != expected_content {
+        return Err(AuthError::AuthenticationFailed);
+    }
+    Ok(values)
+}
+
+fn parse_exact_attributes(
+    attributes: &str,
+    required: &[(&str, usize)],
+) -> Result<Vec<String>, AuthError> {
     let bytes = attributes.as_bytes();
     let mut offset = 0;
-    let mut found = vec![None; required.len()];
-    while offset < bytes.len() {
-        while offset < bytes.len() && bytes[offset].is_ascii_whitespace() {
-            offset += 1;
+    let mut values = Vec::with_capacity(required.len());
+    for (index, (required_name, maximum)) in required.iter().enumerate() {
+        if index > 0 {
+            let separator_start = offset;
+            while offset < bytes.len() && bytes[offset].is_ascii_whitespace() {
+                offset += 1;
+            }
+            if separator_start == offset {
+                return Err(AuthError::AuthenticationFailed);
+            }
         }
-        if offset == bytes.len() {
-            break;
-        }
-        let name_start = offset;
-        while offset < bytes.len()
-            && (bytes[offset].is_ascii_lowercase()
-                || bytes[offset].is_ascii_digit()
-                || bytes[offset] == b'-')
-        {
-            offset += 1;
-        }
-        if name_start == offset {
+        if !attributes[offset..].starts_with(required_name) {
             return Err(AuthError::AuthenticationFailed);
         }
-        let name = &attributes[name_start..offset];
+        offset += required_name.len();
         while offset < bytes.len() && bytes[offset].is_ascii_whitespace() {
             offset += 1;
         }
@@ -501,21 +537,16 @@ fn extract_main_data_attributes(
         }
         let value = &attributes[value_start..offset];
         offset += 1;
-        if let Some((index, (_, maximum))) = required
-            .iter()
-            .enumerate()
-            .find(|(_, (required_name, _))| *required_name == name)
-        {
-            if value.is_empty() || value.len() > *maximum || found[index].is_some() {
-                return Err(AuthError::AuthenticationFailed);
-            }
-            found[index] = Some(value.to_owned());
-        } else if name.starts_with("data-") {
+        if value.is_empty() || value.len() > *maximum {
             return Err(AuthError::AuthenticationFailed);
         }
+        values.push(value.to_owned());
     }
-    found
-        .into_iter()
-        .map(|value| value.ok_or(AuthError::AuthenticationFailed))
-        .collect()
+    while offset < bytes.len() && bytes[offset].is_ascii_whitespace() {
+        offset += 1;
+    }
+    if offset != bytes.len() {
+        return Err(AuthError::AuthenticationFailed);
+    }
+    Ok(values)
 }
