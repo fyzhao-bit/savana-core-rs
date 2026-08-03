@@ -18,6 +18,7 @@ mod deployment_manifest_primitives;
 #[allow(dead_code)] // Consumed by the closed staging/install tree verifier.
 mod deployment_merkle;
 mod deployment_native_bootstrap;
+mod deployment_network;
 mod deployment_operational_trust;
 mod deployment_plan;
 mod deployment_recovery;
@@ -79,7 +80,7 @@ pub use commit_attestation::{ClosedCommitDigestFieldV2, CommitAttestationV2};
 pub use connector_registry::{
     connector_host_allowlist_digest_v2, user_tier_host_allowed_v2, BoundedConnectorHostV2,
     BoundedConnectorNameV2, BoundedConnectorUrlV2, ConnectorDescriptorV2, ConnectorRegistryDeltaV2,
-    ConnectorRegistryStateV2, ConnectorTierV2, ConnectorTransportV2,
+    ConnectorRegistryStateV2, ConnectorStructuralRoleV2, ConnectorTierV2, ConnectorTransportV2,
     PreparedConnectorRegistryDeltaV2,
 };
 #[cfg(any(test, feature = "test-support"))]
@@ -131,6 +132,11 @@ pub use deployment_manifest_primitives::{
 };
 pub use deployment_native_bootstrap::{
     AuthenticatedNativeDeploymentLedgerV2, AuthenticatedNativeDeploymentTrustV2,
+};
+pub use deployment_network::{
+    measured_model_destination_ips_v2, parse_measured_model_connect_addresses_v2,
+    validate_measured_model_connect_addresses_v2, MeasuredModelNetworkErrorV2,
+    MAX_MODEL_CONNECT_ADDRESSES_V2,
 };
 pub use deployment_operational_trust::{
     OperationalTrustRootPurposeV2, OperationalTrustRootSetBindingV2, OperationalTrustRootSetItemV2,

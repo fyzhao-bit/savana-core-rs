@@ -4,6 +4,9 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(all(feature = "test-support", debug_assertions))]
+use std::sync::Arc;
+
 use ed25519_dalek::SigningKey;
 use savana_kernel_protocol::v2::{
     decode_approval_health_response_v2, decode_approval_settlement_view_v2,
@@ -53,7 +56,14 @@ pub struct ApprovalSuiteOneClientV2 {
     client_signing_key: SigningKey,
     server_public_key: [u8; 32],
     socket_path: PathBuf,
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    operation_exchange_for_test: Option<Arc<TestApprovalOperationExchangeV2>>,
 }
+
+#[cfg(all(feature = "test-support", debug_assertions))]
+type TestApprovalOperationExchangeV2 = dyn Fn(UnixMillisV2, ApprovalServiceOperationV2) -> Result<Vec<u8>, ApprovalSuiteOneClientErrorV2>
+    + Send
+    + Sync;
 
 impl core::fmt::Debug for ApprovalSuiteOneClientV2 {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -85,7 +95,29 @@ impl ApprovalSuiteOneClientV2 {
             client_signing_key,
             server_public_key,
             socket_path: PathBuf::from(socket_path),
+            #[cfg(all(feature = "test-support", debug_assertions))]
+            operation_exchange_for_test: None,
         })
+    }
+
+    /// Installs a typed in-process operation exchange for debug-only product-path tests.
+    ///
+    /// The override sits below the public methods' response decoders, so tests still
+    /// exercise canonical response validation. It cannot be compiled into release builds.
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    #[doc(hidden)]
+    pub fn with_operation_exchange_for_test_support<F>(mut self, exchange: F) -> Self
+    where
+        F: Fn(
+                UnixMillisV2,
+                ApprovalServiceOperationV2,
+            ) -> Result<Vec<u8>, ApprovalSuiteOneClientErrorV2>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.operation_exchange_for_test = Some(Arc::new(exchange));
+        self
     }
 
     pub fn health(
@@ -279,6 +311,10 @@ impl ApprovalSuiteOneClientV2 {
     ) -> Result<Vec<u8>, ApprovalSuiteOneClientErrorV2> {
         if operation.role() != self.edge.role() {
             return Err(ApprovalSuiteOneClientErrorV2::Unavailable);
+        }
+        #[cfg(all(feature = "test-support", debug_assertions))]
+        if let Some(exchange) = &self.operation_exchange_for_test {
+            return exchange(deadline, operation);
         }
         let io_deadline = io_deadline(deadline)?;
         let mut stream = UnixStream::connect(&self.socket_path)

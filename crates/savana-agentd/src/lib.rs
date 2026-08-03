@@ -2,6 +2,8 @@
 
 #[cfg(all(feature = "macos-development-authority", not(debug_assertions)))]
 compile_error!("macos-development-authority is forbidden in release builds");
+#[cfg(all(feature = "test-support", not(debug_assertions)))]
+compile_error!("test-support cannot be enabled in a release build");
 
 #[allow(dead_code)] // Wired by the production agentd runtime owner.
 mod effect_gate;
@@ -14,7 +16,11 @@ mod daemon;
 mod durable;
 mod kernel_authority;
 mod kernel_client;
+mod mapper_client;
+mod planner_catalog;
 mod planner_client;
+pub mod planner_privacy;
+mod private_model_transport;
 mod state_owner;
 
 use std::collections::HashSet;
@@ -37,6 +43,9 @@ pub use agent_control::{
     AgentControlKernelClientErrorV2, AgentControlKernelClientV2, KernelTaskCancellationRequestV2,
     KernelTaskPreparationRequestV2, KernelTaskStatusRequestV2, VerifiedAgentControlPeerV2,
 };
+#[cfg(all(feature = "test-support", debug_assertions))]
+#[doc(hidden)]
+pub use browser_authority::{execute_private_planning_pipeline_v2, PrivatePlanningResultV2};
 pub use browser_authority::{AgentBrowserAuthorityErrorV2, AgentBrowserAuthorityV2};
 pub use daemon::AgentdDaemonErrorV2;
 use durable::DurableAgentTaskServiceV2;
@@ -45,6 +54,17 @@ pub use kernel_authority::{
     KernelTaskAuthorityVerifierV2, KernelTaskStatementV2, SignedKernelTaskStatementV2,
 };
 pub use kernel_client::SuiteOneAgentKernelClientV2;
+#[cfg(all(feature = "test-support", debug_assertions))]
+#[doc(hidden)]
+pub use mapper_client::test_certificate_spki_sha256_v2;
+pub use mapper_client::{
+    AgentMapperClientErrorV2, MapperEndpointDeploymentV2, PinnedMtlsAgentMapperClientV2,
+};
+pub use planner_catalog::{
+    project_connector_descriptor_v2, BoundedPlannerSemanticTextV2,
+    DurablePlannerCatalogNamespaceV2, DurablePlannerCatalogV2, PlannerCatalogEntryV2,
+    PlannerCatalogErrorV2, PlannerCatalogRollbackAnchorV2, PlannerCatalogStateHeadV2,
+};
 pub use planner_client::{AgentPlannerClientErrorV2, PinnedMtlsAgentPlannerClientV2};
 pub use state_owner::{AgentTaskStateOwnerErrorV2, AgentTaskStateOwnerV2};
 
@@ -1277,6 +1297,15 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn release_build_has_a_hard_test_support_compile_gate() {
+        let source = include_str!("lib.rs");
+        assert!(source.contains(
+            "#[cfg(all(feature = \"test-support\", not(debug_assertions)))]\n\
+             compile_error!(\"test-support cannot be enabled in a release build\");"
+        ));
+    }
 
     fn authority_key_id() -> Ed25519KeyIdV2 {
         Ed25519KeyIdV2::new([60; 32])

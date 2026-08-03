@@ -138,6 +138,60 @@ Authorization、CORS 和未登记路径，使用固定 CSP，并将 body 限制�
 capability、document reference 和 authentication transfer 都是一次性或
 单用途 opaque capability，不是通用 bearer API。
 
+### 私有 mapper 与结构化 planner
+
+planner 隐私链全部实现在 `savana-agentd`；内核的 planner operation 以及
+`PlannerEnvelopeV2`、`PlannerPlanV2`、`PlannerStepV2` 的规范 wire 编码
+保持不变。两个外部模型接口都是封闭的 mTLS CBOR endpoint：
+
+| 接收方 | 精确接口 | 可接收内容 |
+| --- | --- | --- |
+| 私有 mapper | `POST /savana.mapper.v2/map` | 不含 nonce 的 intent projection，以及 active tool 与本机 semantic catalog 的交集 |
+| 结构化 planner | `POST /savana.planner.v2/plan` | 每次重新生成 ID 的封闭结构节点、边和固定的 dataflow 排序目标 |
+
+浏览器 agent action tag `2` 是 fail-safe 的私有 mapper 路径。tag `16`
+是逐 task 明确选择“与已配置第三方 mapper 共享 intent”的操作；只有经测量
+的 deployment ceiling 允许时才会执行。开发部署固定为 `PrivateOnly`，并
+为 mapper 与 planner 测量不同的 server identity、SPKI pin 和仅 agentd
+可读的 mTLS client credential。
+
+TLS identity 与网络路由被明确分开：endpoint host 只用于 SNI、SAN 校验和
+HTTP `Host`；签名 bootstrap 另外携带有界、规范化、已排序的 connect-address
+list。agentd 只连接这些已测量 socket address，不会回退到 DNS。开发部署的
+planner 与 mapper 分别连接 `127.0.0.1:9443` 和 `127.0.0.1:9445`，同时保留
+不同的 `.invalid` TLS name。
+
+Linux 必须安装 deployment-specific systemd 网络 drop-in。基础 unit 只有
+`IPAddressDeny=any`，没有 allow；`ExecStartPre` 会在固定、root-owned 的
+drop-in 与签名 bootstrap 不完全一致时拒绝启动。root 安装流程为：
+
+```sh
+install -d -o root -g root -m 0755 /etc/systemd/system/savana-agentd.service.d
+/usr/libexec/savana/savana-systemd-agentd-network-policy-v2 install /etc/savana/agentd-bootstrap-v2.json
+/usr/libexec/savana/savana-systemd-agentd-network-policy-v2 validate /etc/savana/agentd-bootstrap-v2.json
+systemctl daemon-reload
+systemctl restart savana-agentd.service
+```
+
+生成器只会原子安装 root:root、`0444` 的
+`20-measured-network.conf`，并且仅允许已测量 endpoint list 中的唯一 IP；
+端口和 server identity 仍由 typed config 与 pinned mTLS 强制执行。
+
+semantic catalog 是 agentd 本机的加密、反回滚存储；Linux 生产路径为
+`/var/lib/savana/agentd/planner-catalog-state-v2.cbor`，macOS 开发部署位于
+固定 agentd state 目录。随部署提供的 row 必须经过测量；用户注册的 row
+由已批准的签名 connector descriptor 投影而来；只有与内核 active
+tool/action 精确匹配的 row 能进入 mapper request。decode table 与内核
+envelope nonce 始终留在本机，decode 只做确定性表查找。
+用户注册的精确 fail-closed 顺序是：内核授权已批准的 pending descriptor →
+目录持久化提交 → 内核 apply。pending、denied、expired 以及被拒绝的
+descriptor 都不会占用目录容量。
+
+这里有不可回避的结构形状下限：planner 为了排序，仍会看到节点数量、
+粗粒度 role/effect 和 dataflow topology；它看不到业务语义或可跨任务复用
+的 tool identifier。若连 topology 也必须隐藏，需要本机 planner 或固定
+template selection，而不是远程结构化规划模式。
+
 ### 内部认证 IPC
 
 以下接口只开放给被 manifest、进程身份、可执行文件测量和角色共同锁定

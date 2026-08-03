@@ -45,6 +45,7 @@ impl AgentUiAuthenticationCompleteBrowserResponseV2 {
 pub enum AgentBrowserActionV2 {
     PrepareFollowupIngress,
     RunPlanner,
+    RunPlannerWithThirdPartyMapper,
     ProposePlanStep(AgentPlanStepRefV2),
     EvaluatePending(AgentPendingToolCallRefV2),
     DispatchTicket(AgentExecutionTicketRefV2),
@@ -957,6 +958,7 @@ fn encode_action(
     let (tag, handle) = match value {
         AgentBrowserActionV2::PrepareFollowupIngress => (1, None),
         AgentBrowserActionV2::RunPlanner => (2, None),
+        AgentBrowserActionV2::RunPlannerWithThirdPartyMapper => (16, None),
         AgentBrowserActionV2::ProposePlanStep(value) => (
             3,
             Some(minicbor::to_vec(value).map_err(ProtocolError::malformed)?),
@@ -1022,6 +1024,7 @@ fn decode_action(
     match (tag, count) {
         (1, Some(1)) => Ok(AgentBrowserActionV2::PrepareFollowupIngress),
         (2, Some(1)) => Ok(AgentBrowserActionV2::RunPlanner),
+        (16, Some(1)) => Ok(AgentBrowserActionV2::RunPlannerWithThirdPartyMapper),
         (3, Some(2)) => Ok(AgentBrowserActionV2::ProposePlanStep(
             minicbor::Decode::decode(decoder, context).map_err(ProtocolError::from_typed_decode)?,
         )),

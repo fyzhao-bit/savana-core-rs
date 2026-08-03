@@ -8,6 +8,7 @@ Type=simple
 User=savana-agent
 Group=savana-agent
 ExecStart=/usr/libexec/savana/savana-agentd --config /etc/savana/agentd-bootstrap-v2.json
+ExecStartPre=/usr/libexec/savana/savana-systemd-agentd-network-policy-v2 validate /etc/savana/agentd-bootstrap-v2.json
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=1s
@@ -49,6 +50,7 @@ SystemCallFilter=~@clock @debug @module @mount @obsolete @privileged @raw-io @re
 SystemCallErrorNumber=EPERM
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SocketBindDeny=any
+IPAddressDeny=any
 LoadCredentialEncrypted=agent-kernel-v2.seed:/etc/savana/credentials/agentd/agent-kernel-v2.seed.cred
 LoadCredentialEncrypted=agent-approval-v2.seed:/etc/savana/credentials/agentd/agent-approval-v2.seed.cred
 LoadCredentialEncrypted=task-state-encryption-v2.key:/etc/savana/credentials/agentd/task-state-encryption-v2.key.cred
@@ -61,6 +63,9 @@ LoadCredentialEncrypted=jarvis-boot-v2.id:/etc/savana/credentials/shared/jarvis-
 LoadCredentialEncrypted=planner-root-v2.der:/etc/savana/credentials/agentd/planner-root-v2.der.cred
 LoadCredentialEncrypted=planner-client-v2.der:/etc/savana/credentials/agentd/planner-client-v2.der.cred
 LoadCredentialEncrypted=planner-client-v2.pk8:/etc/savana/credentials/agentd/planner-client-v2.pk8.cred
+LoadCredentialEncrypted=mapper-root-v2.der:/etc/savana/credentials/agentd/mapper-root-v2.der.cred
+LoadCredentialEncrypted=mapper-client-v2.der:/etc/savana/credentials/agentd/mapper-client-v2.der.cred
+LoadCredentialEncrypted=mapper-client-v2.pk8:/etc/savana/credentials/agentd/mapper-client-v2.pk8.cred
 
 [Install]
 WantedBy=savana-kernel.target

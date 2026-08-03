@@ -144,7 +144,7 @@ fn raw_connector(
     let descriptor_tool = tool(seed);
     let mut descriptor = minicbor::Encoder::new(Vec::new());
     descriptor
-        .array(7)
+        .array(8)
         .unwrap()
         .bytes(connector_id.as_bytes())
         .unwrap()
@@ -159,6 +159,8 @@ fn raw_connector(
         .extend_from_slice(&minicbor::to_vec(descriptor_tool).unwrap());
     descriptor
         .u16(EffectSetV2::READ.bits())
+        .unwrap()
+        .u16(savana_policy_core::v2::ConnectorStructuralRoleV2::Source.tag())
         .unwrap()
         .u64(1)
         .unwrap();

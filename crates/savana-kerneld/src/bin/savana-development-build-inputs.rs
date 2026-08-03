@@ -226,11 +226,14 @@ fn run() -> Result<(), String> {
     let jarvis_principal = random_unique(&mut issued)?;
     let jarvis_peer_class = random_unique(&mut issued)?;
     let agent_task_store_id = random_unique(&mut issued)?;
+    let planner_catalog_store_id = random_unique(&mut issued)?;
     let approval_store_id = random_unique(&mut issued)?;
     let exec_store_id = random_unique(&mut issued)?;
     let exec_connector_store_id = random_unique(&mut issued)?;
     let placeholder = random_unique(&mut issued)?;
     let placeholder_hex = hex(placeholder);
+    let planner_server_spki_placeholder = hex(random_unique(&mut issued)?);
+    let mapper_server_spki_placeholder = hex(random_unique(&mut issued)?);
     let disabled_connector_authority = "00".repeat(32);
 
     let installed_tool_path = format!("{INSTALL_ROOT}/config/policy/{TOOL_ARTIFACT_LEAF}");
@@ -328,12 +331,29 @@ fn run() -> Result<(), String> {
         "task_state_path": format!("{INSTALL_ROOT}/state/agentd/agent-task-state-v2.cbor"),
         "rollback_anchor_path": format!("{INSTALL_ROOT}/state/agentd/task-anchor-v2.cbor"),
         "store_id": hex(agent_task_store_id),
+        "planner_catalog_state_path": format!("{INSTALL_ROOT}/state/agentd/planner-catalog-state-v2.cbor"),
+        "planner_catalog_rollback_anchor_path": format!("{INSTALL_ROOT}/state/agentd/planner-catalog-anchor-v2.cbor"),
+        "planner_catalog_store_id": hex(planner_catalog_store_id),
+        "planner_shipped_catalog": [{
+            "tool_class": TOOL_CLASS,
+            "action_template": ACTION_TEMPLATE,
+            "structural_role": savana_policy_core::v2::ConnectorStructuralRoleV2::Sink.tag(),
+            "effects": EffectSetV2::READ.bits(),
+            "semantic_name": "development.draft_due_diligence_report",
+            "semantic_description": "development shipped due diligence report drafting tool"
+        }],
         "kernel_task_authority_key_id": placeholder_hex,
         "approval_client_key_id": placeholder_hex,
         "approval_server_key_id": placeholder_hex,
         "planner_host": "planner.savana-development.invalid",
         "planner_port": 9443,
-        "planner_server_spki_sha256": placeholder_hex,
+        "planner_connect_addresses": ["127.0.0.1:9443"],
+        "planner_server_spki_sha256": planner_server_spki_placeholder,
+        "intent_trust_deployment_ceiling": 1,
+        "private_mapper_host": "mapper.savana-development.invalid",
+        "private_mapper_port": 9445,
+        "private_mapper_connect_addresses": ["127.0.0.1:9445"],
+        "private_mapper_server_spki_sha256": mapper_server_spki_placeholder,
         "planner_route_id": PLANNER_ROUTE,
         "planner_template_id": 1,
         "planner_intent_tag": 3,

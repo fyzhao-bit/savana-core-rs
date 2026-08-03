@@ -3,6 +3,9 @@
 #[cfg(all(feature = "macos-development-authority", not(debug_assertions)))]
 compile_error!("macos-development-authority is forbidden in release builds");
 
+#[cfg(all(feature = "test-support", not(debug_assertions)))]
+compile_error!("test-support is forbidden in release builds");
+
 use base64::Engine as _;
 use ed25519_dalek::{
     Signature as Ed25519Signature, Signer as _, SigningKey, VerifyingKey as Ed25519VerifyingKey,
@@ -1442,6 +1445,15 @@ mod tests {
     use p256::ecdsa::SigningKey as P256SigningKey;
 
     use super::*;
+
+    #[test]
+    fn release_build_has_a_hard_test_support_compile_gate() {
+        let source = include_str!("lib.rs");
+        assert!(source.contains(
+            "#[cfg(all(feature = \"test-support\", not(debug_assertions)))]\n\
+             compile_error!(\"test-support is forbidden in release builds\");"
+        ));
+    }
 
     #[test]
     fn assertion_client_data_rejects_duplicate_security_fields() {

@@ -1,0 +1,6 @@
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature,keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = DNS:mapper.savana-development.invalid
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer

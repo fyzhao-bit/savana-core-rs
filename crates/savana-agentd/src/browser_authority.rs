@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use savana_approvald::{ApprovalSuiteOneClientErrorV2, ApprovalSuiteOneClientV2};
@@ -16,33 +16,40 @@ use savana_kernel_protocol::v2::{
     ApprovalUiRecordHandleV2, AuthorizeConnectorRegistrationRequestV2,
     AuthorizeConnectorRegistrationResponseV2, AuthorizeReleaseRequestV2,
     AuthorizeToolCallRequestV2, BootIdV2, CloseAgentSessionRequestV2, CommitPlannerValueRequestV2,
-    ConnectorApprovalRecordHandleV2, ConnectorRegistrySnapshotRequestV2, Digest32V2,
-    DispatchExecutionRequestV2, DispatchReleaseRequestV2, DisplayProjectionIdV2,
-    EvaluateToolCallRequestV2, EvaluateToolCallResponseV2, ExecutionHandleV2,
-    ExecutionStatusTargetV2, ExecutionTicketHandleV2, ExecutorIdentityV2,
-    FixedBrowserFormPostCarrierV2, FixedOriginV2, GetExecutionStatusRequestV2,
-    GetReleaseStatusRequestV2, KernelAgentOperationV2, KernelAgentViewCursorV2,
-    MaskedDocumentHandleV2, NamedArgumentValueBindingV2, Nonce32V2,
+    CommitPlannerValueResponseV2, ConnectorApprovalRecordHandleV2,
+    ConnectorRegistrySnapshotRequestV2, Digest32V2, DispatchExecutionRequestV2,
+    DispatchReleaseRequestV2, DisplayProjectionIdV2, EvaluateToolCallRequestV2,
+    EvaluateToolCallResponseV2, ExecutionHandleV2, ExecutionStatusTargetV2,
+    ExecutionTicketHandleV2, ExecutorIdentityV2, FixedBrowserFormPostCarrierV2, FixedOriginV2,
+    GetExecutionStatusRequestV2, GetReleaseStatusRequestV2, KernelAgentOperationV2,
+    KernelAgentViewCursorV2, MaskedDocumentHandleV2, NamedArgumentValueBindingV2, Nonce32V2,
     PendingConnectorRegistrationHandleV2, PendingReleaseHandleV2, PendingToolCallHandleV2,
-    PlanStepHandleV2, PlannerIntentKindV2, PlannerLimitsV2, PlannerPurposeV2, PlannerRouteIdV2,
-    PrepareConnectorRegistrationRequestV2, PrepareConnectorRemovalRequestV2,
-    PrepareConnectorRemovalResponseV2, PrepareFollowupIngressRequestV2,
-    PreparePlannerCallRequestV2, PrepareReleaseRequestV2, ProjectionIdV2,
-    ProposeConnectorRegistrationRequestV2, ProposeToolCallRequestV2, PublicDispatchCompletionV2,
-    PublicExecutionStatusV2, PublicStableCodeV2, RegisteredApprovalV2,
-    RegisteredUiAuthenticationV2, ReleaseApprovalRecordHandleV2, ReleaseHandleV2,
-    ReleaseKernelApprovalHandleV2, ReleaseStatusTargetV2, ReleaseTicketHandleV2,
-    RemoveConnectorRequestV2, RemoveConnectorResponseV2, RequestIdV2,
-    ResumeCommittedAgentAuthenticationResponseV2, RunHandleV2, SignedDurableTaskCorrelationV2,
-    SignedUiAuthenticationSettlementV2, StaticTemplateIdV2, ToolApprovalRecordHandleV2,
-    ToolHandleV2, ToolKernelApprovalHandleV2, UnixMillisV2, ValueHandleV2,
+    PlanStepHandleV2, PlannerIntentKindV2, PlannerLimitsV2, PlannerPlanV2, PlannerPurposeV2,
+    PlannerRouteIdV2, PlannerTicketHandleV2, PrepareConnectorRegistrationRequestV2,
+    PrepareConnectorRemovalRequestV2, PrepareConnectorRemovalResponseV2,
+    PrepareFollowupIngressRequestV2, PreparePlannerCallRequestV2, PreparePlannerCallResponseV2,
+    PrepareReleaseRequestV2, ProjectionIdV2, ProposeConnectorRegistrationRequestV2,
+    ProposeToolCallRequestV2, PublicDispatchCompletionV2, PublicExecutionStatusV2,
+    PublicStableCodeV2, RegisteredApprovalV2, RegisteredUiAuthenticationV2,
+    ReleaseApprovalRecordHandleV2, ReleaseHandleV2, ReleaseKernelApprovalHandleV2,
+    ReleaseStatusTargetV2, ReleaseTicketHandleV2, RemoveConnectorRequestV2,
+    RemoveConnectorResponseV2, RequestIdV2, ResumeCommittedAgentAuthenticationResponseV2,
+    RunHandleV2, SignedDurableTaskCorrelationV2, SignedUiAuthenticationSettlementV2,
+    StaticTemplateIdV2, ToolApprovalRecordHandleV2, ToolHandleV2, ToolKernelApprovalHandleV2,
+    UnixMillisV2, ValueHandleV2,
 };
 use zeroize::Zeroizing;
 
 use crate::{
     effect_gate::{EffectGateCoordinatorV2, EffectGateErrorV2, EffectGateOperationKindV2},
-    AgentControlKernelClientErrorV2, AgentPlannerClientErrorV2, PinnedMtlsAgentPlannerClientV2,
-    SuiteOneAgentKernelClientV2,
+    planner_privacy::{
+        decode_ordered_plan_v2, IntentTrustBoundaryV2, MappedWorkflowV2, MapperCatalogToolV2,
+        MapperIntentRequestV2, OrderedStructuralPlanV2, StructuralNodeIdIssuerV2,
+        StructuralPlannerRequestV2,
+    },
+    AgentControlKernelClientErrorV2, AgentMapperClientErrorV2, AgentPlannerClientErrorV2,
+    DurablePlannerCatalogV2, PinnedMtlsAgentMapperClientV2, PinnedMtlsAgentPlannerClientV2,
+    PlannerCatalogEntryV2, SuiteOneAgentKernelClientV2,
 };
 
 const MAX_AUTHENTICATIONS_V2: usize = 4096;
@@ -51,6 +58,7 @@ const MAX_COMPLETIONS_V2: usize = 4096;
 const MAX_REPLAYS_PER_TAB_V2: usize = 256;
 const MAX_CURSORS_PER_TAB_V2: usize = 256;
 const MAX_OBJECTS_PER_TAB_V2: usize = 4096;
+const MAX_PENDING_CONNECTOR_DESCRIPTOR_BYTES_PER_TAB_V2: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AgentBrowserAuthorityErrorV2 {
@@ -144,19 +152,33 @@ struct PendingReleaseApprovalV2 {
     approvald: ReleaseApprovalRecordHandleV2,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct PendingConnectorRegistrationV2 {
     reference: AgentPendingConnectorRegistrationRefV2,
     kernel: PendingConnectorRegistrationHandleV2,
     approvald: ConnectorApprovalRecordHandleV2,
     transfer: savana_kernel_protocol::v2::ApprovalDisplayAuthenticationTransferCapabilityV2,
+    canonical_descriptor: Arc<Zeroizing<Vec<u8>>>,
+}
+
+impl core::fmt::Debug for PendingConnectorRegistrationV2 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("PendingConnectorRegistrationV2")
+            .field("reference", &self.reference)
+            .field("kernel", &self.kernel)
+            .field("approvald", &self.approvald)
+            .field("transfer", &self.transfer)
+            .field("canonical_descriptor", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
 struct ActionReplayV2 {
     request_digest: Digest32V2,
     nonce: Nonce32V2,
-    response: AgentBrowserMutationResponseV2,
+    response: Option<AgentBrowserMutationResponseV2>,
 }
 
 #[derive(Debug)]
@@ -189,10 +211,88 @@ struct AuthorityStateV2 {
     tabs: Vec<AgentTabV2>,
 }
 
+pub struct PrivatePlanningResultV2 {
+    committed: CommitPlannerValueResponseV2,
+    plan: PlannerPlanV2,
+}
+
+impl PrivatePlanningResultV2 {
+    pub const fn committed(&self) -> &CommitPlannerValueResponseV2 {
+        &self.committed
+    }
+
+    pub const fn plan(&self) -> &PlannerPlanV2 {
+        &self.plan
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_private_planning_pipeline_v2<Guard, Prepare, ProjectCatalog, Map, Plan, Commit>(
+    _effect_guard: Guard,
+    run: RunHandleV2,
+    active_tools: &[ActiveToolViewV2],
+    issuer: &Mutex<StructuralNodeIdIssuerV2>,
+    boundary: IntentTrustBoundaryV2,
+    prepare: Prepare,
+    project_catalog: ProjectCatalog,
+    map: Map,
+    plan: Plan,
+    commit: Commit,
+) -> Result<PrivatePlanningResultV2, AgentBrowserAuthorityErrorV2>
+where
+    Prepare: FnOnce() -> Result<PreparePlannerCallResponseV2, AgentBrowserAuthorityErrorV2>,
+    ProjectCatalog: FnOnce(
+        &[ActiveToolViewV2],
+    ) -> Result<Vec<PlannerCatalogEntryV2>, AgentBrowserAuthorityErrorV2>,
+    Map: FnOnce(
+        &MapperIntentRequestV2,
+        IntentTrustBoundaryV2,
+    ) -> Result<MappedWorkflowV2, AgentBrowserAuthorityErrorV2>,
+    Plan: FnOnce(
+        &StructuralPlannerRequestV2,
+    ) -> Result<OrderedStructuralPlanV2, AgentBrowserAuthorityErrorV2>,
+    Commit: FnOnce(
+        CommitPlannerValueRequestV2,
+    ) -> Result<CommitPlannerValueResponseV2, AgentBrowserAuthorityErrorV2>,
+{
+    let prepared = prepare()?;
+    let projected = project_catalog(active_tools)?;
+    let mapper_tools = projected
+        .iter()
+        .map(MapperCatalogToolV2::from_catalog_entry)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?;
+    let mapper_request =
+        MapperIntentRequestV2::new(prepared.envelope(), active_tools, mapper_tools)
+            .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?;
+    let mapped = map(&mapper_request, boundary)?;
+    let (structural_request, decode_table) = {
+        let mut issuer = issuer
+            .lock()
+            .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)?;
+        mapped
+            .relabel(&mut issuer)
+            .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)?
+    };
+    let ordered = plan(&structural_request)?;
+    let decoded = decode_ordered_plan_v2(prepared.envelope(), &decode_table, &ordered)
+        .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?;
+    let committed = commit(planner_commit_value_request_v2(
+        run,
+        prepared.ticket(),
+        decoded.clone(),
+    ))?;
+    Ok(PrivatePlanningResultV2 {
+        committed,
+        plan: decoded,
+    })
+}
+
 pub struct AgentBrowserAuthorityV2 {
     effect_gate: EffectGateCoordinatorV2,
     kernel: SuiteOneAgentKernelClientV2,
     approval: ApprovalSuiteOneClientV2,
+    mapper: PinnedMtlsAgentMapperClientV2,
     planner: PinnedMtlsAgentPlannerClientV2,
     planner_route: PlannerRouteIdV2,
     planner_template: StaticTemplateIdV2,
@@ -202,6 +302,8 @@ pub struct AgentBrowserAuthorityV2 {
     release_destination_projection: ProjectionIdV2,
     release_display_projection: DisplayProjectionIdV2,
     agentd_boot_id: BootIdV2,
+    planner_catalog: Mutex<DurablePlannerCatalogV2>,
+    structural_node_id_issuer: Mutex<StructuralNodeIdIssuerV2>,
     state: Mutex<AuthorityStateV2>,
 }
 
@@ -218,6 +320,7 @@ impl AgentBrowserAuthorityV2 {
         effect_gate: EffectGateCoordinatorV2,
         kernel: SuiteOneAgentKernelClientV2,
         approval: ApprovalSuiteOneClientV2,
+        mapper: PinnedMtlsAgentMapperClientV2,
         planner: PinnedMtlsAgentPlannerClientV2,
         planner_route: PlannerRouteIdV2,
         planner_template: StaticTemplateIdV2,
@@ -227,11 +330,14 @@ impl AgentBrowserAuthorityV2 {
         release_destination_projection: ProjectionIdV2,
         release_display_projection: DisplayProjectionIdV2,
         agentd_boot_id: BootIdV2,
+        planner_catalog: DurablePlannerCatalogV2,
+        structural_node_id_issuer: StructuralNodeIdIssuerV2,
     ) -> Self {
         Self {
             effect_gate,
             kernel,
             approval,
+            mapper,
             planner,
             planner_route,
             planner_template,
@@ -241,6 +347,8 @@ impl AgentBrowserAuthorityV2 {
             release_destination_projection,
             release_display_projection,
             agentd_boot_id,
+            planner_catalog: Mutex::new(planner_catalog),
+            structural_node_id_issuer: Mutex::new(structural_node_id_issuer),
             state: Mutex::new(AuthorityStateV2::default()),
         }
     }
@@ -538,6 +646,18 @@ impl AgentBrowserAuthorityV2 {
         else {
             return Err(AgentBrowserAuthorityErrorV2::InvalidReference);
         };
+        let planner_boundary = match &action {
+            AgentBrowserActionV2::RunPlanner
+            | AgentBrowserActionV2::RunPlannerWithThirdPartyMapper => {
+                Some(planner_intent_boundary_for_action_v2(&action)?)
+            }
+            _ => None,
+        };
+        if let Some(boundary) = planner_boundary {
+            self.mapper
+                .authorize_boundary(boundary)
+                .map_err(map_mapper)?;
+        }
         let request_digest = browser_action_request_digest(tab, action.clone())?;
         let request_id = browser_kernel_request_id(tab, client_request_nonce, action.clone())?;
         let effect_operation_id =
@@ -551,402 +671,407 @@ impl AgentBrowserAuthorityV2 {
         } else {
             find_action_tab(&mut state, tab)?
         };
-        if let Some(existing) = tab
-            .action_replays
-            .iter()
-            .find(|entry| entry.nonce == client_request_nonce)
-        {
-            return if existing.request_digest == request_digest {
-                Ok(existing.response.clone())
-            } else {
-                Err(AgentBrowserAuthorityErrorV2::StateConflict)
-            };
-        }
-        if tab.action_replays.len() >= MAX_REPLAYS_PER_TAB_V2 {
-            return Err(AgentBrowserAuthorityErrorV2::Overloaded);
-        }
-        tab.action_replays
-            .try_reserve(1)
-            .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
-        self.claim_tab(tab, deadline)?;
-
-        let response = match action {
-            AgentBrowserActionV2::PrepareFollowupIngress => {
-                let response = self
-                    .kernel
-                    .prepare_followup_ingress(
-                        PrepareFollowupIngressRequestV2::new(
-                            required(tab.session)?,
-                            required(tab.run)?,
-                            client_request_nonce,
+        execute_action_nonce_bound_v2(tab, client_request_nonce, request_digest, |tab| {
+            self.claim_tab(tab, deadline)?;
+            let response = match action {
+                AgentBrowserActionV2::PrepareFollowupIngress => {
+                    let response = self
+                        .kernel
+                        .prepare_followup_ingress(
+                            PrepareFollowupIngressRequestV2::new(
+                                required(tab.session)?,
+                                required(tab.run)?,
+                                client_request_nonce,
+                            )
+                            .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
+                            request_id,
+                            deadline,
                         )
-                        .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
-                        request_id,
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
-                AgentBrowserMutationResponseV2::FollowupOpenIngress {
-                    post: FixedBrowserFormPostCarrierV2::AgentFollowupIngress(
-                        response.input_transfer(),
-                    ),
+                        .map_err(map_kernel)?;
+                    AgentBrowserMutationResponseV2::FollowupOpenIngress {
+                        post: FixedBrowserFormPostCarrierV2::AgentFollowupIngress(
+                            response.input_transfer(),
+                        ),
+                    }
                 }
-            }
-            AgentBrowserActionV2::RunPlanner => {
-                let _effect_guard = self
-                    .effect_gate
-                    .acquire(
-                        EffectGateOperationKindV2::PlannerExchange,
-                        effect_operation_id,
-                        effect_gate_deadline(deadline)?,
-                    )
-                    .map_err(map_effect_gate)?;
-                let run = required(tab.run)?;
-                let initial_value = required(tab.initial_value)?;
-                let prepared = self
-                    .kernel
-                    .prepare_planner_call(
-                        PreparePlannerCallRequestV2::new(
-                            run,
-                            self.planner_route,
-                            self.planner_template,
-                            self.planner_intent,
-                            PlannerPurposeV2::PlannerCall,
-                            self.planner_limits,
-                            vec![initial_value],
+                AgentBrowserActionV2::RunPlanner
+                | AgentBrowserActionV2::RunPlannerWithThirdPartyMapper => {
+                    let effect_guard = self
+                        .effect_gate
+                        .acquire(
+                            EffectGateOperationKindV2::PlannerExchange,
+                            effect_operation_id,
+                            effect_gate_deadline(deadline)?,
                         )
-                        .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
-                        request_id,
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
-                let plan = self
-                    .planner
-                    .plan(prepared.envelope(), deadline)
-                    .map_err(map_planner)?;
-                let committed = self
-                    .kernel
-                    .commit_planner_value(
-                        CommitPlannerValueRequestV2::new(run, prepared.ticket(), plan.clone()),
-                        request_id,
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
-                if committed.steps().len() != plan.steps().len()
-                    || tab.objects.len().saturating_add(committed.steps().len())
-                        > MAX_OBJECTS_PER_TAB_V2
-                {
-                    return Err(AgentBrowserAuthorityErrorV2::StateConflict);
-                }
-                tab.objects
-                    .try_reserve(committed.steps().len())
-                    .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
-                let mut references = Vec::new();
-                references
-                    .try_reserve(committed.steps().len())
-                    .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
-                for (kernel_step, plan_step) in committed.steps().iter().copied().zip(plan.steps())
-                {
-                    let tool = tab
-                        .active_tools
-                        .iter()
-                        .copied()
-                        .find(|tool| {
-                            tool.action_template() == plan_step.action_template()
-                                && tool.tool_class() == plan_step.tool_class()
-                        })
-                        .ok_or(AgentBrowserAuthorityErrorV2::StateConflict)?
-                        .tool();
-                    let arguments = plan_step
-                        .slot_bindings()
-                        .iter()
-                        .map(|(name, _)| {
-                            NamedArgumentValueBindingV2::new(name.clone(), initial_value)
-                        })
-                        .collect::<Vec<_>>();
-                    let reference = mint_step_reference(tab)?;
-                    tab.objects.push(BrowserObjectBindingV2::PlanStep {
-                        reference,
-                        kernel: kernel_step,
-                        tool,
-                        arguments,
-                    });
-                    references.push(reference);
-                }
-                AgentBrowserMutationResponseV2::PlannerCommitted { steps: references }
-            }
-            AgentBrowserActionV2::ProposePlanStep(reference) => {
-                let (step, tool, arguments) = tab
-                    .objects
-                    .iter()
-                    .find_map(|object| match object {
-                        BrowserObjectBindingV2::PlanStep {
-                            reference: candidate,
-                            kernel,
+                        .map_err(map_effect_gate)?;
+                    let run = required(tab.run)?;
+                    let initial_value = required(tab.initial_value)?;
+                    let boundary =
+                        planner_boundary.ok_or(AgentBrowserAuthorityErrorV2::InvalidReference)?;
+                    let pipeline = execute_private_planning_pipeline_v2(
+                        effect_guard,
+                        run,
+                        &tab.active_tools,
+                        &self.structural_node_id_issuer,
+                        boundary,
+                        || {
+                            self.kernel
+                                .prepare_planner_call(
+                                    planner_prepare_call_request_v2(
+                                        run,
+                                        self.planner_route,
+                                        self.planner_template,
+                                        self.planner_intent,
+                                        self.planner_limits,
+                                        initial_value,
+                                    )?,
+                                    request_id,
+                                    deadline,
+                                )
+                                .map_err(map_kernel)
+                        },
+                        |active_tools| {
+                            self.planner_catalog
+                                .lock()
+                                .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)?
+                                .project_active(active_tools)
+                                .map_err(|error| match error {
+                                    crate::PlannerCatalogErrorV2::Invalid => {
+                                        AgentBrowserAuthorityErrorV2::InvalidReference
+                                    }
+                                    _ => AgentBrowserAuthorityErrorV2::Unavailable,
+                                })
+                        },
+                        |request, selected_boundary| {
+                            self.mapper
+                                .map(request, selected_boundary, deadline)
+                                .map_err(map_mapper)
+                        },
+                        |request| self.planner.plan(request, deadline).map_err(map_planner),
+                        |request| {
+                            self.kernel
+                                .commit_planner_value(request, request_id, deadline)
+                                .map_err(map_kernel)
+                        },
+                    )?;
+                    let committed = pipeline.committed();
+                    let plan = pipeline.plan();
+                    if committed.steps().len() != plan.steps().len()
+                        || tab.objects.len().saturating_add(committed.steps().len())
+                            > MAX_OBJECTS_PER_TAB_V2
+                    {
+                        return Err(AgentBrowserAuthorityErrorV2::StateConflict);
+                    }
+                    tab.objects
+                        .try_reserve(committed.steps().len())
+                        .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
+                    let mut references = Vec::new();
+                    references
+                        .try_reserve(committed.steps().len())
+                        .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
+                    for (kernel_step, plan_step) in
+                        committed.steps().iter().copied().zip(plan.steps())
+                    {
+                        let tool = tab
+                            .active_tools
+                            .iter()
+                            .copied()
+                            .find(|tool| {
+                                tool.action_template() == plan_step.action_template()
+                                    && tool.tool_class() == plan_step.tool_class()
+                            })
+                            .ok_or(AgentBrowserAuthorityErrorV2::StateConflict)?
+                            .tool();
+                        let arguments = plan_step
+                            .slot_bindings()
+                            .iter()
+                            .map(|(name, _)| {
+                                NamedArgumentValueBindingV2::new(name.clone(), initial_value)
+                            })
+                            .collect::<Vec<_>>();
+                        let reference = mint_step_reference(tab)?;
+                        tab.objects.push(BrowserObjectBindingV2::PlanStep {
+                            reference,
+                            kernel: kernel_step,
                             tool,
                             arguments,
-                        } if *candidate == reference => Some((*kernel, *tool, arguments.clone())),
-                        _ => None,
-                    })
-                    .ok_or(AgentBrowserAuthorityErrorV2::InvalidReference)?;
-                let proposed = self
-                    .kernel
-                    .propose_tool_call(
-                        ProposeToolCallRequestV2::new(step, tool, arguments)
+                        });
+                        references.push(reference);
+                    }
+                    AgentBrowserMutationResponseV2::PlannerCommitted { steps: references }
+                }
+                AgentBrowserActionV2::ProposePlanStep(reference) => {
+                    let (step, tool, arguments) = tab
+                        .objects
+                        .iter()
+                        .find_map(|object| match object {
+                            BrowserObjectBindingV2::PlanStep {
+                                reference: candidate,
+                                kernel,
+                                tool,
+                                arguments,
+                            } if *candidate == reference => {
+                                Some((*kernel, *tool, arguments.clone()))
+                            }
+                            _ => None,
+                        })
+                        .ok_or(AgentBrowserAuthorityErrorV2::InvalidReference)?;
+                    let proposed = self
+                        .kernel
+                        .propose_tool_call(
+                            ProposeToolCallRequestV2::new(step, tool, arguments)
+                                .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
+                            request_id,
+                            deadline,
+                        )
+                        .map_err(map_kernel)?;
+                    let pending = match proposed.current() {
+                        ActionIntentCurrentStateV2::Proposed { pending }
+                        | ActionIntentCurrentStateV2::Evaluating { pending }
+                        | ActionIntentCurrentStateV2::AwaitingApproval { pending } => pending,
+                        _ => return Err(AgentBrowserAuthorityErrorV2::StateConflict),
+                    };
+                    let pending_reference = mint_pending_reference(tab)?;
+                    tab.objects.push(BrowserObjectBindingV2::PendingToolCall {
+                        reference: pending_reference,
+                        kernel: pending,
+                        approval: None,
+                    });
+                    AgentBrowserMutationResponseV2::ToolProposed {
+                        pending: pending_reference,
+                    }
+                }
+                AgentBrowserActionV2::EvaluatePending(reference) => {
+                    self.evaluate_pending(tab, reference, request_id, deadline)?
+                }
+                AgentBrowserActionV2::DispatchTicket(reference) => {
+                    let _effect_guard = self
+                        .effect_gate
+                        .acquire(
+                            EffectGateOperationKindV2::ExecutionDispatch,
+                            effect_operation_id,
+                            effect_gate_deadline(deadline)?,
+                        )
+                        .map_err(map_effect_gate)?;
+                    let ticket = find_execution_ticket(tab, reference)?;
+                    let dispatched = self
+                        .kernel
+                        .dispatch_execution(
+                            DispatchExecutionRequestV2::new(ticket),
+                            request_id,
+                            deadline,
+                        )
+                        .map_err(map_kernel)?;
+                    let execution_reference = mint_execution_reference(tab)?;
+                    tab.objects.push(BrowserObjectBindingV2::Execution {
+                        reference: execution_reference,
+                        kernel: dispatched.execution(),
+                    });
+                    AgentBrowserMutationResponseV2::ExecutionDispatched {
+                        execution: execution_reference,
+                        state: dispatched.status(),
+                    }
+                }
+                AgentBrowserActionV2::PrepareRelease(document) => {
+                    let kernel_document = find_document(tab, document)?;
+                    let prepared = self
+                        .kernel
+                        .prepare_release(
+                            PrepareReleaseRequestV2::new(
+                                kernel_document,
+                                vec![required(tab.initial_value)?],
+                                self.release_executor,
+                                self.release_destination_projection,
+                                self.release_display_projection,
+                            )
                             .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
-                        request_id,
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
-                let pending = match proposed.current() {
-                    ActionIntentCurrentStateV2::Proposed { pending }
-                    | ActionIntentCurrentStateV2::Evaluating { pending }
-                    | ActionIntentCurrentStateV2::AwaitingApproval { pending } => pending,
-                    _ => return Err(AgentBrowserAuthorityErrorV2::StateConflict),
-                };
-                let pending_reference = mint_pending_reference(tab)?;
-                tab.objects.push(BrowserObjectBindingV2::PendingToolCall {
-                    reference: pending_reference,
-                    kernel: pending,
-                    approval: None,
-                });
-                AgentBrowserMutationResponseV2::ToolProposed {
-                    pending: pending_reference,
-                }
-            }
-            AgentBrowserActionV2::EvaluatePending(reference) => {
-                self.evaluate_pending(tab, reference, request_id, deadline)?
-            }
-            AgentBrowserActionV2::DispatchTicket(reference) => {
-                let _effect_guard = self
-                    .effect_gate
-                    .acquire(
-                        EffectGateOperationKindV2::ExecutionDispatch,
-                        effect_operation_id,
-                        effect_gate_deadline(deadline)?,
-                    )
-                    .map_err(map_effect_gate)?;
-                let ticket = find_execution_ticket(tab, reference)?;
-                let dispatched = self
-                    .kernel
-                    .dispatch_execution(
-                        DispatchExecutionRequestV2::new(ticket),
-                        request_id,
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
-                let execution_reference = mint_execution_reference(tab)?;
-                tab.objects.push(BrowserObjectBindingV2::Execution {
-                    reference: execution_reference,
-                    kernel: dispatched.execution(),
-                });
-                AgentBrowserMutationResponseV2::ExecutionDispatched {
-                    execution: execution_reference,
-                    state: dispatched.status(),
-                }
-            }
-            AgentBrowserActionV2::PrepareRelease(document) => {
-                let kernel_document = find_document(tab, document)?;
-                let prepared = self
-                    .kernel
-                    .prepare_release(
-                        PrepareReleaseRequestV2::new(
-                            kernel_document,
-                            vec![required(tab.initial_value)?],
-                            self.release_executor,
-                            self.release_destination_projection,
-                            self.release_display_projection,
+                            request_id,
+                            deadline,
                         )
-                        .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
-                        request_id,
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
-                let registered = self
-                    .approval
-                    .register_approval(
-                        prepared.envelope().clone(),
-                        prepared.display_authentication().clone(),
-                        deadline,
-                    )
-                    .map_err(map_approval)?;
-                let RegisteredApprovalV2::Release {
-                    approval,
-                    display_authentication,
-                } = registered
-                else {
-                    return Err(AgentBrowserAuthorityErrorV2::StateConflict);
-                };
-                tab.pending_releases.push(PendingReleaseApprovalV2 {
-                    pending: prepared.pending(),
-                    kernel: prepared.approval(),
-                    approvald: approval,
-                });
-                AgentBrowserMutationResponseV2::ReleaseOpenApproval {
-                    post: FixedBrowserFormPostCarrierV2::AgentApprovalDisplay(
+                        .map_err(map_kernel)?;
+                    let registered = self
+                        .approval
+                        .register_approval(
+                            prepared.envelope().clone(),
+                            prepared.display_authentication().clone(),
+                            deadline,
+                        )
+                        .map_err(map_approval)?;
+                    let RegisteredApprovalV2::Release {
+                        approval,
                         display_authentication,
-                    ),
+                    } = registered
+                    else {
+                        return Err(AgentBrowserAuthorityErrorV2::StateConflict);
+                    };
+                    tab.pending_releases.push(PendingReleaseApprovalV2 {
+                        pending: prepared.pending(),
+                        kernel: prepared.approval(),
+                        approvald: approval,
+                    });
+                    AgentBrowserMutationResponseV2::ReleaseOpenApproval {
+                        post: FixedBrowserFormPostCarrierV2::AgentApprovalDisplay(
+                            display_authentication,
+                        ),
+                    }
                 }
-            }
-            AgentBrowserActionV2::DispatchRelease(reference) => {
-                let _effect_guard = self
-                    .effect_gate
-                    .acquire(
-                        EffectGateOperationKindV2::ReleaseDispatch,
-                        effect_operation_id,
-                        effect_gate_deadline(deadline)?,
-                    )
-                    .map_err(map_effect_gate)?;
-                let ticket = find_release_ticket(tab, reference)?;
-                let dispatched = self
-                    .kernel
-                    .dispatch_release(DispatchReleaseRequestV2::new(ticket), request_id, deadline)
-                    .map_err(map_kernel)?;
-                let release_reference = mint_release_reference(tab)?;
-                tab.objects.push(BrowserObjectBindingV2::Release {
-                    reference: release_reference,
-                    kernel: dispatched.release(),
-                });
-                AgentBrowserMutationResponseV2::ReleaseDispatched {
-                    release: release_reference,
-                    state: dispatched.status(),
-                }
-            }
-            AgentBrowserActionV2::RevokeVault(document) => {
-                let response = self
-                    .kernel
-                    .revoke_vault(
-                        savana_kernel_protocol::v2::RevokeVaultRequestV2::new(find_document(
-                            tab, document,
-                        )?),
-                        request_id,
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
-                AgentBrowserMutationResponseV2::VaultRevoked {
-                    state: response.state(),
-                }
-            }
-            AgentBrowserActionV2::CloseSession => {
-                let response = self
-                    .kernel
-                    .close_agent_session(
-                        CloseAgentSessionRequestV2::new(required(tab.session)?),
-                        request_id,
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
-                AgentBrowserMutationResponseV2::SessionClosed {
-                    state: response.state(),
-                }
-            }
-            AgentBrowserActionV2::RefreshExecution(reference) => {
-                self.refresh_execution(tab, reference, request_id, deadline)?
-            }
-            AgentBrowserActionV2::RefreshRelease(reference) => {
-                self.refresh_release(tab, reference, request_id, deadline)?
-            }
-            AgentBrowserActionV2::RegisterConnector(canonical_descriptor) => {
-                if tab
-                    .objects
-                    .len()
-                    .saturating_add(tab.pending_connectors.len())
-                    >= MAX_OBJECTS_PER_TAB_V2
-                {
-                    return Err(AgentBrowserAuthorityErrorV2::Overloaded);
-                }
-                tab.pending_connectors
-                    .try_reserve(1)
-                    .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
-                let prepared = self
-                    .kernel
-                    .prepare_connector_registration(
-                        PrepareConnectorRegistrationRequestV2::new(
-                            required(tab.session)?,
-                            canonical_descriptor.clone(),
+                AgentBrowserActionV2::DispatchRelease(reference) => {
+                    let _effect_guard = self
+                        .effect_gate
+                        .acquire(
+                            EffectGateOperationKindV2::ReleaseDispatch,
+                            effect_operation_id,
+                            effect_gate_deadline(deadline)?,
                         )
-                        .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
-                let proposed = self
-                    .kernel
-                    .propose_connector_registration(
-                        ProposeConnectorRegistrationRequestV2::new(
-                            prepared.authorization(),
-                            canonical_descriptor,
+                        .map_err(map_effect_gate)?;
+                    let ticket = find_release_ticket(tab, reference)?;
+                    let dispatched = self
+                        .kernel
+                        .dispatch_release(
+                            DispatchReleaseRequestV2::new(ticket),
+                            request_id,
+                            deadline,
                         )
-                        .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
-                let registered = self
-                    .approval
-                    .register_approval(
-                        proposed.envelope().clone(),
-                        proposed.display_authentication().clone(),
-                        deadline,
-                    )
-                    .map_err(map_approval)?;
-                let RegisteredApprovalV2::Connector {
-                    approval,
-                    display_authentication,
-                } = registered
-                else {
-                    return Err(AgentBrowserAuthorityErrorV2::StateConflict);
-                };
-                let pending = mint_pending_connector_reference(tab)?;
-                tab.pending_connectors.push(PendingConnectorRegistrationV2 {
-                    reference: pending,
-                    kernel: proposed.pending(),
-                    approvald: approval,
-                    transfer: display_authentication,
-                });
-                AgentBrowserMutationResponseV2::ConnectorOpenApproval {
-                    pending,
-                    post: FixedBrowserFormPostCarrierV2::AgentApprovalDisplay(
+                        .map_err(map_kernel)?;
+                    let release_reference = mint_release_reference(tab)?;
+                    tab.objects.push(BrowserObjectBindingV2::Release {
+                        reference: release_reference,
+                        kernel: dispatched.release(),
+                    });
+                    AgentBrowserMutationResponseV2::ReleaseDispatched {
+                        release: release_reference,
+                        state: dispatched.status(),
+                    }
+                }
+                AgentBrowserActionV2::RevokeVault(document) => {
+                    let response = self
+                        .kernel
+                        .revoke_vault(
+                            savana_kernel_protocol::v2::RevokeVaultRequestV2::new(find_document(
+                                tab, document,
+                            )?),
+                            request_id,
+                            deadline,
+                        )
+                        .map_err(map_kernel)?;
+                    AgentBrowserMutationResponseV2::VaultRevoked {
+                        state: response.state(),
+                    }
+                }
+                AgentBrowserActionV2::CloseSession => {
+                    let response = self
+                        .kernel
+                        .close_agent_session(
+                            CloseAgentSessionRequestV2::new(required(tab.session)?),
+                            request_id,
+                            deadline,
+                        )
+                        .map_err(map_kernel)?;
+                    AgentBrowserMutationResponseV2::SessionClosed {
+                        state: response.state(),
+                    }
+                }
+                AgentBrowserActionV2::RefreshExecution(reference) => {
+                    self.refresh_execution(tab, reference, request_id, deadline)?
+                }
+                AgentBrowserActionV2::RefreshRelease(reference) => {
+                    self.refresh_release(tab, reference, request_id, deadline)?
+                }
+                AgentBrowserActionV2::RegisterConnector(canonical_descriptor) => {
+                    reserve_pending_connector_registration(tab, canonical_descriptor.len())?;
+                    let pending_descriptor = Arc::new(Zeroizing::new(canonical_descriptor.clone()));
+                    let prepare_descriptor = canonical_descriptor.clone();
+                    let proposed = prepare_and_propose_connector_registration(
+                        || {
+                            self.kernel
+                                .prepare_connector_registration(
+                                    PrepareConnectorRegistrationRequestV2::new(
+                                        required(tab.session)?,
+                                        prepare_descriptor,
+                                    )
+                                    .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
+                                    deadline,
+                                )
+                                .map_err(map_kernel)
+                        },
+                        |prepared| {
+                            self.kernel
+                                .propose_connector_registration(
+                                    ProposeConnectorRegistrationRequestV2::new(
+                                        prepared.authorization(),
+                                        canonical_descriptor,
+                                    )
+                                    .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)?,
+                                    deadline,
+                                )
+                                .map_err(map_kernel)
+                        },
+                    )?;
+                    let registered = self
+                        .approval
+                        .register_approval(
+                            proposed.envelope().clone(),
+                            proposed.display_authentication().clone(),
+                            deadline,
+                        )
+                        .map_err(map_approval)?;
+                    let RegisteredApprovalV2::Connector {
+                        approval,
                         display_authentication,
-                    ),
+                    } = registered
+                    else {
+                        return Err(AgentBrowserAuthorityErrorV2::StateConflict);
+                    };
+                    let pending = mint_pending_connector_reference(tab)?;
+                    tab.pending_connectors.push(PendingConnectorRegistrationV2 {
+                        reference: pending,
+                        kernel: proposed.pending(),
+                        approvald: approval,
+                        transfer: display_authentication,
+                        canonical_descriptor: pending_descriptor,
+                    });
+                    AgentBrowserMutationResponseV2::ConnectorOpenApproval {
+                        pending,
+                        post: FixedBrowserFormPostCarrierV2::AgentApprovalDisplay(
+                            display_authentication,
+                        ),
+                    }
                 }
-            }
-            AgentBrowserActionV2::FinalizeConnectorRegistration(reference) => {
-                self.finalize_connector_registration(tab, reference, deadline)?
-            }
-            AgentBrowserActionV2::RemoveConnector(connector_id) => {
-                let session = required(tab.session)?;
-                remove_connector_flow(
-                    session,
-                    connector_id,
-                    |request| {
-                        self.kernel
-                            .prepare_connector_removal(request, deadline)
-                            .map_err(map_kernel)
-                    },
-                    |request| {
-                        self.kernel
-                            .remove_connector(request, deadline)
-                            .map_err(map_kernel)
-                    },
-                )?
-            }
-            AgentBrowserActionV2::SnapshotConnectors => {
-                let snapshot = self
-                    .kernel
-                    .connector_registry_snapshot(
-                        ConnectorRegistrySnapshotRequestV2::new(required(tab.session)?),
-                        deadline,
-                    )
-                    .map_err(map_kernel)?;
-                AgentBrowserMutationResponseV2::ConnectorRegistrySnapshot {
-                    canonical_snapshot: snapshot.canonical_snapshot().clone(),
+                AgentBrowserActionV2::FinalizeConnectorRegistration(reference) => {
+                    self.finalize_connector_registration(tab, reference, deadline)?
                 }
-            }
-        };
-        tab.action_replays.push(ActionReplayV2 {
-            request_digest,
-            nonce: client_request_nonce,
-            response: response.clone(),
-        });
-        Ok(response)
+                AgentBrowserActionV2::RemoveConnector(connector_id) => {
+                    let session = required(tab.session)?;
+                    remove_connector_flow(
+                        session,
+                        connector_id,
+                        |request| {
+                            self.kernel
+                                .prepare_connector_removal(request, deadline)
+                                .map_err(map_kernel)
+                        },
+                        |request| {
+                            self.kernel
+                                .remove_connector(request, deadline)
+                                .map_err(map_kernel)
+                        },
+                    )?
+                }
+                AgentBrowserActionV2::SnapshotConnectors => {
+                    let snapshot = self
+                        .kernel
+                        .connector_registry_snapshot(
+                            ConnectorRegistrySnapshotRequestV2::new(required(tab.session)?),
+                            deadline,
+                        )
+                        .map_err(map_kernel)?;
+                    AgentBrowserMutationResponseV2::ConnectorRegistrySnapshot {
+                        canonical_snapshot: snapshot.canonical_snapshot().clone(),
+                    }
+                }
+            };
+            Ok(response)
+        })
     }
 
     fn claim_tab(
@@ -1124,26 +1249,39 @@ impl AgentBrowserAuthorityV2 {
         reference: AgentPendingConnectorRegistrationRefV2,
         deadline: UnixMillisV2,
     ) -> Result<AgentBrowserMutationResponseV2, AgentBrowserAuthorityErrorV2> {
-        let pending = tab
+        let index = tab
             .pending_connectors
             .iter()
-            .find(|candidate| candidate.reference == reference)
-            .cloned()
+            .position(|candidate| candidate.reference == reference)
             .ok_or(AgentBrowserAuthorityErrorV2::InvalidReference)?;
+        let approvald = tab.pending_connectors[index].approvald;
         let settlement = self
             .approval
             .get_agent_approval_settlement(
-                AgentApprovalRecordTargetV2::Connector(pending.approvald),
+                AgentApprovalRecordTargetV2::Connector(approvald),
                 deadline,
             )
             .map_err(map_approval)?;
         finalize_connector_registration_settlement(
-            pending,
+            tab,
+            index,
             settlement,
             |request| {
                 self.kernel
                     .authorize_connector_registration(request, deadline)
                     .map_err(map_kernel)
+            },
+            |canonical_descriptor| {
+                self.planner_catalog
+                    .lock()
+                    .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)?
+                    .insert_connector_descriptor(canonical_descriptor)
+                    .map_err(|error| match error {
+                        crate::PlannerCatalogErrorV2::Invalid => {
+                            AgentBrowserAuthorityErrorV2::InvalidReference
+                        }
+                        _ => AgentBrowserAuthorityErrorV2::Unavailable,
+                    })
             },
             |request| {
                 self.kernel
@@ -1266,10 +1404,55 @@ impl AgentBrowserAuthorityV2 {
     }
 }
 
-fn finalize_connector_registration_settlement<Authorize, Apply>(
-    pending: PendingConnectorRegistrationV2,
+fn prepare_and_propose_connector_registration<Prepare, Propose, Prepared, Proposed>(
+    prepare: Prepare,
+    propose: Propose,
+) -> Result<Proposed, AgentBrowserAuthorityErrorV2>
+where
+    Prepare: FnOnce() -> Result<Prepared, AgentBrowserAuthorityErrorV2>,
+    Propose: FnOnce(Prepared) -> Result<Proposed, AgentBrowserAuthorityErrorV2>,
+{
+    propose(prepare()?)
+}
+
+fn reserve_pending_connector_registration(
+    tab: &mut AgentTabV2,
+    descriptor_bytes: usize,
+) -> Result<(), AgentBrowserAuthorityErrorV2> {
+    if tab
+        .objects
+        .len()
+        .saturating_add(tab.pending_connectors.len())
+        >= MAX_OBJECTS_PER_TAB_V2
+    {
+        return Err(AgentBrowserAuthorityErrorV2::Overloaded);
+    }
+    let retained_bytes = tab
+        .pending_connectors
+        .iter()
+        .try_fold(0_usize, |total, pending| {
+            total.checked_add(pending.canonical_descriptor.len())
+        })
+        .ok_or(AgentBrowserAuthorityErrorV2::Overloaded)?;
+    if descriptor_bytes == 0
+        || retained_bytes
+            .checked_add(descriptor_bytes)
+            .filter(|total| *total <= MAX_PENDING_CONNECTOR_DESCRIPTOR_BYTES_PER_TAB_V2)
+            .is_none()
+    {
+        return Err(AgentBrowserAuthorityErrorV2::Overloaded);
+    }
+    tab.pending_connectors
+        .try_reserve(1)
+        .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)
+}
+
+fn finalize_connector_registration_settlement<Authorize, Persist, Apply>(
+    tab: &mut AgentTabV2,
+    pending_index: usize,
     settlement: ApprovalSettlementViewV2,
     authorize: Authorize,
+    persist: Persist,
     apply: Apply,
 ) -> Result<AgentBrowserMutationResponseV2, AgentBrowserAuthorityErrorV2>
 where
@@ -1278,6 +1461,7 @@ where
             AuthorizeConnectorRegistrationRequestV2,
         )
             -> Result<AuthorizeConnectorRegistrationResponseV2, AgentBrowserAuthorityErrorV2>,
+    Persist: FnOnce(&[u8]) -> Result<(), AgentBrowserAuthorityErrorV2>,
     Apply: FnOnce(
         ApplyApprovedConnectorRegistrationRequestV2,
     ) -> Result<
@@ -1285,6 +1469,11 @@ where
         AgentBrowserAuthorityErrorV2,
     >,
 {
+    let pending = tab
+        .pending_connectors
+        .get(pending_index)
+        .cloned()
+        .ok_or(AgentBrowserAuthorityErrorV2::InvalidReference)?;
     match settlement {
         ApprovalSettlementViewV2::Pending => {
             Ok(AgentBrowserMutationResponseV2::ConnectorOpenApproval {
@@ -1297,9 +1486,11 @@ where
                 AuthorizeConnectorRegistrationRequestV2::new(pending.kernel, settlement)
                     .map_err(|_| AgentBrowserAuthorityErrorV2::StateConflict)?,
             )?;
+            persist(pending.canonical_descriptor.as_slice())?;
             let committed = apply(ApplyApprovedConnectorRegistrationRequestV2::new(
                 authorized.approved(),
             ))?;
+            tab.pending_connectors.swap_remove(pending_index);
             Ok(
                 AgentBrowserMutationResponseV2::ConnectorRegistrationCommitted {
                     pending: pending.reference,
@@ -1311,6 +1502,7 @@ where
             )
         }
         ApprovalSettlementViewV2::Denied { .. } | ApprovalSettlementViewV2::Expired => {
+            tab.pending_connectors.swap_remove(pending_index);
             Err(AgentBrowserAuthorityErrorV2::StateConflict)
         }
     }
@@ -1395,6 +1587,65 @@ fn browser_action_request_digest(
     hasher.update(b"SAVANA_AGENT_BROWSER_ACTION_REQUEST_V2\0");
     hasher.update(bytes);
     Ok(Digest32V2::new(hasher.finalize().into()))
+}
+
+fn resolve_action_replay_v2(
+    replays: &[ActionReplayV2],
+    nonce: Nonce32V2,
+    request_digest: Digest32V2,
+) -> Option<Result<AgentBrowserMutationResponseV2, AgentBrowserAuthorityErrorV2>> {
+    replays
+        .iter()
+        .find(|entry| entry.nonce == nonce)
+        .map(|existing| {
+            if existing.request_digest != request_digest {
+                return Err(AgentBrowserAuthorityErrorV2::StateConflict);
+            }
+            existing
+                .response
+                .clone()
+                .ok_or(AgentBrowserAuthorityErrorV2::StateConflict)
+        })
+}
+
+fn execute_action_nonce_bound_v2<Execute>(
+    tab: &mut AgentTabV2,
+    nonce: Nonce32V2,
+    request_digest: Digest32V2,
+    execute: Execute,
+) -> Result<AgentBrowserMutationResponseV2, AgentBrowserAuthorityErrorV2>
+where
+    Execute: FnOnce(
+        &mut AgentTabV2,
+    ) -> Result<AgentBrowserMutationResponseV2, AgentBrowserAuthorityErrorV2>,
+{
+    if let Some(replayed) = resolve_action_replay_v2(&tab.action_replays, nonce, request_digest) {
+        return replayed;
+    }
+    if tab.action_replays.len() >= MAX_REPLAYS_PER_TAB_V2 {
+        return Err(AgentBrowserAuthorityErrorV2::Overloaded);
+    }
+    tab.action_replays
+        .try_reserve(1)
+        .map_err(|_| AgentBrowserAuthorityErrorV2::Overloaded)?;
+    let claim_index = tab.action_replays.len();
+    tab.action_replays.push(ActionReplayV2 {
+        request_digest,
+        nonce,
+        response: None,
+    });
+
+    let response = execute(tab)?;
+    let claim = tab
+        .action_replays
+        .get_mut(claim_index)
+        .filter(|claim| claim.nonce == nonce && claim.request_digest == request_digest)
+        .ok_or(AgentBrowserAuthorityErrorV2::StateConflict)?;
+    if claim.response.is_some() {
+        return Err(AgentBrowserAuthorityErrorV2::StateConflict);
+    }
+    claim.response = Some(response.clone());
+    Ok(response)
 }
 
 fn browser_kernel_request_id(
@@ -1782,6 +2033,50 @@ fn map_planner(_: AgentPlannerClientErrorV2) -> AgentBrowserAuthorityErrorV2 {
     AgentBrowserAuthorityErrorV2::Unavailable
 }
 
+fn map_mapper(_: AgentMapperClientErrorV2) -> AgentBrowserAuthorityErrorV2 {
+    AgentBrowserAuthorityErrorV2::Unavailable
+}
+
+fn planner_intent_boundary_for_action_v2(
+    action: &AgentBrowserActionV2,
+) -> Result<IntentTrustBoundaryV2, AgentBrowserAuthorityErrorV2> {
+    match action {
+        AgentBrowserActionV2::RunPlanner => Ok(IntentTrustBoundaryV2::Private),
+        AgentBrowserActionV2::RunPlannerWithThirdPartyMapper => {
+            Ok(IntentTrustBoundaryV2::ThirdParty)
+        }
+        _ => Err(AgentBrowserAuthorityErrorV2::InvalidReference),
+    }
+}
+
+fn planner_prepare_call_request_v2(
+    run: RunHandleV2,
+    planner_route: PlannerRouteIdV2,
+    planner_template: StaticTemplateIdV2,
+    planner_intent: PlannerIntentKindV2,
+    planner_limits: PlannerLimitsV2,
+    initial_value: ValueHandleV2,
+) -> Result<PreparePlannerCallRequestV2, AgentBrowserAuthorityErrorV2> {
+    PreparePlannerCallRequestV2::new(
+        run,
+        planner_route,
+        planner_template,
+        planner_intent,
+        PlannerPurposeV2::PlannerCall,
+        planner_limits,
+        vec![initial_value],
+    )
+    .map_err(|_| AgentBrowserAuthorityErrorV2::InvalidReference)
+}
+
+fn planner_commit_value_request_v2(
+    run: RunHandleV2,
+    ticket: PlannerTicketHandleV2,
+    plan: PlannerPlanV2,
+) -> CommitPlannerValueRequestV2 {
+    CommitPlannerValueRequestV2::new(run, ticket, plan)
+}
+
 fn map_approval(error: ApprovalSuiteOneClientErrorV2) -> AgentBrowserAuthorityErrorV2 {
     match error {
         ApprovalSuiteOneClientErrorV2::Rejected(_) => {
@@ -1794,16 +2089,1489 @@ fn map_approval(error: ApprovalSuiteOneClientErrorV2) -> AgentBrowserAuthorityEr
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::rc::Rc;
+    use std::sync::Arc;
 
     use ed25519_dalek::SigningKey;
     use savana_kernel_protocol::v2::{
-        ApprovalDecisionV2, ApprovalPurposeV2, ApprovedConnectorRegistrationHandleV2,
-        ConnectorRemovalAuthorizationHandleV2, PrincipalIdV2, SignedApprovalSettlementV2,
-        UnsignedApprovalSettlementV2,
+        encode_kernel_agent_operation_v2, ActionTemplateIdV2, ApprovalDecisionV2,
+        ApprovalPurposeV2, ApprovedConnectorRegistrationHandleV2,
+        ConnectorRemovalAuthorizationHandleV2, KernelAgentOperationV2, PlannerPlanV2,
+        PlannerStepV2, PlannerTicketHandleV2, PrincipalIdV2, SignedApprovalSettlementV2,
+        ToolClassIdV2, UnsignedApprovalSettlementV2,
     };
 
+    use crate::planner_privacy::IntentTrustDeploymentCeilingV2;
+    use crate::{
+        BoundedPlannerSemanticTextV2, DurablePlannerCatalogNamespaceV2, PlannerCatalogErrorV2,
+        PlannerCatalogRollbackAnchorV2, PlannerCatalogStateHeadV2,
+    };
+    use savana_policy_core::v2::{ConnectorStructuralRoleV2, EffectSetV2};
+
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct ConnectorTestCatalogAnchor(Arc<Mutex<PlannerCatalogStateHeadV2>>);
+
+    impl PlannerCatalogRollbackAnchorV2 for ConnectorTestCatalogAnchor {
+        fn current_head(&self) -> Result<PlannerCatalogStateHeadV2, PlannerCatalogErrorV2> {
+            Ok(*self.0.lock().unwrap())
+        }
+
+        fn compare_and_advance(
+            &mut self,
+            expected: PlannerCatalogStateHeadV2,
+            next: PlannerCatalogStateHeadV2,
+        ) -> Result<(), PlannerCatalogErrorV2> {
+            let mut head = self.0.lock().unwrap();
+            if *head != expected || next.sequence() != expected.sequence() + 1 {
+                return Err(PlannerCatalogErrorV2::RollbackDetected);
+            }
+            *head = next;
+            Ok(())
+        }
+    }
+
+    fn empty_connector_test_catalog() -> (tempfile::TempDir, DurablePlannerCatalogV2) {
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let catalog = DurablePlannerCatalogV2::open(
+            &directory.path().join("planner-catalog-state-v2.cbor"),
+            [0x91; 32],
+            DurablePlannerCatalogNamespaceV2::from_verified_installation(
+                Digest32V2::new([0x92; 32]),
+                Digest32V2::new([0x93; 32]),
+            )
+            .unwrap(),
+            Box::new(ConnectorTestCatalogAnchor::default()),
+            vec![],
+        )
+        .unwrap();
+        (directory, catalog)
+    }
+
+    fn connector_test_catalog_entry() -> PlannerCatalogEntryV2 {
+        PlannerCatalogEntryV2::new(
+            ToolClassIdV2::new(777),
+            ActionTemplateIdV2::new(778),
+            ConnectorStructuralRoleV2::Sink,
+            EffectSetV2::SEND,
+            BoundedPlannerSemanticTextV2::new("approved.connector").unwrap(),
+            BoundedPlannerSemanticTextV2::new("approved connector description").unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn connector_test_catalog_conflict_entry() -> PlannerCatalogEntryV2 {
+        PlannerCatalogEntryV2::new(
+            ToolClassIdV2::new(777),
+            ActionTemplateIdV2::new(778),
+            ConnectorStructuralRoleV2::Sink,
+            EffectSetV2::SEND,
+            BoundedPlannerSemanticTextV2::new("unapproved.connector").unwrap(),
+            BoundedPlannerSemanticTextV2::new("unapproved conflicting description").unwrap(),
+        )
+        .unwrap()
+    }
+
+    mod planner_privacy {
+        use super::*;
+        use std::fs::{File, OpenOptions};
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        use crate::planner_privacy::{
+            decode_mapper_intent_request_v2, decode_structural_planner_request_v2,
+            encode_mapped_workflow_v2, encode_ordered_structural_plan_v2, MappedNodeV2,
+            MappedWorkflowV2, OrderedStructuralPlanV2, StructuralNodeIdIssuerV2, StructuralRoleV2,
+        };
+        use crate::{
+            BoundedPlannerSemanticTextV2, DurablePlannerCatalogNamespaceV2,
+            MapperEndpointDeploymentV2, PlannerCatalogEntryV2, PlannerCatalogErrorV2,
+            PlannerCatalogRollbackAnchorV2, PlannerCatalogStateHeadV2,
+        };
+        use ed25519_dalek::SigningKey;
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+        use rustls::server::WebPkiClientVerifier;
+        use rustls::{RootCertStore, ServerConfig, ServerConnection, StreamOwned};
+        use savana_kernel_protocol::v2::{
+            approval_display_digest_v2, derive_ed25519_key_id_v2,
+            encode_apply_approved_connector_registration_response_v2,
+            encode_approval_settlement_view_v2,
+            encode_authorize_connector_registration_response_v2,
+            encode_commit_planner_value_response_v2,
+            encode_prepare_connector_registration_response_v2,
+            encode_prepare_planner_call_response_v2,
+            encode_propose_connector_registration_response_v2, encode_registered_approval_v2,
+            ApplyApprovedConnectorRegistrationResponseV2, ApprovalBindingV2,
+            ApprovalServiceOperationV2, BoundedApprovalDisplayTextV2, CommitPlannerValueResponseV2,
+            ConnectorUiAuthorizationHandleV2, DurableTaskIdV2, EndpointRoleV2,
+            KernelAgentOperationV2, KernelConnectorControlOperationV2,
+            KernelServiceHandshakeEdgeV2, KernelServiceOperationV2, MaskedDocumentHandleV2,
+            PeerIdentityBindingV2, PlanRevisionDigestV2, PlanStepHandleV2,
+            PrepareConnectorRegistrationResponseV2, PreparePlannerCallResponseV2,
+            ProposeConnectorRegistrationResponseV2, ServiceIdentityV2, SignedApprovalEnvelopeV2,
+            SignedUiAuthenticationEnvelopeV2, UiAuthenticationBindingV2, UiAuthenticationPurposeV2,
+            UnsignedApprovalEnvelopeV2, UnsignedUiAuthenticationEnvelopeV2,
+        };
+        use savana_policy_core::v2::{
+            AttemptKindV2, BoundedConnectorRetryPolicyV2, ConnectorDescriptorV2,
+            ConnectorStructuralRoleV2, ConnectorTierV2, EffectSetV2, ExecutorIdempotencyContractV2,
+            IdentifierV2, InternalValidatorDeclarationV2, UnsignedToolDescriptorV2,
+        };
+        use sha2::{Digest as _, Sha256};
+
+        struct ObservableGuard {
+            held: Rc<Cell<bool>>,
+            events: Rc<RefCell<Vec<&'static str>>>,
+        }
+
+        impl Drop for ObservableGuard {
+            fn drop(&mut self) {
+                self.held.set(false);
+                self.events.borrow_mut().push("guard_drop");
+            }
+        }
+
+        #[derive(Default)]
+        struct TestCatalogAnchor(Mutex<PlannerCatalogStateHeadV2>);
+
+        impl PlannerCatalogRollbackAnchorV2 for TestCatalogAnchor {
+            fn current_head(&self) -> Result<PlannerCatalogStateHeadV2, PlannerCatalogErrorV2> {
+                Ok(*self.0.lock().unwrap())
+            }
+
+            fn compare_and_advance(
+                &mut self,
+                expected: PlannerCatalogStateHeadV2,
+                next: PlannerCatalogStateHeadV2,
+            ) -> Result<(), PlannerCatalogErrorV2> {
+                let mut head = self.0.lock().unwrap();
+                if *head != expected || next.sequence() != expected.sequence() + 1 {
+                    return Err(PlannerCatalogErrorV2::RollbackDetected);
+                }
+                *head = next;
+                Ok(())
+            }
+        }
+
+        fn tls_fixture(name: &str) -> Vec<u8> {
+            let prefix = format!("{name}=");
+            let encoded = include_str!("../../savana-execd/tests/fixtures/provider-tls-v2.hex")
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .unwrap();
+            encoded
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    let digit = |byte: u8| match byte {
+                        b'0'..=b'9' => byte - b'0',
+                        b'a'..=b'f' => byte - b'a' + 10,
+                        _ => panic!("non-hex TLS fixture"),
+                    };
+                    (digit(pair[0]) << 4) | digit(pair[1])
+                })
+                .collect()
+        }
+
+        fn server_pin() -> Digest32V2 {
+            let certificate = tls_fixture("server_cert");
+            Digest32V2::new(
+                Sha256::digest(
+                    crate::private_model_transport::certificate_spki_der(&certificate).unwrap(),
+                )
+                .into(),
+            )
+        }
+
+        fn deadline_after(duration: Duration) -> UnixMillisV2 {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+            UnixMillisV2::new(u64::try_from((now + duration).as_millis()).unwrap())
+        }
+
+        fn model_server_config() -> ServerConfig {
+            let mut client_roots = RootCertStore::empty();
+            client_roots
+                .add(CertificateDer::from(tls_fixture("ca_cert")))
+                .unwrap();
+            let verifier = WebPkiClientVerifier::builder(Arc::new(client_roots))
+                .build()
+                .unwrap();
+            let mut config = ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(
+                vec![CertificateDer::from(tls_fixture("server_cert"))],
+                PrivateKeyDer::try_from(tls_fixture("server_key")).unwrap(),
+            )
+            .unwrap();
+            config.alpn_protocols = vec![b"http/1.1".to_vec()];
+            config
+        }
+
+        fn spawn_model_server<F>(
+            listener: TcpListener,
+            expected_path: &'static str,
+            calls: Arc<AtomicUsize>,
+            respond: F,
+        ) -> thread::JoinHandle<()>
+        where
+            F: FnOnce(Vec<u8>) -> Vec<u8> + Send + 'static,
+        {
+            thread::spawn(move || {
+                listener.set_nonblocking(true).unwrap();
+                let accept_deadline = Instant::now() + Duration::from_secs(3);
+                let (socket, _) = loop {
+                    match listener.accept() {
+                        Ok(accepted) => break accepted,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if Instant::now() >= accept_deadline {
+                                return;
+                            }
+                            thread::yield_now();
+                        }
+                        Err(error) => panic!("model listener failed: {error}"),
+                    }
+                };
+                socket.set_nonblocking(false).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut tls = StreamOwned::new(
+                    ServerConnection::new(Arc::new(model_server_config())).unwrap(),
+                    socket,
+                );
+                let mut header = Vec::new();
+                while !header.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0_u8; 1];
+                    tls.read_exact(&mut byte).unwrap();
+                    header.push(byte[0]);
+                }
+                let header_text = std::str::from_utf8(&header).unwrap();
+                assert!(header_text.starts_with(&format!("POST {expected_path} HTTP/1.1\r\n")));
+                let length = header_text
+                    .split("\r\n")
+                    .find_map(|line| line.strip_prefix("Content-Length: "))
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                let mut body = vec![0_u8; length];
+                tls.read_exact(&mut body).unwrap();
+                assert!(tls
+                    .conn
+                    .peer_certificates()
+                    .is_some_and(|certificates| !certificates.is_empty()));
+                calls.fetch_add(1, Ordering::SeqCst);
+                let response = respond(body);
+                write!(
+                    tls,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/cbor\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response.len()
+                )
+                .unwrap();
+                tls.write_all(&response).unwrap();
+                tls.flush().unwrap();
+                tls.conn.send_close_notify();
+                let _ = tls.conn.complete_io(&mut tls.sock);
+            })
+        }
+
+        fn deployment_edge(
+            role: EndpointRoleV2,
+            client_key: &SigningKey,
+            server_key: &SigningKey,
+        ) -> KernelServiceHandshakeEdgeV2 {
+            KernelServiceHandshakeEdgeV2::from_verified_deployment(
+                role,
+                Digest32V2::new([0x81; 32]),
+                ServiceIdentityV2::new([0x82; 32]),
+                ServiceIdentityV2::new([0x83; 32]),
+                derive_ed25519_key_id_v2(client_key.verifying_key().to_bytes()),
+                derive_ed25519_key_id_v2(server_key.verifying_key().to_bytes()),
+                BootIdV2::new([0x84; 32]),
+                1,
+                Digest32V2::new([0x85; 32]),
+                1,
+                1,
+                Digest32V2::new([0x86; 32]),
+                Digest32V2::new([0x87; 32]),
+                Digest32V2::new([0x88; 32]),
+                Digest32V2::new([0x89; 32]),
+                Digest32V2::new([0x8a; 32]),
+                Digest32V2::new([0x8b; 32]),
+            )
+            .unwrap()
+        }
+
+        #[derive(Default)]
+        struct PipelineCalls {
+            prepare: AtomicUsize,
+            commit: AtomicUsize,
+            mapper: AtomicUsize,
+            planner: AtomicUsize,
+        }
+
+        struct ActFixture {
+            authority: AgentBrowserAuthorityV2,
+            tab: AgentTabSessionCapabilityV2,
+            calls: Arc<PipelineCalls>,
+            mapper_server: thread::JoinHandle<()>,
+            planner_server: thread::JoinHandle<()>,
+            _directory: tempfile::TempDir,
+        }
+
+        fn act_fixture(commit_fails: bool) -> ActFixture {
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            let calls = Arc::new(PipelineCalls::default());
+            let active = ActiveToolViewV2::new(
+                ToolHandleV2::from_authority_entropy([0x91; 32]).unwrap(),
+                ActionTemplateIdV2::new(10),
+                ToolClassIdV2::new(100),
+                StaticTemplateIdV2::new(7),
+            )
+            .unwrap();
+
+            let mapper_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mapper_address = mapper_listener.local_addr().unwrap();
+            let mapper_calls = Arc::clone(&calls);
+            let mapper_server = spawn_model_server(
+                mapper_listener,
+                "/savana.mapper.v2/map",
+                Arc::new(AtomicUsize::new(0)),
+                move |body| {
+                    mapper_calls.mapper.fetch_add(1, Ordering::SeqCst);
+                    let request = decode_mapper_intent_request_v2(&body).unwrap();
+                    assert_eq!(request.available_tools().len(), 1);
+                    assert_eq!(
+                        request.available_tools()[0].semantic_name(),
+                        "customer_lookup"
+                    );
+                    let node = MappedNodeV2::new(
+                        1,
+                        ToolClassIdV2::new(100),
+                        ActionTemplateIdV2::new(10),
+                        vec![],
+                        StructuralRoleV2::Source,
+                        EffectSetV2::READ,
+                    )
+                    .unwrap();
+                    encode_mapped_workflow_v2(
+                        &MappedWorkflowV2::new(&request, vec![node], vec![]).unwrap(),
+                    )
+                    .unwrap()
+                },
+            );
+
+            let planner_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let planner_address = planner_listener.local_addr().unwrap();
+            let planner_calls = Arc::clone(&calls);
+            let planner_server = spawn_model_server(
+                planner_listener,
+                "/savana.planner.v2/plan",
+                Arc::new(AtomicUsize::new(0)),
+                move |body| {
+                    planner_calls.planner.fetch_add(1, Ordering::SeqCst);
+                    let request = decode_structural_planner_request_v2(&body).unwrap();
+                    assert_eq!(request.graph().nodes().len(), 1);
+                    encode_ordered_structural_plan_v2(
+                        &OrderedStructuralPlanV2::new(vec![request.graph().nodes()[0].id()])
+                            .unwrap(),
+                    )
+                    .unwrap()
+                },
+            );
+
+            let mapper = PinnedMtlsAgentMapperClientV2::from_verified_deployment(
+                IntentTrustDeploymentCeilingV2::UserMayUseThirdParty,
+                MapperEndpointDeploymentV2::new(
+                    "provider.example".to_owned(),
+                    mapper_address.port(),
+                    vec![mapper_address],
+                    server_pin(),
+                )
+                .unwrap(),
+                Some(
+                    MapperEndpointDeploymentV2::new(
+                        "provider.example".to_owned(),
+                        mapper_address.port(),
+                        vec![mapper_address],
+                        server_pin(),
+                    )
+                    .unwrap(),
+                ),
+                tls_fixture("ca_cert"),
+                tls_fixture("client_cert"),
+                Zeroizing::new(tls_fixture("client_key")),
+            )
+            .unwrap();
+            let planner = PinnedMtlsAgentPlannerClientV2::from_verified_deployment(
+                "provider.example".to_owned(),
+                planner_address.port(),
+                vec![planner_address],
+                server_pin(),
+                tls_fixture("ca_cert"),
+                tls_fixture("client_cert"),
+                Zeroizing::new(tls_fixture("client_key")),
+            )
+            .unwrap();
+
+            let kernel_client_key = SigningKey::from_bytes(&[0x92; 32]);
+            let kernel_server_key = SigningKey::from_bytes(&[0x93; 32]);
+            let task_authority_key = SigningKey::from_bytes(&[0x94; 32]);
+            let kernel_calls = Arc::clone(&calls);
+            let kernel = SuiteOneAgentKernelClientV2::from_verified_deployment(
+                deployment_edge(
+                    EndpointRoleV2::AgentKernel,
+                    &kernel_client_key,
+                    &kernel_server_key,
+                ),
+                BootIdV2::new([0x95; 32]),
+                PeerIdentityBindingV2::linux(501, 20, 42, 99, Digest32V2::new([0x96; 32])).unwrap(),
+                kernel_client_key,
+                kernel_server_key.verifying_key().to_bytes(),
+                derive_ed25519_key_id_v2(task_authority_key.verifying_key().to_bytes()),
+                task_authority_key.verifying_key().to_bytes(),
+            )
+            .unwrap()
+            .with_operation_exchange_for_test(move |_, deadline, operation| match operation {
+                KernelServiceOperationV2::Agent(KernelAgentOperationV2::PreparePlannerCall(
+                    request,
+                )) => {
+                    kernel_calls.prepare.fetch_add(1, Ordering::SeqCst);
+                    let envelope = savana_kernel_protocol::v2::PlannerEnvelopeV2::new(
+                        request.planner_route(),
+                        request.task_template(),
+                        request.intent(),
+                        vec![ActionTemplateIdV2::new(10)],
+                        vec![],
+                        vec![],
+                        request.limits(),
+                        Nonce32V2::new([0x97; 32]),
+                        deadline,
+                    )
+                    .unwrap();
+                    let digest = Digest32V2::new(
+                        Sha256::digest(minicbor::to_vec(&envelope).unwrap()).into(),
+                    );
+                    encode_prepare_planner_call_response_v2(
+                        &PreparePlannerCallResponseV2::new(
+                            PlannerTicketHandleV2::from_authority_entropy([0x98; 32]).unwrap(),
+                            envelope,
+                            digest,
+                            Digest32V2::new([0x99; 32]),
+                            deadline,
+                        )
+                        .unwrap(),
+                    )
+                    .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+                }
+                KernelServiceOperationV2::Agent(KernelAgentOperationV2::CommitPlannerValue(
+                    request,
+                )) => {
+                    kernel_calls.commit.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(request.plan().steps().len(), 1);
+                    if commit_fails {
+                        return Err(AgentControlKernelClientErrorV2::Unavailable);
+                    }
+                    encode_commit_planner_value_response_v2(
+                        &CommitPlannerValueResponseV2::new(
+                            ValueHandleV2::from_authority_entropy([0x9a; 32]).unwrap(),
+                            Digest32V2::new([0x9b; 32]),
+                            PlanRevisionDigestV2::new([0x9c; 32]),
+                            vec![PlanStepHandleV2::from_authority_entropy([0x9d; 32]).unwrap()],
+                        )
+                        .unwrap(),
+                    )
+                    .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+                }
+                _ => panic!("unexpected fake-kernel operation"),
+            });
+
+            let approval_client_key = SigningKey::from_bytes(&[0xa1; 32]);
+            let approval_server_key = SigningKey::from_bytes(&[0xa2; 32]);
+            let approval = ApprovalSuiteOneClientV2::from_verified_deployment(
+                deployment_edge(
+                    EndpointRoleV2::AgentApproval,
+                    &approval_client_key,
+                    &approval_server_key,
+                ),
+                BootIdV2::new([0xa3; 32]),
+                PeerIdentityBindingV2::linux(501, 20, 43, 100, Digest32V2::new([0xa4; 32]))
+                    .unwrap(),
+                approval_client_key,
+                approval_server_key.verifying_key().to_bytes(),
+            )
+            .unwrap();
+
+            let gate_path = directory.path().join("effect-gate-v2");
+            File::create(&gate_path).unwrap();
+            let gate_file = OpenOptions::new().read(true).open(&gate_path).unwrap();
+            let effect_gate =
+                EffectGateCoordinatorV2::from_shared_only_descriptor(gate_file).unwrap();
+            let catalog_entry = PlannerCatalogEntryV2::new(
+                ToolClassIdV2::new(100),
+                ActionTemplateIdV2::new(10),
+                ConnectorStructuralRoleV2::Source,
+                EffectSetV2::READ,
+                BoundedPlannerSemanticTextV2::new("customer_lookup").unwrap(),
+                BoundedPlannerSemanticTextV2::new("query private customer records").unwrap(),
+            )
+            .unwrap();
+            let planner_catalog = DurablePlannerCatalogV2::open(
+                &directory.path().join("planner-catalog-state-v2.cbor"),
+                [0xa5; 32],
+                DurablePlannerCatalogNamespaceV2::from_verified_installation(
+                    Digest32V2::new([0xa6; 32]),
+                    Digest32V2::new([0xa7; 32]),
+                )
+                .unwrap(),
+                Box::<TestCatalogAnchor>::default(),
+                vec![catalog_entry],
+            )
+            .unwrap();
+            let boot = BootIdV2::new([0xa8; 32]);
+            let mut authority = AgentBrowserAuthorityV2::new(
+                effect_gate,
+                kernel,
+                approval,
+                mapper,
+                planner,
+                PlannerRouteIdV2::new(9),
+                StaticTemplateIdV2::new(7),
+                PlannerIntentKindV2::Search,
+                PlannerLimitsV2::new(2, 1, 1, 4096).unwrap(),
+                ExecutorIdentityV2::new([0xa9; 32]),
+                ProjectionIdV2::new(10),
+                DisplayProjectionIdV2::new(11),
+                boot,
+                planner_catalog,
+                StructuralNodeIdIssuerV2::new().unwrap(),
+            );
+            let tab = AgentTabSessionCapabilityV2::from_authority_entropy([0xaa; 32]).unwrap();
+            let mut tab_state = tab_record(tab, boot, FixedOriginV2::Agent8768, None);
+            tab_state.kernel_document =
+                Some(MaskedDocumentHandleV2::from_authority_entropy([0xab; 32]).unwrap());
+            tab_state.session =
+                Some(AgentSessionHandleV2::from_authority_entropy([0xac; 32]).unwrap());
+            tab_state.run = Some(RunHandleV2::from_authority_entropy([0xad; 32]).unwrap());
+            tab_state.initial_value =
+                Some(ValueHandleV2::from_authority_entropy([0xae; 32]).unwrap());
+            tab_state.active_tools = vec![active];
+            authority.state.get_mut().unwrap().tabs.push(tab_state);
+
+            ActFixture {
+                authority,
+                tab,
+                calls,
+                mapper_server,
+                planner_server,
+                _directory: directory,
+            }
+        }
+
+        #[test]
+        fn planner_privacy_pipeline_orders_and_holds_guard_through_commit() {
+            let events = Rc::new(RefCell::new(vec!["guard_acquire"]));
+            let held = Rc::new(Cell::new(true));
+            let guard = ObservableGuard {
+                held: Rc::clone(&held),
+                events: Rc::clone(&events),
+            };
+            let run = RunHandleV2::from_authority_entropy([0x31; 32]).unwrap();
+            let ticket = PlannerTicketHandleV2::from_authority_entropy([0x32; 32]).unwrap();
+            let active = ActiveToolViewV2::new(
+                ToolHandleV2::from_authority_entropy([0x33; 32]).unwrap(),
+                ActionTemplateIdV2::new(10),
+                ToolClassIdV2::new(100),
+                StaticTemplateIdV2::new(7),
+            )
+            .unwrap();
+            let envelope = savana_kernel_protocol::v2::PlannerEnvelopeV2::new(
+                PlannerRouteIdV2::new(9),
+                StaticTemplateIdV2::new(7),
+                PlannerIntentKindV2::Search,
+                vec![ActionTemplateIdV2::new(10)],
+                vec![],
+                vec![],
+                PlannerLimitsV2::new(2, 1, 1, 4096).unwrap(),
+                Nonce32V2::new([0x34; 32]),
+                UnixMillisV2::new(99_999),
+            )
+            .unwrap();
+            let envelope_digest =
+                Digest32V2::new(Sha256::digest(minicbor::to_vec(&envelope).unwrap()).into());
+            let prepared = PreparePlannerCallResponseV2::new(
+                ticket,
+                envelope,
+                envelope_digest,
+                Digest32V2::new([0x35; 32]),
+                UnixMillisV2::new(99_999),
+            )
+            .unwrap();
+            let catalog_entry = PlannerCatalogEntryV2::new(
+                ToolClassIdV2::new(100),
+                ActionTemplateIdV2::new(10),
+                ConnectorStructuralRoleV2::Source,
+                EffectSetV2::READ,
+                BoundedPlannerSemanticTextV2::new("customer_lookup").unwrap(),
+                BoundedPlannerSemanticTextV2::new("query private customer records").unwrap(),
+            )
+            .unwrap();
+            let issuer = Mutex::new(StructuralNodeIdIssuerV2::new().unwrap());
+
+            let result = execute_private_planning_pipeline_v2(
+                guard,
+                run,
+                &[active],
+                &issuer,
+                IntentTrustBoundaryV2::Private,
+                {
+                    let events = Rc::clone(&events);
+                    move || {
+                        events.borrow_mut().push("prepare");
+                        Ok(prepared)
+                    }
+                },
+                {
+                    let events = Rc::clone(&events);
+                    move |_| {
+                        events.borrow_mut().push("catalog");
+                        Ok(vec![catalog_entry])
+                    }
+                },
+                {
+                    let events = Rc::clone(&events);
+                    move |request, boundary| {
+                        events.borrow_mut().push("mapper");
+                        assert_eq!(boundary, IntentTrustBoundaryV2::Private);
+                        assert_eq!(
+                            request.available_tools()[0].semantic_name(),
+                            "customer_lookup"
+                        );
+                        let node = MappedNodeV2::new(
+                            1,
+                            ToolClassIdV2::new(100),
+                            ActionTemplateIdV2::new(10),
+                            vec![],
+                            StructuralRoleV2::Source,
+                            EffectSetV2::READ,
+                        )
+                        .unwrap();
+                        Ok(MappedWorkflowV2::new(request, vec![node], vec![]).unwrap())
+                    }
+                },
+                {
+                    let events = Rc::clone(&events);
+                    move |request| {
+                        events.borrow_mut().push("planner");
+                        Ok(
+                            OrderedStructuralPlanV2::new(vec![request.graph().nodes()[0].id()])
+                                .unwrap(),
+                        )
+                    }
+                },
+                {
+                    let events = Rc::clone(&events);
+                    let held = Rc::clone(&held);
+                    move |request| {
+                        events.borrow_mut().push("commit");
+                        assert!(held.get());
+                        assert_eq!(request.plan().envelope_nonce(), Nonce32V2::new([0x34; 32]));
+                        CommitPlannerValueResponseV2::new(
+                            ValueHandleV2::from_authority_entropy([0x36; 32]).unwrap(),
+                            Digest32V2::new([0x37; 32]),
+                            PlanRevisionDigestV2::new([0x38; 32]),
+                            vec![PlanStepHandleV2::from_authority_entropy([0x39; 32]).unwrap()],
+                        )
+                        .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)
+                    }
+                },
+            )
+            .unwrap();
+
+            assert_eq!(result.plan().steps().len(), 1);
+            assert_eq!(result.committed().steps().len(), 1);
+            assert_eq!(
+                events.borrow().as_slice(),
+                [
+                    "guard_acquire",
+                    "prepare",
+                    "catalog",
+                    "mapper",
+                    "planner",
+                    "commit",
+                    "guard_drop"
+                ]
+            );
+        }
+
+        #[test]
+        fn real_act_run_planner_caches_success_without_repeating_any_effect() {
+            let fixture = act_fixture(false);
+            let nonce = Nonce32V2::new([0xb1; 32]);
+            let request = || AgentBrowserRequestV2::Act {
+                tab: fixture.tab,
+                client_request_nonce: nonce,
+                action: AgentBrowserActionV2::RunPlanner,
+            };
+            let deadline = deadline_after(Duration::from_secs(5));
+
+            let first_result = fixture.authority.act(request(), deadline);
+            fixture.mapper_server.join().unwrap();
+            fixture.planner_server.join().unwrap();
+            let first = first_result.unwrap_or_else(|error| {
+                panic!(
+                    "first act failed at counts prepare={} mapper={} planner={} commit={}: {error:?}",
+                    fixture.calls.prepare.load(Ordering::SeqCst),
+                    fixture.calls.mapper.load(Ordering::SeqCst),
+                    fixture.calls.planner.load(Ordering::SeqCst),
+                    fixture.calls.commit.load(Ordering::SeqCst),
+                )
+            });
+            let replay = fixture.authority.act(request(), deadline).unwrap();
+
+            assert_eq!(replay, first);
+            assert_eq!(fixture.calls.prepare.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.mapper.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.planner.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.commit.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn real_act_failed_effect_claim_fences_same_nonce_and_boundary_rebinding() {
+            let fixture = act_fixture(true);
+            let nonce = Nonce32V2::new([0xb2; 32]);
+            let request = |action| AgentBrowserRequestV2::Act {
+                tab: fixture.tab,
+                client_request_nonce: nonce,
+                action,
+            };
+            let deadline = deadline_after(Duration::from_secs(5));
+
+            let first = fixture
+                .authority
+                .act(request(AgentBrowserActionV2::RunPlanner), deadline);
+            fixture.mapper_server.join().unwrap();
+            fixture.planner_server.join().unwrap();
+            assert_eq!(first, Err(AgentBrowserAuthorityErrorV2::Unavailable));
+            let counts_after_effect = (
+                fixture.calls.prepare.load(Ordering::SeqCst),
+                fixture.calls.mapper.load(Ordering::SeqCst),
+                fixture.calls.planner.load(Ordering::SeqCst),
+                fixture.calls.commit.load(Ordering::SeqCst),
+            );
+            assert_eq!(counts_after_effect, (1, 1, 1, 1));
+
+            assert_eq!(
+                fixture
+                    .authority
+                    .act(request(AgentBrowserActionV2::RunPlanner), deadline),
+                Err(AgentBrowserAuthorityErrorV2::StateConflict)
+            );
+            assert_eq!(
+                fixture.authority.act(
+                    request(AgentBrowserActionV2::RunPlannerWithThirdPartyMapper),
+                    deadline,
+                ),
+                Err(AgentBrowserAuthorityErrorV2::StateConflict)
+            );
+            assert_eq!(
+                (
+                    fixture.calls.prepare.load(Ordering::SeqCst),
+                    fixture.calls.mapper.load(Ordering::SeqCst),
+                    fixture.calls.planner.load(Ordering::SeqCst),
+                    fixture.calls.commit.load(Ordering::SeqCst),
+                ),
+                counts_after_effect
+            );
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum ConnectorKernelFailure {
+            None,
+            Prepare,
+            Propose,
+            ApplyOnce,
+        }
+
+        #[derive(Default)]
+        struct ConnectorActCalls {
+            prepare: AtomicUsize,
+            propose: AtomicUsize,
+            authorize: AtomicUsize,
+            apply: AtomicUsize,
+            approval_register: AtomicUsize,
+            approval_get: AtomicUsize,
+        }
+
+        struct ConnectorActFixture {
+            authority: AgentBrowserAuthorityV2,
+            tab: AgentTabSessionCapabilityV2,
+            descriptor: Vec<u8>,
+            expected_entries: Vec<PlannerCatalogEntryV2>,
+            catalog_path: std::path::PathBuf,
+            calls: Arc<ConnectorActCalls>,
+            _directory: tempfile::TempDir,
+        }
+
+        fn connector_descriptor_for_act() -> ConnectorDescriptorV2 {
+            const NAME: &str = "direct-act-connector";
+            let digest = |byte| Digest32V2::new([byte; 32]);
+            let package = digest(0xc1);
+            let mut identity = minicbor::Encoder::new(Vec::new());
+            identity
+                .array(2)
+                .unwrap()
+                .str(NAME)
+                .unwrap()
+                .array(2)
+                .unwrap()
+                .u16(1)
+                .unwrap()
+                .bytes(package.as_bytes())
+                .unwrap();
+            let mut hasher = Sha256::new();
+            hasher.update(b"savana.connector.user.v2\0");
+            hasher.update(identity.into_writer());
+            let connector_id = Digest32V2::new(hasher.finalize().into());
+            let contract = ExecutorIdempotencyContractV2::ConnectorIdempotentByExecutionNonce;
+            let tool = UnsignedToolDescriptorV2::from_verified_manifest(
+                2,
+                savana_kernel_protocol::v2::VersionV2::new(1, 0, 0),
+                digest(0xc2),
+                IdentifierV2::new("direct.act.send").unwrap(),
+                ActionTemplateIdV2::new(778),
+                ToolClassIdV2::new(777),
+                digest(0xc3),
+                digest(0xc4),
+                vec![savana_kernel_protocol::v2::RoleIdV2::new(1)],
+                EffectSetV2::SEND,
+                AttemptKindV2::ToolWrite,
+                BoundedConnectorRetryPolicyV2::new(contract, 2, 1_000).unwrap(),
+                vec![InternalValidatorDeclarationV2::new(
+                    savana_kernel_protocol::v2::ImplementationIdV2::new(779),
+                    savana_kernel_protocol::v2::VersionV2::new(1, 0, 0),
+                    digest(0xc5),
+                )],
+                ExecutorIdentityV2::new([0xc6; 32]),
+                ProjectionIdV2::new(780),
+                digest(0xc7),
+                DisplayProjectionIdV2::new(781),
+                digest(0xc8),
+                contract,
+                UnixMillisV2::new(1),
+                UnixMillisV2::new(10_000),
+            )
+            .unwrap();
+            let mut descriptor = minicbor::Encoder::new(Vec::new());
+            descriptor
+                .array(8)
+                .unwrap()
+                .bytes(connector_id.as_bytes())
+                .unwrap()
+                .str(NAME)
+                .unwrap()
+                .u16(ConnectorTierV2::UserRegistered.tag())
+                .unwrap()
+                .array(2)
+                .unwrap()
+                .u16(1)
+                .unwrap()
+                .bytes(package.as_bytes())
+                .unwrap()
+                .array(1)
+                .unwrap();
+            descriptor
+                .writer_mut()
+                .extend_from_slice(&minicbor::to_vec(&tool).unwrap());
+            descriptor
+                .u16(EffectSetV2::SEND.bits())
+                .unwrap()
+                .u16(ConnectorStructuralRoleV2::Sink.tag())
+                .unwrap()
+                .u64(1)
+                .unwrap();
+            ConnectorDescriptorV2::from_canonical_bytes(&descriptor.into_writer(), &[]).unwrap()
+        }
+
+        fn connector_approval_envelopes(
+            descriptor_digest: Digest32V2,
+        ) -> (SignedApprovalEnvelopeV2, SignedUiAuthenticationEnvelopeV2) {
+            let signing_key = SigningKey::from_bytes(&[0xd1; 32]);
+            let text = BoundedApprovalDisplayTextV2::new("approve direct act connector".to_owned())
+                .unwrap();
+            let display_digest = approval_display_digest_v2(text.as_bytes());
+            let envelope = SignedApprovalEnvelopeV2::sign(
+                UnsignedApprovalEnvelopeV2::new(
+                    Digest32V2::new([0xd2; 32]),
+                    Digest32V2::new([0xd3; 32]),
+                    1,
+                    ApprovalPurposeV2::ConnectorRegistration,
+                    Nonce32V2::new([0xd4; 32]),
+                    Nonce32V2::new([0xd5; 32]),
+                    ApprovalBindingV2::ConnectorRegistration {
+                        descriptor_digest,
+                        previous_head_digest: Digest32V2::new([0xd6; 32]),
+                    },
+                    PrincipalIdV2::new([0xd7; 32]),
+                    Digest32V2::new([0xd8; 32]),
+                    display_digest,
+                    text,
+                    Some(Digest32V2::new([0xd9; 32])),
+                    ServiceIdentityV2::new([0xda; 32]),
+                    UnixMillisV2::new(1),
+                    UnixMillisV2::new(u64::MAX - 1),
+                )
+                .unwrap(),
+                &signing_key,
+            )
+            .unwrap();
+            let display_authentication = SignedUiAuthenticationEnvelopeV2::sign(
+                UnsignedUiAuthenticationEnvelopeV2::new(
+                    Digest32V2::new([0xd2; 32]),
+                    Digest32V2::new([0xd3; 32]),
+                    1,
+                    UiAuthenticationPurposeV2::ApprovalDisplay,
+                    UiAuthenticationBindingV2::ApprovalDisplay {
+                        durable_task_id: DurableTaskIdV2::new([0xdb; 32]),
+                        approval_envelope_digest: envelope.envelope_digest().unwrap(),
+                        approval_purpose: ApprovalPurposeV2::ConnectorRegistration,
+                        display_digest,
+                    },
+                    Some(PrincipalIdV2::new([0xd7; 32])),
+                    FixedOriginV2::Approval8766,
+                    FixedOriginV2::Approval8766,
+                    Nonce32V2::new([0xdc; 32]),
+                    UnixMillisV2::new(1),
+                    UnixMillisV2::new(u64::MAX - 1),
+                )
+                .unwrap(),
+                &signing_key,
+            )
+            .unwrap();
+            (envelope, display_authentication)
+        }
+
+        fn connector_settlement(
+            decision: ApprovalDecisionV2,
+            seed: u8,
+        ) -> SignedApprovalSettlementV2 {
+            SignedApprovalSettlementV2::sign(
+                UnsignedApprovalSettlementV2::new(
+                    Digest32V2::new([seed; 32]),
+                    Digest32V2::new([seed.wrapping_add(1); 32]),
+                    1,
+                    ApprovalPurposeV2::ConnectorRegistration,
+                    Digest32V2::new([seed.wrapping_add(2); 32]),
+                    decision,
+                    PrincipalIdV2::new([seed.wrapping_add(3); 32]),
+                    Digest32V2::new([seed.wrapping_add(4); 32]),
+                    Digest32V2::new([seed.wrapping_add(5); 32]),
+                    true,
+                    true,
+                    false,
+                    false,
+                    1,
+                    Nonce32V2::new([seed.wrapping_add(6); 32]),
+                    Nonce32V2::new([seed.wrapping_add(7); 32]),
+                    UnixMillisV2::new(1),
+                    UnixMillisV2::new(u64::MAX - 1),
+                )
+                .unwrap(),
+                &SigningKey::from_bytes(&[seed.wrapping_add(8); 32]),
+            )
+            .unwrap()
+        }
+
+        fn connector_act_fixture(
+            kernel_failure: ConnectorKernelFailure,
+            approval_registration_fails: bool,
+            settlements: Vec<ApprovalSettlementViewV2>,
+        ) -> ConnectorActFixture {
+            use std::collections::VecDeque;
+
+            let directory = tempfile::tempdir().unwrap();
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let catalog_path = directory.path().join("planner-catalog-state-v2.cbor");
+            let planner_catalog = DurablePlannerCatalogV2::open(
+                &catalog_path,
+                [0xe1; 32],
+                DurablePlannerCatalogNamespaceV2::from_verified_installation(
+                    Digest32V2::new([0xe2; 32]),
+                    Digest32V2::new([0xe3; 32]),
+                )
+                .unwrap(),
+                Box::<TestCatalogAnchor>::default(),
+                vec![],
+            )
+            .unwrap();
+            let descriptor_value = connector_descriptor_for_act();
+            let descriptor = descriptor_value.canonical_bytes().to_vec();
+            let expected_entries =
+                crate::planner_catalog::project_connector_descriptor_v2(&descriptor_value).unwrap();
+            let descriptor_digest = Digest32V2::new(Sha256::digest(&descriptor).into());
+            let (envelope, display_authentication) =
+                connector_approval_envelopes(descriptor_digest);
+            let calls = Arc::new(ConnectorActCalls::default());
+            let apply_failures = Arc::new(AtomicUsize::new(usize::from(
+                kernel_failure == ConnectorKernelFailure::ApplyOnce,
+            )));
+            let expected_descriptor = descriptor.clone();
+            let kernel_calls = Arc::clone(&calls);
+            let apply_failures_for_kernel = Arc::clone(&apply_failures);
+            let kernel_client_key = SigningKey::from_bytes(&[0xe4; 32]);
+            let kernel_server_key = SigningKey::from_bytes(&[0xe5; 32]);
+            let task_authority_key = SigningKey::from_bytes(&[0xe6; 32]);
+            let kernel = SuiteOneAgentKernelClientV2::from_verified_deployment(
+                deployment_edge(
+                    EndpointRoleV2::AgentKernel,
+                    &kernel_client_key,
+                    &kernel_server_key,
+                ),
+                BootIdV2::new([0xe7; 32]),
+                PeerIdentityBindingV2::linux(501, 20, 51, 101, Digest32V2::new([0xe8; 32]))
+                    .unwrap(),
+                kernel_client_key,
+                kernel_server_key.verifying_key().to_bytes(),
+                derive_ed25519_key_id_v2(task_authority_key.verifying_key().to_bytes()),
+                task_authority_key.verifying_key().to_bytes(),
+            )
+            .unwrap()
+            .with_operation_exchange_for_test(move |_, deadline, operation| match operation {
+                KernelServiceOperationV2::Connector(
+                    KernelConnectorControlOperationV2::PrepareRegistration(request),
+                ) => {
+                    kernel_calls.prepare.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(request.canonical_descriptor(), expected_descriptor);
+                    if kernel_failure == ConnectorKernelFailure::Prepare {
+                        return Err(AgentControlKernelClientErrorV2::Unavailable);
+                    }
+                    encode_prepare_connector_registration_response_v2(
+                        PrepareConnectorRegistrationResponseV2::new(
+                            ConnectorUiAuthorizationHandleV2::from_authority_entropy([0xe9; 32])
+                                .unwrap(),
+                            descriptor_digest,
+                            Digest32V2::new([0xea; 32]),
+                            deadline,
+                        )
+                        .unwrap(),
+                    )
+                    .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+                }
+                KernelServiceOperationV2::Connector(
+                    KernelConnectorControlOperationV2::ProposeRegistration(request),
+                ) => {
+                    kernel_calls.propose.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(request.canonical_descriptor(), expected_descriptor);
+                    if kernel_failure == ConnectorKernelFailure::Propose {
+                        return Err(AgentControlKernelClientErrorV2::Unavailable);
+                    }
+                    encode_propose_connector_registration_response_v2(
+                        &ProposeConnectorRegistrationResponseV2::new(
+                            PendingConnectorRegistrationHandleV2::from_authority_entropy(
+                                [0xeb; 32],
+                            )
+                            .unwrap(),
+                            envelope.clone(),
+                            display_authentication.clone(),
+                        ),
+                    )
+                    .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+                }
+                KernelServiceOperationV2::Connector(
+                    KernelConnectorControlOperationV2::AuthorizeRegistration(_),
+                ) => {
+                    kernel_calls.authorize.fetch_add(1, Ordering::SeqCst);
+                    encode_authorize_connector_registration_response_v2(
+                        AuthorizeConnectorRegistrationResponseV2::new(
+                            ApprovedConnectorRegistrationHandleV2::from_authority_entropy(
+                                [0xec; 32],
+                            )
+                            .unwrap(),
+                        ),
+                    )
+                    .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+                }
+                KernelServiceOperationV2::Connector(
+                    KernelConnectorControlOperationV2::ApplyApprovedRegistration(_),
+                ) => {
+                    kernel_calls.apply.fetch_add(1, Ordering::SeqCst);
+                    if apply_failures_for_kernel
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                            count.checked_sub(1)
+                        })
+                        .is_ok()
+                    {
+                        return Err(AgentControlKernelClientErrorV2::Unavailable);
+                    }
+                    encode_apply_approved_connector_registration_response_v2(
+                        &ApplyApprovedConnectorRegistrationResponseV2::new(
+                            Digest32V2::new([0xed; 32]),
+                            Digest32V2::new([0xee; 32]),
+                            1,
+                            descriptor_value.connector_id(),
+                        )
+                        .unwrap(),
+                    )
+                    .map_err(|_| AgentControlKernelClientErrorV2::Unavailable)
+                }
+                _ => panic!("unexpected direct-act fake-kernel operation"),
+            });
+
+            let settlements = Arc::new(Mutex::new(VecDeque::from(settlements)));
+            let approval_calls = Arc::clone(&calls);
+            let approval_client_key = SigningKey::from_bytes(&[0xf1; 32]);
+            let approval_server_key = SigningKey::from_bytes(&[0xf2; 32]);
+            let approval = ApprovalSuiteOneClientV2::from_verified_deployment(
+                deployment_edge(EndpointRoleV2::AgentApproval, &approval_client_key, &approval_server_key),
+                BootIdV2::new([0xf3; 32]),
+                PeerIdentityBindingV2::linux(501, 20, 52, 102, Digest32V2::new([0xf4; 32])).unwrap(),
+                approval_client_key,
+                approval_server_key.verifying_key().to_bytes(),
+            )
+            .unwrap()
+            .with_operation_exchange_for_test_support(move |_, operation| match operation {
+                ApprovalServiceOperationV2::RegisterAgentApproval { .. } => {
+                    approval_calls.approval_register.fetch_add(1, Ordering::SeqCst);
+                    if approval_registration_fails {
+                        return Err(ApprovalSuiteOneClientErrorV2::Unavailable);
+                    }
+                    encode_registered_approval_v2(RegisteredApprovalV2::Connector {
+                        approval: ConnectorApprovalRecordHandleV2::from_authority_entropy([0xf5; 32]).unwrap(),
+                        display_authentication: savana_kernel_protocol::v2::ApprovalDisplayAuthenticationTransferCapabilityV2::from_authority_entropy([0xf6; 32]).unwrap(),
+                    })
+                    .map_err(|_| ApprovalSuiteOneClientErrorV2::Unavailable)
+                }
+                ApprovalServiceOperationV2::GetAgentApprovalSettlement { .. } => {
+                    approval_calls.approval_get.fetch_add(1, Ordering::SeqCst);
+                    let settlement = settlements
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .unwrap_or(ApprovalSettlementViewV2::Pending);
+                    encode_approval_settlement_view_v2(&settlement)
+                        .map_err(|_| ApprovalSuiteOneClientErrorV2::Unavailable)
+                }
+                _ => panic!("unexpected direct-act fake-approval operation"),
+            });
+
+            let endpoint = "127.0.0.1:9".parse().unwrap();
+            let mapper_endpoint = MapperEndpointDeploymentV2::new(
+                "provider.example".to_owned(),
+                9,
+                vec![endpoint],
+                server_pin(),
+            )
+            .unwrap();
+            let mapper = PinnedMtlsAgentMapperClientV2::from_verified_deployment(
+                IntentTrustDeploymentCeilingV2::UserMayUseThirdParty,
+                mapper_endpoint.clone(),
+                Some(mapper_endpoint),
+                tls_fixture("ca_cert"),
+                tls_fixture("client_cert"),
+                Zeroizing::new(tls_fixture("client_key")),
+            )
+            .unwrap();
+            let planner = PinnedMtlsAgentPlannerClientV2::from_verified_deployment(
+                "provider.example".to_owned(),
+                9,
+                vec![endpoint],
+                server_pin(),
+                tls_fixture("ca_cert"),
+                tls_fixture("client_cert"),
+                Zeroizing::new(tls_fixture("client_key")),
+            )
+            .unwrap();
+            let gate_path = directory.path().join("effect-gate-v2");
+            File::create(&gate_path).unwrap();
+            let effect_gate = EffectGateCoordinatorV2::from_shared_only_descriptor(
+                OpenOptions::new().read(true).open(&gate_path).unwrap(),
+            )
+            .unwrap();
+            let boot = BootIdV2::new([0xf7; 32]);
+            let mut authority = AgentBrowserAuthorityV2::new(
+                effect_gate,
+                kernel,
+                approval,
+                mapper,
+                planner,
+                PlannerRouteIdV2::new(9),
+                StaticTemplateIdV2::new(7),
+                PlannerIntentKindV2::Search,
+                PlannerLimitsV2::new(2, 1, 1, 4096).unwrap(),
+                ExecutorIdentityV2::new([0xf8; 32]),
+                ProjectionIdV2::new(10),
+                DisplayProjectionIdV2::new(11),
+                boot,
+                planner_catalog,
+                StructuralNodeIdIssuerV2::new().unwrap(),
+            );
+            let tab = AgentTabSessionCapabilityV2::from_authority_entropy([0xf9; 32]).unwrap();
+            let mut tab_state = tab_record(tab, boot, FixedOriginV2::Agent8768, None);
+            tab_state.kernel_document =
+                Some(MaskedDocumentHandleV2::from_authority_entropy([0xfa; 32]).unwrap());
+            tab_state.session =
+                Some(AgentSessionHandleV2::from_authority_entropy([0xfb; 32]).unwrap());
+            tab_state.run = Some(RunHandleV2::from_authority_entropy([0xfc; 32]).unwrap());
+            tab_state.initial_value =
+                Some(ValueHandleV2::from_authority_entropy([0xfd; 32]).unwrap());
+            authority.state.get_mut().unwrap().tabs.push(tab_state);
+
+            ConnectorActFixture {
+                authority,
+                tab,
+                descriptor,
+                expected_entries,
+                catalog_path,
+                calls,
+                _directory: directory,
+            }
+        }
+
+        fn connector_register(
+            fixture: &ConnectorActFixture,
+            nonce_seed: u8,
+        ) -> Result<AgentPendingConnectorRegistrationRefV2, AgentBrowserAuthorityErrorV2> {
+            match fixture.authority.act(
+                AgentBrowserRequestV2::Act {
+                    tab: fixture.tab,
+                    client_request_nonce: Nonce32V2::new([nonce_seed; 32]),
+                    action: AgentBrowserActionV2::RegisterConnector(fixture.descriptor.clone()),
+                },
+                deadline_after(Duration::from_secs(5)),
+            )? {
+                AgentBrowserMutationResponseV2::ConnectorOpenApproval { pending, .. } => {
+                    Ok(pending)
+                }
+                _ => Err(AgentBrowserAuthorityErrorV2::StateConflict),
+            }
+        }
+
+        fn connector_finalize(
+            fixture: &ConnectorActFixture,
+            pending: AgentPendingConnectorRegistrationRefV2,
+            nonce_seed: u8,
+        ) -> Result<AgentBrowserMutationResponseV2, AgentBrowserAuthorityErrorV2> {
+            fixture.authority.act(
+                AgentBrowserRequestV2::Act {
+                    tab: fixture.tab,
+                    client_request_nonce: Nonce32V2::new([nonce_seed; 32]),
+                    action: AgentBrowserActionV2::FinalizeConnectorRegistration(pending),
+                },
+                deadline_after(Duration::from_secs(5)),
+            )
+        }
+
+        fn connector_catalog_entries(fixture: &ConnectorActFixture) -> Vec<PlannerCatalogEntryV2> {
+            fixture
+                .authority
+                .planner_catalog
+                .lock()
+                .unwrap()
+                .entries()
+                .to_vec()
+        }
+
+        fn connector_pending_len(fixture: &ConnectorActFixture) -> usize {
+            fixture.authority.state.lock().unwrap().tabs[0]
+                .pending_connectors
+                .len()
+        }
+
+        #[test]
+        fn direct_act_registration_failures_never_prewrite_the_real_catalog() {
+            for failure in [
+                ConnectorKernelFailure::Prepare,
+                ConnectorKernelFailure::Propose,
+            ] {
+                let fixture = connector_act_fixture(failure, false, vec![]);
+                assert_eq!(
+                    connector_register(&fixture, 0x31),
+                    Err(AgentBrowserAuthorityErrorV2::Unavailable)
+                );
+                assert!(connector_catalog_entries(&fixture).is_empty());
+                assert_eq!(connector_pending_len(&fixture), 0);
+                assert_eq!(fixture.calls.approval_register.load(Ordering::SeqCst), 0);
+                assert_eq!(fixture.calls.prepare.load(Ordering::SeqCst), 1);
+                assert_eq!(
+                    fixture.calls.propose.load(Ordering::SeqCst),
+                    usize::from(failure == ConnectorKernelFailure::Propose)
+                );
+            }
+            let fixture = connector_act_fixture(ConnectorKernelFailure::None, true, vec![]);
+            assert_eq!(
+                connector_register(&fixture, 0x32),
+                Err(AgentBrowserAuthorityErrorV2::Unavailable)
+            );
+            assert!(connector_catalog_entries(&fixture).is_empty());
+            assert_eq!(connector_pending_len(&fixture), 0);
+            assert_eq!(fixture.calls.prepare.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.propose.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.approval_register.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn direct_act_terminal_settlements_cleanup_and_same_key_can_later_commit() {
+            let fixture = connector_act_fixture(
+                ConnectorKernelFailure::None,
+                false,
+                vec![
+                    ApprovalSettlementViewV2::Pending,
+                    ApprovalSettlementViewV2::Denied {
+                        settlement: connector_settlement(ApprovalDecisionV2::Deny, 0x41),
+                    },
+                    ApprovalSettlementViewV2::Expired,
+                    ApprovalSettlementViewV2::Approved {
+                        settlement: connector_settlement(ApprovalDecisionV2::Approve, 0x51),
+                    },
+                ],
+            );
+            let first = connector_register(&fixture, 0x61).unwrap();
+            assert!(matches!(
+                connector_finalize(&fixture, first, 0x62),
+                Ok(AgentBrowserMutationResponseV2::ConnectorOpenApproval { pending, .. })
+                    if pending == first
+            ));
+            assert!(connector_catalog_entries(&fixture).is_empty());
+            assert_eq!(connector_pending_len(&fixture), 1);
+            assert_eq!(
+                connector_finalize(&fixture, first, 0x63),
+                Err(AgentBrowserAuthorityErrorV2::StateConflict)
+            );
+            assert_eq!(connector_pending_len(&fixture), 0);
+
+            let second = connector_register(&fixture, 0x64).unwrap();
+            assert_eq!(
+                connector_finalize(&fixture, second, 0x65),
+                Err(AgentBrowserAuthorityErrorV2::StateConflict)
+            );
+            assert_eq!(connector_pending_len(&fixture), 0);
+            assert!(connector_catalog_entries(&fixture).is_empty());
+
+            let third = connector_register(&fixture, 0x66).unwrap();
+            assert!(matches!(
+                connector_finalize(&fixture, third, 0x67),
+                Ok(AgentBrowserMutationResponseV2::ConnectorRegistrationCommitted { pending, .. })
+                    if pending == third
+            ));
+            assert_eq!(
+                connector_catalog_entries(&fixture),
+                fixture.expected_entries
+            );
+            assert_eq!(connector_pending_len(&fixture), 0);
+            assert_eq!(fixture.calls.prepare.load(Ordering::SeqCst), 3);
+            assert_eq!(fixture.calls.propose.load(Ordering::SeqCst), 3);
+            assert_eq!(fixture.calls.approval_register.load(Ordering::SeqCst), 3);
+            assert_eq!(fixture.calls.approval_get.load(Ordering::SeqCst), 4);
+            assert_eq!(fixture.calls.authorize.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.apply.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn direct_act_catalog_failure_fences_nonce_and_fresh_nonce_retries_before_apply() {
+            let fixture = connector_act_fixture(
+                ConnectorKernelFailure::None,
+                false,
+                vec![
+                    ApprovalSettlementViewV2::Approved {
+                        settlement: connector_settlement(ApprovalDecisionV2::Approve, 0x71),
+                    },
+                    ApprovalSettlementViewV2::Approved {
+                        settlement: connector_settlement(ApprovalDecisionV2::Approve, 0x72),
+                    },
+                ],
+            );
+            let pending = connector_register(&fixture, 0x73).unwrap();
+            fixture
+                .authority
+                .planner_catalog
+                .lock()
+                .unwrap()
+                .fail_next_connector_insert_for_test();
+            assert_eq!(
+                connector_finalize(&fixture, pending, 0x74),
+                Err(AgentBrowserAuthorityErrorV2::Unavailable)
+            );
+            assert_eq!(fixture.calls.apply.load(Ordering::SeqCst), 0);
+            assert_eq!(connector_pending_len(&fixture), 1);
+            assert_eq!(
+                connector_finalize(&fixture, pending, 0x74),
+                Err(AgentBrowserAuthorityErrorV2::StateConflict)
+            );
+            assert!(matches!(
+                connector_finalize(&fixture, pending, 0x75),
+                Ok(AgentBrowserMutationResponseV2::ConnectorRegistrationCommitted { .. })
+            ));
+            assert_eq!(
+                connector_catalog_entries(&fixture),
+                fixture.expected_entries
+            );
+            assert_eq!(fixture.calls.prepare.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.propose.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.approval_register.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.approval_get.load(Ordering::SeqCst), 2);
+            assert_eq!(fixture.calls.authorize.load(Ordering::SeqCst), 2);
+            assert_eq!(fixture.calls.apply.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn direct_act_apply_failure_retains_pending_and_catalog_retry_is_idempotent() {
+            let fixture = connector_act_fixture(
+                ConnectorKernelFailure::ApplyOnce,
+                false,
+                vec![
+                    ApprovalSettlementViewV2::Approved {
+                        settlement: connector_settlement(ApprovalDecisionV2::Approve, 0x81),
+                    },
+                    ApprovalSettlementViewV2::Approved {
+                        settlement: connector_settlement(ApprovalDecisionV2::Approve, 0x82),
+                    },
+                ],
+            );
+            let pending = connector_register(&fixture, 0x83).unwrap();
+            assert_eq!(
+                connector_finalize(&fixture, pending, 0x84),
+                Err(AgentBrowserAuthorityErrorV2::Unavailable)
+            );
+            assert_eq!(
+                connector_catalog_entries(&fixture),
+                fixture.expected_entries
+            );
+            let committed_catalog = fs::read(&fixture.catalog_path).unwrap();
+            assert_eq!(connector_pending_len(&fixture), 1);
+            assert_eq!(
+                connector_finalize(&fixture, pending, 0x84),
+                Err(AgentBrowserAuthorityErrorV2::StateConflict)
+            );
+            assert!(matches!(
+                connector_finalize(&fixture, pending, 0x85),
+                Ok(AgentBrowserMutationResponseV2::ConnectorRegistrationCommitted { .. })
+            ));
+            assert_eq!(fs::read(&fixture.catalog_path).unwrap(), committed_catalog);
+            assert_eq!(connector_pending_len(&fixture), 0);
+            assert_eq!(fixture.calls.prepare.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.propose.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.approval_register.load(Ordering::SeqCst), 1);
+            assert_eq!(fixture.calls.approval_get.load(Ordering::SeqCst), 2);
+            assert_eq!(fixture.calls.authorize.load(Ordering::SeqCst), 2);
+            assert_eq!(fixture.calls.apply.load(Ordering::SeqCst), 2);
+        }
+    }
 
     fn tab_record(
         tab: AgentTabSessionCapabilityV2,
@@ -1846,7 +3614,175 @@ mod tests {
                 [0x44; 32],
             )
             .unwrap(),
+            canonical_descriptor: Arc::new(Zeroizing::new(
+                b"private canonical connector descriptor".to_vec(),
+            )),
         }
+    }
+
+    #[test]
+    fn planner_actions_bind_private_default_and_explicit_third_party_per_request() {
+        assert_eq!(
+            planner_intent_boundary_for_action_v2(&AgentBrowserActionV2::RunPlanner).unwrap(),
+            IntentTrustBoundaryV2::Private
+        );
+        assert_eq!(
+            planner_intent_boundary_for_action_v2(
+                &AgentBrowserActionV2::RunPlannerWithThirdPartyMapper
+            )
+            .unwrap(),
+            IntentTrustBoundaryV2::ThirdParty
+        );
+        assert!(IntentTrustDeploymentCeilingV2::PrivateOnly.permits(IntentTrustBoundaryV2::Private));
+        assert!(
+            !IntentTrustDeploymentCeilingV2::PrivateOnly.permits(IntentTrustBoundaryV2::ThirdParty)
+        );
+        assert!(IntentTrustDeploymentCeilingV2::UserMayUseThirdParty
+            .permits(IntentTrustBoundaryV2::ThirdParty));
+
+        let tab = AgentTabSessionCapabilityV2::from_authority_entropy([0x5a; 32]).unwrap();
+        assert_ne!(
+            browser_action_request_digest(tab, AgentBrowserActionV2::RunPlanner).unwrap(),
+            browser_action_request_digest(
+                tab,
+                AgentBrowserActionV2::RunPlannerWithThirdPartyMapper
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn planner_action_nonce_replay_cannot_rebind_private_to_third_party() {
+        let tab = AgentTabSessionCapabilityV2::from_authority_entropy([0x5b; 32]).unwrap();
+        let nonce = Nonce32V2::new([0x5c; 32]);
+        let private_digest =
+            browser_action_request_digest(tab, AgentBrowserActionV2::RunPlanner).unwrap();
+        let third_party_digest = browser_action_request_digest(
+            tab,
+            AgentBrowserActionV2::RunPlannerWithThirdPartyMapper,
+        )
+        .unwrap();
+        let response = AgentBrowserMutationResponseV2::PlannerCommitted { steps: vec![] };
+        let replays = vec![ActionReplayV2 {
+            request_digest: private_digest,
+            nonce,
+            response: Some(response.clone()),
+        }];
+
+        assert_eq!(
+            resolve_action_replay_v2(&replays, nonce, private_digest),
+            Some(Ok(response))
+        );
+        assert_eq!(
+            resolve_action_replay_v2(&replays, nonce, third_party_digest),
+            Some(Err(AgentBrowserAuthorityErrorV2::StateConflict))
+        );
+    }
+
+    #[test]
+    fn failed_planner_action_claim_blocks_rebinding_and_retry_before_more_side_effects() {
+        let tab_capability =
+            AgentTabSessionCapabilityV2::from_authority_entropy([0x5d; 32]).unwrap();
+        let mut tab = tab_record(
+            tab_capability,
+            BootIdV2::new([0x5e; 32]),
+            FixedOriginV2::Agent8768,
+            None,
+        );
+        let nonce = Nonce32V2::new([0x5f; 32]);
+        let private_action = AgentBrowserActionV2::RunPlanner;
+        let third_party_action = AgentBrowserActionV2::RunPlannerWithThirdPartyMapper;
+        assert!(IntentTrustDeploymentCeilingV2::UserMayUseThirdParty
+            .permits(planner_intent_boundary_for_action_v2(&private_action).unwrap()));
+        assert!(IntentTrustDeploymentCeilingV2::UserMayUseThirdParty
+            .permits(planner_intent_boundary_for_action_v2(&third_party_action).unwrap()));
+        let private_digest =
+            browser_action_request_digest(tab_capability, private_action.clone()).unwrap();
+        let third_party_digest =
+            browser_action_request_digest(tab_capability, third_party_action).unwrap();
+        let side_effect_calls = Cell::new(0_u8);
+
+        assert_eq!(
+            execute_action_nonce_bound_v2(&mut tab, nonce, private_digest, |_| {
+                side_effect_calls.set(side_effect_calls.get() + 1);
+                Err(AgentBrowserAuthorityErrorV2::Unavailable)
+            }),
+            Err(AgentBrowserAuthorityErrorV2::Unavailable)
+        );
+        assert_eq!(side_effect_calls.get(), 1);
+
+        assert_eq!(
+            execute_action_nonce_bound_v2(&mut tab, nonce, third_party_digest, |_| {
+                side_effect_calls.set(side_effect_calls.get() + 1);
+                Ok(AgentBrowserMutationResponseV2::PlannerCommitted { steps: vec![] })
+            }),
+            Err(AgentBrowserAuthorityErrorV2::StateConflict)
+        );
+        assert_eq!(side_effect_calls.get(), 1);
+
+        assert_eq!(
+            execute_action_nonce_bound_v2(&mut tab, nonce, private_digest, |_| {
+                side_effect_calls.set(side_effect_calls.get() + 1);
+                Ok(AgentBrowserMutationResponseV2::PlannerCommitted { steps: vec![] })
+            }),
+            Err(AgentBrowserAuthorityErrorV2::StateConflict)
+        );
+        assert_eq!(side_effect_calls.get(), 1);
+    }
+
+    #[test]
+    fn mapper_boundary_choice_cannot_change_kernel_planner_payloads() {
+        let run = RunHandleV2::from_authority_entropy([0x61; 32]).unwrap();
+        let initial = ValueHandleV2::from_authority_entropy([0x62; 32]).unwrap();
+        let ticket = PlannerTicketHandleV2::from_authority_entropy([0x63; 32]).unwrap();
+        let limits = PlannerLimitsV2::new(4, 3, 2, 4096).unwrap();
+        let plan = PlannerPlanV2::new(
+            Nonce32V2::new([0x64; 32]),
+            vec![PlannerStepV2::new(
+                1,
+                ActionTemplateIdV2::new(10),
+                ToolClassIdV2::new(100),
+                vec![],
+                vec![],
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let payloads = |boundary| {
+            assert!(IntentTrustDeploymentCeilingV2::UserMayUseThirdParty.permits(boundary));
+            let prepare = planner_prepare_call_request_v2(
+                run,
+                PlannerRouteIdV2::new(7),
+                StaticTemplateIdV2::new(8),
+                PlannerIntentKindV2::Search,
+                limits,
+                initial,
+            )
+            .unwrap();
+            let commit = planner_commit_value_request_v2(run, ticket, plan.clone());
+            (
+                prepare.clone(),
+                commit.clone(),
+                encode_kernel_agent_operation_v2(&KernelAgentOperationV2::PreparePlannerCall(
+                    prepare,
+                ))
+                .unwrap(),
+                encode_kernel_agent_operation_v2(&KernelAgentOperationV2::CommitPlannerValue(
+                    commit,
+                ))
+                .unwrap(),
+            )
+        };
+        let private = payloads(
+            planner_intent_boundary_for_action_v2(&AgentBrowserActionV2::RunPlanner).unwrap(),
+        );
+        let third_party = payloads(
+            planner_intent_boundary_for_action_v2(
+                &AgentBrowserActionV2::RunPlannerWithThirdPartyMapper,
+            )
+            .unwrap(),
+        );
+        assert_eq!(private, third_party);
     }
 
     fn connector_settlement(decision: ApprovalDecisionV2) -> SignedApprovalSettlementV2 {
@@ -1878,12 +3814,48 @@ mod tests {
     }
 
     #[test]
+    fn rejected_connector_prepare_or_propose_never_changes_the_real_catalog() {
+        let (_directory, catalog) = empty_connector_test_catalog();
+        for _ in 0..4_097 {
+            assert_eq!(
+                prepare_and_propose_connector_registration(
+                    || Err::<(), _>(AgentBrowserAuthorityErrorV2::InvalidReference),
+                    |_: ()| -> Result<(), AgentBrowserAuthorityErrorV2> { unreachable!() },
+                ),
+                Err(AgentBrowserAuthorityErrorV2::InvalidReference),
+            );
+        }
+        assert!(catalog.entries().is_empty());
+
+        assert_eq!(
+            prepare_and_propose_connector_registration(
+                || Ok(7_u8),
+                |_| Err::<(), _>(AgentBrowserAuthorityErrorV2::StateConflict),
+            ),
+            Err(AgentBrowserAuthorityErrorV2::StateConflict),
+        );
+        assert!(catalog.entries().is_empty());
+    }
+
+    #[test]
     fn connector_finalize_reopens_pending_and_rejects_terminal_nonapproval_without_kernel_calls() {
         let pending = pending_connector_record();
         let calls = Cell::new(0_u8);
+        let mut tab = tab_record(
+            AgentTabSessionCapabilityV2::from_authority_entropy([0x71; 32]).unwrap(),
+            BootIdV2::new([0x72; 32]),
+            FixedOriginV2::Agent8768,
+            None,
+        );
+        tab.pending_connectors.push(pending.clone());
         let reopened = finalize_connector_registration_settlement(
-            pending.clone(),
+            &mut tab,
+            0,
             ApprovalSettlementViewV2::Pending,
+            |_| {
+                calls.set(calls.get() + 1);
+                unreachable!()
+            },
             |_| {
                 calls.set(calls.get() + 1);
                 unreachable!()
@@ -1902,6 +3874,7 @@ mod tests {
                 post: FixedBrowserFormPostCarrierV2::AgentApprovalDisplay(pending.transfer),
             }
         );
+        assert_eq!(tab.pending_connectors.len(), 1);
 
         for settlement in [
             ApprovalSettlementViewV2::Denied {
@@ -1909,10 +3882,22 @@ mod tests {
             },
             ApprovalSettlementViewV2::Expired,
         ] {
+            let mut tab = tab_record(
+                AgentTabSessionCapabilityV2::from_authority_entropy([0x73; 32]).unwrap(),
+                BootIdV2::new([0x74; 32]),
+                FixedOriginV2::Agent8768,
+                None,
+            );
+            tab.pending_connectors.push(pending.clone());
             assert_eq!(
                 finalize_connector_registration_settlement(
-                    pending.clone(),
+                    &mut tab,
+                    0,
                     settlement,
+                    |_| {
+                        calls.set(calls.get() + 1);
+                        unreachable!()
+                    },
                     |_| {
                         calls.set(calls.get() + 1);
                         unreachable!()
@@ -1924,6 +3909,7 @@ mod tests {
                 ),
                 Err(AgentBrowserAuthorityErrorV2::StateConflict)
             );
+            assert!(tab.pending_connectors.is_empty());
         }
         assert_eq!(calls.get(), 0);
     }
@@ -1939,8 +3925,16 @@ mod tests {
         let head_digest = Digest32V2::new([0x52; 32]);
         let connector_id = Digest32V2::new([0x53; 32]);
         let stage = Cell::new(0_u8);
+        let mut tab = tab_record(
+            AgentTabSessionCapabilityV2::from_authority_entropy([0x75; 32]).unwrap(),
+            BootIdV2::new([0x76; 32]),
+            FixedOriginV2::Agent8768,
+            None,
+        );
+        tab.pending_connectors.push(pending.clone());
         let response = finalize_connector_registration_settlement(
-            pending.clone(),
+            &mut tab,
+            0,
             ApprovalSettlementViewV2::Approved { settlement },
             |request| {
                 assert_eq!(stage.get(), 0);
@@ -1949,9 +3943,15 @@ mod tests {
                 assert_eq!(request.settlement(), &expected_settlement);
                 Ok(AuthorizeConnectorRegistrationResponseV2::new(approved))
             },
-            |request| {
+            |descriptor| {
                 assert_eq!(stage.get(), 1);
                 stage.set(2);
+                assert_eq!(descriptor, pending.canonical_descriptor.as_slice());
+                Ok(())
+            },
+            |request| {
+                assert_eq!(stage.get(), 2);
+                stage.set(3);
                 assert_eq!(request.approved(), approved);
                 ApplyApprovedConnectorRegistrationResponseV2::new(
                     signed_delta_digest,
@@ -1963,7 +3963,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(stage.get(), 2);
+        assert_eq!(stage.get(), 3);
+        assert!(tab.pending_connectors.is_empty());
         assert_eq!(
             response,
             AgentBrowserMutationResponseV2::ConnectorRegistrationCommitted {
@@ -1973,6 +3974,148 @@ mod tests {
                 sequence: 9,
                 connector_id,
             }
+        );
+    }
+
+    #[test]
+    fn approved_catalog_failure_skips_apply_and_retains_pending_for_new_nonce_retry() {
+        let pending = pending_connector_record();
+        let settlement = connector_settlement(ApprovalDecisionV2::Approve);
+        let approved =
+            ApprovedConnectorRegistrationHandleV2::from_authority_entropy([0x77; 32]).unwrap();
+        let apply_calls = Cell::new(0_u8);
+        let mut tab = tab_record(
+            AgentTabSessionCapabilityV2::from_authority_entropy([0x78; 32]).unwrap(),
+            BootIdV2::new([0x79; 32]),
+            FixedOriginV2::Agent8768,
+            None,
+        );
+        tab.pending_connectors.push(pending);
+
+        assert_eq!(
+            finalize_connector_registration_settlement(
+                &mut tab,
+                0,
+                ApprovalSettlementViewV2::Approved { settlement },
+                |_| Ok(AuthorizeConnectorRegistrationResponseV2::new(approved)),
+                |_| Err(AgentBrowserAuthorityErrorV2::Unavailable),
+                |_| {
+                    apply_calls.set(apply_calls.get() + 1);
+                    unreachable!()
+                },
+            ),
+            Err(AgentBrowserAuthorityErrorV2::Unavailable),
+        );
+        assert_eq!(apply_calls.get(), 0);
+        assert_eq!(tab.pending_connectors.len(), 1);
+    }
+
+    #[test]
+    fn more_than_catalog_capacity_unapproved_requests_leave_room_for_same_key_approval() {
+        let (_directory, mut catalog) = empty_connector_test_catalog();
+        let pending = pending_connector_record();
+        for index in 0..4_097_u32 {
+            let mut tab = tab_record(
+                AgentTabSessionCapabilityV2::from_authority_entropy(
+                    (index + 1).to_be_bytes().repeat(8).try_into().unwrap(),
+                )
+                .unwrap(),
+                BootIdV2::new([0x7a; 32]),
+                FixedOriginV2::Agent8768,
+                None,
+            );
+            tab.pending_connectors.push(pending.clone());
+            assert_eq!(
+                finalize_connector_registration_settlement(
+                    &mut tab,
+                    0,
+                    ApprovalSettlementViewV2::Expired,
+                    |_| unreachable!(),
+                    |_| {
+                        catalog
+                            .insert_entries(vec![connector_test_catalog_conflict_entry()])
+                            .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)?;
+                        Ok(())
+                    },
+                    |_| unreachable!(),
+                ),
+                Err(AgentBrowserAuthorityErrorV2::StateConflict),
+            );
+            assert!(tab.pending_connectors.is_empty());
+        }
+        assert!(catalog.entries().is_empty());
+
+        let settlement = connector_settlement(ApprovalDecisionV2::Approve);
+        let approved =
+            ApprovedConnectorRegistrationHandleV2::from_authority_entropy([0x7b; 32]).unwrap();
+        let mut tab = tab_record(
+            AgentTabSessionCapabilityV2::from_authority_entropy([0x7c; 32]).unwrap(),
+            BootIdV2::new([0x7d; 32]),
+            FixedOriginV2::Agent8768,
+            None,
+        );
+        tab.pending_connectors.push(pending);
+        finalize_connector_registration_settlement(
+            &mut tab,
+            0,
+            ApprovalSettlementViewV2::Approved { settlement },
+            |_| Ok(AuthorizeConnectorRegistrationResponseV2::new(approved)),
+            |_| {
+                catalog
+                    .insert_entries(vec![connector_test_catalog_entry()])
+                    .map_err(|_| AgentBrowserAuthorityErrorV2::Unavailable)
+            },
+            |_| {
+                ApplyApprovedConnectorRegistrationResponseV2::new(
+                    Digest32V2::new([0x7e; 32]),
+                    Digest32V2::new([0x7f; 32]),
+                    1,
+                    Digest32V2::new([0x80; 32]),
+                )
+                .map_err(|_| AgentBrowserAuthorityErrorV2::StateConflict)
+            },
+        )
+        .unwrap();
+        assert_eq!(catalog.entries(), &[connector_test_catalog_entry()]);
+    }
+
+    #[test]
+    fn pending_connector_debug_redacts_the_canonical_descriptor() {
+        let pending = pending_connector_record();
+        let debug = format!("{pending:?}");
+        assert!(!debug.contains("private canonical connector descriptor"));
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn pending_connector_descriptor_budget_bounds_retained_private_bytes() {
+        let mut tab = tab_record(
+            AgentTabSessionCapabilityV2::from_authority_entropy([0x81; 32]).unwrap(),
+            BootIdV2::new([0x82; 32]),
+            FixedOriginV2::Agent8768,
+            None,
+        );
+        tab.pending_connectors.push(pending_connector_record());
+        assert_eq!(
+            reserve_pending_connector_registration(
+                &mut tab,
+                MAX_PENDING_CONNECTOR_DESCRIPTOR_BYTES_PER_TAB_V2,
+            ),
+            Err(AgentBrowserAuthorityErrorV2::Overloaded),
+        );
+        assert_eq!(tab.pending_connectors.len(), 1);
+
+        tab.pending_connectors.clear();
+        assert_eq!(
+            reserve_pending_connector_registration(
+                &mut tab,
+                MAX_PENDING_CONNECTOR_DESCRIPTOR_BYTES_PER_TAB_V2,
+            ),
+            Ok(()),
+        );
+        assert_eq!(
+            reserve_pending_connector_registration(&mut tab, 0),
+            Err(AgentBrowserAuthorityErrorV2::Overloaded),
         );
     }
 

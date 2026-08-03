@@ -6,8 +6,8 @@ use savana_kernel_protocol::v2::{
 use savana_policy_core::v2::{
     user_tier_host_allowed_v2, AttemptKindV2, BoundedConnectorHostV2,
     BoundedConnectorRetryPolicyV2, BoundedConnectorUrlV2, ConnectorDescriptorV2,
-    ConnectorRegistryStateV2, ConnectorTierV2, ConnectorTransportV2, DeploymentHardLimitsV2,
-    EffectSetV2, ExecutorIdempotencyContractV2, G4Error, IdentifierV2,
+    ConnectorRegistryStateV2, ConnectorStructuralRoleV2, ConnectorTierV2, ConnectorTransportV2,
+    DeploymentHardLimitsV2, EffectSetV2, ExecutorIdempotencyContractV2, G4Error, IdentifierV2,
     InternalValidatorDeclarationV2, SharedVerifiedConnectorRegistryV2, UnsignedToolDescriptorV2,
 };
 use sha2::{Digest as _, Sha256};
@@ -87,10 +87,33 @@ fn raw_descriptor_bytes(
     requested_effects: u16,
     descriptor_version: u64,
 ) -> Vec<u8> {
+    raw_descriptor_bytes_with_role(
+        encoded_tier,
+        id_tier,
+        display_name,
+        transport,
+        tool_descriptors,
+        requested_effects,
+        ConnectorStructuralRoleV2::Sink.tag(),
+        descriptor_version,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn raw_descriptor_bytes_with_role(
+    encoded_tier: u16,
+    id_tier: u16,
+    display_name: &str,
+    transport: RawTransport<'_>,
+    tool_descriptors: &[UnsignedToolDescriptorV2],
+    requested_effects: u16,
+    structural_role: u16,
+    descriptor_version: u64,
+) -> Vec<u8> {
     let connector_id = connector_id_for(id_tier, display_name, &transport);
     let mut encoder = minicbor::Encoder::new(Vec::new());
     encoder
-        .array(7)
+        .array(8)
         .unwrap()
         .bytes(connector_id.as_bytes())
         .unwrap()
@@ -108,9 +131,116 @@ fn raw_descriptor_bytes(
     encoder
         .u16(requested_effects)
         .unwrap()
+        .u16(structural_role)
+        .unwrap()
         .u64(descriptor_version)
         .unwrap();
     encoder.into_writer()
+}
+
+#[test]
+fn structural_role_is_closed_signed_and_canonical_before_descriptor_version() {
+    let authority = SigningKey::from_bytes(&[0x29; 32]);
+    let tool = tool_descriptor(0x2a, EffectSetV2::SEND);
+    let sink = raw_descriptor_bytes_with_role(
+        2,
+        2,
+        "role-signed",
+        RawTransport::Stdio(digest(0x2b)),
+        std::slice::from_ref(&tool),
+        EffectSetV2::SEND.bits(),
+        ConnectorStructuralRoleV2::Sink.tag(),
+        1,
+    );
+    let transform = raw_descriptor_bytes_with_role(
+        2,
+        2,
+        "role-signed",
+        RawTransport::Stdio(digest(0x2b)),
+        std::slice::from_ref(&tool),
+        EffectSetV2::SEND.bits(),
+        ConnectorStructuralRoleV2::Transform.tag(),
+        1,
+    );
+    let sink = ConnectorDescriptorV2::from_canonical_bytes(&sink, &[]).unwrap();
+    let transform = ConnectorDescriptorV2::from_canonical_bytes(&transform, &[]).unwrap();
+    assert_eq!(sink.structural_role(), ConnectorStructuralRoleV2::Sink);
+    assert_eq!(
+        transform.structural_role(),
+        ConnectorStructuralRoleV2::Transform
+    );
+    assert_ne!(sink.canonical_bytes(), transform.canonical_bytes());
+
+    let genesis = digest(0x2c);
+    let sink_delta = signed_delta_bytes(
+        1,
+        genesis,
+        RawOperation::Add(&sink),
+        digest(0x2d),
+        1,
+        &authority,
+    );
+    let transform_delta = signed_delta_bytes(
+        1,
+        genesis,
+        RawOperation::Add(&transform),
+        digest(0x2d),
+        1,
+        &authority,
+    );
+    assert_ne!(
+        domain_hash(DELTA_SIGNED_DOMAIN, &sink_delta),
+        domain_hash(DELTA_SIGNED_DOMAIN, &transform_delta),
+    );
+
+    for role in [0, 4, u16::MAX] {
+        let invalid = raw_descriptor_bytes_with_role(
+            2,
+            2,
+            "role-invalid",
+            RawTransport::Stdio(digest(0x2e)),
+            std::slice::from_ref(&tool),
+            EffectSetV2::SEND.bits(),
+            role,
+            1,
+        );
+        assert_eq!(
+            ConnectorDescriptorV2::from_canonical_bytes(&invalid, &[]).unwrap_err(),
+            G4Error::InvalidDescriptor,
+        );
+    }
+
+    let mut missing = minicbor::Encoder::new(Vec::new());
+    let connector_id = connector_id_for(2, "role-missing", &RawTransport::Stdio(digest(0x2f)));
+    missing
+        .array(7)
+        .unwrap()
+        .bytes(connector_id.as_bytes())
+        .unwrap()
+        .str("role-missing")
+        .unwrap()
+        .u16(2)
+        .unwrap()
+        .array(2)
+        .unwrap()
+        .u16(1)
+        .unwrap()
+        .bytes(digest(0x2f).as_bytes())
+        .unwrap()
+        .array(1)
+        .unwrap();
+    missing
+        .writer_mut()
+        .extend_from_slice(&minicbor::to_vec(&tool).unwrap());
+    missing
+        .u16(EffectSetV2::SEND.bits())
+        .unwrap()
+        .u64(1)
+        .unwrap();
+    assert_eq!(
+        ConnectorDescriptorV2::from_canonical_bytes(&missing.into_writer(), &[]).unwrap_err(),
+        G4Error::NonCanonicalDescriptor,
+    );
 }
 
 fn tool_descriptor(seed: u8, effects: EffectSetV2) -> UnsignedToolDescriptorV2 {
@@ -524,8 +654,8 @@ fn descriptor_rejects_forbidden_hosts_zero_fields_limits_and_noncanonical_cbor()
         1,
     );
     let mut nonminimal = valid.clone();
-    assert_eq!(nonminimal[0], 0x87);
-    nonminimal.splice(0..1, [0x98, 0x07]);
+    assert_eq!(nonminimal[0], 0x88);
+    nonminimal.splice(0..1, [0x98, 0x08]);
     assert_eq!(
         ConnectorDescriptorV2::from_canonical_bytes(&nonminimal, &[]).unwrap_err(),
         G4Error::NonCanonicalDescriptor

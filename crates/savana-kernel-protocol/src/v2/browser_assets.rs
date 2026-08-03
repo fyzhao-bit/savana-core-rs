@@ -473,6 +473,11 @@ pub const SAVANA_BROWSER_SCRIPT_V2: &[u8] = br####""use strict";
       const objects = await loadAgentView(tab, documentReference);
       controls.replaceChildren();
       agentButton(controls, "Run planner", (button) => act(2, null, button));
+      agentButton(
+        controls,
+        "Run planner (share intent with configured third party)",
+        (button) => act(16, null, button)
+      );
       agentButton(controls, "Open follow-up input", (button) => act(1, null, button));
       agentButton(controls, "Close session", (button) => act(9, null, button));
       for (const object of objects) {
@@ -521,6 +526,14 @@ mod tests {
     use std::process::Command;
 
     use super::SAVANA_BROWSER_SCRIPT_V2;
+
+    #[test]
+    fn planner_intent_opt_out_is_separate_and_does_not_replace_private_default() {
+        let script = std::str::from_utf8(SAVANA_BROWSER_SCRIPT_V2).unwrap();
+        assert!(script.contains("agentButton(controls, \"Run planner\", (button) => act(2"));
+        assert!(script.contains("Run planner (share intent with configured third party)"));
+        assert!(script.contains("(button) => act(16, null, button)"));
+    }
 
     #[test]
     fn approval_dom_renders_complete_non_ascii_text_without_byte_summary() {

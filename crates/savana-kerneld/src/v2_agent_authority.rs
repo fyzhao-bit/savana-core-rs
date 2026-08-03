@@ -5710,6 +5710,17 @@ fn connector_registration_display(
     .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
     write!(
         &mut display,
+        "structural_role: {} ({}); ",
+        match descriptor.structural_role() {
+            savana_policy_core::v2::ConnectorStructuralRoleV2::Source => "Source",
+            savana_policy_core::v2::ConnectorStructuralRoleV2::Transform => "Transform",
+            savana_policy_core::v2::ConnectorStructuralRoleV2::Sink => "Sink",
+        },
+        descriptor.structural_role().tag(),
+    )
+    .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    write!(
+        &mut display,
         "descriptor_version: {}; ",
         descriptor.descriptor_version()
     )
@@ -6848,7 +6859,7 @@ pub(crate) mod tests {
 
         let mut descriptor = minicbor::Encoder::new(Vec::new());
         descriptor
-            .array(7)
+            .array(8)
             .unwrap()
             .bytes(connector_id.as_bytes())
             .unwrap()
@@ -6871,7 +6882,13 @@ pub(crate) mod tests {
                 .writer_mut()
                 .extend_from_slice(&minicbor::to_vec(tool).unwrap());
         }
-        descriptor.u16(effects.bits()).unwrap().u64(1).unwrap();
+        descriptor
+            .u16(effects.bits())
+            .unwrap()
+            .u16(savana_policy_core::v2::ConnectorStructuralRoleV2::Sink.tag())
+            .unwrap()
+            .u64(1)
+            .unwrap();
         let bytes = descriptor.into_writer();
         ConnectorDescriptorV2::from_canonical_bytes(
             &bytes,
@@ -6917,7 +6934,7 @@ pub(crate) mod tests {
 
         let mut descriptor = minicbor::Encoder::new(Vec::new());
         descriptor
-            .array(7)
+            .array(8)
             .unwrap()
             .bytes(connector_id.as_bytes())
             .unwrap()
@@ -6940,6 +6957,8 @@ pub(crate) mod tests {
         }
         descriptor
             .u16(EffectSetV2::READ.bits())
+            .unwrap()
+            .u16(savana_policy_core::v2::ConnectorStructuralRoleV2::Source.tag())
             .unwrap()
             .u64(1)
             .unwrap();
@@ -7728,6 +7747,7 @@ pub(crate) mod tests {
             "transport: stdio; package_digest: {}",
             "35".repeat(32)
         )));
+        assert!(display.as_str().contains("structural_role: Source (1)"));
         assert!(!display.as_str().contains("url:"));
 
         let oversized = valid_user_stdio_connector_descriptor(4_096);

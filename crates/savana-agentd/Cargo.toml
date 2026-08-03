@@ -11,7 +11,7 @@ workspace = true
 
 [features]
 default = []
-test-support = []
+test-support = ["savana-approvald/test-support"]
 macos-development-authority = [
     "savana-approvald/macos-development-authority",
     "savana-policy-core/macos-development-authority",
@@ -34,6 +34,7 @@ nix.workspace = true
 rustix.workspace = true
 rustls.workspace = true
 zeroize.workspace = true
+unicode-normalization.workspace = true
 x25519-dalek.workspace = true
 serde.workspace = true
 serde_json.workspace = true
