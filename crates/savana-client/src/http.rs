@@ -163,7 +163,7 @@ impl BrowserRoute {
         }
     }
 
-    const fn response_content_type(self) -> BrowserContentType {
+    pub(crate) const fn response_content_type(self) -> BrowserContentType {
         match self {
             Self::ApprovalEnrollmentBootstrap
             | Self::ApprovalUiAuthenticationAccept

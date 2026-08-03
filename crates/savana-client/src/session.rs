@@ -6,21 +6,27 @@ use savana_kernel_protocol::v2::{
 };
 
 use crate::handle::SessionBinding;
-use crate::{BrowserTransport, Handle, NonceSource};
+use crate::{BrowserTransport, Handle, NonceSource, SavanaError, WebAuthnProvider};
 
 #[allow(dead_code)] // Read by authenticated Agent workflows added in Task 4.
-struct AuthenticatedAgentTab {
-    tab: AgentTabSessionCapabilityV2,
+pub(crate) struct AuthenticatedAgentTab {
+    pub(crate) tab: AgentTabSessionCapabilityV2,
 }
 
 #[allow(dead_code)] // Populated and read by authenticated ingress workflows added in Task 4.
-struct AuthenticatedIngressTab {
-    tab: IngressTabSessionCapabilityV2,
+pub(crate) struct AuthenticatedIngressTab {
+    pub(crate) tab: IngressTabSessionCapabilityV2,
 }
 
 #[allow(dead_code)] // Populated and read by authenticated approval workflows added in Task 4.
-struct AuthenticatedApprovalTab {
-    tab: ApprovalTabSessionCapabilityV2,
+pub(crate) struct AuthenticatedApprovalTab {
+    pub(crate) tab: ApprovalTabSessionCapabilityV2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalSessionState {
+    Open,
+    Closed,
 }
 
 pub struct Session {
@@ -31,11 +37,14 @@ pub struct Session {
     #[allow(dead_code)] // Enforces private capability binding in subsequent workflows.
     pub(crate) binding: SessionBinding,
     #[allow(dead_code)] // Read by authenticated Agent workflows added in Task 4.
-    agent: AuthenticatedAgentTab,
+    pub(crate) agent: AuthenticatedAgentTab,
     #[allow(dead_code)] // Populated by authenticated ingress workflows added in Task 4.
-    ingress: Option<AuthenticatedIngressTab>,
+    pub(crate) ingress: Option<AuthenticatedIngressTab>,
     #[allow(dead_code)] // Populated by authenticated approval workflows added in Task 4.
-    approval: Option<AuthenticatedApprovalTab>,
+    pub(crate) approval: Option<AuthenticatedApprovalTab>,
+    pub(crate) webauthn: Arc<dyn WebAuthnProvider>,
+    pub(crate) state: LocalSessionState,
+    pub(crate) revoked_documents: Vec<AgentMaskedDocumentRefV2>,
     initial_document: Handle,
 }
 
@@ -46,6 +55,7 @@ impl Session {
         binding: SessionBinding,
         tab: AgentTabSessionCapabilityV2,
         document: AgentMaskedDocumentRefV2,
+        webauthn: Arc<dyn WebAuthnProvider>,
     ) -> Self {
         let initial_document = Handle::document(&binding, document);
         Self {
@@ -55,12 +65,23 @@ impl Session {
             agent: AuthenticatedAgentTab { tab },
             ingress: None,
             approval: None,
+            webauthn,
+            state: LocalSessionState::Open,
+            revoked_documents: Vec::new(),
             initial_document,
         }
     }
 
     pub const fn initial_document(&self) -> &Handle {
         &self.initial_document
+    }
+
+    pub(crate) fn require_open(&self) -> Result<(), SavanaError> {
+        if self.state == LocalSessionState::Open {
+            Ok(())
+        } else {
+            Err(SavanaError::InvalidState)
+        }
     }
 }
 

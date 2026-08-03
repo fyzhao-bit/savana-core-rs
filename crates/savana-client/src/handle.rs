@@ -100,6 +100,7 @@ impl PartialEq for SessionBinding {
 }
 
 #[allow(dead_code)] // Variants are consumed by the workflow modules added after Task 2.
+#[derive(Clone)]
 enum Capability {
     Document(AgentMaskedDocumentRefV2),
     PlanStep(AgentPlanStepRefV2),
@@ -128,6 +129,7 @@ impl Capability {
     }
 }
 
+#[derive(Clone)]
 pub struct Handle {
     #[allow(dead_code)] // Read by kind-specific consumers added after Task 2.
     session: SessionBinding,
@@ -152,6 +154,20 @@ impl Handle {
         Self {
             session: session.clone(),
             capability: Capability::PlanStep(capability),
+        }
+    }
+
+    pub(crate) fn expect_document(
+        &self,
+        session: &SessionBinding,
+    ) -> Result<AgentMaskedDocumentRefV2, SavanaError> {
+        self.require_session(session)?;
+        match &self.capability {
+            Capability::Document(capability) => Ok(*capability),
+            _ => Err(SavanaError::WrongHandleKind {
+                expected: HandleKind::Document,
+                actual: self.kind(),
+            }),
         }
     }
 

@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use minicbor::Decode as _;
@@ -62,11 +63,11 @@ impl WebAuthnAssertion {
         .map_err(|_| AuthError::AuthenticationFailed)
     }
 
-    fn credential_id(&self) -> &[u8] {
+    pub(crate) fn credential_id(&self) -> &[u8] {
         self.inner.credential_id()
     }
 
-    fn into_protocol(self) -> BrowserWebAuthnAssertionV2 {
+    pub(crate) fn into_protocol(self) -> BrowserWebAuthnAssertionV2 {
         self.inner
     }
 }
@@ -127,7 +128,7 @@ impl Client {
         &self,
         identity: &Identity,
         bootstrap: &mut SessionBootstrap,
-        webauthn: &dyn WebAuthnProvider,
+        webauthn: Arc<dyn WebAuthnProvider>,
     ) -> Result<Session, AuthError> {
         let transfer = bootstrap.take_transfer()?;
         if !identity.is_active() {
@@ -236,6 +237,7 @@ impl Client {
             binding,
             tab,
             document,
+            webauthn,
         ))
     }
 
@@ -349,13 +351,16 @@ fn send(
     Ok(response)
 }
 
-fn form_transfer<T: minicbor::Encode<()>>(transfer: T) -> Result<Vec<u8>, AuthError> {
+pub(crate) fn form_transfer<T: minicbor::Encode<()>>(transfer: T) -> Result<Vec<u8>, AuthError> {
     let encoded = minicbor::to_vec(transfer).map_err(|_| AuthError::AuthenticationFailed)?;
     let raw = decode_single_bytes(&encoded, 32)?;
     Ok(format!("transfer={}", URL_SAFE_NO_PAD.encode(raw)).into_bytes())
 }
 
-fn decode_capability_attribute<T>(value: &str, expected_length: usize) -> Result<T, AuthError>
+pub(crate) fn decode_capability_attribute<T>(
+    value: &str,
+    expected_length: usize,
+) -> Result<T, AuthError>
 where
     for<'bytes> T: minicbor::Decode<'bytes, V2DecodeContext> + minicbor::Encode<()>,
 {
@@ -424,7 +429,7 @@ fn enrollment_response_parts(
     Ok((*digest.as_bytes(), state))
 }
 
-fn extract_main_data_attributes(
+pub(crate) fn extract_main_data_attributes(
     html: &[u8],
     required: &[(&str, usize)],
 ) -> Result<Vec<String>, AuthError> {

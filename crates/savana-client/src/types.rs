@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use savana_kernel_protocol::v2::AgentViewV2;
+use savana_kernel_protocol::v2::{
+    AgentContentStateV2, AgentViewFieldV2, AgentViewV2, PlaceholderViewV2, StaticTemplateIdV2,
+};
 
 use crate::{Handle, SavanaError};
 
@@ -20,6 +22,46 @@ pub enum ContentKind {
 pub struct MaskedView {
     #[allow(dead_code)] // Populated and projected by read_view in Task 4.
     pub(crate) value: AgentViewV2,
+}
+
+impl MaskedView {
+    pub(crate) const fn from_protocol(value: AgentViewV2) -> Self {
+        Self { value }
+    }
+
+    pub fn masked_text(&self) -> Option<(&str, &[PlaceholderViewV2])> {
+        match &self.value {
+            AgentViewV2::MaskedText { text, placeholders } => {
+                Some((text.as_str(), placeholders.as_slice()))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn structured(&self) -> Option<(StaticTemplateIdV2, &[AgentViewFieldV2])> {
+        match &self.value {
+            AgentViewV2::Structured { template, fields } => Some((*template, fields.as_slice())),
+            _ => None,
+        }
+    }
+
+    pub fn document_page(&self) -> Option<(u32, &str, &[PlaceholderViewV2])> {
+        match &self.value {
+            AgentViewV2::DocumentPage {
+                page_index,
+                text,
+                placeholders,
+            } => Some((*page_index, text.as_str(), placeholders.as_slice())),
+            _ => None,
+        }
+    }
+
+    pub const fn content_state(&self) -> Option<AgentContentStateV2> {
+        match &self.value {
+            AgentViewV2::ContentState(state) => Some(*state),
+            _ => None,
+        }
+    }
 }
 
 impl core::fmt::Debug for MaskedView {
