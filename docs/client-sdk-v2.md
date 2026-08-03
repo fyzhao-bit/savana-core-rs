@@ -37,8 +37,8 @@ The Python `webauthn` object is called synchronously by the Rust worker with
 these exact methods:
 
 ```python
-assert_credential(options_json: bytes) -> Mapping[str, bytes]
-create_credential(options_json: bytes) -> Mapping[str, bytes]
+assert_credential(options_json: bytes) -> dict[str, bytes]
+create_credential(options_json: bytes) -> dict[str, bytes]
 ```
 
 `assert_credential` must return the byte fields `credential_id`,
@@ -196,7 +196,7 @@ callbacks are ordinary synchronous Python callables with the signatures
 checked by the binding.
 
 ```python
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Protocol
 
@@ -213,9 +213,9 @@ from savana import (
 
 
 class WebAuthnCallbacks(Protocol):
-    def assert_credential(self, options_json: bytes) -> Mapping[str, bytes]: ...
+    def assert_credential(self, options_json: bytes) -> dict[str, bytes]: ...
 
-    def create_credential(self, options_json: bytes) -> Mapping[str, bytes]: ...
+    def create_credential(self, options_json: bytes) -> dict[str, bytes]: ...
 
 
 async def run_task(
