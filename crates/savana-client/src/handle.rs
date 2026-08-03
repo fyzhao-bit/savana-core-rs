@@ -187,8 +187,7 @@ impl core::fmt::Debug for Handle {
 }
 
 pub struct SessionBootstrap {
-    #[allow(dead_code)] // Consumed exactly once by Client::session in Task 3.
-    transfer: AgentUiAuthenticationTransferCapabilityV2,
+    transfer: Option<AgentUiAuthenticationTransferCapabilityV2>,
 }
 
 impl SessionBootstrap {
@@ -212,12 +211,15 @@ impl SessionBootstrap {
         let transfer = AgentUiAuthenticationTransferCapabilityV2::from_authority_entropy(bytes)
             .ok_or(AuthError::InvalidBootstrap);
         bytes.zeroize();
-        transfer.map(|transfer| Self { transfer })
+        transfer.map(|transfer| Self {
+            transfer: Some(transfer),
+        })
     }
 
-    #[allow(dead_code)] // Consumed exactly once by Client::session in Task 3.
-    pub(crate) const fn into_transfer(self) -> AgentUiAuthenticationTransferCapabilityV2 {
-        self.transfer
+    pub(crate) fn take_transfer(
+        &mut self,
+    ) -> Result<AgentUiAuthenticationTransferCapabilityV2, AuthError> {
+        self.transfer.take().ok_or(AuthError::InvalidBootstrap)
     }
 }
 

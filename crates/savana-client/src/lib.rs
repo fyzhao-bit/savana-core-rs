@@ -1,18 +1,24 @@
+mod auth;
 mod error;
 mod handle;
 mod http;
+mod identity;
+mod session;
 mod types;
 
 use std::sync::Arc;
 
 use savana_kernel_protocol::v2::Nonce32V2;
 
+pub use auth::{WebAuthnAssertion, WebAuthnAttestation, WebAuthnProvider};
 pub use error::{ApprovalDenied, AuthError, PolicyRefused, SavanaError};
 pub use handle::{Handle, HandleKind, SessionBootstrap};
 pub use http::{
     parse_fixed_http_response, BrowserContentType, BrowserOrigin, BrowserRequest, BrowserResponse,
     BrowserRoute, BrowserService, BrowserTransport, ClientEndpoints, LocalFixedHttpTransport,
 };
+pub use identity::Identity;
+pub use session::Session;
 pub use types::{
     AgentEvent, ApprovalPurpose, ApprovalRequest, ConnectorDescriptor, ContentKind,
     ExecutionResult, ExecutionStatus, IntentPrivacy, MaskedView, Plan, PlanStep, RunLimits,

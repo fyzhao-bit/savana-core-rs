@@ -51,7 +51,7 @@ impl SavanaError {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AuthError {
     #[error("invalid session bootstrap")]
     InvalidBootstrap,
