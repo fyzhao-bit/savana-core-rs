@@ -404,7 +404,10 @@ pub fn decode_approval_decision_browser_finish_response_v2(
 ) -> Result<ApprovalDecisionBrowserFinishResponseV2, ProtocolError> {
     validate(bytes)?;
     let mut decoder = minicbor::Decoder::new(bytes);
-    let value = match decoder.u16().map_err(ProtocolError::malformed)? {
+    let mut context = V2DecodeContext;
+    let tag: u16 = minicbor::Decode::decode(&mut decoder, &mut context)
+        .map_err(ProtocolError::from_typed_decode)?;
+    let value = match tag {
         1 => ApprovalDecisionBrowserFinishResponseV2::Denied,
         2 => ApprovalDecisionBrowserFinishResponseV2::Approved,
         _ => return Err(malformed()),
