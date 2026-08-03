@@ -826,6 +826,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "savana-client"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "getrandom 0.2.17",
+ "savana-kernel-protocol",
+ "thiserror",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "savana-execd"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,18 @@
+[package]
+name = "savana-client"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+base64.workspace = true
+getrandom.workspace = true
+savana-kernel-protocol = { path = "../savana-kernel-protocol" }
+thiserror.workspace = true
+url.workspace = true
+zeroize.workspace = true

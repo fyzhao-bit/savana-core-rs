@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/savana-client",
   "crates/savana-agentd",
   "crates/savana-approvald",
   "crates/savana-execd",

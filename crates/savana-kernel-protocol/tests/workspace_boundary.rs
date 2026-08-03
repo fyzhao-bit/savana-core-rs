@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -31,7 +31,7 @@ fn rust_sources_below(directory: &Path, output: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn production_workspace_contains_exactly_the_eleven_frozen_crates() {
+fn workspace_keeps_the_frozen_core_exact_and_allows_only_declared_non_core_members() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -48,29 +48,42 @@ fn production_workspace_contains_exactly_the_eleven_frozen_crates() {
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let mut members = metadata["workspace_members"]
+    let members = metadata["workspace_members"]
         .as_array()
         .unwrap()
         .iter()
         .map(|member| packages[member.as_str().unwrap()])
-        .collect::<Vec<_>>();
-    members.sort_unstable();
+        .collect::<BTreeSet<_>>();
+    let frozen_core = BTreeSet::from([
+        "savana-agentd",
+        "savana-approvald",
+        "savana-execd",
+        "savana-ingressd",
+        "savana-input-runtime",
+        "savana-kernel-protocol",
+        "savana-kerneld",
+        "savana-leak-gate",
+        "savana-platform-identity",
+        "savana-policy-core",
+        "savana-vault",
+    ]);
+    let declared_non_core = BTreeSet::from(["savana-client"]);
 
     assert_eq!(
-        members,
-        [
-            "savana-agentd",
-            "savana-approvald",
-            "savana-execd",
-            "savana-ingressd",
-            "savana-input-runtime",
-            "savana-kernel-protocol",
-            "savana-kerneld",
-            "savana-leak-gate",
-            "savana-platform-identity",
-            "savana-policy-core",
-            "savana-vault",
-        ]
+        members
+            .intersection(&frozen_core)
+            .copied()
+            .collect::<BTreeSet<_>>(),
+        frozen_core,
+        "the frozen production-core crate set changed"
+    );
+    assert_eq!(
+        members
+            .difference(&frozen_core)
+            .copied()
+            .collect::<BTreeSet<_>>(),
+        declared_non_core,
+        "an undeclared non-core workspace member was added or removed"
     );
 }
 
