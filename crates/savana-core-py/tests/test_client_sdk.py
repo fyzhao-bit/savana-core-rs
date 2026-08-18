@@ -210,6 +210,28 @@ async def test_masked_view_projects_only_an_opaque_continuation_handle():
 
 
 @pytest.mark.asyncio
+async def test_structured_masked_view_exposes_immutable_public_fields_only():
+    session = savana.Session._from_core(savana_core._debug_structured_view_session())
+    view = await session.read_view(session.initial_document)
+
+    assert view.variant == "structured"
+    assert view.template_id == 7
+    assert view.field_count == 1
+    assert view.fields == (
+        (
+            "recipient",
+            "Send to {{PERSON_0}}",
+            ((0, "{{PERSON_0}}", "personal_data"),),
+        ),
+    )
+    assert isinstance(view.fields, tuple)
+    assert isinstance(view.fields[0], tuple)
+    for forbidden in ("raw", "private", "capability", "canonical", "cbor", "to_bytes"):
+        assert not hasattr(view, forbidden)
+    await session.close()
+
+
+@pytest.mark.asyncio
 async def test_blocking_rust_work_runs_off_the_event_loop_thread():
     session = transport_session(delay_seconds=0.15)
     event_loop_thread = threading.get_ident()

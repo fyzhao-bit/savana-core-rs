@@ -20,7 +20,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyDict};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyTuple};
 use savana_client::{
     AgentEvent as ClientAgentEvent, ApprovalCallback, ApprovalPurpose,
     ApprovalRequest as ClientApprovalRequest, AuthError as ClientAuthError, Client as RustClient,
@@ -44,7 +44,8 @@ use savana_kernel_protocol::v2::{
     AgentBrowserViewCursorCapabilityV2, AgentMaskedDocumentRefV2, AgentSessionStatusV2,
     AgentTabSessionCapabilityV2, AgentUiAuthenticationBrowserCeremonyCapabilityV2,
     AgentUiAuthenticationSettlementTransferCapabilityV2, AgentUiPreAuthenticationTabCapabilityV2,
-    AgentViewV2, BoundedAgentTextV2, FixedOriginV2, Nonce32V2,
+    AgentViewFieldV2, AgentViewV2, ArgumentNameV2, BoundedAgentTextV2, ClosedRedactionClassV2,
+    FixedOriginV2, Nonce32V2, PlaceholderViewV2, StaticTemplateIdV2,
     UiAuthenticationBrowserBeginResponseV2, UiAuthenticationBrowserFinishResponseV2,
 };
 #[cfg(debug_assertions)]
@@ -642,6 +643,33 @@ impl PyMaskedView {
     }
 
     #[getter]
+    fn fields(&self, py: Python<'_>) -> Option<Py<PyTuple>> {
+        let (_, fields) = self.inner.structured()?;
+        let fields = fields.iter().map(|field| {
+            let placeholders = PyTuple::new_bound(
+                py,
+                field.placeholders().iter().map(|placeholder| {
+                    (
+                        placeholder.ordinal(),
+                        placeholder.token().as_str().to_owned(),
+                        snake_debug(&format!("{:?}", placeholder.redaction_class())),
+                    )
+                }),
+            );
+            PyTuple::new_bound(
+                py,
+                [
+                    field.name().as_str().to_object(py),
+                    field.text().as_str().to_object(py),
+                    placeholders.to_object(py),
+                ],
+            )
+            .to_object(py)
+        });
+        Some(PyTuple::new_bound(py, fields).unbind())
+    }
+
+    #[getter]
     fn content_state(&self) -> Option<String> {
         self.inner
             .content_state()
@@ -1031,6 +1059,47 @@ fn debug_view_transport_responses() -> PyResult<Vec<Result<BrowserResponse, Clie
                     text: BoundedAgentTextV2::new("second")
                         .map_err(|_| PyValueError::new_err("invalid fixture view"))?,
                     placeholders: vec![],
+                },
+                vec![],
+                None,
+            )
+            .map_err(|_| PyValueError::new_err("invalid fixture view"))?,
+        )
+        .map_err(|_| PyValueError::new_err("invalid fixture response"))?,
+    ));
+    responses.push(close_response);
+    Ok(responses)
+}
+
+#[cfg(debug_assertions)]
+fn debug_structured_view_transport_responses() -> PyResult<Vec<Result<BrowserResponse, ClientError>>>
+{
+    let mut responses = debug_transport_responses()?;
+    let close_response = responses
+        .pop()
+        .ok_or_else(|| PyValueError::new_err("missing close fixture response"))?;
+    let placeholder = PlaceholderViewV2::new(
+        0,
+        BoundedAgentTextV2::new("{{PERSON_0}}")
+            .map_err(|_| PyValueError::new_err("invalid debug placeholder"))?,
+        ClosedRedactionClassV2::PersonalData,
+    )
+    .map_err(|_| PyValueError::new_err("invalid debug placeholder"))?;
+    let field = AgentViewFieldV2::new(
+        ArgumentNameV2::new("recipient".to_owned())
+            .map_err(|_| PyValueError::new_err("invalid debug field"))?,
+        BoundedAgentTextV2::new("Send to {{PERSON_0}}")
+            .map_err(|_| PyValueError::new_err("invalid debug field"))?,
+        vec![placeholder],
+    )
+    .map_err(|_| PyValueError::new_err("invalid debug field"))?;
+    responses.push(debug_response(
+        BrowserContentType::CanonicalCbor,
+        encode_agent_browser_read_view_response_v2(
+            &AgentBrowserReadViewResponseV2::new(
+                AgentViewV2::Structured {
+                    template: StaticTemplateIdV2::new(7),
+                    fields: vec![field],
                 },
                 vec![],
                 None,
@@ -1523,6 +1592,45 @@ fn _debug_view_session() -> PyResult<PySession> {
 
 #[cfg(debug_assertions)]
 #[pyfunction]
+fn _debug_structured_view_session() -> PyResult<PySession> {
+    let transport = Arc::new(DebugScriptedTransport::new(
+        debug_structured_view_transport_responses()?,
+        Duration::ZERO,
+    ));
+    let endpoints = ClientEndpoints::new(AGENT_ENDPOINT, INGRESS_ENDPOINT, APPROVAL_ENDPOINT)
+        .map_err(map_client_error)?;
+    let client = RustClient::with_transport_and_nonce_source(
+        endpoints,
+        transport.clone(),
+        Arc::new(DebugFixedNonces(Mutex::new(1))),
+    );
+    let identity_path = debug_identity_path()?;
+    let identity = ClientIdentity::load(&identity_path).map_err(map_auth_error);
+    let _ = fs::remove_file(&identity_path);
+    if let Some(parent) = identity_path.parent() {
+        let _ = fs::remove_dir(parent);
+    }
+    let identity = identity?;
+    let mut bootstrap =
+        SessionBootstrap::from_control_plane_token(&URL_SAFE_NO_PAD.encode([0x21; 32]))
+            .map_err(map_auth_error)?;
+    let session = client
+        .session(
+            &identity,
+            &mut bootstrap,
+            Arc::new(DebugWebAuthn),
+            Arc::new(DebugApproval),
+        )
+        .map_err(map_auth_error)?;
+    Ok(PySession {
+        inner: Arc::new(Mutex::new(SessionState::Live(Box::new(session)))),
+        callback_errors: Arc::new(CallbackErrors::default()),
+        debug_transport: Some(transport),
+    })
+}
+
+#[cfg(debug_assertions)]
+#[pyfunction]
 fn _debug_handle(kind: &str) -> PyResult<PyHandle> {
     let kind = match kind {
         "document" => "document",
@@ -1599,6 +1707,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(_debug_scripted_session, m)?)?;
         m.add_function(wrap_pyfunction!(_debug_transport_session, m)?)?;
         m.add_function(wrap_pyfunction!(_debug_view_session, m)?)?;
+        m.add_function(wrap_pyfunction!(_debug_structured_view_session, m)?)?;
         m.add_function(wrap_pyfunction!(_debug_handle, m)?)?;
         m.add_function(wrap_pyfunction!(_debug_plan, m)?)?;
         m.add_function(wrap_pyfunction!(_debug_approval_request, m)?)?;

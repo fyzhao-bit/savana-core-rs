@@ -332,7 +332,7 @@ fn committed_registration_must_match_pending_and_descriptor_id() {
 }
 
 #[test]
-fn snapshot_returns_only_session_bound_connector_id_handles() {
+fn snapshot_returns_only_active_session_bound_connector_id_handles() {
     let first = Digest32V2::new([0x61; 32]);
     let second = Digest32V2::new([0x62; 32]);
     let snapshot = registry_snapshot(&[(first, true), (second, false)]);
@@ -346,7 +346,7 @@ fn snapshot_returns_only_session_bound_connector_id_handles() {
 
     let connectors = session.list_connectors().unwrap();
 
-    assert_eq!(connectors.len(), 2);
+    assert_eq!(connectors.len(), 1);
     assert!(connectors
         .iter()
         .all(|connector| connector.kind() == HandleKind::Connector));
