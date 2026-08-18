@@ -1242,6 +1242,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "savana-openclaw-release"
+version = "0.1.0"
+dependencies = [
+ "minicbor",
+ "savana-policy-core",
+ "sha2",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
 name = "savana-platform-identity"
 version = "0.1.0"
 dependencies = [

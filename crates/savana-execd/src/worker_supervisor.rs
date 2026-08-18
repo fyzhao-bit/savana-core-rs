@@ -1294,6 +1294,36 @@ mod tests {
     }
 
     #[test]
+    fn provider_request_matches_openclaw_release_golden_vector() {
+        let target = VerifiedProviderTargetV2::https(
+            BoundedConnectorUrlV2::new("https://127.0.0.1:43191/savana/final-release").unwrap(),
+            Digest32V2::new([0x70; 32]),
+        )
+        .unwrap();
+        let payload = b"released assistant response";
+        let request = VerifiedProviderRequestV2::bind(
+            target,
+            savana_kernel_protocol::v2::Nonce32V2::new([0x05; 32]),
+            Digest32V2::new([0x06; 32]),
+            Digest32V2::new([0x07; 32]),
+            prepared_provider_request_digest(payload),
+            payload,
+        )
+        .unwrap();
+        let actual = request
+            .canonical_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+
+        assert_eq!(
+            actual,
+            include_str!("../../savana-openclaw-release/tests/fixtures/provider-request-v2.hex")
+                .trim()
+        );
+    }
+
+    #[test]
     fn terminal_reuse_wrong_order_and_oversized_frames_kill_and_reap() {
         let fixture = fixture(ConnectorCodecJobModeV2::PrepareAndDecode);
         let mut frames = valid_prepare_frames(&fixture);

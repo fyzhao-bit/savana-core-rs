@@ -12,6 +12,7 @@ members = [
   "crates/savana-kernel-protocol",
   "crates/savana-kerneld",
   "crates/savana-core-py",
+  "crates/savana-openclaw-release",
   "crates/savana-policy-core",
   "crates/savana-platform-identity",
   "crates/savana-vault",
