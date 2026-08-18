@@ -346,8 +346,28 @@ fn tool_denial(step: &PlanStep, code: PublicStableCodeV2) -> SavanaError {
     if code == PublicStableCodeV2::ApprovalDenied {
         return ApprovalDenied.into();
     }
-    let code = stable_code_name(code).to_owned();
-    PolicyRefused::new(Some(step.clone()), code.clone(), code).into()
+    let public_code = stable_code_name(code);
+    if is_policy_refusal(code) {
+        return PolicyRefused::new(
+            Some(step.clone()),
+            public_code.to_owned(),
+            public_code.to_owned(),
+        )
+        .into();
+    }
+    SavanaError::OperationRefused { code: public_code }
+}
+
+const fn is_policy_refusal(code: PublicStableCodeV2) -> bool {
+    matches!(
+        code,
+        PublicStableCodeV2::PolicyDenied
+            | PublicStableCodeV2::PolicyExpired
+            | PublicStableCodeV2::ArtifactRollback
+            | PublicStableCodeV2::RegistryMismatch
+            | PublicStableCodeV2::OntologyMismatch
+            | PublicStableCodeV2::ProjectionMismatch
+    )
 }
 
 const fn stable_code_name(code: PublicStableCodeV2) -> &'static str {

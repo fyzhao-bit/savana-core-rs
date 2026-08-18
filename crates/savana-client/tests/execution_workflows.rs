@@ -107,37 +107,123 @@ fn direct_authorization_dispatches_once_and_returns_only_the_terminal_document()
 }
 
 #[test]
-fn tool_denial_is_typed_and_never_dispatches() {
-    let step = planned_step(0x51);
-    let pending = AgentPendingToolCallRefV2::from_authority_entropy([0x52; 16]).unwrap();
-    let responses = vec![
-        plan_response(step),
-        mutation(AgentBrowserMutationResponseV2::ToolProposed { pending }),
-        mutation(AgentBrowserMutationResponseV2::ToolDenied {
-            code: PublicStableCodeV2::PolicyDenied,
-            trace: trace(0x53),
-        }),
+fn every_tool_denial_has_a_truthful_public_error_category_and_never_dispatches() {
+    let cases = [
+        (PublicStableCodeV2::InvalidReference, "operation"),
+        (PublicStableCodeV2::StateConflict, "operation"),
+        (PublicStableCodeV2::IdempotencyConflict, "operation"),
+        (PublicStableCodeV2::CancellationTooLate, "operation"),
+        (PublicStableCodeV2::LimitExceeded, "operation"),
+        (PublicStableCodeV2::Overloaded, "operation"),
+        (PublicStableCodeV2::DeadlineExceeded, "operation"),
+        (PublicStableCodeV2::Cancelled, "operation"),
+        (PublicStableCodeV2::PolicyDenied, "policy"),
+        (PublicStableCodeV2::PolicyExpired, "policy"),
+        (PublicStableCodeV2::ArtifactRollback, "policy"),
+        (PublicStableCodeV2::RegistryMismatch, "policy"),
+        (PublicStableCodeV2::OntologyMismatch, "policy"),
+        (PublicStableCodeV2::ProjectionMismatch, "policy"),
+        (PublicStableCodeV2::ModelUnavailable, "operation"),
+        (PublicStableCodeV2::ModelContract, "operation"),
+        (PublicStableCodeV2::InputDenied, "operation"),
+        (PublicStableCodeV2::InputMalformed, "operation"),
+        (PublicStableCodeV2::ApprovalDenied, "approval"),
+        (PublicStableCodeV2::ApprovalExpired, "operation"),
+        (PublicStableCodeV2::ApprovalReplay, "operation"),
+        (PublicStableCodeV2::ApprovalBindingMismatch, "operation"),
+        (PublicStableCodeV2::ValidatorMissing, "operation"),
+        (PublicStableCodeV2::ValidatorRejected, "operation"),
+        (PublicStableCodeV2::ValidatorBindingMismatch, "operation"),
+        (PublicStableCodeV2::ExecutionFailedNoEffect, "operation"),
+        (PublicStableCodeV2::ExecutionIndeterminate, "operation"),
+        (PublicStableCodeV2::ResultUnavailable, "operation"),
+        (PublicStableCodeV2::StorageUnavailable, "operation"),
+        (PublicStableCodeV2::AuditUnavailable, "operation"),
+        (PublicStableCodeV2::EntropyUnavailable, "operation"),
+        (PublicStableCodeV2::ServiceUnavailable, "operation"),
+        (PublicStableCodeV2::InternalFatal, "operation"),
     ];
-    let (mut session, transport, _) = authenticated_session(responses);
-    let plan = session.run_planner(IntentPrivacy::Private).unwrap();
+    for (index, (code, expected)) in cases.into_iter().enumerate() {
+        let seed = index as u8 + 1;
+        let step = planned_step(seed);
+        let pending = AgentPendingToolCallRefV2::from_authority_entropy([seed + 40; 16]).unwrap();
+        let responses = vec![
+            plan_response(step),
+            mutation(AgentBrowserMutationResponseV2::ToolProposed { pending }),
+            mutation(AgentBrowserMutationResponseV2::ToolDenied {
+                code,
+                trace: trace(seed + 80),
+            }),
+        ];
+        let (mut session, transport, _) = authenticated_session(responses);
+        let plan = session.run_planner(IntentPrivacy::Private).unwrap();
 
-    assert!(matches!(
-        session.execute(&plan, &RecordingDecision::new(true)),
-        Err(SavanaError::PolicyRefused(_))
-    ));
+        let error = session
+            .execute(&plan, &RecordingDecision::new(true))
+            .unwrap_err();
+        match expected {
+            "policy" => assert!(matches!(error, SavanaError::PolicyRefused(_))),
+            "approval" => assert!(matches!(error, SavanaError::ApprovalDenied(_))),
+            "operation" => assert!(matches!(
+                error,
+                SavanaError::OperationRefused {
+                    code: returned
+                } if returned == stable_code_name_for_test(code)
+            )),
+            _ => unreachable!(),
+        }
 
-    let actions = actions_after_authentication(&transport.take_requests());
-    assert_eq!(
-        actions,
-        vec![
-            AgentBrowserActionV2::RunPlanner,
-            AgentBrowserActionV2::ProposePlanStep(step),
-            AgentBrowserActionV2::EvaluatePending(pending),
-        ]
-    );
-    assert!(!actions
-        .iter()
-        .any(|action| matches!(action, AgentBrowserActionV2::DispatchTicket(_))));
+        let actions = actions_after_authentication(&transport.take_requests());
+        assert_eq!(
+            actions,
+            vec![
+                AgentBrowserActionV2::RunPlanner,
+                AgentBrowserActionV2::ProposePlanStep(step),
+                AgentBrowserActionV2::EvaluatePending(pending),
+            ]
+        );
+        assert!(!actions
+            .iter()
+            .any(|action| matches!(action, AgentBrowserActionV2::DispatchTicket(_))));
+    }
+}
+
+const fn stable_code_name_for_test(code: PublicStableCodeV2) -> &'static str {
+    match code {
+        PublicStableCodeV2::InvalidReference => "invalid_reference",
+        PublicStableCodeV2::StateConflict => "state_conflict",
+        PublicStableCodeV2::IdempotencyConflict => "idempotency_conflict",
+        PublicStableCodeV2::CancellationTooLate => "cancellation_too_late",
+        PublicStableCodeV2::LimitExceeded => "limit_exceeded",
+        PublicStableCodeV2::Overloaded => "overloaded",
+        PublicStableCodeV2::DeadlineExceeded => "deadline_exceeded",
+        PublicStableCodeV2::Cancelled => "cancelled",
+        PublicStableCodeV2::PolicyDenied => "policy_denied",
+        PublicStableCodeV2::PolicyExpired => "policy_expired",
+        PublicStableCodeV2::ArtifactRollback => "artifact_rollback",
+        PublicStableCodeV2::RegistryMismatch => "registry_mismatch",
+        PublicStableCodeV2::OntologyMismatch => "ontology_mismatch",
+        PublicStableCodeV2::ProjectionMismatch => "projection_mismatch",
+        PublicStableCodeV2::ModelUnavailable => "model_unavailable",
+        PublicStableCodeV2::ModelContract => "model_contract",
+        PublicStableCodeV2::InputDenied => "input_denied",
+        PublicStableCodeV2::InputMalformed => "input_malformed",
+        PublicStableCodeV2::ApprovalDenied => "approval_denied",
+        PublicStableCodeV2::ApprovalExpired => "approval_expired",
+        PublicStableCodeV2::ApprovalReplay => "approval_replay",
+        PublicStableCodeV2::ApprovalBindingMismatch => "approval_binding_mismatch",
+        PublicStableCodeV2::ValidatorMissing => "validator_missing",
+        PublicStableCodeV2::ValidatorRejected => "validator_rejected",
+        PublicStableCodeV2::ValidatorBindingMismatch => "validator_binding_mismatch",
+        PublicStableCodeV2::ExecutionFailedNoEffect => "execution_failed_no_effect",
+        PublicStableCodeV2::ExecutionIndeterminate => "execution_indeterminate",
+        PublicStableCodeV2::ResultUnavailable => "result_unavailable",
+        PublicStableCodeV2::StorageUnavailable => "storage_unavailable",
+        PublicStableCodeV2::AuditUnavailable => "audit_unavailable",
+        PublicStableCodeV2::EntropyUnavailable => "entropy_unavailable",
+        PublicStableCodeV2::ServiceUnavailable => "service_unavailable",
+        PublicStableCodeV2::InternalFatal => "internal_fatal",
+    }
 }
 
 #[test]

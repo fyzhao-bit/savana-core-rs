@@ -31,6 +31,8 @@ pub enum SavanaError {
     CallbackFailed,
     #[error("effect outcome is indeterminate")]
     IndeterminateEffect,
+    #[error("operation refused: {code}")]
+    OperationRefused { code: &'static str },
     #[error(transparent)]
     Auth(#[from] AuthError),
     #[error(transparent)]
@@ -55,6 +57,7 @@ impl SavanaError {
             Self::ReplanLimitExceeded => "replan_limit_exceeded",
             Self::CallbackFailed => "callback_failed",
             Self::IndeterminateEffect => "effect_indeterminate",
+            Self::OperationRefused { code } => code,
             Self::Auth(error) => error.code(),
             Self::ApprovalDenied(error) => error.code(),
             Self::PolicyRefused(error) => error.code(),
