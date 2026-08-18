@@ -2,11 +2,17 @@
 
 > Date: 2026-08-18
 >
-> Status: proposed for implementation review
+> Status: approved for implementation
 >
 > OpenClaw compatibility baseline: `openclaw@2026.7.1-2` (exact stable pin)
 >
 > Savana baseline: `codex/security-capabilities-implementation` at `9787784`
+
+> Repository boundary: every adapter, release receiver, test, package manifest,
+> and deployment example described here is implemented and committed in the
+> user's `savana-core-rs` repository. The upstream OpenClaw repository is a
+> read-only compatibility reference and `openclaw@2026.7.1-2` is consumed only
+> as an exact dependency; this project never commits or pushes to OpenClaw.
 
 ## 1. Goal and security claim
 
