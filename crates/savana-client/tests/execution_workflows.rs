@@ -334,58 +334,106 @@ fn every_terminal_execution_state_is_preserved_without_inventing_output() {
 }
 
 #[test]
-fn nonterminal_or_mismatched_refresh_fails_closed_without_retry() {
-    let states = [
-        AgentBrowserExecutionStateV2::Prepared,
-        AgentBrowserExecutionStateV2::Dispatching,
-        AgentBrowserExecutionStateV2::ResultGatePending,
+fn execution_polls_every_valid_nonterminal_state_without_redispatching() {
+    let step = planned_step(0xa0);
+    let pending = AgentPendingToolCallRefV2::from_authority_entropy([0xa1; 16]).unwrap();
+    let ticket = AgentExecutionTicketRefV2::from_authority_entropy([0xa2; 16]).unwrap();
+    let execution = AgentExecutionRefV2::from_authority_entropy([0xa3; 16]).unwrap();
+    let output = AgentMaskedDocumentRefV2::from_authority_entropy([0xa4; 16]).unwrap();
+    let responses = vec![
+        plan_response(step),
+        mutation(AgentBrowserMutationResponseV2::ToolProposed { pending }),
+        mutation(AgentBrowserMutationResponseV2::ToolAuthorized {
+            ticket,
+            trace: trace(0xa5),
+        }),
+        mutation(AgentBrowserMutationResponseV2::ExecutionDispatched {
+            execution,
+            state: PublicDispatchAcceptedStateV2::Prepared,
+        }),
+        mutation(AgentBrowserMutationResponseV2::ExecutionRefreshed {
+            execution,
+            state: AgentBrowserExecutionStateV2::Prepared,
+        }),
+        mutation(AgentBrowserMutationResponseV2::ExecutionRefreshed {
+            execution,
+            state: AgentBrowserExecutionStateV2::Dispatching,
+        }),
+        mutation(AgentBrowserMutationResponseV2::ExecutionRefreshed {
+            execution,
+            state: AgentBrowserExecutionStateV2::ResultGatePending,
+        }),
+        mutation(AgentBrowserMutationResponseV2::ExecutionRefreshed {
+            execution,
+            state: AgentBrowserExecutionStateV2::Succeeded { document: output },
+        }),
     ];
-    for (index, state) in states.into_iter().enumerate() {
-        let seed = 0xa0 + index as u8 * 5;
-        let step = planned_step(seed);
-        let pending = AgentPendingToolCallRefV2::from_authority_entropy([seed + 1; 16]).unwrap();
-        let ticket = AgentExecutionTicketRefV2::from_authority_entropy([seed + 2; 16]).unwrap();
-        let execution = AgentExecutionRefV2::from_authority_entropy([seed + 3; 16]).unwrap();
-        let refreshed = if index == 0 {
-            AgentExecutionRefV2::from_authority_entropy([seed + 4; 16]).unwrap()
-        } else {
-            execution
-        };
-        let responses = vec![
-            plan_response(step),
-            mutation(AgentBrowserMutationResponseV2::ToolProposed { pending }),
-            mutation(AgentBrowserMutationResponseV2::ToolAuthorized {
-                ticket,
-                trace: trace(seed),
-            }),
-            mutation(AgentBrowserMutationResponseV2::ExecutionDispatched {
-                execution,
-                state: PublicDispatchAcceptedStateV2::Prepared,
-            }),
-            mutation(AgentBrowserMutationResponseV2::ExecutionRefreshed {
-                execution: refreshed,
-                state,
-            }),
-        ];
-        let (mut session, transport, _) = authenticated_session(responses);
-        let plan = session.run_planner(IntentPrivacy::Private).unwrap();
-        assert!(matches!(
-            session.execute(&plan, &RecordingDecision::new(true)),
-            Err(SavanaError::InvalidState)
-        ));
-        let requests = transport.take_requests();
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request.route == BrowserRoute::AgentAction)
-                .count(),
-            5
-        );
-    }
+    let (mut session, transport, _) = authenticated_session(responses);
+    let plan = session.run_planner(IntentPrivacy::Private).unwrap();
+
+    let result = session
+        .execute(&plan, &RecordingDecision::new(true))
+        .unwrap();
+
+    assert_eq!(result.status(), ExecutionStatus::Succeeded);
+    let actions = actions_after_authentication(&transport.take_requests());
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|action| matches!(action, AgentBrowserActionV2::DispatchTicket(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|action| matches!(action, AgentBrowserActionV2::RefreshExecution(_)))
+            .count(),
+        4
+    );
 }
 
 #[test]
-fn release_uses_prepare_approval_real_ticket_dispatch_and_refresh() {
+fn mismatched_execution_refresh_reference_fails_closed_without_retry() {
+    let step = planned_step(0xb0);
+    let pending = AgentPendingToolCallRefV2::from_authority_entropy([0xb1; 16]).unwrap();
+    let ticket = AgentExecutionTicketRefV2::from_authority_entropy([0xb2; 16]).unwrap();
+    let execution = AgentExecutionRefV2::from_authority_entropy([0xb3; 16]).unwrap();
+    let other = AgentExecutionRefV2::from_authority_entropy([0xb4; 16]).unwrap();
+    let responses = vec![
+        plan_response(step),
+        mutation(AgentBrowserMutationResponseV2::ToolProposed { pending }),
+        mutation(AgentBrowserMutationResponseV2::ToolAuthorized {
+            ticket,
+            trace: trace(0xb5),
+        }),
+        mutation(AgentBrowserMutationResponseV2::ExecutionDispatched {
+            execution,
+            state: PublicDispatchAcceptedStateV2::Prepared,
+        }),
+        mutation(AgentBrowserMutationResponseV2::ExecutionRefreshed {
+            execution: other,
+            state: AgentBrowserExecutionStateV2::Prepared,
+        }),
+    ];
+    let (mut session, transport, _) = authenticated_session(responses);
+    let plan = session.run_planner(IntentPrivacy::Private).unwrap();
+
+    assert!(matches!(
+        session.execute(&plan, &RecordingDecision::new(true)),
+        Err(SavanaError::InvalidState)
+    ));
+    assert_eq!(
+        actions_after_authentication(&transport.take_requests())
+            .iter()
+            .filter(|action| matches!(action, AgentBrowserActionV2::RefreshExecution(_)))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn release_polls_valid_nonterminal_states_without_redispatching() {
     let transfer =
         ApprovalDisplayAuthenticationTransferCapabilityV2::from_authority_entropy([0xc1; 32])
             .unwrap();
@@ -415,6 +463,14 @@ fn release_uses_prepare_approval_real_ticket_dispatch_and_refresh() {
         mutation(AgentBrowserMutationResponseV2::ReleaseDispatched {
             release,
             state: PublicDispatchAcceptedStateV2::Prepared,
+        }),
+        mutation(AgentBrowserMutationResponseV2::ReleaseRefreshed {
+            release,
+            state: AgentBrowserReleaseStateV2::Prepared,
+        }),
+        mutation(AgentBrowserMutationResponseV2::ReleaseRefreshed {
+            release,
+            state: AgentBrowserReleaseStateV2::Dispatching,
         }),
         mutation(AgentBrowserMutationResponseV2::ReleaseRefreshed {
             release,
@@ -453,6 +509,8 @@ fn release_uses_prepare_approval_real_ticket_dispatch_and_refresh() {
             BrowserRoute::AgentView,
             BrowserRoute::AgentAction,
             BrowserRoute::AgentAction,
+            BrowserRoute::AgentAction,
+            BrowserRoute::AgentAction,
         ]
     );
     let actions = actions_after_authentication(&requests);
@@ -462,6 +520,8 @@ fn release_uses_prepare_approval_real_ticket_dispatch_and_refresh() {
     ));
     assert_eq!(actions[1], AgentBrowserActionV2::DispatchRelease(ticket));
     assert_eq!(actions[2], AgentBrowserActionV2::RefreshRelease(release));
+    assert_eq!(actions[3], AgentBrowserActionV2::RefreshRelease(release));
+    assert_eq!(actions[4], AgentBrowserActionV2::RefreshRelease(release));
 }
 
 #[test]

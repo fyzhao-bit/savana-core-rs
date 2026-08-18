@@ -5,6 +5,8 @@ use savana_kernel_protocol::v2::{
     AgentExecutionRefV2, AgentMaskedDocumentRefV2, AgentReleaseRefV2, ApprovalPurposeV2,
     FixedBrowserFormPostCarrierV2, PublicFailureClassV2, PublicStableCodeV2,
 };
+use std::thread;
+use std::time::Duration;
 
 use crate::approval::ApprovalOutcome;
 use crate::session::LocalSessionState;
@@ -15,6 +17,8 @@ use crate::{
 };
 
 const MAXIMUM_VIEW_BYTES: u32 = 8 * 1024 * 1024 - 512;
+const MAX_TERMINAL_REFRESHES: usize = 12_000;
+const TERMINAL_REFRESH_INTERVAL: Duration = Duration::from_millis(25);
 
 impl Session {
     pub fn execute(
@@ -89,7 +93,7 @@ impl Session {
                 AgentBrowserMutationResponseV2::ExecutionDispatched { execution, .. } => execution,
                 _ => return self.invalid_transition(),
             };
-            let result = self.refresh_execution_once(execution)?;
+            let result = self.refresh_execution_until_terminal(execution)?;
             outputs.extend(result.outputs);
             if result.status != ExecutionStatus::Succeeded {
                 return Ok(ExecutionResult {
@@ -161,65 +165,89 @@ impl Session {
             AgentBrowserMutationResponseV2::ReleaseDispatched { release, .. } => release,
             _ => return self.invalid_transition(),
         };
-        self.refresh_release_once(release)
+        self.refresh_release_until_terminal(release)
     }
 
-    fn refresh_execution_once(
+    fn refresh_execution_until_terminal(
         &mut self,
         execution: AgentExecutionRefV2,
     ) -> Result<ExecutionResult, SavanaError> {
-        let refreshed = self.workflow_action(AgentBrowserActionV2::RefreshExecution(execution))?;
-        match refreshed {
-            AgentBrowserMutationResponseV2::ExecutionRefreshed {
-                execution: returned,
-                state: AgentBrowserExecutionStateV2::Succeeded { document },
-            } if returned == execution => Ok(success_with_document(&self.binding, document)),
-            AgentBrowserMutationResponseV2::ExecutionRefreshed {
-                execution: returned,
-                state: AgentBrowserExecutionStateV2::EffectSucceededOutputQuarantined { class },
-            } if returned == execution => Ok(quarantined(class)),
-            AgentBrowserMutationResponseV2::ExecutionRefreshed {
-                execution: returned,
-                state: AgentBrowserExecutionStateV2::FailedNoEffect { class },
-            } if returned == execution => Ok(failed_no_effect(class)),
-            AgentBrowserMutationResponseV2::ExecutionRefreshed {
-                execution: returned,
-                state: AgentBrowserExecutionStateV2::Indeterminate,
-            } if returned == execution => {
-                self.state = LocalSessionState::Closed;
-                Err(SavanaError::IndeterminateEffect)
+        for attempt in 0..MAX_TERMINAL_REFRESHES {
+            self.check_request_guard()?;
+            let refreshed =
+                self.workflow_action(AgentBrowserActionV2::RefreshExecution(execution))?;
+            match refreshed {
+                AgentBrowserMutationResponseV2::ExecutionRefreshed {
+                    execution: returned,
+                    state,
+                } if returned == execution => match state {
+                    AgentBrowserExecutionStateV2::Prepared
+                    | AgentBrowserExecutionStateV2::Dispatching
+                    | AgentBrowserExecutionStateV2::ResultGatePending => {
+                        if attempt + 1 == MAX_TERMINAL_REFRESHES {
+                            self.state = LocalSessionState::Closed;
+                            return Err(SavanaError::DeadlineExceeded);
+                        }
+                        thread::sleep(TERMINAL_REFRESH_INTERVAL);
+                    }
+                    AgentBrowserExecutionStateV2::Succeeded { document } => {
+                        return Ok(success_with_document(&self.binding, document));
+                    }
+                    AgentBrowserExecutionStateV2::EffectSucceededOutputQuarantined { class } => {
+                        return Ok(quarantined(class));
+                    }
+                    AgentBrowserExecutionStateV2::FailedNoEffect { class } => {
+                        return Ok(failed_no_effect(class));
+                    }
+                    AgentBrowserExecutionStateV2::Indeterminate => {
+                        self.state = LocalSessionState::Closed;
+                        return Err(SavanaError::IndeterminateEffect);
+                    }
+                },
+                _ => return self.invalid_transition(),
             }
-            _ => self.invalid_transition(),
         }
+        unreachable!("terminal refresh loop returns on its final iteration")
     }
 
-    fn refresh_release_once(
+    fn refresh_release_until_terminal(
         &mut self,
         release: AgentReleaseRefV2,
     ) -> Result<ExecutionResult, SavanaError> {
-        let refreshed = self.workflow_action(AgentBrowserActionV2::RefreshRelease(release))?;
-        match refreshed {
-            AgentBrowserMutationResponseV2::ReleaseRefreshed {
-                release: returned,
-                state: AgentBrowserReleaseStateV2::Succeeded,
-            } if returned == release => Ok(succeeded_without_output()),
-            AgentBrowserMutationResponseV2::ReleaseRefreshed {
-                release: returned,
-                state: AgentBrowserReleaseStateV2::EffectSucceededOutputQuarantined { class },
-            } if returned == release => Ok(quarantined(class)),
-            AgentBrowserMutationResponseV2::ReleaseRefreshed {
-                release: returned,
-                state: AgentBrowserReleaseStateV2::FailedNoEffect { class },
-            } if returned == release => Ok(failed_no_effect(class)),
-            AgentBrowserMutationResponseV2::ReleaseRefreshed {
-                release: returned,
-                state: AgentBrowserReleaseStateV2::Indeterminate,
-            } if returned == release => {
-                self.state = LocalSessionState::Closed;
-                Err(SavanaError::IndeterminateEffect)
+        for attempt in 0..MAX_TERMINAL_REFRESHES {
+            self.check_request_guard()?;
+            let refreshed = self.workflow_action(AgentBrowserActionV2::RefreshRelease(release))?;
+            match refreshed {
+                AgentBrowserMutationResponseV2::ReleaseRefreshed {
+                    release: returned,
+                    state,
+                } if returned == release => match state {
+                    AgentBrowserReleaseStateV2::Prepared
+                    | AgentBrowserReleaseStateV2::Dispatching => {
+                        if attempt + 1 == MAX_TERMINAL_REFRESHES {
+                            self.state = LocalSessionState::Closed;
+                            return Err(SavanaError::DeadlineExceeded);
+                        }
+                        thread::sleep(TERMINAL_REFRESH_INTERVAL);
+                    }
+                    AgentBrowserReleaseStateV2::Succeeded => {
+                        return Ok(succeeded_without_output());
+                    }
+                    AgentBrowserReleaseStateV2::EffectSucceededOutputQuarantined { class } => {
+                        return Ok(quarantined(class));
+                    }
+                    AgentBrowserReleaseStateV2::FailedNoEffect { class } => {
+                        return Ok(failed_no_effect(class));
+                    }
+                    AgentBrowserReleaseStateV2::Indeterminate => {
+                        self.state = LocalSessionState::Closed;
+                        return Err(SavanaError::IndeterminateEffect);
+                    }
+                },
+                _ => return self.invalid_transition(),
             }
-            _ => self.invalid_transition(),
         }
+        unreachable!("terminal refresh loop returns on its final iteration")
     }
 
     fn release_ticket_projection(&mut self) -> Result<Vec<AgentBrowserObjectRefV2>, SavanaError> {
