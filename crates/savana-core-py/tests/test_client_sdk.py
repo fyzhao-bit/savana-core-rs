@@ -369,6 +369,15 @@ def test_callback_reentrancy_fails_promptly_once_and_session_can_close():
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
+def test_callback_failures_are_operation_scoped_inside_the_extension():
+    assert savana_core._debug_callback_error_isolation() == (
+        "unrelated",
+        True,
+        True,
+        True,
+    )
+
+
 @pytest.mark.asyncio
 async def test_async_context_manager_closes_once_on_success_and_exception():
     successful = transport_session()

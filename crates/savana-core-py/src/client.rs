@@ -3,6 +3,7 @@ use std::io::Read as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
+use std::{collections::HashMap, thread::ThreadId};
 
 #[cfg(debug_assertions)]
 use std::collections::VecDeque;
@@ -162,19 +163,20 @@ fn snake_debug(value: &str) -> String {
 }
 
 #[derive(Default)]
-struct CallbackErrors(Mutex<Option<PyErr>>);
+struct CallbackErrors(Mutex<HashMap<ThreadId, PyErr>>);
 
 impl CallbackErrors {
     fn record(&self, error: PyErr) {
         if let Ok(mut pending) = self.0.lock() {
-            if pending.is_none() {
-                *pending = Some(error);
-            }
+            pending.entry(std::thread::current().id()).or_insert(error);
         }
     }
 
     fn take(&self) -> Option<PyErr> {
-        self.0.lock().ok().and_then(|mut pending| pending.take())
+        self.0
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.remove(&std::thread::current().id()))
     }
 }
 
@@ -1173,7 +1175,7 @@ impl DebugSession {
 #[pyclass(name = "_Session", module = "savana_core", frozen)]
 struct PySession {
     inner: Arc<Mutex<SessionState>>,
-    callback_errors: Arc<CallbackErrors>,
+    ingress_callback_errors: Arc<CallbackErrors>,
     #[cfg(debug_assertions)]
     debug_transport: Option<Arc<DebugScriptedTransport>>,
 }
@@ -1182,14 +1184,21 @@ impl PySession {
     fn live(session: ClientSession, callback_errors: Arc<CallbackErrors>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(SessionState::Live(Box::new(session)))),
-            callback_errors,
+            ingress_callback_errors: callback_errors,
             #[cfg(debug_assertions)]
             debug_transport: None,
         }
     }
 
-    fn finish<T>(&self, result: Result<T, ClientError>) -> PyResult<T> {
-        if let Some(error) = self.callback_errors.take() {
+    fn finish<T>(result: Result<T, ClientError>) -> PyResult<T> {
+        result.map_err(map_client_error)
+    }
+
+    fn finish_operation<T>(
+        result: Result<T, ClientError>,
+        callback_errors: &CallbackErrors,
+    ) -> PyResult<T> {
+        if let Some(error) = callback_errors.take() {
             return Err(error);
         }
         result.map_err(map_client_error)
@@ -1232,7 +1241,7 @@ impl PySession {
                 SessionState::Debug(session) => session.run(),
             }
         });
-        self.finish(result)
+        Self::finish_operation(result, self.ingress_callback_errors.as_ref())
     }
 
     fn ingest_file(&self, py: Python<'_>, path: PathBuf, content_kind: &str) -> PyResult<()> {
@@ -1246,7 +1255,7 @@ impl PySession {
                 SessionState::Debug(session) => session.run(),
             }
         });
-        self.finish(result)
+        Self::finish_operation(result, self.ingress_callback_errors.as_ref())
     }
 
     fn read_view(&self, py: Python<'_>, handle: &PyHandle) -> PyResult<PyMaskedView> {
@@ -1262,7 +1271,7 @@ impl PySession {
                 SessionState::Debug(_) => Err(ClientError::InvalidState),
             }
         });
-        self.finish(result)
+        Self::finish(result)
     }
 
     fn run_planner(&self, py: Python<'_>, intent_privacy: &str) -> PyResult<PyPlan> {
@@ -1279,7 +1288,7 @@ impl PySession {
                 }
             }
         });
-        self.finish(result)
+        Self::finish(result)
     }
 
     fn execute(
@@ -1294,9 +1303,10 @@ impl PySession {
         } else {
             Some(plan.live_arc()?)
         };
+        let callback_errors = Arc::new(CallbackErrors::default());
         let callback = PythonApproval {
             callback: approval,
-            errors: self.callback_errors.clone(),
+            errors: callback_errors.clone(),
         };
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {
@@ -1318,7 +1328,7 @@ impl PySession {
                 SessionState::Debug(_) => Err(ClientError::InvalidRequest),
             }
         });
-        self.finish(result)
+        Self::finish_operation(result, callback_errors.as_ref())
     }
 
     fn run_agent(
@@ -1331,13 +1341,14 @@ impl PySession {
     ) -> PyResult<PyExecutionResult> {
         let privacy = parse_intent_privacy(intent_privacy)?;
         let limits = limits.inner.clone();
+        let callback_errors = Arc::new(CallbackErrors::default());
         let approval = PythonApproval {
             callback: approval,
-            errors: self.callback_errors.clone(),
+            errors: callback_errors.clone(),
         };
         let events = PythonEvents {
             callback: events,
-            errors: self.callback_errors.clone(),
+            errors: callback_errors.clone(),
         };
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {
@@ -1355,7 +1366,7 @@ impl PySession {
                 }
             }
         });
-        self.finish(result)
+        Self::finish_operation(result, callback_errors.as_ref())
     }
 
     fn release(
@@ -1365,9 +1376,10 @@ impl PySession {
         approval: Py<PyAny>,
     ) -> PyResult<PyExecutionResult> {
         let document = document.live_arc()?;
+        let callback_errors = Arc::new(CallbackErrors::default());
         let callback = PythonApproval {
             callback: approval,
-            errors: self.callback_errors.clone(),
+            errors: callback_errors.clone(),
         };
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {
@@ -1380,7 +1392,7 @@ impl PySession {
                 SessionState::Debug(_) => Err(ClientError::InvalidState),
             }
         });
-        self.finish(result)
+        Self::finish_operation(result, callback_errors.as_ref())
     }
 
     fn register_connector(
@@ -1390,9 +1402,10 @@ impl PySession {
         approval: Py<PyAny>,
     ) -> PyResult<PyHandle> {
         let descriptor = descriptor.inner.clone();
+        let callback_errors = Arc::new(CallbackErrors::default());
         let callback = PythonApproval {
             callback: approval,
-            errors: self.callback_errors.clone(),
+            errors: callback_errors.clone(),
         };
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {
@@ -1405,7 +1418,7 @@ impl PySession {
                 SessionState::Debug(_) => Err(ClientError::InvalidState),
             }
         });
-        self.finish(result)
+        Self::finish_operation(result, callback_errors.as_ref())
     }
 
     fn remove_connector(&self, py: Python<'_>, connector: &PyHandle) -> PyResult<()> {
@@ -1419,7 +1432,7 @@ impl PySession {
                 SessionState::Debug(_) => Err(ClientError::InvalidState),
             }
         });
-        self.finish(result)
+        Self::finish(result)
     }
 
     fn list_connectors(&self, py: Python<'_>) -> PyResult<Vec<PyHandle>> {
@@ -1437,7 +1450,7 @@ impl PySession {
                 }
             }
         });
-        self.finish(result)
+        Self::finish(result)
     }
 
     fn revoke(&self, py: Python<'_>, document: &PyHandle) -> PyResult<()> {
@@ -1451,7 +1464,7 @@ impl PySession {
                 SessionState::Debug(_) => Err(ClientError::InvalidState),
             }
         });
-        self.finish(result)
+        Self::finish(result)
     }
 
     fn close(&self, py: Python<'_>) -> PyResult<()> {
@@ -1464,7 +1477,7 @@ impl PySession {
                 SessionState::Debug(session) => session.close(),
             }
         });
-        self.finish(result)
+        Self::finish(result)
     }
 
     fn __repr__(&self) -> &'static str {
@@ -1504,7 +1517,7 @@ fn _debug_scripted_session(delay_seconds: f64) -> PyResult<PySession> {
             close_count: 0,
             last_worker_thread: None,
         }))),
-        callback_errors: Arc::new(CallbackErrors::default()),
+        ingress_callback_errors: Arc::new(CallbackErrors::default()),
         debug_transport: None,
     })
 }
@@ -1546,7 +1559,7 @@ fn _debug_transport_session(delay_seconds: f64) -> PyResult<PySession> {
         .map_err(map_auth_error)?;
     Ok(PySession {
         inner: Arc::new(Mutex::new(SessionState::Live(Box::new(session)))),
-        callback_errors: Arc::new(CallbackErrors::default()),
+        ingress_callback_errors: Arc::new(CallbackErrors::default()),
         debug_transport: Some(transport),
     })
 }
@@ -1585,7 +1598,7 @@ fn _debug_view_session() -> PyResult<PySession> {
         .map_err(map_auth_error)?;
     Ok(PySession {
         inner: Arc::new(Mutex::new(SessionState::Live(Box::new(session)))),
-        callback_errors: Arc::new(CallbackErrors::default()),
+        ingress_callback_errors: Arc::new(CallbackErrors::default()),
         debug_transport: Some(transport),
     })
 }
@@ -1624,7 +1637,7 @@ fn _debug_structured_view_session() -> PyResult<PySession> {
         .map_err(map_auth_error)?;
     Ok(PySession {
         inner: Arc::new(Mutex::new(SessionState::Live(Box::new(session)))),
-        callback_errors: Arc::new(CallbackErrors::default()),
+        ingress_callback_errors: Arc::new(CallbackErrors::default()),
         debug_transport: Some(transport),
     })
 }
@@ -1685,6 +1698,24 @@ fn _debug_last_worker_thread(session: &PySession) -> PyResult<Option<i64>> {
     }
 }
 
+#[cfg(debug_assertions)]
+#[pyfunction]
+fn _debug_callback_error_isolation(py: Python<'_>) -> PyResult<(String, bool, bool, bool)> {
+    let first = Arc::new(CallbackErrors::default());
+    let second = Arc::new(CallbackErrors::default());
+    first.record(PyValueError::new_err("first callback"));
+
+    let unrelated = PySession::finish_operation(Ok("unrelated".to_owned()), second.as_ref())?;
+    let own = PySession::finish_operation(Ok(()), first.as_ref())
+        .expect_err("the owning operation must receive its callback error");
+    Ok((
+        unrelated,
+        own.is_instance_of::<PyValueError>(py),
+        first.take().is_none(),
+        second.take().is_none(),
+    ))
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("SavanaError", m.py().get_type_bound::<SavanaError>())?;
     m.add("AuthError", m.py().get_type_bound::<AuthError>())?;
@@ -1713,6 +1744,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(_debug_approval_request, m)?)?;
         m.add_function(wrap_pyfunction!(_debug_close_count, m)?)?;
         m.add_function(wrap_pyfunction!(_debug_last_worker_thread, m)?)?;
+        m.add_function(wrap_pyfunction!(_debug_callback_error_isolation, m)?)?;
     }
     Ok(())
 }
