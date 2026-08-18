@@ -117,17 +117,17 @@ impl VerifiedReleaseRequest {
             return Err(ReleaseRequestError::NonCanonical);
         }
 
-        let canonical = encode_canonical(
-            canonical_url.as_str(),
-            &tls_identity_pin,
-            &execution_nonce,
-            &dispatch_core_digest,
-            &dispatch_subject_digest,
-            payload_length as u32,
-            &credential_free_request_digest,
-            &payload_digest,
+        let canonical = encode_canonical(CanonicalRequestFields {
+            canonical_url: canonical_url.as_str(),
+            tls_identity_pin: &tls_identity_pin,
+            execution_nonce: &execution_nonce,
+            dispatch_core_digest: &dispatch_core_digest,
+            dispatch_subject_digest: &dispatch_subject_digest,
+            payload_length: payload_length as u32,
+            credential_free_request_digest: &credential_free_request_digest,
+            payload_digest: &payload_digest,
             payload,
-        )?;
+        })?;
         if canonical.as_slice() != bytes {
             return Err(ReleaseRequestError::NonCanonical);
         }
@@ -190,43 +190,47 @@ fn decode_digest(decoder: &mut minicbor::Decoder<'_>) -> Result<[u8; 32], Releas
         .map_err(|_| ReleaseRequestError::NonCanonical)
 }
 
-fn encode_canonical(
-    canonical_url: &str,
-    tls_identity_pin: &[u8; 32],
-    execution_nonce: &[u8; 32],
-    dispatch_core_digest: &[u8; 32],
-    dispatch_subject_digest: &[u8; 32],
-    payload_length: u32,
-    credential_free_request_digest: &[u8; 32],
-    payload_digest: &[u8; 32],
-    payload: &[u8],
+pub(crate) struct CanonicalRequestFields<'a> {
+    pub canonical_url: &'a str,
+    pub tls_identity_pin: &'a [u8; 32],
+    pub execution_nonce: &'a [u8; 32],
+    pub dispatch_core_digest: &'a [u8; 32],
+    pub dispatch_subject_digest: &'a [u8; 32],
+    pub payload_length: u32,
+    pub credential_free_request_digest: &'a [u8; 32],
+    pub payload_digest: &'a [u8; 32],
+    pub payload: &'a [u8],
+}
+
+pub(crate) fn encode_canonical(
+    fields: CanonicalRequestFields<'_>,
 ) -> Result<Vec<u8>, ReleaseRequestError> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
     encoder
         .array(11)
         .and_then(|encoder| encoder.u16(REQUEST_VERSION))
         .and_then(|encoder| encoder.u16(REQUEST_KIND))
-        .and_then(|encoder| encoder.str(canonical_url))
-        .and_then(|encoder| encoder.bytes(tls_identity_pin))
-        .and_then(|encoder| encoder.bytes(execution_nonce))
-        .and_then(|encoder| encoder.bytes(dispatch_core_digest))
-        .and_then(|encoder| encoder.bytes(dispatch_subject_digest))
-        .and_then(|encoder| encoder.u32(payload_length))
-        .and_then(|encoder| encoder.bytes(credential_free_request_digest))
-        .and_then(|encoder| encoder.bytes(payload_digest))
-        .and_then(|encoder| encoder.bytes(payload))
+        .and_then(|encoder| encoder.str(fields.canonical_url))
+        .and_then(|encoder| encoder.bytes(fields.tls_identity_pin))
+        .and_then(|encoder| encoder.bytes(fields.execution_nonce))
+        .and_then(|encoder| encoder.bytes(fields.dispatch_core_digest))
+        .and_then(|encoder| encoder.bytes(fields.dispatch_subject_digest))
+        .and_then(|encoder| encoder.u32(fields.payload_length))
+        .and_then(|encoder| encoder.bytes(fields.credential_free_request_digest))
+        .and_then(|encoder| encoder.bytes(fields.payload_digest))
+        .and_then(|encoder| encoder.bytes(fields.payload))
         .map_err(|_| ReleaseRequestError::NonCanonical)?;
     Ok(encoder.into_writer())
 }
 
-fn domain_hash(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
+pub(crate) fn domain_hash(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(domain);
     hasher.update(bytes);
     hasher.finalize().into()
 }
 
-fn payload_hash(bytes: &[u8]) -> [u8; 32] {
+pub(crate) fn payload_hash(bytes: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(PAYLOAD_DOMAIN);
     hasher.update((bytes.len() as u64).to_be_bytes());
@@ -234,7 +238,7 @@ fn payload_hash(bytes: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn wire_hash(bytes: &[u8]) -> [u8; 32] {
+pub(crate) fn wire_hash(bytes: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(WIRE_DOMAIN);
     hasher.update((bytes.len() as u64).to_be_bytes());

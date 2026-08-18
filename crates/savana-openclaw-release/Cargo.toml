@@ -10,8 +10,12 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+getrandom.workspace = true
 minicbor.workspace = true
 savana-policy-core = { path = "../savana-policy-core" }
 sha2.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
+
+[dev-dependencies]
+tempfile = "=3.23.0"
