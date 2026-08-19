@@ -424,7 +424,7 @@ pub(crate) fn reject_http_redirect_response_v2(
     Ok(())
 }
 
-fn certificate_spki_der(certificate: &[u8]) -> Option<&[u8]> {
+pub(crate) fn certificate_spki_der(certificate: &[u8]) -> Option<&[u8]> {
     let (_, certificate_content, certificate_end) = der_element(certificate, 0, 0x30)?;
     if certificate_end != certificate.len() {
         return None;

@@ -112,6 +112,12 @@ def test_public_surface_is_exactly_the_approved_types_and_business_methods():
     ]
 
 
+def test_release_receiver_is_native_private_infrastructure_not_public_sdk():
+    assert hasattr(savana_core, "_ReleaseReceiver")
+    assert not hasattr(savana, "_ReleaseReceiver")
+    assert "_ReleaseReceiver" not in savana.__all__
+
+
 def test_choices_and_exception_inheritance_are_stable():
     assert savana.IntentPrivacy.PRIVATE.value == "private"
     assert savana.IntentPrivacy.THIRD_PARTY.value == "third_party"

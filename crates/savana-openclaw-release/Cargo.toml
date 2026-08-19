@@ -12,10 +12,12 @@ workspace = true
 [dependencies]
 getrandom.workspace = true
 minicbor.workspace = true
+rustls.workspace = true
 savana-policy-core = { path = "../savana-policy-core" }
 sha2.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+savana-execd = { path = "../savana-execd", features = ["openclaw-release-test-support"] }
 tempfile = "=3.23.0"

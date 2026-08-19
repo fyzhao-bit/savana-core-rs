@@ -12,6 +12,7 @@ workspace = true
 [features]
 default = []
 macos-development-authority = ["savana-policy-core/macos-development-authority"]
+openclaw-release-test-support = []
 
 [dependencies]
 savana-kernel-protocol = { path = "../savana-kernel-protocol" }
