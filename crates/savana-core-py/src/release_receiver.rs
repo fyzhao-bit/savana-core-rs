@@ -50,6 +50,7 @@ impl PyReleaseReceiver {
     #[pyo3(signature = (
         journal_path,
         canonical_host,
+        listen_port,
         client_root_certificate_path,
         server_certificate_path,
         server_private_key_path,
@@ -58,11 +59,17 @@ impl PyReleaseReceiver {
     fn new(
         journal_path: PathBuf,
         canonical_host: String,
+        listen_port: u16,
         client_root_certificate_path: PathBuf,
         server_certificate_path: PathBuf,
         server_private_key_path: PathBuf,
         expected_client_spki_pin: Vec<u8>,
     ) -> PyResult<Self> {
+        if listen_port == 0 {
+            return Err(PyValueError::new_err(
+                "release receiver port must be a fixed nonzero port",
+            ));
+        }
         require_absolute(&journal_path)?;
         require_absolute(&client_root_certificate_path)?;
         require_absolute(&server_certificate_path)?;
@@ -89,7 +96,7 @@ impl PyReleaseReceiver {
         let store =
             Arc::new(ReleaseReservationStore::open(&journal_path).map_err(map_reservation_error)?);
         let receiver = ReleaseReceiver::bind(
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), listen_port),
             config,
             Arc::clone(&store),
         )

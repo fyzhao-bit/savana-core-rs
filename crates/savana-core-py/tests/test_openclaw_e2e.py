@@ -20,6 +20,12 @@ TLS_FIXTURE = REPOSITORY / "crates/savana-execd/tests/fixtures/provider-tls-v2.h
 ALPN = "savana-provider-v2"
 
 
+def _free_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return listener.getsockname()[1]
+
+
 def _fixture() -> dict[str, bytes]:
     return {
         name: bytes.fromhex(value)
@@ -282,6 +288,7 @@ async def test_only_durably_claimed_mtls_payload_becomes_assistant_text(
     receiver = savana_core._ReleaseReceiver(
         str(journal_path),
         "provider.example",
+        _free_loopback_port(),
         str(receiver_ca_path),
         str(server_certificate_path),
         str(server_key_path),
@@ -390,6 +397,7 @@ def test_real_receiver_rejects_cross_session_reservation(tmp_path: Path) -> None
     receiver = savana_core._ReleaseReceiver(
         str(tmp_path / "release.cbor"),
         "provider.example",
+        _free_loopback_port(),
         str(ca),
         str(server),
         str(key),

@@ -66,6 +66,12 @@ export interface ReleasedTurn {
   readonly text: string;
 }
 
+export interface DoctorSnapshot {
+  readonly activeConnectorCount: number;
+  readonly releaseTargetUrl: string;
+  readonly serviceOrigins: readonly [string, string, string];
+}
+
 export class BridgeFailure extends Error {
   readonly code: FailureCode;
 
@@ -96,11 +102,18 @@ interface PendingReset {
   readonly reject: (error: BridgeFailure) => void;
 }
 
-type Pending = PendingInitialize | PendingTurn | PendingReset;
+interface PendingDoctor {
+  readonly type: "doctor";
+  readonly resolve: (snapshot: DoctorSnapshot) => void;
+  readonly reject: (error: BridgeFailure) => void;
+}
+
+type Pending = PendingInitialize | PendingTurn | PendingReset | PendingDoctor;
 
 export interface BridgeProcessDependencies {
   readonly spawn?: SpawnBridge;
   readonly parentEnvironment?: NodeJS.ProcessEnv;
+  readonly doctorOnly?: boolean;
   readonly diagnostic?: (code: "bridge_stderr" | "bridge_exit" | "bridge_protocol") => void;
 }
 
@@ -109,6 +122,7 @@ export class BridgeProcess {
   readonly #spawn: SpawnBridge;
   readonly #parentEnvironment: NodeJS.ProcessEnv;
   readonly #diagnostic: NonNullable<BridgeProcessDependencies["diagnostic"]>;
+  readonly #doctorOnly: boolean;
   readonly #pending = new Map<number, Pending>();
   readonly #terminalRequestIds = new Set<number>();
   readonly #approvalIds = new Set<string>();
@@ -125,6 +139,7 @@ export class BridgeProcess {
     this.#spawn = dependencies.spawn ?? realSpawn;
     this.#parentEnvironment = dependencies.parentEnvironment ?? process.env;
     this.#diagnostic = dependencies.diagnostic ?? (() => undefined);
+    this.#doctorOnly = dependencies.doctorOnly === true;
   }
 
   get closed(): boolean {
@@ -142,7 +157,7 @@ export class BridgeProcess {
         [
           "-m",
           "savana.openclaw_bridge",
-          "--config",
+          this.#doctorOnly ? "--doctor-config" : "--config",
           this.#config.bridgeConfigPath,
         ],
         {
@@ -259,6 +274,25 @@ export class BridgeProcess {
     return promise;
   }
 
+  async doctor(): Promise<DoctorSnapshot> {
+    this.#requireReady();
+    const requestId = this.#nextRequestId();
+    const promise = new Promise<DoctorSnapshot>((resolve, reject) => {
+      this.#pending.set(requestId, { type: "doctor", resolve, reject });
+    });
+    try {
+      this.#write({
+        protocol_version: PROTOCOL_VERSION,
+        request_id: requestId,
+        type: "doctor.request",
+      });
+    } catch (error) {
+      this.#pending.delete(requestId);
+      throw error;
+    }
+    return promise;
+  }
+
   async dispose(): Promise<void> {
     if (this.#disposing) return;
     this.#disposing = true;
@@ -318,6 +352,24 @@ export class BridgeProcess {
       this.#pending.delete(message.request_id);
       this.#terminalRequestIds.add(message.request_id);
       pending.resolve();
+      return;
+    }
+    if (message.type === "doctor.result") {
+      if (pending.type !== "doctor") throw new ProtocolError();
+      this.#pending.delete(message.request_id);
+      this.#terminalRequestIds.add(message.request_id);
+      pending.resolve({
+        activeConnectorCount: message.active_connector_count,
+        releaseTargetUrl: message.release_target_url,
+        serviceOrigins: message.service_origins,
+      });
+      return;
+    }
+    if (message.type === "doctor.failed") {
+      if (pending.type !== "doctor") throw new ProtocolError();
+      this.#pending.delete(message.request_id);
+      this.#terminalRequestIds.add(message.request_id);
+      pending.reject(new BridgeFailure(message.code));
       return;
     }
     if (pending.type !== "turn") throw new ProtocolError();

@@ -5,6 +5,7 @@ import {
   type OpenClawPluginConfigSchema,
   definePluginEntry,
 } from "openclaw/plugin-sdk/plugin-entry";
+import { getHealthCheck, registerHealthCheck } from "openclaw/plugin-sdk/health";
 
 import { BridgeProcess } from "./src/bridge-process.js";
 import {
@@ -13,6 +14,10 @@ import {
   parsePluginConfig,
 } from "./src/config.js";
 import { createSavanaHarness } from "./src/harness.js";
+import {
+  SAVANA_DOCTOR_CHECK_ID,
+  createSavanaHealthCheck,
+} from "./src/doctor.js";
 import { savanaProvider } from "./src/provider.js";
 
 const configSchema: OpenClawPluginConfigSchema = {
@@ -41,6 +46,19 @@ export default definePluginEntry({
     const bridge = new BridgeProcess(config, {
       diagnostic: (code) => api.logger.warn(`savana runtime: ${code}`),
     });
+    if (getHealthCheck(SAVANA_DOCTOR_CHECK_ID) === undefined) {
+      registerHealthCheck(
+        createSavanaHealthCheck(config, async () => {
+          const doctorBridge = new BridgeProcess(config, { doctorOnly: true });
+          try {
+            await doctorBridge.start();
+            return await doctorBridge.doctor();
+          } finally {
+            await doctorBridge.dispose();
+          }
+        }),
+      );
+    }
     api.registerProvider(savanaProvider);
     api.registerAgentHarness(createSavanaHarness(bridge));
   },

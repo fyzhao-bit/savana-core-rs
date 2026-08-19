@@ -69,6 +69,7 @@ _INBOUND_KEYS = {
     "session.reset": frozenset(
         {"protocol_version", "request_id", "type", "agent_id", "session_id"}
     ),
+    "doctor.request": frozenset({"protocol_version", "request_id", "type"}),
     "shutdown": frozenset({"protocol_version", "request_id", "type"}),
 }
 
@@ -96,6 +97,19 @@ _OUTBOUND_KEYS = {
     "turn.released": frozenset({"protocol_version", "request_id", "type", "text"}),
     "turn.failed": frozenset({"protocol_version", "request_id", "type", "code"}),
     "session.closed": frozenset({"protocol_version", "request_id", "type"}),
+    "doctor.result": frozenset(
+        {
+            "protocol_version",
+            "request_id",
+            "type",
+            "active_connector_count",
+            "release_target_url",
+            "service_origins",
+        }
+    ),
+    "doctor.failed": frozenset(
+        {"protocol_version", "request_id", "type", "code"}
+    ),
 }
 
 _EVENT_KEYS = {
@@ -361,7 +375,19 @@ def _validate_outbound_payload(kind: str, value: Mapping[str, Any]) -> None:
             raise ProtocolError("invalid approval deadline")
     elif kind == "turn.released":
         _bounded_string(value["text"], MAX_RELEASED_TEXT_BYTES)
-    elif kind == "turn.failed" and (
+    elif kind == "doctor.result":
+        _bounded_u32(value["active_connector_count"])
+        _bounded_string(value["release_target_url"], 4096)
+        origins = value["service_origins"]
+        if (
+            not isinstance(origins, list)
+            or len(origins) != 3
+            or any(not isinstance(origin, str) for origin in origins)
+        ):
+            raise ProtocolError("invalid service origins")
+        for origin in origins:
+            _bounded_string(origin, 256)
+    elif kind in {"turn.failed", "doctor.failed"} and (
         not isinstance(value["code"], str) or value["code"] not in _FAILURE_CODES
     ):
         raise ProtocolError("invalid bridge failure code")

@@ -71,6 +71,11 @@ export type PluginToBridgeMessage =
   | {
       protocol_version: typeof PROTOCOL_VERSION;
       request_id: number;
+      type: "doctor.request";
+    }
+  | {
+      protocol_version: typeof PROTOCOL_VERSION;
+      request_id: number;
       type: "shutdown";
     };
 
@@ -127,6 +132,20 @@ export type BridgeToPluginMessage =
       protocol_version: typeof PROTOCOL_VERSION;
       request_id: number;
       type: "session.closed";
+    }
+  | {
+      protocol_version: typeof PROTOCOL_VERSION;
+      request_id: number;
+      type: "doctor.result";
+      active_connector_count: number;
+      release_target_url: string;
+      service_origins: [string, string, string];
+    }
+  | {
+      protocol_version: typeof PROTOCOL_VERSION;
+      request_id: number;
+      type: "doctor.failed";
+      code: FailureCode;
     };
 
 const INBOUND_KEYS: Record<PluginToBridgeMessage["type"], readonly string[]> = {
@@ -162,6 +181,7 @@ const INBOUND_KEYS: Record<PluginToBridgeMessage["type"], readonly string[]> = {
     "agent_id",
     "session_id",
   ],
+  "doctor.request": ["protocol_version", "request_id", "type"],
   shutdown: ["protocol_version", "request_id", "type"],
 };
 
@@ -179,6 +199,15 @@ const OUTBOUND_KEYS: Record<string, readonly string[]> = {
   "turn.released": ["protocol_version", "request_id", "type", "text"],
   "turn.failed": ["protocol_version", "request_id", "type", "code"],
   "session.closed": ["protocol_version", "request_id", "type"],
+  "doctor.result": [
+    "protocol_version",
+    "request_id",
+    "type",
+    "active_connector_count",
+    "release_target_url",
+    "service_origins",
+  ],
+  "doctor.failed": ["protocol_version", "request_id", "type", "code"],
 };
 
 const EVENT_KEYS: Record<BridgeEvent["event"], readonly string[]> = {
@@ -323,6 +352,7 @@ function validateInbound(
       boundedId(value["agent_id"]);
       boundedId(value["session_id"]);
       break;
+    case "doctor.request":
     case "shutdown":
       break;
   }
@@ -364,7 +394,24 @@ function validateOutbound(value: Record<string, unknown>, kind: string): void {
     case "turn.failed":
       if (!FAILURE_CODES.has(value["code"] as FailureCode)) throw new ProtocolError();
       break;
+    case "doctor.failed":
+      if (!FAILURE_CODES.has(value["code"] as FailureCode)) throw new ProtocolError();
+      break;
     case "session.closed":
+      break;
+    case "doctor.result":
+      boundedU32(value["active_connector_count"]);
+      boundedString(value["release_target_url"], 4096);
+      if (
+        !Array.isArray(value["service_origins"]) ||
+        value["service_origins"].length !== 3 ||
+        value["service_origins"].some((origin) => typeof origin !== "string")
+      ) {
+        throw new ProtocolError();
+      }
+      for (const origin of value["service_origins"] as string[]) {
+        boundedString(origin, 256);
+      }
       break;
     default:
       throw new ProtocolError();

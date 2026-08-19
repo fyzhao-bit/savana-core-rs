@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 from savana.openclaw_bridge.auth import AuthBrokerError, WebAuthnBroker
-from savana.openclaw_bridge.protocol import InboundDecoder
+from savana.openclaw_bridge.protocol import InboundDecoder, ProtocolError
 from savana.openclaw_bridge.runtime import (
     ApprovalRouter,
     BridgeProcess,
@@ -90,6 +90,10 @@ class FakeSession:
     async def close(self):
         self.closed = True
         self.calls.append("close")
+
+    async def list_connectors(self):
+        self.calls.append("list_connectors")
+        return [SimpleNamespace(name="active-signed")]
 
 
 class FakeClient:
@@ -211,6 +215,28 @@ async def test_same_session_turns_are_serialized_and_reset_closes_binding():
     replacement = await runtime.run_turn(4, "agent", "session", "turn-3", "three")
     await replacement.complete()
     assert len(client.calls) == 2
+    await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_doctor_uses_fresh_session_and_returns_only_public_readiness():
+    session_calls = []
+    runtime, _, receiver, _, _ = await make_runtime(
+        sessions=[FakeSession(session_calls)]
+    )
+    receiver.canonical_url = "https://provider.example:43191/savana/final-release"
+    result = await runtime.doctor()
+    assert result == {
+        "active_connector_count": 1,
+        "release_target_url": receiver.canonical_url,
+        "service_origins": [
+            "http://localhost:8768",
+            "http://localhost:8767",
+            "http://localhost:8766",
+        ],
+    }
+    assert session_calls == ["list_connectors", "close"]
+    assert "bootstrap" not in repr(result)
     await runtime.shutdown()
 
 
@@ -415,3 +441,30 @@ async def test_process_emits_one_terminal_then_completes_durable_delivery():
             b'{"protocol_version":1,"request_id":4,"type":"shutdown"}\n'
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_doctor_process_rejects_turns_before_any_sdk_effect():
+    class Runtime:
+        async def shutdown(self):
+            return None
+
+    emitted = []
+
+    async def write(message):
+        emitted.append(message)
+
+    process = BridgeProcess(Runtime(), write, doctor_only=True)
+    decoder = InboundDecoder()
+    assert await process.handle(
+        decoder.decode_line(
+            b'{"protocol_version":1,"request_id":1,"type":"initialize","openclaw_version":"2026.7.1-2","plugin_version":"0.1.0"}\n'
+        )
+    )
+    with pytest.raises(ProtocolError):
+        await process.handle(
+            decoder.decode_line(
+                b'{"protocol_version":1,"request_id":2,"type":"turn.start","agent_id":"agent","session_id":"session","turn_id":"turn","text":"must not run"}\n'
+            )
+        )
+    assert [message["type"] for message in emitted] == ["initialized"]

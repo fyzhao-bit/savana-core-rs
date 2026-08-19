@@ -112,6 +112,26 @@ describe("BridgeProcess", () => {
     await bridge.dispose();
   });
 
+  it("uses the non-listening bridge mode for doctor probes", async () => {
+    const child = new FakeChild();
+    const calls: unknown[][] = [];
+    const bridge = new BridgeProcess(config(), {
+      doctorOnly: true,
+      spawn: (command, arguments_, options) => {
+        calls.push([command, arguments_, options]);
+        return child;
+      },
+    });
+    await initialize(bridge, child);
+    expect(calls[0]?.[1]).toEqual([
+      "-m",
+      "savana.openclaw_bridge",
+      "--doctor-config",
+      "/var/lib/savana/bridge.json",
+    ]);
+    await bridge.dispose();
+  });
+
   it("correlates progress, approval, abort, and exactly one terminal", async () => {
     const { bridge, child } = fixture();
     await initialize(bridge, child);
@@ -167,6 +187,35 @@ describe("BridgeProcess", () => {
     expect(written).toContain('"approved":true');
     expect(written).toContain('"type":"turn.cancel"');
     expect(written).not.toContain("Approve exact effect");
+    await bridge.dispose();
+  });
+
+  it("returns only the closed public doctor snapshot", async () => {
+    const { bridge, child } = fixture();
+    await initialize(bridge, child);
+    const doctor = bridge.doctor();
+    await vi.waitFor(() => expect(child.written).toContain('"type":"doctor.request"'));
+    child.reply({
+      protocol_version: 1,
+      request_id: 2,
+      type: "doctor.result",
+      active_connector_count: 1,
+      release_target_url: "https://provider.example:43191/savana/final-release",
+      service_origins: [
+        "http://localhost:8768",
+        "http://localhost:8767",
+        "http://localhost:8766",
+      ],
+    });
+    await expect(doctor).resolves.toEqual({
+      activeConnectorCount: 1,
+      releaseTargetUrl: "https://provider.example:43191/savana/final-release",
+      serviceOrigins: [
+        "http://localhost:8768",
+        "http://localhost:8767",
+        "http://localhost:8766",
+      ],
+    });
     await bridge.dispose();
   });
 

@@ -76,17 +76,19 @@ def test_closed_inbound_union_and_monotonic_request_ids():
                 session_id="session-1",
             )
         ),
-        decoder.decode_line(wire("shutdown", 6)),
+        decoder.decode_line(wire("doctor.request", 6)),
+        decoder.decode_line(wire("shutdown", 7)),
     ]
     assert [message.type for message in messages] == [
         "turn.start",
         "approval.answer",
         "turn.cancel",
         "session.reset",
+        "doctor.request",
         "shutdown",
     ]
     with pytest.raises(ProtocolError):
-        decoder.decode_line(wire("shutdown", 7))
+        decoder.decode_line(wire("shutdown", 8))
 
 
 @pytest.mark.parametrize(
@@ -161,6 +163,21 @@ def test_outbound_union_is_canonical_bounded_and_closed():
         "type": "turn.released",
         "text": "已完成",
     }
+    doctor = encode_outbound(
+        {
+            "protocol_version": PROTOCOL_VERSION,
+            "request_id": 10,
+            "type": "doctor.result",
+            "active_connector_count": 1,
+            "release_target_url": "https://provider.example:43191/savana/final-release",
+            "service_origins": [
+                "http://localhost:8768",
+                "http://localhost:8767",
+                "http://localhost:8766",
+            ],
+        }
+    )
+    assert json.loads(doctor)["active_connector_count"] == 1
     with pytest.raises(ProtocolError):
         encode_outbound(
             {
@@ -202,9 +219,10 @@ def valid_config(tmp_path):
     return {
         "version": 1,
         "identity_path": paths["identity"],
-        "webauthn_fd": 7,
+        "webauthn_fd": 3,
         "release_journal_path": str(tmp_path / "release-journal.cbor"),
         "release_canonical_host": "provider.example",
+        "release_listen_port": 43191,
         "client_root_certificate_path": paths["client_root"],
         "server_certificate_path": paths["server_certificate"],
         "server_private_key_path": paths["server_private_key"],
@@ -221,7 +239,7 @@ def test_config_is_closed_absolute_and_private(tmp_path):
     write_private(config_path, json.dumps(payload).encode())
     config = BridgeConfig.load(config_path)
     assert config.version == 1
-    assert config.webauthn_fd == 7
+    assert config.webauthn_fd == 3
     assert config.max_steps == 8
 
     for mutation in (
@@ -247,5 +265,16 @@ def test_config_rejects_duplicate_keys_and_non_private_file(tmp_path):
     payload = valid_config(tmp_path)
     write_private(config_path, json.dumps(payload).encode())
     os.chmod(config_path, 0o644)
+    with pytest.raises(ConfigError):
+        BridgeConfig.load(config_path)
+
+
+def test_config_rejects_any_broker_descriptor_other_than_inherited_fd_three(
+    tmp_path,
+):
+    config_path = tmp_path / "bridge.json"
+    payload = valid_config(tmp_path)
+    payload["webauthn_fd"] = 4
+    write_private(config_path, json.dumps(payload).encode())
     with pytest.raises(ConfigError):
         BridgeConfig.load(config_path)

@@ -38,6 +38,7 @@ describe("parsePluginConfig", () => {
     ["protocol drift", { ...validConfig(), protocolVersion: 2 }],
     ["too many steps", { ...validConfig(), maxSteps: 65 }],
     ["too many replans", { ...validConfig(), maxReplans: 9 }],
+    ["zero replans", { ...validConfig(), maxReplans: 0 }],
     ["unbounded turn", { ...validConfig(), turnTimeoutSeconds: 301 }],
     ["unbounded approval", { ...validConfig(), approvalTimeoutSeconds: 301 }],
     ["unbounded delivery", { ...validConfig(), releaseDeliveryTimeoutSeconds: 61 }],

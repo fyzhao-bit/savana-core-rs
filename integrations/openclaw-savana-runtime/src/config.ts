@@ -70,7 +70,7 @@ export function parsePluginConfig(value: unknown): SavanaPluginConfig {
   }
 
   const maxSteps = boundedInteger(record["maxSteps"], 1, 64);
-  const maxReplans = boundedInteger(record["maxReplans"], 0, 8);
+  const maxReplans = boundedInteger(record["maxReplans"], 1, 8);
   const turnTimeoutSeconds = boundedNumber(record["turnTimeoutSeconds"], 300);
   const approvalTimeoutSeconds = boundedNumber(
     record["approvalTimeoutSeconds"],

@@ -18,6 +18,7 @@ _CONFIG_KEYS = frozenset(
         "webauthn_fd",
         "release_journal_path",
         "release_canonical_host",
+        "release_listen_port",
         "client_root_certificate_path",
         "server_certificate_path",
         "server_private_key_path",
@@ -41,6 +42,7 @@ class BridgeConfig:
     webauthn_fd: int
     release_journal_path: Path
     release_canonical_host: str
+    release_listen_port: int
     client_root_certificate_path: Path
     server_certificate_path: Path
     server_private_key_path: Path
@@ -107,11 +109,12 @@ class BridgeConfig:
         max_replans = value["max_replans"]
         timeout = value["turn_timeout_seconds"]
         host = value["release_canonical_host"]
-        if type(webauthn_fd) is not int or not 3 <= webauthn_fd <= 1024:
+        listen_port = value["release_listen_port"]
+        if type(webauthn_fd) is not int or webauthn_fd != 3:
             raise ConfigError("bridge configuration is invalid")
         if type(max_steps) is not int or not 1 <= max_steps <= 64:
             raise ConfigError("bridge configuration is invalid")
-        if type(max_replans) is not int or not 0 <= max_replans <= 16:
+        if type(max_replans) is not int or not 1 <= max_replans <= 8:
             raise ConfigError("bridge configuration is invalid")
         if type(timeout) not in (int, float) or isinstance(timeout, bool):
             raise ConfigError("bridge configuration is invalid")
@@ -120,6 +123,8 @@ class BridgeConfig:
             raise ConfigError("bridge configuration is invalid")
         if not isinstance(host, str) or not _HOST.fullmatch(host) or ".." in host:
             raise ConfigError("bridge configuration is invalid")
+        if type(listen_port) is not int or not 1 <= listen_port <= 65535:
+            raise ConfigError("bridge configuration is invalid")
 
         return cls(
             version=CONFIG_VERSION,
@@ -127,6 +132,7 @@ class BridgeConfig:
             webauthn_fd=webauthn_fd,
             release_journal_path=paths["release_journal_path"],
             release_canonical_host=host.lower(),
+            release_listen_port=listen_port,
             client_root_certificate_path=paths["client_root_certificate_path"],
             server_certificate_path=paths["server_certificate_path"],
             server_private_key_path=paths["server_private_key_path"],

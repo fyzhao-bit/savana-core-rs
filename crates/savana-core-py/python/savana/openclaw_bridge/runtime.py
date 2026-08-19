@@ -26,6 +26,11 @@ from .protocol import (
 )
 
 Emit = Callable[[dict[str, Any]], Awaitable[None]]
+SERVICE_ORIGINS = (
+    "http://localhost:8768",
+    "http://localhost:8767",
+    "http://localhost:8766",
+)
 
 
 class BridgeRuntimeError(Exception):
@@ -363,6 +368,41 @@ class BridgeRuntime:
         if callable(close):
             await asyncio.to_thread(close)
 
+    async def doctor(self) -> dict[str, Any]:
+        """Return only bounded, public deployment readiness evidence."""
+        if self._closed:
+            raise BridgeRuntimeError("internal_failure")
+        session = None
+        try:
+            async with asyncio.timeout(self._turn_timeout_seconds):
+                bootstrap = await self._bootstrap_source.next()
+                session = await self._client.session(
+                    self._identity,
+                    bootstrap,
+                    self._webauthn,
+                    lambda _request: False,
+                )
+                connectors = await session.list_connectors()
+                if not isinstance(connectors, (list, tuple)) or len(connectors) > 0xFFFFFFFF:
+                    raise BridgeRuntimeError("protocol_failure")
+                return {
+                    "active_connector_count": len(connectors),
+                    "release_target_url": self._receiver.canonical_url,
+                    "service_origins": list(SERVICE_ORIGINS),
+                }
+        except TimeoutError as error:
+            raise BridgeRuntimeError("deadline_exceeded") from error
+        except BridgeRuntimeError:
+            raise
+        except Exception as error:
+            raise BridgeRuntimeError(_stable_error_code(error)) from error
+        finally:
+            if session is not None:
+                try:
+                    await session.close()
+                except Exception:  # noqa: BLE001 - doctor remains redacted.
+                    pass
+
     async def _session(
         self,
         key: tuple[str, str],
@@ -465,7 +505,9 @@ def _stable_error_code(error: Exception) -> str:
 class BridgeProcess:
     """Closed protocol dispatcher around one :class:`BridgeRuntime`."""
 
-    def __init__(self, runtime: BridgeRuntime, write: Emit) -> None:
+    def __init__(
+        self, runtime: BridgeRuntime, write: Emit, *, doctor_only: bool = False
+    ) -> None:
         self._runtime = runtime
         self._write = write
         self._decoder = InboundDecoder()
@@ -473,6 +515,7 @@ class BridgeProcess:
         self._terminals: set[int] = set()
         self._initialized = False
         self._shutting_down = False
+        self._doctor_only = doctor_only
 
     async def handle_line(self, line: bytes) -> bool:
         message = self._decoder.decode_line(line)
@@ -493,6 +536,8 @@ class BridgeProcess:
             return True
         if not self._initialized:
             raise ProtocolError("bridge is not initialized")
+        if self._doctor_only and message.type not in {"doctor.request", "shutdown"}:
+            raise ProtocolError("doctor bridge accepts only readiness requests")
         if message.type == "turn.start":
             if message.request_id in self._turns:
                 raise ProtocolError("duplicate bridge turn")
@@ -535,6 +580,27 @@ class BridgeProcess:
                     "type": "session.closed",
                 }
             )
+            return True
+        if message.type == "doctor.request":
+            try:
+                result = await self._runtime.doctor()
+                await self._write(
+                    {
+                        "protocol_version": PROTOCOL_VERSION,
+                        "request_id": message.request_id,
+                        "type": "doctor.result",
+                        **result,
+                    }
+                )
+            except BridgeRuntimeError as error:
+                await self._write(
+                    {
+                        "protocol_version": PROTOCOL_VERSION,
+                        "request_id": message.request_id,
+                        "type": "doctor.failed",
+                        "code": error.code,
+                    }
+                )
             return True
         if message.type == "shutdown":
             self._shutting_down = True
@@ -646,23 +712,39 @@ class _StdoutWriter:
         sys.stdout.buffer.flush()
 
 
-async def _run_stdio(config: BridgeConfig) -> int:
-    import savana_core
+class _DoctorReceiverInfo:
+    def __init__(self, canonical_url: str) -> None:
+        self.canonical_url = canonical_url
 
+    def close(self) -> None:
+        return None
+
+
+async def _run_stdio(config: BridgeConfig, *, doctor_only: bool) -> int:
     import savana
 
     try:
         expected_client_pin = await asyncio.to_thread(
             _read_exact_private, config.expected_client_spki_pin_path, 32
         )
-        receiver = savana_core._ReleaseReceiver(
-            str(config.release_journal_path),
-            config.release_canonical_host,
-            str(config.client_root_certificate_path),
-            str(config.server_certificate_path),
-            str(config.server_private_key_path),
-            expected_client_pin,
-        )
+        if doctor_only:
+            receiver = _DoctorReceiverInfo(
+                "https://"
+                f"{config.release_canonical_host}:{config.release_listen_port}"
+                "/savana/final-release"
+            )
+        else:
+            import savana_core
+
+            receiver = savana_core._ReleaseReceiver(
+                str(config.release_journal_path),
+                config.release_canonical_host,
+                config.release_listen_port,
+                str(config.client_root_certificate_path),
+                str(config.server_certificate_path),
+                str(config.server_private_key_path),
+                expected_client_pin,
+            )
         webauthn = WebAuthnBroker(config.webauthn_fd)
         identity = savana.Identity.load(config.identity_path)
         writer = _StdoutWriter()
@@ -680,7 +762,7 @@ async def _run_stdio(config: BridgeConfig) -> int:
         )
     except Exception:  # noqa: BLE001 - startup exposes only a redacted category.
         return 2
-    process = BridgeProcess(runtime, writer)
+    process = BridgeProcess(runtime, writer, doctor_only=doctor_only)
     try:
         while True:
             line = await asyncio.to_thread(
@@ -714,13 +796,14 @@ def _read_exact_private(path: Path, length: int) -> bytes:
 
 def main() -> int:
     arguments = sys.argv[1:]
-    if len(arguments) != 2 or arguments[0] != "--config":
+    if len(arguments) != 2 or arguments[0] not in {"--config", "--doctor-config"}:
         _stderr("startup_failed")
         return 2
+    doctor_only = arguments[0] == "--doctor-config"
     config_path = Path(arguments[1])
     try:
         config = BridgeConfig.load(config_path)
-        return asyncio.run(_run_stdio(config))
+        return asyncio.run(_run_stdio(config, doctor_only=doctor_only))
     except (ConfigError, OSError, RuntimeError):
         _stderr("startup_failed")
         return 2
