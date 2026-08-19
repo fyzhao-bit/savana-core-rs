@@ -55,11 +55,13 @@ class ApprovalRouter:
         loop: asyncio.AbstractEventLoop,
         *,
         timeout_seconds: float,
+        absolute_deadline: float | None = None,
     ) -> None:
         self._turn_request_id = turn_request_id
         self._emit = emit
         self._loop = loop
         self._timeout_seconds = timeout_seconds
+        self._absolute_deadline = absolute_deadline
         self._pending: dict[str, _PendingApproval] = {}
         self._lock = threading.Lock()
         self._cancelled = False
@@ -75,7 +77,18 @@ class ApprovalRouter:
             if self._cancelled or self._pending:
                 return False
             self._pending[approval_id] = pending
-        deadline_unix_ms = int((time.time() + self._timeout_seconds) * 1000)
+        timeout_seconds = self._timeout_seconds
+        if self._absolute_deadline is not None:
+            timeout_seconds = min(
+                timeout_seconds,
+                max(0.0, self._absolute_deadline - time.monotonic()),
+            )
+        if timeout_seconds <= 0:
+            with self._lock:
+                self._pending.pop(approval_id, None)
+            return False
+        approval_deadline = time.monotonic() + timeout_seconds
+        deadline_unix_ms = int((time.time() + timeout_seconds) * 1000)
         future = asyncio.run_coroutine_threadsafe(
             self._emit(
                 {
@@ -91,12 +104,14 @@ class ApprovalRouter:
             self._loop,
         )
         try:
-            future.result(timeout=self._timeout_seconds)
+            future.result(timeout=timeout_seconds)
         except Exception:  # noqa: BLE001 - any output failure denies approval.
             with self._lock:
                 self._pending.pop(approval_id, None)
             return False
-        signalled = pending.event.wait(self._timeout_seconds)
+        signalled = pending.event.wait(
+            max(0.0, approval_deadline - time.monotonic())
+        )
         with self._lock:
             self._pending.pop(approval_id, None)
             return signalled and pending.approved and not self._cancelled
@@ -187,6 +202,8 @@ class BridgeRuntime:
         max_steps: int,
         max_replans: int,
         turn_timeout_seconds: float,
+        approval_timeout_seconds: float,
+        release_delivery_timeout_seconds: float,
         emit: Emit,
     ) -> None:
         self._client = client
@@ -198,6 +215,8 @@ class BridgeRuntime:
         self._max_steps = max_steps
         self._max_replans = max_replans
         self._turn_timeout_seconds = turn_timeout_seconds
+        self._approval_timeout_seconds = approval_timeout_seconds
+        self._release_delivery_timeout_seconds = release_delivery_timeout_seconds
         self._emit = emit
         self._sessions: dict[tuple[str, str], _SessionRecord] = {}
         self._sessions_lock = asyncio.Lock()
@@ -217,11 +236,13 @@ class BridgeRuntime:
         if self._closed:
             raise BridgeRuntimeError("internal_failure")
         loop = asyncio.get_running_loop()
+        turn_deadline = time.monotonic() + self._turn_timeout_seconds
         approvals = ApprovalRouter(
             request_id,
             self._emit,
             loop,
-            timeout_seconds=self._turn_timeout_seconds,
+            timeout_seconds=self._approval_timeout_seconds,
+            absolute_deadline=turn_deadline,
         )
         limits = self._sdk.RunLimits(
             self._max_steps,
@@ -256,10 +277,13 @@ class BridgeRuntime:
                         turn_binding = self._turn_binding(
                             request_id, agent_id, session_id, turn_id
                         )
+                        reservation_timeout = self._remaining_turn_timeout(
+                            turn_deadline
+                        )
                         reservation = await asyncio.to_thread(
                             self._receiver.reserve,
                             turn_binding,
-                            self._turn_timeout_seconds,
+                            reservation_timeout,
                         )
                         release = await record.session.release(document, approvals)
                         if release.status == "failed_no_effect":
@@ -277,7 +301,7 @@ class BridgeRuntime:
                         payload = await asyncio.to_thread(
                             self._receiver.wait,
                             reservation,
-                            self._turn_timeout_seconds,
+                            self._remaining_release_timeout(turn_deadline),
                         )
                         try:
                             released_text = bytes(payload).decode(
@@ -486,6 +510,19 @@ class BridgeRuntime:
         except Exception:  # noqa: BLE001 - the original failure remains authoritative.
             return
 
+    def _remaining_release_timeout(self, turn_deadline: float) -> float:
+        return min(
+            self._release_delivery_timeout_seconds,
+            self._remaining_turn_timeout(turn_deadline),
+        )
+
+    @staticmethod
+    def _remaining_turn_timeout(turn_deadline: float) -> float:
+        remaining = turn_deadline - time.monotonic()
+        if remaining <= 0:
+            raise BridgeRuntimeError("deadline_exceeded")
+        return remaining
+
 
 def _stable_error_code(error: Exception) -> str:
     code = getattr(error, "code", None)
@@ -512,7 +549,6 @@ class BridgeProcess:
         self._write = write
         self._decoder = InboundDecoder()
         self._turns: dict[int, tuple[tuple[str, str], asyncio.Task[None]]] = {}
-        self._terminals: set[int] = set()
         self._initialized = False
         self._shutting_down = False
         self._doctor_only = doctor_only
@@ -622,6 +658,7 @@ class BridgeProcess:
         turn_id: str,
         text: str,
     ) -> None:
+        terminal_emitted = False
         try:
             outcome = await self._runtime.run_turn(
                 request_id, agent_id, session_id, turn_id, text
@@ -636,9 +673,10 @@ class BridgeProcess:
                     "text": outcome.text,
                 }
             )
+            terminal_emitted = True
             await outcome.complete()
         except BridgeRuntimeError as error:
-            if not self._shutting_down and request_id not in self._terminals:
+            if not self._shutting_down and not terminal_emitted:
                 await self._terminal(
                     {
                         "protocol_version": PROTOCOL_VERSION,
@@ -648,7 +686,7 @@ class BridgeProcess:
                     }
                 )
         except asyncio.CancelledError:
-            if not self._shutting_down and request_id not in self._terminals:
+            if not self._shutting_down and not terminal_emitted:
                 await self._terminal(
                     {
                         "protocol_version": PROTOCOL_VERSION,
@@ -658,7 +696,7 @@ class BridgeProcess:
                     }
                 )
         except Exception:  # noqa: BLE001 - process boundary maps every error to a stable code.
-            if not self._shutting_down and request_id not in self._terminals:
+            if not self._shutting_down and not terminal_emitted:
                 await self._terminal(
                     {
                         "protocol_version": PROTOCOL_VERSION,
@@ -671,11 +709,7 @@ class BridgeProcess:
             self._turns.pop(request_id, None)
 
     async def _terminal(self, message: dict[str, Any]) -> None:
-        request_id = message["request_id"]
-        if request_id in self._terminals:
-            raise ProtocolError("duplicate terminal bridge message")
         await self._write(message)
-        self._terminals.add(request_id)
 
     async def _cancel_session(self, key: tuple[str, str]) -> None:
         tasks = []
@@ -745,7 +779,10 @@ async def _run_stdio(config: BridgeConfig, *, doctor_only: bool) -> int:
                 str(config.server_private_key_path),
                 expected_client_pin,
             )
-        webauthn = WebAuthnBroker(config.webauthn_fd)
+        webauthn = WebAuthnBroker(
+            config.webauthn_fd,
+            timeout_seconds=config.turn_timeout_seconds,
+        )
         identity = savana.Identity.load(config.identity_path)
         writer = _StdoutWriter()
         runtime = BridgeRuntime(
@@ -758,6 +795,8 @@ async def _run_stdio(config: BridgeConfig, *, doctor_only: bool) -> int:
             max_steps=config.max_steps,
             max_replans=config.max_replans,
             turn_timeout_seconds=config.turn_timeout_seconds,
+            approval_timeout_seconds=config.approval_timeout_seconds,
+            release_delivery_timeout_seconds=config.release_delivery_timeout_seconds,
             emit=writer,
         )
     except Exception:  # noqa: BLE001 - startup exposes only a redacted category.

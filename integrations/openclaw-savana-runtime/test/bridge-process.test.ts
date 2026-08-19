@@ -190,6 +190,56 @@ describe("BridgeProcess", () => {
     await bridge.dispose();
   });
 
+  it("bounds approval replay state to the active turn", async () => {
+    const { bridge, child } = fixture();
+    await initialize(bridge, child);
+
+    for (const [requestId, turnId] of [
+      [2, "first"],
+      [4, "second"],
+    ] as const) {
+      const approvals: string[] = [];
+      const turn = bridge.runTurn({
+        agentId: "agent",
+        sessionId: "opaque-session",
+        turnId,
+        text: "request",
+        onEvent: () => undefined,
+        onApproval: async (request) => {
+          approvals.push(request.approvalId);
+          return true;
+        },
+      });
+      child.reply({
+        protocol_version: 1,
+        request_id: requestId,
+        type: "approval.request",
+        approval_id: "turn-scoped-approval",
+        display: "Approve exact effect",
+        purpose: "tool_execution",
+        deadline_unix_ms: Date.now() + 30_000,
+      });
+      await vi.waitFor(() =>
+        expect(approvals).toEqual(["turn-scoped-approval"]),
+      );
+      await vi.waitFor(() =>
+        expect(child.written.match(/"type":"approval.answer"/g)).toHaveLength(
+          requestId === 2 ? 1 : 2,
+        ),
+      );
+      child.reply({
+        protocol_version: 1,
+        request_id: requestId,
+        type: "turn.released",
+        text: `released-${turnId}`,
+      });
+      await expect(turn).resolves.toEqual({ text: `released-${turnId}` });
+    }
+
+    expect(bridge.closed).toBe(false);
+    await bridge.dispose();
+  });
+
   it("returns only the closed public doctor snapshot", async () => {
     const { bridge, child } = fixture();
     await initialize(bridge, child);

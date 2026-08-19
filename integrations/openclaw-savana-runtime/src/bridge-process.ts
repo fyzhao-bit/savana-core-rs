@@ -91,6 +91,7 @@ interface PendingInitialize {
 interface PendingTurn {
   readonly type: "turn";
   readonly options: RunTurnOptions;
+  readonly approvalIds: Set<string>;
   readonly resolve: (result: ReleasedTurn) => void;
   readonly reject: (error: BridgeFailure) => void;
   readonly abort?: () => void;
@@ -124,8 +125,6 @@ export class BridgeProcess {
   readonly #diagnostic: NonNullable<BridgeProcessDependencies["diagnostic"]>;
   readonly #doctorOnly: boolean;
   readonly #pending = new Map<number, Pending>();
-  readonly #terminalRequestIds = new Set<number>();
-  readonly #approvalIds = new Set<string>();
   #child: ChildProcessLike | undefined;
   #buffer = Buffer.alloc(0);
   #requestId = 0;
@@ -211,6 +210,7 @@ export class BridgeProcess {
       const pending: PendingTurn = {
         type: "turn",
         options,
+        approvalIds: new Set(),
         resolve,
         reject,
         ...(options.signal === undefined
@@ -335,7 +335,6 @@ export class BridgeProcess {
   }
 
   #handle(message: BridgeToPluginMessage): void {
-    if (this.#terminalRequestIds.has(message.request_id)) throw new ProtocolError();
     const pending = this.#pending.get(message.request_id);
     if (pending === undefined) throw new ProtocolError();
 
@@ -350,14 +349,12 @@ export class BridgeProcess {
     if (message.type === "session.closed") {
       if (pending.type !== "reset") throw new ProtocolError();
       this.#pending.delete(message.request_id);
-      this.#terminalRequestIds.add(message.request_id);
       pending.resolve();
       return;
     }
     if (message.type === "doctor.result") {
       if (pending.type !== "doctor") throw new ProtocolError();
       this.#pending.delete(message.request_id);
-      this.#terminalRequestIds.add(message.request_id);
       pending.resolve({
         activeConnectorCount: message.active_connector_count,
         releaseTargetUrl: message.release_target_url,
@@ -368,7 +365,6 @@ export class BridgeProcess {
     if (message.type === "doctor.failed") {
       if (pending.type !== "doctor") throw new ProtocolError();
       this.#pending.delete(message.request_id);
-      this.#terminalRequestIds.add(message.request_id);
       pending.reject(new BridgeFailure(message.code));
       return;
     }
@@ -382,8 +378,8 @@ export class BridgeProcess {
       return;
     }
     if (message.type === "approval.request") {
-      if (this.#approvalIds.has(message.approval_id)) throw new ProtocolError();
-      this.#approvalIds.add(message.approval_id);
+      if (pending.approvalIds.has(message.approval_id)) throw new ProtocolError();
+      pending.approvalIds.add(message.approval_id);
       void this.#answerApproval(message.request_id, pending, message);
       return;
     }
@@ -441,7 +437,6 @@ export class BridgeProcess {
 
   #finishTurn(requestId: number, pending: PendingTurn): void {
     this.#deletePending(requestId);
-    this.#terminalRequestIds.add(requestId);
     if (pending.abort !== undefined) {
       pending.options.signal?.removeEventListener("abort", pending.abort);
     }

@@ -19,7 +19,11 @@ export class SessionBindings {
     const existing = sessions.get(openClawSessionId);
     if (existing !== undefined) return existing;
     const bytes = this.#random();
-    if (!Buffer.isBuffer(bytes) || bytes.length !== 32) {
+    if (
+      !Buffer.isBuffer(bytes) ||
+      bytes.length !== 32 ||
+      bytes.every((byte) => byte === 0)
+    ) {
       throw new Error("Savana session binding unavailable");
     }
     const binding = bytes.toString("base64url");

@@ -59,6 +59,8 @@ async function deployment() {
       max_steps: 24,
       max_replans: 4,
       turn_timeout_seconds: 120,
+      approval_timeout_seconds: 120,
+      release_delivery_timeout_seconds: 30,
     }),
     { mode: 0o600 },
   );
@@ -147,5 +149,25 @@ describe("Savana OpenClaw doctor", () => {
     const rendered = JSON.stringify(findings);
     expect(rendered).not.toContain(files.bridge);
     expect(rendered).not.toContain("openai/gpt-5");
+  });
+
+  it("rejects plugin limits that differ from the private bridge limits", async () => {
+    const { config, plugin } = await deployment();
+    const findings = await runSavanaDoctor(
+      config,
+      { ...plugin, releaseDeliveryTimeoutSeconds: 31 },
+      async () => ({
+        activeConnectorCount: 1,
+        releaseTargetUrl: "https://provider.example:43191/savana/final-release",
+        serviceOrigins: [
+          "http://localhost:8768",
+          "http://localhost:8767",
+          "http://localhost:8766",
+        ],
+      }),
+    );
+    expect(findings.map((finding) => finding.requirement)).toContain(
+      "limit-binding",
+    );
   });
 });

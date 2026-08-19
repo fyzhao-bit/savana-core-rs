@@ -230,6 +230,8 @@ def valid_config(tmp_path):
         "max_steps": 8,
         "max_replans": 2,
         "turn_timeout_seconds": 120.0,
+        "approval_timeout_seconds": 30.0,
+        "release_delivery_timeout_seconds": 10.0,
     }
 
 
@@ -241,12 +243,16 @@ def test_config_is_closed_absolute_and_private(tmp_path):
     assert config.version == 1
     assert config.webauthn_fd == 3
     assert config.max_steps == 8
+    assert config.approval_timeout_seconds == 30.0
+    assert config.release_delivery_timeout_seconds == 10.0
 
     for mutation in (
         lambda value: value.update({"unknown": True}),
         lambda value: value.update({"identity_path": "relative"}),
         lambda value: value.update({"version": 2}),
         lambda value: value.update({"turn_timeout_seconds": 301}),
+        lambda value: value.update({"approval_timeout_seconds": 301}),
+        lambda value: value.update({"release_delivery_timeout_seconds": 61}),
         lambda value: value.update({"bootstrap_token": "inline-secret"}),
     ):
         invalid = valid_config(tmp_path)

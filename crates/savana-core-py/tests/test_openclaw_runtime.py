@@ -161,6 +161,8 @@ async def make_runtime(*, sessions, receiver=None, emit=None):
         max_steps=8,
         max_replans=2,
         turn_timeout_seconds=2.0,
+        approval_timeout_seconds=1.0,
+        release_delivery_timeout_seconds=0.25,
         emit=emit or default_emit,
     )
     return runtime, client, receiver, emitted, calls
@@ -190,6 +192,11 @@ async def test_real_turn_shape_reuses_session_and_completes_only_after_emission(
     ]
     assert all("first request" not in repr(message) for message in emitted)
     assert not hasattr(first, "handle")
+    reserve_timeouts = [call[2] for call in receiver.calls if call[0] == "reserve"]
+    wait_timeouts = [call[2] for call in receiver.calls if call[0] == "wait"]
+    assert reserve_timeouts and wait_timeouts
+    assert all(0.25 < timeout <= 2.0 for timeout in reserve_timeouts)
+    assert all(0 < timeout <= 0.25 for timeout in wait_timeouts)
     await runtime.shutdown()
     assert session.closed
 
@@ -366,6 +373,19 @@ def test_webauthn_broker_uses_only_bounded_inherited_socket_protocol():
         os.close(write_end)
 
 
+@pytest.mark.asyncio
+async def test_webauthn_broker_has_its_own_bounded_io_deadline():
+    bridge, product = socket.socketpair()
+    broker = WebAuthnBroker(bridge.fileno(), timeout_seconds=0.05)
+    try:
+        with pytest.raises(AuthBrokerError):
+            await asyncio.wait_for(broker.next(), timeout=0.5)
+    finally:
+        broker.close()
+        bridge.close()
+        product.close()
+
+
 def test_process_startup_failure_keeps_stdout_protocol_only_and_redacts_stderr():
     completed = subprocess.run(
         [sys.executable, "-m", "savana.openclaw_bridge"],
@@ -429,6 +449,7 @@ async def test_process_emits_one_terminal_then_completes_durable_delivery():
         "turn.released",
     ]
     assert order[-2:] == [("write", "turn.released"), "complete"]
+    assert not hasattr(process, "_terminals")
 
     assert await process.handle(
         decoder.decode_line(

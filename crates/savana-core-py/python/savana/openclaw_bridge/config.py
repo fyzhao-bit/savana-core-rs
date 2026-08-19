@@ -26,6 +26,8 @@ _CONFIG_KEYS = frozenset(
         "max_steps",
         "max_replans",
         "turn_timeout_seconds",
+        "approval_timeout_seconds",
+        "release_delivery_timeout_seconds",
     }
 )
 _HOST = re.compile(r"(?=.{1,253}\Z)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\Z")
@@ -50,6 +52,8 @@ class BridgeConfig:
     max_steps: int
     max_replans: int
     turn_timeout_seconds: float
+    approval_timeout_seconds: float
+    release_delivery_timeout_seconds: float
 
     @classmethod
     def load(cls, path: str | os.PathLike[str]) -> BridgeConfig:
@@ -108,6 +112,8 @@ class BridgeConfig:
         max_steps = value["max_steps"]
         max_replans = value["max_replans"]
         timeout = value["turn_timeout_seconds"]
+        approval_timeout = value["approval_timeout_seconds"]
+        release_timeout = value["release_delivery_timeout_seconds"]
         host = value["release_canonical_host"]
         listen_port = value["release_listen_port"]
         if type(webauthn_fd) is not int or webauthn_fd != 3:
@@ -120,6 +126,20 @@ class BridgeConfig:
             raise ConfigError("bridge configuration is invalid")
         timeout = float(timeout)
         if not 1.0 <= timeout <= 300.0:
+            raise ConfigError("bridge configuration is invalid")
+        if type(approval_timeout) not in (int, float) or isinstance(
+            approval_timeout, bool
+        ):
+            raise ConfigError("bridge configuration is invalid")
+        approval_timeout = float(approval_timeout)
+        if not 0 < approval_timeout <= 300.0:
+            raise ConfigError("bridge configuration is invalid")
+        if type(release_timeout) not in (int, float) or isinstance(
+            release_timeout, bool
+        ):
+            raise ConfigError("bridge configuration is invalid")
+        release_timeout = float(release_timeout)
+        if not 0 < release_timeout <= 60.0:
             raise ConfigError("bridge configuration is invalid")
         if not isinstance(host, str) or not _HOST.fullmatch(host) or ".." in host:
             raise ConfigError("bridge configuration is invalid")
@@ -140,6 +160,8 @@ class BridgeConfig:
             max_steps=max_steps,
             max_replans=max_replans,
             turn_timeout_seconds=timeout,
+            approval_timeout_seconds=approval_timeout,
+            release_delivery_timeout_seconds=release_timeout,
         )
 
 

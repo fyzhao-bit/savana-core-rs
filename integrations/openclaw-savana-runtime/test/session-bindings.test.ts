@@ -31,4 +31,15 @@ describe("SessionBindings", () => {
     const restarted = new SessionBindings(random);
     expect(restarted.getOrCreate("agent", "session")).not.toBe(active);
   });
+
+  it("rejects an all-zero or malformed entropy result", () => {
+    for (const random of [
+      () => Buffer.alloc(32),
+      () => Buffer.alloc(31, 1),
+    ]) {
+      expect(() =>
+        new SessionBindings(random).getOrCreate("agent", "session"),
+      ).toThrow("Savana session binding unavailable");
+    }
+  });
 });

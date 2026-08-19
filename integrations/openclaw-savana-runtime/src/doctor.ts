@@ -41,6 +41,8 @@ const BRIDGE_CONFIG_KEYS = new Set([
   "max_steps",
   "max_replans",
   "turn_timeout_seconds",
+  "approval_timeout_seconds",
+  "release_delivery_timeout_seconds",
 ]);
 
 export type SavanaDoctorProbe = () => Promise<DoctorSnapshot>;
@@ -89,6 +91,9 @@ export async function runSavanaDoctor(
     await requireFile(pluginConfig.pythonExecutable, false);
     await requireFile(pluginConfig.bridgeConfigPath, true);
     bridge = await readBridgeConfig(pluginConfig.bridgeConfigPath);
+    if (!limitsMatch(bridge, pluginConfig)) {
+      error("limit-binding", "OpenClaw and Savana bridge limits do not match.");
+    }
     await checkBridgeFiles(bridge);
     await checkCertificateBinding(bridge);
   } catch (failure) {
@@ -201,6 +206,8 @@ interface BridgeDeploymentConfig {
   readonly max_steps: number;
   readonly max_replans: number;
   readonly turn_timeout_seconds: number;
+  readonly approval_timeout_seconds: number;
+  readonly release_delivery_timeout_seconds: number;
 }
 
 async function readBridgeConfig(configPath: string): Promise<BridgeDeploymentConfig> {
@@ -246,7 +253,49 @@ async function readBridgeConfig(configPath: string): Promise<BridgeDeploymentCon
   ) {
     throw new DoctorFailure("bridge-config");
   }
+  const maxSteps = record["max_steps"];
+  const maxReplans = record["max_replans"];
+  const turnTimeout = record["turn_timeout_seconds"];
+  const approvalTimeout = record["approval_timeout_seconds"];
+  const releaseTimeout = record["release_delivery_timeout_seconds"];
+  if (
+    !Number.isInteger(maxSteps) ||
+    (maxSteps as number) < 1 ||
+    (maxSteps as number) > 64 ||
+    !Number.isInteger(maxReplans) ||
+    (maxReplans as number) < 1 ||
+    (maxReplans as number) > 8 ||
+    !boundedTimeout(turnTimeout, 300) ||
+    (turnTimeout as number) < 1 ||
+    !boundedTimeout(approvalTimeout, 300) ||
+    !boundedTimeout(releaseTimeout, 60)
+  ) {
+    throw new DoctorFailure("bridge-config");
+  }
   return record as unknown as BridgeDeploymentConfig;
+}
+
+function boundedTimeout(value: unknown, maximum: number): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    value > 0 &&
+    value <= maximum
+  );
+}
+
+function limitsMatch(
+  bridge: BridgeDeploymentConfig,
+  plugin: SavanaPluginConfig,
+): boolean {
+  return (
+    bridge.max_steps === plugin.maxSteps &&
+    bridge.max_replans === plugin.maxReplans &&
+    bridge.turn_timeout_seconds === plugin.turnTimeoutSeconds &&
+    bridge.approval_timeout_seconds === plugin.approvalTimeoutSeconds &&
+    bridge.release_delivery_timeout_seconds ===
+      plugin.releaseDeliveryTimeoutSeconds
+  );
 }
 
 async function checkBridgeFiles(config: BridgeDeploymentConfig): Promise<void> {

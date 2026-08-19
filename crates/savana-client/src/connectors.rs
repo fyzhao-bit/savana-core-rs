@@ -196,7 +196,8 @@ fn decode_registry_snapshot(bytes: &[u8]) -> Result<Vec<Digest32V2>, SavanaError
     }
     Ok(entries
         .into_iter()
-        .filter_map(|(id, active)| active.then(|| Digest32V2::new(id)))
+        .filter(|(_, active)| *active)
+        .map(|(id, _)| Digest32V2::new(id))
         .collect())
 }
 

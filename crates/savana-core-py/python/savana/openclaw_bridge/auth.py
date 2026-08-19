@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import math
 import os
 import socket
 import stat
@@ -24,9 +25,17 @@ class AuthBrokerError(Exception):
 class WebAuthnBroker:
     """Synchronous SDK callback backed only by an inherited Unix socket."""
 
-    def __init__(self, inherited_fd: int) -> None:
-        if type(inherited_fd) is not int or inherited_fd < 3:
+    def __init__(self, inherited_fd: int, *, timeout_seconds: float = 30.0) -> None:
+        if (
+            type(inherited_fd) is not int
+            or inherited_fd < 3
+            or isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(timeout_seconds)
+            or not 0 < timeout_seconds <= 300
+        ):
             raise AuthBrokerError("WebAuthn broker is unavailable")
+        channel: socket.socket | None = None
         try:
             metadata = os.fstat(inherited_fd)
             if not stat.S_ISSOCK(metadata.st_mode):
@@ -39,7 +48,10 @@ class WebAuthnBroker:
             ):
                 channel.close()
                 raise AuthBrokerError("WebAuthn broker is unavailable")
+            channel.settimeout(float(timeout_seconds))
         except (OSError, ValueError) as error:
+            if channel is not None:
+                channel.close()
             raise AuthBrokerError("WebAuthn broker is unavailable") from error
         self._channel = channel
         self._lock = threading.Lock()

@@ -346,6 +346,8 @@ async def test_only_durably_claimed_mtls_payload_becomes_assistant_text(
         max_steps=8,
         max_replans=2,
         turn_timeout_seconds=3.0,
+        approval_timeout_seconds=2.0,
+        release_delivery_timeout_seconds=1.0,
         emit=writer,
     )
     process = BridgeProcess(runtime, writer)

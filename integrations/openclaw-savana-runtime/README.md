@@ -89,9 +89,15 @@ The file is closed-schema JSON and must be mode `0600` on POSIX:
   "expected_client_spki_pin_path": "/var/lib/savana/openclaw/execd-client-spki.sha256",
   "max_steps": 24,
   "max_replans": 4,
-  "turn_timeout_seconds": 120
+  "turn_timeout_seconds": 120,
+  "approval_timeout_seconds": 120,
+  "release_delivery_timeout_seconds": 30
 }
 ```
+
+The five limits above must exactly match the corresponding values in the
+OpenClaw plugin configuration. The doctor check rejects drift between the two
+closed configurations.
 
 `release_listen_port` is fixed, nonzero, and exclusive to this product. The
 deployment-shipped `savana-openclaw-delivery` connector and signed
