@@ -81,6 +81,7 @@ async function deployment() {
     plugins: {
       enabled: true,
       allow: ["savana"],
+      slots: { memory: "none" },
       entries: { savana: { enabled: true, config: { ...plugin } } },
     },
     agents: {
@@ -89,9 +90,19 @@ async function deployment() {
           id: "personal",
           model: { primary: "savana/agent" },
           models: { "savana/agent": { agentRuntime: { id: "savana" } } },
+          memorySearch: { enabled: false },
           tools: { deny: ["*"] },
         },
       ],
+    },
+    session: {
+      maintenance: {
+        mode: "enforce",
+        pruneAfter: "7d",
+        maxEntries: 100,
+        resetArchiveRetention: "7d",
+        maxDiskBytes: 64 * 1024 * 1024,
+      },
     },
   } satisfies OpenClawConfig;
   return { config, files, plugin };
@@ -168,6 +179,33 @@ describe("Savana OpenClaw doctor", () => {
     );
     expect(findings.map((finding) => finding.requirement)).toContain(
       "limit-binding",
+    );
+  });
+
+  it("rejects unbounded OpenClaw memory and transcript retention", async () => {
+    const { config, plugin } = await deployment();
+    const unsafe = {
+      ...config,
+      plugins: { ...config.plugins, slots: { memory: "memory-core" } },
+      agents: {
+        list: config.agents.list.map((agent) => ({
+          ...agent,
+          memorySearch: { enabled: true },
+        })),
+      },
+      session: { maintenance: { mode: "warn", pruneAfter: "30d" } },
+    } as unknown as OpenClawConfig;
+    const findings = await runSavanaDoctor(unsafe, plugin, async () => ({
+      activeConnectorCount: 1,
+      releaseTargetUrl: "https://provider.example:43191/savana/final-release",
+      serviceOrigins: [
+        "http://localhost:8768",
+        "http://localhost:8767",
+        "http://localhost:8766",
+      ],
+    }));
+    expect(findings.map((finding) => finding.requirement)).toEqual(
+      expect.arrayContaining(["memory-disabled", "transcript-retention"]),
     );
   });
 });

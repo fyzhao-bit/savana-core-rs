@@ -17,6 +17,7 @@ import { createSavanaHarness } from "./src/harness.js";
 import {
   SAVANA_DOCTOR_CHECK_ID,
   createSavanaHealthCheck,
+  runSavanaDoctor,
 } from "./src/doctor.js";
 import { savanaProvider } from "./src/provider.js";
 
@@ -46,19 +47,60 @@ export default definePluginEntry({
     const bridge = new BridgeProcess(config, {
       diagnostic: (code) => api.logger.warn(`savana runtime: ${code}`),
     });
+    const doctorProbe = async () => {
+      const doctorBridge = new BridgeProcess(config, { doctorOnly: true });
+      try {
+        await doctorBridge.start();
+        return await doctorBridge.doctor();
+      } finally {
+        await doctorBridge.dispose();
+      }
+    };
     if (getHealthCheck(SAVANA_DOCTOR_CHECK_ID) === undefined) {
       registerHealthCheck(
-        createSavanaHealthCheck(config, async () => {
-          const doctorBridge = new BridgeProcess(config, { doctorOnly: true });
-          try {
-            await doctorBridge.start();
-            return await doctorBridge.doctor();
-          } finally {
-            await doctorBridge.dispose();
-          }
-        }),
+        createSavanaHealthCheck(config, doctorProbe),
       );
     }
+    api.registerCli(
+      ({ program }) => {
+        const savana = program
+          .command("savana")
+          .description("Operate the Savana privacy runtime");
+        savana
+          .command("doctor")
+          .description("Run the fail-closed Savana runtime preflight")
+          .option("--json", "Emit machine-readable JSON")
+          .action(async (options: { json?: boolean }) => {
+            const findings = await runSavanaDoctor(api.config, config, doctorProbe);
+            const report = {
+              ok: findings.length === 0,
+              checkId: SAVANA_DOCTOR_CHECK_ID,
+              findings,
+            };
+            if (options.json === true) {
+              process.stdout.write(`${JSON.stringify(report)}\n`);
+            } else if (report.ok) {
+              process.stdout.write("Savana runtime preflight passed.\n");
+            } else {
+              for (const finding of findings) {
+                process.stderr.write(
+                  `Savana preflight: ${finding.requirement ?? finding.checkId}: ${finding.message}\n`,
+                );
+              }
+            }
+            process.exitCode = report.ok ? 0 : 1;
+          });
+      },
+      {
+        descriptors: [
+          {
+            name: "savana",
+            description: "Operate the Savana privacy runtime",
+            hasSubcommands: true,
+          },
+        ],
+      },
+    );
     api.registerProvider(savanaProvider);
     api.registerAgentHarness(createSavanaHarness(bridge));
   },

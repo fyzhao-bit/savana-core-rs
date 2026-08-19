@@ -204,6 +204,7 @@ describe("provider and plugin registration", () => {
     const providers: unknown[] = [];
     const harnesses: unknown[] = [];
     const registerTool = vi.fn();
+    const registerCli = vi.fn();
     plugin.register?.({
       pluginConfig: {
         pythonExecutable: "/opt/savana/bin/python3",
@@ -220,11 +221,13 @@ describe("provider and plugin registration", () => {
       },
       registerProvider: (provider: unknown) => providers.push(provider),
       registerAgentHarness: (harness: unknown) => harnesses.push(harness),
+      registerCli,
       registerTool,
     } as unknown as OpenClawPluginApi);
 
     expect(providers).toHaveLength(1);
     expect(harnesses).toHaveLength(1);
+    expect(registerCli).toHaveBeenCalledOnce();
     expect(registerTool).not.toHaveBeenCalled();
   });
 });

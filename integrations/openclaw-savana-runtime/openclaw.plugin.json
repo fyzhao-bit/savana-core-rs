@@ -1,5 +1,17 @@
 {
   "id": "savana",
+  "activation": {
+    "onStartup": true,
+    "onCommands": [
+      "savana"
+    ]
+  },
+  "commandAliases": [
+    {
+      "name": "savana",
+      "kind": "cli"
+    }
+  ],
   "providers": [
     "savana"
   ],

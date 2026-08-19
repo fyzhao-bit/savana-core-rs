@@ -144,6 +144,15 @@ function checkOpenClawSelection(config: OpenClawConfig, error: AddError): void {
   const selected = [defaults, ...agents].filter((agent) =>
     modelSelection(agent?.model).primary === "savana/agent",
   );
+  if (!memoryDisabled(config, selected)) {
+    error("memory-disabled", "OpenClaw memory must be disabled for the Savana agent.");
+  }
+  if (!boundedTranscriptRetention(config)) {
+    error(
+      "transcript-retention",
+      "OpenClaw transcript retention must use the bounded Savana profile.",
+    );
+  }
   if (selected.length === 0) {
     error("model-selection", "No agent explicitly selects savana/agent.");
     return;
@@ -161,6 +170,65 @@ function checkOpenClawSelection(config: OpenClawConfig, error: AddError): void {
       error("tools-denied", "OpenClaw tools must be denied for every Savana agent.");
     }
   }
+}
+
+function memoryDisabled(
+  config: OpenClawConfig,
+  agents: readonly unknown[],
+): boolean {
+  const plugins = config.plugins as
+    | { slots?: { memory?: unknown } }
+    | undefined;
+  return (
+    plugins?.slots?.memory === "none" &&
+    agents.every((agent) => {
+      if (agent === null || typeof agent !== "object" || Array.isArray(agent)) {
+        return false;
+      }
+      const memorySearch = (agent as { memorySearch?: unknown }).memorySearch;
+      return (
+        memorySearch !== null &&
+        typeof memorySearch === "object" &&
+        !Array.isArray(memorySearch) &&
+        (memorySearch as { enabled?: unknown }).enabled === false
+      );
+    })
+  );
+}
+
+function boundedTranscriptRetention(config: OpenClawConfig): boolean {
+  const session = (config as { session?: unknown }).session;
+  if (session === null || typeof session !== "object" || Array.isArray(session)) {
+    return false;
+  }
+  const maintenance = (session as { maintenance?: unknown }).maintenance;
+  if (
+    maintenance === null ||
+    typeof maintenance !== "object" ||
+    Array.isArray(maintenance)
+  ) {
+    return false;
+  }
+  const policy = maintenance as Record<string, unknown>;
+  return (
+    policy["mode"] === "enforce" &&
+    durationAtMostSevenDays(policy["pruneAfter"]) &&
+    durationAtMostSevenDays(policy["resetArchiveRetention"]) &&
+    boundedPositiveInteger(policy["maxEntries"], 100) &&
+    boundedPositiveInteger(policy["maxDiskBytes"], 64 * 1024 * 1024)
+  );
+}
+
+function durationAtMostSevenDays(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const match = /^(\d+)d$/.exec(value);
+  if (match === null) return false;
+  const days = Number(match[1]);
+  return Number.isSafeInteger(days) && days >= 1 && days <= 7;
+}
+
+function boundedPositiveInteger(value: unknown, maximum: number): boolean {
+  return Number.isSafeInteger(value) && (value as number) >= 1 && (value as number) <= maximum;
 }
 
 function modelSelection(value: unknown): { primary?: string; fallbacks: readonly string[] } {

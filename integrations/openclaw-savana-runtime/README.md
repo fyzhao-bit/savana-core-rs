@@ -130,6 +130,7 @@ top-level MCP configuration:
   "plugins": {
     "enabled": true,
     "allow": ["savana"],
+    "slots": { "memory": "none" },
     "entries": {
       "savana": {
         "enabled": true,
@@ -157,9 +158,19 @@ top-level MCP configuration:
         "models": {
           "savana/agent": { "agentRuntime": { "id": "savana" } }
         },
+        "memorySearch": { "enabled": false },
         "tools": { "deny": ["*"] }
       }
     ]
+  },
+  "session": {
+    "maintenance": {
+      "mode": "enforce",
+      "pruneAfter": "7d",
+      "maxEntries": 100,
+      "resetArchiveRetention": "7d",
+      "maxDiskBytes": 67108864
+    }
   }
 }
 ```
@@ -170,20 +181,25 @@ fails closed if OpenClaw supplies them at runtime.
 
 ## Preflight
 
-Run the registered read-only OpenClaw health check before starting the
-Gateway:
+Run the plugin-owned read-only preflight before starting the Gateway:
 
 ```sh
-openclaw doctor --lint --only savana.runtime --json
+openclaw savana doctor --json
 ```
 
+The report keeps the stable check id `savana.runtime`. The pinned OpenClaw CLI
+does not load external runtime-registered checks into its core
+`doctor --lint --only` registry, so this package exposes the same check through
+its explicitly activated `savana` operator command.
+
 The check verifies the exact versions, plugin/model/harness selection, no
-fallback, tool/MCP denial, private files, FD 3 broker binding, fixed service
-origins, matching receiver certificate/private key, nonzero client SPKI pin,
-fixed release URL, and at least one active connector returned by a fresh
-authenticated Savana session. Its probe uses `--doctor-config`, so it does not
-bind or compete with the production release port. Findings contain only stable
-check names and generic messages.
+fallback, tool/MCP denial, disabled OpenClaw memory, bounded transcript
+retention, private files, FD 3 broker binding, fixed service origins, matching
+receiver certificate/private key, nonzero client SPKI pin, fixed release URL,
+and at least one active connector returned by a fresh authenticated Savana
+session. Its probe uses `--doctor-config`, so it does not bind or compete with
+the production release port. Findings contain only stable check names and
+generic messages.
 
 ## Reset and recovery
 
