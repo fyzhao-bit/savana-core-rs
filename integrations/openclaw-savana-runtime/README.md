@@ -201,6 +201,12 @@ session. Its probe uses `--doctor-config`, so it does not bind or compete with
 the production release port. Findings contain only stable check names and
 generic messages.
 
+The current macOS development service graph does not yet satisfy the formal
+release handoff. The exact transport conflict and the reviewed designs that
+can clear it are recorded in
+[`docs/openclaw-deployment-acceptance-gate.md`](../../docs/openclaw-deployment-acceptance-gate.md).
+Do not start the Gateway while this gate is active.
+
 ## Reset and recovery
 
 OpenClaw reset closes the corresponding native Savana session and discards the
