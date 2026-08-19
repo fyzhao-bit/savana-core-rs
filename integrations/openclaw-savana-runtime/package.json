@@ -1,0 +1,33 @@
+{
+  "name": "@savana/openclaw-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Fail-closed OpenClaw agent harness backed by the Savana privacy kernel",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fyzhao-bit/savana-core-rs.git",
+    "directory": "integrations/openclaw-savana-runtime"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0"
+  },
+  "peerDependencies": {
+    "openclaw": "2026.7.1-2"
+  },
+  "devDependencies": {
+    "@types/node": "24.3.0",
+    "openclaw": "2026.7.1-2",
+    "typescript": "5.9.2",
+    "vitest": "3.2.4"
+  }
+}

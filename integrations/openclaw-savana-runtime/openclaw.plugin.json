@@ -1,0 +1,81 @@
+{
+  "id": "savana",
+  "providers": [
+    "savana"
+  ],
+  "nonSecretAuthMarkers": [
+    "savana-native-runtime"
+  ],
+  "syntheticAuthRefs": [
+    "savana"
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "pythonExecutable",
+      "bridgeConfigPath",
+      "protocolVersion",
+      "bridgeVersion",
+      "openclawVersion",
+      "maxSteps",
+      "maxReplans",
+      "turnTimeoutSeconds",
+      "approvalTimeoutSeconds",
+      "releaseDeliveryTimeoutSeconds",
+      "logLevel"
+    ],
+    "properties": {
+      "pythonExecutable": {
+        "type": "string"
+      },
+      "bridgeConfigPath": {
+        "type": "string"
+      },
+      "bridgeWorkingDirectory": {
+        "type": "string"
+      },
+      "protocolVersion": {
+        "const": 1
+      },
+      "bridgeVersion": {
+        "const": "0.1.0"
+      },
+      "openclawVersion": {
+        "const": "2026.7.1-2"
+      },
+      "maxSteps": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 64
+      },
+      "maxReplans": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 8
+      },
+      "turnTimeoutSeconds": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "maximum": 300
+      },
+      "approvalTimeoutSeconds": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "maximum": 300
+      },
+      "releaseDeliveryTimeoutSeconds": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "maximum": 60
+      },
+      "logLevel": {
+        "enum": [
+          "error",
+          "warn",
+          "info"
+        ]
+      }
+    }
+  }
+}
