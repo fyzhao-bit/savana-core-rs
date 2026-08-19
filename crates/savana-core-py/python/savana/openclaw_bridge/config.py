@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import os
-from pathlib import Path
 import re
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
-
 
 MAX_CONFIG_BYTES = 64 * 1024
 CONFIG_VERSION = 1
@@ -16,7 +15,6 @@ _CONFIG_KEYS = frozenset(
     {
         "version",
         "identity_path",
-        "bootstrap_path",
         "webauthn_fd",
         "release_journal_path",
         "release_canonical_host",
@@ -40,7 +38,6 @@ class ConfigError(Exception):
 class BridgeConfig:
     version: int
     identity_path: Path
-    bootstrap_path: Path
     webauthn_fd: int
     release_journal_path: Path
     release_canonical_host: str
@@ -53,7 +50,7 @@ class BridgeConfig:
     turn_timeout_seconds: float
 
     @classmethod
-    def load(cls, path: str | os.PathLike[str]) -> "BridgeConfig":
+    def load(cls, path: str | os.PathLike[str]) -> BridgeConfig:
         path = Path(path)
         _require_absolute(path)
         _require_private_regular_file(path)
@@ -66,7 +63,12 @@ class BridgeConfig:
                 encoded.decode("utf-8", errors="strict"),
                 object_pairs_hook=_unique_object,
             )
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ConfigError) as error:
+        except (
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            ConfigError,
+        ) as error:
             raise ConfigError("bridge configuration is invalid") from error
         if not isinstance(value, dict) or frozenset(value) != _CONFIG_KEYS:
             raise ConfigError("bridge configuration is invalid")
@@ -77,7 +79,6 @@ class BridgeConfig:
             name: Path(value[name]) if isinstance(value[name], str) else None
             for name in (
                 "identity_path",
-                "bootstrap_path",
                 "release_journal_path",
                 "client_root_certificate_path",
                 "server_certificate_path",
@@ -91,7 +92,6 @@ class BridgeConfig:
             _require_absolute(item)
         for name in (
             "identity_path",
-            "bootstrap_path",
             "server_private_key_path",
             "expected_client_spki_pin_path",
         ):
@@ -124,7 +124,6 @@ class BridgeConfig:
         return cls(
             version=CONFIG_VERSION,
             identity_path=paths["identity_path"],
-            bootstrap_path=paths["bootstrap_path"],
             webauthn_fd=webauthn_fd,
             release_journal_path=paths["release_journal_path"],
             release_canonical_host=host.lower(),

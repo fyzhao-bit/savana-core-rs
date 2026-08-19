@@ -3,7 +3,6 @@ import os
 from pathlib import Path
 
 import pytest
-
 from savana.openclaw_bridge.config import BridgeConfig, ConfigError
 from savana.openclaw_bridge.protocol import (
     MAX_INBOUND_TEXT_BYTES,
@@ -93,7 +92,7 @@ def test_closed_inbound_union_and_monotonic_request_ids():
 @pytest.mark.parametrize(
     "line",
     [
-        b'not-json\n',
+        b"not-json\n",
         b'{"protocol_version":1,"request_id":1,"type":"initialize","openclaw_version":"2026.7.1-2","plugin_version":NaN}\n',
         b'{"protocol_version":1,"protocol_version":1,"request_id":1,"type":"initialize","openclaw_version":"2026.7.1-2","plugin_version":"0.1.0"}\n',
         wire(
@@ -192,7 +191,6 @@ def valid_config(tmp_path):
     paths = {}
     for name in (
         "identity",
-        "bootstrap",
         "client_root",
         "server_certificate",
         "server_private_key",
@@ -204,7 +202,6 @@ def valid_config(tmp_path):
     return {
         "version": 1,
         "identity_path": paths["identity"],
-        "bootstrap_path": paths["bootstrap"],
         "webauthn_fd": 7,
         "release_journal_path": str(tmp_path / "release-journal.cbor"),
         "release_canonical_host": "provider.example",

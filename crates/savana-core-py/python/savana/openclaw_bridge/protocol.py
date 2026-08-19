@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
+from collections.abc import Mapping
+from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Mapping
-
+from typing import Any
 
 PROTOCOL_VERSION = 1
 OPENCLAW_VERSION = "2026.7.1-2"
@@ -93,21 +93,13 @@ _OUTBOUND_KEYS = {
             "deadline_unix_ms",
         }
     ),
-    "turn.released": frozenset(
-        {"protocol_version", "request_id", "type", "text"}
-    ),
-    "turn.failed": frozenset(
-        {"protocol_version", "request_id", "type", "code"}
-    ),
-    "session.closed": frozenset(
-        {"protocol_version", "request_id", "type"}
-    ),
+    "turn.released": frozenset({"protocol_version", "request_id", "type", "text"}),
+    "turn.failed": frozenset({"protocol_version", "request_id", "type", "code"}),
+    "session.closed": frozenset({"protocol_version", "request_id", "type"}),
 }
 
 _EVENT_KEYS = {
-    "planning": frozenset(
-        {"protocol_version", "request_id", "type", "event"}
-    ),
+    "planning": frozenset({"protocol_version", "request_id", "type", "event"}),
     "step_started": frozenset(
         {"protocol_version", "request_id", "type", "event", "index"}
     ),
@@ -127,12 +119,8 @@ _EVENT_KEYS = {
     "replanning": frozenset(
         {"protocol_version", "request_id", "type", "event", "count"}
     ),
-    "refused": frozenset(
-        {"protocol_version", "request_id", "type", "event"}
-    ),
-    "completed": frozenset(
-        {"protocol_version", "request_id", "type", "event"}
-    ),
+    "refused": frozenset({"protocol_version", "request_id", "type", "event"}),
+    "completed": frozenset({"protocol_version", "request_id", "type", "event"}),
 }
 
 _PURPOSES = {
@@ -221,13 +209,16 @@ def encode_outbound(message: Mapping[str, Any]) -> bytes:
     _require_request_id(value.get("request_id"))
     _validate_outbound_payload(kind, value)
     try:
-        encoded = json.dumps(
-            value,
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8") + b"\n"
+        encoded = (
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            + b"\n"
+        )
     except (TypeError, ValueError, UnicodeEncodeError) as error:
         raise ProtocolError("invalid outbound bridge message") from error
     if len(encoded) > MAX_LINE_BYTES:
@@ -251,7 +242,12 @@ def _decode_json_line(line: bytes) -> dict[str, Any]:
             object_pairs_hook=_closed_object,
             parse_constant=_reject_constant,
         )
-    except (UnicodeDecodeError, UnicodeEncodeError, json.JSONDecodeError, ProtocolError) as error:
+    except (
+        UnicodeDecodeError,
+        UnicodeEncodeError,
+        json.JSONDecodeError,
+        ProtocolError,
+    ) as error:
         raise ProtocolError("invalid bridge JSON") from error
     if not isinstance(value, dict):
         raise ProtocolError("bridge message must be an object")
@@ -365,9 +361,10 @@ def _validate_outbound_payload(kind: str, value: Mapping[str, Any]) -> None:
             raise ProtocolError("invalid approval deadline")
     elif kind == "turn.released":
         _bounded_string(value["text"], MAX_RELEASED_TEXT_BYTES)
-    elif kind == "turn.failed":
-        if not isinstance(value["code"], str) or value["code"] not in _FAILURE_CODES:
-            raise ProtocolError("invalid bridge failure code")
+    elif kind == "turn.failed" and (
+        not isinstance(value["code"], str) or value["code"] not in _FAILURE_CODES
+    ):
+        raise ProtocolError("invalid bridge failure code")
 
 
 def main() -> int:
