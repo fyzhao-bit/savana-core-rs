@@ -10,7 +10,7 @@
     "noFallthroughCasesInSwitch": true,
     "noPropertyAccessFromIndexSignature": true,
     "verbatimModuleSyntax": true,
-    "skipLibCheck": false,
+    "skipLibCheck": true,
     "types": [
       "node",
       "vitest/globals"
