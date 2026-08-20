@@ -1,62 +1,78 @@
 # OpenClaw production deployment acceptance gate
 
-Status: blocked pending a reviewed transport design. This is a fail-closed
-release gate, not a test bypass or a missing OpenClaw configuration value.
+Status: reviewed design 1 is implemented in source. Live installation and
+hardware-backed approval evidence remain pending. This is a fail-closed
+release gate, not a test bypass.
 
-## Observable implementation facts
+## Implemented security boundary
 
-The current execd process owns one
-`VerifiedRustlsProviderTransportV2`. Its deployment manifest pins one socket
-address, canonical URL, TLS server identity, client credential, and ALPN.
+Execd now supports the closed `split-final-release` routing mode. It constructs
+two independent `VerifiedRustlsProviderTransportV2` instances from signed
+bootstrap material and separate private-key credentials.
 
-Tool execution may resolve a connector descriptor, but
-`verify_https_connector_target_v2` still requires that descriptor to name the
-same provisioned canonical URL, TLS pin, hostname, and port. Final release does
-not resolve a connector descriptor: `connector_dispatch_for_subject` returns a
-connector only for `ToolExecution`, so `FinalRelease` uses the same global
-deployment provider target directly.
+The runtime accepts only `(ToolExecution, connector present)` and
+`(FinalRelease, connector absent)`. It validates that pairing before locking or
+calling either transport. Tool execution selects the tool provider and final
+release selects the release provider. Each worker descriptor is issued with
+the credential identity of the selected transport.
 
-The OpenClaw release receiver validates the canonical provider frame, mTLS
-client, URL, server SPKI pin, reservation, and payload binding. The frame
-contains execution and dispatch digests, but no receiver-verifiable dispatch
-kind. Consequently the receiver cannot distinguish a tool provider frame from
-a final-release provider frame. Its global one-release reservation is safe
-only when no tool frame can arrive at that endpoint.
+The macOS development material keeps the JARVIS tool provider at port 9444 and
+adds the distinct release identity
+`https://release.savana-development.invalid:43191/savana/final-release`, with
+separate server/client certificates and an execd client private key.
 
-The current macOS development deployment additionally pins the provider to
-`https://provider.savana-development.invalid:9444/`; the JARVIS provider owns
-that listener. Its connector registry starts from an empty genesis and ships
-with the connector update authority disabled. The installed JARVIS runtime
-also does not expose the product-owned inherited-FD WebAuthn/bootstrap broker
-required by the OpenClaw bridge.
+The OpenClaw chat protocol contains neither `approval.request` nor
+`approval.answer`. Every SDK approval callback sends a fresh
+`approval.decide` request on the inherited product broker socket. Only bounded
+`approval_required` lifecycle state crosses into OpenClaw; display text and
+correlation IDs stay inside the trusted Savana side.
 
-## Why startup is refused
+## Automated source evidence
 
-Repointing the single provider to the OpenClaw receiver would disable the
-existing JARVIS connector provider. Allowing both tool and final-release frames
-to reach the receiver could let an unrelated tool frame claim the sole release
-reservation. Proxying by guessing from plaintext payload shape would not be a
-cryptographic dispatch-kind proof.
+- Router tests prove the two dispatch kinds select different manifest-bound
+  targets and reject both kind/connector mismatches before transport access.
+- Bootstrap tests prove legacy defaulting and fail-closed split requirements.
+- Python tests prove one fresh broker decision per callback, absolute deadline
+  and cancellation behavior, terminal denial, and no chat approval command.
+  The integration fixture exercises the real framed broker socket and real
+  Rust mTLS/durable release receiver, but intentionally uses SDK/session test
+  doubles; it is not evidence of a live authenticated dispatch or hardware
+  WebAuthn ceremony.
+- TypeScript tests prove approval control messages poison the bridge and chat
+  `queueMessage` cannot approve.
+- The doctor verifies the root-owned execd bootstrap and recomputes the final
+  provider server SPKI, CA/client digests, client SPKI, credential identity,
+  and endpoint binding after an authenticated live SDK probe.
 
-Starting OpenClaw while any of those conditions remains true would contradict
-the released-only security claim. `openclaw savana doctor --json` therefore
-continues to fail closed.
+The release receiver still validates the canonical provider frame, TLS 1.3,
+mTLS client, URL, server SPKI pin, reservation and payload binding. Provider
+wire V2 and public service ports 8765–8768 are unchanged.
 
-## Reviewed designs that can clear the gate
+## Remaining live acceptance evidence
 
-One of these mutually exclusive designs must be approved and implemented:
+Before enabling the production Gateway, operators must record all of:
 
-1. Add a separately manifest-bound final-release transport selected from the
-   already verified `FinalRelease` dispatch kind. This preserves the existing
-   tool provider but changes execd configuration/runtime behavior and requires
-   a frozen-boundary review.
-2. Ship an OpenClaw-only Savana deployment with no tool connectors and pin its
-   sole provider to the Rust release receiver. This requires no wire change,
-   but it does not satisfy the intended MCP-capable personal assistant.
-3. Extend the provider wire with a signed, receiver-verifiable dispatch kind
-   and place a Rust multiplexer at the pinned endpoint. This is a wire-version
-   change and requires a new protocol design and compatibility plan.
+1. Install and restart the reviewed execd build with the signed
+   `split-final-release` bootstrap and both private-key credentials. On
+   systemd, install
+   `deploy/systemd/savana-execd-split-final-release.conf` as an execd service
+   drop-in; the base unit intentionally remains compatible with
+   `legacy-shared` and does not request the second credential.
+2. Start the Rust final-release receiver on the fixed loopback port with its
+   reviewed server identity and execd client pin.
+3. Provide FD 3 from the product-owned broker and demonstrate three sequential
+   trusted-UI decisions—two tool calls and final release—each followed by the
+   unchanged Approvald hardware-WebAuthn ceremony.
+4. Demonstrate denial, window close and timeout each terminate the whole agent
+   loop without retry, replanning, tool substitution or fallback.
+5. Run `openclaw savana doctor --json`, archive a zero-finding report and
+   complete the frozen-boundary hash review.
 
-Until one design clears review, do not weaken the doctor, fabricate deployment
-credentials, share bootstrap tokens through OpenClaw configuration, or start
-the Gateway with a fallback model/tool loop.
+The live records in steps 3 and 4—not the source integration fixture—are the
+acceptance evidence for authenticated execd dispatch and the unchanged
+Approvald hardware-WebAuthn sequence.
+
+Until those live checks pass, do not weaken the doctor, fabricate deployment
+credentials, expose approval displays or IDs to OpenClaw, share bootstrap
+tokens through configuration, or start the Gateway with a fallback model/tool
+loop.

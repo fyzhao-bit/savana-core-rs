@@ -58,37 +58,39 @@ def test_closed_inbound_union_and_monotonic_request_ids():
                 text="帮我整理今天的安排",
             )
         ),
-        decoder.decode_line(
-            wire(
-                "approval.answer",
-                3,
-                turn_request_id=2,
-                approval_id="approval-1",
-                approved=True,
-            )
-        ),
-        decoder.decode_line(wire("turn.cancel", 4, turn_request_id=2)),
+        decoder.decode_line(wire("turn.cancel", 3, turn_request_id=2)),
         decoder.decode_line(
             wire(
                 "session.reset",
-                5,
+                4,
                 agent_id="personal",
                 session_id="session-1",
             )
         ),
-        decoder.decode_line(wire("doctor.request", 6)),
-        decoder.decode_line(wire("shutdown", 7)),
+        decoder.decode_line(wire("doctor.request", 5)),
+        decoder.decode_line(wire("shutdown", 6)),
     ]
     assert [message.type for message in messages] == [
         "turn.start",
-        "approval.answer",
         "turn.cancel",
         "session.reset",
         "doctor.request",
         "shutdown",
     ]
     with pytest.raises(ProtocolError):
-        decoder.decode_line(wire("shutdown", 8))
+        decoder.decode_line(wire("shutdown", 7))
+
+    decoder = initialized_decoder()
+    with pytest.raises(ProtocolError):
+        decoder.decode_line(
+            wire(
+                "approval.answer",
+                2,
+                turn_request_id=1,
+                approval_id="approval-1",
+                approved=True,
+            )
+        )
 
 
 @pytest.mark.parametrize(
@@ -197,6 +199,18 @@ def test_outbound_union_is_canonical_bounded_and_closed():
                 "detail": "private detail",
             }
         )
+    with pytest.raises(ProtocolError):
+        encode_outbound(
+            {
+                "protocol_version": PROTOCOL_VERSION,
+                "request_id": 9,
+                "type": "approval.request",
+                "approval_id": "chat-controlled",
+                "display": "must never cross the OpenClaw bridge",
+                "purpose": "tool_execution",
+                "deadline_unix_ms": 1,
+            }
+        )
 
 
 def write_private(path: Path, data: bytes = b"x"):
@@ -208,6 +222,7 @@ def valid_config(tmp_path):
     paths = {}
     for name in (
         "identity",
+        "execd_bootstrap",
         "client_root",
         "server_certificate",
         "server_private_key",
@@ -219,6 +234,7 @@ def valid_config(tmp_path):
     return {
         "version": 1,
         "identity_path": paths["identity"],
+        "execd_bootstrap_path": paths["execd_bootstrap"],
         "webauthn_fd": 3,
         "release_journal_path": str(tmp_path / "release-journal.cbor"),
         "release_canonical_host": "provider.example",
@@ -241,6 +257,7 @@ def test_config_is_closed_absolute_and_private(tmp_path):
     write_private(config_path, json.dumps(payload).encode())
     config = BridgeConfig.load(config_path)
     assert config.version == 1
+    assert config.execd_bootstrap_path == Path(payload["execd_bootstrap_path"])
     assert config.webauthn_fd == 3
     assert config.max_steps == 8
     assert config.approval_timeout_seconds == 30.0

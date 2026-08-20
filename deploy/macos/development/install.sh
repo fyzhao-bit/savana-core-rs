@@ -655,6 +655,10 @@ issue_runtime_certificate provider-server provider.savana-development.invalid \
   "$tls_profile_directory/provider-server.ext"
 issue_runtime_certificate provider-client savana-execd-development \
   "$tls_profile_directory/client.ext"
+issue_runtime_certificate final-release-server release.savana-development.invalid \
+  "$tls_profile_directory/final-release-server.ext"
+issue_runtime_certificate final-release-client savana-execd-final-release-development \
+  "$tls_profile_directory/client.ext"
 
 attestation_aaguid=534156414e4144455631000000000001
 attestation_root_measurement=$(
@@ -676,6 +680,10 @@ attestation_root_measurement=$(
   -pubkey -noout \
   | /usr/bin/openssl pkey -pubin -outform DER \
     -out "$temporary_directory/provider-server.spki.der"
+/usr/bin/openssl x509 -in "$temporary_directory/final-release-server.cert.pem" \
+  -pubkey -noout \
+  | /usr/bin/openssl pkey -pubin -outform DER \
+    -out "$temporary_directory/final-release-server.spki.der"
 
 /usr/bin/install -o root -g wheel -m 0444 \
   "$temporary_directory/runtime-ca.cert.der" \
@@ -692,6 +700,12 @@ attestation_root_measurement=$(
 /usr/bin/install -o root -g wheel -m 0444 \
   "$temporary_directory/provider-client.cert.der" \
   "$install_root/config/tls/provider-client-v2.der"
+/usr/bin/install -o root -g wheel -m 0444 \
+  "$temporary_directory/final-release-server.spki.der" \
+  "$install_root/config/tls/final-release-server-spki-v2.der"
+/usr/bin/install -o root -g wheel -m 0444 \
+  "$temporary_directory/final-release-client.cert.der" \
+  "$install_root/config/tls/final-release-client-v2.der"
 /usr/bin/install -o root -g wheel -m 0444 \
   "$temporary_directory/webauthn-attestation-root.cert.der" \
   "$install_root/config/approvald/development-webauthn-attestation-root-v2.der"
@@ -717,10 +731,14 @@ attestation_root_measurement=$(
 /usr/bin/install -o root -g _savana_exec_dev -m 0440 \
   "$temporary_directory/provider-client.key.pk8" \
   "$install_root/credentials/execd/provider-tls-private-key-v2.der"
+/usr/bin/install -o root -g _savana_exec_dev -m 0440 \
+  "$temporary_directory/final-release-client.key.pk8" \
+  "$install_root/credentials/execd/final-release-provider-tls-private-key-v2.der"
 
 for leaf in runtime-ca.cert.pem planner-server.cert.pem planner-server.key.pem \
   mapper-server.cert.pem mapper-server.key.pem \
-  provider-server.cert.pem provider-server.key.pem; do
+  provider-server.cert.pem provider-server.key.pem \
+  final-release-server.cert.pem final-release-server.key.pem; do
   /usr/bin/install -o root -g _savana_jarvis_dev -m 0440 \
     "$temporary_directory/$leaf" "$install_root/credentials/jarvis-python/$leaf"
 done

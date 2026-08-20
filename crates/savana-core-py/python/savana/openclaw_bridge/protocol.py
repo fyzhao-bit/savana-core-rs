@@ -15,8 +15,6 @@ MAX_LINE_BYTES = 1024 * 1024
 MAX_INBOUND_TEXT_BYTES = 256 * 1024
 MAX_RELEASED_TEXT_BYTES = 1024 * 1024
 MAX_ID_BYTES = 256
-MAX_APPROVAL_DISPLAY_BYTES = 16 * 1024
-MAX_APPROVAL_ID_BYTES = 256
 MAX_REQUEST_ID = (1 << 53) - 1
 
 
@@ -53,16 +51,6 @@ _INBOUND_KEYS = {
             "text",
         }
     ),
-    "approval.answer": frozenset(
-        {
-            "protocol_version",
-            "request_id",
-            "type",
-            "turn_request_id",
-            "approval_id",
-            "approved",
-        }
-    ),
     "turn.cancel": frozenset(
         {"protocol_version", "request_id", "type", "turn_request_id"}
     ),
@@ -83,17 +71,6 @@ _OUTBOUND_KEYS = {
         }
     ),
     "turn.event": None,
-    "approval.request": frozenset(
-        {
-            "protocol_version",
-            "request_id",
-            "type",
-            "approval_id",
-            "display",
-            "purpose",
-            "deadline_unix_ms",
-        }
-    ),
     "turn.released": frozenset({"protocol_version", "request_id", "type", "text"}),
     "turn.failed": frozenset({"protocol_version", "request_id", "type", "code"}),
     "session.closed": frozenset({"protocol_version", "request_id", "type"}),
@@ -333,11 +310,6 @@ def _validate_inbound_payload(kind: str, value: Mapping[str, Any]) -> None:
         _bounded_id(value["session_id"])
         _bounded_id(value["turn_id"])
         _bounded_string(value["text"], MAX_INBOUND_TEXT_BYTES)
-    elif kind == "approval.answer":
-        _require_request_id(value["turn_request_id"])
-        _bounded_string(value["approval_id"], MAX_APPROVAL_ID_BYTES)
-        if type(value["approved"]) is not bool:
-            raise ProtocolError("invalid approval answer")
     elif kind == "turn.cancel":
         _require_request_id(value["turn_request_id"])
     elif kind == "session.reset":
@@ -365,14 +337,6 @@ def _validate_outbound_payload(kind: str, value: Mapping[str, Any]) -> None:
             raise ProtocolError("invalid bridge approval purpose")
         if event not in _EVENT_KEYS:
             raise ProtocolError("invalid bridge event")
-    elif kind == "approval.request":
-        _bounded_string(value["approval_id"], MAX_APPROVAL_ID_BYTES)
-        _bounded_string(value["display"], MAX_APPROVAL_DISPLAY_BYTES)
-        if not isinstance(value["purpose"], str) or value["purpose"] not in _PURPOSES:
-            raise ProtocolError("invalid bridge approval purpose")
-        deadline = value["deadline_unix_ms"]
-        if type(deadline) is not int or deadline <= 0 or deadline > (1 << 63) - 1:
-            raise ProtocolError("invalid approval deadline")
     elif kind == "turn.released":
         _bounded_string(value["text"], MAX_RELEASED_TEXT_BYTES)
     elif kind == "doctor.result":

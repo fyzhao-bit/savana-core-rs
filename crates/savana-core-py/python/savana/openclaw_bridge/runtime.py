@@ -39,18 +39,13 @@ class BridgeRuntimeError(Exception):
         self.code = code
 
 
-@dataclass(slots=True)
-class _PendingApproval:
-    event: threading.Event
-    approved: bool = False
-
-
 class ApprovalRouter:
-    """Turns synchronous SDK approval callbacks into correlated bridge events."""
+    """Routes SDK approval callbacks only to the trusted inherited broker."""
 
     def __init__(
         self,
         turn_request_id: int,
+        broker: Any,
         emit: Emit,
         loop: asyncio.AbstractEventLoop,
         *,
@@ -58,25 +53,25 @@ class ApprovalRouter:
         absolute_deadline: float | None = None,
     ) -> None:
         self._turn_request_id = turn_request_id
+        self._broker = broker
         self._emit = emit
         self._loop = loop
         self._timeout_seconds = timeout_seconds
         self._absolute_deadline = absolute_deadline
-        self._pending: dict[str, _PendingApproval] = {}
         self._lock = threading.Lock()
+        self._cancel_event = threading.Event()
         self._cancelled = False
+        self._in_flight = False
 
     def __call__(self, request: Any) -> bool:
         display = getattr(request, "display", None)
         purpose = getattr(request, "purpose", None)
         if not isinstance(display, str) or not isinstance(purpose, str):
             return False
-        approval_id = secrets.token_urlsafe(32)
-        pending = _PendingApproval(threading.Event())
         with self._lock:
-            if self._cancelled or self._pending:
+            if self._cancelled or self._in_flight:
                 return False
-            self._pending[approval_id] = pending
+            self._in_flight = True
         timeout_seconds = self._timeout_seconds
         if self._absolute_deadline is not None:
             timeout_seconds = min(
@@ -85,54 +80,41 @@ class ApprovalRouter:
             )
         if timeout_seconds <= 0:
             with self._lock:
-                self._pending.pop(approval_id, None)
+                self._in_flight = False
             return False
-        approval_deadline = time.monotonic() + timeout_seconds
         deadline_unix_ms = int((time.time() + timeout_seconds) * 1000)
-        future = asyncio.run_coroutine_threadsafe(
-            self._emit(
-                {
-                    "protocol_version": PROTOCOL_VERSION,
-                    "request_id": self._turn_request_id,
-                    "type": "approval.request",
-                    "approval_id": approval_id,
-                    "display": display,
-                    "purpose": purpose,
-                    "deadline_unix_ms": deadline_unix_ms,
-                }
-            ),
-            self._loop,
-        )
         try:
-            future.result(timeout=timeout_seconds)
-        except Exception:  # noqa: BLE001 - any output failure denies approval.
+            lifecycle = asyncio.run_coroutine_threadsafe(
+                self._emit(
+                    {
+                        "protocol_version": PROTOCOL_VERSION,
+                        "request_id": self._turn_request_id,
+                        "type": "turn.event",
+                        "event": "approval_required",
+                        "purpose": purpose,
+                    }
+                ),
+                self._loop,
+            )
+            lifecycle.result(timeout=timeout_seconds)
+            approved = self._broker.decide_approval(
+                display,
+                purpose,
+                deadline_unix_ms,
+                self._cancel_event,
+            )
+        except Exception:  # noqa: BLE001 - any broker failure denies approval.
+            approved = False
+        finally:
             with self._lock:
-                self._pending.pop(approval_id, None)
-            return False
-        signalled = pending.event.wait(
-            max(0.0, approval_deadline - time.monotonic())
-        )
+                self._in_flight = False
         with self._lock:
-            self._pending.pop(approval_id, None)
-            return signalled and pending.approved and not self._cancelled
-
-    def answer(self, turn_request_id: int, approval_id: str, approved: bool) -> bool:
-        with self._lock:
-            if turn_request_id != self._turn_request_id or self._cancelled:
-                return False
-            pending = self._pending.get(approval_id)
-            if pending is None or pending.event.is_set():
-                return False
-            pending.approved = approved is True
-            pending.event.set()
-            return True
+            return approved is True and not self._cancelled
 
     def cancel(self) -> None:
         with self._lock:
             self._cancelled = True
-            for pending in self._pending.values():
-                pending.approved = False
-                pending.event.set()
+            self._cancel_event.set()
 
 
 class _SessionApprovalDispatcher:
@@ -239,6 +221,7 @@ class BridgeRuntime:
         turn_deadline = time.monotonic() + self._turn_timeout_seconds
         approvals = ApprovalRouter(
             request_id,
+            self._webauthn,
             self._emit,
             loop,
             timeout_seconds=self._approval_timeout_seconds,
@@ -337,19 +320,6 @@ class BridgeRuntime:
         finally:
             async with self._active_lock:
                 self._active.pop(request_id, None)
-
-    def answer_approval(
-        self,
-        turn_request_id: int,
-        approval_id: str,
-        approved: bool,
-    ) -> bool:
-        active = self._active.get(turn_request_id)
-        return (
-            False
-            if active is None
-            else active.approvals.answer(turn_request_id, approval_id, approved)
-        )
 
     def cancel_turn(self, turn_request_id: int) -> bool:
         active = self._active.get(turn_request_id)
@@ -472,6 +442,8 @@ class BridgeRuntime:
     ) -> Callable[[Any], None]:
         def callback(event: Any) -> None:
             kind = getattr(event, "kind", None)
+            if kind == "approval_required":
+                return
             message: dict[str, Any] = {
                 "protocol_version": PROTOCOL_VERSION,
                 "request_id": request_id,
@@ -588,14 +560,6 @@ class BridgeProcess:
                 )
             )
             self._turns[message.request_id] = (key, task)
-            return True
-        if message.type == "approval.answer":
-            if not self._runtime.answer_approval(
-                payload["turn_request_id"],
-                payload["approval_id"],
-                payload["approved"],
-            ):
-                raise ProtocolError("approval answer is stale or mismatched")
             return True
         if message.type == "turn.cancel":
             if not self._runtime.cancel_turn(payload["turn_request_id"]):

@@ -1,5 +1,6 @@
 import {
   X509Certificate,
+  createHash,
   createPrivateKey,
   createPublicKey,
   timingSafeEqual,
@@ -30,6 +31,7 @@ const EXPECTED_ORIGINS = [
 const BRIDGE_CONFIG_KEYS = new Set([
   "version",
   "identity_path",
+  "execd_bootstrap_path",
   "webauthn_fd",
   "release_journal_path",
   "release_canonical_host",
@@ -46,6 +48,9 @@ const BRIDGE_CONFIG_KEYS = new Set([
 ]);
 
 export type SavanaDoctorProbe = () => Promise<DoctorSnapshot>;
+export interface SavanaDoctorDependencies {
+  readonly rootOwned?: (filePath: string) => Promise<boolean>;
+}
 
 export function createSavanaHealthCheck(
   pluginConfig: SavanaPluginConfig,
@@ -66,6 +71,7 @@ export async function runSavanaDoctor(
   openClawConfig: OpenClawConfig,
   pluginConfig: SavanaPluginConfig,
   probe: SavanaDoctorProbe,
+  dependencies: SavanaDoctorDependencies = {},
 ): Promise<readonly HealthFinding[]> {
   const findings: HealthFinding[] = [];
   const error = (requirement: string, message: string): void => {
@@ -102,8 +108,10 @@ export async function runSavanaDoctor(
     error(requirement, "Savana bridge deployment files are not ready.");
   }
 
+  let liveProbeSucceeded = false;
   try {
     const snapshot = await probe();
+    liveProbeSucceeded = true;
     if (
       snapshot.serviceOrigins.length !== EXPECTED_ORIGINS.length ||
       snapshot.serviceOrigins.some((origin, index) => origin !== EXPECTED_ORIGINS[index])
@@ -118,6 +126,21 @@ export async function runSavanaDoctor(
     }
   } catch {
     error("live-probe", "Savana authenticated readiness probe failed.");
+  }
+
+  if (bridge !== undefined && liveProbeSucceeded) {
+    try {
+      await checkExecdFinalReleaseBinding(
+        bridge,
+        dependencies.rootOwned ?? rootOwnedRegularFile,
+      );
+    } catch (failure) {
+      const requirement =
+        failure instanceof DoctorFailure
+          ? failure.requirement
+          : "final-release-binding";
+      error(requirement, "The execd final-release route is not safely bound.");
+    }
   }
 
   return findings;
@@ -263,6 +286,7 @@ function toolsDenied(value: unknown): boolean {
 interface BridgeDeploymentConfig {
   readonly version: 1;
   readonly identity_path: string;
+  readonly execd_bootstrap_path: string;
   readonly webauthn_fd: 3;
   readonly release_journal_path: string;
   readonly release_canonical_host: string;
@@ -304,6 +328,7 @@ async function readBridgeConfig(configPath: string): Promise<BridgeDeploymentCon
   }
   const paths = [
     "identity_path",
+    "execd_bootstrap_path",
     "release_journal_path",
     "client_root_certificate_path",
     "server_certificate_path",
@@ -368,6 +393,7 @@ function limitsMatch(
 
 async function checkBridgeFiles(config: BridgeDeploymentConfig): Promise<void> {
   await requireFile(config.identity_path, true);
+  await requireFile(config.execd_bootstrap_path, false);
   await requireFile(config.client_root_certificate_path, false);
   await requireFile(config.server_certificate_path, false);
   await requireFile(config.server_private_key_path, true);
@@ -381,6 +407,204 @@ async function checkBridgeFiles(config: BridgeDeploymentConfig): Promise<void> {
   if (pin.length !== 32 || pin.every((byte) => byte === 0)) {
     throw new DoctorFailure("client-pin");
   }
+}
+
+interface ExecdFinalReleaseProvider {
+  readonly address: string;
+  readonly server_name: string;
+  readonly canonical_url: string;
+  readonly server_spki_sha256: string;
+  readonly root_certificate_path: string;
+  readonly root_certificate_digest: string;
+  readonly client_certificate_paths: readonly string[];
+  readonly client_certificate_digests: readonly string[];
+  readonly alpn_protocol_hex: string;
+  readonly endpoint_binding_digest: string;
+  readonly credential_handle_identity_digest: string;
+}
+
+const FINAL_RELEASE_PROVIDER_KEYS = new Set([
+  "address",
+  "server_name",
+  "canonical_url",
+  "server_spki_sha256",
+  "root_certificate_path",
+  "root_certificate_digest",
+  "client_certificate_paths",
+  "client_certificate_digests",
+  "alpn_protocol_hex",
+  "endpoint_binding_digest",
+  "credential_handle_identity_digest",
+]);
+
+async function checkExecdFinalReleaseBinding(
+  bridge: BridgeDeploymentConfig,
+  rootOwned: (filePath: string) => Promise<boolean>,
+): Promise<void> {
+  if (!(await rootOwned(bridge.execd_bootstrap_path))) {
+    throw new DoctorFailure("root-owned-execd-bootstrap");
+  }
+  let decoded: unknown;
+  try {
+    const encoded = await readFile(bridge.execd_bootstrap_path);
+    if (encoded.length === 0 || encoded.length > 128 * 1024) {
+      throw new DoctorFailure("final-release-routing");
+    }
+    decoded = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(encoded));
+  } catch (failure) {
+    if (failure instanceof DoctorFailure) throw failure;
+    throw new DoctorFailure("final-release-routing");
+  }
+  if (decoded === null || typeof decoded !== "object" || Array.isArray(decoded)) {
+    throw new DoctorFailure("final-release-routing");
+  }
+  const bootstrap = decoded as Record<string, unknown>;
+  const rawProvider = bootstrap["final_release_provider"];
+  if (
+    bootstrap["provider_routing_mode"] !== "split-final-release" ||
+    rawProvider === null ||
+    typeof rawProvider !== "object" ||
+    Array.isArray(rawProvider)
+  ) {
+    throw new DoctorFailure("final-release-routing");
+  }
+  const record = rawProvider as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (
+    keys.length !== FINAL_RELEASE_PROVIDER_KEYS.size ||
+    keys.some((key) => !FINAL_RELEASE_PROVIDER_KEYS.has(key))
+  ) {
+    throw new DoctorFailure("final-release-routing");
+  }
+  const stringFields = [
+    "address",
+    "server_name",
+    "canonical_url",
+    "server_spki_sha256",
+    "root_certificate_path",
+    "root_certificate_digest",
+    "alpn_protocol_hex",
+    "endpoint_binding_digest",
+    "credential_handle_identity_digest",
+  ];
+  if (
+    stringFields.some((field) => typeof record[field] !== "string") ||
+    !Array.isArray(record["client_certificate_paths"]) ||
+    !Array.isArray(record["client_certificate_digests"]) ||
+    record["client_certificate_paths"].length < 1 ||
+    record["client_certificate_paths"].length > 8 ||
+    record["client_certificate_paths"].length !==
+      record["client_certificate_digests"].length ||
+    record["client_certificate_paths"].some(
+      (candidate) => typeof candidate !== "string" || !path.isAbsolute(candidate),
+    ) ||
+    record["client_certificate_digests"].some(
+      (candidate) => typeof candidate !== "string" || !validDigestHex(candidate),
+    )
+  ) {
+    throw new DoctorFailure("final-release-routing");
+  }
+  const provider = record as unknown as ExecdFinalReleaseProvider;
+  const expectedUrl = `https://${bridge.release_canonical_host}:${bridge.release_listen_port}/savana/final-release`;
+  if (
+    provider.address !== `127.0.0.1:${bridge.release_listen_port}` ||
+    provider.server_name !== bridge.release_canonical_host ||
+    provider.canonical_url !== expectedUrl ||
+    provider.root_certificate_path !== bridge.client_root_certificate_path ||
+    !path.isAbsolute(provider.root_certificate_path) ||
+    provider.alpn_protocol_hex !== Buffer.from("savana-provider-v2").toString("hex") ||
+    ![provider.server_spki_sha256, provider.root_certificate_digest,
+      provider.endpoint_binding_digest,
+      provider.credential_handle_identity_digest].every(validDigestHex)
+  ) {
+    throw new DoctorFailure("final-release-binding");
+  }
+
+  await requireFile(provider.root_certificate_path, false);
+  const root = await readFile(provider.root_certificate_path);
+  const clientCertificates: Buffer[] = [];
+  for (const [index, certificatePath] of provider.client_certificate_paths.entries()) {
+    await requireFile(certificatePath, false);
+    const certificate = await readFile(certificatePath);
+    if (
+      sha256(certificate).toString("hex") !==
+      provider.client_certificate_digests[index]
+    ) {
+      throw new DoctorFailure("final-release-binding");
+    }
+    try {
+      new X509Certificate(certificate);
+    } catch {
+      throw new DoctorFailure("final-release-binding");
+    }
+    clientCertificates.push(certificate);
+  }
+  const clientCertificate = clientCertificates[0];
+  if (clientCertificate === undefined) {
+    throw new DoctorFailure("final-release-binding");
+  }
+  const serverCertificate = new X509Certificate(await readFile(bridge.server_certificate_path));
+  const client = new X509Certificate(clientCertificate);
+  const rootDigest = sha256(root);
+  const clientDigest = sha256(clientCertificate);
+  const serverSpki = serverCertificate.publicKey.export({ type: "spki", format: "der" });
+  const clientSpki = client.publicKey.export({ type: "spki", format: "der" });
+  const expectedClientPin = await readFile(bridge.expected_client_spki_pin_path);
+  const credential = createHash("sha256")
+    .update(Buffer.from("SAVANA_PROVIDER_CREDENTIAL_HANDLE_IDENTITY_V2\0"))
+    .update(clientDigest)
+    .digest();
+  const endpoint = createHash("sha256");
+  endpoint.update(Buffer.from("SAVANA_PROVIDER_TLS_ENDPOINT_BINDING_V2\0"));
+  endpoint.update(Buffer.from([4, 127, 0, 0, 1]));
+  const port = Buffer.alloc(2);
+  port.writeUInt16BE(bridge.release_listen_port);
+  endpoint.update(port);
+  const serverName = Buffer.from(bridge.release_canonical_host);
+  const serverNameLength = Buffer.alloc(2);
+  serverNameLength.writeUInt16BE(serverName.length);
+  endpoint.update(serverNameLength);
+  endpoint.update(serverName);
+  endpoint.update(rootDigest);
+  endpoint.update(clientDigest);
+  const alpn = Buffer.from("savana-provider-v2");
+  const alpnLength = Buffer.alloc(2);
+  alpnLength.writeUInt16BE(alpn.length);
+  endpoint.update(alpnLength);
+  endpoint.update(alpn);
+
+  if (
+    sha256(serverSpki).toString("hex") !== provider.server_spki_sha256 ||
+    rootDigest.toString("hex") !== provider.root_certificate_digest ||
+    clientDigest.toString("hex") !== provider.client_certificate_digests[0] ||
+    !buffersEqual(sha256(clientSpki), expectedClientPin) ||
+    credential.toString("hex") !== provider.credential_handle_identity_digest ||
+    endpoint.digest("hex") !== provider.endpoint_binding_digest
+  ) {
+    throw new DoctorFailure("final-release-binding");
+  }
+}
+
+async function rootOwnedRegularFile(filePath: string): Promise<boolean> {
+  const metadata = await lstat(filePath);
+  return (
+    metadata.isFile() &&
+    !metadata.isSymbolicLink() &&
+    metadata.uid === 0 &&
+    (metadata.mode & 0o022) === 0
+  );
+}
+
+function sha256(value: Buffer): Buffer {
+  return createHash("sha256").update(value).digest();
+}
+
+function validDigestHex(value: string): boolean {
+  return /^[0-9a-f]{64}$/.test(value);
+}
+
+function buffersEqual(left: Buffer, right: Buffer): boolean {
+  return left.length === right.length && timingSafeEqual(left, right);
 }
 
 async function checkCertificateBinding(config: BridgeDeploymentConfig): Promise<void> {

@@ -15,6 +15,7 @@ _CONFIG_KEYS = frozenset(
     {
         "version",
         "identity_path",
+        "execd_bootstrap_path",
         "webauthn_fd",
         "release_journal_path",
         "release_canonical_host",
@@ -41,6 +42,7 @@ class ConfigError(Exception):
 class BridgeConfig:
     version: int
     identity_path: Path
+    execd_bootstrap_path: Path
     webauthn_fd: int
     release_journal_path: Path
     release_canonical_host: str
@@ -85,6 +87,7 @@ class BridgeConfig:
             name: Path(value[name]) if isinstance(value[name], str) else None
             for name in (
                 "identity_path",
+                "execd_bootstrap_path",
                 "release_journal_path",
                 "client_root_certificate_path",
                 "server_certificate_path",
@@ -102,7 +105,11 @@ class BridgeConfig:
             "expected_client_spki_pin_path",
         ):
             _require_private_regular_file(paths[name])
-        for name in ("client_root_certificate_path", "server_certificate_path"):
+        for name in (
+            "execd_bootstrap_path",
+            "client_root_certificate_path",
+            "server_certificate_path",
+        ):
             _require_regular_file(paths[name])
         journal_parent = paths["release_journal_path"].parent
         if not journal_parent.is_dir():
@@ -149,6 +156,7 @@ class BridgeConfig:
         return cls(
             version=CONFIG_VERSION,
             identity_path=paths["identity_path"],
+            execd_bootstrap_path=paths["execd_bootstrap_path"],
             webauthn_fd=webauthn_fd,
             release_journal_path=paths["release_journal_path"],
             release_canonical_host=host.lower(),

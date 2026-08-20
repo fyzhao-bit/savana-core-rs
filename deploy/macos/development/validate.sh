@@ -332,7 +332,7 @@ for helper in savana-development-manifest savana-development-material savana-dev
   }
 done
 
-for input in runtime-ca.cnf planner-server.ext mapper-server.ext provider-server.ext client.ext; do
+for input in runtime-ca.cnf planner-server.ext mapper-server.ext provider-server.ext final-release-server.ext client.ext; do
   path="$script_directory/tls/$input"
   [ -s "$path" ] && [ ! -L "$path" ] || {
     echo "missing fixed TLS profile: $path" >&2

@@ -6,6 +6,8 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -142,7 +144,7 @@ class FakeReceiver:
         self.calls.append(("close",))
 
 
-async def make_runtime(*, sessions, receiver=None, emit=None):
+async def make_runtime(*, sessions, receiver=None, emit=None, webauthn="webauthn"):
     calls = []
     client = FakeClient(sessions)
     receiver = receiver or FakeReceiver()
@@ -155,7 +157,7 @@ async def make_runtime(*, sessions, receiver=None, emit=None):
         client=client,
         identity="identity",
         bootstrap_source=FakeBootstrapSource(),
-        webauthn="webauthn",
+        webauthn=webauthn,
         receiver=receiver,
         sdk=FakeSdk,
         max_steps=8,
@@ -269,31 +271,304 @@ async def test_failed_no_effect_clears_but_other_release_failures_seal():
 
 
 @pytest.mark.asyncio
-async def test_approval_answer_is_one_time_turn_bound_and_cancellation_denies():
-    emitted = asyncio.Queue()
+async def test_approval_router_uses_only_trusted_broker_and_cancellation_denies():
+    class Broker:
+        def __init__(self):
+            self.calls = []
+
+        def decide_approval(
+            self, display, purpose, deadline_unix_ms, cancel_event=None
+        ):
+            self.calls.append((display, purpose, deadline_unix_ms, cancel_event))
+            return True
+
+    broker = Broker()
+    emitted = []
 
     async def emit(message):
-        await emitted.put(message)
+        emitted.append(message)
 
-    router = ApprovalRouter(9, emit, asyncio.get_running_loop(), timeout_seconds=1.0)
+    router = ApprovalRouter(
+        9, broker, emit, asyncio.get_running_loop(), timeout_seconds=1.0
+    )
     request = SimpleNamespace(display="Approve exact release", purpose="final_release")
-    decision = asyncio.create_task(asyncio.to_thread(router, request))
-    outbound = await asyncio.wait_for(emitted.get(), timeout=1)
-    assert outbound["type"] == "approval.request"
-    assert outbound["display"] == request.display
-    assert router.answer(8, outbound["approval_id"], True) is False
-    assert router.answer(9, "wrong", True) is False
-    assert router.answer(9, outbound["approval_id"], True) is True
-    assert await decision is True
-    assert router.answer(9, outbound["approval_id"], True) is False
+    assert await asyncio.to_thread(router, request) is True
+    assert len(broker.calls) == 1
+    assert broker.calls[0][0:2] == (request.display, request.purpose)
+    assert isinstance(broker.calls[0][3], threading.Event)
+    assert emitted == [
+        {
+            "protocol_version": 1,
+            "request_id": 9,
+            "type": "turn.event",
+            "event": "approval_required",
+            "purpose": "final_release",
+        }
+    ]
 
     cancelled = ApprovalRouter(
-        10, emit, asyncio.get_running_loop(), timeout_seconds=1.0
+        10, broker, emit, asyncio.get_running_loop(), timeout_seconds=1.0
     )
-    decision = asyncio.create_task(asyncio.to_thread(cancelled, request))
-    await asyncio.wait_for(emitted.get(), timeout=1)
     cancelled.cancel()
-    assert await decision is False
+    assert await asyncio.to_thread(cancelled, request) is False
+    assert len(broker.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_approval_router_cancellation_wakes_an_in_flight_broker():
+    entered = threading.Event()
+
+    class Broker:
+        def decide_approval(
+            self, display, purpose, deadline_unix_ms, cancel_event=None
+        ):
+            assert cancel_event is not None
+            entered.set()
+            assert cancel_event.wait(timeout=1.0)
+            return True
+
+    async def emit(_message):
+        return None
+
+    router = ApprovalRouter(
+        11, Broker(), emit, asyncio.get_running_loop(), timeout_seconds=2.0
+    )
+    request = SimpleNamespace(display="Approve exact effect", purpose="tool_execution")
+    pending = asyncio.create_task(asyncio.to_thread(router, request))
+    assert await asyncio.to_thread(entered.wait, 1.0)
+    router.cancel()
+    assert await asyncio.wait_for(pending, timeout=0.5) is False
+
+
+@pytest.mark.asyncio
+async def test_every_sdk_approval_callback_uses_broker_and_denial_stops_loop():
+    class Broker:
+        def __init__(self, decisions):
+            self.decisions = iter(decisions)
+            self.calls = []
+
+        def decide_approval(
+            self, display, purpose, deadline_unix_ms, cancel_event=None
+        ):
+            self.calls.append((display, purpose, deadline_unix_ms, cancel_event))
+            return next(self.decisions)
+
+        def close(self):
+            return None
+
+    class ApprovingSession(FakeSession):
+        async def run_agent(self, privacy, limits, approval, events):
+            self.calls.append("run")
+            for index in range(2):
+                if not await asyncio.to_thread(
+                    approval,
+                    SimpleNamespace(
+                        display=f"Tool call {index}", purpose="tool_execution"
+                    ),
+                ):
+                    raise BridgeRuntimeError("approval_denied")
+            return SimpleNamespace(status="succeeded", outputs=[FakeHandle()])
+
+        async def release(self, handle, approval):
+            self.calls.append("release")
+            if not await asyncio.to_thread(
+                approval,
+                SimpleNamespace(display="Release", purpose="final_release"),
+            ):
+                raise BridgeRuntimeError("approval_denied")
+            return SimpleNamespace(status="succeeded", outputs=[], failure_class=None)
+
+    approved_broker = Broker([True, True, True])
+    approved_session = ApprovingSession([])
+    runtime, _, _, _, _ = await make_runtime(
+        sessions=[approved_session], webauthn=approved_broker
+    )
+    released = await runtime.run_turn(20, "agent", "session", "turn", "request")
+    await released.complete()
+    assert [call[1] for call in approved_broker.calls] == [
+        "tool_execution",
+        "tool_execution",
+        "final_release",
+    ]
+    await runtime.shutdown()
+
+    denied_broker = Broker([True, False])
+    denied_session = ApprovingSession([])
+    runtime, _, _, _, _ = await make_runtime(
+        sessions=[denied_session], webauthn=denied_broker
+    )
+    with pytest.raises(BridgeRuntimeError) as failure:
+        await runtime.run_turn(21, "agent", "session", "turn", "request")
+    assert failure.value.code == "approval_denied"
+    assert denied_session.calls == [("ingest", "request", "chat_text"), "run"]
+    assert len(denied_broker.calls) == 2
+    await runtime.shutdown()
+
+
+def test_approval_broker_uses_fresh_correlated_decisions_for_every_call():
+    bridge, product = socket.socketpair()
+    broker = WebAuthnBroker(bridge.fileno())
+    observed = []
+
+    def product_side():
+        for expected_decision in (True, True, False):
+            length = struct.unpack(">I", product.recv(4))[0]
+            request = json.loads(product.recv(length))
+            observed.append(request)
+            response = json.dumps(
+                {
+                    "protocol_version": 1,
+                    "type": "approval.decision",
+                    "approval_id": request["approval_id"],
+                    "approved": expected_decision,
+                },
+                separators=(",", ":"),
+            ).encode()
+            product.sendall(struct.pack(">I", len(response)) + response)
+
+    thread = threading.Thread(target=product_side)
+    thread.start()
+    try:
+        decisions = [
+            broker.decide_approval(
+                f"Approve call {index}",
+                "tool_execution",
+                int(time.time() * 1000) + 5_000,
+            )
+            for index in range(3)
+        ]
+        assert decisions == [True, True, False]
+        assert len({request["approval_id"] for request in observed}) == 3
+        assert all(len(request["approval_id"]) == 43 for request in observed)
+        assert all(request["type"] == "approval.decide" for request in observed)
+    finally:
+        thread.join(timeout=1)
+        broker.close()
+        bridge.close()
+        product.close()
+
+
+def test_approval_broker_rejects_invalid_requests_and_uncorrelated_responses():
+    bridge, product = socket.socketpair()
+    broker = WebAuthnBroker(bridge.fileno())
+    now = int(time.time() * 1000)
+    try:
+        for display, purpose, deadline in (
+            ("x" * (16 * 1024 + 1), "tool_execution", now + 5_000),
+            ("Approve", "unknown", now + 5_000),
+            ("Approve", "tool_execution", now - 1),
+            ("e\u0301", "tool_execution", now + 5_000),
+        ):
+            with pytest.raises(AuthBrokerError):
+                broker.decide_approval(display, purpose, deadline)
+
+        def product_side():
+            length = struct.unpack(">I", product.recv(4))[0]
+            request = json.loads(product.recv(length))
+            response = json.dumps(
+                {
+                    "protocol_version": 1,
+                    "type": "approval.decision",
+                    "approval_id": "A" * 43,
+                    "approved": True,
+                },
+                separators=(",", ":"),
+            ).encode()
+            assert request["approval_id"] != "A" * 43
+            product.sendall(struct.pack(">I", len(response)) + response)
+
+        thread = threading.Thread(target=product_side)
+        thread.start()
+        with pytest.raises(AuthBrokerError):
+            broker.decide_approval("Approve", "tool_execution", now + 5_000)
+        thread.join(timeout=1)
+    finally:
+        broker.close()
+        bridge.close()
+        product.close()
+
+
+def test_approval_broker_deadline_covers_lock_wait_and_cancel_wakes_io():
+    bridge, product = socket.socketpair()
+    broker = WebAuthnBroker(bridge.fileno(), timeout_seconds=2.0)
+    cancel_event = threading.Event()
+    first_errors = []
+
+    def first_call():
+        try:
+            broker.decide_approval(
+                "Approve first call",
+                "tool_execution",
+                int(time.time() * 1000) + 2_000,
+                cancel_event,
+            )
+        except AuthBrokerError as error:
+            first_errors.append(error)
+
+    thread = threading.Thread(target=first_call)
+    thread.start()
+    try:
+        length = struct.unpack(">I", product.recv(4))[0]
+        request = json.loads(product.recv(length))
+        assert request["type"] == "approval.decide"
+
+        started = time.monotonic()
+        with pytest.raises(AuthBrokerError):
+            broker.decide_approval(
+                "Approve queued call",
+                "tool_execution",
+                int(time.time() * 1000) + 150,
+            )
+        assert time.monotonic() - started < 0.5
+
+        cancel_event.set()
+        thread.join(timeout=0.5)
+        assert not thread.is_alive()
+        assert len(first_errors) == 1
+    finally:
+        cancel_event.set()
+        thread.join(timeout=1)
+        broker.close()
+        bridge.close()
+        product.close()
+
+
+def test_approval_broker_rejects_a_response_arriving_after_deadline():
+    bridge, product = socket.socketpair()
+    broker = WebAuthnBroker(bridge.fileno(), timeout_seconds=1.0)
+
+    def product_side():
+        try:
+            length = struct.unpack(">I", product.recv(4))[0]
+            request = json.loads(product.recv(length))
+            time.sleep(0.25)
+            response = json.dumps(
+                {
+                    "protocol_version": 1,
+                    "type": "approval.decision",
+                    "approval_id": request["approval_id"],
+                    "approved": True,
+                },
+                separators=(",", ":"),
+            ).encode()
+            product.sendall(struct.pack(">I", len(response)) + response)
+        except OSError:
+            pass
+
+    thread = threading.Thread(target=product_side)
+    thread.start()
+    try:
+        with pytest.raises(AuthBrokerError):
+            broker.decide_approval(
+                "Approve late response",
+                "tool_execution",
+                int(time.time() * 1000) + 100,
+            )
+    finally:
+        thread.join(timeout=1)
+        broker.close()
+        bridge.close()
+        product.close()
 
 
 def test_webauthn_broker_uses_only_bounded_inherited_socket_protocol():

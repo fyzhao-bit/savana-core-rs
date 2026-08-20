@@ -8,7 +8,6 @@ export const MAX_LINE_BYTES = 1024 * 1024;
 export const MAX_INBOUND_TEXT_BYTES = 256 * 1024;
 export const MAX_RELEASED_TEXT_BYTES = 1024 * 1024;
 export const MAX_ID_BYTES = 256;
-export const MAX_APPROVAL_DISPLAY_BYTES = 16 * 1024;
 export const MAX_REQUEST_ID = Number.MAX_SAFE_INTEGER;
 
 export type ApprovalPurpose =
@@ -46,14 +45,6 @@ export type PluginToBridgeMessage =
       session_id: string;
       turn_id: string;
       text: string;
-    }
-  | {
-      protocol_version: typeof PROTOCOL_VERSION;
-      request_id: number;
-      type: "approval.answer";
-      turn_request_id: number;
-      approval_id: string;
-      approved: boolean;
     }
   | {
       protocol_version: typeof PROTOCOL_VERSION;
@@ -110,15 +101,6 @@ export type BridgeToPluginMessage =
   | {
       protocol_version: typeof PROTOCOL_VERSION;
       request_id: number;
-      type: "approval.request";
-      approval_id: string;
-      display: string;
-      purpose: ApprovalPurpose;
-      deadline_unix_ms: number;
-    }
-  | {
-      protocol_version: typeof PROTOCOL_VERSION;
-      request_id: number;
       type: "turn.released";
       text: string;
     }
@@ -165,14 +147,6 @@ const INBOUND_KEYS: Record<PluginToBridgeMessage["type"], readonly string[]> = {
     "turn_id",
     "text",
   ],
-  "approval.answer": [
-    "protocol_version",
-    "request_id",
-    "type",
-    "turn_request_id",
-    "approval_id",
-    "approved",
-  ],
   "turn.cancel": ["protocol_version", "request_id", "type", "turn_request_id"],
   "session.reset": [
     "protocol_version",
@@ -187,15 +161,6 @@ const INBOUND_KEYS: Record<PluginToBridgeMessage["type"], readonly string[]> = {
 
 const OUTBOUND_KEYS: Record<string, readonly string[]> = {
   initialized: ["protocol_version", "request_id", "type", "bridge_version"],
-  "approval.request": [
-    "protocol_version",
-    "request_id",
-    "type",
-    "approval_id",
-    "display",
-    "purpose",
-    "deadline_unix_ms",
-  ],
   "turn.released": ["protocol_version", "request_id", "type", "text"],
   "turn.failed": ["protocol_version", "request_id", "type", "code"],
   "session.closed": ["protocol_version", "request_id", "type"],
@@ -340,11 +305,6 @@ function validateInbound(
       boundedId(value["turn_id"]);
       boundedString(value["text"], MAX_INBOUND_TEXT_BYTES);
       break;
-    case "approval.answer":
-      requestId(value["turn_request_id"]);
-      boundedString(value["approval_id"], MAX_ID_BYTES);
-      if (typeof value["approved"] !== "boolean") throw new ProtocolError();
-      break;
     case "turn.cancel":
       requestId(value["turn_request_id"]);
       break;
@@ -377,17 +337,6 @@ function validateOutbound(value: Record<string, unknown>, kind: string): void {
       if (event === "replanning") boundedU32(value["count"]);
       break;
     }
-    case "approval.request":
-      boundedString(value["approval_id"], MAX_ID_BYTES);
-      boundedString(value["display"], MAX_APPROVAL_DISPLAY_BYTES);
-      if (!PURPOSES.has(value["purpose"] as ApprovalPurpose)) throw new ProtocolError();
-      if (
-        !Number.isSafeInteger(value["deadline_unix_ms"]) ||
-        (value["deadline_unix_ms"] as number) <= 0
-      ) {
-        throw new ProtocolError();
-      }
-      break;
     case "turn.released":
       boundedString(value["text"], MAX_RELEASED_TEXT_BYTES);
       break;

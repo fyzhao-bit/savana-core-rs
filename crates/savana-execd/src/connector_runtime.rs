@@ -17,10 +17,64 @@ use crate::{
     ExecdStateOwnerV2,
 };
 
+enum VerifiedProviderTransportRouterV2 {
+    LegacyShared(Mutex<Box<dyn ProviderTransportV2>>),
+    Split {
+        tool: Mutex<Box<dyn ProviderTransportV2>>,
+        final_release: Mutex<Box<dyn ProviderTransportV2>>,
+    },
+}
+
+impl VerifiedProviderTransportRouterV2 {
+    fn legacy(transport: Box<dyn ProviderTransportV2>) -> Self {
+        Self::LegacyShared(Mutex::new(transport))
+    }
+
+    fn split(
+        tool: Box<dyn ProviderTransportV2>,
+        final_release: Box<dyn ProviderTransportV2>,
+    ) -> Self {
+        Self::Split {
+            tool: Mutex::new(tool),
+            final_release: Mutex::new(final_release),
+        }
+    }
+
+    fn with_transport<T>(
+        &self,
+        kind: DispatchEnvelopeKindV2,
+        has_connector: bool,
+        operation: impl FnOnce(&mut dyn ProviderTransportV2) -> Result<T, ExecdProtocolServiceErrorV2>,
+    ) -> Result<T, ExecdProtocolServiceErrorV2> {
+        if !matches!(
+            (kind, has_connector),
+            (DispatchEnvelopeKindV2::ToolExecution, true)
+                | (DispatchEnvelopeKindV2::FinalRelease, false)
+        ) {
+            return Err(ExecdProtocolServiceErrorV2::Binding);
+        }
+        let selected = match self {
+            Self::LegacyShared(transport) => transport,
+            Self::Split {
+                tool,
+                final_release,
+            } => match kind {
+                DispatchEnvelopeKindV2::ToolExecution => tool,
+                DispatchEnvelopeKindV2::FinalRelease => final_release,
+            },
+        };
+        let mut transport = selected
+            .lock()
+            .map_err(|_| ExecdProtocolServiceErrorV2::ResultUnavailable)?;
+        operation(transport.as_mut())
+    }
+}
+
 pub(crate) struct VerifiedConnectorExecutionRuntimeV2 {
     supervisor: ConnectorWorkerSupervisorV2,
     issuer: ConnectorJobDescriptorIssuerV2,
-    transport: Mutex<Box<dyn ProviderTransportV2>>,
+    final_release_issuer: Option<ConnectorJobDescriptorIssuerV2>,
+    transports: VerifiedProviderTransportRouterV2,
     ready: AtomicBool,
 }
 
@@ -42,7 +96,27 @@ impl VerifiedConnectorExecutionRuntimeV2 {
         Self {
             supervisor,
             issuer,
-            transport: Mutex::new(transport),
+            final_release_issuer: None,
+            transports: VerifiedProviderTransportRouterV2::legacy(transport),
+            ready: AtomicBool::new(true),
+        }
+    }
+
+    pub(crate) fn from_verified_split_components(
+        supervisor: ConnectorWorkerSupervisorV2,
+        tool_issuer: ConnectorJobDescriptorIssuerV2,
+        final_release_issuer: ConnectorJobDescriptorIssuerV2,
+        tool_transport: Box<dyn ProviderTransportV2>,
+        final_release_transport: Box<dyn ProviderTransportV2>,
+    ) -> Self {
+        Self {
+            supervisor,
+            issuer: tool_issuer,
+            final_release_issuer: Some(final_release_issuer),
+            transports: VerifiedProviderTransportRouterV2::split(
+                tool_transport,
+                final_release_transport,
+            ),
             ready: AtomicBool::new(true),
         }
     }
@@ -63,10 +137,42 @@ impl VerifiedConnectorExecutionRuntimeV2 {
         {
             return Err(ExecdProtocolServiceErrorV2::Binding);
         }
-        let mut transport = self.transport.lock().map_err(|_| {
+        let result =
+            self.transports
+                .with_transport(query.kind(), connector.is_some(), |transport| {
+                    self.process_with_transport(
+                        owner, query, payload, connector, now, deadline, transport,
+                    )
+                });
+        if matches!(result, Err(ExecdProtocolServiceErrorV2::ResultUnavailable)) {
             self.ready.store(false, Ordering::Release);
-            ExecdProtocolServiceErrorV2::ResultUnavailable
-        })?;
+        }
+        result
+    }
+
+    fn issuer_for(
+        &self,
+        kind: DispatchEnvelopeKindV2,
+    ) -> Result<&ConnectorJobDescriptorIssuerV2, ExecdProtocolServiceErrorV2> {
+        match kind {
+            DispatchEnvelopeKindV2::ToolExecution => Ok(&self.issuer),
+            DispatchEnvelopeKindV2::FinalRelease => {
+                Ok(self.final_release_issuer.as_ref().unwrap_or(&self.issuer))
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn process_with_transport(
+        &self,
+        owner: &ExecdStateOwnerV2,
+        query: ExecdQueryV2,
+        payload: Zeroizing<Vec<u8>>,
+        connector: Option<&PreparedConnectorDispatchV2>,
+        now: UnixMillisV2,
+        deadline: Instant,
+        transport: &mut dyn ProviderTransportV2,
+    ) -> Result<(), ExecdProtocolServiceErrorV2> {
         let target = match connector {
             Some(connector) => transport.verify_connector_target(
                 connector.descriptor().tier(),
@@ -82,7 +188,7 @@ impl VerifiedConnectorExecutionRuntimeV2 {
                 .ok_or(ExecdProtocolServiceErrorV2::Binding)?,
         );
         let (descriptor, ephemeral_seed) = self
-            .issuer
+            .issuer_for(query.kind())?
             .issue_prepare(
                 query.execution_nonce(),
                 query.dispatch_core_digest(),
@@ -91,8 +197,7 @@ impl VerifiedConnectorExecutionRuntimeV2 {
                 descriptor_deadline,
             )
             .map_err(|_| ExecdProtocolServiceErrorV2::Binding)?;
-        let mut provider =
-            OwnerBackedProviderAttemptV2::new(owner, transport.as_mut(), &target, now);
+        let mut provider = OwnerBackedProviderAttemptV2::new(owner, transport, &target, now);
         let outcome = self.supervisor.prepare_and_decode(
             &descriptor,
             payload,
@@ -260,7 +365,7 @@ impl VerifiedConnectorExecutionRuntimeV2 {
                         .ok_or(ExecdProtocolServiceErrorV2::Binding)?,
                 );
                 let (descriptor, ephemeral_seed) = self
-                    .issuer
+                    .issuer_for(query.kind())?
                     .issue_decode_retained(
                         query.execution_nonce(),
                         query.dispatch_core_digest(),
@@ -369,4 +474,142 @@ fn domain_digest(domain: &[u8], bytes: &[u8]) -> Digest32V2 {
     hasher.update(domain);
     hasher.update(bytes);
     Digest32V2::new(hasher.finalize().into())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use savana_policy_core::v2::{
+        BoundedConnectorHostV2, BoundedConnectorUrlV2, ConnectorTierV2, ConnectorTransportV2,
+    };
+
+    use super::*;
+    use crate::worker_supervisor::{VerifiedProviderRequestV2, VerifiedProviderTargetV2};
+    use crate::EffectPermitV2;
+
+    struct RecordingTransportV2 {
+        target: VerifiedProviderTargetV2,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RecordingTransportV2 {
+        fn new(url: &str, marker: u8, calls: Arc<AtomicUsize>) -> Self {
+            Self {
+                target: VerifiedProviderTargetV2::https(
+                    BoundedConnectorUrlV2::new(url).unwrap(),
+                    Digest32V2::new([marker; 32]),
+                )
+                .unwrap(),
+                calls,
+            }
+        }
+    }
+
+    impl ProviderTransportV2 for RecordingTransportV2 {
+        fn verified_deployment_target(
+            &self,
+        ) -> Result<VerifiedProviderTargetV2, ConnectorWorkerSupervisorErrorV2> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(self.target.clone())
+        }
+
+        fn verify_connector_target(
+            &self,
+            _tier: ConnectorTierV2,
+            _transport: &ConnectorTransportV2,
+            _active_host_allowlist: &[BoundedConnectorHostV2],
+        ) -> Result<VerifiedProviderTargetV2, ConnectorWorkerSupervisorErrorV2> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(self.target.clone())
+        }
+
+        fn execute(
+            &mut self,
+            _request: &VerifiedProviderRequestV2,
+            _permit: &EffectPermitV2,
+            _maximum_response_bytes: u32,
+            _deadline: Instant,
+        ) -> Result<Vec<u8>, ConnectorWorkerSupervisorErrorV2> {
+            unreachable!("routing tests do not execute provider requests")
+        }
+    }
+
+    #[test]
+    fn split_router_selects_manifest_bound_transport_by_dispatch_kind() {
+        let tool_calls = Arc::new(AtomicUsize::new(0));
+        let release_calls = Arc::new(AtomicUsize::new(0));
+        let router = VerifiedProviderTransportRouterV2::split(
+            Box::new(RecordingTransportV2::new(
+                "https://tool.example:9444/mcp",
+                1,
+                Arc::clone(&tool_calls),
+            )),
+            Box::new(RecordingTransportV2::new(
+                "https://release.example:43191/savana/final-release",
+                2,
+                Arc::clone(&release_calls),
+            )),
+        );
+
+        let tool_url = router
+            .with_transport(DispatchEnvelopeKindV2::ToolExecution, true, |transport| {
+                Ok(transport
+                    .verified_deployment_target()
+                    .map_err(|_| ExecdProtocolServiceErrorV2::Binding)?
+                    .canonical_url()
+                    .as_str()
+                    .to_owned())
+            })
+            .unwrap();
+        let release_url = router
+            .with_transport(DispatchEnvelopeKindV2::FinalRelease, false, |transport| {
+                Ok(transport
+                    .verified_deployment_target()
+                    .map_err(|_| ExecdProtocolServiceErrorV2::Binding)?
+                    .canonical_url()
+                    .as_str()
+                    .to_owned())
+            })
+            .unwrap();
+
+        assert_eq!(tool_url, "https://tool.example:9444/mcp");
+        assert_eq!(
+            release_url,
+            "https://release.example:43191/savana/final-release"
+        );
+        assert_eq!(tool_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(release_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn split_router_rejects_kind_connector_mismatch_before_transport_access() {
+        let tool_calls = Arc::new(AtomicUsize::new(0));
+        let release_calls = Arc::new(AtomicUsize::new(0));
+        let router = VerifiedProviderTransportRouterV2::split(
+            Box::new(RecordingTransportV2::new(
+                "https://tool.example:9444/mcp",
+                1,
+                Arc::clone(&tool_calls),
+            )),
+            Box::new(RecordingTransportV2::new(
+                "https://release.example:43191/savana/final-release",
+                2,
+                Arc::clone(&release_calls),
+            )),
+        );
+
+        for (kind, has_connector) in [
+            (DispatchEnvelopeKindV2::ToolExecution, false),
+            (DispatchEnvelopeKindV2::FinalRelease, true),
+        ] {
+            assert_eq!(
+                router.with_transport(kind, has_connector, |_| Ok(())),
+                Err(ExecdProtocolServiceErrorV2::Binding)
+            );
+        }
+        assert_eq!(tool_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(release_calls.load(Ordering::Relaxed), 0);
+    }
 }

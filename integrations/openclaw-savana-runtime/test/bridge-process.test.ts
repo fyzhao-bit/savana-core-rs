@@ -132,11 +132,10 @@ describe("BridgeProcess", () => {
     await bridge.dispose();
   });
 
-  it("correlates progress, approval, abort, and exactly one terminal", async () => {
+  it("correlates approval lifecycle, abort, and exactly one terminal", async () => {
     const { bridge, child } = fixture();
     await initialize(bridge, child);
     const events: string[] = [];
-    const approvals: string[] = [];
     const abort = new AbortController();
     const turn = bridge.runTurn({
       agentId: "agent",
@@ -146,10 +145,6 @@ describe("BridgeProcess", () => {
       signal: abort.signal,
       onEvent: (event) => {
         events.push(event.event);
-      },
-      onApproval: async (request) => {
-        approvals.push(request.display);
-        return true;
       },
     });
 
@@ -162,16 +157,10 @@ describe("BridgeProcess", () => {
     child.reply({
       protocol_version: 1,
       request_id: 2,
-      type: "approval.request",
-      approval_id: "approval",
-      display: "Approve exact effect",
+      type: "turn.event",
+      event: "approval_required",
       purpose: "tool_execution",
-      deadline_unix_ms: Date.now() + 30_000,
     });
-    await vi.waitFor(() => expect(approvals).toEqual(["Approve exact effect"]));
-    await vi.waitFor(() =>
-      expect(child.written).toContain('"type":"approval.answer"'),
-    );
     abort.abort();
     child.reply({
       protocol_version: 1,
@@ -181,63 +170,35 @@ describe("BridgeProcess", () => {
     });
 
     await expect(turn).rejects.toMatchObject({ code: "cancelled" });
-    expect(events).toEqual(["planning"]);
+    expect(events).toEqual(["planning", "approval_required"]);
     const written = child.written;
-    expect(written).toContain('"type":"approval.answer"');
-    expect(written).toContain('"approved":true');
+    expect(written).not.toContain('"type":"approval.answer"');
     expect(written).toContain('"type":"turn.cancel"');
-    expect(written).not.toContain("Approve exact effect");
     await bridge.dispose();
   });
 
-  it("bounds approval replay state to the active turn", async () => {
+  it("rejects any approval control message from the chat bridge", async () => {
     const { bridge, child } = fixture();
     await initialize(bridge, child);
 
-    for (const [requestId, turnId] of [
-      [2, "first"],
-      [4, "second"],
-    ] as const) {
-      const approvals: string[] = [];
-      const turn = bridge.runTurn({
-        agentId: "agent",
-        sessionId: "opaque-session",
-        turnId,
-        text: "request",
-        onEvent: () => undefined,
-        onApproval: async (request) => {
-          approvals.push(request.approvalId);
-          return true;
-        },
-      });
-      child.reply({
-        protocol_version: 1,
-        request_id: requestId,
-        type: "approval.request",
-        approval_id: "turn-scoped-approval",
-        display: "Approve exact effect",
-        purpose: "tool_execution",
-        deadline_unix_ms: Date.now() + 30_000,
-      });
-      await vi.waitFor(() =>
-        expect(approvals).toEqual(["turn-scoped-approval"]),
-      );
-      await vi.waitFor(() =>
-        expect(child.written.match(/"type":"approval.answer"/g)).toHaveLength(
-          requestId === 2 ? 1 : 2,
-        ),
-      );
-      child.reply({
-        protocol_version: 1,
-        request_id: requestId,
-        type: "turn.released",
-        text: `released-${turnId}`,
-      });
-      await expect(turn).resolves.toEqual({ text: `released-${turnId}` });
-    }
-
-    expect(bridge.closed).toBe(false);
-    await bridge.dispose();
+    const turn = bridge.runTurn({
+      agentId: "agent",
+      sessionId: "opaque-session",
+      turnId: "turn",
+      text: "request",
+      onEvent: () => undefined,
+    });
+    child.reply({
+      protocol_version: 1,
+      request_id: 2,
+      type: "approval.request",
+      approval_id: "forbidden",
+      display: "Approve exact effect",
+      purpose: "tool_execution",
+      deadline_unix_ms: Date.now() + 30_000,
+    } as never);
+    await expect(turn).rejects.toMatchObject({ code: "indeterminate" });
+    expect(bridge.closed).toBe(true);
   });
 
   it("returns only the closed public doctor snapshot", async () => {
@@ -278,7 +239,6 @@ describe("BridgeProcess", () => {
       turnId: "turn",
       text: "request",
       onEvent: () => undefined,
-      onApproval: async () => false,
     });
     child.stderr.write("raw secret must not be logged\n");
     child.crash();
@@ -291,7 +251,6 @@ describe("BridgeProcess", () => {
         turnId: "next",
         text: "must not replay",
         onEvent: () => undefined,
-        onApproval: async () => false,
       }),
     ).rejects.toBeInstanceOf(BridgeFailure);
   });
@@ -305,7 +264,6 @@ describe("BridgeProcess", () => {
       turnId: "turn",
       text: "request",
       onEvent: () => undefined,
-      onApproval: async () => false,
     });
     const terminal = {
       protocol_version: 1,

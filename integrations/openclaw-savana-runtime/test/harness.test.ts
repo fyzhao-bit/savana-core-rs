@@ -1,16 +1,9 @@
-import type {
-  AgentHarnessAttemptParams,
-  AgentHarnessUserInputQuestion,
-} from "openclaw/plugin-sdk/agent-harness-runtime";
+import type { AgentHarnessAttemptParams } from "openclaw/plugin-sdk/agent-harness-runtime";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import { describe, expect, it, vi } from "vitest";
 
 import plugin from "../index.js";
-import type {
-  ApprovalPrompt,
-  ReleasedTurn,
-  RunTurnOptions,
-} from "../src/bridge-process.js";
+import type { ReleasedTurn, RunTurnOptions } from "../src/bridge-process.js";
 import { BridgeFailure } from "../src/bridge-process.js";
 import { createSavanaHarness } from "../src/harness.js";
 import { savanaProvider } from "../src/provider.js";
@@ -20,22 +13,18 @@ class FakeBridge {
   readonly reset = vi.fn(async () => undefined);
   readonly dispose = vi.fn(async () => undefined);
   readonly calls: RunTurnOptions[] = [];
-  approval = true;
+  hold: Promise<void> | undefined;
   failure: BridgeFailure | undefined;
 
   async runTurn(options: RunTurnOptions): Promise<ReleasedTurn> {
     this.calls.push(options);
     await options.onEvent({ event: "planning" });
+    await options.onEvent({
+      event: "approval_required",
+      purpose: "tool_execution",
+    });
     if (this.failure !== undefined) throw this.failure;
-    if (this.approval) {
-      const approved = await options.onApproval({
-        approvalId: "approval",
-        display: "Approve exact connector effect",
-        purpose: "tool_execution",
-        deadlineUnixMs: Date.now() + 10_000,
-      });
-      if (!approved) throw new BridgeFailure("approval_denied");
-    }
+    await this.hold;
     return { text: "released response" };
   }
 }
@@ -71,7 +60,6 @@ function runtime() {
         queueMessage(text: string): Promise<void>;
       }
     | undefined;
-  const questions: AgentHarnessUserInputQuestion[][] = [];
   const events: unknown[] = [];
   const harness = createSavanaHarness(bridge, {
     activate: (_sessionId, handle) => {
@@ -80,16 +68,12 @@ function runtime() {
     deactivate: () => {
       activeHandle = undefined;
     },
-    deliverApproval: async (_params, value) => {
-      questions.push([...value]);
-    },
   });
   return {
     active: () => activeHandle,
     bridge,
     events,
     harness,
-    questions,
   };
 }
 
@@ -113,7 +97,11 @@ describe("Savana harness", () => {
   });
 
   it("sends only current inbound text and emits only released assistant bytes", async () => {
-    const { active, bridge, harness, questions } = runtime();
+    const { active, bridge, harness } = runtime();
+    let resume: () => void = () => undefined;
+    bridge.hold = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
     const agentEvents: unknown[] = [];
     const attempt = harness.runAttempt(
       params({
@@ -122,9 +110,11 @@ describe("Savana harness", () => {
         },
       }),
     );
-    await vi.waitFor(() => expect(questions).toHaveLength(1));
-    expect(questions[0]?.[0]?.question).toBe("Approve exact connector effect");
-    await active()?.queueMessage("Approve");
+    await vi.waitFor(() => expect(bridge.calls).toHaveLength(1));
+    await expect(active()?.queueMessage("Approve")).rejects.toThrow(
+      "trusted product UI",
+    );
+    resume();
     const result = await attempt;
 
     expect(bridge.calls[0]?.text).toBe("current user request");
@@ -143,12 +133,16 @@ describe("Savana harness", () => {
         data: { event: "planning" },
         sessionKey: "agent:main:session",
       },
+      {
+        stream: "savana.lifecycle",
+        data: { event: "approval_required", purpose: "tool_execution" },
+        sessionKey: "agent:main:session",
+      },
     ]);
   });
 
   it("retires an indeterminate binding and never falls back or replays", async () => {
     const { bridge, harness } = runtime();
-    bridge.approval = false;
     bridge.failure = new BridgeFailure("indeterminate");
     await expect(harness.runAttempt(params())).rejects.toMatchObject({
       code: "indeterminate",
@@ -162,11 +156,10 @@ describe("Savana harness", () => {
   });
 
   it("resets and disposes native bridge sessions", async () => {
-    const { active, bridge, harness, questions } = runtime();
-    const attempt = harness.runAttempt(params());
-    await vi.waitFor(() => expect(questions).toHaveLength(1));
-    await active()?.queueMessage("Deny");
-    await expect(attempt).rejects.toMatchObject({ code: "approval_denied" });
+    const { bridge, harness } = runtime();
+    await expect(harness.runAttempt(params())).resolves.toMatchObject({
+      assistantTexts: ["released response"],
+    });
 
     await harness.reset?.({
       agentId: "personal",

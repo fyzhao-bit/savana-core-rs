@@ -2,20 +2,13 @@ import type {
   AgentHarness,
   AgentHarnessAttemptParams,
   AgentHarnessAttemptResult,
-  AgentHarnessUserInputQuestion,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import {
   clearActiveEmbeddedRun,
-  deliverAgentHarnessUserInputPrompt,
   setActiveEmbeddedRun,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 
-import type {
-  ApprovalPrompt,
-  BridgeProcess,
-  ReleasedTurn,
-  RunTurnOptions,
-} from "./bridge-process.js";
+import type { BridgeProcess, ReleasedTurn, RunTurnOptions } from "./bridge-process.js";
 import { BridgeFailure } from "./bridge-process.js";
 import { selectInboundText } from "./input.js";
 import {
@@ -48,7 +41,6 @@ interface ActiveHandle {
 
 export interface SavanaHarnessDependencies {
   readonly bindings?: SessionBindings;
-  readonly deliverApproval?: typeof deliverAgentHarnessUserInputPrompt;
   readonly activate?: (sessionId: string, handle: ActiveHandle, sessionKey?: string, sessionFile?: string) => void;
   readonly deactivate?: (sessionId: string, handle: ActiveHandle, sessionKey?: string, sessionFile?: string) => void;
 }
@@ -58,8 +50,6 @@ export function createSavanaHarness(
   dependencies: SavanaHarnessDependencies = {},
 ): AgentHarness {
   const bindings = dependencies.bindings ?? new SessionBindings();
-  const deliverApproval =
-    dependencies.deliverApproval ?? deliverAgentHarnessUserInputPrompt;
   const activate = dependencies.activate ?? setActiveEmbeddedRun;
   const deactivate = dependencies.deactivate ?? clearActiveEmbeddedRun;
   let started: Promise<void> | undefined;
@@ -107,7 +97,6 @@ export function createSavanaHarness(
       const agentId = params.agentId ?? "default";
       const openClawSessionId = params.sessionId;
       const bridgeSessionId = bindings.getOrCreate(agentId, openClawSessionId);
-      const approval = new ApprovalCoordinator(params, deliverApproval);
       const localAbort = new AbortController();
       const signal = params.abortSignal
         ? AbortSignal.any([params.abortSignal, localAbort.signal])
@@ -116,10 +105,8 @@ export function createSavanaHarness(
       const handle: ActiveHandle = {
         kind: "embedded",
         runId: params.runId,
-        queueMessage: async (answer) => {
-          if (!approval.answer(answer)) {
-            throw new Error("Savana runtime is not awaiting approval");
-          }
+        queueMessage: async () => {
+          throw new Error("Savana approvals require the trusted product UI");
         },
         isStreaming: () => running,
         isStopped: () => !running,
@@ -139,11 +126,9 @@ export function createSavanaHarness(
           text,
           signal,
           onEvent: async (event) => emitProgress(params, event),
-          onApproval: async (request) => approval.request(request),
         });
         return releasedResult(params, released.text);
       } catch (error) {
-        approval.cancel();
         if (error instanceof BridgeFailure && error.code === "cancelled") {
           await retire(agentId, openClawSessionId, bridgeSessionId);
           return abortedResult(params);
@@ -154,7 +139,6 @@ export function createSavanaHarness(
           : new BridgeFailure("internal_failure");
       } finally {
         running = false;
-        approval.cancel();
         deactivate(params.sessionId, handle, params.sessionKey, params.sessionFile);
         params.replyOperation?.detachBackend(handle);
       }
@@ -172,74 +156,6 @@ export function createSavanaHarness(
       await bridge.dispose();
     },
   };
-}
-
-class ApprovalCoordinator {
-  readonly #params: AgentHarnessAttemptParams;
-  readonly #deliver: typeof deliverAgentHarnessUserInputPrompt;
-  #pending:
-    | {
-        readonly resolve: (approved: boolean) => void;
-        readonly timer: NodeJS.Timeout;
-      }
-    | undefined;
-
-  constructor(
-    params: AgentHarnessAttemptParams,
-    deliver: typeof deliverAgentHarnessUserInputPrompt,
-  ) {
-    this.#params = params;
-    this.#deliver = deliver;
-  }
-
-  async request(request: ApprovalPrompt): Promise<boolean> {
-    if (this.#pending !== undefined) return false;
-    const remaining = request.deadlineUnixMs - Date.now();
-    if (remaining <= 0) return false;
-    const questions: readonly AgentHarnessUserInputQuestion[] = [
-      {
-        id: request.approvalId,
-        header: "Savana approval",
-        question: request.display,
-        isOther: false,
-        isSecret: false,
-        options: [{ label: "Approve" }, { label: "Deny" }],
-      },
-    ];
-    let resolvePending: (approved: boolean) => void = () => undefined;
-    const answer = new Promise<boolean>((resolve) => {
-      resolvePending = resolve;
-    });
-    const timer = setTimeout(() => {
-      this.#settle(false);
-    }, remaining);
-    timer.unref();
-    this.#pending = { resolve: resolvePending, timer };
-    try {
-      await this.#deliver(this.#params, questions);
-    } catch {
-      this.#settle(false);
-    }
-    return answer;
-  }
-
-  answer(text: string): boolean {
-    if (this.#pending === undefined) return false;
-    this.#settle(text.trim() === "Approve");
-    return true;
-  }
-
-  cancel(): void {
-    this.#settle(false);
-  }
-
-  #settle(approved: boolean): void {
-    const pending = this.#pending;
-    if (pending === undefined) return;
-    this.#pending = undefined;
-    clearTimeout(pending.timer);
-    pending.resolve(approved);
-  }
 }
 
 function verifyClaimedAttempt(params: AgentHarnessAttemptParams): void {

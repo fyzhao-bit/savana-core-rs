@@ -9,7 +9,6 @@ import {
 } from "./config.js";
 import {
   MAX_LINE_BYTES,
-  type ApprovalPurpose,
   type BridgeEvent,
   type BridgeToPluginMessage,
   type FailureCode,
@@ -45,13 +44,6 @@ export type SpawnBridge = (
   options: SpawnBridgeOptions,
 ) => ChildProcessLike;
 
-export interface ApprovalPrompt {
-  readonly approvalId: string;
-  readonly display: string;
-  readonly purpose: ApprovalPurpose;
-  readonly deadlineUnixMs: number;
-}
-
 export interface RunTurnOptions {
   readonly agentId: string;
   readonly sessionId: string;
@@ -59,7 +51,6 @@ export interface RunTurnOptions {
   readonly text: string;
   readonly signal?: AbortSignal;
   readonly onEvent: (event: BridgeEvent) => void | Promise<void>;
-  readonly onApproval: (request: ApprovalPrompt) => Promise<boolean>;
 }
 
 export interface ReleasedTurn {
@@ -91,7 +82,6 @@ interface PendingInitialize {
 interface PendingTurn {
   readonly type: "turn";
   readonly options: RunTurnOptions;
-  readonly approvalIds: Set<string>;
   readonly resolve: (result: ReleasedTurn) => void;
   readonly reject: (error: BridgeFailure) => void;
   readonly abort?: () => void;
@@ -210,7 +200,6 @@ export class BridgeProcess {
       const pending: PendingTurn = {
         type: "turn",
         options,
-        approvalIds: new Set(),
         resolve,
         reject,
         ...(options.signal === undefined
@@ -377,12 +366,6 @@ export class BridgeProcess {
       });
       return;
     }
-    if (message.type === "approval.request") {
-      if (pending.approvalIds.has(message.approval_id)) throw new ProtocolError();
-      pending.approvalIds.add(message.approval_id);
-      void this.#answerApproval(message.request_id, pending, message);
-      return;
-    }
     if (message.type === "turn.released") {
       this.#finishTurn(message.request_id, pending);
       pending.resolve({ text: message.text });
@@ -394,45 +377,6 @@ export class BridgeProcess {
       return;
     }
     throw new ProtocolError();
-  }
-
-  async #answerApproval(
-    turnRequestId: number,
-    pending: PendingTurn,
-    message: Extract<BridgeToPluginMessage, { type: "approval.request" }>,
-  ): Promise<void> {
-    let approved = false;
-    const remaining = Math.max(0, message.deadline_unix_ms - Date.now());
-    if (remaining > 0) {
-      try {
-        approved =
-          (await withTimeout(
-            pending.options.onApproval({
-              approvalId: message.approval_id,
-              display: message.display,
-              purpose: message.purpose,
-              deadlineUnixMs: message.deadline_unix_ms,
-            }),
-            Math.min(remaining, this.#config.approvalTimeoutSeconds * 1000),
-            () => undefined,
-          )) === true;
-      } catch {
-        approved = false;
-      }
-    }
-    if (this.#pending.get(turnRequestId) !== pending || this.#closed) return;
-    try {
-      this.#write({
-        protocol_version: PROTOCOL_VERSION,
-        request_id: this.#nextRequestId(),
-        type: "approval.answer",
-        turn_request_id: turnRequestId,
-        approval_id: message.approval_id,
-        approved,
-      });
-    } catch {
-      this.#poison("bridge_protocol");
-    }
   }
 
   #finishTurn(requestId: number, pending: PendingTurn): void {

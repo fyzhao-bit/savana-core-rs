@@ -7,15 +7,25 @@ import base64
 import json
 import math
 import os
+import re
+import secrets
 import socket
 import stat
 import struct
 import threading
+import time
+import unicodedata
 from typing import Any
 
 AUTH_PROTOCOL_VERSION = 1
 MAX_AUTH_FRAME_BYTES = 1024 * 1024
 MAX_AUTH_FIELD_BYTES = 512 * 1024
+MAX_APPROVAL_DISPLAY_BYTES = 16 * 1024
+MAX_APPROVAL_IDS = 65_536
+APPROVAL_PURPOSES = frozenset(
+    {"ingress", "tool_execution", "final_release", "connector_registration"}
+)
+_APPROVAL_ID = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 
 
 class AuthBrokerError(Exception):
@@ -55,6 +65,10 @@ class WebAuthnBroker:
             raise AuthBrokerError("WebAuthn broker is unavailable") from error
         self._channel = channel
         self._lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        self._approval_id_lock = threading.Lock()
+        self._issued_approval_ids: set[str] = set()
+        self._timeout_seconds = float(timeout_seconds)
         self._closed = False
 
     def assert_credential(self, options_json: bytes) -> dict[str, bytes]:
@@ -83,8 +97,87 @@ class WebAuthnBroker:
         """Obtain a fresh one-use session bootstrap on the same private channel."""
         return await asyncio.to_thread(self._next_bootstrap)
 
+    def decide_approval(
+        self,
+        display: str,
+        purpose: str,
+        deadline_unix_ms: int,
+        cancel_event: threading.Event | None = None,
+    ) -> bool:
+        if not isinstance(display, str) or not display:
+            raise AuthBrokerError("approval broker request is invalid")
+        try:
+            display_bytes = display.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as error:
+            raise AuthBrokerError("approval broker request is invalid") from error
+        if (
+            unicodedata.normalize("NFC", display) != display
+            or any(unicodedata.category(character) == "Cc" for character in display)
+            or len(display_bytes) > MAX_APPROVAL_DISPLAY_BYTES
+            or not isinstance(purpose, str)
+            or purpose not in APPROVAL_PURPOSES
+            or type(deadline_unix_ms) is not int
+            or deadline_unix_ms <= int(time.time() * 1000)
+            or deadline_unix_ms > (1 << 63) - 1
+        ):
+            raise AuthBrokerError("approval broker request is invalid")
+        approval_id = self._fresh_approval_id()
+        request = {
+            "protocol_version": AUTH_PROTOCOL_VERSION,
+            "type": "approval.decide",
+            "approval_id": approval_id,
+            "display": display,
+            "purpose": purpose,
+            "deadline_unix_ms": deadline_unix_ms,
+        }
+        encoded = json.dumps(
+            request,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        if len(encoded) > MAX_AUTH_FRAME_BYTES:
+            raise AuthBrokerError("approval broker request is oversized")
+        remaining = (deadline_unix_ms - int(time.time() * 1000)) / 1000.0
+        if remaining <= 0:
+            raise AuthBrokerError("approval broker request is expired")
+        monotonic_deadline = time.monotonic() + min(
+            self._timeout_seconds, remaining
+        )
+        response = self._roundtrip(
+            encoded,
+            monotonic_deadline=monotonic_deadline,
+            cancel_event=cancel_event,
+        )
+        if (
+            frozenset(response)
+            != {"protocol_version", "type", "approval_id", "approved"}
+            or response.get("protocol_version") != AUTH_PROTOCOL_VERSION
+            or response.get("type") != "approval.decision"
+            or not isinstance(response.get("approval_id"), str)
+            or not secrets.compare_digest(response["approval_id"], approval_id)
+            or type(response.get("approved")) is not bool
+        ):
+            raise AuthBrokerError("approval broker response is invalid")
+        return response["approved"]
+
+    def _fresh_approval_id(self) -> str:
+        with self._approval_id_lock:
+            if len(self._issued_approval_ids) >= MAX_APPROVAL_IDS:
+                raise AuthBrokerError("approval broker is unavailable")
+            for _ in range(4):
+                approval_id = secrets.token_urlsafe(32)
+                if (
+                    _APPROVAL_ID.fullmatch(approval_id)
+                    and approval_id not in self._issued_approval_ids
+                ):
+                    self._issued_approval_ids.add(approval_id)
+                    return approval_id
+        raise AuthBrokerError("approval broker is unavailable")
+
     def close(self) -> None:
-        with self._lock:
+        with self._state_lock:
             if self._closed:
                 return
             self._closed = True
@@ -161,38 +254,126 @@ class WebAuthnBroker:
             raise AuthBrokerError("session bootstrap broker response is invalid")
         return token
 
-    def _roundtrip(self, encoded: bytes) -> dict[str, Any]:
+    def _roundtrip(
+        self,
+        encoded: bytes,
+        *,
+        monotonic_deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
         if not encoded or len(encoded) > MAX_AUTH_FRAME_BYTES:
             raise AuthBrokerError("authentication broker request is invalid")
-        with self._lock:
-            if self._closed:
-                raise AuthBrokerError("authentication broker is unavailable")
-            try:
-                self._channel.sendall(struct.pack(">I", len(encoded)) + encoded)
-                length = struct.unpack(">I", _read_exact(self._channel, 4))[0]
-                if length == 0 or length > MAX_AUTH_FRAME_BYTES:
-                    raise AuthBrokerError("authentication broker response is invalid")
-                response = json.loads(
-                    _read_exact(self._channel, length).decode("utf-8", errors="strict"),
-                    object_pairs_hook=_unique_object,
-                    parse_constant=_reject_constant,
+        deadline = (
+            time.monotonic() + self._timeout_seconds
+            if monotonic_deadline is None
+            else monotonic_deadline
+        )
+        acquired = False
+        previous_timeout: float | None = None
+        try:
+            while not acquired:
+                remaining = _remaining_seconds(deadline, cancel_event)
+                acquired = self._lock.acquire(
+                    timeout=min(remaining, 0.1 if cancel_event is not None else remaining)
                 )
-            except (
-                OSError,
-                UnicodeDecodeError,
-                json.JSONDecodeError,
-                struct.error,
-            ) as error:
-                raise AuthBrokerError("authentication broker is unavailable") from error
+            with self._state_lock:
+                if self._closed:
+                    raise AuthBrokerError("authentication broker is unavailable")
+            previous_timeout = self._channel.gettimeout()
+            _write_all(
+                self._channel,
+                struct.pack(">I", len(encoded)) + encoded,
+                deadline,
+                cancel_event,
+            )
+            length = struct.unpack(
+                ">I", _read_exact(self._channel, 4, deadline, cancel_event)
+            )[0]
+            if length == 0 or length > MAX_AUTH_FRAME_BYTES:
+                raise AuthBrokerError("authentication broker response is invalid")
+            response = json.loads(
+                _read_exact(self._channel, length, deadline, cancel_event).decode(
+                    "utf-8", errors="strict"
+                ),
+                object_pairs_hook=_unique_object,
+                parse_constant=_reject_constant,
+            )
+            _remaining_seconds(deadline, cancel_event)
+        except AuthBrokerError:
+            if acquired:
+                self.close()
+            raise
+        except (
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            struct.error,
+        ) as error:
+            if acquired:
+                self.close()
+            raise AuthBrokerError("authentication broker is unavailable") from error
+        finally:
+            if acquired:
+                if previous_timeout is not None:
+                    try:
+                        self._channel.settimeout(previous_timeout)
+                    except OSError:
+                        pass
+                self._lock.release()
         if not isinstance(response, dict):
             raise AuthBrokerError("authentication broker response is invalid")
         return response
 
 
-def _read_exact(channel: socket.socket, length: int) -> bytes:
+def _remaining_seconds(
+    monotonic_deadline: float,
+    cancel_event: threading.Event | None,
+) -> float:
+    if cancel_event is not None and cancel_event.is_set():
+        raise AuthBrokerError("authentication broker request was cancelled")
+    remaining = monotonic_deadline - time.monotonic()
+    if remaining <= 0:
+        raise AuthBrokerError("authentication broker request expired")
+    return remaining
+
+
+def _io_timeout(remaining: float, cancel_event: threading.Event | None) -> float:
+    return min(remaining, 0.1 if cancel_event is not None else remaining)
+
+
+def _write_all(
+    channel: socket.socket,
+    encoded: bytes,
+    monotonic_deadline: float,
+    cancel_event: threading.Event | None,
+) -> None:
+    view = memoryview(encoded)
+    while view:
+        remaining = _remaining_seconds(monotonic_deadline, cancel_event)
+        channel.settimeout(_io_timeout(remaining, cancel_event))
+        try:
+            written = channel.send(view)
+        except socket.timeout:
+            continue
+        if written <= 0:
+            raise AuthBrokerError("authentication broker closed")
+        view = view[written:]
+
+
+def _read_exact(
+    channel: socket.socket,
+    length: int,
+    monotonic_deadline: float,
+    cancel_event: threading.Event | None,
+) -> bytes:
     output = bytearray()
     while len(output) < length:
-        chunk = channel.recv(length - len(output))
+        remaining = _remaining_seconds(monotonic_deadline, cancel_event)
+        channel.settimeout(_io_timeout(remaining, cancel_event))
+        try:
+            chunk = channel.recv(length - len(output))
+        except socket.timeout:
+            continue
         if not chunk:
             raise AuthBrokerError("WebAuthn broker closed")
         output.extend(chunk)

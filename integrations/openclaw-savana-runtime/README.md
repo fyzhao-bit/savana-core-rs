@@ -26,9 +26,10 @@ current inbound text
   -> Python public Savana SDK
   -> ingest_text(CHAT_TEXT)
   -> run_agent(PRIVATE, bounded RunLimits)
+  -> one trusted FD 3 approval.decision for every tool call
   -> opaque document handle
-  -> explicit release approval
-  -> execd verified provider transport
+  -> one trusted FD 3 approval.decision for final release
+  -> execd dispatch-kind-selected final-release transport
   -> fixed 127.0.0.1 TLS 1.3/mTLS receiver
   -> durable single-flight release journal
   -> one turn.released UTF-8 value
@@ -79,9 +80,10 @@ The file is closed-schema JSON and must be mode `0600` on POSIX:
 {
   "version": 1,
   "identity_path": "/var/lib/savana/openclaw/identity.cbor",
+  "execd_bootstrap_path": "/etc/savana/execd-bootstrap-v2.json",
   "webauthn_fd": 3,
   "release_journal_path": "/var/lib/savana/openclaw/release.cbor",
-  "release_canonical_host": "provider.example",
+  "release_canonical_host": "release.savana.example",
   "release_listen_port": 43191,
   "client_root_certificate_path": "/etc/savana/openclaw/execd-ca.der",
   "server_certificate_path": "/etc/savana/openclaw/receiver.der",
@@ -100,12 +102,21 @@ OpenClaw plugin configuration. The doctor check rejects drift between the two
 closed configurations.
 
 `release_listen_port` is fixed, nonzero, and exclusive to this product. The
-deployment-shipped `savana-openclaw-delivery` connector and signed
-`BuildFinalRelease` rule must name the exact canonical URL
-`https://provider.example:43191/savana/final-release`, the receiver
-certificate/SPKI, TLS 1.3, and ALPN `savana-provider-v2`. The receiver still
-connects only through `127.0.0.1`; `provider.example` is the pinned TLS
-identity, not a DNS routing decision.
+root-owned execd bootstrap must use `provider_routing_mode` value
+`split-final-release` and a distinct `final_release_provider` naming the exact
+canonical URL
+`https://release.savana.example:43191/savana/final-release`, receiver
+certificate/SPKI, TLS 1.3, ALPN `savana-provider-v2`, client certificate and
+private-key credential. Execd selects this transport only from the already
+authenticated `FinalRelease` dispatch kind. Tool execution remains on the
+separately pinned tool provider. Both sockets connect only through
+`127.0.0.1`; the canonical hosts are TLS identities, not DNS routing inputs.
+
+The base `deploy/systemd/savana-execd.service` remains usable with
+`legacy-shared` and therefore does not request the final-release private key.
+A split deployment must install
+`deploy/systemd/savana-execd-split-final-release.conf` as an execd service
+drop-in and provision its separately encrypted credential before restart.
 
 The identity, bridge config, receiver private key, and raw 32-byte execd client
 SPKI pin must be private regular files without symlinks. Certificate inputs
@@ -118,6 +129,28 @@ broker socket as descriptor 3. The TypeScript bridge passes only that
 descriptor to Python. Bootstrap tokens and WebAuthn material are requested
 over the framed broker protocol; they must never appear in JSON, environment
 variables, argv, stdin/stdout logs, or transcripts.
+
+For every SDK approval callback Python sends one length-prefixed request on
+that same private socket:
+
+```json
+{
+  "protocol_version": 1,
+  "type": "approval.decide",
+  "approval_id": "fresh-43-character-base64url-value",
+  "display": "the exact bounded Savana approval display",
+  "purpose": "tool_execution",
+  "deadline_unix_ms": 1900000000000
+}
+```
+
+The product broker must present the display in trusted Savana UI and return an
+exact `approval.decision` carrying the same ID and a boolean `approved`.
+Every read or write tool call gets a new decision. Denial, window close,
+timeout, malformed response, or broker failure denies the callback and ends
+the whole agent loop; there is no retry, replan, substitute tool, or fallback.
+OpenClaw receives only `turn.event {event: "approval_required", purpose}`.
+It never receives the display or ID and cannot answer an approval through chat.
 
 ## OpenClaw configuration
 
@@ -196,16 +229,13 @@ The check verifies the exact versions, plugin/model/harness selection, no
 fallback, tool/MCP denial, disabled OpenClaw memory, bounded transcript
 retention, private files, FD 3 broker binding, fixed service origins, matching
 receiver certificate/private key, nonzero client SPKI pin, fixed release URL,
+the root-owned execd split-routing mode, exact release address/URL, server
+SPKI, root/client certificate digests, endpoint binding, credential identity,
 and at least one active connector returned by a fresh authenticated Savana
 session. Its probe uses `--doctor-config`, so it does not bind or compete with
 the production release port. Findings contain only stable check names and
-generic messages.
-
-The current macOS development service graph does not yet satisfy the formal
-release handoff. The exact transport conflict and the reviewed designs that
-can clear it are recorded in
+generic messages. Live installation and hardware-WebAuthn evidence remain in
 [`docs/openclaw-deployment-acceptance-gate.md`](../../docs/openclaw-deployment-acceptance-gate.md).
-Do not start the Gateway while this gate is active.
 
 ## Reset and recovery
 
@@ -222,10 +252,11 @@ or replay the OpenClaw message as a recovery shortcut.
 
 The adapter prevents OpenClaw's model/tool loop from seeing Savana private
 values and only returns explicitly released bytes. OpenClaw still receives the
-original channel message before Savana, plus approval displays, bounded
-lifecycle events, and the released final answer; its normal session/transcript
-storage may retain those values. Channel transport, OpenClaw Gateway security,
-and transcript retention remain outside the Rust kernel boundary.
+original channel message before Savana, bounded approval/lifecycle state, and
+the released final answer; it receives no approval display, approval ID, tool
+arguments, or private tool result. Its normal session/transcript storage may
+retain the values it does receive. Channel transport, OpenClaw Gateway
+security, and transcript retention remain outside the Rust kernel boundary.
 
 OpenClaw upstream is not modified by this integration and no code is pushed to
 its repository.

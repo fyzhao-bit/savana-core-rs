@@ -5,6 +5,8 @@ import json
 import os
 import socket
 import ssl
+import struct
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -12,6 +14,7 @@ from urllib.parse import urlsplit
 import pytest
 import savana_core
 from savana.openclaw_bridge.protocol import InboundDecoder
+from savana.openclaw_bridge.auth import WebAuthnBroker
 from savana.openclaw_bridge.runtime import BridgeProcess, BridgeRuntime
 
 
@@ -307,40 +310,45 @@ async def test_only_durably_claimed_mtls_payload_becomes_assistant_text(
     )
     emitted: list[dict] = []
     journal_at_release: bytes | None = None
-    approval_request_id = 90
     process: BridgeProcess
     decoder = InboundDecoder()
 
     async def writer(message: dict) -> None:
-        nonlocal approval_request_id, journal_at_release
+        nonlocal journal_at_release
         emitted.append(message)
-        if message["type"] == "approval.request":
-            request_id = approval_request_id
-            approval_request_id += 1
-            await process.handle(
-                decoder.decode_line(
-                    json.dumps(
-                        {
-                            "protocol_version": 1,
-                            "request_id": request_id,
-                            "type": "approval.answer",
-                            "turn_request_id": message["request_id"],
-                            "approval_id": message["approval_id"],
-                            "approved": True,
-                        },
-                        separators=(",", ":"),
-                    ).encode()
-                    + b"\n"
-                )
-            )
         if message["type"] == "turn.released":
             journal_at_release = journal_path.read_bytes()
+
+    broker_side, product_side = socket.socketpair()
+    broker = WebAuthnBroker(broker_side.fileno())
+    broker_requests: list[dict] = []
+    expected_approvals = 2 if connector_effect else 1
+
+    def approve_every_call() -> None:
+        for _ in range(expected_approvals):
+            header = product_side.recv(4)
+            length = struct.unpack(">I", header)[0]
+            request = json.loads(product_side.recv(length))
+            broker_requests.append(request)
+            response = json.dumps(
+                {
+                    "protocol_version": 1,
+                    "type": "approval.decision",
+                    "approval_id": request["approval_id"],
+                    "approved": True,
+                },
+                separators=(",", ":"),
+            ).encode()
+            product_side.sendall(struct.pack(">I", len(response)) + response)
+
+    approval_thread = threading.Thread(target=approve_every_call)
+    approval_thread.start()
 
     runtime = BridgeRuntime(
         client=_Client(_Session(deliver, connector_effect=connector_effect)),
         identity="identity",
         bootstrap_source=_Bootstrap(),
-        webauthn=SimpleNamespace(close=lambda: None),
+        webauthn=broker,
         receiver=receiver,
         sdk=_Sdk,
         max_steps=8,
@@ -382,7 +390,22 @@ async def test_only_durably_claimed_mtls_payload_becomes_assistant_text(
     assert journal[2][0] == 2  # claimed
     assert journal[2][-1] == payload
     assert terminals[0]["text"].encode() == journal[2][-1]
+    assert [request["purpose"] for request in broker_requests] == (
+        ["tool_execution", "final_release"]
+        if connector_effect
+        else ["final_release"]
+    )
+    lifecycle = [message for message in emitted if message["type"] == "turn.event"]
+    assert [message["event"] for message in lifecycle] == [
+        "planning",
+        *(["approval_required"] if connector_effect else []),
+        "approval_required",
+    ]
+    assert all("display" not in message and "approval_id" not in message for message in emitted)
     await runtime.shutdown()
+    approval_thread.join(timeout=1)
+    broker_side.close()
+    product_side.close()
 
 
 def test_real_receiver_rejects_cross_session_reservation(tmp_path: Path) -> None:
