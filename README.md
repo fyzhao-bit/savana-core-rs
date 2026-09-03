@@ -234,6 +234,25 @@ handles; it does not select a role or receive a Rust capability.
 
 ## Exposed interfaces
 
+### OpenClaw production runtime
+
+The repository also contains the pinned, text-only OpenClaw adapter at
+[`integrations/openclaw-savana-runtime`](integrations/openclaw-savana-runtime/README.md).
+It targets exactly `openclaw@2026.7.1-2` and registers one provider
+(`savana`), one model (`agent`), and one harness (`savana`), with zero
+OpenClaw tools and zero MCP servers. OpenClaw upstream is a read-only
+compatibility dependency; every adapter source, test, and document remains in
+this `savana-core-rs` repository.
+
+The adapter sends only the exact current inbound text to the public Python SDK.
+Savana runs the private bounded agent loop and explicit approval flow. The only
+assistant text accepted back is a payload delivered by execd to the fixed
+loopback TLS 1.3/mTLS receiver, durably claimed by the sole release
+reservation. See the integration README for installation, fixed-port release
+connector provisioning, certificate formats, the FD 3 product authentication
+broker, OpenClaw model-scoped configuration, `savana.runtime` doctor check,
+recovery, and the honest transcript privacy boundary.
+
 JARVIS remains the trusted control integration and supplies a one-time session
 bootstrap out of band. The V2 client SDK then uses exactly three
 application-facing loopback services: Agent, Ingress, and Approval. JARVIS is

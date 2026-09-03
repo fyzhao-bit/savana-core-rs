@@ -25,6 +25,9 @@ mod connector_registry;
 mod connector_runtime;
 mod daemon;
 mod durable;
+#[cfg(feature = "openclaw-release-test-support")]
+#[doc(hidden)]
+pub mod openclaw_release_test_support;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod protocol_service;
 mod provider_transport;

@@ -1108,6 +1108,7 @@ dependencies = [
  "pyo3",
  "savana-client",
  "savana-kernel-protocol",
+ "savana-openclaw-release",
  "zeroize",
 ]
 
@@ -1239,6 +1240,21 @@ dependencies = [
  "regex",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "savana-openclaw-release"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "minicbor",
+ "rustls",
+ "savana-execd",
+ "savana-policy-core",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "zeroize",
 ]
 
 [[package]]

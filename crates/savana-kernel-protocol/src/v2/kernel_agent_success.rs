@@ -1395,6 +1395,18 @@ impl AgentViewFieldV2 {
             placeholders,
         })
     }
+
+    pub const fn name(&self) -> &ArgumentNameV2 {
+        &self.name
+    }
+
+    pub const fn text(&self) -> &BoundedAgentTextV2 {
+        &self.text
+    }
+
+    pub fn placeholders(&self) -> &[PlaceholderViewV2] {
+        &self.placeholders
+    }
 }
 
 impl<C> minicbor::Encode<C> for AgentViewFieldV2 {
@@ -1896,4 +1908,30 @@ fn decode_error(position: usize) -> minicbor::decode::Error {
 
 fn is_zero(bytes: &[u8]) -> bool {
     bytes.iter().all(|byte| *byte == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AgentViewFieldV2, BoundedAgentTextV2, ClosedRedactionClassV2, PlaceholderViewV2};
+    use crate::v2::ArgumentNameV2;
+
+    #[test]
+    fn structured_view_fields_expose_only_their_public_masked_projection() {
+        let placeholder = PlaceholderViewV2::new(
+            0,
+            BoundedAgentTextV2::new("{{PERSON_0}}").unwrap(),
+            ClosedRedactionClassV2::PersonalData,
+        )
+        .unwrap();
+        let field = AgentViewFieldV2::new(
+            ArgumentNameV2::new("recipient".to_owned()).unwrap(),
+            BoundedAgentTextV2::new("Send to {{PERSON_0}}").unwrap(),
+            vec![placeholder.clone()],
+        )
+        .unwrap();
+
+        assert_eq!(field.name().as_str(), "recipient");
+        assert_eq!(field.text().as_str(), "Send to {{PERSON_0}}");
+        assert_eq!(field.placeholders(), &[placeholder]);
+    }
 }

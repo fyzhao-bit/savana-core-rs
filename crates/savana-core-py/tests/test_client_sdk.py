@@ -112,6 +112,12 @@ def test_public_surface_is_exactly_the_approved_types_and_business_methods():
     ]
 
 
+def test_release_receiver_is_native_private_infrastructure_not_public_sdk():
+    assert hasattr(savana_core, "_ReleaseReceiver")
+    assert not hasattr(savana, "_ReleaseReceiver")
+    assert "_ReleaseReceiver" not in savana.__all__
+
+
 def test_choices_and_exception_inheritance_are_stable():
     assert savana.IntentPrivacy.PRIVATE.value == "private"
     assert savana.IntentPrivacy.THIRD_PARTY.value == "third_party"
@@ -206,6 +212,28 @@ async def test_masked_view_projects_only_an_opaque_continuation_handle():
     assert second.page_index == 1
     assert second.text == "second"
     assert second.continuation is None
+    await session.close()
+
+
+@pytest.mark.asyncio
+async def test_structured_masked_view_exposes_immutable_public_fields_only():
+    session = savana.Session._from_core(savana_core._debug_structured_view_session())
+    view = await session.read_view(session.initial_document)
+
+    assert view.variant == "structured"
+    assert view.template_id == 7
+    assert view.field_count == 1
+    assert view.fields == (
+        (
+            "recipient",
+            "Send to {{PERSON_0}}",
+            ((0, "{{PERSON_0}}", "personal_data"),),
+        ),
+    )
+    assert isinstance(view.fields, tuple)
+    assert isinstance(view.fields[0], tuple)
+    for forbidden in ("raw", "private", "capability", "canonical", "cbor", "to_bytes"):
+        assert not hasattr(view, forbidden)
     await session.close()
 
 
@@ -345,6 +373,15 @@ def test_callback_reentrancy_fails_promptly_once_and_session_can_close():
         check=False,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_callback_failures_are_operation_scoped_inside_the_extension():
+    assert savana_core._debug_callback_error_isolation() == (
+        "unrelated",
+        True,
+        True,
+        True,
+    )
 
 
 @pytest.mark.asyncio

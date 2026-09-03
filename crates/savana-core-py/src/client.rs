@@ -3,6 +3,7 @@ use std::io::Read as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
+use std::{collections::HashMap, thread::ThreadId};
 
 #[cfg(debug_assertions)]
 use std::collections::VecDeque;
@@ -20,7 +21,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyDict};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyTuple};
 use savana_client::{
     AgentEvent as ClientAgentEvent, ApprovalCallback, ApprovalPurpose,
     ApprovalRequest as ClientApprovalRequest, AuthError as ClientAuthError, Client as RustClient,
@@ -44,7 +45,8 @@ use savana_kernel_protocol::v2::{
     AgentBrowserViewCursorCapabilityV2, AgentMaskedDocumentRefV2, AgentSessionStatusV2,
     AgentTabSessionCapabilityV2, AgentUiAuthenticationBrowserCeremonyCapabilityV2,
     AgentUiAuthenticationSettlementTransferCapabilityV2, AgentUiPreAuthenticationTabCapabilityV2,
-    AgentViewV2, BoundedAgentTextV2, FixedOriginV2, Nonce32V2,
+    AgentViewFieldV2, AgentViewV2, ArgumentNameV2, BoundedAgentTextV2, ClosedRedactionClassV2,
+    FixedOriginV2, Nonce32V2, PlaceholderViewV2, StaticTemplateIdV2,
     UiAuthenticationBrowserBeginResponseV2, UiAuthenticationBrowserFinishResponseV2,
 };
 #[cfg(debug_assertions)]
@@ -161,19 +163,20 @@ fn snake_debug(value: &str) -> String {
 }
 
 #[derive(Default)]
-struct CallbackErrors(Mutex<Option<PyErr>>);
+struct CallbackErrors(Mutex<HashMap<ThreadId, PyErr>>);
 
 impl CallbackErrors {
     fn record(&self, error: PyErr) {
         if let Ok(mut pending) = self.0.lock() {
-            if pending.is_none() {
-                *pending = Some(error);
-            }
+            pending.entry(std::thread::current().id()).or_insert(error);
         }
     }
 
     fn take(&self) -> Option<PyErr> {
-        self.0.lock().ok().and_then(|mut pending| pending.take())
+        self.0
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.remove(&std::thread::current().id()))
     }
 }
 
@@ -642,6 +645,33 @@ impl PyMaskedView {
     }
 
     #[getter]
+    fn fields(&self, py: Python<'_>) -> Option<Py<PyTuple>> {
+        let (_, fields) = self.inner.structured()?;
+        let fields = fields.iter().map(|field| {
+            let placeholders = PyTuple::new_bound(
+                py,
+                field.placeholders().iter().map(|placeholder| {
+                    (
+                        placeholder.ordinal(),
+                        placeholder.token().as_str().to_owned(),
+                        snake_debug(&format!("{:?}", placeholder.redaction_class())),
+                    )
+                }),
+            );
+            PyTuple::new_bound(
+                py,
+                [
+                    field.name().as_str().to_object(py),
+                    field.text().as_str().to_object(py),
+                    placeholders.to_object(py),
+                ],
+            )
+            .to_object(py)
+        });
+        Some(PyTuple::new_bound(py, fields).unbind())
+    }
+
+    #[getter]
     fn content_state(&self) -> Option<String> {
         self.inner
             .content_state()
@@ -1044,6 +1074,47 @@ fn debug_view_transport_responses() -> PyResult<Vec<Result<BrowserResponse, Clie
 }
 
 #[cfg(debug_assertions)]
+fn debug_structured_view_transport_responses() -> PyResult<Vec<Result<BrowserResponse, ClientError>>>
+{
+    let mut responses = debug_transport_responses()?;
+    let close_response = responses
+        .pop()
+        .ok_or_else(|| PyValueError::new_err("missing close fixture response"))?;
+    let placeholder = PlaceholderViewV2::new(
+        0,
+        BoundedAgentTextV2::new("{{PERSON_0}}")
+            .map_err(|_| PyValueError::new_err("invalid debug placeholder"))?,
+        ClosedRedactionClassV2::PersonalData,
+    )
+    .map_err(|_| PyValueError::new_err("invalid debug placeholder"))?;
+    let field = AgentViewFieldV2::new(
+        ArgumentNameV2::new("recipient".to_owned())
+            .map_err(|_| PyValueError::new_err("invalid debug field"))?,
+        BoundedAgentTextV2::new("Send to {{PERSON_0}}")
+            .map_err(|_| PyValueError::new_err("invalid debug field"))?,
+        vec![placeholder],
+    )
+    .map_err(|_| PyValueError::new_err("invalid debug field"))?;
+    responses.push(debug_response(
+        BrowserContentType::CanonicalCbor,
+        encode_agent_browser_read_view_response_v2(
+            &AgentBrowserReadViewResponseV2::new(
+                AgentViewV2::Structured {
+                    template: StaticTemplateIdV2::new(7),
+                    fields: vec![field],
+                },
+                vec![],
+                None,
+            )
+            .map_err(|_| PyValueError::new_err("invalid fixture view"))?,
+        )
+        .map_err(|_| PyValueError::new_err("invalid fixture response"))?,
+    ));
+    responses.push(close_response);
+    Ok(responses)
+}
+
+#[cfg(debug_assertions)]
 fn debug_identity_path() -> PyResult<PathBuf> {
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
     let stamp = SystemTime::now()
@@ -1104,7 +1175,7 @@ impl DebugSession {
 #[pyclass(name = "_Session", module = "savana_core", frozen)]
 struct PySession {
     inner: Arc<Mutex<SessionState>>,
-    callback_errors: Arc<CallbackErrors>,
+    ingress_callback_errors: Arc<CallbackErrors>,
     #[cfg(debug_assertions)]
     debug_transport: Option<Arc<DebugScriptedTransport>>,
 }
@@ -1113,14 +1184,21 @@ impl PySession {
     fn live(session: ClientSession, callback_errors: Arc<CallbackErrors>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(SessionState::Live(Box::new(session)))),
-            callback_errors,
+            ingress_callback_errors: callback_errors,
             #[cfg(debug_assertions)]
             debug_transport: None,
         }
     }
 
-    fn finish<T>(&self, result: Result<T, ClientError>) -> PyResult<T> {
-        if let Some(error) = self.callback_errors.take() {
+    fn finish<T>(result: Result<T, ClientError>) -> PyResult<T> {
+        result.map_err(map_client_error)
+    }
+
+    fn finish_operation<T>(
+        result: Result<T, ClientError>,
+        callback_errors: &CallbackErrors,
+    ) -> PyResult<T> {
+        if let Some(error) = callback_errors.take() {
             return Err(error);
         }
         result.map_err(map_client_error)
@@ -1163,7 +1241,7 @@ impl PySession {
                 SessionState::Debug(session) => session.run(),
             }
         });
-        self.finish(result)
+        Self::finish_operation(result, self.ingress_callback_errors.as_ref())
     }
 
     fn ingest_file(&self, py: Python<'_>, path: PathBuf, content_kind: &str) -> PyResult<()> {
@@ -1177,7 +1255,7 @@ impl PySession {
                 SessionState::Debug(session) => session.run(),
             }
         });
-        self.finish(result)
+        Self::finish_operation(result, self.ingress_callback_errors.as_ref())
     }
 
     fn read_view(&self, py: Python<'_>, handle: &PyHandle) -> PyResult<PyMaskedView> {
@@ -1193,7 +1271,7 @@ impl PySession {
                 SessionState::Debug(_) => Err(ClientError::InvalidState),
             }
         });
-        self.finish(result)
+        Self::finish(result)
     }
 
     fn run_planner(&self, py: Python<'_>, intent_privacy: &str) -> PyResult<PyPlan> {
@@ -1210,7 +1288,7 @@ impl PySession {
                 }
             }
         });
-        self.finish(result)
+        Self::finish(result)
     }
 
     fn execute(
@@ -1225,9 +1303,10 @@ impl PySession {
         } else {
             Some(plan.live_arc()?)
         };
+        let callback_errors = Arc::new(CallbackErrors::default());
         let callback = PythonApproval {
             callback: approval,
-            errors: self.callback_errors.clone(),
+            errors: callback_errors.clone(),
         };
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {
@@ -1249,7 +1328,7 @@ impl PySession {
                 SessionState::Debug(_) => Err(ClientError::InvalidRequest),
             }
         });
-        self.finish(result)
+        Self::finish_operation(result, callback_errors.as_ref())
     }
 
     fn run_agent(
@@ -1262,13 +1341,14 @@ impl PySession {
     ) -> PyResult<PyExecutionResult> {
         let privacy = parse_intent_privacy(intent_privacy)?;
         let limits = limits.inner.clone();
+        let callback_errors = Arc::new(CallbackErrors::default());
         let approval = PythonApproval {
             callback: approval,
-            errors: self.callback_errors.clone(),
+            errors: callback_errors.clone(),
         };
         let events = PythonEvents {
             callback: events,
-            errors: self.callback_errors.clone(),
+            errors: callback_errors.clone(),
         };
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {
@@ -1286,7 +1366,7 @@ impl PySession {
                 }
             }
         });
-        self.finish(result)
+        Self::finish_operation(result, callback_errors.as_ref())
     }
 
     fn release(
@@ -1296,9 +1376,10 @@ impl PySession {
         approval: Py<PyAny>,
     ) -> PyResult<PyExecutionResult> {
         let document = document.live_arc()?;
+        let callback_errors = Arc::new(CallbackErrors::default());
         let callback = PythonApproval {
             callback: approval,
-            errors: self.callback_errors.clone(),
+            errors: callback_errors.clone(),
         };
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {
@@ -1311,7 +1392,7 @@ impl PySession {
                 SessionState::Debug(_) => Err(ClientError::InvalidState),
             }
         });
-        self.finish(result)
+        Self::finish_operation(result, callback_errors.as_ref())
     }
 
     fn register_connector(
@@ -1321,9 +1402,10 @@ impl PySession {
         approval: Py<PyAny>,
     ) -> PyResult<PyHandle> {
         let descriptor = descriptor.inner.clone();
+        let callback_errors = Arc::new(CallbackErrors::default());
         let callback = PythonApproval {
             callback: approval,
-            errors: self.callback_errors.clone(),
+            errors: callback_errors.clone(),
         };
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {
@@ -1336,7 +1418,7 @@ impl PySession {
                 SessionState::Debug(_) => Err(ClientError::InvalidState),
             }
         });
-        self.finish(result)
+        Self::finish_operation(result, callback_errors.as_ref())
     }
 
     fn remove_connector(&self, py: Python<'_>, connector: &PyHandle) -> PyResult<()> {
@@ -1350,7 +1432,7 @@ impl PySession {
                 SessionState::Debug(_) => Err(ClientError::InvalidState),
             }
         });
-        self.finish(result)
+        Self::finish(result)
     }
 
     fn list_connectors(&self, py: Python<'_>) -> PyResult<Vec<PyHandle>> {
@@ -1368,7 +1450,7 @@ impl PySession {
                 }
             }
         });
-        self.finish(result)
+        Self::finish(result)
     }
 
     fn revoke(&self, py: Python<'_>, document: &PyHandle) -> PyResult<()> {
@@ -1382,7 +1464,7 @@ impl PySession {
                 SessionState::Debug(_) => Err(ClientError::InvalidState),
             }
         });
-        self.finish(result)
+        Self::finish(result)
     }
 
     fn close(&self, py: Python<'_>) -> PyResult<()> {
@@ -1395,7 +1477,7 @@ impl PySession {
                 SessionState::Debug(session) => session.close(),
             }
         });
-        self.finish(result)
+        Self::finish(result)
     }
 
     fn __repr__(&self) -> &'static str {
@@ -1435,7 +1517,7 @@ fn _debug_scripted_session(delay_seconds: f64) -> PyResult<PySession> {
             close_count: 0,
             last_worker_thread: None,
         }))),
-        callback_errors: Arc::new(CallbackErrors::default()),
+        ingress_callback_errors: Arc::new(CallbackErrors::default()),
         debug_transport: None,
     })
 }
@@ -1477,7 +1559,7 @@ fn _debug_transport_session(delay_seconds: f64) -> PyResult<PySession> {
         .map_err(map_auth_error)?;
     Ok(PySession {
         inner: Arc::new(Mutex::new(SessionState::Live(Box::new(session)))),
-        callback_errors: Arc::new(CallbackErrors::default()),
+        ingress_callback_errors: Arc::new(CallbackErrors::default()),
         debug_transport: Some(transport),
     })
 }
@@ -1516,7 +1598,46 @@ fn _debug_view_session() -> PyResult<PySession> {
         .map_err(map_auth_error)?;
     Ok(PySession {
         inner: Arc::new(Mutex::new(SessionState::Live(Box::new(session)))),
-        callback_errors: Arc::new(CallbackErrors::default()),
+        ingress_callback_errors: Arc::new(CallbackErrors::default()),
+        debug_transport: Some(transport),
+    })
+}
+
+#[cfg(debug_assertions)]
+#[pyfunction]
+fn _debug_structured_view_session() -> PyResult<PySession> {
+    let transport = Arc::new(DebugScriptedTransport::new(
+        debug_structured_view_transport_responses()?,
+        Duration::ZERO,
+    ));
+    let endpoints = ClientEndpoints::new(AGENT_ENDPOINT, INGRESS_ENDPOINT, APPROVAL_ENDPOINT)
+        .map_err(map_client_error)?;
+    let client = RustClient::with_transport_and_nonce_source(
+        endpoints,
+        transport.clone(),
+        Arc::new(DebugFixedNonces(Mutex::new(1))),
+    );
+    let identity_path = debug_identity_path()?;
+    let identity = ClientIdentity::load(&identity_path).map_err(map_auth_error);
+    let _ = fs::remove_file(&identity_path);
+    if let Some(parent) = identity_path.parent() {
+        let _ = fs::remove_dir(parent);
+    }
+    let identity = identity?;
+    let mut bootstrap =
+        SessionBootstrap::from_control_plane_token(&URL_SAFE_NO_PAD.encode([0x21; 32]))
+            .map_err(map_auth_error)?;
+    let session = client
+        .session(
+            &identity,
+            &mut bootstrap,
+            Arc::new(DebugWebAuthn),
+            Arc::new(DebugApproval),
+        )
+        .map_err(map_auth_error)?;
+    Ok(PySession {
+        inner: Arc::new(Mutex::new(SessionState::Live(Box::new(session)))),
+        ingress_callback_errors: Arc::new(CallbackErrors::default()),
         debug_transport: Some(transport),
     })
 }
@@ -1577,6 +1698,24 @@ fn _debug_last_worker_thread(session: &PySession) -> PyResult<Option<i64>> {
     }
 }
 
+#[cfg(debug_assertions)]
+#[pyfunction]
+fn _debug_callback_error_isolation(py: Python<'_>) -> PyResult<(String, bool, bool, bool)> {
+    let first = Arc::new(CallbackErrors::default());
+    let second = Arc::new(CallbackErrors::default());
+    first.record(PyValueError::new_err("first callback"));
+
+    let unrelated = PySession::finish_operation(Ok("unrelated".to_owned()), second.as_ref())?;
+    let own = PySession::finish_operation(Ok(()), first.as_ref())
+        .expect_err("the owning operation must receive its callback error");
+    Ok((
+        unrelated,
+        own.is_instance_of::<PyValueError>(py),
+        first.take().is_none(),
+        second.take().is_none(),
+    ))
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("SavanaError", m.py().get_type_bound::<SavanaError>())?;
     m.add("AuthError", m.py().get_type_bound::<AuthError>())?;
@@ -1599,11 +1738,13 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(_debug_scripted_session, m)?)?;
         m.add_function(wrap_pyfunction!(_debug_transport_session, m)?)?;
         m.add_function(wrap_pyfunction!(_debug_view_session, m)?)?;
+        m.add_function(wrap_pyfunction!(_debug_structured_view_session, m)?)?;
         m.add_function(wrap_pyfunction!(_debug_handle, m)?)?;
         m.add_function(wrap_pyfunction!(_debug_plan, m)?)?;
         m.add_function(wrap_pyfunction!(_debug_approval_request, m)?)?;
         m.add_function(wrap_pyfunction!(_debug_close_count, m)?)?;
         m.add_function(wrap_pyfunction!(_debug_last_worker_thread, m)?)?;
+        m.add_function(wrap_pyfunction!(_debug_callback_error_isolation, m)?)?;
     }
     Ok(())
 }

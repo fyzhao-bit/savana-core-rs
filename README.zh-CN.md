@@ -68,6 +68,22 @@ HKDF-SHA-256、双向 HMAC confirmation 和 ChaCha20-Poly1305。每条连接
 
 ## 对外接口
 
+### OpenClaw 正式运行时
+
+本仓库还包含固定版本、仅文本的 OpenClaw 适配器：
+[`integrations/openclaw-savana-runtime`](integrations/openclaw-savana-runtime/README.md)。
+它只兼容 `openclaw@2026.7.1-2`，只注册一个 provider（`savana`）、一个
+model（`agent`）和一个 harness（`savana`），不向 OpenClaw 注册任何 tool
+或 MCP server。OpenClaw 上游只是只读兼容依赖；适配器源码、测试和文档
+全部保留在本 `savana-core-rs` 仓库，不会向 OpenClaw 仓库提交或推送。
+
+适配器只把当前用户输入的精确文本交给公开 Python SDK。私有的有界 agent
+loop、G1-G7 和审批仍由 Savana 执行。只有 execd 经固定回环 TLS 1.3/mTLS
+接收器送达、并被唯一 release reservation 持久认领的 payload，才能成为
+OpenClaw assistant 文本。安装、固定端口 release connector、证书格式、
+FD 3 产品认证 broker、model-scoped 配置、`savana.runtime` doctor、恢复流程
+和真实 transcript 隐私边界见适配器 README。
+
 JARVIS 仍是可信控制集成，并通过带外方式提供一次性 session bootstrap。
 随后 V2 客户端 SDK 只使用三个面向应用的 loopback 服务：Agent、Ingress
 和 Approval。JARVIS 不是第四个 SDK 服务。Python 应用和 SDK 都不直接

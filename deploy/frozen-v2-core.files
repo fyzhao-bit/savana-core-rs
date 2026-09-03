@@ -15,6 +15,8 @@ crates/savana-approvald/src/lib.rs
 crates/savana-approvald/src/protocol_state_owner.rs
 crates/savana-approvald/src/state_owner.rs
 crates/savana-execd/src/connector_registry.rs
+crates/savana-execd/src/connector_runtime.rs
+crates/savana-execd/src/daemon.rs
 crates/savana-execd/src/state_owner.rs
 crates/savana-ingressd/src/state_owner.rs
 crates/savana-input-runtime/Cargo.toml
@@ -154,6 +156,9 @@ crates/savana-vault/Cargo.toml
 crates/savana-vault/src/durable.rs
 crates/savana-vault/src/lib.rs
 deploy/macos/development/install.sh
+deploy/macos/development/tls/final-release-server.ext
 deploy/macos/development/tls/mapper-server.ext
 deploy/macos/development/validate.sh
 deploy/systemd/savana-agentd.service
+deploy/systemd/savana-execd-split-final-release.conf
+deploy/systemd/savana-execd.service

@@ -96,6 +96,8 @@ mod implementation {
     const ANCHOR_AUTHENTICATION_KEY_CREDENTIAL_V2: &str = "journal-anchor-authentication-v2.key";
     const CONNECTOR_DESCRIPTOR_SEED_CREDENTIAL_V2: &str = "connector-descriptor-v2.seed";
     const PROVIDER_TLS_PRIVATE_KEY_CREDENTIAL_V2: &str = "provider-tls-private-key-v2.der";
+    const FINAL_RELEASE_PROVIDER_TLS_PRIVATE_KEY_CREDENTIAL_V2: &str =
+        "final-release-provider-tls-private-key-v2.der";
     const EXECUTOR_FD_NAME_V2: &str = "savana-kernel-executor";
     #[cfg(target_os = "linux")]
     const EXECUTOR_SOCKET_PATH_V2: &str = "/run/savana/execd/kerneld/execd.sock";
@@ -142,7 +144,19 @@ mod implementation {
         journal_schema_version: u16,
         journal_key_epoch: u64,
         worker: WorkerDtoV2,
+        #[serde(default)]
+        provider_routing_mode: ProviderRoutingModeDtoV2,
         provider: ProviderDtoV2,
+        #[serde(default)]
+        final_release_provider: Option<ProviderDtoV2>,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+    #[serde(rename_all = "kebab-case")]
+    enum ProviderRoutingModeDtoV2 {
+        #[default]
+        LegacyShared,
+        SplitFinalRelease,
     }
 
     #[derive(Clone, Deserialize)]
@@ -191,6 +205,37 @@ mod implementation {
         anchor_authentication_key: [u8; 32],
         connector_descriptor_seed: Zeroizing<[u8; 32]>,
         provider_tls_private_key: Zeroizing<Vec<u8>>,
+        final_release_provider_tls_private_key: Option<Zeroizing<Vec<u8>>>,
+    }
+
+    fn validate_provider_routing_configuration(
+        mode: ProviderRoutingModeDtoV2,
+        provider: &ProviderDtoV2,
+        final_release_provider: Option<&ProviderDtoV2>,
+    ) -> Result<(), ExecdDaemonErrorV2> {
+        match (mode, final_release_provider) {
+            (ProviderRoutingModeDtoV2::LegacyShared, None) => Ok(()),
+            (ProviderRoutingModeDtoV2::SplitFinalRelease, Some(release)) => {
+                let client_leaf_path_matches = provider.client_certificate_paths.first()
+                    == release.client_certificate_paths.first();
+                let client_leaf_digest_matches = provider.client_certificate_digests.first()
+                    == release.client_certificate_digests.first();
+                if provider.address == release.address
+                    || provider.server_name == release.server_name
+                    || provider.canonical_url == release.canonical_url
+                    || provider.server_spki_sha256 == release.server_spki_sha256
+                    || provider.endpoint_binding_digest == release.endpoint_binding_digest
+                    || provider.credential_handle_identity_digest
+                        == release.credential_handle_identity_digest
+                    || client_leaf_path_matches
+                    || client_leaf_digest_matches
+                {
+                    return Err(ExecdDaemonErrorV2::DeploymentUnavailable);
+                }
+                Ok(())
+            }
+            _ => Err(ExecdDaemonErrorV2::DeploymentUnavailable),
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -458,23 +503,6 @@ mod implementation {
         )
         .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
         let provider = &loaded.bootstrap.provider;
-        let root_certificate = read_digest_bound_file(
-            &provider.root_certificate_path,
-            MAX_ARTIFACT_BYTES_V2,
-            &provider.root_certificate_digest,
-        )?;
-        if provider.client_certificate_paths.is_empty()
-            || provider.client_certificate_paths.len() != provider.client_certificate_digests.len()
-            || provider.client_certificate_paths.len() > 8
-        {
-            return Err(ExecdDaemonErrorV2::DeploymentUnavailable);
-        }
-        let client_certificates = provider
-            .client_certificate_paths
-            .iter()
-            .zip(&provider.client_certificate_digests)
-            .map(|(path, digest)| read_digest_bound_file(path, MAX_ARTIFACT_BYTES_V2, digest))
-            .collect::<Result<Vec<_>, _>>()?;
         let credential_identity =
             Digest32V2::new(decode_hex_32(&provider.credential_handle_identity_digest)?);
         let issuer = ConnectorJobDescriptorIssuerV2::from_verified_deployment(
@@ -494,6 +522,82 @@ mod implementation {
             Some(Box::new(launcher)),
         )
         .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
+        let transport = build_verified_provider_transport(
+            provider,
+            loaded.keys.provider_tls_private_key.clone(),
+        )?;
+        match loaded.bootstrap.provider_routing_mode {
+            ProviderRoutingModeDtoV2::LegacyShared => Ok(Box::new(
+                VerifiedConnectorExecutionRuntimeV2::from_verified_components(
+                    supervisor,
+                    issuer,
+                    Box::new(transport),
+                ),
+            )),
+            ProviderRoutingModeDtoV2::SplitFinalRelease => {
+                let release_provider = loaded
+                    .bootstrap
+                    .final_release_provider
+                    .as_ref()
+                    .ok_or(ExecdDaemonErrorV2::DeploymentUnavailable)?;
+                let release_key = loaded
+                    .keys
+                    .final_release_provider_tls_private_key
+                    .as_ref()
+                    .ok_or(ExecdDaemonErrorV2::DeploymentUnavailable)?;
+                let release_credential_identity = Digest32V2::new(decode_hex_32(
+                    &release_provider.credential_handle_identity_digest,
+                )?);
+                let release_issuer = ConnectorJobDescriptorIssuerV2::from_verified_deployment(
+                    loaded.startup.installation_id(),
+                    loaded.startup.active_state_manifest_digest(),
+                    loaded.startup.deployment_generation(),
+                    loaded.startup.effect_fence_epoch(),
+                    worker_artifact_digest,
+                    no_network_digest,
+                    credential_absence_digest,
+                    release_credential_identity,
+                    loaded.keys.connector_descriptor_seed.clone(),
+                )
+                .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
+                let release_transport =
+                    build_verified_provider_transport(release_provider, release_key.clone())?;
+                Ok(Box::new(
+                    VerifiedConnectorExecutionRuntimeV2::from_verified_split_components(
+                        supervisor,
+                        issuer,
+                        release_issuer,
+                        Box::new(transport),
+                        Box::new(release_transport),
+                    ),
+                ))
+            }
+        }
+    }
+
+    fn build_verified_provider_transport(
+        provider: &ProviderDtoV2,
+        private_key: Zeroizing<Vec<u8>>,
+    ) -> Result<VerifiedRustlsProviderTransportV2, ExecdDaemonErrorV2> {
+        let root_certificate = read_digest_bound_file(
+            &provider.root_certificate_path,
+            MAX_ARTIFACT_BYTES_V2,
+            &provider.root_certificate_digest,
+        )?;
+        if provider.client_certificate_paths.is_empty()
+            || provider.client_certificate_paths.len() != provider.client_certificate_digests.len()
+            || provider.client_certificate_paths.len() > 8
+        {
+            return Err(ExecdDaemonErrorV2::DeploymentUnavailable);
+        }
+        let client_certificates = provider
+            .client_certificate_paths
+            .iter()
+            .zip(&provider.client_certificate_digests)
+            .map(|(path, digest)| read_digest_bound_file(path, MAX_ARTIFACT_BYTES_V2, digest))
+            .collect::<Result<Vec<_>, _>>()?;
+        let credential_identity =
+            Digest32V2::new(decode_hex_32(&provider.credential_handle_identity_digest)?);
         let transport = VerifiedRustlsProviderTransportV2::from_verified_manifest(
             provider
                 .address
@@ -505,19 +609,13 @@ mod implementation {
             Digest32V2::new(decode_hex_32(&provider.server_spki_sha256)?),
             root_certificate,
             client_certificates,
-            loaded.keys.provider_tls_private_key.clone(),
+            private_key,
             decode_hex_bounded(&provider.alpn_protocol_hex, 255)?,
             Digest32V2::new(decode_hex_32(&provider.endpoint_binding_digest)?),
             credential_identity,
         )
         .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
-        Ok(Box::new(
-            VerifiedConnectorExecutionRuntimeV2::from_verified_components(
-                supervisor,
-                issuer,
-                Box::new(transport),
-            ),
-        ))
+        Ok(transport)
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -772,6 +870,11 @@ mod implementation {
             read_regular_file(config_path, MAX_BOOTSTRAP_BYTES_V2, Some((0, 0, 0o444)))?;
         let bootstrap: BootstrapDtoV2 = serde_json::from_slice(&bootstrap_bytes)
             .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
+        validate_provider_routing_configuration(
+            bootstrap.provider_routing_mode,
+            &bootstrap.provider,
+            bootstrap.final_release_provider.as_ref(),
+        )?;
         if bootstrap.services.len() != SERVICE_COUNT_V2 {
             return Err(ExecdDaemonErrorV2::DeploymentUnavailable);
         }
@@ -779,7 +882,7 @@ mod implementation {
         startup
             .verify_loaded_service_config_v2(ClosedServiceIdV2::Execd, &bootstrap_bytes)
             .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
-        let keys = load_key_material()?;
+        let keys = load_key_material(&bootstrap)?;
         Ok(LoadedStartupV2 {
             startup,
             bootstrap,
@@ -820,6 +923,10 @@ mod implementation {
             &bootstrap.provider.root_certificate_path,
         ];
         paths.extend(bootstrap.provider.client_certificate_paths.iter());
+        if let Some(provider) = bootstrap.final_release_provider.as_ref() {
+            paths.push(&provider.root_certificate_path);
+            paths.extend(provider.client_certificate_paths.iter());
+        }
         if paths
             .into_iter()
             .any(|path| !closed_development_path(root, path))
@@ -904,8 +1011,25 @@ mod implementation {
         Ok(bytes)
     }
 
-    fn load_key_material() -> Result<KeyMaterialV2, ExecdDaemonErrorV2> {
+    fn load_key_material(bootstrap: &BootstrapDtoV2) -> Result<KeyMaterialV2, ExecdDaemonErrorV2> {
         let server_seed = Zeroizing::new(read_exact_credential(SERVER_SEED_CREDENTIAL_V2)?);
+        let provider_tls_private_key = Zeroizing::new(read_variable_credential(
+            PROVIDER_TLS_PRIVATE_KEY_CREDENTIAL_V2,
+            MAX_CREDENTIAL_BYTES_V2,
+        )?);
+        let final_release_provider_tls_private_key = match bootstrap.provider_routing_mode {
+            ProviderRoutingModeDtoV2::LegacyShared => None,
+            ProviderRoutingModeDtoV2::SplitFinalRelease => {
+                let key = Zeroizing::new(read_variable_credential(
+                    FINAL_RELEASE_PROVIDER_TLS_PRIVATE_KEY_CREDENTIAL_V2,
+                    MAX_CREDENTIAL_BYTES_V2,
+                )?);
+                if key.as_slice() == provider_tls_private_key.as_slice() {
+                    return Err(ExecdDaemonErrorV2::DeploymentUnavailable);
+                }
+                Some(key)
+            }
+        };
         Ok(KeyMaterialV2 {
             boot_id: read_exact_credential(BOOT_ID_CREDENTIAL_V2)?,
             kernel_client_public_key: read_exact_key(
@@ -926,10 +1050,8 @@ mod implementation {
             connector_descriptor_seed: Zeroizing::new(read_exact_credential(
                 CONNECTOR_DESCRIPTOR_SEED_CREDENTIAL_V2,
             )?),
-            provider_tls_private_key: Zeroizing::new(read_variable_credential(
-                PROVIDER_TLS_PRIVATE_KEY_CREDENTIAL_V2,
-                MAX_CREDENTIAL_BYTES_V2,
-            )?),
+            provider_tls_private_key,
+            final_release_provider_tls_private_key,
         })
     }
 
@@ -1397,6 +1519,7 @@ mod implementation {
                     credential_absence_profile_path: "/no-creds".into(),
                     credential_absence_profile_digest: "24".repeat(32),
                 },
+                provider_routing_mode: ProviderRoutingModeDtoV2::LegacyShared,
                 provider: ProviderDtoV2 {
                     address: "127.0.0.1:443".to_owned(),
                     server_name: "provider.invalid".to_owned(),
@@ -1410,6 +1533,7 @@ mod implementation {
                     endpoint_binding_digest: "33".repeat(32),
                     credential_handle_identity_digest: "34".repeat(32),
                 },
+                final_release_provider: None,
             };
             assert!(verify_runtime_paths(&bootstrap).is_ok());
             bootstrap.journal_path = "/var/lib/savana/execd/renamed.cbor".into();
@@ -1532,6 +1656,104 @@ mod implementation {
                 )
                 .unwrap()
             );
+        }
+
+        #[test]
+        fn provider_routing_mode_defaults_to_legacy_shared() {
+            #[derive(Deserialize)]
+            struct RoutingDefault {
+                #[serde(default)]
+                provider_routing_mode: ProviderRoutingModeDtoV2,
+            }
+
+            let parsed: RoutingDefault = serde_json::from_str("{}").unwrap();
+            assert_eq!(
+                parsed.provider_routing_mode,
+                ProviderRoutingModeDtoV2::LegacyShared
+            );
+        }
+
+        #[test]
+        fn split_provider_routing_is_closed_and_requires_distinct_manifest_bindings() {
+            let provider = ProviderDtoV2 {
+                address: "127.0.0.1:9444".to_owned(),
+                server_name: "provider.invalid".to_owned(),
+                canonical_url: "https://provider.invalid:9444/mcp".to_owned(),
+                server_spki_sha256: "30".repeat(32),
+                root_certificate_path: "/tool-root.der".into(),
+                root_certificate_digest: "31".repeat(32),
+                client_certificate_paths: vec!["/tool-client.der".into()],
+                client_certificate_digests: vec!["32".repeat(32)],
+                alpn_protocol_hex: "736176616e612d70726f76696465722d7632".to_owned(),
+                endpoint_binding_digest: "33".repeat(32),
+                credential_handle_identity_digest: "34".repeat(32),
+            };
+
+            assert_eq!(
+                validate_provider_routing_configuration(
+                    ProviderRoutingModeDtoV2::SplitFinalRelease,
+                    &provider,
+                    None,
+                ),
+                Err(ExecdDaemonErrorV2::DeploymentUnavailable)
+            );
+            assert_eq!(
+                validate_provider_routing_configuration(
+                    ProviderRoutingModeDtoV2::LegacyShared,
+                    &provider,
+                    Some(&provider),
+                ),
+                Err(ExecdDaemonErrorV2::DeploymentUnavailable)
+            );
+            assert_eq!(
+                validate_provider_routing_configuration(
+                    ProviderRoutingModeDtoV2::SplitFinalRelease,
+                    &provider,
+                    Some(&provider),
+                ),
+                Err(ExecdDaemonErrorV2::DeploymentUnavailable)
+            );
+
+            let mut release = provider.clone();
+            release.address = "127.0.0.1:43191".to_owned();
+            release.server_name = "release.invalid".to_owned();
+            release.canonical_url = "https://release.invalid:43191/savana/final-release".to_owned();
+            release.server_spki_sha256 = "40".repeat(32);
+            release.root_certificate_path = "/release-root.der".into();
+            release.root_certificate_digest = "41".repeat(32);
+            release.client_certificate_paths = vec!["/release-client.der".into()];
+            release.client_certificate_digests = vec!["42".repeat(32)];
+            release.endpoint_binding_digest = "43".repeat(32);
+            release.credential_handle_identity_digest = "44".repeat(32);
+
+            assert!(validate_provider_routing_configuration(
+                ProviderRoutingModeDtoV2::SplitFinalRelease,
+                &provider,
+                Some(&release),
+            )
+            .is_ok());
+
+            let shared_intermediate_path: PathBuf = "/shared-intermediate.der".into();
+            let shared_intermediate_digest = "45".repeat(32);
+            let mut provider_with_chain = provider.clone();
+            provider_with_chain
+                .client_certificate_paths
+                .push(shared_intermediate_path.clone());
+            provider_with_chain
+                .client_certificate_digests
+                .push(shared_intermediate_digest.clone());
+            release
+                .client_certificate_paths
+                .push(shared_intermediate_path);
+            release
+                .client_certificate_digests
+                .push(shared_intermediate_digest);
+            assert!(validate_provider_routing_configuration(
+                ProviderRoutingModeDtoV2::SplitFinalRelease,
+                &provider_with_chain,
+                Some(&release),
+            )
+            .is_ok());
         }
 
         #[test]

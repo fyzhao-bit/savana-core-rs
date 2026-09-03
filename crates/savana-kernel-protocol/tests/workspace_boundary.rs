@@ -19,7 +19,7 @@ const FROZEN_CORE_MEMBERS: [&str; 11] = [
     "savana-vault",
 ];
 
-const ALLOWED_WORKSPACE_MEMBERS: [&str; 14] = [
+const ALLOWED_WORKSPACE_MEMBERS: [&str; 15] = [
     "libsavana-ner",
     "savana-agentd",
     "savana-approvald",
@@ -31,6 +31,7 @@ const ALLOWED_WORKSPACE_MEMBERS: [&str; 14] = [
     "savana-kernel-protocol",
     "savana-kerneld",
     "savana-leak-gate",
+    "savana-openclaw-release",
     "savana-platform-identity",
     "savana-policy-core",
     "savana-vault",
@@ -121,6 +122,7 @@ fn workspace_boundary_rejects_duplicate_package_names() {
         "savana-kernel-protocol",
         "savana-kerneld",
         "savana-leak-gate",
+        "savana-openclaw-release",
         "savana-platform-identity",
         "savana-policy-core",
         "savana-vault",

@@ -36,6 +36,7 @@ mod macos {
     const MAX_CERTIFICATE_BYTES: usize = 64 * 1024;
     const PROVIDER_ALPN: &[u8] = b"savana-provider-v2";
     const PROVIDER_SERVER_NAME: &str = "provider.savana-development.invalid";
+    const FINAL_RELEASE_SERVER_NAME: &str = "release.savana-development.invalid";
     const PLANNER_SERVER_NAME: &str = "planner.savana-development.invalid";
     const MAPPER_SERVER_NAME: &str = "mapper.savana-development.invalid";
 
@@ -716,8 +717,13 @@ mod macos {
         let client_certificate_path = root.join("config/tls/provider-client-v2.der");
         let root_certificate = read_bounded(&root_certificate_path, MAX_CERTIFICATE_BYTES)?;
         let client_certificate = read_bounded(&client_certificate_path, MAX_CERTIFICATE_BYTES)?;
-        let endpoint_binding =
-            provider_endpoint_binding(&root_certificate, &client_certificate, PROVIDER_ALPN);
+        let endpoint_binding = provider_endpoint_binding(
+            &root_certificate,
+            &client_certificate,
+            PROVIDER_ALPN,
+            PROVIDER_SERVER_NAME,
+            9444,
+        );
         let credential_identity = domain_digest(
             b"SAVANA_PROVIDER_CREDENTIAL_HANDLE_IDENTITY_V2\0",
             &Sha256::digest(&client_certificate),
@@ -886,6 +892,96 @@ mod macos {
             &["provider", "credential_handle_identity_digest"],
             credential_identity,
         )?;
+        let release_client_certificate_path = root.join("config/tls/final-release-client-v2.der");
+        let release_client_certificate =
+            read_bounded(&release_client_certificate_path, MAX_CERTIFICATE_BYTES)?;
+        let release_endpoint_binding = provider_endpoint_binding(
+            &root_certificate,
+            &release_client_certificate,
+            PROVIDER_ALPN,
+            FINAL_RELEASE_SERVER_NAME,
+            43191,
+        );
+        let release_credential_identity = domain_digest(
+            b"SAVANA_PROVIDER_CREDENTIAL_HANDLE_IDENTITY_V2\0",
+            &Sha256::digest(&release_client_certificate),
+        );
+        let release_spki = read_bounded(
+            &root.join("config/tls/final-release-server-spki-v2.der"),
+            MAX_CERTIFICATE_BYTES,
+        )?;
+        set_value(
+            &mut exec,
+            &["provider_routing_mode"],
+            Value::String("split-final-release".to_owned()),
+        )?;
+        set_value(
+            &mut exec,
+            &["final_release_provider", "address"],
+            Value::String("127.0.0.1:43191".to_owned()),
+        )?;
+        set_value(
+            &mut exec,
+            &["final_release_provider", "server_name"],
+            Value::String(FINAL_RELEASE_SERVER_NAME.to_owned()),
+        )?;
+        set_value(
+            &mut exec,
+            &["final_release_provider", "canonical_url"],
+            Value::String(format!(
+                "https://{FINAL_RELEASE_SERVER_NAME}:43191/savana/final-release"
+            )),
+        )?;
+        set_hex(
+            &mut exec,
+            &["final_release_provider", "server_spki_sha256"],
+            Sha256::digest(release_spki).into(),
+        )?;
+        set_value(
+            &mut exec,
+            &["final_release_provider", "root_certificate_path"],
+            Value::String(root_certificate_path.to_string_lossy().into_owned()),
+        )?;
+        set_hex(
+            &mut exec,
+            &["final_release_provider", "root_certificate_digest"],
+            Sha256::digest(&root_certificate).into(),
+        )?;
+        set_value(
+            &mut exec,
+            &["final_release_provider", "client_certificate_paths"],
+            Value::Array(vec![Value::String(
+                release_client_certificate_path
+                    .to_string_lossy()
+                    .into_owned(),
+            )]),
+        )?;
+        set_value(
+            &mut exec,
+            &["final_release_provider", "client_certificate_digests"],
+            Value::Array(vec![Value::String(hex(Sha256::digest(
+                &release_client_certificate,
+            )
+            .into()))]),
+        )?;
+        set_value(
+            &mut exec,
+            &["final_release_provider", "alpn_protocol_hex"],
+            Value::String(hex_bytes(PROVIDER_ALPN)),
+        )?;
+        set_hex(
+            &mut exec,
+            &["final_release_provider", "endpoint_binding_digest"],
+            release_endpoint_binding,
+        )?;
+        set_hex(
+            &mut exec,
+            &[
+                "final_release_provider",
+                "credential_handle_identity_digest",
+            ],
+            release_credential_identity,
+        )?;
         write_json(&root.join("config/execd-bootstrap-v2.json"), &exec)?;
 
         let mut template = read_json(&root.join("config/development-manifest-template-v2.json"))?;
@@ -1035,14 +1131,16 @@ mod macos {
         root_certificate: &[u8],
         client_certificate: &[u8],
         alpn: &[u8],
+        server_name: &str,
+        port: u16,
     ) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"SAVANA_PROVIDER_TLS_ENDPOINT_BINDING_V2\0");
         hasher.update([4]);
         hasher.update([127, 0, 0, 1]);
-        hasher.update(9444_u16.to_be_bytes());
-        hasher.update((PROVIDER_SERVER_NAME.len() as u16).to_be_bytes());
-        hasher.update(PROVIDER_SERVER_NAME.as_bytes());
+        hasher.update(port.to_be_bytes());
+        hasher.update((server_name.len() as u16).to_be_bytes());
+        hasher.update(server_name.as_bytes());
         hasher.update(Sha256::digest(root_certificate));
         hasher.update(Sha256::digest(client_certificate));
         hasher.update((alpn.len() as u16).to_be_bytes());

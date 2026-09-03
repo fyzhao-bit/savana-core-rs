@@ -107,37 +107,123 @@ fn direct_authorization_dispatches_once_and_returns_only_the_terminal_document()
 }
 
 #[test]
-fn tool_denial_is_typed_and_never_dispatches() {
-    let step = planned_step(0x51);
-    let pending = AgentPendingToolCallRefV2::from_authority_entropy([0x52; 16]).unwrap();
-    let responses = vec![
-        plan_response(step),
-        mutation(AgentBrowserMutationResponseV2::ToolProposed { pending }),
-        mutation(AgentBrowserMutationResponseV2::ToolDenied {
-            code: PublicStableCodeV2::PolicyDenied,
-            trace: trace(0x53),
-        }),
+fn every_tool_denial_has_a_truthful_public_error_category_and_never_dispatches() {
+    let cases = [
+        (PublicStableCodeV2::InvalidReference, "operation"),
+        (PublicStableCodeV2::StateConflict, "operation"),
+        (PublicStableCodeV2::IdempotencyConflict, "operation"),
+        (PublicStableCodeV2::CancellationTooLate, "operation"),
+        (PublicStableCodeV2::LimitExceeded, "operation"),
+        (PublicStableCodeV2::Overloaded, "operation"),
+        (PublicStableCodeV2::DeadlineExceeded, "operation"),
+        (PublicStableCodeV2::Cancelled, "operation"),
+        (PublicStableCodeV2::PolicyDenied, "policy"),
+        (PublicStableCodeV2::PolicyExpired, "policy"),
+        (PublicStableCodeV2::ArtifactRollback, "policy"),
+        (PublicStableCodeV2::RegistryMismatch, "policy"),
+        (PublicStableCodeV2::OntologyMismatch, "policy"),
+        (PublicStableCodeV2::ProjectionMismatch, "policy"),
+        (PublicStableCodeV2::ModelUnavailable, "operation"),
+        (PublicStableCodeV2::ModelContract, "operation"),
+        (PublicStableCodeV2::InputDenied, "operation"),
+        (PublicStableCodeV2::InputMalformed, "operation"),
+        (PublicStableCodeV2::ApprovalDenied, "approval"),
+        (PublicStableCodeV2::ApprovalExpired, "operation"),
+        (PublicStableCodeV2::ApprovalReplay, "operation"),
+        (PublicStableCodeV2::ApprovalBindingMismatch, "operation"),
+        (PublicStableCodeV2::ValidatorMissing, "operation"),
+        (PublicStableCodeV2::ValidatorRejected, "operation"),
+        (PublicStableCodeV2::ValidatorBindingMismatch, "operation"),
+        (PublicStableCodeV2::ExecutionFailedNoEffect, "operation"),
+        (PublicStableCodeV2::ExecutionIndeterminate, "operation"),
+        (PublicStableCodeV2::ResultUnavailable, "operation"),
+        (PublicStableCodeV2::StorageUnavailable, "operation"),
+        (PublicStableCodeV2::AuditUnavailable, "operation"),
+        (PublicStableCodeV2::EntropyUnavailable, "operation"),
+        (PublicStableCodeV2::ServiceUnavailable, "operation"),
+        (PublicStableCodeV2::InternalFatal, "operation"),
     ];
-    let (mut session, transport, _) = authenticated_session(responses);
-    let plan = session.run_planner(IntentPrivacy::Private).unwrap();
+    for (index, (code, expected)) in cases.into_iter().enumerate() {
+        let seed = index as u8 + 1;
+        let step = planned_step(seed);
+        let pending = AgentPendingToolCallRefV2::from_authority_entropy([seed + 40; 16]).unwrap();
+        let responses = vec![
+            plan_response(step),
+            mutation(AgentBrowserMutationResponseV2::ToolProposed { pending }),
+            mutation(AgentBrowserMutationResponseV2::ToolDenied {
+                code,
+                trace: trace(seed + 80),
+            }),
+        ];
+        let (mut session, transport, _) = authenticated_session(responses);
+        let plan = session.run_planner(IntentPrivacy::Private).unwrap();
 
-    assert!(matches!(
-        session.execute(&plan, &RecordingDecision::new(true)),
-        Err(SavanaError::PolicyRefused(_))
-    ));
+        let error = session
+            .execute(&plan, &RecordingDecision::new(true))
+            .unwrap_err();
+        match expected {
+            "policy" => assert!(matches!(error, SavanaError::PolicyRefused(_))),
+            "approval" => assert!(matches!(error, SavanaError::ApprovalDenied(_))),
+            "operation" => assert!(matches!(
+                error,
+                SavanaError::OperationRefused {
+                    code: returned
+                } if returned == stable_code_name_for_test(code)
+            )),
+            _ => unreachable!(),
+        }
 
-    let actions = actions_after_authentication(&transport.take_requests());
-    assert_eq!(
-        actions,
-        vec![
-            AgentBrowserActionV2::RunPlanner,
-            AgentBrowserActionV2::ProposePlanStep(step),
-            AgentBrowserActionV2::EvaluatePending(pending),
-        ]
-    );
-    assert!(!actions
-        .iter()
-        .any(|action| matches!(action, AgentBrowserActionV2::DispatchTicket(_))));
+        let actions = actions_after_authentication(&transport.take_requests());
+        assert_eq!(
+            actions,
+            vec![
+                AgentBrowserActionV2::RunPlanner,
+                AgentBrowserActionV2::ProposePlanStep(step),
+                AgentBrowserActionV2::EvaluatePending(pending),
+            ]
+        );
+        assert!(!actions
+            .iter()
+            .any(|action| matches!(action, AgentBrowserActionV2::DispatchTicket(_))));
+    }
+}
+
+const fn stable_code_name_for_test(code: PublicStableCodeV2) -> &'static str {
+    match code {
+        PublicStableCodeV2::InvalidReference => "invalid_reference",
+        PublicStableCodeV2::StateConflict => "state_conflict",
+        PublicStableCodeV2::IdempotencyConflict => "idempotency_conflict",
+        PublicStableCodeV2::CancellationTooLate => "cancellation_too_late",
+        PublicStableCodeV2::LimitExceeded => "limit_exceeded",
+        PublicStableCodeV2::Overloaded => "overloaded",
+        PublicStableCodeV2::DeadlineExceeded => "deadline_exceeded",
+        PublicStableCodeV2::Cancelled => "cancelled",
+        PublicStableCodeV2::PolicyDenied => "policy_denied",
+        PublicStableCodeV2::PolicyExpired => "policy_expired",
+        PublicStableCodeV2::ArtifactRollback => "artifact_rollback",
+        PublicStableCodeV2::RegistryMismatch => "registry_mismatch",
+        PublicStableCodeV2::OntologyMismatch => "ontology_mismatch",
+        PublicStableCodeV2::ProjectionMismatch => "projection_mismatch",
+        PublicStableCodeV2::ModelUnavailable => "model_unavailable",
+        PublicStableCodeV2::ModelContract => "model_contract",
+        PublicStableCodeV2::InputDenied => "input_denied",
+        PublicStableCodeV2::InputMalformed => "input_malformed",
+        PublicStableCodeV2::ApprovalDenied => "approval_denied",
+        PublicStableCodeV2::ApprovalExpired => "approval_expired",
+        PublicStableCodeV2::ApprovalReplay => "approval_replay",
+        PublicStableCodeV2::ApprovalBindingMismatch => "approval_binding_mismatch",
+        PublicStableCodeV2::ValidatorMissing => "validator_missing",
+        PublicStableCodeV2::ValidatorRejected => "validator_rejected",
+        PublicStableCodeV2::ValidatorBindingMismatch => "validator_binding_mismatch",
+        PublicStableCodeV2::ExecutionFailedNoEffect => "execution_failed_no_effect",
+        PublicStableCodeV2::ExecutionIndeterminate => "execution_indeterminate",
+        PublicStableCodeV2::ResultUnavailable => "result_unavailable",
+        PublicStableCodeV2::StorageUnavailable => "storage_unavailable",
+        PublicStableCodeV2::AuditUnavailable => "audit_unavailable",
+        PublicStableCodeV2::EntropyUnavailable => "entropy_unavailable",
+        PublicStableCodeV2::ServiceUnavailable => "service_unavailable",
+        PublicStableCodeV2::InternalFatal => "internal_fatal",
+    }
 }
 
 #[test]
@@ -334,58 +420,106 @@ fn every_terminal_execution_state_is_preserved_without_inventing_output() {
 }
 
 #[test]
-fn nonterminal_or_mismatched_refresh_fails_closed_without_retry() {
-    let states = [
-        AgentBrowserExecutionStateV2::Prepared,
-        AgentBrowserExecutionStateV2::Dispatching,
-        AgentBrowserExecutionStateV2::ResultGatePending,
+fn execution_polls_every_valid_nonterminal_state_without_redispatching() {
+    let step = planned_step(0xa0);
+    let pending = AgentPendingToolCallRefV2::from_authority_entropy([0xa1; 16]).unwrap();
+    let ticket = AgentExecutionTicketRefV2::from_authority_entropy([0xa2; 16]).unwrap();
+    let execution = AgentExecutionRefV2::from_authority_entropy([0xa3; 16]).unwrap();
+    let output = AgentMaskedDocumentRefV2::from_authority_entropy([0xa4; 16]).unwrap();
+    let responses = vec![
+        plan_response(step),
+        mutation(AgentBrowserMutationResponseV2::ToolProposed { pending }),
+        mutation(AgentBrowserMutationResponseV2::ToolAuthorized {
+            ticket,
+            trace: trace(0xa5),
+        }),
+        mutation(AgentBrowserMutationResponseV2::ExecutionDispatched {
+            execution,
+            state: PublicDispatchAcceptedStateV2::Prepared,
+        }),
+        mutation(AgentBrowserMutationResponseV2::ExecutionRefreshed {
+            execution,
+            state: AgentBrowserExecutionStateV2::Prepared,
+        }),
+        mutation(AgentBrowserMutationResponseV2::ExecutionRefreshed {
+            execution,
+            state: AgentBrowserExecutionStateV2::Dispatching,
+        }),
+        mutation(AgentBrowserMutationResponseV2::ExecutionRefreshed {
+            execution,
+            state: AgentBrowserExecutionStateV2::ResultGatePending,
+        }),
+        mutation(AgentBrowserMutationResponseV2::ExecutionRefreshed {
+            execution,
+            state: AgentBrowserExecutionStateV2::Succeeded { document: output },
+        }),
     ];
-    for (index, state) in states.into_iter().enumerate() {
-        let seed = 0xa0 + index as u8 * 5;
-        let step = planned_step(seed);
-        let pending = AgentPendingToolCallRefV2::from_authority_entropy([seed + 1; 16]).unwrap();
-        let ticket = AgentExecutionTicketRefV2::from_authority_entropy([seed + 2; 16]).unwrap();
-        let execution = AgentExecutionRefV2::from_authority_entropy([seed + 3; 16]).unwrap();
-        let refreshed = if index == 0 {
-            AgentExecutionRefV2::from_authority_entropy([seed + 4; 16]).unwrap()
-        } else {
-            execution
-        };
-        let responses = vec![
-            plan_response(step),
-            mutation(AgentBrowserMutationResponseV2::ToolProposed { pending }),
-            mutation(AgentBrowserMutationResponseV2::ToolAuthorized {
-                ticket,
-                trace: trace(seed),
-            }),
-            mutation(AgentBrowserMutationResponseV2::ExecutionDispatched {
-                execution,
-                state: PublicDispatchAcceptedStateV2::Prepared,
-            }),
-            mutation(AgentBrowserMutationResponseV2::ExecutionRefreshed {
-                execution: refreshed,
-                state,
-            }),
-        ];
-        let (mut session, transport, _) = authenticated_session(responses);
-        let plan = session.run_planner(IntentPrivacy::Private).unwrap();
-        assert!(matches!(
-            session.execute(&plan, &RecordingDecision::new(true)),
-            Err(SavanaError::InvalidState)
-        ));
-        let requests = transport.take_requests();
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request.route == BrowserRoute::AgentAction)
-                .count(),
-            5
-        );
-    }
+    let (mut session, transport, _) = authenticated_session(responses);
+    let plan = session.run_planner(IntentPrivacy::Private).unwrap();
+
+    let result = session
+        .execute(&plan, &RecordingDecision::new(true))
+        .unwrap();
+
+    assert_eq!(result.status(), ExecutionStatus::Succeeded);
+    let actions = actions_after_authentication(&transport.take_requests());
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|action| matches!(action, AgentBrowserActionV2::DispatchTicket(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|action| matches!(action, AgentBrowserActionV2::RefreshExecution(_)))
+            .count(),
+        4
+    );
 }
 
 #[test]
-fn release_uses_prepare_approval_real_ticket_dispatch_and_refresh() {
+fn mismatched_execution_refresh_reference_fails_closed_without_retry() {
+    let step = planned_step(0xb0);
+    let pending = AgentPendingToolCallRefV2::from_authority_entropy([0xb1; 16]).unwrap();
+    let ticket = AgentExecutionTicketRefV2::from_authority_entropy([0xb2; 16]).unwrap();
+    let execution = AgentExecutionRefV2::from_authority_entropy([0xb3; 16]).unwrap();
+    let other = AgentExecutionRefV2::from_authority_entropy([0xb4; 16]).unwrap();
+    let responses = vec![
+        plan_response(step),
+        mutation(AgentBrowserMutationResponseV2::ToolProposed { pending }),
+        mutation(AgentBrowserMutationResponseV2::ToolAuthorized {
+            ticket,
+            trace: trace(0xb5),
+        }),
+        mutation(AgentBrowserMutationResponseV2::ExecutionDispatched {
+            execution,
+            state: PublicDispatchAcceptedStateV2::Prepared,
+        }),
+        mutation(AgentBrowserMutationResponseV2::ExecutionRefreshed {
+            execution: other,
+            state: AgentBrowserExecutionStateV2::Prepared,
+        }),
+    ];
+    let (mut session, transport, _) = authenticated_session(responses);
+    let plan = session.run_planner(IntentPrivacy::Private).unwrap();
+
+    assert!(matches!(
+        session.execute(&plan, &RecordingDecision::new(true)),
+        Err(SavanaError::InvalidState)
+    ));
+    assert_eq!(
+        actions_after_authentication(&transport.take_requests())
+            .iter()
+            .filter(|action| matches!(action, AgentBrowserActionV2::RefreshExecution(_)))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn release_polls_valid_nonterminal_states_without_redispatching() {
     let transfer =
         ApprovalDisplayAuthenticationTransferCapabilityV2::from_authority_entropy([0xc1; 32])
             .unwrap();
@@ -415,6 +549,14 @@ fn release_uses_prepare_approval_real_ticket_dispatch_and_refresh() {
         mutation(AgentBrowserMutationResponseV2::ReleaseDispatched {
             release,
             state: PublicDispatchAcceptedStateV2::Prepared,
+        }),
+        mutation(AgentBrowserMutationResponseV2::ReleaseRefreshed {
+            release,
+            state: AgentBrowserReleaseStateV2::Prepared,
+        }),
+        mutation(AgentBrowserMutationResponseV2::ReleaseRefreshed {
+            release,
+            state: AgentBrowserReleaseStateV2::Dispatching,
         }),
         mutation(AgentBrowserMutationResponseV2::ReleaseRefreshed {
             release,
@@ -453,6 +595,8 @@ fn release_uses_prepare_approval_real_ticket_dispatch_and_refresh() {
             BrowserRoute::AgentView,
             BrowserRoute::AgentAction,
             BrowserRoute::AgentAction,
+            BrowserRoute::AgentAction,
+            BrowserRoute::AgentAction,
         ]
     );
     let actions = actions_after_authentication(&requests);
@@ -462,6 +606,8 @@ fn release_uses_prepare_approval_real_ticket_dispatch_and_refresh() {
     ));
     assert_eq!(actions[1], AgentBrowserActionV2::DispatchRelease(ticket));
     assert_eq!(actions[2], AgentBrowserActionV2::RefreshRelease(release));
+    assert_eq!(actions[3], AgentBrowserActionV2::RefreshRelease(release));
+    assert_eq!(actions[4], AgentBrowserActionV2::RefreshRelease(release));
 }
 
 #[test]

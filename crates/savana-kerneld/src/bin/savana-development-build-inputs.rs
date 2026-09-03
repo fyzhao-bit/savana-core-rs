@@ -474,6 +474,7 @@ fn run() -> Result<(), String> {
             "credential_absence_profile_path": format!("{INSTALL_ROOT}/sandbox/execd/connector-credential-absence-profile-v2.json"),
             "credential_absence_profile_digest": placeholder_hex
         },
+        "provider_routing_mode": "split-final-release",
         "provider": {
             "address": "127.0.0.1:9444",
             "server_name": "provider.savana-development.invalid",
@@ -482,6 +483,19 @@ fn run() -> Result<(), String> {
             "root_certificate_path": format!("{INSTALL_ROOT}/config/tls/runtime-root-v2.der"),
             "root_certificate_digest": placeholder_hex,
             "client_certificate_paths": [format!("{INSTALL_ROOT}/config/tls/provider-client-v2.der")],
+            "client_certificate_digests": [placeholder_hex],
+            "alpn_protocol_hex": "736176616e612d70726f76696465722d7632",
+            "endpoint_binding_digest": placeholder_hex,
+            "credential_handle_identity_digest": placeholder_hex
+        },
+        "final_release_provider": {
+            "address": "127.0.0.1:43191",
+            "server_name": "release.savana-development.invalid",
+            "canonical_url": "https://release.savana-development.invalid:43191/savana/final-release",
+            "server_spki_sha256": placeholder_hex,
+            "root_certificate_path": format!("{INSTALL_ROOT}/config/tls/runtime-root-v2.der"),
+            "root_certificate_digest": placeholder_hex,
+            "client_certificate_paths": [format!("{INSTALL_ROOT}/config/tls/final-release-client-v2.der")],
             "client_certificate_digests": [placeholder_hex],
             "alpn_protocol_hex": "736176616e612d70726f76696465722d7632",
             "endpoint_binding_digest": placeholder_hex,

@@ -16,6 +16,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 mod client;
+mod release_receiver;
 
 /// Report the crate version. Retained as a trivial import-sanity probe.
 #[pyfunction]
@@ -548,6 +549,7 @@ fn mask_pages(
 #[pymodule]
 fn savana_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     client::register(m)?;
+    release_receiver::register(m)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(detect_strict, m)?)?;
     m.add_function(wrap_pyfunction!(leak_gate, m)?)?;

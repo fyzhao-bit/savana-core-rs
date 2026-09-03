@@ -18,6 +18,7 @@ libsavana-ner = { path = "../libsavana-ner" }
 minicbor.workspace = true
 savana-client = { path = "../savana-client" }
 savana-kernel-protocol = { path = "../savana-kernel-protocol" }
+savana-openclaw-release = { path = "../savana-openclaw-release" }
 zeroize.workspace = true
 # abi3-py312: build ONE stable-ABI wheel (cp312-abi3) per platform — forward-
 # compatible with 3.13+, and (crucially) needs no per-interpreter match, so the
