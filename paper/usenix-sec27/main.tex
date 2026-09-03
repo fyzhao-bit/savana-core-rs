@@ -402,7 +402,10 @@ kernel operations enumerate what an agent may \emph{ask for} and what each
 request must \emph{prove}. This is the difference between ``the agent is
 sandboxed'' and ``the agent has no authority to sandbox'': the kernel does
 not filter the agent's actions, because the agent has no actions, only
-requests.
+requests. The claim is about \emph{values}: what a request may move and what
+effect it may cause. It is not yet a claim about \emph{choices}---which of
+several trusted values a request names---and \S\ref{sec:control} states that
+gap precisely.
 
 \subsection{State ownership}
 
@@ -1082,6 +1085,58 @@ enforcement}, since nothing would have noticed if the two implementations
 had stopped agreeing. The current design closes that gap on all five paths.
 We regard the distinction as one the literature should insist on.
 
+\paragraph{Control-selection dependency.}
+\label{sec:control}
+The label model governs what a value may do; it does not record who chose
+the value. A compromised proposer still decides which tool a step invokes,
+which of several trusted handles fills a control field, how trusted fields
+are combined, and whether and when a committed step is proposed. If the
+user's input contains both Alice's and Bob's addresses, both are
+\textsf{UserAuthorized} with \SEND, and an injected agent that binds
+\code{to} to Bob passes every check in \S\ref{sec:labels}: the intent's
+effect set is the intersection of its \emph{argument} labels, the plan's
+\textsf{ExternalUntrusted} label is never joined, and the intent-flow
+validator that asks ``should untrusted data steer this effect?'' looks
+only at argument integrity---its own comment records that user values
+``stay \textsf{UserAuthorized} even when the planner selects them''. This is
+the implicit-flow problem of classical IFC in a system without a branching
+interpreter: the dependency lives at who bound the argument and what they
+had read when they did, and CaMeL's control-dependency tracking has no
+counterpart here. Two further findings sharpen it. The tool-execution
+approval display renders argument names and digests, not values, so a human
+cannot see the substitution; and the planner envelope assigns one constant
+slot kind to every value, so candidates are not even distinguishable by
+kind. Ontology allowlists constrain values, not choices, and egress binding
+covers only release sinks. A third finding is that plan commit checks a step's
+tool class against the active registry and its template for equality, but
+not against the signed per-intent template allowlist, which only shapes what
+the planner is told; a summarization task can therefore commit a send step
+outright, so destination-level tracking alone would not suffice. We have
+specified, but not implemented, a design that closes the gap without a fifth
+label dimension. Every choice on seven facets---tool, effect kind, resource
+scope, magnitude, argument, destination, and the decision to act now---becomes
+a provenance node whose parents are the chosen item and the \emph{selector}
+(the plan or the proposing request), so \code{derive_normal} already labels a
+machine-made choice \textsf{ExternalUntrusted}. The kernel computes candidate
+snapshots from a closed universe it alone populates (admitted ingress
+values, derivations, signed registries), stamps them with a monotone epoch,
+and re-verifies a singleton's epoch at dispatch, so "one candidate" is a
+proof the agent cannot forge by offering a subset and cannot leave stale.
+G2-extracted role relations pin a facet to what the user named and refuse a
+plan that names another. A durable, monotone read-taint record classifies a
+choice as made before or after the agent read untrusted content. The only
+way a choice regains trusted integrity is a closed, one-shot, action-scoped
+endorsement transition---evidence being a user role, a singleton proof, or a
+settlement---whose output is bounded to \textsf{UserAuthorized}, is never a
+derivation parent, and matches exactly one evaluation digest. A seventh
+validator escalates unendorsed choices to a human under a signed
+facet-by-effect-by-class table in which tainted and outside-intent choices
+are never permitted, and the display renders the chosen item with its
+selection reason while the settlement binds the selection digest. Until that design
+ships, the honest statement of \S\ref{sec:overview} stands: \sys{} prevents
+effect laundering of values, not choice laundering of trusted values by an
+untrusted party.
+
 \paragraph{Platform root of trust.} The production deployment path requires
 a non-exportable platform keystore adapter and a hardware-backed monotonic
 rollback authority. The sealed platform boundary currently reports that
@@ -1145,7 +1200,10 @@ calls; and design-pattern surveys~\cite{beurerkellner2025patterns,willison2025tr
 catalog structural defenses. \sys{} shares the architectural thesis and
 differs in engineering completeness---signed supply chain, durability and
 crash recovery, real transports, adversarial matrices---and in addressing
-shape and intent leakage. Detection- and training-based
+shape and intent leakage. CaMeL's interpreter additionally propagates
+control dependencies to values and tool calls inside a branch;
+\S\ref{sec:control} explains why \sys{} currently lacks a counterpart and
+how one is specified. Detection- and training-based
 defenses~\cite{wallace2024hierarchy,hines2024spotlighting,chen2025struq,chen2025secalign}
 and formal benchmarks~\cite{liu2024formalizing,debenedetti2024agentdojo,zhan2024injecagent}
 are complementary: they operate inside the boundary \sys{} relocates, and
