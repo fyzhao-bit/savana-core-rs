@@ -49,16 +49,24 @@ pub use approval_service::{
 };
 pub use bindings::FinalReleaseSemanticBindingV2;
 pub use browser::{
-    decode_ui_authentication_browser_begin_request_v2,
+    decode_owner_authentication_profile_v2, decode_ui_authentication_browser_begin_request_v2,
     decode_ui_authentication_browser_begin_response_v2,
     decode_ui_authentication_browser_finish_request_v2,
     decode_ui_authentication_browser_finish_response_v2,
+    decode_ui_authentication_platform_begin_response_v2,
+    decode_ui_authentication_platform_status_request_v2,
+    decode_ui_authentication_platform_status_response_v2, encode_owner_authentication_profile_v2,
     encode_ui_authentication_browser_begin_request_v2,
     encode_ui_authentication_browser_begin_response_v2,
     encode_ui_authentication_browser_finish_request_v2,
-    encode_ui_authentication_browser_finish_response_v2, BrowserWebAuthnAssertionV2,
-    UiAuthenticationBrowserBeginRequestV2, UiAuthenticationBrowserBeginResponseV2,
-    UiAuthenticationBrowserFinishRequestV2, UiAuthenticationBrowserFinishResponseV2,
+    encode_ui_authentication_browser_finish_response_v2,
+    encode_ui_authentication_platform_begin_response_v2,
+    encode_ui_authentication_platform_status_request_v2,
+    encode_ui_authentication_platform_status_response_v2, BrowserWebAuthnAssertionV2,
+    OwnerAuthenticationProfileV2, UiAuthenticationBrowserBeginRequestV2,
+    UiAuthenticationBrowserBeginResponseV2, UiAuthenticationBrowserFinishRequestV2,
+    UiAuthenticationBrowserFinishResponseV2, UiAuthenticationPlatformBeginResponseV2,
+    UiAuthenticationPlatformStatusRequestV2, UiAuthenticationPlatformStatusResponseV2,
 };
 pub use browser_agent::{
     decode_agent_browser_mutation_response_v2, decode_agent_browser_read_view_response_v2,
@@ -75,15 +83,23 @@ pub use browser_approval::{
     decode_approval_decision_browser_begin_response_v2,
     decode_approval_decision_browser_finish_request_v2,
     decode_approval_decision_browser_finish_response_v2,
+    decode_approval_decision_platform_begin_response_v2,
+    decode_approval_decision_platform_status_request_v2,
+    decode_approval_decision_platform_status_response_v2,
     decode_approval_display_browser_request_v2, decode_approval_display_view_v2,
     encode_approval_decision_browser_begin_request_v2,
     encode_approval_decision_browser_begin_response_v2,
     encode_approval_decision_browser_finish_request_v2,
     encode_approval_decision_browser_finish_response_v2,
+    encode_approval_decision_platform_begin_response_v2,
+    encode_approval_decision_platform_status_request_v2,
+    encode_approval_decision_platform_status_response_v2,
     encode_approval_display_browser_request_v2, encode_approval_display_view_v2,
     ApprovalDecisionBrowserBeginRequestV2, ApprovalDecisionBrowserBeginResponseV2,
     ApprovalDecisionBrowserFinishRequestV2, ApprovalDecisionBrowserFinishResponseV2,
-    ApprovalDisplayBrowserRequestV2, ApprovalDisplayViewV2,
+    ApprovalDecisionPlatformBeginResponseV2, ApprovalDecisionPlatformStatusRequestV2,
+    ApprovalDecisionPlatformStatusResponseV2, ApprovalDisplayBrowserRequestV2,
+    ApprovalDisplayViewV2,
 };
 pub use browser_assets::SAVANA_BROWSER_SCRIPT_V2;
 pub use browser_enrollment::{

@@ -67,9 +67,13 @@ pub enum FixedHttpRouteV2 {
     ApprovalUiAuthenticationAccept,
     ApprovalUiAuthenticationBegin,
     ApprovalUiAuthenticationFinish,
+    ApprovalUiAuthenticationPlatformBegin,
+    ApprovalUiAuthenticationPlatformStatus,
     ApprovalDisplay,
     ApprovalDecisionBegin,
     ApprovalDecisionFinish,
+    ApprovalDecisionPlatformBegin,
+    ApprovalDecisionPlatformStatus,
     ApprovalEnrollmentBegin,
     ApprovalEnrollmentFinish,
     IngressBootstrapAccept,
@@ -418,6 +422,12 @@ fn route(
         (FixedHttpServiceV2::Approval, "POST", "/v2/ui-auth/finish") => {
             FixedHttpRouteV2::ApprovalUiAuthenticationFinish
         }
+        (FixedHttpServiceV2::Approval, "POST", "/v2/ui-auth/platform/begin") => {
+            FixedHttpRouteV2::ApprovalUiAuthenticationPlatformBegin
+        }
+        (FixedHttpServiceV2::Approval, "POST", "/v2/ui-auth/platform/status") => {
+            FixedHttpRouteV2::ApprovalUiAuthenticationPlatformStatus
+        }
         (FixedHttpServiceV2::Approval, "POST", "/v2/approval/display") => {
             FixedHttpRouteV2::ApprovalDisplay
         }
@@ -426,6 +436,12 @@ fn route(
         }
         (FixedHttpServiceV2::Approval, "POST", "/v2/approval/decision/finish") => {
             FixedHttpRouteV2::ApprovalDecisionFinish
+        }
+        (FixedHttpServiceV2::Approval, "POST", "/v2/approval/decision/platform/begin") => {
+            FixedHttpRouteV2::ApprovalDecisionPlatformBegin
+        }
+        (FixedHttpServiceV2::Approval, "POST", "/v2/approval/decision/platform/status") => {
+            FixedHttpRouteV2::ApprovalDecisionPlatformStatus
         }
         (FixedHttpServiceV2::Approval, "POST", "/v2/webauthn/enroll/begin") => {
             FixedHttpRouteV2::ApprovalEnrollmentBegin
@@ -526,9 +542,13 @@ fn validate_origin(
         }
         FixedHttpRouteV2::ApprovalUiAuthenticationBegin
         | FixedHttpRouteV2::ApprovalUiAuthenticationFinish
+        | FixedHttpRouteV2::ApprovalUiAuthenticationPlatformBegin
+        | FixedHttpRouteV2::ApprovalUiAuthenticationPlatformStatus
         | FixedHttpRouteV2::ApprovalDisplay
         | FixedHttpRouteV2::ApprovalDecisionBegin
         | FixedHttpRouteV2::ApprovalDecisionFinish
+        | FixedHttpRouteV2::ApprovalDecisionPlatformBegin
+        | FixedHttpRouteV2::ApprovalDecisionPlatformStatus
         | FixedHttpRouteV2::ApprovalEnrollmentBegin
         | FixedHttpRouteV2::ApprovalEnrollmentFinish => origin == Some(FixedOriginV2::Approval8766),
         FixedHttpRouteV2::IngressInputBegin
@@ -568,6 +588,80 @@ fn set_once<T>(slot: &mut Option<T>, value: T) -> Result<(), FixedHttpErrorV2> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_http_platform_routes_are_approval_post_same_origin_only() {
+        let routes = [
+            (
+                "/v2/ui-auth/platform/begin",
+                FixedHttpRouteV2::ApprovalUiAuthenticationPlatformBegin,
+            ),
+            (
+                "/v2/ui-auth/platform/status",
+                FixedHttpRouteV2::ApprovalUiAuthenticationPlatformStatus,
+            ),
+            (
+                "/v2/approval/decision/platform/begin",
+                FixedHttpRouteV2::ApprovalDecisionPlatformBegin,
+            ),
+            (
+                "/v2/approval/decision/platform/status",
+                FixedHttpRouteV2::ApprovalDecisionPlatformStatus,
+            ),
+        ];
+        for (path, expected) in routes {
+            let request = |method: &str, host: &str, origin: &str| {
+                let mut bytes = format!(
+                    "{method} {path} HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\nContent-Type: application/cbor\r\nContent-Length: 1\r\n\r\n"
+                )
+                .into_bytes();
+                bytes.push(0x80);
+                bytes
+            };
+            let decoded = read_fixed_http_request_v2(
+                &mut request("POST", "localhost:8766", "http://localhost:8766").as_slice(),
+                FixedHttpServiceV2::Approval,
+            )
+            .unwrap();
+            assert_eq!(decoded.route(), expected);
+
+            assert_eq!(
+                read_fixed_http_request_v2(
+                    &mut request("GET", "localhost:8766", "http://localhost:8766").as_slice(),
+                    FixedHttpServiceV2::Approval,
+                ),
+                Err(FixedHttpErrorV2::NotFound)
+            );
+            assert_eq!(
+                read_fixed_http_request_v2(
+                    &mut request("POST", "localhost:8766", "http://localhost:8765").as_slice(),
+                    FixedHttpServiceV2::Approval,
+                ),
+                Err(FixedHttpErrorV2::UnauthorizedOrigin)
+            );
+            assert!(read_fixed_http_request_v2(
+                &mut request("POST", "localhost:8765", "http://localhost:8765").as_slice(),
+                FixedHttpServiceV2::Jarvis,
+            )
+            .is_err());
+            assert!(read_fixed_http_request_v2(
+                &mut request("POST", "localhost:8766", "http://127.0.0.1:8766").as_slice(),
+                FixedHttpServiceV2::Approval,
+            )
+            .is_err());
+            let query = format!("{path}?retry=1");
+            let mut request = format!(
+                "POST {query} HTTP/1.1\r\nHost: localhost:8766\r\nOrigin: http://localhost:8766\r\nContent-Type: application/cbor\r\nContent-Length: 1\r\n\r\n"
+            )
+            .into_bytes();
+            request.push(0x80);
+            assert!(read_fixed_http_request_v2(
+                &mut request.as_slice(),
+                FixedHttpServiceV2::Approval,
+            )
+            .is_err());
+        }
+    }
 
     #[test]
     fn closed_surface_accepts_exact_ingress_mutation() {

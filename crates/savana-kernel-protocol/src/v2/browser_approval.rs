@@ -4,7 +4,7 @@ use zeroize::Zeroizing;
 use super::{
     approval_display_digest_v2, cbor::V2DecodeContext, ApprovalDecisionCeremonyCapabilityV2,
     ApprovalDecisionV2, ApprovalPurposeV2, ApprovalTabSessionCapabilityV2,
-    BoundedApprovalDisplayTextV2, BrowserWebAuthnAssertionV2, Digest32V2, Nonce32V2,
+    BoundedApprovalDisplayTextV2, BrowserWebAuthnAssertionV2, Digest32V2, Nonce32V2, UnixMillisV2,
 };
 use crate::{ProtocolError, StableCode};
 
@@ -198,6 +198,233 @@ impl ApprovalDecisionBrowserFinishRequestV2 {
 pub enum ApprovalDecisionBrowserFinishResponseV2 {
     Denied,
     Approved,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApprovalDecisionPlatformBeginResponseV2 {
+    ceremony: ApprovalDecisionCeremonyCapabilityV2,
+    expires_at: UnixMillisV2,
+}
+
+impl ApprovalDecisionPlatformBeginResponseV2 {
+    pub fn new(
+        ceremony: ApprovalDecisionCeremonyCapabilityV2,
+        expires_at: UnixMillisV2,
+    ) -> Result<Self, ProtocolError> {
+        if expires_at.get() == 0 {
+            return Err(malformed());
+        }
+        Ok(Self {
+            ceremony,
+            expires_at,
+        })
+    }
+
+    pub const fn ceremony(self) -> ApprovalDecisionCeremonyCapabilityV2 {
+        self.ceremony
+    }
+
+    pub const fn expires_at(self) -> UnixMillisV2 {
+        self.expires_at
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApprovalDecisionPlatformStatusRequestV2 {
+    ceremony: ApprovalDecisionCeremonyCapabilityV2,
+    client_request_nonce: Nonce32V2,
+}
+
+impl ApprovalDecisionPlatformStatusRequestV2 {
+    pub fn new(
+        ceremony: ApprovalDecisionCeremonyCapabilityV2,
+        client_request_nonce: Nonce32V2,
+    ) -> Result<Self, ProtocolError> {
+        if client_request_nonce.as_bytes() == &[0; 32] {
+            return Err(malformed());
+        }
+        Ok(Self {
+            ceremony,
+            client_request_nonce,
+        })
+    }
+
+    pub const fn ceremony(self) -> ApprovalDecisionCeremonyCapabilityV2 {
+        self.ceremony
+    }
+
+    pub const fn client_request_nonce(self) -> Nonce32V2 {
+        self.client_request_nonce
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalDecisionPlatformStatusResponseV2 {
+    Pending,
+    Completed(ApprovalDecisionBrowserFinishResponseV2),
+    Denied,
+    Expired,
+    CredentialInvalidated,
+    Unavailable,
+    Indeterminate,
+    ProtocolFailure,
+}
+
+pub fn encode_approval_decision_platform_begin_response_v2(
+    value: ApprovalDecisionPlatformBeginResponseV2,
+) -> Result<Vec<u8>, ProtocolError> {
+    if value.expires_at.get() == 0 {
+        return Err(malformed());
+    }
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder.array(2).map_err(ProtocolError::malformed)?;
+    value
+        .ceremony
+        .encode(&mut encoder, &mut ())
+        .and_then(|()| value.expires_at.encode(&mut encoder, &mut ()))
+        .map_err(ProtocolError::malformed)?;
+    Ok(encoder.into_writer())
+}
+
+pub fn decode_approval_decision_platform_begin_response_v2(
+    bytes: &[u8],
+) -> Result<ApprovalDecisionPlatformBeginResponseV2, ProtocolError> {
+    validate(bytes)?;
+    let mut decoder = minicbor::Decoder::new(bytes);
+    if decoder.array().map_err(ProtocolError::malformed)? != Some(2) {
+        return Err(malformed());
+    }
+    let mut context = V2DecodeContext;
+    let value = ApprovalDecisionPlatformBeginResponseV2::new(
+        minicbor::Decode::decode(&mut decoder, &mut context)
+            .map_err(ProtocolError::from_typed_decode)?,
+        minicbor::Decode::decode(&mut decoder, &mut context)
+            .map_err(ProtocolError::from_typed_decode)?,
+    )?;
+    if decoder.position() != bytes.len()
+        || encode_approval_decision_platform_begin_response_v2(value)? != bytes
+    {
+        return Err(noncanonical());
+    }
+    Ok(value)
+}
+
+pub fn encode_approval_decision_platform_status_request_v2(
+    value: ApprovalDecisionPlatformStatusRequestV2,
+) -> Result<Vec<u8>, ProtocolError> {
+    if value.client_request_nonce.as_bytes() == &[0; 32] {
+        return Err(malformed());
+    }
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder.array(2).map_err(ProtocolError::malformed)?;
+    value
+        .ceremony
+        .encode(&mut encoder, &mut ())
+        .and_then(|()| value.client_request_nonce.encode(&mut encoder, &mut ()))
+        .map_err(ProtocolError::malformed)?;
+    Ok(encoder.into_writer())
+}
+
+pub fn decode_approval_decision_platform_status_request_v2(
+    bytes: &[u8],
+) -> Result<ApprovalDecisionPlatformStatusRequestV2, ProtocolError> {
+    validate(bytes)?;
+    let mut decoder = minicbor::Decoder::new(bytes);
+    if decoder.array().map_err(ProtocolError::malformed)? != Some(2) {
+        return Err(malformed());
+    }
+    let mut context = V2DecodeContext;
+    let value = ApprovalDecisionPlatformStatusRequestV2::new(
+        minicbor::Decode::decode(&mut decoder, &mut context)
+            .map_err(ProtocolError::from_typed_decode)?,
+        minicbor::Decode::decode(&mut decoder, &mut context)
+            .map_err(ProtocolError::from_typed_decode)?,
+    )?;
+    if decoder.position() != bytes.len()
+        || encode_approval_decision_platform_status_request_v2(value)? != bytes
+    {
+        return Err(noncanonical());
+    }
+    Ok(value)
+}
+
+pub fn encode_approval_decision_platform_status_response_v2(
+    value: ApprovalDecisionPlatformStatusResponseV2,
+) -> Result<Vec<u8>, ProtocolError> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    match value {
+        ApprovalDecisionPlatformStatusResponseV2::Pending => {
+            encode_platform_status(&mut encoder, 1)?
+        }
+        ApprovalDecisionPlatformStatusResponseV2::Completed(completion) => {
+            let completion = encode_approval_decision_browser_finish_response_v2(completion)?;
+            encoder
+                .array(2)
+                .and_then(|encoder| encoder.u16(2))
+                .and_then(|encoder| encoder.bytes(&completion))
+                .map_err(ProtocolError::malformed)?;
+        }
+        ApprovalDecisionPlatformStatusResponseV2::Denied => {
+            encode_platform_status(&mut encoder, 3)?
+        }
+        ApprovalDecisionPlatformStatusResponseV2::Expired => {
+            encode_platform_status(&mut encoder, 4)?
+        }
+        ApprovalDecisionPlatformStatusResponseV2::CredentialInvalidated => {
+            encode_platform_status(&mut encoder, 5)?
+        }
+        ApprovalDecisionPlatformStatusResponseV2::Unavailable => {
+            encode_platform_status(&mut encoder, 6)?
+        }
+        ApprovalDecisionPlatformStatusResponseV2::Indeterminate => {
+            encode_platform_status(&mut encoder, 7)?
+        }
+        ApprovalDecisionPlatformStatusResponseV2::ProtocolFailure => {
+            encode_platform_status(&mut encoder, 8)?
+        }
+    }
+    Ok(encoder.into_writer())
+}
+
+pub fn decode_approval_decision_platform_status_response_v2(
+    bytes: &[u8],
+) -> Result<ApprovalDecisionPlatformStatusResponseV2, ProtocolError> {
+    validate(bytes)?;
+    let mut decoder = minicbor::Decoder::new(bytes);
+    let count = decoder.array().map_err(ProtocolError::malformed)?;
+    let tag = decoder.u16().map_err(ProtocolError::malformed)?;
+    let value = match (count, tag) {
+        (Some(1), 1) => ApprovalDecisionPlatformStatusResponseV2::Pending,
+        (Some(2), 2) => ApprovalDecisionPlatformStatusResponseV2::Completed(
+            decode_approval_decision_browser_finish_response_v2(
+                decoder.bytes().map_err(ProtocolError::malformed)?,
+            )?,
+        ),
+        (Some(1), 3) => ApprovalDecisionPlatformStatusResponseV2::Denied,
+        (Some(1), 4) => ApprovalDecisionPlatformStatusResponseV2::Expired,
+        (Some(1), 5) => ApprovalDecisionPlatformStatusResponseV2::CredentialInvalidated,
+        (Some(1), 6) => ApprovalDecisionPlatformStatusResponseV2::Unavailable,
+        (Some(1), 7) => ApprovalDecisionPlatformStatusResponseV2::Indeterminate,
+        (Some(1), 8) => ApprovalDecisionPlatformStatusResponseV2::ProtocolFailure,
+        _ => return Err(malformed()),
+    };
+    if decoder.position() != bytes.len()
+        || encode_approval_decision_platform_status_response_v2(value)? != bytes
+    {
+        return Err(noncanonical());
+    }
+    Ok(value)
+}
+
+fn encode_platform_status<W: minicbor::encode::Write>(
+    encoder: &mut minicbor::Encoder<W>,
+    tag: u16,
+) -> Result<(), ProtocolError> {
+    encoder
+        .array(1)
+        .and_then(|encoder| encoder.u16(tag))
+        .map_err(ProtocolError::malformed)?;
+    Ok(())
 }
 
 pub fn encode_approval_display_browser_request_v2(
@@ -471,6 +698,134 @@ fn noncanonical() -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_status_approval_begin_and_request_are_canonical_and_nonce_bound() {
+        let ceremony =
+            ApprovalDecisionCeremonyCapabilityV2::from_authority_entropy([0x71; 32]).unwrap();
+        let expires_at = super::super::UnixMillisV2::new(120_000);
+        let begin = ApprovalDecisionPlatformBeginResponseV2::new(ceremony, expires_at).unwrap();
+        let bytes = encode_approval_decision_platform_begin_response_v2(begin).unwrap();
+        let decoded = decode_approval_decision_platform_begin_response_v2(&bytes).unwrap();
+        assert_eq!(decoded, begin);
+        assert_eq!(decoded.ceremony(), ceremony);
+        assert_eq!(decoded.expires_at(), expires_at);
+
+        let nonce = Nonce32V2::new([0x72; 32]);
+        let status = ApprovalDecisionPlatformStatusRequestV2::new(ceremony, nonce).unwrap();
+        let bytes = encode_approval_decision_platform_status_request_v2(status).unwrap();
+        let decoded = decode_approval_decision_platform_status_request_v2(&bytes).unwrap();
+        assert_eq!(decoded, status);
+        assert_eq!(decoded.ceremony(), ceremony);
+        assert_eq!(decoded.client_request_nonce(), nonce);
+
+        let zero_expiry = [0x82, 0x58, 0x20]
+            .into_iter()
+            .chain([0x71; 32])
+            .chain([0x00])
+            .collect::<Vec<_>>();
+        assert!(decode_approval_decision_platform_begin_response_v2(&zero_expiry).is_err());
+
+        let mut zero_ceremony = encode_approval_decision_platform_begin_response_v2(begin).unwrap();
+        zero_ceremony[3..35].fill(0);
+        assert!(decode_approval_decision_platform_begin_response_v2(&zero_ceremony).is_err());
+
+        let mut zero_nonce = bytes.clone();
+        zero_nonce[37..69].fill(0);
+        assert!(decode_approval_decision_platform_status_request_v2(&zero_nonce).is_err());
+        let mut noncanonical = bytes.clone();
+        noncanonical[0] = 0x83;
+        assert!(decode_approval_decision_platform_status_request_v2(&noncanonical).is_err());
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(decode_approval_decision_platform_status_request_v2(&trailing).is_err());
+    }
+
+    #[test]
+    fn platform_status_approval_responses_are_closed_and_cannot_decode_ui_completion() {
+        let responses = [
+            ApprovalDecisionPlatformStatusResponseV2::Pending,
+            ApprovalDecisionPlatformStatusResponseV2::Completed(
+                ApprovalDecisionBrowserFinishResponseV2::Denied,
+            ),
+            ApprovalDecisionPlatformStatusResponseV2::Completed(
+                ApprovalDecisionBrowserFinishResponseV2::Approved,
+            ),
+            ApprovalDecisionPlatformStatusResponseV2::Denied,
+            ApprovalDecisionPlatformStatusResponseV2::Expired,
+            ApprovalDecisionPlatformStatusResponseV2::CredentialInvalidated,
+            ApprovalDecisionPlatformStatusResponseV2::Unavailable,
+            ApprovalDecisionPlatformStatusResponseV2::Indeterminate,
+            ApprovalDecisionPlatformStatusResponseV2::ProtocolFailure,
+        ];
+        for response in responses {
+            let bytes = encode_approval_decision_platform_status_response_v2(response).unwrap();
+            let decoded = decode_approval_decision_platform_status_response_v2(&bytes).unwrap();
+            assert_eq!(decoded, response);
+            assert_eq!(
+                encode_approval_decision_platform_status_response_v2(decoded).unwrap(),
+                bytes
+            );
+        }
+
+        assert_eq!(
+            encode_approval_decision_platform_status_response_v2(
+                ApprovalDecisionPlatformStatusResponseV2::Pending
+            )
+            .unwrap(),
+            vec![0x81, 0x01]
+        );
+        for (response, tag) in [
+            (ApprovalDecisionPlatformStatusResponseV2::Denied, 3_u8),
+            (ApprovalDecisionPlatformStatusResponseV2::Expired, 4),
+            (
+                ApprovalDecisionPlatformStatusResponseV2::CredentialInvalidated,
+                5,
+            ),
+            (ApprovalDecisionPlatformStatusResponseV2::Unavailable, 6),
+            (ApprovalDecisionPlatformStatusResponseV2::Indeterminate, 7),
+            (ApprovalDecisionPlatformStatusResponseV2::ProtocolFailure, 8),
+        ] {
+            assert_eq!(
+                encode_approval_decision_platform_status_response_v2(response).unwrap(),
+                vec![0x81, tag]
+            );
+        }
+
+        let ui_completion = super::super::encode_ui_authentication_platform_status_response_v2(
+            super::super::UiAuthenticationPlatformStatusResponseV2::Completed(
+                super::super::UiAuthenticationBrowserFinishResponseV2::ApprovalDisplayReady {
+                    tab: ApprovalTabSessionCapabilityV2::from_authority_entropy([0x73; 32])
+                        .unwrap(),
+                },
+            ),
+        )
+        .unwrap();
+        assert!(decode_approval_decision_platform_status_response_v2(&ui_completion).is_err());
+
+        let approval_completion = encode_approval_decision_platform_status_response_v2(
+            ApprovalDecisionPlatformStatusResponseV2::Completed(
+                ApprovalDecisionBrowserFinishResponseV2::Approved,
+            ),
+        )
+        .unwrap();
+        assert!(
+            super::super::decode_ui_authentication_platform_status_response_v2(
+                &approval_completion
+            )
+            .is_err()
+        );
+
+        for malformed in [
+            vec![0x81, 0x09],
+            vec![0x82, 0x01, 0x01],
+            vec![0x81, 0x18, 0x01],
+            vec![0x81, 0x01, 0x00],
+            vec![0x82, 0x02, 0x03],
+        ] {
+            assert!(decode_approval_decision_platform_status_response_v2(&malformed).is_err());
+        }
+    }
 
     #[test]
     fn browser_view_encodes_exact_gated_text_and_node_digest() {
