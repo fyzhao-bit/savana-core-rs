@@ -23,7 +23,17 @@ mod kernel_success;
 mod primitives;
 mod service;
 mod signed;
+mod task_action_approval;
 mod task_authorization;
+pub use task_action_approval::{
+    decode_signed_task_action_approval_v2, decode_task_action_approval_v2,
+    encode_signed_task_action_approval_v2, encode_task_action_approval_v2,
+    sign_task_action_approval_v2, verify_task_action_approval_v2, SignedTaskActionApprovalV2,
+    TaskActionApprovalContextV2, TaskActionApprovalDecisionV2, TaskActionApprovalV2,
+    VerifiedTaskActionApprovalV2, MAX_TASK_ACTION_APPROVAL_BYTES_V2,
+};
+#[cfg(test)]
+mod task_action_approval_tests;
 #[cfg(test)]
 mod task_authorization_tests;
 mod transport;

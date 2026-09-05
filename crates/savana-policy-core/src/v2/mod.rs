@@ -52,6 +52,7 @@ mod intent;
 mod labels;
 mod leak_gate;
 
+mod control_selection;
 #[allow(dead_code)] // Closed AST is activated only through the G4 verified-state adapter.
 mod ontology;
 mod production;
@@ -63,11 +64,22 @@ mod recovery_rollback_readiness;
 mod rollback_verification_attestation;
 mod rollback_verification_evidence;
 mod store_compatibility;
+mod task_authorization;
 mod transition_audit;
 #[allow(dead_code)] // Activated by the G5 evaluation transaction.
 mod validator;
 mod value;
 mod verification_evidence;
+pub use control_selection::{
+    authorization_digest_v2, checked_control_endorsements_v2, AuthorizationDigestV2,
+    ControlEndorsementV2, ControlEvidenceV2, ControlFacetV2, ControlSelectionV2,
+};
+pub use task_authorization::{
+    task_effect_set_v2, CompleteContractDomainV2, TaskAuthorizationErrorV2, TaskMatchContextV2,
+    VerifiedTaskAuthorizationV2, VerifiedTaskMatchV2,
+};
+#[cfg(test)]
+mod task_authorization_tests;
 
 pub use authenticated_anchor::{AuthenticatedFileAnchorErrorV2, AuthenticatedFileAnchorV2};
 pub use binding::{
