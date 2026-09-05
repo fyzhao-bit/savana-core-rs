@@ -65,6 +65,8 @@ mod rollback_verification_attestation;
 mod rollback_verification_evidence;
 mod store_compatibility;
 mod task_authorization;
+mod task_state;
+pub use task_state::{TaskAuthorizationStateV2, TaskDispatchAuthorizationV2, TaskDispatchBindingV2, VerifiedTaskOutcomeV2};
 mod transition_audit;
 #[allow(dead_code)] // Activated by the G5 evaluation transaction.
 mod validator;

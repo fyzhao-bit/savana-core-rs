@@ -54,6 +54,14 @@ pub struct VerifiedTaskAuthorizationV2 {
     digest: Digest32V2,
 }
 impl VerifiedTaskAuthorizationV2 {
+    // The AEAD-validated durable snapshot is a separate, crate-private trust path.
+    pub(crate) fn from_authenticated_snapshot(
+        material: TaskAuthorizationV2,
+    ) -> Result<Self, super::G4Error> {
+        let digest = task_authorization_digest_v2(&material)
+            .map_err(|_| super::G4Error::DurableStateCorrupt)?;
+        Ok(Self { material, digest })
+    }
     /// Trust context/key must be selected by the trusted owner, not the proposer.
     #[allow(clippy::too_many_arguments)]
     pub fn verify(

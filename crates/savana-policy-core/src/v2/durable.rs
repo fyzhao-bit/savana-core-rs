@@ -46,6 +46,7 @@ use super::quota::{
     AuthenticatedEffectDispositionKindV2, DispatchQuotaCounterEntryV2, DispatchQuotaLedgerEntryV2,
     DispatchQuotaLedgerV2,
 };
+use super::task_state::TaskLedgerV2;
 use super::validator::{decision_record_digest, G5DecisionEntryV2};
 use super::{
     descriptor_digest_v2, ActionIntentRecordV2, ActionIntentResolutionV2, ActionIntentStateV2,
@@ -60,12 +61,18 @@ use super::{
     VerifiedInternalValidatorRegistryV2, VerifiedProjectionOutputsV2, VerifiedQuotaLimitV2,
     VerifiedStoredBindingsV2,
 };
+use super::{
+    TaskAuthorizationStateV2, TaskDispatchAuthorizationV2, TaskDispatchBindingV2,
+    VerifiedTaskAuthorizationV2, VerifiedTaskOutcomeV2,
+};
 use crate::atomic_file::{self, PersistencePhase};
 use crate::lock_file::LedgerLock;
+use savana_kernel_protocol::v2::UnixMillisV2;
 
 const STATE_FILE_NAME: &str = "kernel-g4-state-v2.cbor";
 const STATE_LOCK_FILE_NAME: &str = ".kernel-g4-state-v2.cbor.lock";
 const STATE_SCHEMA_VERSION: u16 = 2;
+const PAYLOAD_SCHEMA_VERSION: u16 = 3;
 const STATE_ENCRYPTION_AAD_DOMAIN: &[u8] = b"SAVANA_KERNEL_G4_STATE_ENCRYPTION_V2\0";
 const STATE_HEAD_DOMAIN: &[u8] = b"SAVANA_KERNEL_G4_STATE_HEAD_V2\0";
 const STATE_KEY_DERIVATION_DOMAIN: &[u8] = b"SAVANA_KERNEL_G4_STATE_KEY_DERIVATION_V2\0";
@@ -83,26 +90,35 @@ const MAX_TOKENS: usize = 64;
 const MAX_PROJECTION_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const DESTINATION_DIGEST_DOMAIN: &[u8] = b"SAVANA_DESTINATION_V2\0";
 const DISPLAY_DIGEST_DOMAIN: &[u8] = b"SAVANA_DISPLAY_V2\0";
+#[cfg(test)]
+#[path = "durable_task_tests.rs"]
+mod task_tests;
 
 #[derive(Debug, Clone)]
 struct DurableG4SnapshotV2 {
+    payload_schema: u16,
+    legacy_intents: Vec<ActionIntentIdV2>,
     sequence: u64,
     previous_state_digest: Digest32V2,
     intents: ActionIntentIndexV2,
     quota: DispatchQuotaLedgerV2,
     decisions: G5DecisionIndexV2,
     dispatch: KernelDispatchJournalV2,
+    tasks: TaskLedgerV2,
 }
 
 impl Default for DurableG4SnapshotV2 {
     fn default() -> Self {
         Self {
+            payload_schema: PAYLOAD_SCHEMA_VERSION,
+            legacy_intents: Vec::new(),
             sequence: 0,
             previous_state_digest: Digest32V2::new([0; 32]),
             intents: ActionIntentIndexV2::default(),
             quota: DispatchQuotaLedgerV2::default(),
             decisions: G5DecisionIndexV2::default(),
             dispatch: KernelDispatchJournalV2::default(),
+            tasks: TaskLedgerV2::default(),
         }
     }
 }
@@ -218,6 +234,45 @@ impl std::fmt::Debug for DurableG4StateV2 {
 }
 
 impl DurableG4StateV2 {
+    pub fn install_verified_task_authorization(
+        &mut self,
+        authorization: VerifiedTaskAuthorizationV2,
+    ) -> Result<(), G4Error> {
+        self.ensure_usable()?;
+        let mut next = self.snapshot.clone();
+        if next
+            .tasks
+            .install(authorization, self.namespace.installation_id())?
+        {
+            self.commit(next)?;
+        }
+        Ok(())
+    }
+    pub fn revoke_task_authorization(&mut self, task: DurableTaskIdV2) -> Result<(), G4Error> {
+        self.ensure_usable()?;
+        let mut next = self.snapshot.clone();
+        if next.tasks.revoke(task)? {
+            self.commit(next)?;
+        }
+        Ok(())
+    }
+    pub fn task_authorization_state(
+        &self,
+        task: DurableTaskIdV2,
+    ) -> Result<TaskAuthorizationStateV2, G4Error> {
+        self.ensure_usable()?;
+        self.snapshot.tasks.projection(task)
+    }
+    pub fn task_dispatch_binding(
+        &self,
+        nonce: Nonce32V2,
+    ) -> Result<&TaskDispatchBindingV2, G4Error> {
+        self.ensure_usable()?;
+        self.snapshot
+            .tasks
+            .binding(nonce)
+            .ok_or(G4Error::StateConflict)
+    }
     pub fn open(
         path: &Path,
         master_encryption_key: [u8; 32],
@@ -518,11 +573,16 @@ impl DurableG4StateV2 {
         ticket: VerifiedExecutionTicketV2,
         authority: VerifiedEffectGateAuthorityV2,
         sealed_envelope_digest: Digest32V2,
+        task: &TaskDispatchAuthorizationV2,
+        now: UnixMillisV2,
     ) -> Result<DispatchPreparationV2, G4Error> {
         self.ensure_usable()?;
         let guard_authority = authority.clone();
         guard_authority.while_current_connector_registry_head(|connector_registry_digest| {
             let mut next = self.snapshot.clone();
+            if next.legacy_intents.contains(&action_intent_id) {
+                return Err(G4Error::StateConflict);
+            }
             let intent = next
                 .intents
                 .intents
@@ -546,15 +606,24 @@ impl DurableG4StateV2 {
                 sealed_envelope_digest,
                 connector_registry_digest,
             )?;
-            if preparation.kind() == DispatchPreparationKindV2::Replay {
-                return Ok(preparation);
-            }
             let journal_entry = next
                 .dispatch
                 .entries
-                .last()
+                .iter()
+                .find(|e| e.core.execution_nonce == preparation.execution_nonce())
                 .cloned()
                 .ok_or(G4Error::StateConflict)?;
+            next.tasks.prepare(
+                task,
+                &journal_entry,
+                self.namespace.installation_id(),
+                verified_limit.policy_binding_digest(),
+                now,
+                preparation.kind() == DispatchPreparationKindV2::Replay,
+            )?;
+            if preparation.kind() == DispatchPreparationKindV2::Replay {
+                return Ok(preparation);
+            }
             next.quota.reserve_or_replay(
                 verified_limit,
                 intent.record.durable_run_id,
@@ -576,12 +645,29 @@ impl DurableG4StateV2 {
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_verified_tool_dispatch(
         &mut self,
+        _action_intent_id: ActionIntentIdV2,
+        _verified_limit: VerifiedQuotaLimitV2,
+        _approval: Option<super::VerifiedToolApprovalSettlementV2>,
+        _ticket: super::ResolvedExecutionTicketV2,
+        _authority: super::VerifiedEffectGateLeaseV2,
+        _sealed_envelope_digest: Digest32V2,
+    ) -> Result<super::KernelPreparedDispatchV2, G4Error> {
+        // Staged compatibility entry point: never mint missing task authority.
+        self.ensure_usable()?;
+        Err(G4Error::StateConflict)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_task_bound_tool_dispatch(
+        &mut self,
         action_intent_id: ActionIntentIdV2,
         verified_limit: VerifiedQuotaLimitV2,
         approval: Option<super::VerifiedToolApprovalSettlementV2>,
         ticket: super::ResolvedExecutionTicketV2,
         authority: super::VerifiedEffectGateLeaseV2,
         sealed_envelope_digest: Digest32V2,
+        task: &TaskDispatchAuthorizationV2,
+        now: UnixMillisV2,
     ) -> Result<super::KernelPreparedDispatchV2, G4Error> {
         let super::ResolvedExecutionTicketV2 {
             inner: ticket,
@@ -594,6 +680,8 @@ impl DurableG4StateV2 {
             ticket,
             authority.inner,
             sealed_envelope_digest,
+            task,
+            now,
         )?;
         let core = self.dispatch_core(preparation.execution_nonce())?;
         Ok(super::KernelPreparedDispatchV2::new(
@@ -601,6 +689,8 @@ impl DurableG4StateV2 {
             core,
             ticket_digest,
             sealed_envelope_digest,
+            self.task_dispatch_binding(preparation.execution_nonce())?
+                .clone(),
         ))
     }
 
@@ -612,6 +702,8 @@ impl DurableG4StateV2 {
         ticket: VerifiedFinalReleaseTicketV2,
         authority: VerifiedEffectGateAuthorityV2,
         sealed_envelope_digest: Digest32V2,
+        task: &TaskDispatchAuthorizationV2,
+        now: UnixMillisV2,
     ) -> Result<DispatchPreparationV2, G4Error> {
         self.ensure_usable()?;
         let guard_authority = authority.clone();
@@ -627,15 +719,24 @@ impl DurableG4StateV2 {
                     sealed_envelope_digest,
                     connector_registry_digest,
                 )?;
-            if preparation.kind() == DispatchPreparationKindV2::Replay {
-                return Ok(preparation);
-            }
             let journal_entry = next
                 .dispatch
                 .entries
-                .last()
+                .iter()
+                .find(|e| e.core.execution_nonce == preparation.execution_nonce())
                 .cloned()
                 .ok_or(G4Error::StateConflict)?;
+            next.tasks.prepare(
+                task,
+                &journal_entry,
+                self.namespace.installation_id(),
+                verified_limit.policy_binding_digest(),
+                now,
+                preparation.kind() == DispatchPreparationKindV2::Replay,
+            )?;
+            if preparation.kind() == DispatchPreparationKindV2::Replay {
+                return Ok(preparation);
+            }
             next.quota.reserve_or_replay(
                 verified_limit,
                 release.durable_run_id(),
@@ -650,12 +751,28 @@ impl DurableG4StateV2 {
 
     pub fn prepare_verified_final_release_dispatch(
         &mut self,
+        _release: &super::VerifiedFinalReleaseRecordV2,
+        _verified_limit: VerifiedQuotaLimitV2,
+        _approval: &super::VerifiedFinalReleaseSettlementV2,
+        _ticket: super::ResolvedFinalReleaseTicketV2,
+        _authority: super::VerifiedEffectGateLeaseV2,
+        _sealed_envelope_digest: Digest32V2,
+    ) -> Result<super::KernelPreparedDispatchV2, G4Error> {
+        self.ensure_usable()?;
+        Err(G4Error::StateConflict)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_task_bound_final_release_dispatch(
+        &mut self,
         release: &super::VerifiedFinalReleaseRecordV2,
         verified_limit: VerifiedQuotaLimitV2,
         approval: &super::VerifiedFinalReleaseSettlementV2,
         ticket: super::ResolvedFinalReleaseTicketV2,
         authority: super::VerifiedEffectGateLeaseV2,
         sealed_envelope_digest: Digest32V2,
+        task: &TaskDispatchAuthorizationV2,
+        now: UnixMillisV2,
     ) -> Result<super::KernelPreparedDispatchV2, G4Error> {
         let expected_subject = DispatchQuotaSubjectV2::final_release(
             release.inner.binding().release_quota_subject_digest(),
@@ -673,6 +790,8 @@ impl DurableG4StateV2 {
             ticket,
             authority.inner,
             sealed_envelope_digest,
+            task,
+            now,
         )?;
         let core = self.dispatch_core(preparation.execution_nonce())?;
         Ok(super::KernelPreparedDispatchV2::new(
@@ -680,6 +799,8 @@ impl DurableG4StateV2 {
             core,
             ticket_digest,
             sealed_envelope_digest,
+            self.task_dispatch_binding(preparation.execution_nonce())?
+                .clone(),
         ))
     }
 
@@ -694,7 +815,7 @@ impl DurableG4StateV2 {
         if !matches!(entry.core.subject, DispatchSubjectV2::ToolExecution { .. }) {
             return Err(G4Error::StateConflict);
         }
-        self.reconcile_tool_dispatch(entry.proof)
+        self.reconcile_tool_dispatch_with_outcome(entry.proof, true)
     }
 
     pub fn reconcile_signed_final_release_dispatch(
@@ -708,7 +829,50 @@ impl DurableG4StateV2 {
         if !matches!(entry.core.subject, DispatchSubjectV2::FinalRelease { .. }) {
             return Err(G4Error::StateConflict);
         }
-        self.reconcile_final_release_dispatch(entry.proof)
+        self.reconcile_final_release_dispatch_with_outcome(entry.proof, true)
+    }
+
+    pub fn verify_task_outcome(
+        &self,
+        receipt: &SignedExecutorDispositionReceiptV2,
+        expected_key_id: Ed25519KeyIdV2,
+        public_key: [u8; 32],
+        now: UnixMillisV2,
+    ) -> Result<VerifiedTaskOutcomeV2, G4Error> {
+        self.ensure_usable()?;
+        let entry = self.dispatch_entry_for_receipt(receipt, expected_key_id, public_key, now)?;
+        if !matches!(
+            entry.proof.disposition.kind(),
+            AuthenticatedEffectDispositionKindV2::KnownSuccess
+                | AuthenticatedEffectDispositionKindV2::FailedNoEffect
+        ) {
+            return Err(G4Error::StateConflict);
+        }
+        Ok(VerifiedTaskOutcomeV2 {
+            proof: entry.proof,
+            authorization_digest: self
+                .task_dispatch_binding(entry.proof.execution_nonce)?
+                .authorization_digest(),
+        })
+    }
+
+    pub fn reconcile_task_outcome(
+        &mut self,
+        outcome: VerifiedTaskOutcomeV2,
+    ) -> Result<KernelDispatchStateV2, G4Error> {
+        if self
+            .task_dispatch_binding(outcome.proof.execution_nonce)?
+            .authorization_digest()
+            != outcome.authorization_digest
+        {
+            return Err(G4Error::StateConflict);
+        }
+        let core = self.dispatch_core(outcome.proof.execution_nonce)?;
+        if matches!(core.subject, DispatchSubjectV2::ToolExecution { .. }) {
+            self.reconcile_tool_dispatch_with_outcome(outcome.proof, true)
+        } else {
+            self.reconcile_final_release_dispatch_with_outcome(outcome.proof, true)
+        }
     }
 
     pub fn reconcile_typed_effect_started_final_release_dispatch(
@@ -886,7 +1050,7 @@ impl DurableG4StateV2 {
         if !matches!(entry.core.subject, DispatchSubjectV2::ToolExecution { .. }) {
             return Err(G4Error::StateConflict);
         }
-        self.reconcile_tool_dispatch(entry.proof)
+        self.reconcile_tool_dispatch_with_outcome(entry.proof, true)
     }
 
     pub fn reconcile_stored_signed_final_release_dispatch(
@@ -899,7 +1063,7 @@ impl DurableG4StateV2 {
         if !matches!(entry.core.subject, DispatchSubjectV2::FinalRelease { .. }) {
             return Err(G4Error::StateConflict);
         }
-        self.reconcile_final_release_dispatch(entry.proof)
+        self.reconcile_final_release_dispatch_with_outcome(entry.proof, true)
     }
 
     /// Records a kernel-local no-effect recovery only while the dispatch WAL
@@ -964,8 +1128,17 @@ impl DurableG4StateV2 {
         &mut self,
         proof: VerifiedExecutorDispositionV2,
     ) -> Result<KernelDispatchStateV2, G4Error> {
+        self.reconcile_tool_dispatch_with_outcome(proof, false)
+    }
+
+    fn reconcile_tool_dispatch_with_outcome(
+        &mut self,
+        proof: VerifiedExecutorDispositionV2,
+        verified_terminal: bool,
+    ) -> Result<KernelDispatchStateV2, G4Error> {
         self.ensure_usable()?;
         let mut next = self.snapshot.clone();
+        next.tasks.reconcile(proof, verified_terminal)?;
         let entry = next
             .dispatch
             .entries
@@ -1003,8 +1176,17 @@ impl DurableG4StateV2 {
         &mut self,
         proof: VerifiedExecutorDispositionV2,
     ) -> Result<KernelDispatchStateV2, G4Error> {
+        self.reconcile_final_release_dispatch_with_outcome(proof, false)
+    }
+
+    fn reconcile_final_release_dispatch_with_outcome(
+        &mut self,
+        proof: VerifiedExecutorDispositionV2,
+        verified_terminal: bool,
+    ) -> Result<KernelDispatchStateV2, G4Error> {
         self.ensure_usable()?;
         let mut next = self.snapshot.clone();
+        next.tasks.reconcile(proof, verified_terminal)?;
         let entry = next
             .dispatch
             .entries
@@ -1138,6 +1320,8 @@ impl DurableG4StateV2 {
     }
 
     fn commit(&mut self, mut next: DurableG4SnapshotV2) -> Result<(), G4Error> {
+        // Migration happens only as part of an ordinary successful transaction.
+        next.payload_schema = PAYLOAD_SCHEMA_VERSION;
         next.sequence = self
             .current_head
             .sequence
@@ -1288,8 +1472,8 @@ fn decode_encrypted_snapshot(
 fn encode_snapshot_payload(snapshot: &DurableG4SnapshotV2) -> Result<Zeroizing<Vec<u8>>, G4Error> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
     encoder
-        .array(9)
-        .and_then(|encoder| encoder.u16(STATE_SCHEMA_VERSION))
+        .array(if snapshot.payload_schema == 2 { 9 } else { 11 })
+        .and_then(|encoder| encoder.u16(snapshot.payload_schema))
         .and_then(|encoder| encoder.u64(snapshot.sequence))
         .map_err(|_| G4Error::DurableStateCorrupt)?;
     snapshot
@@ -1302,6 +1486,19 @@ fn encode_snapshot_payload(snapshot: &DurableG4SnapshotV2) -> Result<Zeroizing<V
     encode_reservations(&mut encoder, &snapshot.quota)?;
     encode_g5_decisions(&mut encoder, &snapshot.decisions)?;
     encode_dispatch_entries(&mut encoder, &snapshot.dispatch)?;
+    if snapshot.payload_schema == PAYLOAD_SCHEMA_VERSION {
+        encoder
+            .bytes(&snapshot.tasks.encode()?)
+            .map_err(|_| G4Error::DurableStateCorrupt)?;
+        encoder
+            .array(snapshot.legacy_intents.len() as u64)
+            .map_err(|_| G4Error::DurableStateCorrupt)?;
+        for id in &snapshot.legacy_intents {
+            encoder
+                .bytes(id.as_bytes())
+                .map_err(|_| G4Error::DurableStateCorrupt)?;
+        }
+    }
     Ok(Zeroizing::new(encoder.into_writer()))
 }
 
@@ -1662,8 +1859,9 @@ fn encode_dispatch_entries(
 
 fn decode_snapshot_payload(payload: &[u8]) -> Result<DurableG4SnapshotV2, G4Error> {
     let mut decoder = minicbor::Decoder::new(payload);
-    require_array(&mut decoder, 9)?;
-    if decoder.u16().map_err(|_| G4Error::DurableStateCorrupt)? != STATE_SCHEMA_VERSION {
+    let fields = decoder.array().map_err(|_| G4Error::DurableStateCorrupt)?;
+    let payload_schema = decoder.u16().map_err(|_| G4Error::DurableStateCorrupt)?;
+    if !matches!((payload_schema, fields), (2, Some(9)) | (3, Some(11))) {
         return Err(G4Error::DurableStateCorrupt);
     }
     let sequence = decoder.u64().map_err(|_| G4Error::DurableStateCorrupt)?;
@@ -1674,10 +1872,27 @@ fn decode_snapshot_payload(payload: &[u8]) -> Result<DurableG4SnapshotV2, G4Erro
     let reservations = decode_reservations(&mut decoder)?;
     let decisions = decode_g5_decisions(&mut decoder)?;
     let dispatch = decode_dispatch_entries(&mut decoder)?;
+    let tasks = if payload_schema == PAYLOAD_SCHEMA_VERSION {
+        TaskLedgerV2::decode(decoder.bytes().map_err(|_| G4Error::DurableStateCorrupt)?)?
+    } else {
+        TaskLedgerV2::default()
+    };
+    let legacy_intents = if payload_schema == 2 {
+        intents.iter().map(|i| i.record.action_intent_id).collect()
+    } else {
+        let mut ids = Vec::new();
+        for _ in 0..bounded_array(&mut decoder, MAX_INTENTS)? {
+            ids.push(ActionIntentIdV2::new(decode_fixed::<32>(&mut decoder)?));
+        }
+        ids
+    };
     if decoder.position() != payload.len() {
         return Err(G4Error::DurableStateCorrupt);
     }
     let snapshot = DurableG4SnapshotV2 {
+        payload_schema,
+        tasks,
+        legacy_intents,
         sequence,
         previous_state_digest,
         intents: ActionIntentIndexV2 { intents, replay },
@@ -2142,6 +2357,22 @@ fn decode_final_release_binding(
 }
 
 fn validate_snapshot(snapshot: &DurableG4SnapshotV2) -> Result<(), G4Error> {
+    snapshot.tasks.validate(&snapshot.dispatch)?;
+    for (index, id) in snapshot.legacy_intents.iter().enumerate() {
+        if snapshot.legacy_intents[..index].contains(id)
+            || !snapshot
+                .intents
+                .intents
+                .iter()
+                .any(|i| i.record.action_intent_id == *id)
+            || snapshot.dispatch.entries.iter().any(|e| {
+                e.core.subject.tool_action_intent_id() == Some(*id)
+                    && snapshot.tasks.binding(e.core.execution_nonce).is_some()
+            })
+        {
+            return Err(G4Error::DurableStateCorrupt);
+        }
+    }
     if snapshot.sequence == 0
         || (snapshot.sequence == 1 && !is_zero(snapshot.previous_state_digest.as_bytes()))
         || (snapshot.sequence > 1 && is_zero(snapshot.previous_state_digest.as_bytes()))

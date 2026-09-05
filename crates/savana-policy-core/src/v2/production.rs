@@ -466,6 +466,7 @@ impl VerifiedFinalReleaseSettlementV2 {
 /// is represented only by its digest and cannot be replayed as a capability.
 #[derive(Debug, Clone)]
 pub struct KernelPreparedDispatchV2 {
+    task_binding: super::TaskDispatchBindingV2,
     preparation: DispatchPreparationV2,
     core: DispatchCoreV2,
     consumed_ticket_digest: Digest32V2,
@@ -478,8 +479,10 @@ impl KernelPreparedDispatchV2 {
         core: DispatchCoreV2,
         consumed_ticket_digest: Digest32V2,
         sealed_envelope_digest: Digest32V2,
+        task_binding: super::TaskDispatchBindingV2,
     ) -> Self {
         Self {
+            task_binding,
             preparation,
             core,
             consumed_ticket_digest,
@@ -489,6 +492,10 @@ impl KernelPreparedDispatchV2 {
 
     pub const fn preparation(&self) -> DispatchPreparationV2 {
         self.preparation
+    }
+
+    pub const fn task_binding(&self) -> &super::TaskDispatchBindingV2 {
+        &self.task_binding
     }
 
     pub const fn core(&self) -> &DispatchCoreV2 {

@@ -695,10 +695,36 @@ impl KernelDispatchJournalV2 {
         sealed_envelope_digest: Digest32V2,
         connector_registry_digest: Digest32V2,
     ) -> Result<DispatchPreparationV2, G4Error> {
+        if ticket.action_intent_id != record.action_intent_id
+            || ticket.semantic_binding_digest != record.semantic_binding_digest
+        {
+            return Err(G4Error::StateConflict);
+        }
         if let Some(existing) = self.entries.iter().find(|entry| {
             entry.core.subject.tool_action_intent_id() == Some(record.action_intent_id)
         }) {
-            if existing.consumed_ticket_digest != ticket.ticket_digest
+            let replay_approval = match (decision, approval) {
+                (G5DecisionBranchV2::Permit, None) => None,
+                (G5DecisionBranchV2::RequireApproval, Some(a))
+                    if a.action_intent_id == record.action_intent_id
+                        && a.active_state_manifest_digest
+                            == record.active_state_manifest_digest
+                        && a.approval_binding_digest
+                            == super::intent::tool_approval_binding_digest_v2(
+                                record.action_intent_id,
+                                record.semantic_binding_digest,
+                                record.active_state_manifest_digest,
+                            )? =>
+                {
+                    Some(a.settlement_digest)
+                }
+                _ => return Err(G4Error::StateConflict),
+            };
+            if !matches!(&existing.core.subject, DispatchSubjectV2::ToolExecution {binding,approval_settlement_digest,..}
+                if binding == record.binding() && *approval_settlement_digest == replay_approval)
+                || existing.core.durable_task_id != record.durable_task_id
+                || existing.core.durable_run_id != record.durable_run_id
+                || existing.consumed_ticket_digest != ticket.ticket_digest
                 || existing.sealed_envelope_digest != sealed_envelope_digest
                 || existing.core.installation_id != authority.installation_id
                 || existing.core.active_state_manifest_digest
@@ -828,6 +854,14 @@ impl KernelDispatchJournalV2 {
         sealed_envelope_digest: Digest32V2,
         connector_registry_digest: Digest32V2,
     ) -> Result<DispatchPreparationV2, G4Error> {
+        if ticket.durable_release_id != record.durable_release_id
+            || ticket.binding_digest != record.binding_digest
+            || approval.durable_release_id != record.durable_release_id
+            || approval.binding_digest != record.binding_digest
+            || approval.active_state_manifest_digest != record.active_state_manifest_digest
+        {
+            return Err(G4Error::StateConflict);
+        }
         if let Some(existing) = self.entries.iter().find(|entry| {
             entry.core.subject.durable_release_id() == Some(record.durable_release_id)
         }) {
@@ -838,7 +872,9 @@ impl KernelDispatchJournalV2 {
                     approval_settlement_digest,
                 } if binding == record.binding
                     && approval_settlement_digest == approval.settlement_digest
-            ) || existing.consumed_ticket_digest != ticket.ticket_digest
+            ) || existing.core.durable_task_id != record.durable_task_id
+                || existing.core.durable_run_id != record.durable_run_id
+                || existing.consumed_ticket_digest != ticket.ticket_digest
                 || existing.sealed_envelope_digest != sealed_envelope_digest
                 || existing.core.installation_id != authority.installation_id
                 || existing.core.active_state_manifest_digest

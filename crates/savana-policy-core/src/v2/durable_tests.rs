@@ -26,9 +26,299 @@ use super::{
     VerifiedInternalValidatorRegistryV2, VerifiedOntologyEvaluationV2, VerifiedPolicyDispositionV2,
     VerifiedQuotaLimitV2, VerifiedToolApprovalSettlementV2,
 };
+use super::{
+    checked_control_endorsements_v2, ControlEvidenceV2, ControlSelectionV2,
+    TaskDispatchAuthorizationV2, TaskMatchContextV2, VerifiedTaskAuthorizationV2,
+};
 use crate::v2::ArgumentNameV2;
+use savana_kernel_protocol::v2::{
+    sign_task_authorization_v2, ActionAlternativeV2, ActionCodecProfileV2, ActionContentV2,
+    MagnitudeUnitV2, TaskAuthorizationClauseV2, TaskAuthorizationV2, TaskEffectV2,
+    TaskEvidenceKindV2, UnixMillisV2,
+};
 
-fn shared_connector_registry(seed: u8) -> SharedVerifiedConnectorRegistryV2 {
+pub(super) fn signed_task(
+    task: DurableTaskIdV2,
+    revision: u64,
+    clauses: Vec<TaskAuthorizationClauseV2>,
+) -> VerifiedTaskAuthorizationV2 {
+    let key = SigningKey::from_bytes(&[0xb1; 32]);
+    let material = TaskAuthorizationV2::new(
+        Digest32V2::new([0xb2; 32]),
+        PrincipalIdV2::new([0x73; 32]),
+        task,
+        revision,
+        Digest32V2::new([2; 32]),
+        Digest32V2::new([3; 32]),
+        UnixMillisV2::new(1),
+        UnixMillisV2::new(20_000),
+        TaskEvidenceKindV2::AuthenticatedStructuredInput,
+        Digest32V2::new([0xb3; 32]),
+        Digest32V2::new([0xb4; 32]),
+        clauses,
+    )
+    .unwrap();
+    VerifiedTaskAuthorizationV2::verify(
+        &sign_task_authorization_v2(material, &key).unwrap(),
+        &key.verifying_key(),
+        PrincipalIdV2::new([0x73; 32]),
+        task,
+        Digest32V2::new([2; 32]),
+        Digest32V2::new([3; 32]),
+        UnixMillisV2::new(10),
+    )
+    .unwrap()
+}
+
+pub(super) fn task_clause(
+    id: u64,
+    action: ActionAlternativeV2,
+    budget: u64,
+    attempts: u64,
+    deps: Vec<u64>,
+    retry: bool,
+) -> TaskAuthorizationClauseV2 {
+    TaskAuthorizationClauseV2::new(id, vec![action], budget, budget, attempts, deps, retry).unwrap()
+}
+
+pub(super) fn task_request(
+    store: &DurableG4StateV2,
+    task: DurableTaskIdV2,
+    clause: u64,
+    magnitude: u64,
+    payload: Digest32V2,
+    provenance: Digest32V2,
+    plan: Digest32V2,
+) -> TaskDispatchAuthorizationV2 {
+    let state = store.task_authorization_state(task).unwrap();
+    let contract = state.authorization();
+    let c = contract
+        .material()
+        .clauses()
+        .iter()
+        .find(|c| c.clause_id() == clause)
+        .unwrap();
+    let content = ActionContentV2::new(
+        contract.material().authorization_id(),
+        contract.material().revision(),
+        clause,
+        0,
+        c.alternatives()[0].clone(),
+        magnitude,
+        payload,
+        provenance,
+        plan,
+        contract
+            .candidate_domain(clause, UnixMillisV2::new(10))
+            .unwrap()
+            .digest(),
+        state.digest(),
+        state.revision(),
+    )
+    .unwrap();
+    let current = TaskMatchContextV2 {
+        current_authorization: Some(contract),
+        pre_state_digest: state.digest(),
+        pre_state_revision: state.revision(),
+        deployment_generation: 7,
+        now: UnixMillisV2::new(10),
+    };
+    let matched = contract.match_action(&content, &current).unwrap();
+    let selections = ControlSelectionV2::from_match(&matched, Digest32V2::new([0xb5; 32])).unwrap();
+    let endorsements = checked_control_endorsements_v2(
+        &matched,
+        &selections,
+        ControlEvidenceV2::ExplicitAlternative,
+        &current,
+    )
+    .unwrap();
+    TaskDispatchAuthorizationV2::new(matched, endorsements)
+}
+
+pub(super) fn release_action(binding: FinalReleaseSemanticBindingV2) -> ActionAlternativeV2 {
+    ActionAlternativeV2::new(
+        Digest32V2::new([0xb6; 32]),
+        ActionCodecProfileV2::FixedJsonPostV1,
+        TaskEffectV2::FinalRelease,
+        binding.vault_segment_digest(),
+        binding.destination_digest(),
+        Digest32V2::new([0xb7; 32]),
+        MagnitudeUnitV2::Bytes,
+    )
+    .unwrap()
+}
+
+pub(super) fn task_store(
+    path: &std::path::Path,
+    key: [u8; 32],
+    anchor: TestRollbackProtectedStateAnchorV2,
+) -> DurableG4StateV2 {
+    DurableG4StateV2::open_for_test_in_namespace(
+        path,
+        key,
+        anchor,
+        DurableStateNamespaceV2::new_for_test(2, 0x54),
+    )
+    .unwrap()
+}
+fn install_tool_task(
+    store: &mut DurableG4StateV2,
+    record: &super::ActionIntentRecordV2,
+) -> TaskDispatchAuthorizationV2 {
+    let b = record.binding();
+    let action = ActionAlternativeV2::new(
+        b.tool_descriptor_digest(),
+        ActionCodecProfileV2::FixedJsonPostV1,
+        TaskEffectV2::Update,
+        Digest32V2::new([0xb6; 32]),
+        Digest32V2::new([0xb7; 32]),
+        Digest32V2::new([0xb8; 32]),
+        MagnitudeUnitV2::Count,
+    )
+    .unwrap();
+    store
+        .install_verified_task_authorization(signed_task(
+            record.durable_task_id,
+            1,
+            vec![task_clause(1, action, 10, 10, vec![], true)],
+        ))
+        .unwrap();
+    task_request(
+        store,
+        record.durable_task_id,
+        1,
+        1,
+        b.argument_digest(),
+        b.provenance_set_digest(),
+        Digest32V2::new(*b.plan_revision_digest().as_bytes()),
+    )
+}
+
+#[test]
+fn task_state_budget_replay_stale_amendment_and_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("kernel-g4-state-v2.cbor");
+    let anchor = TestRollbackProtectedStateAnchorV2::default();
+    let namespace = DurableStateNamespaceV2::new_for_test(2, 0x54);
+    let task = DurableTaskIdV2::new([4; 32]);
+    let binding = final_release_binding_for_test(0x91, [13; 32]);
+    let action = release_action(binding);
+    let contract = signed_task(
+        task,
+        1,
+        vec![task_clause(1, action.clone(), 5, 2, vec![], true)],
+    );
+    let mut store =
+        DurableG4StateV2::open_for_test_in_namespace(&path, [0x81; 32], anchor.clone(), namespace)
+            .unwrap();
+    store
+        .install_verified_task_authorization(contract.clone())
+        .unwrap();
+    let head = store.authenticated_state_head().unwrap();
+    store.install_verified_task_authorization(contract).unwrap();
+    assert_eq!(store.authenticated_state_head().unwrap(), head);
+    let request = task_request(
+        &store,
+        task,
+        1,
+        4,
+        binding.release_payload_digest(),
+        binding.evidence_digest(),
+        Digest32V2::new([9; 32]),
+    );
+    let release = VerifiedFinalReleaseDispatchV2::new_for_test(
+        Digest32V2::new([2; 32]),
+        Digest32V2::new([3; 32]),
+        binding,
+    );
+    let registry = shared_connector_registry(0x94);
+    let prepare = |store: &mut DurableG4StateV2, request: &TaskDispatchAuthorizationV2, seed| {
+        store.prepare_final_release_dispatch(
+            &release,
+            limit(
+                10,
+                DispatchQuotaSubjectV2::final_release(binding.release_quota_subject_digest()),
+            ),
+            VerifiedFinalReleaseApprovalBindingV2::new_for_test(&release, 0x96),
+            VerifiedFinalReleaseTicketV2::new_for_test(&release, seed),
+            VerifiedEffectGateAuthorityV2::from_authenticated_unfenced_ledger(
+                Digest32V2::new([2; 32]),
+                Digest32V2::new([3; 32]),
+                7,
+                8,
+                false,
+                ExecutorIdentityV2::new([13; 32]),
+                savana_kernel_protocol::v2::HpkeX25519KeyIdV2::new([0x93; 32]),
+                &registry,
+                UnixMillisV2::new(10_000),
+            )
+            .unwrap(),
+            Digest32V2::new([0x98; 32]),
+            request,
+            UnixMillisV2::new(10),
+        )
+    };
+    let prepared = prepare(&mut store, &request, 0x97).unwrap();
+    let head = store.authenticated_state_head().unwrap();
+    assert_eq!(
+        prepare(&mut store, &request, 0x97)
+            .unwrap()
+            .execution_nonce(),
+        prepared.execution_nonce()
+    );
+    assert_eq!(store.authenticated_state_head().unwrap(), head);
+    assert!(prepare(&mut store, &request, 0x99).is_err());
+    let state = store.task_authorization_state(task).unwrap();
+    assert_eq!(state.clause_consumption(1), Some((1, 4)));
+    assert!(store
+        .install_verified_task_authorization(signed_task(
+            task,
+            2,
+            vec![task_clause(1, action.clone(), 3, 2, vec![], true)]
+        ))
+        .is_err());
+    store
+        .install_verified_task_authorization(signed_task(
+            task,
+            2,
+            vec![task_clause(2, action.clone(), 5, 2, vec![], true)],
+        ))
+        .unwrap();
+    store
+        .install_verified_task_authorization(signed_task(
+            task,
+            3,
+            vec![task_clause(1, action, 5, 2, vec![], true)],
+        ))
+        .unwrap();
+    assert_eq!(
+        store
+            .task_authorization_state(task)
+            .unwrap()
+            .clause_consumption(1),
+        Some((1, 4))
+    );
+    store.revoke_task_authorization(task).unwrap();
+    let state_digest = store.task_authorization_state(task).unwrap().digest();
+    drop(store);
+    let reopened =
+        DurableG4StateV2::open_for_test_in_namespace(&path, [0x81; 32], anchor, namespace).unwrap();
+    assert!(reopened.task_authorization_state(task).unwrap().revoked());
+    assert_eq!(
+        reopened.task_authorization_state(task).unwrap().digest(),
+        state_digest
+    );
+    assert_eq!(
+        reopened
+            .task_authorization_state(task)
+            .unwrap()
+            .clause_consumption(1),
+        Some((1, 4))
+    );
+    assert_eq!(reopened.recovery_projection().unwrap().len(), 1);
+}
+
+pub(super) fn shared_connector_registry(seed: u8) -> SharedVerifiedConnectorRegistryV2 {
     SharedVerifiedConnectorRegistryV2::from_verified_state(
         ConnectorRegistryStateV2::from_verified_genesis(
             Digest32V2::new([seed; 32]),
@@ -381,8 +671,9 @@ fn g7_prepare_quota_intent_and_wal_commit_atomically_and_replay_after_restart() 
         )
         .unwrap()
     };
+    let task_proof;
     let preparation = {
-        let mut store = DurableG4StateV2::open_for_test(&path, key, anchor.clone()).unwrap();
+        let mut store = task_store(&path, key, anchor.clone());
         let material = record.material().clone();
         let intent = store
             .create_or_replay_intent(
@@ -404,6 +695,23 @@ fn g7_prepare_quota_intent_and_wal_commit_atomically_and_replay_after_restart() 
                 G5PolicyDispositionV2::permit_for_test(),
             )
             .unwrap();
+        // Missing task authority must never produce a new executor handoff.
+        assert!(store
+            .prepare_verified_tool_dispatch(
+                intent.action_intent_id(),
+                VerifiedQuotaLimitV2::new_for_test(1, 0x85, subject),
+                None,
+                ResolvedExecutionTicketV2::from_resolved_kernel_ticket(
+                    Digest32V2::new([0x86; 32]),
+                    intent.action_intent_id(),
+                    super::tool_execution_semantic_binding_digest_v2(record.binding()).unwrap(),
+                )
+                .unwrap(),
+                authority(),
+                Digest32V2::new([0x87; 32]),
+            )
+            .is_err());
+        task_proof = install_tool_task(&mut store, &record);
         store.set_before_next_commit_hook_for_test({
             let connector_registry = connector_registry.clone();
             let connector_delta = connector_delta.clone();
@@ -415,7 +723,7 @@ fn g7_prepare_quota_intent_and_wal_commit_atomically_and_replay_after_restart() 
             }
         });
         let prepared = store
-            .prepare_verified_tool_dispatch(
+            .prepare_task_bound_tool_dispatch(
                 intent.action_intent_id(),
                 VerifiedQuotaLimitV2::new_for_test(1, 0x85, subject),
                 None,
@@ -427,6 +735,8 @@ fn g7_prepare_quota_intent_and_wal_commit_atomically_and_replay_after_restart() 
                 .unwrap(),
                 authority(),
                 Digest32V2::new([0x87; 32]),
+                &task_proof,
+                UnixMillisV2::new(10),
             )
             .unwrap();
         assert_eq!(
@@ -455,9 +765,9 @@ fn g7_prepare_quota_intent_and_wal_commit_atomically_and_replay_after_restart() 
         prepared
     };
 
-    let mut reopened = DurableG4StateV2::open_for_test(&path, key, anchor.clone()).unwrap();
+    let mut reopened = task_store(&path, key, anchor.clone());
     let replay = reopened
-        .prepare_verified_tool_dispatch(
+        .prepare_task_bound_tool_dispatch(
             record.action_intent_id(),
             VerifiedQuotaLimitV2::new_for_test(1, 0x85, subject),
             None,
@@ -469,6 +779,8 @@ fn g7_prepare_quota_intent_and_wal_commit_atomically_and_replay_after_restart() 
             .unwrap(),
             authority(),
             Digest32V2::new([0x87; 32]),
+            &task_proof,
+            UnixMillisV2::new(10),
         )
         .unwrap();
     assert_eq!(
@@ -499,7 +811,7 @@ fn g7_prepare_quota_intent_and_wal_commit_atomically_and_replay_after_restart() 
     );
     drop(reopened);
 
-    let reopened = DurableG4StateV2::open_for_test(&path, key, anchor).unwrap();
+    let reopened = task_store(&path, key, anchor);
     assert_eq!(
         reopened
             .quota_counter(record.durable_run_id, subject)
@@ -527,7 +839,7 @@ fn g7_approval_dispatch_advances_through_authorized_approval_atomically() {
     let subject = DispatchQuotaSubjectV2::tool_attempt(AttemptKindV2::ToolWrite);
     let semantic_binding_digest =
         tool_execution_semantic_binding_digest_v2(record.binding()).unwrap();
-    let mut store = DurableG4StateV2::open_for_test(&path, key, anchor).unwrap();
+    let mut store = task_store(&path, key, anchor);
     let material = record.material().clone();
     let intent = store
         .create_or_replay_intent(
@@ -550,8 +862,9 @@ fn g7_approval_dispatch_advances_through_authorized_approval_atomically() {
         )
         .unwrap();
 
+    let task_proof = install_tool_task(&mut store, &record);
     let prepared = store
-        .prepare_verified_tool_dispatch(
+        .prepare_task_bound_tool_dispatch(
             intent.action_intent_id(),
             VerifiedQuotaLimitV2::new_for_test(1, 0x94, subject),
             Some(
@@ -587,12 +900,45 @@ fn g7_approval_dispatch_advances_through_authorized_approval_atomically() {
             )
             .unwrap(),
             Digest32V2::new([0x99; 32]),
+            &task_proof,
+            UnixMillisV2::new(10),
         )
         .unwrap();
 
     assert_eq!(
         prepared.preparation().kind(),
         super::DispatchPreparationKindV2::Created
+    );
+    assert!(
+        store
+            .prepare_tool_dispatch(
+                intent.action_intent_id(),
+                VerifiedQuotaLimitV2::new_for_test(1, 0x94, subject),
+                None,
+                super::dispatch::VerifiedExecutionTicketV2::from_verified_ticket(
+                    Digest32V2::new([0x96; 32]),
+                    intent.action_intent_id(),
+                    semantic_binding_digest
+                )
+                .unwrap(),
+                VerifiedEffectGateAuthorityV2::from_authenticated_unfenced_ledger(
+                    Digest32V2::new([2; 32]),
+                    Digest32V2::new([3; 32]),
+                    7,
+                    8,
+                    false,
+                    ExecutorIdentityV2::new([13; 32]),
+                    savana_kernel_protocol::v2::HpkeX25519KeyIdV2::new([0x97; 32]),
+                    &shared_connector_registry(0x98),
+                    UnixMillisV2::new(10_000)
+                )
+                .unwrap(),
+                Digest32V2::new([0x99; 32]),
+                &task_proof,
+                UnixMillisV2::new(10)
+            )
+            .is_err(),
+        "replay cannot drop its original approval"
     );
     let replay_material = record.material().clone();
     let replay = store
@@ -653,8 +999,32 @@ fn g7_final_release_wal_and_quota_survive_restart_without_aliasing_tool_attempts
         )
         .unwrap()
     };
+    let task_proof;
     let preparation = {
-        let mut store = DurableG4StateV2::open_for_test(&path, key, anchor.clone()).unwrap();
+        let mut store = task_store(&path, key, anchor.clone());
+        store
+            .install_verified_task_authorization(signed_task(
+                DurableTaskIdV2::new([4; 32]),
+                1,
+                vec![task_clause(
+                    1,
+                    release_action(binding),
+                    10,
+                    10,
+                    vec![],
+                    true,
+                )],
+            ))
+            .unwrap();
+        task_proof = task_request(
+            &store,
+            DurableTaskIdV2::new([4; 32]),
+            1,
+            1,
+            binding.release_payload_digest(),
+            binding.evidence_digest(),
+            Digest32V2::new([9; 32]),
+        );
         store.set_before_next_commit_hook_for_test({
             let connector_registry = connector_registry.clone();
             let connector_delta = connector_delta.clone();
@@ -673,6 +1043,8 @@ fn g7_final_release_wal_and_quota_survive_restart_without_aliasing_tool_attempts
                 VerifiedFinalReleaseTicketV2::new_for_test(&release, 0x97),
                 authority(),
                 Digest32V2::new([0x98; 32]),
+                &task_proof,
+                UnixMillisV2::new(10),
             )
             .unwrap();
         assert_eq!(
@@ -689,7 +1061,7 @@ fn g7_final_release_wal_and_quota_survive_restart_without_aliasing_tool_attempts
         prepared
     };
 
-    let mut reopened = DurableG4StateV2::open_for_test(&path, key, anchor.clone()).unwrap();
+    let mut reopened = task_store(&path, key, anchor.clone());
     let replay = reopened
         .prepare_final_release_dispatch(
             &release,
@@ -698,6 +1070,8 @@ fn g7_final_release_wal_and_quota_survive_restart_without_aliasing_tool_attempts
             VerifiedFinalReleaseTicketV2::new_for_test(&release, 0x97),
             authority(),
             Digest32V2::new([0x98; 32]),
+            &task_proof,
+            UnixMillisV2::new(10),
         )
         .unwrap();
     assert_eq!(replay.execution_nonce(), preparation.execution_nonce());
@@ -714,6 +1088,8 @@ fn g7_final_release_wal_and_quota_survive_restart_without_aliasing_tool_attempts
                 VerifiedFinalReleaseTicketV2::new_for_test(&release, 0x97),
                 authority(),
                 Digest32V2::new([0x98; 32]),
+                &task_proof,
+                UnixMillisV2::new(10),
             )
             .unwrap_err(),
         G4Error::StateConflict
@@ -755,6 +1131,8 @@ fn g7_final_release_wal_and_quota_survive_restart_without_aliasing_tool_attempts
                 VerifiedFinalReleaseTicketV2::new_for_test(&other_release, 0x9a),
                 authority(),
                 Digest32V2::new([0x9b; 32]),
+                &task_proof,
+                UnixMillisV2::new(10),
             )
             .unwrap_err(),
         G4Error::StateConflict
@@ -785,7 +1163,7 @@ fn g7_final_release_wal_and_quota_survive_restart_without_aliasing_tool_attempts
     );
     drop(reopened);
 
-    let reopened = DurableG4StateV2::open_for_test(&path, key, anchor).unwrap();
+    let reopened = task_store(&path, key, anchor);
     assert_eq!(
         reopened
             .quota_counter(release.durable_run_id(), subject)
