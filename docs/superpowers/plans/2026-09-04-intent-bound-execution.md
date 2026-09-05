@@ -13,7 +13,7 @@ and live hardware/product deployment are not claimed.
 - [x] Task 6: reviewed request/response profiles, actual worker/provider boundary and terminal evidence; tool routing and schema parity verified.
 - [x] Task 7: readable exact approval, context/editor, Rust/Python facade and receiver-before-planning integration; reviewed V2 manifest refreshed.
 - [x] Task 8: native nine-case tool and seven-case release paths, dynamic dependent task, executor reopen/ACK-loss recovery, bounded 1,440-trace accounting model, default workspace and feature coverage, final scoped source review.
-- [ ] Task 9: revise paper and supporting summaries, compile/render and verify.
+- [x] Task 9: revised paper and supporting summaries; ten-page PDF compiled and all pages visually checked. Engineering evidence remains separate from unrun experiments; local fallback is not an official submission template.
 
 Detailed commands, failed runs, platform prerequisites and limits are in
 `docs/verification/intent-bound-execution.md`; mechanisms map to executable
@@ -23,6 +23,13 @@ which filtered only that already-tested replay case. No unexecuted test is count
 as passed. Code changes stay local; no deployment or push.
 
 ## Historical implementation checklist
+
+Task 9 closure: the immutable user attachment was preserved. The repository paper
+now states the task-trace boundary and its limits, with a code/test/assumption map.
+Primary related-work revisions and the current CFP were checked. All citations
+and labels resolve; no overfull boxes remain. The Chinese summary is current;
+older August reports are explicitly marked historical. See the paper README and
+the paper-verification section of the evidence record for reproduction.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -354,8 +361,8 @@ issuer-to-provider test, whole-branch run and final review below remain open.
 
 **Files:** `paper/usenix-sec27/main.tex`, `references.bib`, `README.md`; relevant `docs/academic-summary.zh-CN.md`, `docs/paper-draft.md`, `docs/technical-report.md`; add implementation-to-claim table.
 
-- [ ] Use immutable user LaTeX attachment `e26ecf5e-cfd4-4b41-a129-89f03923f795/pasted-text.txt` as primary prose input, preserving it. Revise repository paper, not attachment.
-- [ ] Map each mechanism claim to final code/test/assumption. Focus joint task traces, complete-domain evidence, acyclic digests, atomic consumption and actual business-request boundary. State limited codecs/grammar and remaining experimental gaps honestly.
-- [ ] Verify primary citations for PCAS/Progent/CaMeL/FIDES/CapAgent/IGAC and classical endorsement; distinguish threat models from demonstrated attacks. Keep results TBD unless actually measured and report engineering tests separately.
-- [ ] Verify current USENIX 2027 formatting/instructions; compile LaTeX, resolve undefined references/labels and check rendered layout with PDF skill. Do not use fallback styling as official submission readiness.
-- [ ] Final status must separately state code evidence, unmeasured experiments, remaining limitations, local branch/commits, and that nothing has been pushed/deployed without approval.
+- [x] Use immutable user LaTeX attachment `e26ecf5e-cfd4-4b41-a129-89f03923f795/pasted-text.txt` as primary prose input, preserving it. Revise repository paper, not attachment.
+- [x] Map each mechanism claim to final code/test/assumption. Focus joint task traces, complete-domain evidence, acyclic digests, atomic consumption and actual business-request boundary. State limited codecs/grammar and remaining experimental gaps honestly.
+- [x] Verify primary citations for PCAS/Progent/CaMeL/FIDES/CapAgent/IGAC and classical endorsement; distinguish threat models from demonstrated attacks. Keep results TBD unless actually measured and report engineering tests separately.
+- [x] Verify current USENIX 2027 formatting/instructions; compile LaTeX, resolve undefined references/labels and check rendered layout with PDF skill. Do not use fallback styling as official submission readiness.
+- [x] Final status must separately state code evidence, unmeasured experiments, remaining limitations, local branch/commits, and that nothing has been pushed/deployed without approval.

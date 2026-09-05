@@ -7,6 +7,9 @@ No install, service reset, credential change, push or deployment was performed.
 
 ## Implemented boundary
 
+Final code snapshot: **73e0684**. The subsequent paper/documentation-only commit
+does not change this tested production snapshot.
+
 1. Authenticated original input and context feed a bounded structured draft.
    Native issuance verifies source/principal/task/deployment/revision. A separately
    approved draft can install/amend authority; action approval cannot enlarge it.
@@ -142,6 +145,49 @@ feature-workspace invocation is made. The default workspace invocation is clean.
 V2 hashes cover reviewed changed paths and new task wire/issuer/control/execution
 sources. They detect source changes, not complete TCB coverage or release trust.
 V1 frozen assets remain unchanged. No production materializer was executed.
+
+## Paper verification (2026-09-05)
+
+The revised [paper](../../paper/usenix-sec27/main.tex) and
+[build instructions](../../paper/usenix-sec27/README.md) describe code snapshot
+73e0684. The user's original LaTeX attachment was read and left unchanged.
+The [Chinese summary](../academic-summary.zh-CN.md) replaces outdated measurements
+and absolute guarantees; the older August paper/report are marked historical.
+
+From paper/usenix-sec27:
+
+~~~sh
+latexmk -pdf -interaction=nonstopmode -halt-on-error \
+  -outdir=../../tmp/pdfs/usenix -jobname=savana-intent-bound main.tex
+~~~
+
+Final build passed with TeX Live 2025, latexmk 4.86a, pdfLaTeX and BibTeX.
+The result is ten letter-size pages, with all citations and labels resolved,
+no overfull boxes and no draft insertion markers. All ten pages were rendered
+at 110 dpi and visually reviewed, including tables, formulas and bibliography.
+Underfull line/page advisories remain; they were visually reviewed, not hidden.
+Text extraction confirmed nonempty pages, no unresolved citation marker and
+glyph boxes clear of page edges. This is a clipping check, not template
+certification.
+
+The initial build caught a math macro used outside math mode; ensuremath and
+short digest notation fixed it. Initial text-bound diagnostics used the nominal
+text baseline box and flagged 2.2-point font descenders. The final clipping check
+uses actual page-edge clearance, alongside visual inspection; margins/fonts were
+not shrunk to satisfy it.
+
+Generated output: output/pdf/savana-intent-bound.pdf (ignored build artifact).
+SHA-256 of the delivered build:
+dcfa8795133b741cb9243ad00d4917beb61631303098cda74b94229b31976cd7.
+The hash identifies this rendered file, not bit-for-bit reproducibility across
+TeX versions/timestamps or a signed release.
+
+Primary citations were checked for CaMeL v2, Fides v2, Progent v3,
+PCAS v1/FORGE v3, IGAC v3, CapAgent and classical checked endorsement.
+The current Security '27 CFP was checked. Official style download returned 403;
+the bundled fallback remains explicitly a working-draft approximation.
+Empirical evaluation, anonymous artifact packaging and final official-template
+validation remain submission work, not completed experiments.
 
 ## Residual limits
 

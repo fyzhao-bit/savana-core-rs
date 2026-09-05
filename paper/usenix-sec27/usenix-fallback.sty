@@ -21,19 +21,22 @@
 \setlength{\parindent}{1pc}
 \setlength{\parskip}{0pt plus 1pt}
 
+% Avoid the article class's narrow quotation-style abstract in two columns.
+\renewenvironment{abstract}{\subsection*{Abstract}}{\par}
+
 % Heading fonts approximating the USENIX defaults.
 \renewcommand\section{\@startsection{section}{1}{\z@}%
   {-3.5ex \@plus -1ex \@minus -.2ex}%
   {2.3ex \@plus.2ex}%
-  {\reset@font\Large\bfseries}}
+  {\reset@font\Large\bfseries\raggedright}}
 \renewcommand\subsection{\@startsection{subsection}{2}{\z@}%
   {-3.25ex\@plus -1ex \@minus -.2ex}%
   {1.5ex \@plus .2ex}%
-  {\reset@font\large\bfseries}}
+  {\reset@font\large\bfseries\raggedright}}
 \renewcommand\subsubsection{\@startsection{subsubsection}{3}{\z@}%
   {-3.25ex\@plus -1ex \@minus -.2ex}%
   {1.5ex \@plus .2ex}%
-  {\reset@font\normalsize\bfseries}}
+  {\reset@font\normalsize\bfseries\raggedright}}
 
 % USENIX papers carry no page numbers in the submission template.
 \pagestyle{empty}

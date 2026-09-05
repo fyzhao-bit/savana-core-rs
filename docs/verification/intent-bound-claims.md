@@ -24,6 +24,11 @@ is an executable witness, not a theorem or a measured population result.
 
 ## Claims deliberately not made
 
+The revised paper maps this table to Sections 3–7 (implemented mechanisms),
+Section 8 (conditional abstract argument), Section 9 (engineering evidence),
+Section 10 (unrun experiments) and Section 12 (limitations). It uses code snapshot
+73e0684; the paper build and visual checks are recorded in the verification file.
+
 - No new claim to invent capabilities, endorsement, IFC, deterministic agent
   monitors, task-scoped authority, or temporal policies. Comparisons must include
   CaMeL, Fides, Progent, PCAS/FORGE, IGAC, CapAgent and classical endorsement.

@@ -11,3 +11,7 @@ __pycache__/
 # maturin / PyO3 build artifacts placed into the source tree
 *.so
 *.pyd
+
+# Locally built paper PDFs and render/TeX intermediates.
+/tmp/pdfs/
+/output/pdf/
