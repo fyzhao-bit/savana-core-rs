@@ -531,7 +531,7 @@ fn disposition(value: &str) -> Result<BusinessResponseDispositionV2, BusinessCod
         _ => Err(BusinessCodecErrorV2::Unsupported),
     }
 }
-fn identifier(s: &str, max: usize) -> bool {
+pub(super) fn identifier(s: &str, max: usize) -> bool {
     !s.is_empty()
         && s.len() <= max
         && s.bytes()

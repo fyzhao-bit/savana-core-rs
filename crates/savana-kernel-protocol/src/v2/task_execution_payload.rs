@@ -67,8 +67,26 @@ impl TaskExecutionPayloadV2 {
                     return Err(BusinessCodecErrorV2::Binding);
                 }
             }
-            DispatchSubjectV2::FinalRelease { .. } => {
-                if self.content.action().effect() != super::TaskEffectV2::FinalRelease {
+            DispatchSubjectV2::FinalRelease { binding, .. } => {
+                let profile = self.request.profile();
+                if self.content.action().effect() != super::TaskEffectV2::FinalRelease
+                    || self.content.action().destination_digest() != binding.destination_digest()
+                    || self.content.provenance_digest() != binding.evidence_digest()
+                    || *profile
+                        != super::final_release_business_profile_v2(
+                            profile.target_identity(),
+                            profile.credential_identity(),
+                        )?
+                {
+                    return Err(BusinessCodecErrorV2::Binding);
+                }
+                let delivery =
+                    super::decode_final_release_delivery_v2(&self.request.canonical_json())?;
+                let mut digest = Sha256::new();
+                digest.update(b"SAVANA_FINAL_RELEASE_PAYLOAD_V2\0");
+                digest.update((delivery.payload().len() as u64).to_be_bytes());
+                digest.update(delivery.payload());
+                if Digest32V2::new(digest.finalize().into()) != binding.release_payload_digest() {
                     return Err(BusinessCodecErrorV2::Binding);
                 }
             }

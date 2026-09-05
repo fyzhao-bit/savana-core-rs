@@ -180,6 +180,22 @@ authority 31 passed. Final-release producer and whole-chain validation remain op
 
 ## Task 6: Exact request profile and executor boundary validation
 
+Final-release receiver checkpoint (2026-09-05): the closed fixed POST mapping now
+names `input:<digest>` and `application-turn:<digest>`, with canonical unpadded
+base64 for at most 32 KiB of actual binary payload and a count of one release.
+The receiver checks that exact turn against its durable reservation, rather than
+assigning whichever delivery arrives next. New raw legacy bodies are refused;
+explicit legacy claimed journal records remain readable/reconcilable without
+rewriting on open. New claimed records use a distinct tag and revalidate the
+inner turn on recovery. The mTLS receiver returns the reviewed correlated JSON
+success response only after durable claim. Outer custom CBOR/mTLS framing stays
+unchanged. Protocol capsule checks tie actual decoded bytes, destination and
+evidence to the authenticated release core. Tests: full protocol 242 passed
+before the additional core-consistency test; both focused release codec tests
+passed afterward. Full receiver suite 16 passed, including actual mTLS positive
+and wrong-turn/legacy-body rejection. This is not the complete native issuer to
+provider run; live profile deployment and UI/context integration remain open.
+
 Task 6B execution-boundary checkpoint (2026-09-05): the real tool seal now
 contains a closed ActionContent/business-request capsule. The executor verifies
 its preseal/core binding, actual target and credential identities and compares

@@ -6,6 +6,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use savana_kernel_protocol::v2::decode_final_release_delivery_v2;
 use savana_policy_core::v2::BoundedConnectorUrlV2;
 use zeroize::Zeroizing;
 
@@ -38,6 +39,8 @@ pub enum ReservationError {
     Expired,
     #[error("the operation does not match the active turn")]
     CrossTurn,
+    #[error("the final-release business request is invalid")]
+    InvalidBusinessRequest,
     #[error("the final-release request is a duplicate")]
     DuplicateDelivery,
     #[error("there is no active final-release reservation")]
@@ -135,9 +138,9 @@ impl ReleaseReservationStore {
         })
     }
 
-    /// Claims the one globally reserved release. The request itself carries no
-    /// caller-selected turn identifier; ordering is therefore enforced by the
-    /// single-flight journal and the opaque id required to read the result.
+    /// Claims only the exact turn named in the authenticated transport's closed
+    /// business request. Single flight is a concurrency bound, not a destination
+    /// mapping. Legacy raw frames may be decoded for recovery, never newly claimed.
     pub fn claim_next(
         &self,
         now_unix_ms: u64,
@@ -167,7 +170,19 @@ impl ReleaseReservationStore {
                     journal.state = ReservationState::Sealed(SealReason::DuplicateDelivery);
                     return Err(ReservationError::DuplicateDelivery);
                 }
+                let delivery = match decode_final_release_delivery_v2(request.payload()) {
+                    Ok(delivery) => delivery,
+                    Err(_) => {
+                        journal.state = ReservationState::Sealed(SealReason::UnexpectedDelivery);
+                        return Err(ReservationError::InvalidBusinessRequest);
+                    }
+                };
+                if delivery.turn_binding().as_bytes() != &reserved.turn_binding {
+                    journal.state = ReservationState::Sealed(SealReason::UnexpectedDelivery);
+                    return Err(ReservationError::CrossTurn);
+                }
                 journal.state = ReservationState::Claimed(Box::new(Claimed {
+                    turn_bound: true,
                     reservation_id: reserved.reservation_id,
                     turn_binding: reserved.turn_binding,
                     expires_at_unix_ms: reserved.expires_at_unix_ms,
@@ -196,9 +211,20 @@ impl ReleaseReservationStore {
             .map_err(|_| ReservationError::DurableState)?;
         match &journal.state {
             ReservationState::Claimed(claimed) if claimed.reservation_id == *reservation_id => {
+                let payload = if claimed.turn_bound {
+                    let delivery = decode_final_release_delivery_v2(&claimed.payload)
+                        .map_err(|_| ReservationError::DurableState)?;
+                    if delivery.turn_binding().as_bytes() != &claimed.turn_binding {
+                        return Err(ReservationError::DurableState);
+                    }
+                    Zeroizing::new(delivery.payload().to_vec())
+                } else {
+                    // Explicit legacy journal variant: read/reconcile only.
+                    Zeroizing::new(claimed.payload.to_vec())
+                };
                 Ok(ReleasedPayload {
                     turn_binding: claimed.turn_binding,
-                    payload: Zeroizing::new(claimed.payload.to_vec()),
+                    payload,
                 })
             }
             ReservationState::Claimed(_) | ReservationState::Reserved(_) => {
@@ -348,6 +374,7 @@ struct Reserved {
 
 #[derive(Clone, PartialEq, Eq)]
 struct Claimed {
+    turn_bound: bool,
     reservation_id: ReservationId,
     turn_binding: [u8; 32],
     expires_at_unix_ms: u64,
@@ -486,7 +513,7 @@ fn encode_state(
         ReservationState::Claimed(claimed) => {
             encoder
                 .array(13)
-                .and_then(|encoder| encoder.u8(2))
+                .and_then(|encoder| encoder.u8(if claimed.turn_bound { 4 } else { 2 }))
                 .and_then(|encoder| encoder.bytes(&claimed.reservation_id.0))
                 .and_then(|encoder| encoder.bytes(&claimed.turn_binding))
                 .and_then(|encoder| encoder.u64(claimed.expires_at_unix_ms))
@@ -566,7 +593,8 @@ fn decode_state(decoder: &mut minicbor::Decoder<'_>) -> Result<ReservationState,
                 expires_at_unix_ms,
             }))
         }
-        (2, 13) => {
+        (2 | 4, 13) => {
+            let turn_bound = tag == 4;
             let reservation_id = ReservationId(decode_nonzero_32(decoder)?);
             let turn_binding = decode_nonzero_32(decoder)?;
             let expires_at_unix_ms = decoder.u64().map_err(|_| ReservationError::DurableState)?;
@@ -609,7 +637,15 @@ fn decode_state(decoder: &mut minicbor::Decoder<'_>) -> Result<ReservationState,
             if wire_digest != wire_hash(&canonical_request) {
                 return Err(ReservationError::DurableState);
             }
+            if turn_bound {
+                let delivery = decode_final_release_delivery_v2(payload)
+                    .map_err(|_| ReservationError::DurableState)?;
+                if delivery.turn_binding().as_bytes() != &turn_binding {
+                    return Err(ReservationError::DurableState);
+                }
+            }
             Ok(ReservationState::Claimed(Box::new(Claimed {
+                turn_bound,
                 reservation_id,
                 turn_binding,
                 expires_at_unix_ms,

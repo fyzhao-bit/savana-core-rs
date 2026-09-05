@@ -1251,6 +1251,7 @@ dependencies = [
  "minicbor",
  "rustls",
  "savana-execd",
+ "savana-kernel-protocol",
  "savana-policy-core",
  "sha2",
  "tempfile",

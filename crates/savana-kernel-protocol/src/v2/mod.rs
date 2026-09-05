@@ -10,6 +10,12 @@ mod browser_ingress;
 mod business_json;
 mod business_request;
 mod business_unicode;
+mod final_release_business;
+pub use final_release_business::{
+    decode_final_release_delivery_v2, final_release_business_profile_v2,
+    final_release_business_request_v2, FinalReleaseDeliveryV2,
+    MAX_FINAL_RELEASE_BUSINESS_PAYLOAD_BYTES_V2,
+};
 pub use business_request::{
     decode_business_controls_v2, decode_business_profile_v2, encode_business_controls_v2,
     encode_business_profile_v2, BusinessCodecErrorV2, BusinessControlsV2, BusinessFieldRoleV2,
