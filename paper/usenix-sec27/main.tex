@@ -1,4 +1,5 @@
-%% Implementation-grounded draft, 2026-09-05; code snapshot 73e0684.
+%% Implementation-grounded draft, 2026-09-05; production snapshot 73e0684.
+%% Independent task-trace specification and finite model added separately.
 %% User attachment preserved. Empirical evaluation pending; not submission-ready.
 \documentclass[letterpaper,twocolumn,10pt]{article}
 \IfFileExists{usenix-2020-09.sty}
@@ -42,9 +43,12 @@ The executor checks the actual application request before a provider attempt
 and verifies completion from the retained response. Existing information-flow
 and declassification gates remain mandatory. We implement this path in the Rust
 runtime and client integration. Native fixtures exercise dependent multi-step
-execution, malicious workers, lost acknowledgements and executor recovery;
-a separate bounded oracle checks task accounting. These are engineering
-witnesses, not empirical attack-success or performance results. The prototype
+execution, malicious workers, lost acknowledgements and executor recovery.
+An independent event-history specification defines seven prefix invariants.
+Finite exploration exhausts eleven declared model configurations and detects
+eleven intentionally weakened variants; a separate oracle exercises real Rust
+accounting. These are bounded verification witnesses, not a Rust refinement
+proof or empirical attack-success or performance results. The prototype
 supports closed request profiles and structured authorization; it does not claim
 general natural-language intent inference, provider-internal semantics, or
 complete crash availability.
@@ -113,18 +117,22 @@ target and credential identity before opening the provider-attempt boundary.
 The retained response, interpreted by a reviewed codec, determines whether
 a successor's success dependency is satisfied.
 
-\paragraph{Contributions.}
-First, we give a bounded task-trace design combining complete action relations,
-separate endorsement and durable consumption
-(\S\ref{sec:contract}--\S\ref{sec:durable}).
-Second, we implement continuity checks from authenticated issuance through
-actual requests and verified outcomes in the existing Rust runtime
-(\S\ref{sec:boundary}--\S\ref{sec:implementation}).
-Third, we provide implementation witnesses and a bounded differential
-accounting model, separating them from the empirical experiments still required
-(\S\ref{sec:evidence}--\S\ref{sec:evaluation}).
-The contribution is neither a more expressive general policy language nor a
-claim that prior systems cannot express an equivalent relation.
+\paragraph{Contributions and their limits.}
+First, we define task-authorized traces independently of the implementation's
+admission decisions, with obligations for authority origin, binding,
+consumption, dependencies, outcomes, attempts and acknowledgement order
+(\S\ref{sec:argument}). Constructional counterexamples show why selected local
+checks do not imply these composed obligations.
+Second, we implement their bounded realization from authenticated issuance
+through actual requests and verified outcomes in the existing Rust runtime
+(\S\ref{sec:contract}--\S\ref{sec:implementation}).
+Third, we provide a finite model-to-specification checker, explicit faulty
+variants, a source/commit-boundary correspondence map and complementary Rust
+witnesses (\S\ref{sec:evidence}). Empirical comparison remains unrun.
+This is neither a more expressive general policy language nor a claim that
+prior systems cannot realize equivalent enforcement. Establishing a useful
+systems contribution beyond composition of known mechanisms still requires
+same-capability comparison.
 
 \section{Threat Model and Scope}
 \label{sec:threat}
@@ -527,38 +535,127 @@ rejects placeholder/unreviewed inputs. We tested the generator but did not insta
 its output or migrate a running deployment. Unsupported report descriptors do
 not acquire fabricated semantic mappings.
 
-\section{Conditional Security Argument}
+\section{Trace Specification and Conditional Argument}
 \label{sec:argument}
 
-We state the intended abstract monitor property separately from implementation
-evidence. Let a trace consist of contract revisions, reservations, monitored
-provider attempts and verified outcomes. Given a correctly authenticated contract
-and sound profile, its legal prefixes are those obtained by the checks in
-\S\ref{sec:contract}--\S\ref{sec:boundary}. The monitored attempt projection must
-remain a prefix of this permitted relation/state machine.
+\subsection{An implementation-independent prefix language}
 
-The argument has three obligations. \emph{Authority origin:} only authenticated
-issuance or task-purpose approval installs a contract; arbitrary planner output
-and action approval cannot enlarge it. \emph{State preservation:} the durable
-owner's single transition checks complete membership, current evidence and
-remaining counters before consuming an attempt. Exact replay preserves the
-reservation; verified no-effect settlement refunds magnitude at most once;
-only known success satisfies a predecessor. \emph{Boundary preservation:} a
-provider attempt requires a verified dispatch and an actual request equal to its
-bound request, while outcome authority comes from the retained response.
+Let $C_v$ be an independently authenticated contract revision. Clause $j$
+declares a whole-action relation $R_{v,j}$, attempt bound $A_{v,j}$, magnitude
+bound $M_{v,j}$, predecessor identities and a no-effect refund rule.
+The authority input is fixed separately from the planner's actions. It is not
+inferred from whichever actions the implementation happens to accept.
 
-Under these assumptions, induction over abstract transitions preserves the
-relation and budget invariants. This is a proof sketch for the stated monitor
-abstraction, \emph{not} a machine-checked refinement proof of the Rust code,
-cryptography, distributed transport, OS or provider. Tests exercise the
-obligations but do not prove the assumptions or all possible interleavings.
+A trace records authority issuance/amendment, action approvals, durable
+reservations, actual-request fences, monitored transport attempts, retained
+responses, completion certification, policy settlement and ACKs. Let $H_j$
+be its immutable reservation history for clause $j$. Define consumption by
+that history:
+\begin{align}
+  \mathsf{Attempts}_j(H) &= |H_j|,\\
+  \mathsf{Magnitude}_j(H) &= \sum_{h\in H_j} \mathsf{charge}(h).
+\end{align}
+Here $\mathsf{charge}(h)=0$ only after verified pre-effect failure when the
+contract \emph{at reservation time} permits a refund; otherwise it is the
+reserved magnitude. Refund never removes $h$ from $H_j$. Later amendments
+cannot retroactively change its refund rule.
 
-The property permits adversarial choices already allowed by the contract.
-It does not recover the user's unstated intentions, guarantee useful task
-completion, or prevent disclosure through information intentionally released to
-an authorized reader. Classical checked endorsement and robust integrity inform
-our separation of evidence, but their language-level theorems do not
-automatically transfer to this implementation~\cite{askarov2011}.
+The permitted language $L(C)$ consists of traces whose every prefix satisfies
+the following seven properties. These are defined over authority and observed
+events, not over a return value such as \emph{Savana allowed the action}.
+
+\begin{description}
+\item[S1: Origin.] Only authenticated task-purpose input installs or amends
+the declared root; action approval cannot become task authority. No new
+reservation follows revocation.
+\item[S2: Binding.] Each reservation selects one whole tuple in the current
+relation and has evidence binding that tuple and the current pre-state.
+The actual request/profile equals the immutable reserved request. Replay
+cannot replace it.
+\item[S3: Consumption.] A new reservation keeps history-derived attempts and
+magnitude within the current bounds. Durable counters equal that history;
+replay, amendment and recovery cannot erase it.
+\item[S4: Dependency.] A successor has settled, verified predecessor success
+in the current semantic epoch. Unknown or success from a different epoch
+does not satisfy the dependency.
+\item[S5: Outcome.] Success is grounded in an observed, retained, classified
+response and exact-execution completion evidence, not a worker assertion.
+No-effect evidence precedes a possible effect; terminal replay cannot change
+the outcome.
+\item[S6: Attempt.] One reserved execution identity invokes the monitored
+application transport at most once, including across restart.
+\item[S7: ACK order.] The policy outcome is durably committed before completion
+ACK. The native implementation also commits the owned result first.
+\end{description}
+
+S6 is not exactly-once remote business execution. A lost response can leave
+whether the provider acted unknown; separately authorized execution identities
+can still consume remaining task budget. Likewise, S1 is
+\emph{prepare-linearized revocation}: already committed dispatches may still
+attempt and reconcile. It does not promise instantaneous cancellation at the
+provider.
+
+A semantic epoch changes when clause identities, alternatives or dependencies
+change, including an A--B--A amendment. Changing only numeric bounds preserves
+the epoch and existing success, but not free budget. The trace properties
+permit adversarial choices already authorized by the contract; they do not
+recover unstated intent or guarantee useful task completion.
+
+\subsection{Why local checks do not automatically compose}
+
+Consider $R=\{(A,\mathrm{Alice}),(B,\mathrm{Bob})\}$. The pair
+$(A,\mathrm{Bob})$ belongs to the product of its field projections but not
+to $R$. Next, two requests can each satisfy a one-attempt limit in an old
+zero-consumption snapshot yet violate S3 if both commit independently.
+Finally, authentic approval of $(A,\mathrm{Alice})$ does not imply S2 if a
+worker substitutes another request after approval.
+
+These elementary counterexamples identify separate composition obligations:
+whole-relation membership, serialized check-and-consume, and binding at the
+actual transport boundary. A forgotten crash fence or fabricated completion
+adds S6 or S5 failures. They are not new capability/transaction primitives,
+nor demonstrated exploits against a published implementation. A competing
+system that discharges the same obligations is not excluded by this argument.
+
+\subsection{Conditional preservation and concrete obligations}
+
+The abstract implementation has separate durable policy and executor states.
+Reserve atomically checks current evidence/dependencies and consumes authority.
+Fence verifies the actual request and persists attempt state before creating a
+live one-use continuation. Emit consumes it. Crash destroys that continuation
+and an unretained response, but not the durable fence. Retain and Certify are
+separate: decoding or verification can still conservatively fail after
+retention. Settlement applies the original refund rule; replay and ACK mint
+no authority.
+
+Induction over these abstract rules has explicit cases: task-purpose issuance
+preserves S1; matching and atomic reservation preserve S2--S4; the immutable
+request and one-use continuation preserve S2/S6; observed response evidence
+and original-contract settlement preserve S3/S5; commit-before-ACK preserves
+S7. The finite checker exercises instances and compositions of these cases,
+not an unbounded machine-checked induction.
+
+The source correspondence identifies real boundaries. Policy preparation
+modifies task, quota, dispatch and intent in one private snapshot before
+durable commit. The executor checks business-request equivalence and target/
+credential identity before its two pre-transport journal commits.
+Recovery from either attempted state without a retained response becomes
+indeterminate; retained responses are decoded without resending.
+Native completion commits result and policy outcome before ACK.
+
+These obligations rely on correct authority authentication, canonical identity,
+sound codecs, atomic durable storage/rollback protection and complete
+mediation. In particular, Execd cannot independently inspect another owner's
+disk: a nonzero kernel commit digest in an authenticated ACK is not by itself
+proof of durability. S7 depends on trusted native caller ordering.
+The two-owner model does not separately model the vault transaction.
+
+This is a conditional abstract argument and finite model-to-specification
+evidence, \emph{not} a mechanized Rust refinement proof. Such a proof would need
+an abstraction function from concrete stored/in-flight states and coverage of
+all concrete transitions and crash cuts. Classical checked endorsement informs
+the design but supplies no automatic language-level noninterference or
+robust-integrity theorem for this runtime~\cite{askarov2011}.
 
 \section{Engineering Evidence}
 \label{sec:evidence}
@@ -611,8 +708,48 @@ including exact terminal replay. The run observes 984 admitted probes,
 These counts describe a finite accounting projection, not exhaustive state-space
 coverage of the protocol. Existing fault hooks separately test uncertain
 issuance/prepare commit, durable rename boundaries, stale revisions, concurrent
-prepares and refunds. Unbounded scheduling and full-kernel refinement are future
-verification work.
+prepares and refunds.
+
+\subsection{Finite graph exploration and negative controls}
+
+Separately from the Rust oracle, we implement the prefix specification as an
+event-history observer and an implementation-shaped two-owner state machine.
+They share finite contract inputs and event types, but no admission predicate.
+The observer derives consumption from historical reservations rather than the
+machine's mutable counters. A breadth-first search checks every outgoing edge
+of each reachable product state and preserves shortest counterexample paths.
+State-cap exhaustion fails as incomplete; it is not reported as safety.
+
+The committed run exhausts eleven separate configurations: joint relations,
+one-winner races, stale evidence, dependencies, semantic amendments, A--B--A
+epochs, numeric amendments, recovery, retry limits, a lost-fence configuration
+and revocation. Their per-configuration sum is 11,788 states and 59,003 edges,
+including self-loops, with no S1--S7 violation found. This is not one combined
+all-feature graph. Bounds are one task, one/two clauses, one--three execution
+identities and authorized revisions, unit magnitude, at most two permitted
+attempts per clause, and finite resource/recipient/profile choices.
+
+All eleven declared faulty variants produce counterexamples: action approval
+as a root, Cartesian membership, split check/commit, stale approval, unchecked
+actual request, worker-asserted success, old-epoch dependency, volatile attempt
+fence, unknown refund, reset-on-amend and premature ACK. The shortest prefixes
+range from one to eleven abstract events. These are intentionally constructed
+negative controls, not attack trials against other systems.
+
+Fourteen checker tests additionally cover invalid observations and non-vacuity.
+Each baseline must admit successful execution and terminal-first settlement;
+applicable scenarios must also exhibit dependencies, proven-no-effect retry,
+amendment after consumption, retained-response recovery and execution of a
+pre-revocation reservation. Always-deny does not satisfy these checks.
+Generated results include exact bounds, source hashes and paths; CI regenerates
+and compares them.
+
+The graph omits cross-task identities, real time, registry/deployment updates,
+individual cryptographic/control records, byte parsing, variable magnitude,
+torn storage states and the separate vault owner. Message loss is abstracted
+by delayed observations and crash cuts, not a detailed unbounded network.
+Positive witnesses and fault variants help detect specification mistakes but
+cannot eliminate correlated errors in two hand-written models.
 
 \subsection{Regression scope and limitations}
 
@@ -771,10 +908,12 @@ We do not claim temporal policies are unique to \sys{}.
 
 \paragraph{Intent-scoped capabilities.}
 IGAC derives a short-lived intent certificate, narrows static tool authority and
-checks tool/payload effects. It explicitly identifies certificate fidelity and
+checks tool/payload effects; its substrate includes preflight/state witnesses
+and idempotency replay. It explicitly identifies certificate fidelity and
 sound effect bounds as conditions for request confinement~\cite{zhu2026igac}.
-CapAgent maps human-attested intent to purpose-bound capabilities and combines
-scope checks with semantic data-flow governance~\cite{hou2026capagent}.
+CapAgent maps human-attested intent to purpose-bound capabilities with budgets,
+nonces and attenuation, combining scope checks with semantic data-flow
+governance~\cite{hou2026capagent}.
 These are close prior work, so signed task intent is not our novelty claim.
 \sys{} deliberately offers a narrower closed-codec semantic boundary while
 making joint alternatives, separate control evidence, atomic consumption,
@@ -786,12 +925,12 @@ Comparative security or performance superiority remains unmeasured.
 
 The strongest unresolved research question is not whether more tests pass,
 but whether the implementation can be shown to refine a precise trace
-specification under all relevant interleavings. The bounded accounting oracle
-does not model every distributed failure, parser, credential or platform.
-A next step is a small explicit-state model of issuance, approval, prepare,
-attempt, outcome and recovery, with a stated mapping to each durable owner.
-Mechanized refinement or targeted model checking must identify its bounds and
-assumptions rather than being described as a proof of the entire product.
+specification under all relevant interleavings. The independent prefix
+specification and finite graph check now make that target explicit, but the
+manual source correspondence is not a mechanized Rust abstraction function.
+The graphs and complementary Rust oracle do not cover every distributed
+failure, parser, credential or platform. Their finite bounds and trusted
+environment assumptions must accompany any claim based on them.
 
 Contract authoring remains a trust/utility boundary. Broad user approval can
 authorize undesirable choices, while exact alternatives can reject legitimate
@@ -811,8 +950,9 @@ or prove that a manifest lists the entire TCB.
 \sys{} confines a model's proposals using separately authenticated task authority,
 complete action relations, state-bound endorsement and durable accounting.
 The execution boundary checks the request actually attempted and the response
-used as evidence for subsequent steps. The implementation and bounded witnesses
-support these concrete mechanisms, with explicit recovery and codec limits.
+used as evidence for subsequent steps. An independent prefix specification,
+finite negative controls and implementation witnesses make the composition
+obligations explicit, with stated recovery and codec limits.
 Empirical security, utility, approval-cost and performance comparisons remain
 necessary before drawing a publication-level effectiveness conclusion.
 
@@ -833,7 +973,8 @@ confusion and burden; any participant study requires suitable consent and review
 
 This working draft is not yet an artifact submission. The accompanying source
 contains the runtime changes, closed codecs, native fixtures, bounded accounting
-oracle, claim-to-code map and verification record with failures and exclusions.
+oracle, independent prefix specification, finite graph checker, source-hashed
+counterexamples, claim-to-code map and verification records with exclusions.
 Before submission, an anonymous, frozen artifact must include reproducible build
 instructions, pinned dependencies and all measured experiment inputs/outputs.
 No anonymous artifact URL or benchmark dataset is asserted to exist yet.
@@ -846,21 +987,20 @@ feature configurations sequentially or in separate target directories because
 integration fixtures copy package executables. Platform prerequisites and
 test-only keys must not be mistaken for production trust material.
 
+The finite checker is in \code{verification/task_trace}, uses Python's standard
+library, and regenerates the committed results in CI. Its contract inputs,
+fault variants, coverage requirements and source hashes are available without
+live model calls or platform credentials. It is a research artifact, not a
+component loaded by the production authority path.
+
 \section{Illustrative Trace and Witness Boundary}
 
-Consider two one-attempt clauses. Clause 1 permits $(A,\mathrm{Alice})$.
-Clause 2 permits $(B,\mathrm{Bob})$ after known success of clause 1.
-A proposal for clause 2 initially fails. A proposal for clause 1 reserves its
-attempt and magnitude. A transport ACK alone does not enable clause 2; a verified
-successful terminal response does. A new plan may then execute clause 2, while
-another plan cannot replenish either budget. This ordering is exercised by the
-native two-step fixture, not just by an isolated matcher.
-
-If the first provider reply is unknown instead, the successor remains blocked.
-If a worker changes Alice to another recipient, validation refuses the request
-before any provider attempt. If the dispatch ACK is lost after success, the
-original query identity remains and executor reopen reconciles the retained
-response without sending again. These witnesses establish the stated cases
-only; they do not demonstrate full kerneld-session restoration or all
-provider-side failure behaviors.
+The native two-step fixture predeclares $(A,\mathrm{Alice})$ and
+$(B,\mathrm{Bob})$, each with one attempt. Step 2 requires verified step-1
+success, not a transport ACK; replanning cannot replenish either budget.
+Unknown keeps the successor blocked. Separate cases reject worker recipient
+substitution before transport and recover retained success after a lost dispatch
+ACK without resending. These are selected implementation witnesses, not runtime
+resource discovery, full kerneld-session restoration or coverage of all
+provider-side failures.
 \end{document}

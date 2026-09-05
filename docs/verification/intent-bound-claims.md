@@ -20,14 +20,17 @@ is an executable witness, not a theorem or a measured population result.
 | Dispatch/ACK uncertainty | native `v2_agent_authority.rs`, executor encrypted journal | Nine-case tool and seven-case release native fixtures | Same native owner retains handles; executor restart tested; full kerneld restart does not restore opaque query handles |
 | Receiver-bound final release | protocol `final_release_business.rs`; openclaw-release `reservation.rs`, `server.rs` | Native final release; mTLS receiver wrong-turn/legacy-body tests | Original owned document, at most 32 KiB; no arbitrary synthesized output producer |
 | SDK and planning order | `savana-client/src/task_authorization.rs`; Python bridge runtime; OpenClaw integration | Python 61 tests; TypeScript 65 tests; browser DOM output decoded by Rust | Host task.draft broker/live hardware deployment not demonstrated |
-| Bounded state exploration | test-only policy `task_authorization_model.rs` | 1,440 differential traces, 984 admitted/1,896 refused probes, six accounting observations | Bounded accounting abstraction; no exhaustive distributed model or machine-checked proof |
+| Bounded Rust accounting exploration | test-only policy `task_authorization_model.rs` | 1,440 differential traces, 984 admitted/1,896 refused probes, six accounting observations | Real Rust accounting projection, not a distributed refinement proof |
+| Independent prefix specification and finite graph checking | Research-only `verification/task_trace/spec.py`, `model.py`, `check.py`; manual `docs/research/task-trace-rust-map.md` | Eleven exhausted graphs; 11,788 states / 59,003 edges; eleven faulty variants detected; fourteen checker tests | Separate finite configurations, idealized authority/storage; model-to-spec conformance, not Rust extraction or proof |
 
 ## Claims deliberately not made
 
 The revised paper maps this table to Sections 3–7 (implemented mechanisms),
-Section 8 (conditional abstract argument), Section 9 (engineering evidence),
+Section 8 (independent prefix specification and conditional argument), Section 9 (bounded verification/engineering evidence),
 Section 10 (unrun experiments) and Section 12 (limitations). It uses code snapshot
-73e0684; the paper build and visual checks are recorded in the verification file.
+73e0684. The original paper build is recorded in the verification file; the
+research-only specification/model increment and updated PDF checks are recorded
+in [the new verification record](task-trace-model.md).
 
 - No new claim to invent capabilities, endorsement, IFC, deterministic agent
   monitors, task-scoped authority, or temporal policies. Comparisons must include

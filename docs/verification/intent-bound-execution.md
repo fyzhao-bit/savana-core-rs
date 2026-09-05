@@ -146,7 +146,11 @@ V2 hashes cover reviewed changed paths and new task wire/issuer/control/executio
 sources. They detect source changes, not complete TCB coverage or release trust.
 V1 frozen assets remain unchanged. No production materializer was executed.
 
-## Paper verification (2026-09-05)
+## Previous paper verification (2026-09-05, before the trace-model increment)
+
+The ten-page build and hash in this section are retained historical evidence.
+The current independent-specification/model update and eleven-page PDF are
+documented in [task-trace model verification](task-trace-model.md).
 
 The revised [paper](../../paper/usenix-sec27/main.tex) and
 [build instructions](../../paper/usenix-sec27/README.md) describe code snapshot
