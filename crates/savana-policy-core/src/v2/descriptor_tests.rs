@@ -162,6 +162,136 @@ fn business_profile_descriptor_refuses_tool_and_effect_mismatch() {
 }
 
 #[test]
+fn task_draft_profiles_must_match_every_current_active_descriptor() {
+    use savana_kernel_protocol::v2::*;
+    let version = VersionV2::new(4, 5, 6);
+    let key = SigningKey::from_bytes(&[55; 32]);
+    let key_id = Ed25519KeyIdV2::new([56; 32]);
+    let publisher = VerifiedRegistryPublisherV2::new_for_test(
+        key_id,
+        key.verifying_key().to_bytes(),
+        UnixMillisV2::new(1),
+        UnixMillisV2::new(2000),
+    )
+    .unwrap();
+    let old = descriptor(version, vec![RoleIdV2::new(1)], vec![]);
+    let new = old
+        .clone()
+        .with_business_profile(business_profile())
+        .unwrap();
+    let sign = |value: &UnsignedToolDescriptorV2| {
+        let digest = descriptor_digest_v2(value).unwrap();
+        let mut msg = b"SAVANA_TOOL_DESCRIPTOR_SIGNATURE_V2\0".to_vec();
+        msg.extend_from_slice(digest.as_bytes());
+        SignedToolDescriptorV2::new_for_test(
+            minicbor::to_vec(value).unwrap(),
+            key_id,
+            key.sign(&msg).to_bytes(),
+        )
+        .verify(&publisher, version, UnixMillisV2::new(500))
+        .unwrap()
+    };
+    let make_registry = |value: &UnsignedToolDescriptorV2| {
+        let verified = sign(value);
+        let digest = verified.descriptor_digest();
+        ActiveToolRegistryV2::intersect(
+            &VerifiedToolRegistryV2::new_for_test(version, vec![verified.clone()]).unwrap(),
+            &VerifiedPolicyToolSetV2::new_for_test(vec![
+                VerifiedPolicyToolActivationV2::new_for_test(digest, 0, Digest32V2::new([57; 32])),
+            ])
+            .unwrap(),
+            &VerifiedManifestToolConstraintSetV2::new_for_test(vec![
+                VerifiedManifestToolConstraintV2::new_for_test(
+                    digest,
+                    2,
+                    500_000_000,
+                    verified.unsigned().internal_validators().to_vec(),
+                ),
+            ])
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let active = make_registry(&new);
+    assert_eq!(active.len(), 1);
+    let make_draft = |digest, profile: &BusinessProfileV2| {
+        let controls = BusinessControlsV2::from_fields(
+            profile,
+            vec![
+                ("file".into(), BusinessValueV2::Text("A".into())),
+                ("to".into(), BusinessValueV2::Text("Alice".into())),
+            ],
+        )
+        .unwrap();
+        TaskAuthorizationDraftV2::new(
+            Digest32V2::new([58; 32]),
+            PrincipalIdV2::new([59; 32]),
+            DurableTaskIdV2::new([60; 32]),
+            1,
+            Digest32V2::new([61; 32]),
+            Digest32V2::new([62; 32]),
+            1,
+            UnixMillisV2::new(100),
+            UnixMillisV2::new(1000),
+            Digest32V2::new([63; 32]),
+            vec![TaskAuthorizationDraftClauseV2::new(
+                1,
+                vec![TaskAuthorizationDraftAlternativeV2::new(digest, controls).unwrap()],
+                1,
+                2,
+                2,
+                vec![],
+                false,
+            )
+            .unwrap()],
+        )
+        .unwrap()
+    };
+    let digest = descriptor_digest_v2(&new).unwrap();
+    let valid = make_draft(digest, &business_profile());
+    active
+        .validate_task_draft_profiles(&valid, RoleIdV2::new(1), UnixMillisV2::new(500))
+        .unwrap();
+    for (role, now) in [(9, 500), (1, 900), (1, 1)] {
+        assert!(active
+            .validate_task_draft_profiles(&valid, RoleIdV2::new(role), UnixMillisV2::new(now))
+            .is_err());
+    }
+    let p = business_profile();
+    let fake = BusinessProfileV2::new(
+        p.codec(),
+        p.operation(),
+        p.target_identity(),
+        Digest32V2::new([99; 32]),
+        p.effect(),
+        p.magnitude_rule(),
+        p.fields().to_vec(),
+    )
+    .unwrap();
+    assert!(active
+        .validate_task_draft_profiles(
+            &make_draft(digest, &fake),
+            RoleIdV2::new(1),
+            UnixMillisV2::new(500)
+        )
+        .is_err());
+    assert!(active
+        .validate_task_draft_profiles(
+            &make_draft(Digest32V2::new([98; 32]), &p),
+            RoleIdV2::new(1),
+            UnixMillisV2::new(500)
+        )
+        .is_err());
+    assert!(make_registry(&old)
+        .validate_task_draft_profiles(
+            &make_draft(descriptor_digest_v2(&old).unwrap(), &p),
+            RoleIdV2::new(1),
+            UnixMillisV2::new(500)
+        )
+        .is_err());
+}
+
+#[test]
 fn attempt_and_idempotency_contract_tags_are_exact() {
     assert_eq!(
         minicbor::to_vec(AttemptKindV2::ToolIrreversible).unwrap(),

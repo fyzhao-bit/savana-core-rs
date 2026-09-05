@@ -101,6 +101,7 @@ pub enum ApprovalPurposeV2 {
     ToolExecution,
     FinalRelease,
     ConnectorRegistration,
+    TaskAuthorization,
 }
 
 impl ApprovalPurposeV2 {
@@ -110,6 +111,7 @@ impl ApprovalPurposeV2 {
             Self::ToolExecution => 2,
             Self::FinalRelease => 3,
             Self::ConnectorRegistration => 4,
+            Self::TaskAuthorization => 5,
         }
     }
 
@@ -119,6 +121,7 @@ impl ApprovalPurposeV2 {
             Self::ToolExecution => b"SAVANA_TOOL_APPROVAL_ENVELOPE_V2\0",
             Self::FinalRelease => b"SAVANA_RELEASE_APPROVAL_ENVELOPE_V2\0",
             Self::ConnectorRegistration => b"SAVANA_CONNECTOR_REGISTRATION_APPROVAL_ENVELOPE_V2\0",
+            Self::TaskAuthorization => b"SAVANA_TASK_AUTHORIZATION_APPROVAL_ENVELOPE_V2_SCHEMA1\0",
         }
     }
 
@@ -129,6 +132,9 @@ impl ApprovalPurposeV2 {
             Self::FinalRelease => b"SAVANA_RELEASE_APPROVAL_SETTLEMENT_V2\0",
             Self::ConnectorRegistration => {
                 b"SAVANA_CONNECTOR_REGISTRATION_APPROVAL_SETTLEMENT_V2\0"
+            }
+            Self::TaskAuthorization => {
+                b"SAVANA_TASK_AUTHORIZATION_APPROVAL_SETTLEMENT_V2_SCHEMA1\0"
             }
         }
     }
@@ -1396,6 +1402,7 @@ fn decode_purpose(tag: u16) -> Result<ApprovalPurposeV2, ApprovalErrorV2> {
         2 => Ok(ApprovalPurposeV2::ToolExecution),
         3 => Ok(ApprovalPurposeV2::FinalRelease),
         4 => Ok(ApprovalPurposeV2::ConnectorRegistration),
+        5 => Ok(ApprovalPurposeV2::TaskAuthorization),
         _ => Err(ApprovalErrorV2::NonCanonicalEnvelope),
     }
 }

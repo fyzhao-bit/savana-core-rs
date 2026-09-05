@@ -194,6 +194,22 @@ impl ApprovalSuiteOneClientV2 {
             .map_err(|_| ApprovalSuiteOneClientErrorV2::Unavailable)
     }
 
+    pub fn get_task_authorization_approval_settlement(
+        &self,
+        approval: savana_kernel_protocol::v2::TaskAuthorizationApprovalRecordHandleV2,
+        deadline: UnixMillisV2,
+    ) -> Result<ApprovalSettlementViewV2, ApprovalSuiteOneClientErrorV2> {
+        if self.edge.role() != EndpointRoleV2::IngressApproval {
+            return Err(ApprovalSuiteOneClientErrorV2::Unavailable);
+        }
+        let body = self.exchange(
+            ApprovalServiceOperationV2::GetTaskAuthorizationApprovalSettlement { approval },
+            deadline,
+        )?;
+        decode_approval_settlement_view_v2(&body)
+            .map_err(|_| ApprovalSuiteOneClientErrorV2::Unavailable)
+    }
+
     pub fn get_agent_approval_settlement(
         &self,
         approval: AgentApprovalRecordTargetV2,

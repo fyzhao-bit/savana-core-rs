@@ -495,3 +495,125 @@ fn business_request_format_and_default_ignorable_controls_never_enter_identity_f
         }
     }
 }
+
+#[test]
+fn task_draft_controls_match_real_requests_without_dummy_payload_or_quantity() {
+    let p = profile(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        BusinessMagnitudeV2::CountField,
+    );
+    let fields = vec![
+        ("file".into(), BusinessValueV2::Text("A".into())),
+        ("to".into(), BusinessValueV2::Text("Alice".into())),
+        ("subject".into(), BusinessValueV2::Text("report".into())),
+    ];
+    let controls = BusinessControlsV2::from_fields(&p, fields.clone()).unwrap();
+    assert_eq!(controls.resource(), "A");
+    assert_eq!(controls.destination(), "Alice");
+    for quantity in [1, 2, u64::MAX] {
+        let request = BusinessRequestV2::parse(&p, "request-1", &input(quantity)).unwrap();
+        assert_eq!(
+            controls.action_alternative(d(90)).unwrap(),
+            request.action_alternative(d(90)).unwrap()
+        );
+    }
+    let encoded = encode_business_controls_v2(&controls).unwrap();
+    assert_eq!(decode_business_controls_v2(&encoded).unwrap(), controls);
+    for extra in [
+        ("body", BusinessValueV2::Text("dummy".into())),
+        ("quantity", BusinessValueV2::Unsigned(1)),
+    ] {
+        let mut wrong = fields.clone();
+        wrong.push((extra.0.into(), extra.1));
+        assert!(BusinessControlsV2::from_fields(&p, wrong).is_err());
+    }
+    let mut missing = fields.clone();
+    missing.pop();
+    assert!(BusinessControlsV2::from_fields(&p, missing).is_err());
+    let mut invisible = fields;
+    invisible[1].1 = BusinessValueV2::Text("Ali\u{180e}ce".into());
+    assert!(BusinessControlsV2::from_fields(&p, invisible).is_err());
+    assert!(!format!("{controls:?}").contains("Alice"));
+}
+
+#[test]
+fn task_draft_controls_enforce_encoded_bounds_and_canonical_wire() {
+    let p = profile(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        BusinessMagnitudeV2::FixedCount(1),
+    );
+    let fields = |subject: String| {
+        vec![
+            ("file".into(), BusinessValueV2::Text("A".into())),
+            ("to".into(), BusinessValueV2::Text("Alice".into())),
+            ("subject".into(), BusinessValueV2::Text(subject)),
+        ]
+    };
+    // Quotes are valid visible text, but escaping doubles their encoded size.
+    assert!(BusinessControlsV2::from_fields(&p, fields("\"".repeat(33 * 1024))).is_err());
+    let controls = BusinessControlsV2::from_fields(&p, fields("report".into())).unwrap();
+    let wire = encode_business_controls_v2(&controls).unwrap();
+    let mut trailing = wire.clone();
+    trailing.push(0);
+    assert!(decode_business_controls_v2(&trailing).is_err());
+    let mut noncanonical = wire.clone();
+    noncanonical.splice(1..2, [0x18, 1]);
+    assert!(decode_business_controls_v2(&noncanonical).is_err());
+    for values in [
+        br#"{"file":"A","to":"Alice","subject":"report","s\u0075bject":"other"}"#.as_slice(),
+        br#"{ "file":"A","subject":"report","to":"Alice"}"#.as_slice(),
+        br#"{"file":"A","subject":1,"to":"Alice"}"#.as_slice(),
+    ] {
+        let mut e = minicbor::Encoder::new(Vec::new());
+        e.array(3)
+            .unwrap()
+            .u8(1)
+            .unwrap()
+            .bytes(&encode_business_profile_v2(&p).unwrap())
+            .unwrap()
+            .bytes(values)
+            .unwrap();
+        assert!(decode_business_controls_v2(&e.into_writer()).is_err());
+    }
+}
+
+#[test]
+fn task_draft_controls_bound_total_escaped_fields_not_only_individual_text() {
+    let mut fields = vec![BusinessFieldV2::new(
+        "body",
+        BusinessFieldRoleV2::Payload,
+        BusinessFieldTypeV2::Text,
+    )
+    .unwrap()];
+    let mut values = Vec::new();
+    for i in 0..31 {
+        let name = format!("f{i:02}{}", "x".repeat(61));
+        fields.push(
+            BusinessFieldV2::new(
+                &name,
+                match i {
+                    0 => BusinessFieldRoleV2::Resource,
+                    1 => BusinessFieldRoleV2::Destination,
+                    _ => BusinessFieldRoleV2::Parameter,
+                },
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+        );
+        values.push((name, BusinessValueV2::Text("\"".repeat(1024))));
+    }
+    let p = BusinessProfileV2::new(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        "mail.send",
+        d(1),
+        d(2),
+        TaskEffectV2::Send,
+        BusinessMagnitudeV2::FixedCount(1),
+        fields,
+    )
+    .unwrap();
+    assert!(
+        BusinessControlsV2::from_fields(&p, values).is_err(),
+        "builder must not create a controls value that its own decoder rejects"
+    );
+}

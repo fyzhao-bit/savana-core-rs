@@ -22,6 +22,8 @@ const TOOL_APPROVAL_ENVELOPE_DOMAIN_V2: &[u8] = b"SAVANA_TOOL_APPROVAL_ENVELOPE_
 const RELEASE_APPROVAL_ENVELOPE_DOMAIN_V2: &[u8] = b"SAVANA_RELEASE_APPROVAL_ENVELOPE_V2\0";
 const CONNECTOR_REGISTRATION_APPROVAL_ENVELOPE_DOMAIN_V2: &[u8] =
     b"SAVANA_CONNECTOR_REGISTRATION_APPROVAL_ENVELOPE_V2\0";
+const TASK_AUTHORIZATION_APPROVAL_ENVELOPE_DOMAIN_V2: &[u8] =
+    b"SAVANA_TASK_AUTHORIZATION_APPROVAL_ENVELOPE_V2_SCHEMA1\0";
 const UI_AUTH_INGRESS_ENVELOPE_DOMAIN_V2: &[u8] = b"SAVANA_UI_AUTH_INGRESS_ENVELOPE_V2\0";
 const UI_AUTH_APPROVAL_DISPLAY_ENVELOPE_DOMAIN_V2: &[u8] =
     b"SAVANA_UI_AUTH_APPROVAL_DISPLAY_ENVELOPE_V2\0";
@@ -37,6 +39,8 @@ const TOOL_APPROVAL_SETTLEMENT_DOMAIN_V2: &[u8] = b"SAVANA_TOOL_APPROVAL_SETTLEM
 const RELEASE_APPROVAL_SETTLEMENT_DOMAIN_V2: &[u8] = b"SAVANA_RELEASE_APPROVAL_SETTLEMENT_V2\0";
 const CONNECTOR_REGISTRATION_APPROVAL_SETTLEMENT_DOMAIN_V2: &[u8] =
     b"SAVANA_CONNECTOR_REGISTRATION_APPROVAL_SETTLEMENT_V2\0";
+const TASK_AUTHORIZATION_APPROVAL_SETTLEMENT_DOMAIN_V2: &[u8] =
+    b"SAVANA_TASK_AUTHORIZATION_APPROVAL_SETTLEMENT_V2_SCHEMA1\0";
 const AGENT_AUTHENTICATION_CLOSURE_DESCRIPTOR_DOMAIN_V2: &[u8] =
     b"SAVANA_AGENT_AUTH_CLOSURE_DESCRIPTOR_V2\0";
 const AGENT_AUTHENTICATION_CLOSURE_DESCRIPTOR_DIGEST_DOMAIN_V2: &[u8] =
@@ -263,6 +267,15 @@ closed_unit_enum_v2! {
         ToolExecution = 2,
         FinalRelease = 3,
         ConnectorRegistration = 4,
+        TaskAuthorization = 5,
+    }
+}
+
+closed_unit_enum_v2! {
+    TaskAuthorizationChangeV2 {
+        Create = 1,
+        Amend = 2,
+        Revoke = 3,
     }
 }
 
@@ -1031,6 +1044,16 @@ closed_unit_enum_v2! {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalBindingV2 {
+    /// Independent task-root consent, never interchangeable with action approval.
+    /// The trusted owner binds the exact pending draft (or revocation projection)
+    /// and checks the current authorization revision before any durable change.
+    TaskAuthorization {
+        authorization_id: Digest32V2,
+        task: DurableTaskIdV2,
+        revision: u64,
+        change: TaskAuthorizationChangeV2,
+        draft_digest: Digest32V2,
+    },
     Ingress {
         pending_ingress_id: Digest32V2,
         ingress_subject_digest: Digest32V2,
@@ -1057,6 +1080,7 @@ impl ApprovalBindingV2 {
             Self::ToolExecution { .. } => ApprovalPurposeV2::ToolExecution,
             Self::FinalRelease { .. } => ApprovalPurposeV2::FinalRelease,
             Self::ConnectorRegistration { .. } => ApprovalPurposeV2::ConnectorRegistration,
+            Self::TaskAuthorization { .. } => ApprovalPurposeV2::TaskAuthorization,
         }
     }
 
@@ -1867,6 +1891,33 @@ impl SignedApprovalSettlementV2 {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn verify_task_authorization(
+        &self,
+        expected_key_id: Ed25519KeyIdV2,
+        verifying_key: [u8; 32],
+        expected_installation_id: Digest32V2,
+        expected_active_state_manifest_digest: Digest32V2,
+        expected_deployment_generation: u64,
+        expected_envelope_digest: Digest32V2,
+        expected_principal: PrincipalIdV2,
+        expected_challenge: Nonce32V2,
+        now: UnixMillisV2,
+    ) -> Result<VerifiedApprovalSettlementV2, ProtocolError> {
+        self.verify_for_purpose(
+            expected_key_id,
+            verifying_key,
+            expected_installation_id,
+            expected_active_state_manifest_digest,
+            expected_deployment_generation,
+            ApprovalPurposeV2::TaskAuthorization,
+            expected_envelope_digest,
+            expected_principal,
+            expected_challenge,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn verify_for_purpose(
         &self,
         expected_key_id: Ed25519KeyIdV2,
@@ -2663,6 +2714,23 @@ fn encode_approval_binding(
     value: ApprovalBindingV2,
 ) -> Result<(), ProtocolError> {
     match value {
+        ApprovalBindingV2::TaskAuthorization {
+            authorization_id,
+            task,
+            revision,
+            change,
+            draft_digest,
+        } => {
+            encoder
+                .array(6)
+                .and_then(|e| e.u16(5))
+                .map_err(ProtocolError::malformed)?;
+            encode_fixed(encoder, &authorization_id)?;
+            encode_fixed(encoder, &task)?;
+            encoder.u64(revision).map_err(ProtocolError::malformed)?;
+            encode_fixed(encoder, &change)?;
+            encode_fixed(encoder, &draft_digest)?;
+        }
         ApprovalBindingV2::Ingress {
             pending_ingress_id,
             ingress_subject_digest,
@@ -2718,6 +2786,13 @@ fn decode_approval_binding(
     let length = decoder.array().map_err(ProtocolError::malformed)?;
     let tag = decoder.u16().map_err(ProtocolError::malformed)?;
     match (tag, length) {
+        (5, Some(6)) => Ok(ApprovalBindingV2::TaskAuthorization {
+            authorization_id: decode_fixed(decoder, context)?,
+            task: decode_fixed(decoder, context)?,
+            revision: decoder.u64().map_err(ProtocolError::malformed)?,
+            change: decode_fixed(decoder, context)?,
+            draft_digest: decode_fixed(decoder, context)?,
+        }),
         (1, Some(5)) => Ok(ApprovalBindingV2::Ingress {
             pending_ingress_id: decode_fixed(decoder, context)?,
             ingress_subject_digest: decode_fixed(decoder, context)?,
@@ -3439,6 +3514,23 @@ fn validate_signature_parts(
 
 fn approval_binding_is_nonzero(binding: ApprovalBindingV2) -> bool {
     match binding {
+        ApprovalBindingV2::TaskAuthorization {
+            authorization_id,
+            task,
+            revision,
+            change,
+            draft_digest,
+        } => {
+            !is_zero(authorization_id.as_bytes())
+                && !is_zero(task.as_bytes())
+                && !is_zero(draft_digest.as_bytes())
+                && revision != 0
+                && match change {
+                    TaskAuthorizationChangeV2::Create => revision == 1,
+                    TaskAuthorizationChangeV2::Amend => revision > 1,
+                    TaskAuthorizationChangeV2::Revoke => true,
+                }
+        }
         ApprovalBindingV2::Ingress {
             pending_ingress_id,
             ingress_subject_digest,
@@ -3511,6 +3603,7 @@ fn ui_authentication_binding_is_nonzero(binding: UiAuthenticationBindingV2) -> b
 
 const fn approval_envelope_domain(purpose: ApprovalPurposeV2) -> &'static [u8] {
     match purpose {
+        ApprovalPurposeV2::TaskAuthorization => TASK_AUTHORIZATION_APPROVAL_ENVELOPE_DOMAIN_V2,
         ApprovalPurposeV2::Ingress => INGRESS_APPROVAL_ENVELOPE_DOMAIN_V2,
         ApprovalPurposeV2::ToolExecution => TOOL_APPROVAL_ENVELOPE_DOMAIN_V2,
         ApprovalPurposeV2::FinalRelease => RELEASE_APPROVAL_ENVELOPE_DOMAIN_V2,
@@ -3538,6 +3631,7 @@ const fn ui_authentication_settlement_domain(purpose: UiAuthenticationPurposeV2)
 
 const fn approval_settlement_domain(purpose: ApprovalPurposeV2) -> &'static [u8] {
     match purpose {
+        ApprovalPurposeV2::TaskAuthorization => TASK_AUTHORIZATION_APPROVAL_SETTLEMENT_DOMAIN_V2,
         ApprovalPurposeV2::Ingress => INGRESS_APPROVAL_SETTLEMENT_DOMAIN_V2,
         ApprovalPurposeV2::ToolExecution => TOOL_APPROVAL_SETTLEMENT_DOMAIN_V2,
         ApprovalPurposeV2::FinalRelease => RELEASE_APPROVAL_SETTLEMENT_DOMAIN_V2,

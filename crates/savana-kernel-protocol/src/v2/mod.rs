@@ -11,14 +11,16 @@ mod business_json;
 mod business_request;
 mod business_unicode;
 pub use business_request::{
-    decode_business_profile_v2, encode_business_profile_v2, BusinessCodecErrorV2,
-    BusinessFieldRoleV2, BusinessFieldTypeV2, BusinessFieldV2, BusinessMagnitudeV2,
-    BusinessProfileV2, BusinessRequestV2, BusinessResponseDispositionV2, BusinessValueV2,
-    MAX_BUSINESS_JSON_BYTES_V2, MAX_BUSINESS_PROFILE_BYTES_V2,
+    decode_business_controls_v2, decode_business_profile_v2, encode_business_controls_v2,
+    encode_business_profile_v2, BusinessCodecErrorV2, BusinessControlsV2, BusinessFieldRoleV2,
+    BusinessFieldTypeV2, BusinessFieldV2, BusinessMagnitudeV2, BusinessProfileV2,
+    BusinessRequestV2, BusinessResponseDispositionV2, BusinessValueV2, MAX_BUSINESS_JSON_BYTES_V2,
+    MAX_BUSINESS_PROFILE_BYTES_V2,
 };
 mod cbor;
 mod effect_gate_projection;
 mod handles;
+pub use handles::TaskAuthorizationApprovalRecordHandleV2;
 mod http;
 mod jarvis;
 mod kernel_agent;
@@ -32,6 +34,7 @@ mod kernel_success;
 mod primitives;
 mod service;
 mod signed;
+pub use signed::TaskAuthorizationChangeV2;
 mod task_action_approval;
 mod task_authorization;
 pub use task_action_approval::{
@@ -49,12 +52,15 @@ mod transport;
 
 pub use task_authorization::{
     action_content_digest_v2, decode_action_content_v2, decode_signed_task_authorization_v2,
-    decode_task_authorization_v2, encode_action_content_v2, encode_signed_task_authorization_v2,
+    decode_task_authorization_draft_v2, decode_task_authorization_v2, encode_action_content_v2,
+    encode_signed_task_authorization_v2, encode_task_authorization_draft_v2,
     encode_task_authorization_v2, sign_task_authorization_v2, task_authorization_digest_v2,
-    verify_task_authorization_v2, ActionAlternativeV2, ActionCodecProfileV2, ActionContentV2,
-    MagnitudeUnitV2, SignedTaskAuthorizationV2, TaskAuthorizationClauseV2, TaskAuthorizationV2,
-    TaskEffectV2, TaskEvidenceKindV2, MAX_ACTION_ALTERNATIVES_V2, MAX_TASK_AUTHORIZATION_BYTES_V2,
-    MAX_TASK_AUTHORIZATION_CLAUSES_V2, MAX_TASK_PREDECESSORS_V2,
+    task_authorization_draft_digest_v2, verify_task_authorization_v2, ActionAlternativeV2,
+    ActionCodecProfileV2, ActionContentV2, MagnitudeUnitV2, SignedTaskAuthorizationV2,
+    TaskAuthorizationClauseV2, TaskAuthorizationDraftAlternativeV2, TaskAuthorizationDraftClauseV2,
+    TaskAuthorizationDraftV2, TaskAuthorizationV2, TaskEffectV2, TaskEvidenceKindV2,
+    MAX_ACTION_ALTERNATIVES_V2, MAX_TASK_AUTHORIZATION_BYTES_V2, MAX_TASK_AUTHORIZATION_CLAUSES_V2,
+    MAX_TASK_AUTHORIZATION_DRAFT_BYTES_V2, MAX_TASK_PREDECESSORS_V2,
 };
 
 pub use application::{

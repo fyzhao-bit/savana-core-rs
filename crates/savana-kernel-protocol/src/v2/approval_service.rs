@@ -17,8 +17,8 @@ use super::{
     IngressUiAuthenticationTransferCapabilityV2, Nonce32V2, PublicServiceStateV2,
     ReleaseApprovalRecordHandleV2, RequestIdV2, SignedAgentAuthenticationClosureDescriptorV2,
     SignedApprovalEnvelopeV2, SignedApprovalSettlementV2, SignedUiAuthenticationEnvelopeV2,
-    SignedUiAuthenticationSettlementV2, ToolApprovalRecordHandleV2, UnixMillisV2, ZeroizingTextV2,
-    PROTOCOL_MAJOR, PROTOCOL_MINOR,
+    SignedUiAuthenticationSettlementV2, TaskAuthorizationApprovalRecordHandleV2,
+    ToolApprovalRecordHandleV2, UnixMillisV2, ZeroizingTextV2, PROTOCOL_MAJOR, PROTOCOL_MINOR,
 };
 
 const MAX_APPROVAL_SERVICE_BYTES_V2: usize = 1024 * 1024;
@@ -45,6 +45,9 @@ pub enum ApprovalServiceOperationV2 {
     },
     GetIngressApprovalSettlement {
         approval: IngressApprovalRecordHandleV2,
+    },
+    GetTaskAuthorizationApprovalSettlement {
+        approval: TaskAuthorizationApprovalRecordHandleV2,
     },
     RegisterAgentUiAuthentication {
         envelope: SignedUiAuthenticationEnvelopeV2,
@@ -85,6 +88,7 @@ impl ApprovalServiceOperationV2 {
             Self::IngressHealth
             | Self::RegisterIngressApproval { .. }
             | Self::GetIngressApprovalSettlement { .. }
+            | Self::GetTaskAuthorizationApprovalSettlement { .. }
             | Self::RegisterIngressUiAuthentication { .. }
             | Self::ConsumeIngressUiAuthenticationSettlement { .. } => {
                 EndpointRoleV2::IngressApproval
@@ -107,6 +111,7 @@ impl ApprovalServiceOperationV2 {
             Self::ConsumeAgentUiAuthenticationSettlement { .. }
             | Self::ConsumeIngressUiAuthenticationSettlement { .. } => 23,
             Self::CloseAgentAuthenticationAttempt { .. } => 24,
+            Self::GetTaskAuthorizationApprovalSettlement { .. } => 25,
             Self::CreateEnrollmentCode { .. } => 100,
             Self::RevokeCredential { .. } => 101,
         }
@@ -264,6 +269,10 @@ pub enum AgentApprovalRecordTargetV2 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegisteredApprovalV2 {
+    TaskAuthorization {
+        approval: TaskAuthorizationApprovalRecordHandleV2,
+        display_authentication: ApprovalDisplayAuthenticationTransferCapabilityV2,
+    },
     Ingress {
         approval: IngressApprovalRecordHandleV2,
         display_authentication: ApprovalDisplayAuthenticationTransferCapabilityV2,
@@ -482,6 +491,18 @@ pub fn encode_registered_approval_v2(
     let mut encoder = minicbor::Encoder::new(Vec::new());
     encoder.array(3).map_err(ProtocolError::malformed)?;
     match value {
+        RegisteredApprovalV2::TaskAuthorization {
+            approval,
+            display_authentication,
+        } => {
+            encoder.u16(5).map_err(ProtocolError::malformed)?;
+            approval
+                .encode(&mut encoder, &mut ())
+                .map_err(ProtocolError::malformed)?;
+            display_authentication
+                .encode(&mut encoder, &mut ())
+                .map_err(ProtocolError::malformed)?;
+        }
         RegisteredApprovalV2::Ingress {
             approval,
             display_authentication,
@@ -536,6 +557,12 @@ pub fn decode_registered_approval_v2(
     let tag = decoder.u16().map_err(ProtocolError::malformed)?;
     let mut context = V2DecodeContext;
     let value = match (role, tag) {
+        (EndpointRoleV2::IngressApproval, 5) => RegisteredApprovalV2::TaskAuthorization {
+            approval: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+            display_authentication: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        },
         (EndpointRoleV2::IngressApproval, 1) => RegisteredApprovalV2::Ingress {
             approval: minicbor::Decode::decode(&mut decoder, &mut context)
                 .map_err(ProtocolError::from_typed_decode)?,
@@ -820,6 +847,12 @@ fn encode_operation_body(value: &ApprovalServiceOperationV2) -> Result<Vec<u8>, 
                 .encode(&mut encoder, &mut ())
                 .map_err(ProtocolError::malformed)?;
         }
+        ApprovalServiceOperationV2::GetTaskAuthorizationApprovalSettlement { approval } => {
+            encoder.array(1).map_err(ProtocolError::malformed)?;
+            approval
+                .encode(&mut encoder, &mut ())
+                .map_err(ProtocolError::malformed)?;
+        }
         ApprovalServiceOperationV2::GetAgentApprovalSettlement { approval } => {
             encoder.array(1).map_err(ProtocolError::malformed)?;
             encode_agent_approval_target(&mut encoder, *approval)?;
@@ -931,6 +964,14 @@ fn decode_operation_body(
             require_array(&mut decoder, 1)?;
             let mut context = V2DecodeContext;
             ApprovalServiceOperationV2::GetIngressApprovalSettlement {
+                approval: minicbor::Decode::decode(&mut decoder, &mut context)
+                    .map_err(ProtocolError::from_typed_decode)?,
+            }
+        }
+        (EndpointRoleV2::IngressApproval, 25) => {
+            require_array(&mut decoder, 1)?;
+            let mut context = V2DecodeContext;
+            ApprovalServiceOperationV2::GetTaskAuthorizationApprovalSettlement {
                 approval: minicbor::Decode::decode(&mut decoder, &mut context)
                     .map_err(ProtocolError::from_typed_decode)?,
             }

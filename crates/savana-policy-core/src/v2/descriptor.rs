@@ -962,6 +962,31 @@ impl ActiveToolRegistryV2 {
         &self.0
     }
 
+    /// Validates the *entire* draft against this active registry at the supplied
+    /// instant and role. This does not authenticate the user or grant authority;
+    /// the issuer must repeat it at settlement/install and normal dispatch still
+    /// resolves its descriptor against the current registry.
+    pub fn validate_task_draft_profiles(
+        &self,
+        draft: &savana_kernel_protocol::v2::TaskAuthorizationDraftV2,
+        role: RoleIdV2,
+        now: UnixMillisV2,
+    ) -> Result<(), G4Error> {
+        for clause in draft.clauses() {
+            for alternative in clause.alternatives() {
+                let record = self
+                    .resolve(alternative.descriptor_digest(), role, now)
+                    .ok_or(G4Error::DescriptorNotActive)?;
+                if record.descriptor().unsigned().require_business_profile()?
+                    != alternative.controls().profile()
+                {
+                    return Err(G4Error::InvalidDescriptor);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn len(&self) -> usize {
         self.0.len()
     }

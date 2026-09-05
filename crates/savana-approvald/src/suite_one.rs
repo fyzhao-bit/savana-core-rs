@@ -236,6 +236,13 @@ impl ApprovalSuiteOneServerV2 {
                 encode_approval_settlement_view_v2(&view)
                     .map_err(|_| ApprovalUiAuthorityErrorV2::Unavailable)
             }
+            ApprovalServiceOperationV2::GetTaskAuthorizationApprovalSettlement { approval } => {
+                let view = self
+                    .authority
+                    .get_task_authorization_approval_settlement(approval, now, deadline)?;
+                encode_approval_settlement_view_v2(&view)
+                    .map_err(|_| ApprovalUiAuthorityErrorV2::Unavailable)
+            }
             ApprovalServiceOperationV2::RegisterAgentUiAuthentication { envelope } => {
                 let registered = self.authority.register(
                     EndpointRoleV2::AgentApproval,

@@ -581,6 +581,7 @@ impl ProtocolApprovalServiceV2 {
         }
         let credential_index = self.credential_index(assertion)?;
         let legacy_purpose = match unsigned.purpose() {
+            ProtocolApprovalPurposeV2::TaskAuthorization => ApprovalPurposeV2::TaskAuthorization,
             savana_kernel_protocol::v2::ApprovalPurposeV2::Ingress => ApprovalPurposeV2::Ingress,
             savana_kernel_protocol::v2::ApprovalPurposeV2::ToolExecution => {
                 ApprovalPurposeV2::ToolExecution
@@ -761,16 +762,37 @@ impl ProtocolApprovalServiceV2 {
         display_authentication: &ProtocolSignedUiAuthenticationEnvelopeV2,
         now: UnixMillisV2,
     ) -> Result<(Digest32V2, Digest32V2, ProtocolApprovalPurposeV2), ApprovalErrorV2> {
-        let approval_digest = self.register_approval_envelope(envelope, now)?;
-        let display_digest =
-            self.register_ui_authentication_envelope(display_authentication, now)?;
-        let approval = self.approval_challenge(approval_digest, now)?;
-        let display = self.ui_authentication_challenge(display_digest, now)?;
+        // Validate both signed purposes and their complete pairing before adding
+        // any record. The state owner additionally commits the pair atomically.
+        let approval = envelope
+            .verify_for_approval_service(
+                self.kernel_envelope_key_id,
+                self.kernel_envelope_public_key,
+                self.installation_id,
+                self.active_state_manifest_digest,
+                self.deployment_generation,
+                self.approvald_endpoint_identity,
+                now,
+            )
+            .map_err(|_| ApprovalErrorV2::InvalidEnvelopeSignature)?;
+        let display = display_authentication
+            .verify(
+                self.kernel_envelope_key_id,
+                self.kernel_envelope_public_key,
+                self.installation_id,
+                self.active_state_manifest_digest,
+                self.deployment_generation,
+                now,
+            )
+            .map_err(|_| ApprovalErrorV2::InvalidEnvelopeSignature)?;
+        let approval_digest = envelope
+            .envelope_digest()
+            .map_err(|_| ApprovalErrorV2::NonCanonicalEnvelope)?;
         let role_matches = matches!(
             (role, approval.purpose()),
             (
                 EndpointRoleV2::IngressApproval,
-                ProtocolApprovalPurposeV2::Ingress
+                ProtocolApprovalPurposeV2::Ingress | ProtocolApprovalPurposeV2::TaskAuthorization
             ) | (
                 EndpointRoleV2::AgentApproval,
                 ProtocolApprovalPurposeV2::ToolExecution
@@ -781,13 +803,17 @@ impl ProtocolApprovalServiceV2 {
         let binding_matches = matches!(
             display.binding(),
             UiAuthenticationBindingV2::ApprovalDisplay {
+                durable_task_id,
                 approval_envelope_digest,
                 approval_purpose,
                 display_digest,
-                ..
             } if approval_envelope_digest == approval_digest
                 && approval_purpose == approval.purpose()
                 && display_digest == approval.display_digest()
+                && match approval.binding() {
+                    savana_kernel_protocol::v2::ApprovalBindingV2::TaskAuthorization { task, .. } => task == durable_task_id,
+                    _ => true,
+                }
         );
         if display.purpose() != UiAuthenticationPurposeV2::ApprovalDisplay
             || display.expected_principal() != Some(approval.expected_principal())
@@ -796,6 +822,9 @@ impl ProtocolApprovalServiceV2 {
         {
             return Err(ApprovalErrorV2::InvalidChallenge);
         }
+        self.register_approval_envelope(envelope, now)?;
+        let display_digest =
+            self.register_ui_authentication_envelope(display_authentication, now)?;
         Ok((approval_digest, display_digest, approval.purpose()))
     }
 
@@ -1513,6 +1542,17 @@ fn validate_restored_approval_settlement(
 ) -> Result<(), ApprovalErrorV2> {
     let settlement_unsigned = settlement.unsigned();
     let verified = match envelope.purpose() {
+        ProtocolApprovalPurposeV2::TaskAuthorization => settlement.verify_task_authorization(
+            deployment.settlement_key_id,
+            deployment.settlement_public_key(),
+            deployment.installation_id,
+            deployment.active_state_manifest_digest,
+            deployment.deployment_generation,
+            envelope_digest,
+            envelope.expected_principal(),
+            envelope.decision_challenge(),
+            settlement_unsigned.issued_at(),
+        ),
         ProtocolApprovalPurposeV2::Ingress => settlement.verify_ingress(
             deployment.settlement_key_id,
             deployment.settlement_public_key(),
@@ -2270,6 +2310,275 @@ mod tests {
                 UnixMillisV2::new(301),
             )
             .is_err());
+    }
+
+    #[test]
+    fn task_root_approval_requires_ingress_role_exact_ceremony_and_survives_recovery() {
+        use savana_kernel_protocol::v2::{
+            ApprovalDecisionV2 as ProtocolApprovalDecisionV2, DurableTaskIdV2, EndpointRoleV2,
+            TaskAuthorizationChangeV2,
+        };
+        let kernel_key = SigningKey::from_bytes(&[0x71; 32]);
+        let principal = PrincipalIdV2::new([0x81; 32]);
+        let credential = Digest32V2::new([0x82; 32]);
+        let p256 = P256SigningKey::from_slice(&[0x83; 32]).unwrap();
+        let mut initial = enrollment_service();
+        initial
+            .load_verified_hardware_credential(
+                credential,
+                principal,
+                [0x84; 16],
+                p256.verifying_key()
+                    .to_encoded_point(false)
+                    .as_bytes()
+                    .try_into()
+                    .unwrap(),
+                1,
+            )
+            .unwrap();
+        for (change, revision) in [
+            (TaskAuthorizationChangeV2::Create, 1),
+            (TaskAuthorizationChangeV2::Amend, 2),
+            (TaskAuthorizationChangeV2::Revoke, 2),
+        ] {
+            let mut service = initial.clone();
+            let challenge = Nonce32V2::new([0x85; 32]);
+            let display = BoundedApprovalDisplayTextV2::new(
+                "Exact task authorization: A -> Alice; B -> Bob; limit 2".into(),
+            )
+            .unwrap();
+            let display_digest =
+                savana_kernel_protocol::v2::approval_display_digest_v2(display.as_bytes());
+            let unsigned = UnsignedApprovalEnvelopeV2::new(
+                service.installation_id,
+                service.active_state_manifest_digest,
+                9,
+                ApprovalPurposeV2::TaskAuthorization,
+                Nonce32V2::new([0x86; 32]),
+                challenge,
+                ApprovalBindingV2::TaskAuthorization {
+                    authorization_id: Digest32V2::new([0x87; 32]),
+                    task: DurableTaskIdV2::new([0x88; 32]),
+                    revision,
+                    change,
+                    draft_digest: Digest32V2::new([0x89; 32]),
+                },
+                principal,
+                Digest32V2::new([0x89; 32]),
+                display_digest,
+                display,
+                Some(Digest32V2::new([0x8a; 32])),
+                service.approvald_endpoint_identity,
+                UnixMillisV2::new(100),
+                UnixMillisV2::new(1000),
+            )
+            .unwrap();
+            let approval = SignedApprovalEnvelopeV2::sign(unsigned.clone(), &kernel_key).unwrap();
+            let digest = approval.envelope_digest().unwrap();
+            let ui = SignedUiAuthenticationEnvelopeV2::sign(
+                UnsignedUiAuthenticationEnvelopeV2::new(
+                    service.installation_id,
+                    service.active_state_manifest_digest,
+                    9,
+                    UiAuthenticationPurposeV2::ApprovalDisplay,
+                    UiAuthenticationBindingV2::ApprovalDisplay {
+                        durable_task_id: DurableTaskIdV2::new([0x88; 32]),
+                        approval_envelope_digest: digest,
+                        approval_purpose: ApprovalPurposeV2::TaskAuthorization,
+                        display_digest,
+                    },
+                    Some(principal),
+                    FixedOriginV2::Approval8766,
+                    FixedOriginV2::Approval8766,
+                    Nonce32V2::new([0x8b; 32]),
+                    UnixMillisV2::new(100),
+                    UnixMillisV2::new(1000),
+                )
+                .unwrap(),
+                &kernel_key,
+            )
+            .unwrap();
+            let before = service.encode_mutable_state().unwrap();
+            let agent_signed = SignedApprovalEnvelopeV2::sign(
+                unsigned.clone(),
+                &SigningKey::from_bytes(&[0xff; 32]),
+            )
+            .unwrap();
+            assert!(service
+                .register_approval_pair(
+                    EndpointRoleV2::IngressApproval,
+                    &agent_signed,
+                    &ui,
+                    UnixMillisV2::new(200)
+                )
+                .is_err());
+            assert!(service
+                .register_approval_pair(
+                    EndpointRoleV2::AgentApproval,
+                    &approval,
+                    &ui,
+                    UnixMillisV2::new(200)
+                )
+                .is_err());
+            // Even correctly kernel-signed display authentication cannot switch
+            // the task, principal, approval purpose, or the displayed bytes.
+            for field in 0..4 {
+                let bad_ui = SignedUiAuthenticationEnvelopeV2::sign(
+                    UnsignedUiAuthenticationEnvelopeV2::new(
+                        service.installation_id,
+                        service.active_state_manifest_digest,
+                        9,
+                        UiAuthenticationPurposeV2::ApprovalDisplay,
+                        UiAuthenticationBindingV2::ApprovalDisplay {
+                            durable_task_id: DurableTaskIdV2::new(
+                                [if field == 0 { 0xee } else { 0x88 }; 32],
+                            ),
+                            approval_envelope_digest: digest,
+                            approval_purpose: if field == 1 {
+                                ApprovalPurposeV2::Ingress
+                            } else {
+                                ApprovalPurposeV2::TaskAuthorization
+                            },
+                            display_digest: if field == 2 {
+                                Digest32V2::new([0xee; 32])
+                            } else {
+                                display_digest
+                            },
+                        },
+                        Some(if field == 3 {
+                            PrincipalIdV2::new([0xee; 32])
+                        } else {
+                            principal
+                        }),
+                        FixedOriginV2::Approval8766,
+                        FixedOriginV2::Approval8766,
+                        Nonce32V2::new([0x8c; 32]),
+                        UnixMillisV2::new(100),
+                        UnixMillisV2::new(1000),
+                    )
+                    .unwrap(),
+                    &kernel_key,
+                )
+                .unwrap();
+                assert!(service
+                    .register_approval_pair(
+                        EndpointRoleV2::IngressApproval,
+                        &approval,
+                        &bad_ui,
+                        UnixMillisV2::new(200)
+                    )
+                    .is_err());
+            }
+            assert_eq!(
+                before,
+                service.encode_mutable_state().unwrap(),
+                "a rejected role must not register a task-root envelope"
+            );
+            service
+                .register_approval_pair(
+                    EndpointRoleV2::IngressApproval,
+                    &approval,
+                    &ui,
+                    UnixMillisV2::new(200),
+                )
+                .unwrap();
+            let encoded = service.encode_mutable_state().unwrap();
+            let mut service =
+                ProtocolApprovalServiceV2::restore_mutable_state(enrollment_service(), &encoded)
+                    .unwrap();
+            assert_eq!(
+                service
+                    .approval_challenge(digest, UnixMillisV2::new(200))
+                    .unwrap()
+                    .display_text(),
+                unsigned.display_text()
+            );
+            assert!(service
+                .settle_approval(
+                    digest,
+                    ProtocolApprovalDecisionV2::Approve,
+                    &assertion(&p256, credential, principal, Nonce32V2::new([0xee; 32]), 2),
+                    UnixMillisV2::new(300)
+                )
+                .is_err());
+            let settlement = service
+                .settle_approval(
+                    digest,
+                    ProtocolApprovalDecisionV2::Approve,
+                    &assertion(&p256, credential, principal, challenge, 2),
+                    UnixMillisV2::new(300),
+                )
+                .unwrap();
+            settlement
+                .verify_task_authorization(
+                    service.settlement_key_id(),
+                    service.settlement_public_key(),
+                    service.installation_id,
+                    service.active_state_manifest_digest,
+                    9,
+                    digest,
+                    principal,
+                    challenge,
+                    UnixMillisV2::new(301),
+                )
+                .unwrap();
+            assert!(settlement
+                .verify_ingress(
+                    service.settlement_key_id(),
+                    service.settlement_public_key(),
+                    service.installation_id,
+                    service.active_state_manifest_digest,
+                    9,
+                    digest,
+                    principal,
+                    challenge,
+                    UnixMillisV2::new(301)
+                )
+                .is_err());
+            assert!(settlement
+                .verify_tool_execution(
+                    service.settlement_key_id(),
+                    service.settlement_public_key(),
+                    service.installation_id,
+                    service.active_state_manifest_digest,
+                    9,
+                    digest,
+                    principal,
+                    challenge,
+                    UnixMillisV2::new(301)
+                )
+                .is_err());
+            assert!(settlement
+                .verify_task_authorization(
+                    service.settlement_key_id(),
+                    service.settlement_public_key(),
+                    service.installation_id,
+                    service.active_state_manifest_digest,
+                    9,
+                    Digest32V2::new([0xee; 32]),
+                    principal,
+                    challenge,
+                    UnixMillisV2::new(301)
+                )
+                .is_err());
+            let mut restored = ProtocolApprovalServiceV2::restore_mutable_state(
+                enrollment_service(),
+                &service.encode_mutable_state().unwrap(),
+            )
+            .unwrap();
+            assert!(restored
+                .settle_approval(
+                    digest,
+                    ProtocolApprovalDecisionV2::Approve,
+                    &assertion(&p256, credential, principal, challenge, 3),
+                    UnixMillisV2::new(400)
+                )
+                .is_err());
+            assert_eq!(
+                restored.approval_envelopes[0].settlement.as_ref(),
+                Some(&settlement)
+            );
+        }
     }
 
     #[test]

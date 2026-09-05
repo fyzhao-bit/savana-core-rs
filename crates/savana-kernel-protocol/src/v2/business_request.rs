@@ -26,6 +26,10 @@ use super::{ActionAlternativeV2, ActionCodecProfileV2, Digest32V2, MagnitudeUnit
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 
+#[path = "business_controls.rs"]
+mod controls;
+pub use controls::{decode_business_controls_v2, encode_business_controls_v2, BusinessControlsV2};
+
 pub const MAX_BUSINESS_JSON_BYTES_V2: usize = 64 * 1024;
 pub const MAX_BUSINESS_PROFILE_BYTES_V2: usize = 16 * 1024;
 
@@ -249,27 +253,7 @@ impl BusinessRequestV2 {
         if fields.len() != profile.fields.len() || !identifier(request_id, 128) {
             return Err(BusinessCodecErrorV2::Malformed);
         }
-        let mut args = BTreeMap::new();
-        let mut size = 0usize;
-        for (name, value) in fields {
-            if !identifier(&name, 64) || args.contains_key(&name) {
-                return Err(BusinessCodecErrorV2::Malformed);
-            }
-            let v = match value {
-                BusinessValueV2::Text(s) => {
-                    size = size
-                        .checked_add(s.len())
-                        .ok_or(BusinessCodecErrorV2::Limit)?;
-                    if size > MAX_BUSINESS_JSON_BYTES_V2 {
-                        return Err(BusinessCodecErrorV2::Limit);
-                    }
-                    Json::Text(s)
-                }
-                BusinessValueV2::Unsigned(n) => Json::Unsigned(n),
-                BusinessValueV2::Boolean(b) => Json::Bool(b),
-            };
-            args.insert(name, v);
-        }
+        let args = controls::field_map(fields)?;
         let text = |s: &str| Json::Text(s.into());
         let pairs = match profile.codec {
             ActionCodecProfileV2::McpToolsCallJsonV1 => vec![
@@ -345,11 +329,9 @@ impl BusinessRequestV2 {
             let value = args
                 .get(&field.name)
                 .ok_or(BusinessCodecErrorV2::Malformed)?;
+            controls::validate_field(field, value)?;
             match (field.kind, value) {
                 (BusinessFieldTypeV2::Text, Json::Text(v)) => {
-                    if field.role != BusinessFieldRoleV2::Payload && !control_text(v) {
-                        return Err(BusinessCodecErrorV2::Malformed);
-                    }
                     if field.role == BusinessFieldRoleV2::Payload
                         && profile.magnitude == BusinessMagnitudeV2::Utf8PayloadBytes
                     {
@@ -420,19 +402,10 @@ impl BusinessRequestV2 {
         self.text_role(BusinessFieldRoleV2::Payload)
     }
     pub fn resource_digest(&self) -> Digest32V2 {
-        hash(
-            b"SAVANA_BUSINESS_RESOURCE_V2_SCHEMA1\0",
-            &[self.profile.target.as_bytes(), self.resource().as_bytes()],
-        )
+        controls::resource_digest(&self.profile, &self.fields)
     }
     pub fn destination_digest(&self) -> Digest32V2 {
-        hash(
-            b"SAVANA_BUSINESS_DESTINATION_V2_SCHEMA1\0",
-            &[
-                self.profile.target.as_bytes(),
-                self.destination().as_bytes(),
-            ],
-        )
+        controls::destination_digest(&self.profile, &self.fields)
     }
     pub fn payload_digest(&self) -> Digest32V2 {
         hash(
@@ -470,17 +443,7 @@ impl BusinessRequestV2 {
         .map_err(malformed)
     }
     pub fn parameters_digest(&self) -> Digest32V2 {
-        let parameters = self
-            .profile
-            .fields
-            .iter()
-            .filter(|f| f.role == BusinessFieldRoleV2::Parameter)
-            .map(|f| (f.name.clone(), self.fields[&f.name].clone()))
-            .collect();
-        hash(
-            b"SAVANA_BUSINESS_PARAMETERS_V2_SCHEMA1\0",
-            &[&Json::Object(parameters).canonical()],
-        )
+        controls::parameters_digest(&self.profile, &self.fields)
     }
     pub fn digest(&self) -> Digest32V2 {
         hash(

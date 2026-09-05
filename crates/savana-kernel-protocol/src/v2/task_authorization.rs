@@ -361,46 +361,54 @@ impl TaskAuthorizationV2 {
         ] {
             nonzero(digest.as_bytes())?;
         }
-        let mut previous = 0;
-        for clause in &self.clauses.0 {
-            clause.validate()?;
-            if clause.clause_id <= previous {
-                return Err(malformed());
-            }
-            previous = clause.clause_id;
-        }
-        // Bounded DFS accepts arbitrary stable IDs, including forward dependencies.
-        fn visit(
-            i: usize,
-            clauses: &[TaskAuthorizationClauseV2],
-            marks: &mut [u8; 64],
-        ) -> Result<(), ProtocolError> {
-            if marks[i] == 1 {
-                return Err(malformed());
-            }
-            if marks[i] == 2 {
-                return Ok(());
-            }
-            marks[i] = 1;
-            for id in clauses[i].predecessor_clause_ids() {
-                let j = clauses
-                    .binary_search_by_key(id, |c| c.clause_id)
-                    .map_err(|_| malformed())?;
-                visit(j, clauses, marks)?;
-            }
-            marks[i] = 2;
-            Ok(())
-        }
-        let mut marks = [0; 64];
-        for i in 0..self.clauses.0.len() {
-            visit(i, &self.clauses.0, &mut marks)?;
-        }
-        Ok(())
+        validate_clauses(&self.clauses.0)
     }
     getters!(schema: u64,authorization_id: Digest32V2,principal: PrincipalIdV2,task: DurableTaskIdV2,revision: u64,installation_digest: Digest32V2,manifest_digest: Digest32V2,not_before: UnixMillisV2,expires_at: UnixMillisV2,evidence_kind: TaskEvidenceKindV2,user_evidence_digest: Digest32V2,rendering_digest: Digest32V2);
     pub fn clauses(&self) -> &[TaskAuthorizationClauseV2] {
         &self.clauses.0
     }
+}
+
+// Shared with readable drafts: never create fake user evidence just to check a graph.
+fn validate_clauses(clauses: &[TaskAuthorizationClauseV2]) -> Result<(), ProtocolError> {
+    if clauses.is_empty() || clauses.len() > MAX_TASK_AUTHORIZATION_CLAUSES_V2 {
+        return Err(malformed());
+    }
+    let mut previous = 0;
+    for clause in clauses {
+        clause.validate()?;
+        if clause.clause_id <= previous {
+            return Err(malformed());
+        }
+        previous = clause.clause_id;
+    }
+    // Bounded DFS accepts arbitrary stable IDs, including forward dependencies.
+    fn visit(
+        i: usize,
+        clauses: &[TaskAuthorizationClauseV2],
+        marks: &mut [u8; 64],
+    ) -> Result<(), ProtocolError> {
+        if marks[i] == 1 {
+            return Err(malformed());
+        }
+        if marks[i] == 2 {
+            return Ok(());
+        }
+        marks[i] = 1;
+        for id in clauses[i].predecessor_clause_ids() {
+            let j = clauses
+                .binary_search_by_key(id, |c| c.clause_id)
+                .map_err(|_| malformed())?;
+            visit(j, clauses, marks)?;
+        }
+        marks[i] = 2;
+        Ok(())
+    }
+    let mut marks = [0; 64];
+    for i in 0..clauses.len() {
+        visit(i, clauses, &mut marks)?;
+    }
+    Ok(())
 }
 struct_wire!(
     TaskAuthorizationV2,
@@ -686,3 +694,12 @@ pub fn verify_task_authorization_v2(
     }
     Ok(material)
 }
+
+#[path = "task_draft.rs"]
+mod draft;
+pub use draft::{
+    decode_task_authorization_draft_v2, encode_task_authorization_draft_v2,
+    task_authorization_draft_digest_v2, TaskAuthorizationDraftAlternativeV2,
+    TaskAuthorizationDraftClauseV2, TaskAuthorizationDraftV2,
+    MAX_TASK_AUTHORIZATION_DRAFT_BYTES_V2,
+};

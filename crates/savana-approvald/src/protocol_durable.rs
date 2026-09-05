@@ -621,4 +621,150 @@ mod tests {
             ApprovalErrorV2::RollbackDetected
         );
     }
+
+    #[test]
+    fn task_root_approval_pair_is_atomic_encrypted_and_restart_recoverable() {
+        use savana_kernel_protocol::v2::*;
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.path().join("approval-protocol-state-v2.cbor");
+        let namespace = DurableApprovalNamespaceV2::from_verified_installation(
+            Digest32V2::new([0x43; 32]),
+            Digest32V2::new([0x46; 32]),
+        )
+        .unwrap();
+        let anchor = TestAnchor::default();
+        let key = SigningKey::from_bytes(&[0x41; 32]);
+        let principal = PrincipalIdV2::new([0x51; 32]);
+        let task = DurableTaskIdV2::new([0x52; 32]);
+        let text = BoundedApprovalDisplayTextV2::new(
+            "task-root secret readable controls: A -> Alice".into(),
+        )
+        .unwrap();
+        let display_digest = approval_display_digest_v2(text.as_bytes());
+        let approval = SignedApprovalEnvelopeV2::sign(
+            UnsignedApprovalEnvelopeV2::new(
+                Digest32V2::new([0x43; 32]),
+                Digest32V2::new([0x44; 32]),
+                5,
+                ApprovalPurposeV2::TaskAuthorization,
+                Nonce32V2::new([0x53; 32]),
+                Nonce32V2::new([0x54; 32]),
+                ApprovalBindingV2::TaskAuthorization {
+                    authorization_id: Digest32V2::new([0x55; 32]),
+                    task,
+                    revision: 1,
+                    change: TaskAuthorizationChangeV2::Create,
+                    draft_digest: Digest32V2::new([0x56; 32]),
+                },
+                principal,
+                Digest32V2::new([0x56; 32]),
+                display_digest,
+                text.clone(),
+                Some(Digest32V2::new([0x57; 32])),
+                ServiceIdentityV2::new([0x45; 32]),
+                UnixMillisV2::new(100),
+                UnixMillisV2::new(1000),
+            )
+            .unwrap(),
+            &key,
+        )
+        .unwrap();
+        let digest = approval.envelope_digest().unwrap();
+        let ui = SignedUiAuthenticationEnvelopeV2::sign(
+            UnsignedUiAuthenticationEnvelopeV2::new(
+                Digest32V2::new([0x43; 32]),
+                Digest32V2::new([0x44; 32]),
+                5,
+                UiAuthenticationPurposeV2::ApprovalDisplay,
+                UiAuthenticationBindingV2::ApprovalDisplay {
+                    durable_task_id: task,
+                    approval_envelope_digest: digest,
+                    approval_purpose: ApprovalPurposeV2::TaskAuthorization,
+                    display_digest,
+                },
+                Some(principal),
+                FixedOriginV2::Approval8766,
+                FixedOriginV2::Approval8766,
+                Nonce32V2::new([0x58; 32]),
+                UnixMillisV2::new(100),
+                UnixMillisV2::new(1000),
+            )
+            .unwrap(),
+            &key,
+        )
+        .unwrap();
+        let pair;
+        {
+            let mut owner = DurableProtocolApprovalServiceV2::open(
+                &path,
+                [0x48; 32],
+                namespace,
+                Box::new(anchor.clone()),
+                deployment(),
+            )
+            .unwrap();
+            let before = owner.current_head();
+            assert!(owner
+                .register_approval_pair(
+                    EndpointRoleV2::AgentApproval,
+                    &approval,
+                    &ui,
+                    UnixMillisV2::new(200)
+                )
+                .is_err());
+            assert_eq!(before, owner.current_head());
+            assert!(!path.exists());
+            pair = owner
+                .register_approval_pair(
+                    EndpointRoleV2::IngressApproval,
+                    &approval,
+                    &ui,
+                    UnixMillisV2::new(200),
+                )
+                .unwrap();
+            assert_eq!(
+                owner.current_head().sequence(),
+                1,
+                "pair is one owner commit"
+            );
+            assert_eq!(pair.0, digest);
+            assert!(!fs::read(&path)
+                .unwrap()
+                .windows(text.as_bytes().len())
+                .any(|w| w == text.as_bytes()));
+        }
+        let mut recovered = DurableProtocolApprovalServiceV2::open(
+            &path,
+            [0x48; 32],
+            namespace,
+            Box::new(anchor),
+            deployment(),
+        )
+        .unwrap();
+        assert_eq!(
+            recovered
+                .approval_challenge(digest, UnixMillisV2::new(300))
+                .unwrap()
+                .display_text(),
+            &text
+        );
+        assert_eq!(
+            recovered
+                .approval_settlement_view(digest, UnixMillisV2::new(300))
+                .unwrap(),
+            ApprovalSettlementViewV2::Pending
+        );
+        assert_eq!(
+            recovered
+                .register_approval_pair(
+                    EndpointRoleV2::IngressApproval,
+                    &approval,
+                    &ui,
+                    UnixMillisV2::new(300)
+                )
+                .unwrap(),
+            pair
+        );
+    }
 }

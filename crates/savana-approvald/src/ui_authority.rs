@@ -24,9 +24,10 @@ use savana_kernel_protocol::v2::{
     ServiceIdentityV2, SignedAgentAuthenticationAttemptClosureProofV2,
     SignedAgentAuthenticationClosureDescriptorV2, SignedApprovalEnvelopeV2,
     SignedUiAuthenticationEnvelopeV2, SignedUiAuthenticationSettlementV2,
-    ToolApprovalRecordHandleV2, UiAuthenticationBrowserBeginRequestV2,
-    UiAuthenticationBrowserBeginResponseV2, UiAuthenticationBrowserFinishRequestV2,
-    UiAuthenticationBrowserFinishResponseV2, UiAuthenticationPurposeV2, UnixMillisV2,
+    TaskAuthorizationApprovalRecordHandleV2, ToolApprovalRecordHandleV2,
+    UiAuthenticationBrowserBeginRequestV2, UiAuthenticationBrowserBeginResponseV2,
+    UiAuthenticationBrowserFinishRequestV2, UiAuthenticationBrowserFinishResponseV2,
+    UiAuthenticationPurposeV2, UnixMillisV2,
 };
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
@@ -119,6 +120,7 @@ struct UiRecordV2 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApprovalRecordHandleV2 {
+    TaskAuthorization(TaskAuthorizationApprovalRecordHandleV2),
     Ingress(IngressApprovalRecordHandleV2),
     Tool(ToolApprovalRecordHandleV2),
     Release(ReleaseApprovalRecordHandleV2),
@@ -478,6 +480,12 @@ impl ApprovalUiAuthorityV2 {
             return Err(ApprovalUiAuthorityErrorV2::Unavailable);
         }
         let handle = match (role, purpose) {
+            (EndpointRoleV2::IngressApproval, ApprovalPurposeV2::TaskAuthorization) => {
+                ApprovalRecordHandleV2::TaskAuthorization(
+                    TaskAuthorizationApprovalRecordHandleV2::from_authority_entropy(handle_entropy)
+                        .ok_or(ApprovalUiAuthorityErrorV2::Unavailable)?,
+                )
+            }
             (EndpointRoleV2::IngressApproval, ApprovalPurposeV2::Ingress) => {
                 ApprovalRecordHandleV2::Ingress(
                     IngressApprovalRecordHandleV2::from_authority_entropy(handle_entropy)
@@ -566,6 +574,20 @@ impl ApprovalUiAuthorityV2 {
             }
         };
         self.get_approval_settlement(handle, EndpointRoleV2::AgentApproval, now, deadline)
+    }
+
+    pub fn get_task_authorization_approval_settlement(
+        &self,
+        approval: TaskAuthorizationApprovalRecordHandleV2,
+        now: UnixMillisV2,
+        deadline: Instant,
+    ) -> Result<ApprovalSettlementViewV2, ApprovalUiAuthorityErrorV2> {
+        self.get_approval_settlement(
+            ApprovalRecordHandleV2::TaskAuthorization(approval),
+            EndpointRoleV2::IngressApproval,
+            now,
+            deadline,
+        )
     }
 
     fn get_approval_settlement(
@@ -1025,6 +1047,12 @@ fn registered_approval(
     record: &ApprovalRecordV2,
 ) -> Result<RegisteredApprovalV2, ApprovalUiAuthorityErrorV2> {
     match record.handle {
+        ApprovalRecordHandleV2::TaskAuthorization(approval) => {
+            Ok(RegisteredApprovalV2::TaskAuthorization {
+                approval,
+                display_authentication: record.display_transfer,
+            })
+        }
         ApprovalRecordHandleV2::Ingress(approval) => Ok(RegisteredApprovalV2::Ingress {
             approval,
             display_authentication: record.display_transfer,

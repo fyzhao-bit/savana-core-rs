@@ -585,9 +585,8 @@ const fn error_set_for(role: EndpointRoleV2, tag: u16) -> Option<ErrorSetV2> {
         | (EndpointRoleV2::IngressKernel, 43 | 46 | 47) => Some(ErrorSetV2::Approval),
         (EndpointRoleV2::AgentApproval, 20 | 22..=24)
         | (EndpointRoleV2::IngressApproval, 20 | 22..=23) => Some(ErrorSetV2::Approval),
-        (EndpointRoleV2::AgentApproval | EndpointRoleV2::IngressApproval, 21) => {
-            Some(ErrorSetV2::Query)
-        }
+        (EndpointRoleV2::AgentApproval | EndpointRoleV2::IngressApproval, 21)
+        | (EndpointRoleV2::IngressApproval, 25) => Some(ErrorSetV2::Query),
         (EndpointRoleV2::ApprovalAdmin, 100 | 101) => Some(ErrorSetV2::ControlMutation),
         (EndpointRoleV2::AgentKernel, 29 | 34) | (EndpointRoleV2::KernelExecutor, 60 | 62..=64) => {
             Some(ErrorSetV2::Execution)

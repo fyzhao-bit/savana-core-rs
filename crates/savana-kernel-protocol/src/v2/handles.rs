@@ -320,6 +320,10 @@ kernel_handle_v2!(
     b"SAVANA_CONNECTOR_APPROVAL_RECORD_HANDLE_V2\0"
 );
 kernel_handle_v2!(
+    TaskAuthorizationApprovalRecordHandleV2,
+    b"SAVANA_TASK_AUTHORIZATION_APPROVAL_RECORD_HANDLE_V2_SCHEMA1\0"
+);
+kernel_handle_v2!(
     IngressUiAuthenticationTransferCapabilityV2,
     b"SAVANA_INGRESS_UI_AUTH_TRANSFER_V2\0"
 );
