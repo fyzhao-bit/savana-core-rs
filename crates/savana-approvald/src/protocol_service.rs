@@ -609,7 +609,7 @@ impl ProtocolApprovalServiceV2 {
         )?;
         let settlement_nonce = random_nonce()?;
         let expires_at = bounded_settlement_expiry(now, unsigned.expires_at())?;
-        let settlement = ProtocolSignedApprovalSettlementV2::sign(
+        let mut settlement = ProtocolSignedApprovalSettlementV2::sign(
             UnsignedApprovalSettlementV2::new(
                 self.installation_id,
                 self.active_state_manifest_digest,
@@ -634,6 +634,27 @@ impl ProtocolApprovalServiceV2 {
             &self.settlement_signing_key,
         )
         .map_err(|_| ApprovalErrorV2::InvalidEnvelopeSignature)?;
+        if unsigned.task_action_binding().is_some()
+            && decision == ProtocolApprovalDecisionV2::Approve
+        {
+            let context = unsigned
+                .task_action_context(&settlement.unsigned())
+                .map_err(|_| ApprovalErrorV2::InvalidChallenge)?;
+            let exact = savana_kernel_protocol::v2::sign_task_action_approval_v2(
+                savana_kernel_protocol::v2::TaskActionApprovalV2::new(
+                    context,
+                    savana_kernel_protocol::v2::TaskActionApprovalDecisionV2::Approve,
+                    now,
+                    expires_at,
+                )
+                .map_err(|_| ApprovalErrorV2::InvalidChallenge)?,
+                &self.settlement_signing_key,
+            )
+            .map_err(|_| ApprovalErrorV2::InvalidEnvelopeSignature)?;
+            settlement = settlement
+                .with_task_action_approval(exact)
+                .map_err(|_| ApprovalErrorV2::InvalidEnvelopeSignature)?;
+        }
         self.credentials[credential_index].signature_counter = verified.signature_counter();
         self.approval_envelopes[record_index].settlement = Some(settlement.clone());
         Ok(settlement)
@@ -810,6 +831,7 @@ impl ProtocolApprovalServiceV2 {
             } if approval_envelope_digest == approval_digest
                 && approval_purpose == approval.purpose()
                 && display_digest == approval.display_digest()
+                && approval.task_action_binding().is_none_or(|binding| binding.task() == durable_task_id)
                 && match approval.binding() {
                     savana_kernel_protocol::v2::ApprovalBindingV2::TaskAuthorization { task, .. } => task == durable_task_id,
                     _ => true,
@@ -1600,6 +1622,25 @@ fn validate_restored_approval_settlement(
             ),
     }
     .map_err(|_| ApprovalErrorV2::DurableAuthentication)?;
+    if envelope.task_action_binding().is_some()
+        && settlement_unsigned.decision() == ProtocolApprovalDecisionV2::Approve
+    {
+        let context = envelope
+            .task_action_context(&settlement_unsigned)
+            .map_err(|_| ApprovalErrorV2::DurableAuthentication)?;
+        savana_kernel_protocol::v2::verify_task_action_approval_v2(
+            settlement
+                .task_action_approval()
+                .ok_or(ApprovalErrorV2::DurableAuthentication)?,
+            &ed25519_dalek::VerifyingKey::from_bytes(&deployment.settlement_public_key())
+                .map_err(|_| ApprovalErrorV2::DurableAuthentication)?,
+            &context,
+            settlement_unsigned.issued_at(),
+        )
+        .map_err(|_| ApprovalErrorV2::DurableAuthentication)?;
+    } else if settlement.task_action_approval().is_some() {
+        return Err(ApprovalErrorV2::DurableAuthentication);
+    }
     let credential = deployment
         .credentials
         .iter()
@@ -2579,6 +2620,166 @@ mod tests {
                 Some(&settlement)
             );
         }
+    }
+
+    #[test]
+    fn action_content_approval_is_issued_only_after_actual_ceremony_and_cannot_be_downgraded_on_restore(
+    ) {
+        use savana_kernel_protocol::v2::*;
+        let d = |n| Digest32V2::new([n; 32]);
+        let kernel_key = SigningKey::from_bytes(&[0x71; 32]);
+        let principal = PrincipalIdV2::new([0x81; 32]);
+        let credential = d(0x82);
+        let p256 = P256SigningKey::from_slice(&[0x83; 32]).unwrap();
+        let mut service = enrollment_service();
+        service
+            .load_verified_hardware_credential(
+                credential,
+                principal,
+                [0x84; 16],
+                p256.verifying_key()
+                    .to_encoded_point(false)
+                    .as_bytes()
+                    .try_into()
+                    .unwrap(),
+                1,
+            )
+            .unwrap();
+        let challenge = Nonce32V2::new([0x85; 32]);
+        let display = BoundedApprovalDisplayTextV2::new("Send A to Alice; 1 item".into()).unwrap();
+        let semantic = ToolExecutionSemanticBindingV2::new(
+            PlanRevisionDigestV2::new([1; 32]),
+            InternalStepIdV2::new([2; 32]),
+            d(3),
+            d(4),
+            d(5),
+            d(6),
+            d(7),
+            d(8),
+            d(9),
+            d(10),
+            AttemptKindV2::new(1),
+        )
+        .unwrap();
+        let unsigned = UnsignedApprovalEnvelopeV2::new(
+            service.installation_id,
+            service.active_state_manifest_digest,
+            9,
+            ApprovalPurposeV2::ToolExecution,
+            Nonce32V2::new([0x86; 32]),
+            challenge,
+            ApprovalBindingV2::ToolExecution {
+                action_intent_id: ActionIntentIdV2::new([0x87; 32]),
+                binding: semantic,
+            },
+            principal,
+            d(0x88),
+            approval_display_digest_v2(display.as_bytes()),
+            display,
+            Some(d(0x89)),
+            service.approvald_endpoint_identity,
+            UnixMillisV2::new(100),
+            UnixMillisV2::new(1000),
+        )
+        .unwrap()
+        .with_task_action_binding(
+            TaskActionApprovalBindingV2::new(d(0x90), d(0x91), 1, DurableTaskIdV2::new([0x92; 32]))
+                .unwrap(),
+        )
+        .unwrap();
+        let envelope = SignedApprovalEnvelopeV2::sign(unsigned.clone(), &kernel_key).unwrap();
+        let make_ui = |task: DurableTaskIdV2| {
+            SignedUiAuthenticationEnvelopeV2::sign(
+                UnsignedUiAuthenticationEnvelopeV2::new(
+                    service.installation_id,
+                    service.active_state_manifest_digest,
+                    9,
+                    UiAuthenticationPurposeV2::ApprovalDisplay,
+                    UiAuthenticationBindingV2::ApprovalDisplay {
+                        durable_task_id: task,
+                        approval_envelope_digest: envelope.envelope_digest().unwrap(),
+                        approval_purpose: ApprovalPurposeV2::ToolExecution,
+                        display_digest: unsigned.display_digest(),
+                    },
+                    Some(principal),
+                    FixedOriginV2::Approval8766,
+                    FixedOriginV2::Approval8766,
+                    Nonce32V2::new([0x93; 32]),
+                    UnixMillisV2::new(100),
+                    UnixMillisV2::new(1000),
+                )
+                .unwrap(),
+                &kernel_key,
+            )
+            .unwrap()
+        };
+        let wrong_ui = make_ui(DurableTaskIdV2::new([0xff; 32]));
+        let correct_ui = make_ui(DurableTaskIdV2::new([0x92; 32]));
+        assert!(service
+            .register_approval_pair(
+                EndpointRoleV2::AgentApproval,
+                &envelope,
+                &wrong_ui,
+                UnixMillisV2::new(200)
+            )
+            .is_err());
+        assert!(service.approval_envelopes.is_empty());
+        let (digest, _, _) = service
+            .register_approval_pair(
+                EndpointRoleV2::AgentApproval,
+                &envelope,
+                &correct_ui,
+                UnixMillisV2::new(200),
+            )
+            .unwrap();
+        assert!(service.approval_envelopes[0].settlement.is_none());
+        assert!(service
+            .settle_approval(
+                digest,
+                ApprovalDecisionV2::Approve,
+                &assertion(&p256, credential, principal, Nonce32V2::new([0xff; 32]), 2),
+                UnixMillisV2::new(300)
+            )
+            .is_err());
+        assert!(service.approval_envelopes[0].settlement.is_none());
+        let receipt = service
+            .settle_approval(
+                digest,
+                ApprovalDecisionV2::Approve,
+                &assertion(&p256, credential, principal, challenge, 2),
+                UnixMillisV2::new(300),
+            )
+            .unwrap();
+        let context = unsigned.task_action_context(&receipt.unsigned()).unwrap();
+        let exact = receipt
+            .task_action_approval()
+            .expect("generic approval is not content-bound action evidence");
+        verify_task_action_approval_v2(
+            exact,
+            &ed25519_dalek::VerifyingKey::from_bytes(&service.settlement_public_key()).unwrap(),
+            &context,
+            UnixMillisV2::new(301),
+        )
+        .unwrap();
+        let snapshot = service.encode_mutable_state().unwrap();
+        let restored =
+            ProtocolApprovalServiceV2::restore_mutable_state(enrollment_service(), &snapshot)
+                .unwrap();
+        assert_eq!(
+            restored.approval_envelopes[0].settlement.as_ref().unwrap(),
+            &receipt
+        );
+        // A signed generic receipt stripped of its required exact-action proof is
+        // valid for the old protocol but must not silently restore this new pair.
+        let stripped =
+            SignedApprovalSettlementV2::sign(receipt.unsigned(), &service.settlement_signing_key)
+                .unwrap();
+        service.approval_envelopes[0].settlement = Some(stripped);
+        assert!(ProtocolApprovalServiceV2::restore_mutable_state(
+            enrollment_service(),
+            &service.encode_mutable_state().unwrap()
+        )
+        .is_err());
     }
 
     #[test]

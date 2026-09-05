@@ -160,6 +160,24 @@ business-request equivalence or prove the end-to-end provider path (Task 6B/8).
 - [ ] Populate verified relations from contract matching, replace the empty relation assumption. New plan versions require fresh evaluation but cannot alter authority. Final release must obey the same task resource/destination/effect budget constraints, not become an unguarded bypass.
 - [ ] Route to Task 3 atomic prepare. Recovery never reconstructs new grants from old records. Run kerneld production-handler tests plus existing declassification/leak-gate regressions, commit and review.
 
+Task 4C/5B action-approval checkpoint (2026-09-05): tool G5 creates a schema-3
+approval envelope binding ContentDigest plus authorization ID/revision and task.
+After the real verified user ceremony, approvald signs the separate TaskActionApproval
+and persists it together with the generic settlement. New settlement arity 4
+transports this proof; legacy arity 3 never supplies it. Recovery rejects removal
+or mismatch of a required proof. The paired UI task must match the action task.
+Native authorization independently verifies both signatures and the exact stored
+envelope/content context before marking consent consumed. G7 uses approval-backed
+endorsements when consent is required, carrying the real settlement digest and
+nonce into atomic task consumption and AuthorizationDigest. No old generic consent
+is rebranded as the new proof. Protocol, real approval-service ceremony/recovery,
+and native proposal/evaluate/authorize regressions pass. Task 7A's actual tool
+approval display now renders deterministic readable JSON with exact resource,
+destination, complete request, budgets and predecessors; format characters and
+markup are escaped without changing request semantics. Overlong expansion is
+refused, never truncated. Tests: full protocol 241, approvald 19, native agent
+authority 31 passed. Final-release producer and whole-chain validation remain open.
+
 ## Task 6: Exact request profile and executor boundary validation
 
 Task 6B execution-boundary checkpoint (2026-09-05): the real tool seal now

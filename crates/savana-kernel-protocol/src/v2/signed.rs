@@ -1111,9 +1111,62 @@ pub struct UnsignedApprovalEnvelopeV2 {
     approvald_endpoint_identity: ServiceIdentityV2,
     issued_at: UnixMillisV2,
     expires_at: UnixMillisV2,
+    task_action: Option<super::TaskActionApprovalBindingV2>,
 }
 
 impl UnsignedApprovalEnvelopeV2 {
+    pub fn with_task_action_binding(
+        mut self,
+        binding: super::TaskActionApprovalBindingV2,
+    ) -> Result<Self, ProtocolError> {
+        if !matches!(
+            self.purpose,
+            ApprovalPurposeV2::ToolExecution | ApprovalPurposeV2::FinalRelease
+        ) {
+            return Err(malformed());
+        }
+        self.task_action = Some(binding);
+        Ok(self)
+    }
+
+    pub fn task_action_binding(&self) -> Option<super::TaskActionApprovalBindingV2> {
+        self.task_action
+    }
+
+    /// Derive expected material from the retained envelope and actual ceremony.
+    /// This structural check is not signature or user-authentication evidence.
+    pub fn task_action_context(
+        &self,
+        settlement: &UnsignedApprovalSettlementV2,
+    ) -> Result<super::TaskActionApprovalContextV2, ProtocolError> {
+        let binding = self.task_action.ok_or_else(malformed)?;
+        if settlement.installation_id != self.installation_id
+            || settlement.active_state_manifest_digest != self.active_state_manifest_digest
+            || settlement.deployment_generation != self.deployment_generation
+            || settlement.purpose != self.purpose
+            || settlement.authenticated_principal != self.expected_principal
+            || settlement.challenge != self.decision_challenge
+            || settlement.issued_at.get() < self.issued_at.get()
+            || settlement.expires_at.get() > self.expires_at.get()
+        {
+            return Err(malformed());
+        }
+        Ok(super::TaskActionApprovalContextV2 {
+            content_digest: binding.content_digest,
+            authorization_id: binding.authorization_id,
+            authorization_revision: binding.authorization_revision,
+            task: binding.task,
+            principal: settlement.authenticated_principal,
+            installation_digest: self.installation_id,
+            manifest_digest: self.active_state_manifest_digest,
+            deployment_generation: self.deployment_generation,
+            challenge_nonce: Digest32V2::new(*self.decision_challenge.as_bytes()),
+            settlement_nonce: Digest32V2::new(*settlement.settlement_nonce.as_bytes()),
+            authentication_context_digest: settlement.authentication_context_digest,
+            display_digest: self.display_digest,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         installation_id: Digest32V2,
@@ -1169,6 +1222,7 @@ impl UnsignedApprovalEnvelopeV2 {
             approvald_endpoint_identity,
             issued_at,
             expires_at,
+            task_action: None,
         })
     }
 
@@ -1739,9 +1793,44 @@ pub struct SignedApprovalSettlementV2 {
     unsigned: UnsignedApprovalSettlementV2,
     key_id: Ed25519KeyIdV2,
     signature: Ed25519SignatureV2,
+    task_action: Option<super::SignedTaskActionApprovalV2>,
 }
 
 impl SignedApprovalSettlementV2 {
+    pub fn task_action_approval(&self) -> Option<&super::SignedTaskActionApprovalV2> {
+        self.task_action.as_ref()
+    }
+
+    /// Attach separately signed content-bound evidence. This checks consistency,
+    /// not authenticity; consumers must verify both signatures against their key.
+    pub fn with_task_action_approval(
+        mut self,
+        approval: super::SignedTaskActionApprovalV2,
+    ) -> Result<Self, ProtocolError> {
+        let material = super::decode_task_action_approval_v2(approval.canonical_payload())?;
+        let context = material.context();
+        let u = self.unsigned;
+        if !matches!(
+            u.purpose,
+            ApprovalPurposeV2::ToolExecution | ApprovalPurposeV2::FinalRelease
+        ) || u.decision != ApprovalDecisionV2::Approve
+            || material.decision() != super::TaskActionApprovalDecisionV2::Approve
+            || context.installation_digest != u.installation_id
+            || context.manifest_digest != u.active_state_manifest_digest
+            || context.deployment_generation != u.deployment_generation
+            || context.principal != u.authenticated_principal
+            || context.authentication_context_digest != u.authentication_context_digest
+            || context.challenge_nonce.as_bytes() != u.challenge.as_bytes()
+            || context.settlement_nonce.as_bytes() != u.settlement_nonce.as_bytes()
+            || material.issued_at() != u.issued_at
+            || material.expires_at() != u.expires_at
+        {
+            return Err(malformed());
+        }
+        self.task_action = Some(approval);
+        Ok(self)
+    }
+
     pub fn sign(
         unsigned: UnsignedApprovalSettlementV2,
         signing_key: &SigningKey,
@@ -1766,6 +1855,7 @@ impl SignedApprovalSettlementV2 {
             unsigned,
             key_id,
             signature,
+            task_action: None,
         })
     }
 
@@ -2477,12 +2567,57 @@ macro_rules! signed_object_v2 {
     };
 }
 
-signed_object_v2!(
-    SignedApprovalSettlementV2,
-    UnsignedApprovalSettlementV2,
-    encode_unsigned_approval_settlement_v2,
-    decode_unsigned_approval_settlement_v2
-);
+impl<C> minicbor::Encode<C> for SignedApprovalSettlementV2 {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut minicbor::Encoder<W>,
+        _: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        let payload = encode_unsigned_approval_settlement_v2(&self.unsigned)
+            .map_err(|_| minicbor::encode::Error::message("invalid approval settlement"))?;
+        e.array(if self.task_action.is_some() { 4 } else { 3 })?
+            .bytes(&payload)?;
+        minicbor::Encode::encode(&self.key_id, e, &mut ())?;
+        minicbor::Encode::encode(&self.signature, e, &mut ())?;
+        if let Some(approval) = &self.task_action {
+            let bytes = super::encode_signed_task_action_approval_v2(approval)
+                .map_err(|_| minicbor::encode::Error::message("invalid task action approval"))?;
+            e.bytes(&bytes)?;
+        }
+        Ok(())
+    }
+}
+impl<'b> minicbor::Decode<'b, V2DecodeContext> for SignedApprovalSettlementV2 {
+    fn decode(
+        d: &mut minicbor::Decoder<'b>,
+        context: &mut V2DecodeContext,
+    ) -> Result<Self, minicbor::decode::Error> {
+        let position = d.position();
+        let length = d.array()?;
+        if !matches!(length, Some(3) | Some(4)) {
+            return Err(decode_error(position));
+        }
+        let payload = d.bytes()?;
+        if payload.len() > MAX_SIGNED_PAYLOAD_BYTES_V2 {
+            return Err(decode_error(position));
+        }
+        let unsigned =
+            decode_unsigned_approval_settlement_v2(payload).map_err(|_| decode_error(position))?;
+        let key = minicbor::Decode::decode(d, context)?;
+        let signature = minicbor::Decode::decode(d, context)?;
+        let receipt =
+            Self::from_parts(unsigned, key, signature).map_err(|_| decode_error(position))?;
+        if length == Some(4) {
+            let approval = super::decode_signed_task_action_approval_v2(d.bytes()?)
+                .map_err(|_| decode_error(position))?;
+            receipt
+                .with_task_action_approval(approval)
+                .map_err(|_| decode_error(position))
+        } else {
+            Ok(receipt)
+        }
+    }
+}
 signed_object_v2!(
     SignedUiAuthenticationSettlementV2,
     UnsignedUiAuthenticationSettlementV2,
@@ -2604,8 +2739,8 @@ fn encode_unsigned_approval_envelope_v2(
 ) -> Result<Vec<u8>, ProtocolError> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
     encoder
-        .array(16)
-        .and_then(|encoder| encoder.u16(2))
+        .array(if value.task_action.is_some() { 17 } else { 16 })
+        .and_then(|encoder| encoder.u16(if value.task_action.is_some() { 3 } else { 2 }))
         .map_err(ProtocolError::malformed)?;
     encode_fixed(&mut encoder, &value.installation_id)?;
     encode_fixed(&mut encoder, &value.active_state_manifest_digest)?;
@@ -2629,6 +2764,9 @@ fn encode_unsigned_approval_envelope_v2(
     encode_fixed(&mut encoder, &value.approvald_endpoint_identity)?;
     encode_fixed(&mut encoder, &value.issued_at)?;
     encode_fixed(&mut encoder, &value.expires_at)?;
+    if let Some(binding) = &value.task_action {
+        encode_fixed(&mut encoder, binding)?;
+    }
     Ok(encoder.into_writer())
 }
 
@@ -2637,10 +2775,13 @@ fn decode_unsigned_approval_envelope_v2(
 ) -> Result<UnsignedApprovalEnvelopeV2, ProtocolError> {
     scan_single(bytes)?;
     let mut decoder = minicbor::Decoder::new(bytes);
-    expect_array(&mut decoder, 16)?;
-    expect_schema_two(&mut decoder)?;
+    let length = decoder.array().map_err(ProtocolError::malformed)?;
+    let schema = decoder.u16().map_err(ProtocolError::malformed)?;
+    if !matches!((length, schema), (Some(16), 2) | (Some(17), 3)) {
+        return Err(malformed());
+    }
     let mut context = V2DecodeContext;
-    let value = UnsignedApprovalEnvelopeV2::new(
+    let mut value = UnsignedApprovalEnvelopeV2::new(
         decode_fixed(&mut decoder, &mut context)?,
         decode_fixed(&mut decoder, &mut context)?,
         decoder.u64().map_err(ProtocolError::malformed)?,
@@ -2659,6 +2800,9 @@ fn decode_unsigned_approval_envelope_v2(
         decode_fixed(&mut decoder, &mut context)?,
         decode_fixed(&mut decoder, &mut context)?,
     )?;
+    if schema == 3 {
+        value = value.with_task_action_binding(decode_fixed(&mut decoder, &mut context)?)?;
+    }
     require_canonical_end(
         &decoder,
         bytes,

@@ -9,6 +9,77 @@ use sha2::{Digest as _, Sha256};
 pub const MAX_TASK_ACTION_APPROVAL_BYTES_V2: usize = 1024;
 const SIGN_DOMAIN: &[u8] = b"SAVANA_TASK_ACTION_APPROVAL_SIGNATURE_V2_SCHEMA1\0";
 const DIGEST_DOMAIN: &[u8] = b"SAVANA_TASK_ACTION_APPROVAL_DIGEST_V2_SCHEMA1\0";
+
+/// Pre-ceremony binding signed by the kernel inside the approval envelope.
+/// Deliberately excludes the future settlement and authorization digests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskActionApprovalBindingV2 {
+    pub(super) content_digest: Digest32V2,
+    pub(super) authorization_id: Digest32V2,
+    pub(super) authorization_revision: u64,
+    pub(super) task: DurableTaskIdV2,
+}
+impl TaskActionApprovalBindingV2 {
+    pub fn new(
+        content_digest: Digest32V2,
+        authorization_id: Digest32V2,
+        authorization_revision: u64,
+        task: DurableTaskIdV2,
+    ) -> Result<Self, ProtocolError> {
+        nonzero(content_digest.as_bytes())?;
+        nonzero(authorization_id.as_bytes())?;
+        nonzero(task.as_bytes())?;
+        if authorization_revision == 0 {
+            return Err(invalid());
+        }
+        Ok(Self {
+            content_digest,
+            authorization_id,
+            authorization_revision,
+            task,
+        })
+    }
+    pub fn content_digest(&self) -> Digest32V2 {
+        self.content_digest
+    }
+    pub fn authorization_id(&self) -> Digest32V2 {
+        self.authorization_id
+    }
+    pub fn authorization_revision(&self) -> u64 {
+        self.authorization_revision
+    }
+    pub fn task(&self) -> DurableTaskIdV2 {
+        self.task
+    }
+}
+impl<C> minicbor::Encode<C> for TaskActionApprovalBindingV2 {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut minicbor::Encoder<W>,
+        _: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        e.array(5)?
+            .u16(1)?
+            .bytes(self.content_digest.as_bytes())?
+            .bytes(self.authorization_id.as_bytes())?
+            .u64(self.authorization_revision)?
+            .bytes(self.task.as_bytes())?;
+        Ok(())
+    }
+}
+impl<'b, C> minicbor::Decode<'b, C> for TaskActionApprovalBindingV2 {
+    fn decode(d: &mut minicbor::Decoder<'b>, _: &mut C) -> Result<Self, minicbor::decode::Error> {
+        let bad = || minicbor::decode::Error::message("invalid task action binding");
+        if d.array()? != Some(5) || d.u16()? != 1 {
+            return Err(bad());
+        }
+        let content = Digest32V2::new(d.bytes()?.try_into().map_err(|_| bad())?);
+        let authorization = Digest32V2::new(d.bytes()?.try_into().map_err(|_| bad())?);
+        let revision = d.u64()?;
+        let task = DurableTaskIdV2::new(d.bytes()?.try_into().map_err(|_| bad())?);
+        Self::new(content, authorization, revision, task).map_err(|_| bad())
+    }
+}
 fn invalid() -> ProtocolError {
     ProtocolError::stable(StableCode::ProtocolMalformedCbor)
 }

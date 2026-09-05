@@ -61,6 +61,89 @@ fn input(quantity: u64) -> Vec<u8> {
 }
 
 #[test]
+fn action_review_is_exact_readable_bounded_and_not_model_prose() {
+    let p = profile(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        BusinessMagnitudeV2::CountField,
+    );
+    let review = |request: &BusinessRequestV2, used, charged| {
+        let action = request.action_alternative(d(21)).unwrap();
+        let root = TaskAuthorizationV2::new(
+            d(20),
+            PrincipalIdV2::new([30; 32]),
+            DurableTaskIdV2::new([31; 32]),
+            1,
+            d(32),
+            d(33),
+            UnixMillisV2::new(1),
+            UnixMillisV2::new(1000),
+            TaskEvidenceKindV2::AuthenticatedStructuredInput,
+            d(34),
+            d(35),
+            vec![
+                TaskAuthorizationClauseV2::new(1, vec![action.clone()], 1, 1, 1, vec![], false)
+                    .unwrap(),
+                TaskAuthorizationClauseV2::new(2, vec![action.clone()], 3, 5, 3, vec![1], true)
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let content = ActionContentV2::new(
+            d(20),
+            1,
+            2,
+            0,
+            action,
+            request.magnitude(),
+            request.payload_digest(),
+            d(22),
+            d(23),
+            d(24),
+            d(25),
+            1,
+        )
+        .unwrap();
+        render_task_action_display_v2(&content, &root, request, used, charged)
+    };
+    let source = String::from_utf8(input(2))
+        .unwrap()
+        .replace("hello", "<script>&\\n\\u202eevil\\u200b");
+    let request = BusinessRequestV2::parse(&p, "request-1", source.as_bytes()).unwrap();
+    let display = review(&request, 1, 2).unwrap();
+    let text = display.as_str();
+    assert!(!text.contains('<') && !text.contains('&'));
+    assert!(!text.contains('\u{202e}') && !text.contains('\u{200b}'));
+    assert!(text.contains("\\u202e") && text.contains("\\u200b"));
+    let decoded: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(decoded["resource"], "A");
+    assert_eq!(decoded["destination"], "Alice");
+    assert_eq!(decoded["magnitude"], 2);
+    assert_eq!(decoded["attempts_after_prepare"], 2);
+    assert_eq!(decoded["magnitude_after_prepare"], 4);
+    assert_eq!(
+        decoded["requires_verified_success_of_clauses"],
+        serde_json::json!([1])
+    );
+    assert_eq!(
+        decoded["approval_kind"],
+        "One action; does not amend task authorization"
+    );
+    assert_eq!(
+        decoded["exact_business_request"],
+        serde_json::from_slice::<serde_json::Value>(&request.canonical_json()).unwrap()
+    );
+    for (used, charged) in [(3, 0), (0, 4), (u64::MAX, 0), (0, u64::MAX)] {
+        assert!(review(&request, used, charged).is_err());
+    }
+    // Escaping expansion must reject the whole review, not hide/truncate the tail.
+    let oversized = String::from_utf8(input(1))
+        .unwrap()
+        .replace("hello", &"<".repeat(25_000));
+    let oversized = BusinessRequestV2::parse(&p, "request-1", oversized.as_bytes()).unwrap();
+    assert!(review(&oversized, 0, 0).is_err());
+}
+
+#[test]
 fn task_execution_payload_is_closed_content_bound_and_redacts_debug() {
     let profile = profile(
         ActionCodecProfileV2::McpToolsCallJsonV1,
