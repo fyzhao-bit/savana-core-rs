@@ -82,6 +82,10 @@ pub enum FixedHttpRouteV2 {
     IngressInputChunk,
     IngressInputFinalize,
     IngressInputAbort,
+    IngressTaskEstablish,
+    IngressTaskApprovalPrepare,
+    IngressTaskApprovalCommit,
+    IngressTaskRevoke,
     AgentUiAuthenticationComplete,
     AgentView,
     AgentAction,
@@ -467,6 +471,18 @@ fn route(
         (FixedHttpServiceV2::Ingress, "POST", "/v2/input/abort") => {
             FixedHttpRouteV2::IngressInputAbort
         }
+        (FixedHttpServiceV2::Ingress, "POST", "/v2/task/establish") => {
+            FixedHttpRouteV2::IngressTaskEstablish
+        }
+        (FixedHttpServiceV2::Ingress, "POST", "/v2/task/revoke") => {
+            FixedHttpRouteV2::IngressTaskRevoke
+        }
+        (FixedHttpServiceV2::Ingress, "POST", "/v2/task/approval/prepare") => {
+            FixedHttpRouteV2::IngressTaskApprovalPrepare
+        }
+        (FixedHttpServiceV2::Ingress, "POST", "/v2/task/approval/commit") => {
+            FixedHttpRouteV2::IngressTaskApprovalCommit
+        }
         (FixedHttpServiceV2::Agent, "POST", "/v2/ui-auth/complete") => {
             FixedHttpRouteV2::AgentUiAuthenticationComplete
         }
@@ -554,6 +570,10 @@ fn validate_origin(
         FixedHttpRouteV2::IngressInputBegin
         | FixedHttpRouteV2::IngressInputChunk
         | FixedHttpRouteV2::IngressInputFinalize
+        | FixedHttpRouteV2::IngressTaskEstablish
+        | FixedHttpRouteV2::IngressTaskRevoke
+        | FixedHttpRouteV2::IngressTaskApprovalPrepare
+        | FixedHttpRouteV2::IngressTaskApprovalCommit
         | FixedHttpRouteV2::IngressInputAbort => origin == Some(FixedOriginV2::Ingress8767),
         FixedHttpRouteV2::AgentView | FixedHttpRouteV2::AgentAction => {
             origin == Some(FixedOriginV2::Agent8768)
@@ -676,6 +696,32 @@ mod tests {
             read_fixed_http_request_v2(&mut bytes.as_slice(), FixedHttpServiceV2::Ingress).unwrap();
         assert_eq!(decoded.route(), FixedHttpRouteV2::IngressInputBegin);
         assert_eq!(decoded.body(), body);
+    }
+
+    #[test]
+    fn task_mutations_require_exact_ingress_origin() {
+        for path in [
+            "/v2/task/establish",
+            "/v2/task/revoke",
+            "/v2/task/approval/prepare",
+            "/v2/task/approval/commit",
+        ] {
+            for origin in [
+                "http://localhost:8767",
+                "http://localhost:8768",
+                "http://localhost:8765",
+                "https://attacker.example",
+                "null",
+            ] {
+                let mut bytes = format!("POST {path} HTTP/1.1\r\nHost: localhost:8767\r\nOrigin: {origin}\r\nContent-Type: application/cbor\r\nContent-Length: 1\r\n\r\n").into_bytes();
+                bytes.push(0x80);
+                assert_eq!(
+                    read_fixed_http_request_v2(&mut bytes.as_slice(), FixedHttpServiceV2::Ingress)
+                        .is_ok(),
+                    origin == "http://localhost:8767"
+                );
+            }
+        }
     }
 
     #[test]

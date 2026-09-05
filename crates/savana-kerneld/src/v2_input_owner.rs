@@ -18,6 +18,8 @@ use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
 const MAX_INPUT_CHUNK_BYTES: usize = 1024 * 1024;
+const TASK_SUBMISSION_DOMAIN: &[u8] =
+    b"SAVANA_AUTHENTICATED_STRUCTURED_TASK_SUBMISSION_V2_SCHEMA1\0";
 const MAX_INPUT_SESSION_BYTES: usize = 64 * 1024 * 1024;
 const INPUT_COMMITMENT_DOMAIN: &[u8] = b"SAVANA_FINALIZED_INPUT_COMMITMENT_V2\0";
 const CHANNEL_COMMITMENTS_DOMAIN: &[u8] = b"SAVANA_INPUT_CHANNEL_COMMITMENTS_V2\0";
@@ -522,6 +524,25 @@ pub(crate) struct KernelInputOwnerV2 {
     extractions: Vec<ParserExtractionRecordV2>,
 }
 
+/// Created only by the input owner after resolving an actual finalized input
+/// session and its verified UI authentication. No wire `trusted` flag exists.
+pub(crate) struct AuthenticatedTaskDraftSubmissionV2 {
+    draft_digest: Digest32V2,
+    evidence_digest: Digest32V2,
+    authorization: KernelVerifiedUiAuthorizationV2,
+}
+impl AuthenticatedTaskDraftSubmissionV2 {
+    pub(crate) fn draft_digest(&self) -> Digest32V2 {
+        self.draft_digest
+    }
+    pub(crate) fn evidence_digest(&self) -> Digest32V2 {
+        self.evidence_digest
+    }
+    pub(crate) fn authorization(&self) -> KernelVerifiedUiAuthorizationV2 {
+        self.authorization
+    }
+}
+
 impl std::fmt::Debug for KernelInputOwnerV2 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -534,6 +555,58 @@ impl std::fmt::Debug for KernelInputOwnerV2 {
 }
 
 impl KernelInputOwnerV2 {
+    /// This method is for the dedicated typed ingress operation only, never for
+    /// interpreting chat text or planner output as user authorization.
+    pub(crate) fn authenticate_task_draft_submission(
+        &self,
+        session: InputSessionHandleV2,
+        draft: &savana_kernel_protocol::v2::TaskAuthorizationDraftV2,
+        manifest: Digest32V2,
+        generation: u64,
+        now: UnixMillisV2,
+    ) -> Result<AuthenticatedTaskDraftSubmissionV2, KernelInputErrorV2> {
+        let commitment = session.authority_commitment(&self.handle_key);
+        let record = self
+            .sessions
+            .iter()
+            .find(|s| s.session_commitment == commitment)
+            .ok_or(KernelInputErrorV2::InvalidReference)?;
+        let auth = record.authorization;
+        if record.state != KernelInputPublicStateV2::Finalized
+            || record.finalized_input_commitment != Some(draft.source_input_digest())
+            || auth.durable_task_id() != Some(draft.task())
+            || auth.authenticated_principal() != draft.principal()
+            || auth.installation_id() != draft.installation_digest()
+            || auth.active_state_manifest_digest() != manifest
+            || draft.manifest_digest() != manifest
+            || auth.deployment_generation() != generation
+            || draft.deployment_generation() != generation
+            || now.get() == 0
+            || now.get() >= auth.expires_at().get()
+            || now.get() < draft.not_before().get()
+            || now.get() >= draft.expires_at().get()
+        {
+            return Err(KernelInputErrorV2::ProvenanceMismatch);
+        }
+        let draft_digest = savana_kernel_protocol::v2::task_authorization_draft_digest_v2(draft)
+            .map_err(|_| KernelInputErrorV2::ProvenanceMismatch)?;
+        let evidence_digest = domain_hash_many(
+            TASK_SUBMISSION_DOMAIN,
+            &[
+                draft_digest.as_bytes(),
+                auth.settlement_digest().as_bytes(),
+                auth.authentication_context_digest().as_bytes(),
+                auth.binding_digest().as_bytes(),
+                draft.source_input_digest().as_bytes(),
+            ],
+        );
+        Ok(AuthenticatedTaskDraftSubmissionV2 {
+            draft_digest,
+            evidence_digest,
+            authorization: auth,
+        })
+    }
+
     pub(crate) fn new(
         maximum_sessions: usize,
         maximum_input_bytes: usize,
@@ -1706,7 +1779,7 @@ fn input_chunk_digest_from_internal_id(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use ed25519_dalek::SigningKey;
     use savana_kernel_protocol::v2::{
         derive_ed25519_key_id_v2, input_channel_step_digest_v2, input_chunk_digest_v2,
@@ -1859,8 +1932,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn finalized_chat_material_leaves_no_plaintext_in_the_handle_resolver() {
+    pub(crate) fn finalized_task_input_fixture(
+    ) -> (KernelInputOwnerV2, super::InputSessionHandleV2, Digest32V2) {
         let mut owner = KernelInputOwnerV2::new(4, 4096).unwrap();
         let begun = begin_chat(&mut owner, b"abc");
         let ack = owner
@@ -1895,6 +1968,12 @@ mod tests {
         assert_ne!(finalized.input_commitment().as_bytes(), &[0; 32]);
         assert_eq!(finalized.channels()[0].bytes(), b"abc");
         assert_eq!(owner.retained_plaintext_bytes(), 0);
+        (owner, begun.session(), finalized.input_commitment())
+    }
+
+    #[test]
+    fn finalized_chat_material_leaves_no_plaintext_in_the_handle_resolver() {
+        finalized_task_input_fixture();
     }
 
     #[test]

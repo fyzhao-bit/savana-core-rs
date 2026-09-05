@@ -187,6 +187,7 @@ mod native {
     const ENVELOPE_SIGNING_SEED_CREDENTIAL_V2: &str = "envelope-signing-v2.seed";
     const AUTHORITY_ENVELOPE_SEED_CREDENTIAL_V2: &str = "authority-envelope-v2.seed";
     const TASK_CORRELATION_SEED_CREDENTIAL_V2: &str = "task-correlation-v2.seed";
+    const TASK_AUTHORIZATION_SEED_CREDENTIAL_V2: &str = "task-authorization-v2.seed";
     const VAULT_ENCRYPTION_KEY_CREDENTIAL_V2: &str = "vault-encryption-v2.key";
     const VAULT_ANCHOR_AUTHENTICATION_KEY_CREDENTIAL_V2: &str =
         "vault-anchor-authentication-v2.key";
@@ -249,6 +250,8 @@ mod native {
         ui_settlement_public_key: String,
         ingress_settlement_key_id: String,
         ingress_settlement_public_key: String,
+        task_authorization_key_id: String,
+        task_authorization_public_key: String,
         agentd_boot_id: String,
         approvald_boot_id: String,
         machine_boot_id: String,
@@ -369,6 +372,7 @@ mod native {
         envelope_signing_key: SigningKey,
         authority_envelope_signing_key: SigningKey,
         task_correlation_signing_key: SigningKey,
+        task_authorization_signing_key: SigningKey,
         vault_encryption_key: [u8; 32],
         vault_anchor_authentication_key: [u8; 32],
         agent_state_encryption_key: [u8; 32],
@@ -388,6 +392,8 @@ mod native {
         ui_settlement_public_key: [u8; 32],
         ingress_settlement_key_id: Ed25519KeyIdV2,
         ingress_settlement_public_key: [u8; 32],
+        task_authorization_key_id: Ed25519KeyIdV2,
+        task_authorization_public_key: [u8; 32],
         agentd_boot_id: BootIdV2,
         approvald_boot_id: BootIdV2,
         machine_boot_id: BootIdV2,
@@ -555,6 +561,8 @@ mod native {
         lifecycle: &mut dyn ServerLifecycle,
     ) -> Result<(), StableCode> {
         let (startup, keys, runtime_material) = load_verified_startup(config_path)?;
+        let task_issuer =
+            load_task_authorization_issuer(&keys, &runtime_material, startup.installation_id())?;
         let self_lock = startup
             .service_lock(ClosedServiceIdV2::Kerneld)
             .ok_or(StableCode::KernelUnavailable)?;
@@ -832,6 +840,9 @@ mod native {
                 .map_err(|_| StableCode::KernelUnavailable)?;
             (shared, authority)
         };
+        agent_authority
+            .install_task_issuer(task_issuer)
+            .map_err(|_| StableCode::KernelUnavailable)?;
         let g7_runtime = KernelG7RuntimeV2::from_verified_deployment(
             runtime_material.policy.quota_limit,
             runtime_material.policy.quota_policy_digest,
@@ -2417,6 +2428,8 @@ mod native {
         let runtime = load_runtime_material(&bootstrap, &startup)?;
         keys.connector_authority_signing_key =
             load_connector_authority_signing_key(&keys, &runtime)?;
+        // Validate the purpose-separated issuer on initial load AND reload.
+        let _ = load_task_authorization_issuer(&keys, &runtime, startup.installation_id())?;
         Ok((startup, keys, runtime))
     }
 
@@ -2550,6 +2563,9 @@ mod native {
         )?);
         let task_correlation_seed =
             Zeroizing::new(read_native_credential(TASK_CORRELATION_SEED_CREDENTIAL_V2)?);
+        let task_authorization_seed = Zeroizing::new(read_native_credential(
+            TASK_AUTHORIZATION_SEED_CREDENTIAL_V2,
+        )?);
         let vault_encryption_key = read_native_credential(VAULT_ENCRYPTION_KEY_CREDENTIAL_V2)?;
         let vault_anchor_authentication_key =
             read_native_credential(VAULT_ANCHOR_AUTHENTICATION_KEY_CREDENTIAL_V2)?;
@@ -2568,6 +2584,7 @@ mod native {
         let envelope_signing_key = SigningKey::from_bytes(&envelope_seed);
         let authority_envelope_signing_key = SigningKey::from_bytes(&authority_envelope_seed);
         let task_correlation_signing_key = SigningKey::from_bytes(&task_correlation_seed);
+        let task_authorization_signing_key = SigningKey::from_bytes(&task_authorization_seed);
         let executor_client_signing_key = SigningKey::from_bytes(&executor_client_seed);
         let agent = startup
             .edge_lock(ClosedServiceEdgeIdV2::AgentKernel)
@@ -2613,6 +2630,7 @@ mod native {
             envelope_signing_key,
             authority_envelope_signing_key,
             task_correlation_signing_key,
+            task_authorization_signing_key,
             vault_encryption_key,
             vault_anchor_authentication_key,
             agent_state_encryption_key,
@@ -2623,6 +2641,30 @@ mod native {
             executor_server_public_key,
             connector_authority_signing_key: None,
         })
+    }
+
+    fn load_task_authorization_issuer(
+        keys: &KernelKeyMaterialV2,
+        runtime: &RuntimeMaterialV2,
+        installation: Digest32V2,
+    ) -> Result<crate::v2_task_authority::KernelTaskAuthorizationIssuerV2, StableCode> {
+        let mut distinct = Zeroizing::new(connector_authority_distinct_material(keys, runtime));
+        distinct.push(runtime.policy.connector_authority_public_key);
+        if let Some(k) = &keys.connector_authority_signing_key {
+            distinct.push(k.to_bytes());
+        }
+        crate::v2_task_authority::KernelTaskAuthorizationIssuerV2::new(
+            installation,
+            keys.task_authorization_signing_key.clone(),
+            runtime.task_authorization_key_id,
+            runtime.task_authorization_public_key,
+            keys.authority_envelope_signing_key
+                .verifying_key()
+                .to_bytes(),
+            runtime.ingress_settlement_public_key,
+            &distinct,
+        )
+        .map_err(|_| StableCode::KernelUnavailable)
     }
 
     fn load_connector_authority_signing_key(
@@ -2637,7 +2679,14 @@ mod native {
             || native_credential_present(CONNECTOR_AUTHORITY_SEED_CREDENTIAL_V2),
             || read_native_credential(CONNECTOR_AUTHORITY_SEED_CREDENTIAL_V2),
         )?;
-        let distinct_material = connector_authority_distinct_material(keys, runtime);
+        let mut distinct_material =
+            Zeroizing::new(connector_authority_distinct_material(keys, runtime));
+        distinct_material.push(keys.task_authorization_signing_key.to_bytes());
+        distinct_material.push(
+            keys.task_authorization_signing_key
+                .verifying_key()
+                .to_bytes(),
+        );
         validate_connector_authority_material(key_id, public_key, private_key, &distinct_material)
     }
 
@@ -2784,6 +2833,10 @@ mod native {
             ui_settlement_public_key,
             ingress_settlement_key_id,
             ingress_settlement_public_key,
+            task_authorization_key_id: Ed25519KeyIdV2::new(decode_hex_32(
+                &bootstrap.task_authorization_key_id,
+            )?),
+            task_authorization_public_key: decode_hex_32(&bootstrap.task_authorization_public_key)?,
             agentd_boot_id: BootIdV2::new(decode_hex_32(&bootstrap.agentd_boot_id)?),
             approvald_boot_id: BootIdV2::new(decode_hex_32(&bootstrap.approvald_boot_id)?),
             machine_boot_id: BootIdV2::new(decode_hex_32(&bootstrap.machine_boot_id)?),

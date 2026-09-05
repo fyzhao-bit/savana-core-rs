@@ -69,6 +69,7 @@ mod macos {
         let kernel_envelope = ed25519(&mut issued)?;
         let kernel_authority = ed25519(&mut issued)?;
         let kernel_correlation = ed25519(&mut issued)?;
+        let task_authorization = ed25519(&mut issued)?;
         let agent_approval = ed25519(&mut issued)?;
         let ingress_approval = ed25519(&mut issued)?;
         let admin_approval = ed25519(&mut issued)?;
@@ -110,6 +111,11 @@ mod macos {
                     "kerneld",
                     "task-correlation-v2.seed",
                     kernel_correlation.seed,
+                ),
+                (
+                    "kerneld",
+                    "task-authorization-v2.seed",
+                    task_authorization.seed,
                 ),
                 (
                     "kerneld",
@@ -297,6 +303,7 @@ mod macos {
                 kernel_envelope: &kernel_envelope,
                 kernel_authority: &kernel_authority,
                 kernel_correlation: &kernel_correlation,
+                task_authorization: &task_authorization,
                 agent_approval: &agent_approval,
                 ingress_approval: &ingress_approval,
                 admin_approval: &admin_approval,
@@ -326,6 +333,7 @@ mod macos {
         kernel_envelope: &'a Ed25519Material,
         kernel_authority: &'a Ed25519Material,
         kernel_correlation: &'a Ed25519Material,
+        task_authorization: &'a Ed25519Material,
         agent_approval: &'a Ed25519Material,
         ingress_approval: &'a Ed25519Material,
         admin_approval: &'a Ed25519Material,
@@ -404,6 +412,12 @@ mod macos {
         set_hex(&mut kernel, &["agentd_boot_id"], patch.agentd_boot)?;
         set_hex(&mut kernel, &["approvald_boot_id"], patch.approvald_boot)?;
         set_hex(&mut kernel, &["machine_boot_id"], patch.machine_boot)?;
+        set_key_pair(
+            &mut kernel,
+            &["task_authorization_key_id"],
+            &["task_authorization_public_key"],
+            patch.task_authorization,
+        )?;
         set_key_pair(
             &mut kernel,
             &["ui_settlement_key_id"],

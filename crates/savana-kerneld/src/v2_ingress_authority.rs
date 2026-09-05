@@ -312,6 +312,157 @@ impl std::fmt::Debug for KernelIngressAuthorityV2 {
 }
 
 impl KernelIngressAuthorityV2 {
+    pub(crate) fn prepare_task_authorization_display(
+        &self,
+        draft: &savana_kernel_protocol::v2::TaskAuthorizationDraftV2,
+        proof: &crate::v2_input_owner::AuthenticatedTaskDraftSubmissionV2,
+        now: UnixMillisV2,
+    ) -> Result<
+        (SignedApprovalEnvelopeV2, SignedUiAuthenticationEnvelopeV2),
+        KernelIngressAuthorityErrorV2,
+    > {
+        use savana_kernel_protocol::v2::{
+            task_authorization_draft_digest_v2, FixedOriginV2, TaskAuthorizationChangeV2,
+        };
+        let auth = proof.authorization();
+        let digest = task_authorization_draft_digest_v2(draft)
+            .map_err(|_| KernelIngressAuthorityErrorV2::BindingMismatch)?;
+        if proof.draft_digest() != digest
+            || auth.installation_id() != self.config.installation_id
+            || draft.installation_digest() != self.config.installation_id
+            || auth.durable_task_id() != Some(draft.task())
+            || auth.authenticated_principal() != draft.principal()
+            || auth.active_state_manifest_digest() != draft.manifest_digest()
+            || auth.deployment_generation() != draft.deployment_generation()
+        {
+            return Err(KernelIngressAuthorityErrorV2::BindingMismatch);
+        }
+        let expires_at = bounded_expiry(
+            now,
+            APPROVAL_TTL_MS,
+            UnixMillisV2::new(auth.expires_at().get().min(draft.expires_at().get())),
+        )?;
+        if now.get() < draft.not_before().get() {
+            return Err(KernelIngressAuthorityErrorV2::BindingMismatch);
+        }
+        let text = draft
+            .render_approval_text()
+            .map_err(|_| KernelIngressAuthorityErrorV2::BindingMismatch)?;
+        let value = KernelValueV2::text(text.as_str())
+            .map_err(|_| KernelIngressAuthorityErrorV2::BindingMismatch)?;
+        let context = ProvenanceContextV2::from_authenticated_runtime(
+            ProducerIdentityV2::new(*self.config.ingressd_identity.as_bytes()),
+            durable_run_id(
+                self.config.installation_id,
+                draft.manifest_digest(),
+                draft.task(),
+                draft.principal(),
+                draft.source_input_digest(),
+            )
+            .map_err(|_| KernelIngressAuthorityErrorV2::BindingMismatch)?,
+            draft.manifest_digest(),
+            now,
+            expires_at,
+        )
+        .map_err(|_| KernelIngressAuthorityErrorV2::BindingMismatch)?;
+        // The root is the deliberately typed, authenticated submission, not an
+        // agent's assertion that a string came from the user.
+        let parent = ProvenanceRecordV2::from_verified_kernel_input(
+            &value,
+            context,
+            auth.settlement_digest(),
+            proof.evidence_digest(),
+            auth.authentication_context_digest(),
+            auth.binding_digest(),
+            self.config.policy_allowed_effects,
+        )
+        .map_err(|_| KernelIngressAuthorityErrorV2::BindingMismatch)?;
+        let rules = self
+            .config
+            .declassification_rules
+            .snapshot()
+            .map_err(|_| KernelIngressAuthorityErrorV2::Unavailable)?;
+        let declassification = ProvenanceRecordV2::declassify(
+            &value,
+            context,
+            DeclassificationTransitionV2::BuildApprovalDisplay,
+            &rules,
+            ClosedDeclassificationPurposeV2::ApprovalDisplay.purpose_digest(),
+            token_set_digest_v2(&[]).map_err(|_| KernelIngressAuthorityErrorV2::BindingMismatch)?,
+            None,
+            &[&parent],
+            self.config.policy_allowed_effects,
+            now.get(),
+        )
+        .map_err(|_| KernelIngressAuthorityErrorV2::BindingMismatch)?;
+        if declassification
+            .judge_handoff(DeclassificationTransitionV2::BuildApprovalDisplay, &rules)
+            != HandoffJudgmentV2::Admits
+        {
+            return Err(KernelIngressAuthorityErrorV2::BindingMismatch);
+        }
+        let display_digest = approval_display_digest_v2(text.as_bytes());
+        let unsigned = UnsignedApprovalEnvelopeV2::new(
+            self.config.installation_id,
+            draft.manifest_digest(),
+            draft.deployment_generation(),
+            ApprovalPurposeV2::TaskAuthorization,
+            Nonce32V2::new(random_bytes()?),
+            Nonce32V2::new(random_bytes()?),
+            ApprovalBindingV2::TaskAuthorization {
+                authorization_id: draft.authorization_id(),
+                task: draft.task(),
+                revision: draft.revision(),
+                change: if draft.revision() == 1 {
+                    TaskAuthorizationChangeV2::Create
+                } else {
+                    TaskAuthorizationChangeV2::Amend
+                },
+                draft_digest: digest,
+            },
+            draft.principal(),
+            hash_many(
+                b"SAVANA_TASK_APPROVAL_DISPLAY_PROJECTION_V2_SCHEMA1\0",
+                &[digest.as_bytes(), proof.evidence_digest().as_bytes()],
+            ),
+            display_digest,
+            text,
+            Some(declassification.provenance_digest()),
+            self.config.approvald_identity,
+            now,
+            expires_at,
+        )
+        .map_err(|_| KernelIngressAuthorityErrorV2::BindingMismatch)?;
+        let envelope = SignedApprovalEnvelopeV2::sign(unsigned, &self.config.envelope_signing_key)
+            .map_err(|_| KernelIngressAuthorityErrorV2::Unavailable)?;
+        let ui = UnsignedUiAuthenticationEnvelopeV2::new(
+            self.config.installation_id,
+            draft.manifest_digest(),
+            draft.deployment_generation(),
+            UiAuthenticationPurposeV2::ApprovalDisplay,
+            UiAuthenticationBindingV2::ApprovalDisplay {
+                durable_task_id: draft.task(),
+                approval_envelope_digest: envelope
+                    .envelope_digest()
+                    .map_err(|_| KernelIngressAuthorityErrorV2::Unavailable)?,
+                approval_purpose: ApprovalPurposeV2::TaskAuthorization,
+                display_digest,
+            },
+            Some(draft.principal()),
+            FixedOriginV2::Approval8766,
+            FixedOriginV2::Approval8766,
+            Nonce32V2::new(random_bytes()?),
+            now,
+            expires_at,
+        )
+        .map_err(|_| KernelIngressAuthorityErrorV2::BindingMismatch)?;
+        Ok((
+            envelope,
+            SignedUiAuthenticationEnvelopeV2::sign(ui, &self.config.envelope_signing_key)
+                .map_err(|_| KernelIngressAuthorityErrorV2::Unavailable)?,
+        ))
+    }
+
     pub(crate) fn new(
         config: KernelIngressSecurityConfigV2,
         maximum_records: usize,

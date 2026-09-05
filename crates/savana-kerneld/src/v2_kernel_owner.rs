@@ -61,6 +61,10 @@ pub(crate) enum KernelRuntimeHandlerV2 {
     RegisterParserWorkerJob,
     AppendParserWorkerPageFrame,
     CommitParserWorkerResult,
+    EstablishTaskAuthorization,
+    PrepareTaskAuthorizationApproval,
+    CommitTaskAuthorizationApproval,
+    RevokeTaskAuthorization,
 }
 
 impl KernelRuntimeHandlerV2 {
@@ -109,7 +113,11 @@ impl KernelRuntimeHandlerV2 {
             | Self::AuthenticateIngressUi
             | Self::RegisterParserWorkerJob
             | Self::AppendParserWorkerPageFrame
-            | Self::CommitParserWorkerResult => EndpointRoleV2::IngressKernel,
+            | Self::CommitParserWorkerResult
+            | Self::EstablishTaskAuthorization
+            | Self::PrepareTaskAuthorizationApproval
+            | Self::CommitTaskAuthorizationApproval
+            | Self::RevokeTaskAuthorization => EndpointRoleV2::IngressKernel,
         }
     }
 
@@ -154,12 +162,16 @@ impl KernelRuntimeHandlerV2 {
             Self::RegisterParserWorkerJob => 48,
             Self::AppendParserWorkerPageFrame => 49,
             Self::CommitParserWorkerResult => 50,
+            Self::EstablishTaskAuthorization => 51,
+            Self::PrepareTaskAuthorizationApproval => 52,
+            Self::CommitTaskAuthorizationApproval => 53,
+            Self::RevokeTaskAuthorization => 54,
         }
     }
 }
 
 #[cfg(test)]
-pub(crate) const ALL_KERNEL_RUNTIME_HANDLERS_V2: [KernelRuntimeHandlerV2; 44] = [
+pub(crate) const ALL_KERNEL_RUNTIME_HANDLERS_V2: [KernelRuntimeHandlerV2; 48] = [
     KernelRuntimeHandlerV2::AgentHealth,
     KernelRuntimeHandlerV2::ClaimAgentSession,
     KernelRuntimeHandlerV2::PrepareFollowupIngress,
@@ -204,6 +216,10 @@ pub(crate) const ALL_KERNEL_RUNTIME_HANDLERS_V2: [KernelRuntimeHandlerV2; 44] = 
     KernelRuntimeHandlerV2::RegisterParserWorkerJob,
     KernelRuntimeHandlerV2::AppendParserWorkerPageFrame,
     KernelRuntimeHandlerV2::CommitParserWorkerResult,
+    KernelRuntimeHandlerV2::EstablishTaskAuthorization,
+    KernelRuntimeHandlerV2::PrepareTaskAuthorizationApproval,
+    KernelRuntimeHandlerV2::CommitTaskAuthorizationApproval,
+    KernelRuntimeHandlerV2::RevokeTaskAuthorization,
 ];
 
 pub(crate) fn handler_for_operation_v2(
@@ -291,6 +307,18 @@ pub(crate) fn handler_for_operation_v2(
             }
             KernelIngressOperationV2::CommitParserWorkerResult(_) => {
                 KernelRuntimeHandlerV2::CommitParserWorkerResult
+            }
+            KernelIngressOperationV2::EstablishTaskAuthorization(_) => {
+                KernelRuntimeHandlerV2::EstablishTaskAuthorization
+            }
+            KernelIngressOperationV2::PrepareTaskAuthorizationApproval(_) => {
+                KernelRuntimeHandlerV2::PrepareTaskAuthorizationApproval
+            }
+            KernelIngressOperationV2::CommitTaskAuthorizationApproval(_) => {
+                KernelRuntimeHandlerV2::CommitTaskAuthorizationApproval
+            }
+            KernelIngressOperationV2::RevokeTaskAuthorization(_) => {
+                KernelRuntimeHandlerV2::RevokeTaskAuthorization
             }
         }),
         KernelServiceOperationV2::Connector(operation) => Ok(match operation {
@@ -646,13 +674,13 @@ mod tests {
     use super::{handler_for_operation_v2, ALL_KERNEL_RUNTIME_HANDLERS_V2};
 
     #[test]
-    fn exhaustive_handler_table_covers_all_44_kerneld_operations_once() {
-        assert_eq!(ALL_KERNEL_RUNTIME_HANDLERS_V2.len(), 44);
+    fn exhaustive_handler_table_covers_all_48_kerneld_operations_once() {
+        assert_eq!(ALL_KERNEL_RUNTIME_HANDLERS_V2.len(), 48);
         let actual = ALL_KERNEL_RUNTIME_HANDLERS_V2
             .into_iter()
             .map(|handler| (role_tag(handler.role()), handler.tag()))
             .collect::<BTreeSet<_>>();
-        assert_eq!(actual.len(), 44);
+        assert_eq!(actual.len(), 48);
 
         let expected = kernel_agent_operation_tags_v2()
             .iter()

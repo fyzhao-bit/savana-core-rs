@@ -321,6 +321,19 @@ impl std::fmt::Debug for PreparedAgentClaimMaterialV2 {
 }
 
 impl PreparedAgentClaimMaterialV2 {
+    fn matches_exactly(&self, other: &Self) -> Result<bool, KernelAgentAuthorityErrorV2> {
+        Ok(self.durable_run_id == other.durable_run_id
+            && self.producer_identity == other.producer_identity
+            && savana_policy_core::v2::value_digest_v2(&self.initial_value)
+                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?
+                == savana_policy_core::v2::value_digest_v2(&other.initial_value)
+                    .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?
+            && self.provenance == other.provenance
+            && self.initial_document == other.initial_document
+            && self.policy_allowed_effects == other.policy_allowed_effects
+            && self.signed_planner_policy == other.signed_planner_policy
+            && self.expires_at == other.expires_at)
+    }
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_verified_ingress(
         durable_run_id: DurableRunIdV2,
@@ -432,6 +445,8 @@ struct TaskRecordV2 {
     durable_run_id: Option<DurableRunIdV2>,
     material: Option<PreparedAgentClaimMaterialV2>,
     current_authentication_preparation: Option<usize>,
+    source_input_digest: Option<Digest32V2>,
+    task_authorization_digest: Option<Digest32V2>,
 }
 
 struct AuthenticationPreparationRecordV2 {
@@ -472,6 +487,7 @@ struct SessionRecordV2 {
     initial_document: MaskedDocumentHandleV2,
     initial_value: ValueHandleV2,
     status: AgentSessionStatusV2,
+    task_authorization_digest: Option<Digest32V2>,
 }
 
 struct ConnectorAuthorizationRecordV2 {
@@ -660,6 +676,7 @@ struct PlannerTicketRecordV2 {
     declassification_provenance_digest: Digest32V2,
     expires_at: UnixMillisV2,
     consumed: bool,
+    task_authorization_digest: Digest32V2,
 }
 
 struct ToolRecordV2 {
@@ -1240,6 +1257,7 @@ pub(crate) struct KernelAgentAuthorityV2 {
     release_tickets: Vec<ReleaseTicketRecordV2>,
     releases: Vec<ReleaseRecordV2>,
     policy: Option<KernelG4G5RuntimeV2>,
+    task_issuer: Option<crate::v2_task_authority::KernelTaskAuthorizationIssuerV2>,
     durable_state: Option<DurableKernelAgentAuthorityStateV2>,
     durable_poisoned: bool,
     #[cfg(test)]
@@ -1278,6 +1296,236 @@ impl std::fmt::Debug for KernelAgentAuthorityV2 {
 }
 
 impl KernelAgentAuthorityV2 {
+    pub(crate) fn revoke_task_authorization(
+        &mut self,
+        request: &savana_kernel_protocol::v2::RevokeTaskAuthorizationRequestV2,
+        proof: &crate::v2_input_owner::AuthenticatedTaskDraftSubmissionV2,
+        now: UnixMillisV2,
+    ) -> Result<
+        savana_kernel_protocol::v2::RevokeTaskAuthorizationResponseV2,
+        crate::v2_task_authority::TaskAuthorityErrorV2,
+    > {
+        use crate::v2_task_authority::TaskAuthorityErrorV2 as E;
+        self.ensure_durable_available()
+            .map_err(|_| E::Unavailable)?;
+        let digest = self.task_issuer.as_ref().ok_or(E::Unavailable)?.revoke(
+            &mut self.policy.as_mut().ok_or(E::Unavailable)?.durable,
+            proof,
+            request.draft(),
+            now,
+        )?;
+        for s in &mut self.sessions {
+            if s.durable_task_id == request.draft().task()
+                && s.principal == request.draft().principal()
+            {
+                s.status = AgentSessionStatusV2::Closed;
+            }
+        }
+        // The durable G4 revocation is authoritative even if this subsequent
+        // status write is interrupted. Existing effect history is never erased.
+        if let Some(t) = self
+            .tasks
+            .iter_mut()
+            .find(|t| t.durable_task_id == request.draft().task())
+        {
+            t.task_authorization_digest = Some(digest);
+            if matches!(
+                t.status,
+                PublicTaskStatusV2::AwaitingInput
+                    | PublicTaskStatusV2::Processing
+                    | PublicTaskStatusV2::AwaitingIngressApproval
+                    | PublicTaskStatusV2::Ready { .. }
+            ) {
+                t.status = PublicTaskStatusV2::Cancelled;
+            }
+        }
+        self.persist_recovery_snapshot()
+            .map_err(|_| E::Unavailable)?;
+        savana_kernel_protocol::v2::RevokeTaskAuthorizationResponseV2::new(digest)
+            .map_err(|_| E::Binding)
+    }
+    pub(crate) fn prepare_task_approval(
+        &mut self,
+        request: &savana_kernel_protocol::v2::PrepareTaskAuthorizationApprovalRequestV2,
+        proof: &crate::v2_input_owner::AuthenticatedTaskDraftSubmissionV2,
+        now: UnixMillisV2,
+    ) -> Result<
+        savana_policy_core::v2::PendingTaskAuthorizationV2,
+        crate::v2_task_authority::TaskAuthorityErrorV2,
+    > {
+        use crate::v2_task_authority::TaskAuthorityErrorV2;
+        let issuer = self
+            .task_issuer
+            .as_ref()
+            .ok_or(TaskAuthorityErrorV2::Unavailable)?;
+        let policy = self
+            .policy
+            .as_mut()
+            .ok_or(TaskAuthorityErrorV2::Unavailable)?;
+        let d = request.draft();
+        let id = domain_digest(
+            b"SAVANA_TASK_ISSUANCE_REQUEST_V2_SCHEMA1\0",
+            &[
+                d.installation_digest().as_bytes(),
+                d.task().as_bytes(),
+                d.principal().as_bytes(),
+                request.request_nonce().as_bytes(),
+            ],
+        );
+        let pending = issuer.prepare(
+            &mut policy.durable,
+            &policy.active_tools,
+            policy.role,
+            proof,
+            d.clone(),
+            id,
+            now,
+        )?;
+        if pending.installed_digest().is_some() {
+            return Err(TaskAuthorityErrorV2::State);
+        }
+        Ok(pending)
+    }
+
+    pub(crate) fn attach_task_approval(
+        &mut self,
+        request: Digest32V2,
+        envelope: SignedApprovalEnvelopeV2,
+        display: SignedUiAuthenticationEnvelopeV2,
+        manifest: Digest32V2,
+        generation: u64,
+        now: UnixMillisV2,
+    ) -> Result<(), crate::v2_task_authority::TaskAuthorityErrorV2> {
+        use crate::v2_task_authority::TaskAuthorityErrorV2;
+        self.task_issuer
+            .as_ref()
+            .ok_or(TaskAuthorityErrorV2::Unavailable)?
+            .attach_approval(
+                &mut self
+                    .policy
+                    .as_mut()
+                    .ok_or(TaskAuthorityErrorV2::Unavailable)?
+                    .durable,
+                request,
+                envelope,
+                display,
+                manifest,
+                generation,
+                now,
+            )
+    }
+
+    pub(crate) fn commit_task_approval(
+        &mut self,
+        request: &savana_kernel_protocol::v2::CommitTaskAuthorizationApprovalRequestV2,
+        manifest: Digest32V2,
+        generation: u64,
+        now: UnixMillisV2,
+    ) -> Result<
+        savana_kernel_protocol::v2::EstablishTaskAuthorizationResponseV2,
+        crate::v2_task_authority::TaskAuthorityErrorV2,
+    > {
+        use crate::v2_task_authority::TaskAuthorityErrorV2;
+        let issuer = self
+            .task_issuer
+            .as_ref()
+            .ok_or(TaskAuthorityErrorV2::Unavailable)?;
+        let p = self
+            .policy
+            .as_mut()
+            .ok_or(TaskAuthorityErrorV2::Unavailable)?;
+        let digest = issuer.settle_approved(
+            &mut p.durable,
+            &p.active_tools,
+            p.role,
+            request.request_digest(),
+            request.settlement(),
+            manifest,
+            generation,
+            now,
+        )?;
+        let draft = p
+            .durable
+            .pending_task_authorization(request.request_digest())
+            .map_err(|_| TaskAuthorityErrorV2::State)?
+            .ok_or(TaskAuthorityErrorV2::State)?
+            .draft();
+        let task = draft.task();
+        let principal = draft.principal();
+        // Exact retries may return an historical installation receipt, but may
+        // never revive a revoked/replaced grant or move a session backwards.
+        self.activate_task_authorization(task, principal, digest, now)?;
+        savana_kernel_protocol::v2::EstablishTaskAuthorizationResponseV2::new(
+            request.request_digest(),
+            digest,
+        )
+        .map_err(|_| TaskAuthorityErrorV2::Binding)
+    }
+
+    pub(crate) fn install_task_issuer(
+        &mut self,
+        issuer: crate::v2_task_authority::KernelTaskAuthorizationIssuerV2,
+    ) -> Result<(), KernelAgentAuthorityErrorV2> {
+        if self.task_issuer.is_some() {
+            return Err(KernelAgentAuthorityErrorV2::StateConflict);
+        }
+        self.task_issuer = Some(issuer);
+        Ok(())
+    }
+
+    pub(crate) fn establish_task_authorization(
+        &mut self,
+        request: &savana_kernel_protocol::v2::EstablishTaskAuthorizationRequestV2,
+        proof: &crate::v2_input_owner::AuthenticatedTaskDraftSubmissionV2,
+        now: UnixMillisV2,
+    ) -> Result<
+        savana_kernel_protocol::v2::EstablishTaskAuthorizationResponseV2,
+        crate::v2_task_authority::TaskAuthorityErrorV2,
+    > {
+        use crate::v2_task_authority::TaskAuthorityErrorV2;
+        let issuer = self
+            .task_issuer
+            .as_ref()
+            .ok_or(TaskAuthorityErrorV2::Unavailable)?;
+        let policy = self
+            .policy
+            .as_mut()
+            .ok_or(TaskAuthorityErrorV2::Unavailable)?;
+        let d = request.draft();
+        let request_digest = domain_digest(
+            b"SAVANA_TASK_ISSUANCE_REQUEST_V2_SCHEMA1\0",
+            &[
+                d.installation_digest().as_bytes(),
+                d.task().as_bytes(),
+                d.principal().as_bytes(),
+                request.request_nonce().as_bytes(),
+            ],
+        );
+        issuer.prepare(
+            &mut policy.durable,
+            &policy.active_tools,
+            policy.role,
+            proof,
+            d.clone(),
+            request_digest,
+            now,
+        )?;
+        let digest = issuer.issue_structured(
+            &mut policy.durable,
+            &policy.active_tools,
+            policy.role,
+            proof,
+            request_digest,
+            now,
+        )?;
+        self.activate_task_authorization(d.task(), d.principal(), digest, now)?;
+        savana_kernel_protocol::v2::EstablishTaskAuthorizationResponseV2::new(
+            request_digest,
+            digest,
+        )
+        .map_err(|_| TaskAuthorityErrorV2::Binding)
+    }
+
     pub(crate) fn new(
         config: KernelAgentSecurityConfigV2,
         maximum_records: usize,
@@ -1306,6 +1554,7 @@ impl KernelAgentAuthorityV2 {
             release_tickets: Vec::new(),
             releases: Vec::new(),
             policy: None,
+            task_issuer: None,
             durable_state: None,
             durable_poisoned: false,
             #[cfg(test)]
@@ -1371,16 +1620,26 @@ impl KernelAgentAuthorityV2 {
     }
 
     fn encode_recovery_snapshot(&self) -> Result<Vec<u8>, KernelAgentAuthorityErrorV2> {
+        self.encode_recovery_snapshot_schema(3)
+    }
+
+    fn encode_recovery_snapshot_schema(
+        &self,
+        schema: u16,
+    ) -> Result<Vec<u8>, KernelAgentAuthorityErrorV2> {
+        if !matches!(schema, 2 | 3) {
+            return Err(KernelAgentAuthorityErrorV2::Unavailable);
+        }
         let mut encoder = minicbor::Encoder::new(Vec::new());
         encoder
             .array(4)
-            .and_then(|encoder| encoder.u16(2))
+            .and_then(|encoder| encoder.u16(schema))
             .and_then(|encoder| encoder.bytes(self.recovery_security_binding().as_bytes()))
             .and_then(|encoder| encoder.array(self.tasks.len() as u64))
             .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
         for task in &self.tasks {
             encoder
-                .array(13)
+                .array(if schema == 3 { 15 } else { 13 })
                 .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
             encode_recovery_value(&mut encoder, &task.preparation)?;
             encode_recovery_value(&mut encoder, &task.agent_task_nonce)?;
@@ -1415,6 +1674,13 @@ impl KernelAgentAuthorityV2 {
                         .null()
                         .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
                 }
+            }
+            if schema == 3 {
+                encode_optional_recovery_value(&mut encoder, task.source_input_digest.as_ref())?;
+                encode_optional_recovery_value(
+                    &mut encoder,
+                    task.task_authorization_digest.as_ref(),
+                )?;
             }
         }
         encoder
@@ -1465,10 +1731,13 @@ impl KernelAgentAuthorityV2 {
             .array()
             .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?
             != Some(4)
-            || decoder
-                .u16()
-                .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?
-                != 2
+        {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        let schema = decoder
+            .u16()
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        if !matches!(schema, 2 | 3)
             || Digest32V2::new(decode_recovery_fixed::<32>(&mut decoder)?)
                 != self.recovery_security_binding()
         {
@@ -1485,7 +1754,7 @@ impl KernelAgentAuthorityV2 {
                 .to_bytes(),
         );
         for _ in 0..task_count {
-            require_recovery_array(&mut decoder, 13)?;
+            require_recovery_array(&mut decoder, if schema == 3 { 15 } else { 13 })?;
             let mut context = V2DecodeContext;
             let preparation = decode_recovery_value(&mut decoder, &mut context)?;
             let agent_task_nonce = decode_recovery_value(&mut decoder, &mut context)?;
@@ -1512,6 +1781,16 @@ impl KernelAgentAuthorityV2 {
                 Some(decode_prepared_claim_material(&mut decoder, &mut context)?)
             };
             let current_authentication_preparation = decode_optional_recovery_u32(&mut decoder)?;
+            let source_input_digest: Option<Digest32V2> = if schema == 3 {
+                decode_optional_recovery_value(&mut decoder, &mut context)?
+            } else {
+                None
+            };
+            let task_authorization_digest: Option<Digest32V2> = if schema == 3 {
+                decode_optional_recovery_value(&mut decoder, &mut context)?
+            } else {
+                None
+            };
             let verified = correlation
                 .verify(
                     correlation_key_id,
@@ -1526,6 +1805,9 @@ impl KernelAgentAuthorityV2 {
                 )
                 .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
             if verified.durable_task_id() != durable_task_id
+                || source_input_digest.is_some_and(|d| d.as_bytes() == &[0; 32])
+                || task_authorization_digest.is_some_and(|d| d.as_bytes() == &[0; 32])
+                || (task_authorization_digest.is_some() && source_input_digest.is_none())
                 || material.as_ref().is_some_and(|material| {
                     Some(material.durable_run_id) != durable_run_id
                         || material.provenance.producer_identity() != material.producer_identity
@@ -1556,6 +1838,8 @@ impl KernelAgentAuthorityV2 {
                 material,
                 current_authentication_preparation: current_authentication_preparation
                     .map(|value| value as usize),
+                source_input_digest,
+                task_authorization_digest,
             });
         }
         let authentication_count = decode_recovery_count(&mut decoder, self.maximum_records)?;
@@ -1655,7 +1939,7 @@ impl KernelAgentAuthorityV2 {
                             || self.authentication_preparations[index].task_index != task_index
                     })
             })
-            || self.encode_recovery_snapshot()? != bytes
+            || self.encode_recovery_snapshot_schema(schema)? != bytes
         {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
@@ -1735,6 +2019,7 @@ impl KernelAgentAuthorityV2 {
     pub(crate) fn production_ready(&self) -> bool {
         !self.durable_poisoned
             && self.durable_state.is_some()
+            && self.task_issuer.is_some()
             && self
                 .policy
                 .as_ref()
@@ -1807,6 +2092,8 @@ impl KernelAgentAuthorityV2 {
             durable_run_id: None,
             material: None,
             current_authentication_preparation: None,
+            source_input_digest: None,
+            task_authorization_digest: None,
         });
         self.persist_recovery_snapshot()?;
         Ok(PrepareNewIngressResponseV2::Prepared {
@@ -1820,9 +2107,13 @@ impl KernelAgentAuthorityV2 {
         &mut self,
         durable_task_id: DurableTaskIdV2,
         principal: PrincipalIdV2,
+        source_input_digest: Digest32V2,
         material: PreparedAgentClaimMaterialV2,
     ) -> Result<(), KernelAgentAuthorityErrorV2> {
         self.ensure_durable_available()?;
+        if source_input_digest.as_bytes() == &[0; 32] {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
         let task = self
             .tasks
             .iter_mut()
@@ -1832,8 +2123,14 @@ impl KernelAgentAuthorityV2 {
             if existing != principal {
                 return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
             }
-            if task.material.is_some() {
-                return Ok(());
+            if let Some(stored) = &task.material {
+                return if task.source_input_digest == Some(source_input_digest)
+                    && stored.matches_exactly(&material)?
+                {
+                    Ok(())
+                } else {
+                    Err(KernelAgentAuthorityErrorV2::BindingMismatch)
+                };
             }
         }
         if !matches!(
@@ -1854,8 +2151,127 @@ impl KernelAgentAuthorityV2 {
         task.claim_digest = Some(claim_digest);
         task.durable_run_id = Some(material.durable_run_id);
         task.material = Some(material);
-        task.status = PublicTaskStatusV2::Ready { bootstrap: None };
+        task.source_input_digest = Some(source_input_digest);
+        // Input consent is not task authority. The subsequent typed submission
+        // or independent task approval makes this input available to planning.
+        task.status = PublicTaskStatusV2::Processing;
         self.persist_recovery_snapshot()
+    }
+
+    pub(crate) fn ingress_material_is_committed(
+        &self,
+        task: DurableTaskIdV2,
+        principal: PrincipalIdV2,
+        source: Digest32V2,
+        manifest: Digest32V2,
+    ) -> Result<bool, KernelAgentAuthorityErrorV2> {
+        self.ensure_durable_available()?;
+        let t = self
+            .tasks
+            .iter()
+            .find(|t| t.durable_task_id == task)
+            .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        if t.material.is_some() {
+            if t.expected_principal != Some(principal)
+                || t.source_input_digest != Some(source)
+                || t.active_state_manifest_digest != manifest
+            {
+                return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn activate_committed_task_authorization(
+        &mut self,
+        task: DurableTaskIdV2,
+        principal: PrincipalIdV2,
+        manifest: Digest32V2,
+        generation: u64,
+        now: UnixMillisV2,
+    ) -> Result<(), crate::v2_task_authority::TaskAuthorityErrorV2> {
+        use crate::v2_task_authority::TaskAuthorityErrorV2 as E;
+        self.ensure_durable_available()
+            .map_err(|_| E::Unavailable)?;
+        let owner = &self.policy.as_ref().ok_or(E::Unavailable)?.durable;
+        let Some(state) = owner
+            .find_task_authorization_state(task)
+            .map_err(|_| E::State)?
+        else {
+            return Ok(());
+        };
+        if state.revoked() {
+            return Ok(());
+        }
+        let digest = state.authorization().digest();
+        let Some(draft) = owner
+            .installed_task_authorization_draft(digest)
+            .map_err(|_| E::State)?
+        else {
+            // Legacy grants have no authenticated input association and cannot
+            // activate newly handed-off input through recovery.
+            return Ok(());
+        };
+        if draft.manifest_digest() != manifest || draft.deployment_generation() != generation {
+            return Err(E::Binding);
+        }
+        self.activate_task_authorization(task, principal, digest, now)
+    }
+
+    fn activate_task_authorization(
+        &mut self,
+        task: DurableTaskIdV2,
+        principal: PrincipalIdV2,
+        digest: Digest32V2,
+        now: UnixMillisV2,
+    ) -> Result<(), crate::v2_task_authority::TaskAuthorityErrorV2> {
+        use crate::v2_task_authority::TaskAuthorityErrorV2 as E;
+        self.ensure_durable_available()
+            .map_err(|_| E::Unavailable)?;
+        let p = self.policy.as_ref().ok_or(E::Unavailable)?;
+        let state = p
+            .durable
+            .task_authorization_state(task)
+            .map_err(|_| E::State)?;
+        if state.revoked() || state.authorization().digest() != digest {
+            return Ok(());
+        }
+        let draft = p
+            .durable
+            .installed_task_authorization_draft(digest)
+            .map_err(|_| E::State)?
+            .ok_or(E::State)?;
+        if draft.principal() != principal
+            || now.get() < draft.not_before().get()
+            || now.get() >= draft.expires_at().get()
+        {
+            return Err(E::Binding);
+        }
+        if let Some(t) = self.tasks.iter_mut().find(|t| t.durable_task_id == task) {
+            if let Some(material) = &t.material {
+                if t.expected_principal != Some(principal)
+                    || t.source_input_digest != Some(draft.source_input_digest())
+                    || t.active_state_manifest_digest != draft.manifest_digest()
+                    || now.get() >= material.expires_at.get()
+                {
+                    return Err(E::Binding);
+                }
+                t.task_authorization_digest = Some(digest);
+                if t.status == PublicTaskStatusV2::Processing {
+                    t.status = PublicTaskStatusV2::Ready { bootstrap: None };
+                }
+            }
+        }
+        for s in &mut self.sessions {
+            if s.durable_task_id == task
+                && s.principal == principal
+                && s.active_state_manifest_digest == draft.manifest_digest()
+            {
+                s.task_authorization_digest = Some(digest);
+            }
+        }
+        self.persist_recovery_snapshot().map_err(|_| E::Unavailable)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2262,6 +2678,7 @@ impl KernelAgentAuthorityV2 {
             initial_document: material.initial_document,
             initial_value: initial.handle(),
             status: AgentSessionStatusV2::Running,
+            task_authorization_digest: None,
         });
         self.tools.extend(
             active_tool_entries
@@ -2391,6 +2808,37 @@ impl KernelAgentAuthorityV2 {
             .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)
     }
 
+    fn require_session_task_authorization(
+        &self,
+        session: &SessionRecordV2,
+        now: UnixMillisV2,
+    ) -> Result<Digest32V2, KernelAgentAuthorityErrorV2> {
+        let state = self
+            .policy
+            .as_ref()
+            .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?
+            .durable
+            .task_authorization_state(session.durable_task_id)
+            .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+        let authorization = state.authorization();
+        let m = authorization.material();
+        if state.revoked()
+            || m.principal() != session.principal
+            || m.task() != session.durable_task_id
+            || m.installation_digest() != self.config.installation_id
+            || m.manifest_digest() != session.active_state_manifest_digest
+            || now.get() < m.not_before().get()
+            || now.get() >= m.expires_at().get()
+            || now.get() >= session.expires_at.get()
+            || session
+                .task_authorization_digest
+                .is_some_and(|d| d != authorization.digest())
+        {
+            return Err(KernelAgentAuthorityErrorV2::StateConflict);
+        }
+        Ok(authorization.digest())
+    }
+
     pub(crate) fn prepare_planner_call(
         &mut self,
         request: &PreparePlannerCallRequestV2,
@@ -2402,7 +2850,7 @@ impl KernelAgentAuthorityV2 {
         if self.planner_tickets.len() >= self.maximum_records {
             return Err(KernelAgentAuthorityErrorV2::LimitExceeded);
         }
-        let (signed_planner_policy, session_role) = self
+        let session = self
             .sessions
             .iter()
             .find(|session| {
@@ -2412,8 +2860,10 @@ impl KernelAgentAuthorityV2 {
                         AgentSessionStatusV2::Ready | AgentSessionStatusV2::Running
                     )
             })
-            .map(|session| (session.signed_planner_policy.clone(), session.role))
             .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        let task_authorization_digest = self.require_session_task_authorization(session, now)?;
+        let signed_planner_policy = session.signed_planner_policy.clone();
+        let session_role = session.role;
         let effective_limits = intersect_planner_request(
             &signed_planner_policy,
             request.planner_route(),
@@ -2598,7 +3048,13 @@ impl KernelAgentAuthorityV2 {
             declassification_provenance_digest,
             expires_at,
             consumed: false,
+            task_authorization_digest,
         });
+        self.sessions
+            .iter_mut()
+            .find(|s| s.run == request.run())
+            .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?
+            .task_authorization_digest = Some(task_authorization_digest);
         Ok(response)
     }
 
@@ -2669,6 +3125,11 @@ impl KernelAgentAuthorityV2 {
                     )
             })
             .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        if self.require_session_task_authorization(session, now)?
+            != record.task_authorization_digest
+        {
+            return Err(KernelAgentAuthorityErrorV2::StateConflict);
+        }
         let policy = self
             .policy
             .as_ref()
@@ -6516,7 +6977,7 @@ pub(crate) mod tests {
     }
 
     #[derive(Clone)]
-    struct TestG4StateAnchorV2(Arc<Mutex<RollbackProtectedStateHeadV2>>);
+    pub(crate) struct TestG4StateAnchorV2(Arc<Mutex<RollbackProtectedStateHeadV2>>);
 
     impl Default for TestG4StateAnchorV2 {
         fn default() -> Self {
@@ -6674,9 +7135,261 @@ pub(crate) mod tests {
     pub(crate) fn planner_authority_fixture() -> PlannerAuthorityFixtureV2 {
         planner_authority_fixture_with_approval_display(true)
     }
+    pub(crate) fn task_issuer_agent_fixture(
+        durable: DurableG4StateV2,
+        issuer: crate::v2_task_authority::KernelTaskAuthorizationIssuerV2,
+    ) -> KernelAgentAuthorityV2 {
+        let mut f = planner_authority_fixture_with_task(true, false);
+        f.authority.config.installation_id = Digest32V2::new([0x30; 32]);
+        f.authority.policy.as_mut().unwrap().durable = durable;
+        f.authority.install_task_issuer(issuer).unwrap();
+        f.authority
+    }
+
+    #[test]
+    fn ingress_handoff_replay_preserves_exact_material_and_waits_for_task_authority() {
+        use super::*;
+        let mut f = planner_authority_fixture_with_task(true, false);
+        let s = &f.authority.sessions[0];
+        let task = s.durable_task_id;
+        let principal = s.principal;
+        let manifest = s.active_state_manifest_digest;
+        let correlation = SignedDurableTaskCorrelationV2::sign(
+            UnsignedDurableTaskCorrelationV2::new(
+                f.authority.config.installation_id,
+                manifest,
+                7,
+                task,
+                f.authority.config.agentd_identity,
+                f.authority.config.agentd_kernel_client_boot_id,
+                f.authority.config.kerneld_server_boot_id,
+                f.authority.config.machine_boot_id,
+                UnixMillisV2::new(1),
+                UnixMillisV2::new(9000),
+                UnixMillisV2::new(10000),
+            )
+            .unwrap(),
+            &f.authority.config.correlation_signing_key,
+        )
+        .unwrap();
+        let material = || {
+            let initial_value = KernelValueV2::text("private planner prompt").unwrap();
+            let provenance = f
+                .values
+                .resolve_g4_value(f.run, f.prompt, UnixMillisV2::new(200))
+                .unwrap()
+                .provenance()
+                .clone();
+            PreparedAgentClaimMaterialV2::from_verified_ingress(
+                provenance.run_internal_id(),
+                provenance.producer_identity(),
+                initial_value,
+                provenance,
+                MaskedDocumentHandleV2::from_authority_entropy([0x96; 32]).unwrap(),
+                EffectSetV2::SEND,
+                SignedPlannerPolicyV2::from_verified_input(
+                    planner_input_runtime()
+                        .process(
+                            InputChannelV2::ChatText,
+                            "send to alice@example.com",
+                            UnixMillisV2::new(100),
+                        )
+                        .unwrap()
+                        .planner_envelope(),
+                )
+                .unwrap(),
+                UnixMillisV2::new(10000),
+            )
+            .unwrap()
+        };
+        f.authority.tasks.push(TaskRecordV2 {
+            preparation: NewTaskPreparationHandleV2::from_authority_entropy([71; 32]).unwrap(),
+            agent_task_nonce: Nonce32V2::new([72; 32]),
+            client_request_nonce: Nonce32V2::new([73; 32]),
+            durable_task_id: task,
+            active_state_manifest_digest: manifest,
+            correlation,
+            ingress_transfer: KernelIngressBootstrapTransferCapabilityV2::from_authority_entropy(
+                [74; 32],
+            )
+            .unwrap(),
+            status: PublicTaskStatusV2::AwaitingInput,
+            expected_principal: None,
+            claim_digest: None,
+            durable_run_id: None,
+            material: None,
+            current_authentication_preparation: None,
+            source_input_digest: None,
+            task_authorization_digest: None,
+        });
+        let source = Digest32V2::new([75; 32]);
+        assert!(f
+            .authority
+            .mark_ingress_committed(task, principal, Digest32V2::new([0; 32]), material())
+            .is_err());
+        f.authority
+            .mark_ingress_committed(task, principal, source, material())
+            .unwrap();
+        assert_eq!(f.authority.tasks[0].status, PublicTaskStatusV2::Processing);
+        assert_eq!(f.authority.tasks[0].task_authorization_digest, None);
+        f.authority
+            .mark_ingress_committed(task, principal, source, material())
+            .unwrap();
+        assert!(f
+            .authority
+            .ingress_material_is_committed(task, principal, source, manifest)
+            .unwrap());
+        assert!(f
+            .authority
+            .ingress_material_is_committed(task, principal, Digest32V2::new([76; 32]), manifest)
+            .is_err());
+        let mut changed = material();
+        changed.initial_document =
+            MaskedDocumentHandleV2::from_authority_entropy([77; 32]).unwrap();
+        assert!(f
+            .authority
+            .mark_ingress_committed(task, principal, source, changed)
+            .is_err());
+        for schema in [2, 3] {
+            let encoded = f.authority.encode_recovery_snapshot_schema(schema).unwrap();
+            let mut restored = planner_authority_fixture().authority;
+            restored
+                .restore_recovery_snapshot(&encoded, UnixMillisV2::new(201))
+                .unwrap();
+            assert_eq!(restored.tasks[0].task_authorization_digest, None);
+            assert_eq!(
+                restored.tasks[0].source_input_digest,
+                if schema == 3 { Some(source) } else { None }
+            );
+            assert_eq!(restored.tasks[0].status, PublicTaskStatusV2::Processing);
+            assert_eq!(
+                restored.encode_recovery_snapshot_schema(schema).unwrap(),
+                encoded
+            );
+        }
+        // The policy owner may finish before the input handoff or before the
+        // agent owner's follow-up write. Recover the current exact root without
+        // reminting the claim, and never revive a revoked grant.
+        let template =
+            crate::v2_task_authority::tests::draft(&planner_active_tools(), source, 1, "Alice");
+        let draft = savana_kernel_protocol::v2::TaskAuthorizationDraftV2::new(
+            template.authorization_id(),
+            principal,
+            task,
+            1,
+            f.authority.config.installation_id,
+            manifest,
+            7,
+            UnixMillisV2::new(1),
+            UnixMillisV2::new(10000),
+            source,
+            template.clauses().to_vec(),
+        )
+        .unwrap();
+        let key = SigningKey::from_bytes(&[0x39; 32]);
+        let signed = savana_kernel_protocol::v2::sign_task_authorization_v2(
+            draft
+                .to_unsigned_authorization(
+                    savana_kernel_protocol::v2::TaskEvidenceKindV2::AuthenticatedStructuredInput,
+                    Digest32V2::new([0x37; 32]),
+                )
+                .unwrap(),
+            &key,
+        )
+        .unwrap();
+        let verified = savana_policy_core::v2::VerifiedTaskAuthorizationV2::verify(
+            &signed,
+            &key.verifying_key(),
+            principal,
+            task,
+            f.authority.config.installation_id,
+            manifest,
+            UnixMillisV2::new(200),
+        )
+        .unwrap();
+        let digest = verified.digest();
+        let owner = &mut f.authority.policy.as_mut().unwrap().durable;
+        owner
+            .record_pending_task_authorization(draft, Digest32V2::new([78; 32]))
+            .unwrap();
+        owner
+            .install_pending_task_authorization(Digest32V2::new([78; 32]), verified)
+            .unwrap();
+        assert!(f
+            .authority
+            .activate_committed_task_authorization(
+                task,
+                principal,
+                manifest,
+                8,
+                UnixMillisV2::new(201)
+            )
+            .is_err());
+        f.authority
+            .activate_committed_task_authorization(
+                task,
+                principal,
+                manifest,
+                7,
+                UnixMillisV2::new(201),
+            )
+            .unwrap();
+        assert_eq!(
+            f.authority.tasks[0].status,
+            PublicTaskStatusV2::Ready { bootstrap: None }
+        );
+        assert_eq!(f.authority.tasks[0].task_authorization_digest, Some(digest));
+        assert!(f
+            .authority
+            .ingress_material_is_committed(task, principal, source, manifest)
+            .unwrap());
+        let encoded = f.authority.encode_recovery_snapshot().unwrap();
+        let mut restarted = planner_authority_fixture_with_task(true, false);
+        restarted.authority.policy = f.authority.policy.take();
+        restarted
+            .authority
+            .restore_recovery_snapshot(&encoded, UnixMillisV2::new(202))
+            .unwrap();
+        f.authority = restarted.authority;
+        f.authority
+            .activate_committed_task_authorization(
+                task,
+                principal,
+                manifest,
+                7,
+                UnixMillisV2::new(202),
+            )
+            .unwrap();
+        assert_eq!(f.authority.tasks[0].task_authorization_digest, Some(digest));
+        f.authority
+            .policy
+            .as_mut()
+            .unwrap()
+            .durable
+            .revoke_task_authorization(task)
+            .unwrap();
+        f.authority.tasks[0].status = PublicTaskStatusV2::Processing;
+        f.authority
+            .activate_committed_task_authorization(
+                task,
+                principal,
+                manifest,
+                7,
+                UnixMillisV2::new(203),
+            )
+            .unwrap();
+        assert_eq!(f.authority.tasks[0].status, PublicTaskStatusV2::Processing);
+    }
 
     fn planner_authority_fixture_with_approval_display(
         include_approval_display: bool,
+    ) -> PlannerAuthorityFixtureV2 {
+        planner_authority_fixture_with_task(include_approval_display, true)
+    }
+
+    fn planner_authority_fixture_with_task(
+        include_approval_display: bool,
+        install_task: bool,
     ) -> PlannerAuthorityFixtureV2 {
         let caller_identity = ServiceIdentityV2::new([0x81; 32]);
         let producer = ProducerIdentityV2::new([0x82; 32]);
@@ -6777,7 +7490,11 @@ pub(crate) mod tests {
             initial_document: MaskedDocumentHandleV2::from_authority_entropy([0x96; 32]).unwrap(),
             initial_value: prompt,
             status: AgentSessionStatusV2::Ready,
+            task_authorization_digest: None,
         });
+        if install_task {
+            install_planner_task(&mut authority, 1, UnixMillisV2::new(10_000));
+        }
         PlannerAuthorityFixtureV2 {
             _directory: directory,
             authority,
@@ -6786,6 +7503,153 @@ pub(crate) mod tests {
             run,
             prompt,
         }
+    }
+
+    fn install_planner_task(
+        authority: &mut KernelAgentAuthorityV2,
+        revision: u64,
+        expires: UnixMillisV2,
+    ) {
+        use savana_kernel_protocol::v2::{
+            sign_task_authorization_v2, ActionAlternativeV2, ActionCodecProfileV2, MagnitudeUnitV2,
+            TaskAuthorizationClauseV2, TaskAuthorizationV2, TaskEffectV2, TaskEvidenceKindV2,
+        };
+        let s = &authority.sessions[0];
+        let key = SigningKey::from_bytes(&[0x39; 32]);
+        let m = TaskAuthorizationV2::new(
+            Digest32V2::new([0x38; 32]),
+            s.principal,
+            s.durable_task_id,
+            revision,
+            authority.config.installation_id,
+            s.active_state_manifest_digest,
+            UnixMillisV2::new(1),
+            expires,
+            TaskEvidenceKindV2::ApprovedDraft,
+            Digest32V2::new([0x37; 32]),
+            Digest32V2::new([0x36; 32]),
+            vec![TaskAuthorizationClauseV2::new(
+                1,
+                vec![ActionAlternativeV2::new(
+                    Digest32V2::new([0x35; 32]),
+                    ActionCodecProfileV2::FixedJsonPostV1,
+                    TaskEffectV2::Send,
+                    Digest32V2::new([0x34; 32]),
+                    Digest32V2::new([0x33; 32]),
+                    Digest32V2::new([0x32; 32]),
+                    MagnitudeUnitV2::Count,
+                )
+                .unwrap()],
+                1,
+                10,
+                10,
+                vec![],
+                false,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let verified = savana_policy_core::v2::VerifiedTaskAuthorizationV2::verify(
+            &sign_task_authorization_v2(m, &key).unwrap(),
+            &key.verifying_key(),
+            s.principal,
+            s.durable_task_id,
+            authority.config.installation_id,
+            s.active_state_manifest_digest,
+            UnixMillisV2::new(100),
+        )
+        .unwrap();
+        authority
+            .policy
+            .as_mut()
+            .unwrap()
+            .durable
+            .install_verified_task_authorization(verified)
+            .unwrap();
+    }
+
+    #[test]
+    fn planner_entry_requires_live_exact_task_authority_and_commit_rechecks_revocation() {
+        let limits = PlannerLimitsV2::new(2, 1, 2, 4096).unwrap();
+        let mut f = planner_authority_fixture_with_task(true, false);
+        let request = PreparePlannerCallRequestV2::new(
+            f.run,
+            PlannerRouteIdV2::new(7),
+            StaticTemplateIdV2::new(11),
+            PlannerIntentKindV2::SendMessage,
+            PlannerPurposeV2::PlannerCall,
+            limits,
+            vec![f.prompt],
+        )
+        .unwrap();
+        assert!(f
+            .authority
+            .prepare_planner_call(
+                &request,
+                &f.values,
+                f.caller_identity,
+                UnixMillisV2::new(200)
+            )
+            .is_err());
+        assert!(f.authority.planner_tickets.is_empty());
+        install_planner_task(&mut f.authority, 1, UnixMillisV2::new(10_000));
+        let principal = f.authority.sessions[0].principal;
+        f.authority.sessions[0].principal = PrincipalIdV2::new([0x30; 32]);
+        assert!(f
+            .authority
+            .prepare_planner_call(
+                &request,
+                &f.values,
+                f.caller_identity,
+                UnixMillisV2::new(200)
+            )
+            .is_err());
+        f.authority.sessions[0].principal = principal;
+        assert!(f
+            .authority
+            .prepare_planner_call(
+                &request,
+                &f.values,
+                f.caller_identity,
+                UnixMillisV2::new(10_000)
+            )
+            .is_err());
+        let (ticket, nonce, slot) = f.prepare(limits);
+        let task = f.authority.sessions[0].durable_task_id;
+        f.authority
+            .policy
+            .as_mut()
+            .unwrap()
+            .durable
+            .revoke_task_authorization(task)
+            .unwrap();
+        let plan = valid_planner_plan_for_task_gate(nonce, slot);
+        assert!(f.commit(ticket, plan).is_err());
+        assert!(!f.authority.planner_tickets[0].consumed);
+        assert!(f
+            .authority
+            .prepare_planner_call(
+                &request,
+                &f.values,
+                f.caller_identity,
+                UnixMillisV2::new(202)
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn task_revision_replacement_invalidates_prepared_planner_ticket() {
+        let mut f = planner_authority_fixture();
+        let (ticket, nonce, slot) = f.prepare(PlannerLimitsV2::new(2, 1, 2, 4096).unwrap());
+        install_planner_task(&mut f.authority, 2, UnixMillisV2::new(10_000));
+        assert!(f
+            .commit(ticket, valid_planner_plan_for_task_gate(nonce, slot))
+            .is_err());
+        assert!(!f.authority.planner_tickets[0].consumed);
+    }
+
+    fn valid_planner_plan_for_task_gate(nonce: Nonce32V2, slot: PlannerSlotRefV2) -> PlannerPlanV2 {
+        PlannerPlanV2::new(nonce, vec![planner_step(1, 21, 31, slot, vec![])]).unwrap()
     }
 
     fn connector_tool_descriptor(
@@ -7849,7 +8713,7 @@ pub(crate) mod tests {
             &directory.join("kernel-g4-state-v2.cbor"),
             [0x99; 32],
             DurableStateNamespaceV2::from_verified_installation(
-                Digest32V2::new([0x9a; 32]),
+                Digest32V2::new([0x89; 32]),
                 Digest32V2::new([0x9b; 32]),
             )
             .unwrap(),
@@ -8061,7 +8925,7 @@ pub(crate) mod tests {
         .unwrap()
     }
 
-    fn planner_declassification_rules(
+    pub(crate) fn planner_declassification_rules(
         include_approval_display: bool,
     ) -> crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2 {
         planner_declassification_rules_with_handoffs(include_approval_display, None, None)
@@ -8161,7 +9025,7 @@ pub(crate) mod tests {
         .unwrap()
     }
 
-    fn planner_active_tools() -> ActiveToolRegistryV2 {
+    pub(crate) fn planner_active_tools() -> ActiveToolRegistryV2 {
         let registry_version = VersionV2::new(1, 0, 0);
         let publisher_key = SigningKey::from_bytes(&[0xa1; 32]);
         let publisher_key_id = Ed25519KeyIdV2::new([0xa2; 32]);
@@ -8300,6 +9164,9 @@ pub(crate) mod tests {
             UnixMillisV2::new(10_000),
         )
         .unwrap();
+        let unsigned = unsigned
+            .with_business_profile(task_business_profile(provider_tool_id))
+            .unwrap();
         let descriptor_digest = descriptor_digest_v2(&unsigned).unwrap();
         let mut signature_input = b"SAVANA_TOOL_DESCRIPTOR_SIGNATURE_V2\0".to_vec();
         signature_input.extend_from_slice(descriptor_digest.as_bytes());
@@ -8314,6 +9181,39 @@ pub(crate) mod tests {
             .unwrap()
             .verify(publisher, registry_version, UnixMillisV2::new(100))
             .unwrap()
+    }
+
+    fn task_business_profile(operation: &str) -> savana_kernel_protocol::v2::BusinessProfileV2 {
+        use savana_kernel_protocol::v2::*;
+        BusinessProfileV2::new(
+            ActionCodecProfileV2::McpToolsCallJsonV1,
+            operation,
+            Digest32V2::new([0x28; 32]),
+            Digest32V2::new([0x29; 32]),
+            TaskEffectV2::Send,
+            BusinessMagnitudeV2::FixedCount(1),
+            vec![
+                BusinessFieldV2::new(
+                    "body",
+                    BusinessFieldRoleV2::Payload,
+                    BusinessFieldTypeV2::Text,
+                )
+                .unwrap(),
+                BusinessFieldV2::new(
+                    "file",
+                    BusinessFieldRoleV2::Resource,
+                    BusinessFieldTypeV2::Text,
+                )
+                .unwrap(),
+                BusinessFieldV2::new(
+                    "to",
+                    BusinessFieldRoleV2::Destination,
+                    BusinessFieldTypeV2::Text,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap()
     }
 
     fn planner_step(

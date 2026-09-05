@@ -164,6 +164,26 @@ pub(crate) struct TaskLedgerV2 {
     tasks: Vec<TaskStateV2>,
 }
 impl TaskLedgerV2 {
+    pub(crate) fn historical(&self, digest: Digest32V2) -> Option<&VerifiedTaskAuthorizationV2> {
+        self.tasks
+            .iter()
+            .flat_map(|s| &s.history)
+            .find(|a| a.digest() == digest)
+    }
+    pub(crate) fn current(
+        &self,
+        task: DurableTaskIdV2,
+    ) -> Result<Option<TaskAuthorizationStateV2>, G4Error> {
+        if self
+            .tasks
+            .iter()
+            .any(|s| s.current().material().task() == task)
+        {
+            self.projection(task).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
     pub(crate) fn projection(
         &self,
         task: DurableTaskIdV2,

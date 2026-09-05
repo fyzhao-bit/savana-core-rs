@@ -98,6 +98,21 @@ Staging boundary: Task 4A adds unprivileged readable draft/control types, exact 
 
 Task 4A wire notes: readable draft schema 1 is a canonical 12-field CBOR array, bounded to 1 MiB, with separate draft and final-authorization digest domains. Control projections use only Resource/Destination/Parameter fields from the shared business codec; payload and variable quantity are deliberately absent. Task-root approval purpose tag 5 binds authorization ID, task, revision, create/amend/revoke change kind, and draft digest. Registration remains on authenticated `IngressApproval` tag 20; its result tag 5 carries a dedicated opaque handle; settlement query is `IngressApproval` tag 25 with the existing closed Query error contract. AgentApproval does not gain this operation or purpose. Existing display-declassification requirements remain mandatory. A revocation binding is not itself an implemented revocation issuer.
 
+Task 4B checkpoint (2026-09-05): native dedicated-key issuance, exact finalized-input
+proof, durable pending/approval/installation receipts, monotonic amendment/revocation,
+IngressKernel 51–54 and same-origin browser mutations are implemented. G4 plaintext
+schema 4 retains schema 2/3 recovery readers. Planner preparation/commit require the
+current root. Input handoff stays Processing until matching authority exists, including
+exact replay and root-before-input commit ordering. Dedicated key material/config
+generation is wired without deployment. Full protocol/policy/ingress tests pass with
+test-local sockets permitted; native issuer 5/5, pending issuance 4/4, handoff 1/1 and
+development input generator 1/1 pass. Feature-gated kerneld/policy all-target compilation
+passes. Still open: fresh-session browser recovery after in-memory ingress loss,
+content-bound task-action settlement production, and end-to-end closure. Latest full
+kerneld library run has one known final-release failure because Task 5 has not replaced
+the intentionally disabled no-task-authority prepare call. This is not Task 4/branch
+completion and is not yet deployable.
+
 - [ ] Test real ingress handler refusal of unsigned/agent-signed/self-attested contracts, wrong user/session/task/version, tampered approved drafts, missing fields, ambiguous free text; valid authenticated structured path and exact approved-draft path succeed before planning.
 - [ ] Add bounded structured contract draft operations on authenticated ingress (not JARVIS content-free control). Store canonical draft, render full fields, bind approval challenge/settlement to draft digest and dedicated task-authorization purpose. Trusted kernel issuer verifies settlement then signs; dedicated expected key purpose in startup/config.
 - [ ] Authenticate structured input through the existing ingress/session authority. No arbitrary public Rust constructor or boolean stands for a verified user. Unsupported natural-language expressions stay nonexecuting drafts; do not claim an open-language compiler.

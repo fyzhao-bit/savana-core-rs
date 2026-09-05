@@ -1365,6 +1365,225 @@ impl CommitParserWorkerResultRequestV2 {
     }
 }
 
+/// Deliberate typed submission on the authenticated ingress edge. The input
+/// session is resolved by the kernel; the draft's principal is not an assertion.
+#[derive(Debug, Clone)]
+pub struct EstablishTaskAuthorizationRequestV2 {
+    session: InputSessionHandleV2,
+    draft: super::TaskAuthorizationDraftV2,
+    request_nonce: super::Nonce32V2,
+}
+pub type PrepareTaskAuthorizationApprovalRequestV2 = EstablishTaskAuthorizationRequestV2;
+pub type RevokeTaskAuthorizationRequestV2 = EstablishTaskAuthorizationRequestV2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RevokeTaskAuthorizationResponseV2 {
+    authorization_digest: Digest32V2,
+}
+impl RevokeTaskAuthorizationResponseV2 {
+    pub fn new(authorization_digest: Digest32V2) -> Result<Self, ProtocolError> {
+        if is_zero(authorization_digest.as_bytes()) {
+            return Err(malformed());
+        }
+        Ok(Self {
+            authorization_digest,
+        })
+    }
+    pub fn authorization_digest(&self) -> Digest32V2 {
+        self.authorization_digest
+    }
+}
+pub fn encode_revoke_task_authorization_response_v2(
+    value: &RevokeTaskAuthorizationResponseV2,
+) -> Result<Vec<u8>, ProtocolError> {
+    let mut e = minicbor::Encoder::new(Vec::new());
+    e.array(1).map_err(ProtocolError::malformed)?;
+    encode_fixed(&mut e, &value.authorization_digest)?;
+    Ok(e.into_writer())
+}
+pub fn decode_revoke_task_authorization_response_v2(
+    bytes: &[u8],
+) -> Result<RevokeTaskAuthorizationResponseV2, ProtocolError> {
+    scan_single(bytes)?;
+    let mut d = minicbor::Decoder::new(bytes);
+    expect_array(&mut d, 1)?;
+    let value =
+        RevokeTaskAuthorizationResponseV2::new(decode_fixed(&mut d, &mut V2DecodeContext)?)?;
+    if d.position() != bytes.len() || encode_revoke_task_authorization_response_v2(&value)? != bytes
+    {
+        return Err(malformed());
+    }
+    Ok(value)
+}
+
+#[derive(Debug, Clone)]
+pub struct PrepareTaskAuthorizationApprovalResponseV2 {
+    request_digest: Digest32V2,
+    envelope: super::SignedApprovalEnvelopeV2,
+    display_authentication: super::SignedUiAuthenticationEnvelopeV2,
+}
+impl PrepareTaskAuthorizationApprovalResponseV2 {
+    pub fn new(
+        request_digest: Digest32V2,
+        envelope: super::SignedApprovalEnvelopeV2,
+        display_authentication: super::SignedUiAuthenticationEnvelopeV2,
+    ) -> Result<Self, ProtocolError> {
+        if is_zero(request_digest.as_bytes())
+            || envelope.unverified_material()?.purpose() != ApprovalPurposeV2::TaskAuthorization
+        {
+            return Err(malformed());
+        }
+        Ok(Self {
+            request_digest,
+            envelope,
+            display_authentication,
+        })
+    }
+    pub fn request_digest(&self) -> Digest32V2 {
+        self.request_digest
+    }
+    pub fn envelope(&self) -> &super::SignedApprovalEnvelopeV2 {
+        &self.envelope
+    }
+    pub fn display_authentication(&self) -> &super::SignedUiAuthenticationEnvelopeV2 {
+        &self.display_authentication
+    }
+}
+pub fn encode_prepare_task_authorization_approval_response_v2(
+    value: &PrepareTaskAuthorizationApprovalResponseV2,
+) -> Result<Vec<u8>, ProtocolError> {
+    let mut e = minicbor::Encoder::new(Vec::new());
+    e.array(3).map_err(ProtocolError::malformed)?;
+    encode_fixed(&mut e, &value.request_digest)?;
+    encode_fixed(&mut e, &value.envelope)?;
+    encode_fixed(&mut e, &value.display_authentication)?;
+    Ok(e.into_writer())
+}
+pub fn decode_prepare_task_authorization_approval_response_v2(
+    bytes: &[u8],
+) -> Result<PrepareTaskAuthorizationApprovalResponseV2, ProtocolError> {
+    scan_single(bytes)?;
+    let mut d = minicbor::Decoder::new(bytes);
+    let mut c = V2DecodeContext;
+    expect_array(&mut d, 3)?;
+    let v = PrepareTaskAuthorizationApprovalResponseV2::new(
+        decode_fixed(&mut d, &mut c)?,
+        decode_fixed(&mut d, &mut c)?,
+        decode_fixed(&mut d, &mut c)?,
+    )?;
+    if d.position() != bytes.len()
+        || encode_prepare_task_authorization_approval_response_v2(&v)? != bytes
+    {
+        return Err(malformed());
+    }
+    Ok(v)
+}
+#[derive(Debug, Clone)]
+pub struct CommitTaskAuthorizationApprovalRequestV2 {
+    request_digest: Digest32V2,
+    settlement: SignedApprovalSettlementV2,
+}
+impl CommitTaskAuthorizationApprovalRequestV2 {
+    pub fn new(
+        request_digest: Digest32V2,
+        settlement: SignedApprovalSettlementV2,
+    ) -> Result<Self, ProtocolError> {
+        if is_zero(request_digest.as_bytes())
+            || settlement.unsigned().purpose() != ApprovalPurposeV2::TaskAuthorization
+        {
+            return Err(malformed());
+        }
+        Ok(Self {
+            request_digest,
+            settlement,
+        })
+    }
+    pub fn request_digest(&self) -> Digest32V2 {
+        self.request_digest
+    }
+    pub fn settlement(&self) -> &SignedApprovalSettlementV2 {
+        &self.settlement
+    }
+}
+impl EstablishTaskAuthorizationRequestV2 {
+    pub fn new(
+        session: InputSessionHandleV2,
+        draft: super::TaskAuthorizationDraftV2,
+        request_nonce: super::Nonce32V2,
+    ) -> Result<Self, ProtocolError> {
+        if is_zero(request_nonce.as_bytes()) {
+            return Err(malformed());
+        }
+        Ok(Self {
+            session,
+            draft,
+            request_nonce,
+        })
+    }
+    pub fn session(&self) -> InputSessionHandleV2 {
+        self.session
+    }
+    pub fn draft(&self) -> &super::TaskAuthorizationDraftV2 {
+        &self.draft
+    }
+    pub fn request_nonce(&self) -> super::Nonce32V2 {
+        self.request_nonce
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EstablishTaskAuthorizationResponseV2 {
+    request_digest: Digest32V2,
+    authorization_digest: Digest32V2,
+}
+impl EstablishTaskAuthorizationResponseV2 {
+    pub fn new(
+        request_digest: Digest32V2,
+        authorization_digest: Digest32V2,
+    ) -> Result<Self, ProtocolError> {
+        if is_zero(request_digest.as_bytes()) || is_zero(authorization_digest.as_bytes()) {
+            return Err(malformed());
+        }
+        Ok(Self {
+            request_digest,
+            authorization_digest,
+        })
+    }
+    pub fn request_digest(&self) -> Digest32V2 {
+        self.request_digest
+    }
+    pub fn authorization_digest(&self) -> Digest32V2 {
+        self.authorization_digest
+    }
+}
+pub fn encode_establish_task_authorization_response_v2(
+    value: &EstablishTaskAuthorizationResponseV2,
+) -> Result<Vec<u8>, ProtocolError> {
+    let mut e = minicbor::Encoder::new(Vec::new());
+    e.array(2).map_err(ProtocolError::malformed)?;
+    encode_fixed(&mut e, &value.request_digest)?;
+    encode_fixed(&mut e, &value.authorization_digest)?;
+    Ok(e.into_writer())
+}
+pub fn decode_establish_task_authorization_response_v2(
+    bytes: &[u8],
+) -> Result<EstablishTaskAuthorizationResponseV2, ProtocolError> {
+    scan_single(bytes)?;
+    let mut d = minicbor::Decoder::new(bytes);
+    expect_array(&mut d, 2)?;
+    let mut c = V2DecodeContext;
+    let value = EstablishTaskAuthorizationResponseV2::new(
+        decode_fixed(&mut d, &mut c)?,
+        decode_fixed(&mut d, &mut c)?,
+    )?;
+    if d.position() != bytes.len()
+        || encode_establish_task_authorization_response_v2(&value)? != bytes
+    {
+        return Err(malformed());
+    }
+    Ok(value)
+}
+
 #[derive(Debug)]
 pub enum KernelIngressOperationV2 {
     Health(KernelIngressHealthRequestV2),
@@ -1379,6 +1598,10 @@ pub enum KernelIngressOperationV2 {
     RegisterParserWorkerJob(RegisterParserWorkerJobRequestV2),
     AppendParserWorkerPageFrame(AppendParserWorkerPageFrameRequestV2),
     CommitParserWorkerResult(CommitParserWorkerResultRequestV2),
+    EstablishTaskAuthorization(EstablishTaskAuthorizationRequestV2),
+    PrepareTaskAuthorizationApproval(PrepareTaskAuthorizationApprovalRequestV2),
+    CommitTaskAuthorizationApproval(CommitTaskAuthorizationApprovalRequestV2),
+    RevokeTaskAuthorization(RevokeTaskAuthorizationRequestV2),
 }
 
 impl KernelIngressOperationV2 {
@@ -1396,12 +1619,18 @@ impl KernelIngressOperationV2 {
             Self::RegisterParserWorkerJob(_) => 48,
             Self::AppendParserWorkerPageFrame(_) => 49,
             Self::CommitParserWorkerResult(_) => 50,
+            Self::EstablishTaskAuthorization(_) => 51,
+            Self::PrepareTaskAuthorizationApproval(_) => 52,
+            Self::CommitTaskAuthorizationApproval(_) => 53,
+            Self::RevokeTaskAuthorization(_) => 54,
         }
     }
 }
 
-pub const fn kernel_ingress_operation_tags_v2() -> &'static [u16; 12] {
-    &[0, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50]
+pub const fn kernel_ingress_operation_tags_v2() -> &'static [u16; 16] {
+    &[
+        0, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54,
+    ]
 }
 
 pub fn encode_kernel_ingress_operation_v2(
@@ -1474,6 +1703,21 @@ pub fn encode_kernel_ingress_operation_v2(
             encode_header(&mut encoder, 50, 2)?;
             encode_fixed(&mut encoder, &request.extraction)?;
             encode_fixed(&mut encoder, &request.attestation)?;
+        }
+        KernelIngressOperationV2::EstablishTaskAuthorization(request)
+        | KernelIngressOperationV2::RevokeTaskAuthorization(request)
+        | KernelIngressOperationV2::PrepareTaskAuthorizationApproval(request) => {
+            encode_header(&mut encoder, value.tag(), 3)?;
+            encode_fixed(&mut encoder, &request.session)?;
+            encoder
+                .bytes(&super::encode_task_authorization_draft_v2(&request.draft)?)
+                .map_err(ProtocolError::malformed)?;
+            encode_fixed(&mut encoder, &request.request_nonce)?;
+        }
+        KernelIngressOperationV2::CommitTaskAuthorizationApproval(request) => {
+            encode_header(&mut encoder, 53, 2)?;
+            encode_fixed(&mut encoder, &request.request_digest)?;
+            encode_fixed(&mut encoder, &request.settlement)?;
         }
     }
     Ok(encoder.into_writer())
@@ -1583,6 +1827,32 @@ pub fn decode_kernel_ingress_operation_v2(
                     decode_fixed(&mut decoder, &mut context)?,
                     decode_fixed(&mut decoder, &mut context)?,
                 ),
+            )
+        }
+        51 | 52 | 54 => {
+            expect_array(&mut decoder, 3)?;
+            let request = EstablishTaskAuthorizationRequestV2::new(
+                decode_fixed(&mut decoder, &mut context)?,
+                super::decode_task_authorization_draft_v2(
+                    decoder.bytes().map_err(ProtocolError::malformed)?,
+                )?,
+                decode_fixed(&mut decoder, &mut context)?,
+            )?;
+            if tag == 54 {
+                KernelIngressOperationV2::RevokeTaskAuthorization(request)
+            } else if tag == 51 {
+                KernelIngressOperationV2::EstablishTaskAuthorization(request)
+            } else {
+                KernelIngressOperationV2::PrepareTaskAuthorizationApproval(request)
+            }
+        }
+        53 => {
+            expect_array(&mut decoder, 2)?;
+            KernelIngressOperationV2::CommitTaskAuthorizationApproval(
+                CommitTaskAuthorizationApprovalRequestV2::new(
+                    decode_fixed(&mut decoder, &mut context)?,
+                    decode_fixed(&mut decoder, &mut context)?,
+                )?,
             )
         }
         _ => return Err(ProtocolError::stable(StableCode::ProtocolUnknownOperation)),

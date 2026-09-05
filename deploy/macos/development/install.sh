@@ -809,6 +809,13 @@ harden_generated_public_keys() {
 
 SAVANA_AUTHORITY_CLASS=development \
   "$install_root/libexec/savana-development-material" "$install_root"
+task_authorization_credential="$install_root/credentials/kerneld/task-authorization-v2.seed"
+[ -f "$task_authorization_credential" ] && \
+  [ ! -L "$task_authorization_credential" ] && \
+  [ "$(/usr/bin/stat -f %z "$task_authorization_credential")" = "32" ] || {
+    echo "task authorization has incomplete private material" >&2
+    exit 70
+  }
 connector_authority_credential="$install_root/credentials/kerneld/connector-authority-v2.seed"
 connector_authority_key_id=$(
   /usr/bin/plutil -extract policy_runtime.connector_authority_key_id raw -expect string \

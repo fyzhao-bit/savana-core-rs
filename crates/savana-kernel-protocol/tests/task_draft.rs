@@ -1,5 +1,48 @@
 use savana_kernel_protocol::v2::*;
 
+#[test]
+fn task_browser_submission_is_typed_tab_bound_and_canonical() {
+    let tab = IngressTabSessionCapabilityV2::from_authority_entropy([91; 32]).unwrap();
+    let nonce = Nonce32V2::new([92; 32]);
+    for request in [
+        IngressBrowserRequestV2::EstablishTaskAuthorization {
+            tab,
+            client_request_nonce: nonce,
+            draft: draft(vec![clause(1, vec![])], 1).unwrap(),
+        },
+        IngressBrowserRequestV2::PrepareTaskAuthorizationApproval {
+            tab,
+            client_request_nonce: nonce,
+            draft: draft(vec![clause(1, vec![])], 1).unwrap(),
+        },
+        IngressBrowserRequestV2::CommitTaskAuthorizationApproval {
+            tab,
+            client_request_nonce: nonce,
+            request_digest: d(93),
+        },
+        IngressBrowserRequestV2::RevokeTaskAuthorization {
+            tab,
+            client_request_nonce: nonce,
+            draft: draft(vec![clause(1, vec![])], 1).unwrap(),
+        },
+    ] {
+        let encoded = encode_ingress_browser_request_v2(&request).unwrap();
+        let decoded = decode_ingress_browser_request_v2(&encoded).unwrap();
+        assert_eq!(decoded.tab(), tab);
+        assert_eq!(decoded.client_request_nonce(), nonce);
+        assert_eq!(
+            encode_ingress_browser_request_v2(&decoded).unwrap(),
+            encoded
+        );
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert!(decode_ingress_browser_request_v2(&trailing).is_err());
+        let mut unknown = encoded.clone();
+        unknown[1] = 23;
+        assert!(decode_ingress_browser_request_v2(&unknown).is_err());
+    }
+}
+
 fn d(n: u8) -> Digest32V2 {
     Digest32V2::new([n; 32])
 }
@@ -167,6 +210,34 @@ fn task_draft_roundtrip_preserves_joint_relations_and_displays_actual_limits() {
     for secret in ["Alice", "report", "Bob"] {
         assert!(!format!("{value:?}").contains(secret));
     }
+}
+
+#[test]
+fn structured_task_submission_is_a_separate_canonical_ingress_operation() {
+    let request = EstablishTaskAuthorizationRequestV2::new(
+        InputSessionHandleV2::from_authority_entropy([0x70; 32]).unwrap(),
+        draft(vec![clause(1, vec![])], 1).unwrap(),
+        Nonce32V2::new([0x71; 32]),
+    )
+    .unwrap();
+    let op = KernelIngressOperationV2::EstablishTaskAuthorization(request);
+    assert_eq!(op.tag(), 51);
+    let bytes = encode_kernel_ingress_operation_v2(&op).unwrap();
+    assert_eq!(
+        encode_kernel_ingress_operation_v2(&decode_kernel_ingress_operation_v2(&bytes).unwrap())
+            .unwrap(),
+        bytes
+    );
+    assert!(decode_kernel_agent_operation_v2(&bytes).is_err());
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(decode_kernel_ingress_operation_v2(&trailing).is_err());
+    let response = EstablishTaskAuthorizationResponseV2::new(d(10), d(11)).unwrap();
+    let bytes = encode_establish_task_authorization_response_v2(&response).unwrap();
+    assert_eq!(
+        decode_establish_task_authorization_response_v2(&bytes).unwrap(),
+        response
+    );
 }
 
 #[test]

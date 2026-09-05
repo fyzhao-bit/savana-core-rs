@@ -280,6 +280,7 @@ mod v2_server;
 mod v2_startup;
 #[allow(dead_code)] // Activated by the V2 authenticated dispatch routes.
 mod v2_state_owner;
+mod v2_task_authority;
 #[allow(dead_code)] // Activated by the native V2 listener entry point.
 mod v2_transport_owner;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]

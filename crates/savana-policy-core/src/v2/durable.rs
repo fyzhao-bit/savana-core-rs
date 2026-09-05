@@ -46,6 +46,7 @@ use super::quota::{
     AuthenticatedEffectDispositionKindV2, DispatchQuotaCounterEntryV2, DispatchQuotaLedgerEntryV2,
     DispatchQuotaLedgerV2,
 };
+use super::task_issuance::{PendingTaskAuthorizationV2, TaskIssuanceLedgerV2};
 use super::task_state::TaskLedgerV2;
 use super::validator::{decision_record_digest, G5DecisionEntryV2};
 use super::{
@@ -68,11 +69,12 @@ use super::{
 use crate::atomic_file::{self, PersistencePhase};
 use crate::lock_file::LedgerLock;
 use savana_kernel_protocol::v2::UnixMillisV2;
+use savana_kernel_protocol::v2::{SignedApprovalEnvelopeV2, TaskAuthorizationDraftV2};
 
 const STATE_FILE_NAME: &str = "kernel-g4-state-v2.cbor";
 const STATE_LOCK_FILE_NAME: &str = ".kernel-g4-state-v2.cbor.lock";
 const STATE_SCHEMA_VERSION: u16 = 2;
-const PAYLOAD_SCHEMA_VERSION: u16 = 3;
+const PAYLOAD_SCHEMA_VERSION: u16 = 4;
 const STATE_ENCRYPTION_AAD_DOMAIN: &[u8] = b"SAVANA_KERNEL_G4_STATE_ENCRYPTION_V2\0";
 const STATE_HEAD_DOMAIN: &[u8] = b"SAVANA_KERNEL_G4_STATE_HEAD_V2\0";
 const STATE_KEY_DERIVATION_DOMAIN: &[u8] = b"SAVANA_KERNEL_G4_STATE_KEY_DERIVATION_V2\0";
@@ -105,6 +107,7 @@ struct DurableG4SnapshotV2 {
     decisions: G5DecisionIndexV2,
     dispatch: KernelDispatchJournalV2,
     tasks: TaskLedgerV2,
+    issuance: TaskIssuanceLedgerV2,
 }
 
 impl Default for DurableG4SnapshotV2 {
@@ -119,6 +122,7 @@ impl Default for DurableG4SnapshotV2 {
             decisions: G5DecisionIndexV2::default(),
             dispatch: KernelDispatchJournalV2::default(),
             tasks: TaskLedgerV2::default(),
+            issuance: TaskIssuanceLedgerV2::default(),
         }
     }
 }
@@ -234,6 +238,97 @@ impl std::fmt::Debug for DurableG4StateV2 {
 }
 
 impl DurableG4StateV2 {
+    /// Persist before showing approval. This stores unprivileged material only.
+    pub fn record_pending_task_authorization(
+        &mut self,
+        draft: TaskAuthorizationDraftV2,
+        request_digest: Digest32V2,
+    ) -> Result<PendingTaskAuthorizationV2, G4Error> {
+        self.ensure_usable()?;
+        if draft.installation_digest() != self.namespace.installation_id() {
+            return Err(G4Error::StateConflict);
+        }
+        if let Some(existing) = self.snapshot.issuance.find(request_digest) {
+            return if existing.draft() == &draft {
+                Ok(existing.clone())
+            } else {
+                Err(G4Error::StateConflict)
+            };
+        }
+        let previous = match self.snapshot.tasks.current(draft.task())? {
+            None if draft.revision() == 1 => None,
+            Some(s)
+                if !s.revoked()
+                    && s.authorization().material().authorization_id()
+                        == draft.authorization_id()
+                    && s.authorization().material().principal() == draft.principal()
+                    && s.authorization().material().revision().checked_add(1)
+                        == Some(draft.revision()) =>
+            {
+                Some(s.authorization().digest())
+            }
+            _ => return Err(G4Error::StateConflict),
+        };
+        let mut next = self.snapshot.clone();
+        next.issuance.record(draft, request_digest, previous)?;
+        let record = next
+            .issuance
+            .find(request_digest)
+            .cloned()
+            .ok_or(G4Error::StateConflict)?;
+        self.commit(next)?;
+        Ok(record)
+    }
+    pub fn pending_task_authorization(
+        &self,
+        request: Digest32V2,
+    ) -> Result<Option<&PendingTaskAuthorizationV2>, G4Error> {
+        self.ensure_usable()?;
+        Ok(self.snapshot.issuance.find(request))
+    }
+    pub fn installed_task_authorization_draft(
+        &self,
+        digest: Digest32V2,
+    ) -> Result<Option<&TaskAuthorizationDraftV2>, G4Error> {
+        self.ensure_usable()?;
+        Ok(self.snapshot.issuance.installed_draft(digest))
+    }
+    pub fn attach_task_authorization_approval(
+        &mut self,
+        request: Digest32V2,
+        envelope: SignedApprovalEnvelopeV2,
+        display_authentication: savana_kernel_protocol::v2::SignedUiAuthenticationEnvelopeV2,
+    ) -> Result<(), G4Error> {
+        self.ensure_usable()?;
+        let mut next = self.snapshot.clone();
+        if next
+            .issuance
+            .attach_envelope(request, envelope, display_authentication)?
+        {
+            self.commit(next)?;
+        }
+        Ok(())
+    }
+    /// Grant installation and pending-record settlement are one owner commit.
+    pub fn install_pending_task_authorization(
+        &mut self,
+        request: Digest32V2,
+        authorization: VerifiedTaskAuthorizationV2,
+    ) -> Result<(), G4Error> {
+        self.ensure_usable()?;
+        let current = self
+            .snapshot
+            .tasks
+            .current(authorization.material().task())?
+            .map(|s| s.authorization().digest());
+        let mut next = self.snapshot.clone();
+        if next.issuance.finish(request, &authorization, current)? {
+            next.tasks
+                .install(authorization, self.namespace.installation_id())?;
+            self.commit(next)?;
+        }
+        Ok(())
+    }
     pub fn install_verified_task_authorization(
         &mut self,
         authorization: VerifiedTaskAuthorizationV2,
@@ -262,6 +357,17 @@ impl DurableG4StateV2 {
     ) -> Result<TaskAuthorizationStateV2, G4Error> {
         self.ensure_usable()?;
         self.snapshot.tasks.projection(task)
+    }
+    /// Missing authority is distinct from a corrupt or unavailable owner.
+    pub fn find_task_authorization_state(
+        &self,
+        task: DurableTaskIdV2,
+    ) -> Result<Option<TaskAuthorizationStateV2>, G4Error> {
+        self.ensure_usable()?;
+        match self.snapshot.tasks.current(task)? {
+            Some(_) => self.snapshot.tasks.projection(task).map(Some),
+            None => Ok(None),
+        }
     }
     pub fn task_dispatch_binding(
         &self,
@@ -1474,7 +1580,12 @@ fn decode_encrypted_snapshot(
 fn encode_snapshot_payload(snapshot: &DurableG4SnapshotV2) -> Result<Zeroizing<Vec<u8>>, G4Error> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
     encoder
-        .array(if snapshot.payload_schema == 2 { 9 } else { 11 })
+        .array(match snapshot.payload_schema {
+            2 => 9,
+            3 => 11,
+            4 => 12,
+            _ => return Err(G4Error::DurableStateCorrupt),
+        })
         .and_then(|encoder| encoder.u16(snapshot.payload_schema))
         .and_then(|encoder| encoder.u64(snapshot.sequence))
         .map_err(|_| G4Error::DurableStateCorrupt)?;
@@ -1488,7 +1599,7 @@ fn encode_snapshot_payload(snapshot: &DurableG4SnapshotV2) -> Result<Zeroizing<V
     encode_reservations(&mut encoder, &snapshot.quota)?;
     encode_g5_decisions(&mut encoder, &snapshot.decisions)?;
     encode_dispatch_entries(&mut encoder, &snapshot.dispatch)?;
-    if snapshot.payload_schema == PAYLOAD_SCHEMA_VERSION {
+    if snapshot.payload_schema >= 3 {
         encoder
             .bytes(&snapshot.tasks.encode()?)
             .map_err(|_| G4Error::DurableStateCorrupt)?;
@@ -1500,6 +1611,11 @@ fn encode_snapshot_payload(snapshot: &DurableG4SnapshotV2) -> Result<Zeroizing<V
                 .bytes(id.as_bytes())
                 .map_err(|_| G4Error::DurableStateCorrupt)?;
         }
+    }
+    if snapshot.payload_schema >= 4 {
+        encoder
+            .bytes(&snapshot.issuance.encode()?)
+            .map_err(|_| G4Error::DurableStateCorrupt)?;
     }
     Ok(Zeroizing::new(encoder.into_writer()))
 }
@@ -1863,7 +1979,10 @@ fn decode_snapshot_payload(payload: &[u8]) -> Result<DurableG4SnapshotV2, G4Erro
     let mut decoder = minicbor::Decoder::new(payload);
     let fields = decoder.array().map_err(|_| G4Error::DurableStateCorrupt)?;
     let payload_schema = decoder.u16().map_err(|_| G4Error::DurableStateCorrupt)?;
-    if !matches!((payload_schema, fields), (2, Some(9)) | (3, Some(11))) {
+    if !matches!(
+        (payload_schema, fields),
+        (2, Some(9)) | (3, Some(11)) | (4, Some(12))
+    ) {
         return Err(G4Error::DurableStateCorrupt);
     }
     let sequence = decoder.u64().map_err(|_| G4Error::DurableStateCorrupt)?;
@@ -1874,7 +1993,7 @@ fn decode_snapshot_payload(payload: &[u8]) -> Result<DurableG4SnapshotV2, G4Erro
     let reservations = decode_reservations(&mut decoder)?;
     let decisions = decode_g5_decisions(&mut decoder)?;
     let dispatch = decode_dispatch_entries(&mut decoder)?;
-    let tasks = if payload_schema == PAYLOAD_SCHEMA_VERSION {
+    let tasks = if payload_schema >= 3 {
         TaskLedgerV2::decode(decoder.bytes().map_err(|_| G4Error::DurableStateCorrupt)?)?
     } else {
         TaskLedgerV2::default()
@@ -1888,12 +2007,18 @@ fn decode_snapshot_payload(payload: &[u8]) -> Result<DurableG4SnapshotV2, G4Erro
         }
         ids
     };
+    let issuance = if payload_schema >= 4 {
+        TaskIssuanceLedgerV2::decode(decoder.bytes().map_err(|_| G4Error::DurableStateCorrupt)?)?
+    } else {
+        TaskIssuanceLedgerV2::default()
+    };
     if decoder.position() != payload.len() {
         return Err(G4Error::DurableStateCorrupt);
     }
     let snapshot = DurableG4SnapshotV2 {
         payload_schema,
         tasks,
+        issuance,
         legacy_intents,
         sequence,
         previous_state_digest,
@@ -2360,6 +2485,10 @@ fn decode_final_release_binding(
 
 fn validate_snapshot(snapshot: &DurableG4SnapshotV2) -> Result<(), G4Error> {
     snapshot.tasks.validate(&snapshot.dispatch)?;
+    snapshot.issuance.validate()?;
+    snapshot
+        .issuance
+        .validate_authority_references(&snapshot.tasks)?;
     for (index, id) in snapshot.legacy_intents.iter().enumerate() {
         if snapshot.legacy_intents[..index].contains(id)
             || !snapshot

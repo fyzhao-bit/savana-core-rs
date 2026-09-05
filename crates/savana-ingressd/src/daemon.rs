@@ -472,6 +472,10 @@ mod implementation {
             route @ (FixedHttpRouteV2::IngressInputBegin
             | FixedHttpRouteV2::IngressInputChunk
             | FixedHttpRouteV2::IngressInputFinalize
+            | FixedHttpRouteV2::IngressTaskEstablish
+            | FixedHttpRouteV2::IngressTaskRevoke
+            | FixedHttpRouteV2::IngressTaskApprovalPrepare
+            | FixedHttpRouteV2::IngressTaskApprovalCommit
             | FixedHttpRouteV2::IngressInputAbort) => {
                 let decoded = decode_ingress_browser_request_v2(request.body())
                     .map_err(|_| IngressdDaemonErrorV2::EndpointUnavailable)?;
@@ -505,6 +509,18 @@ mod implementation {
             ) | (
                 FixedHttpRouteV2::IngressInputAbort,
                 IngressBrowserRequestV2::Abort { .. }
+            ) | (
+                FixedHttpRouteV2::IngressTaskEstablish,
+                IngressBrowserRequestV2::EstablishTaskAuthorization { .. }
+            ) | (
+                FixedHttpRouteV2::IngressTaskRevoke,
+                IngressBrowserRequestV2::RevokeTaskAuthorization { .. }
+            ) | (
+                FixedHttpRouteV2::IngressTaskApprovalPrepare,
+                IngressBrowserRequestV2::PrepareTaskAuthorizationApproval { .. }
+            ) | (
+                FixedHttpRouteV2::IngressTaskApprovalCommit,
+                IngressBrowserRequestV2::CommitTaskAuthorizationApproval { .. }
             )
         )
     }

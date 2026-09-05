@@ -1411,6 +1411,12 @@ impl UnsignedUiAuthenticationEnvelopeV2 {
 }
 
 impl SignedApprovalEnvelopeV2 {
+    /// Decode for storage/structural comparisons only. This does not authenticate
+    /// the signer, caller, deployment, principal, purpose, or validity interval.
+    pub fn unverified_material(&self) -> Result<UnsignedApprovalEnvelopeV2, ProtocolError> {
+        decode_unsigned_approval_envelope_v2(&self.canonical_payload)
+    }
+
     pub fn sign(
         unsigned: UnsignedApprovalEnvelopeV2,
         signing_key: &SigningKey,
@@ -1524,6 +1530,11 @@ impl SignedApprovalEnvelopeV2 {
 }
 
 impl SignedUiAuthenticationEnvelopeV2 {
+    /// Structural material only; callers must use `verify` for authority.
+    pub fn unverified_material(&self) -> Result<UnsignedUiAuthenticationEnvelopeV2, ProtocolError> {
+        decode_unsigned_ui_authentication_envelope_v2(&self.canonical_payload)
+    }
+
     pub fn sign(
         unsigned: UnsignedUiAuthenticationEnvelopeV2,
         signing_key: &SigningKey,

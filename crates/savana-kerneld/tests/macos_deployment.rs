@@ -1439,6 +1439,13 @@ fn build_input_generator_emits_cryptographically_bound_runtime_inputs() {
     let agentd: serde_json::Value =
         serde_json::from_slice(&fs::read(config.join("agentd-bootstrap-v2.json")).unwrap())
             .unwrap();
+    for field in ["task_authorization_key_id", "task_authorization_public_key"] {
+        let placeholder = kerneld[field].as_str().expect("mandatory task key field");
+        assert_eq!(placeholder.len(), 64);
+        assert!(placeholder.bytes().all(|b| b.is_ascii_hexdigit()));
+        // The materializer replaces all placeholders with distinct real keys.
+        assert_eq!(kerneld[field], kerneld["ui_settlement_key_id"]);
+    }
     assert_eq!(
         kerneld["agent_authority_state_path"].as_str(),
         Some(

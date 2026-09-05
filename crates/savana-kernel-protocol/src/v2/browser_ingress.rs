@@ -31,11 +31,45 @@ pub enum IngressBrowserRequestV2 {
         tab: IngressTabSessionCapabilityV2,
         client_request_nonce: Nonce32V2,
     },
+    /// A deliberate typed submission on the authenticated ingress tab, never
+    /// inferred from chat text or planner output.
+    EstablishTaskAuthorization {
+        tab: IngressTabSessionCapabilityV2,
+        client_request_nonce: Nonce32V2,
+        draft: super::TaskAuthorizationDraftV2,
+    },
+    PrepareTaskAuthorizationApproval {
+        tab: IngressTabSessionCapabilityV2,
+        client_request_nonce: Nonce32V2,
+        draft: super::TaskAuthorizationDraftV2,
+    },
+    CommitTaskAuthorizationApproval {
+        tab: IngressTabSessionCapabilityV2,
+        client_request_nonce: Nonce32V2,
+        request_digest: Digest32V2,
+    },
+    RevokeTaskAuthorization {
+        tab: IngressTabSessionCapabilityV2,
+        client_request_nonce: Nonce32V2,
+        draft: super::TaskAuthorizationDraftV2,
+    },
 }
 
 impl core::fmt::Debug for IngressBrowserRequestV2 {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::RevokeTaskAuthorization { .. } => {
+                formatter.write_str("RevokeTaskAuthorization(<redacted>)")
+            }
+            Self::EstablishTaskAuthorization { .. } => {
+                formatter.write_str("EstablishTaskAuthorization(<redacted>)")
+            }
+            Self::PrepareTaskAuthorizationApproval { .. } => {
+                formatter.write_str("PrepareTaskAuthorizationApproval(<redacted>)")
+            }
+            Self::CommitTaskAuthorizationApproval { .. } => {
+                formatter.write_str("CommitTaskAuthorizationApproval(<redacted>)")
+            }
             Self::Begin {
                 tab,
                 client_request_nonce,
@@ -90,12 +124,32 @@ impl IngressBrowserRequestV2 {
             Self::Begin { tab, .. }
             | Self::Append { tab, .. }
             | Self::Finalize { tab, .. }
+            | Self::EstablishTaskAuthorization { tab, .. }
+            | Self::PrepareTaskAuthorizationApproval { tab, .. }
+            | Self::CommitTaskAuthorizationApproval { tab, .. }
+            | Self::RevokeTaskAuthorization { tab, .. }
             | Self::Abort { tab, .. } => *tab,
         }
     }
 
     pub const fn client_request_nonce(&self) -> Nonce32V2 {
         match self {
+            Self::RevokeTaskAuthorization {
+                client_request_nonce,
+                ..
+            } => *client_request_nonce,
+            Self::EstablishTaskAuthorization {
+                client_request_nonce,
+                ..
+            }
+            | Self::PrepareTaskAuthorizationApproval {
+                client_request_nonce,
+                ..
+            }
+            | Self::CommitTaskAuthorizationApproval {
+                client_request_nonce,
+                ..
+            } => *client_request_nonce,
             Self::Begin {
                 client_request_nonce,
                 ..
@@ -150,6 +204,18 @@ pub enum IngressBrowserMutationResponseV2 {
         state: InputPublicStateV2,
     },
     Aborted,
+    TaskAuthorizationEstablished {
+        request_digest: Digest32V2,
+        authorization_digest: Digest32V2,
+    },
+    TaskAuthorizationOpenApproval {
+        request_digest: Digest32V2,
+        transfer: ApprovalDisplayAuthenticationTransferCapabilityV2,
+    },
+    TaskAuthorizationRejected,
+    TaskAuthorizationRevoked {
+        authorization_digest: Digest32V2,
+    },
 }
 
 pub fn encode_ingress_browser_request_v2(
@@ -157,6 +223,59 @@ pub fn encode_ingress_browser_request_v2(
 ) -> Result<Vec<u8>, ProtocolError> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
     match value {
+        IngressBrowserRequestV2::EstablishTaskAuthorization {
+            tab,
+            client_request_nonce,
+            draft,
+        }
+        | IngressBrowserRequestV2::RevokeTaskAuthorization {
+            tab,
+            client_request_nonce,
+            draft,
+        }
+        | IngressBrowserRequestV2::PrepareTaskAuthorizationApproval {
+            tab,
+            client_request_nonce,
+            draft,
+        } => {
+            let tag = if matches!(
+                value,
+                IngressBrowserRequestV2::RevokeTaskAuthorization { .. }
+            ) {
+                8
+            } else if matches!(
+                value,
+                IngressBrowserRequestV2::EstablishTaskAuthorization { .. }
+            ) {
+                5
+            } else {
+                6
+            };
+            encoder
+                .array(4)
+                .and_then(|e| e.u16(tag))
+                .map_err(ProtocolError::malformed)?;
+            tab.encode(&mut encoder, &mut ())
+                .and_then(|()| client_request_nonce.encode(&mut encoder, &mut ()))
+                .map_err(ProtocolError::malformed)?;
+            encoder
+                .bytes(&super::encode_task_authorization_draft_v2(draft)?)
+                .map_err(ProtocolError::malformed)?;
+        }
+        IngressBrowserRequestV2::CommitTaskAuthorizationApproval {
+            tab,
+            client_request_nonce,
+            request_digest,
+        } => {
+            encoder
+                .array(4)
+                .and_then(|e| e.u16(7))
+                .map_err(ProtocolError::malformed)?;
+            tab.encode(&mut encoder, &mut ())
+                .and_then(|()| client_request_nonce.encode(&mut encoder, &mut ()))
+                .and_then(|()| request_digest.encode(&mut encoder, &mut ()))
+                .map_err(ProtocolError::malformed)?;
+        }
         IngressBrowserRequestV2::Begin {
             tab,
             client_request_nonce,
@@ -236,6 +355,50 @@ pub fn decode_ingress_browser_request_v2(
     let tag = decoder.u16().map_err(ProtocolError::malformed)?;
     let mut context = V2DecodeContext;
     let value = match (tag, count) {
+        (5 | 6 | 8, Some(4)) => {
+            let tab = minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?;
+            let client_request_nonce = minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?;
+            let draft = super::decode_task_authorization_draft_v2(
+                decoder.bytes().map_err(ProtocolError::malformed)?,
+            )?;
+            if tag == 8 {
+                IngressBrowserRequestV2::RevokeTaskAuthorization {
+                    tab,
+                    client_request_nonce,
+                    draft,
+                }
+            } else if tag == 5 {
+                IngressBrowserRequestV2::EstablishTaskAuthorization {
+                    tab,
+                    client_request_nonce,
+                    draft,
+                }
+            } else {
+                IngressBrowserRequestV2::PrepareTaskAuthorizationApproval {
+                    tab,
+                    client_request_nonce,
+                    draft,
+                }
+            }
+        }
+        (7, Some(4)) => {
+            let tab = minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?;
+            let client_request_nonce = minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?;
+            let request_digest: Digest32V2 = minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?;
+            if request_digest.as_bytes() == &[0; 32] {
+                return Err(malformed());
+            }
+            IngressBrowserRequestV2::CommitTaskAuthorizationApproval {
+                tab,
+                client_request_nonce,
+                request_digest,
+            }
+        }
         (1, Some(6)) => IngressBrowserRequestV2::Begin {
             tab: minicbor::Decode::decode(&mut decoder, &mut context)
                 .map_err(ProtocolError::from_typed_decode)?,
@@ -310,6 +473,59 @@ pub fn encode_ingress_browser_mutation_response_v2(
 ) -> Result<Vec<u8>, ProtocolError> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
     match value {
+        IngressBrowserMutationResponseV2::TaskAuthorizationRevoked {
+            authorization_digest,
+        } => {
+            if authorization_digest.as_bytes() == &[0; 32] {
+                return Err(malformed());
+            }
+            encoder
+                .array(2)
+                .and_then(|e| e.u16(10))
+                .map_err(ProtocolError::malformed)?;
+            authorization_digest
+                .encode(&mut encoder, &mut ())
+                .map_err(ProtocolError::malformed)?;
+        }
+        IngressBrowserMutationResponseV2::TaskAuthorizationEstablished {
+            request_digest,
+            authorization_digest,
+        } => {
+            if request_digest.as_bytes() == &[0; 32] || authorization_digest.as_bytes() == &[0; 32]
+            {
+                return Err(malformed());
+            }
+            encoder
+                .array(3)
+                .and_then(|e| e.u16(7))
+                .map_err(ProtocolError::malformed)?;
+            request_digest
+                .encode(&mut encoder, &mut ())
+                .and_then(|()| authorization_digest.encode(&mut encoder, &mut ()))
+                .map_err(ProtocolError::malformed)?;
+        }
+        IngressBrowserMutationResponseV2::TaskAuthorizationOpenApproval {
+            request_digest,
+            transfer,
+        } => {
+            if request_digest.as_bytes() == &[0; 32] {
+                return Err(malformed());
+            }
+            encoder
+                .array(3)
+                .and_then(|e| e.u16(8))
+                .map_err(ProtocolError::malformed)?;
+            request_digest
+                .encode(&mut encoder, &mut ())
+                .and_then(|()| transfer.encode(&mut encoder, &mut ()))
+                .map_err(ProtocolError::malformed)?;
+        }
+        IngressBrowserMutationResponseV2::TaskAuthorizationRejected => {
+            encoder
+                .array(1)
+                .and_then(|e| e.u16(9))
+                .map_err(ProtocolError::malformed)?;
+        }
         IngressBrowserMutationResponseV2::Begun { next_sequence } => {
             encoder
                 .array(2)
@@ -376,6 +592,23 @@ pub fn decode_ingress_browser_mutation_response_v2(
     let tag = decoder.u16().map_err(ProtocolError::malformed)?;
     let mut context = V2DecodeContext;
     let value = match (tag, count) {
+        (10, Some(2)) => IngressBrowserMutationResponseV2::TaskAuthorizationRevoked {
+            authorization_digest: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        },
+        (7, Some(3)) => IngressBrowserMutationResponseV2::TaskAuthorizationEstablished {
+            request_digest: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+            authorization_digest: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        },
+        (8, Some(3)) => IngressBrowserMutationResponseV2::TaskAuthorizationOpenApproval {
+            request_digest: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+            transfer: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        },
+        (9, Some(1)) => IngressBrowserMutationResponseV2::TaskAuthorizationRejected,
         (1, Some(2)) => IngressBrowserMutationResponseV2::Begun {
             next_sequence: decoder.u32().map_err(ProtocolError::malformed)?,
         },

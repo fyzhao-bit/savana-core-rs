@@ -29,6 +29,21 @@ mod kernel_connector;
 mod kernel_executor;
 mod kernel_executor_success;
 mod kernel_ingress;
+pub use kernel_ingress::{
+    decode_establish_task_authorization_response_v2,
+    encode_establish_task_authorization_response_v2, EstablishTaskAuthorizationRequestV2,
+    EstablishTaskAuthorizationResponseV2,
+};
+pub use kernel_ingress::{
+    decode_prepare_task_authorization_approval_response_v2,
+    encode_prepare_task_authorization_approval_response_v2,
+    CommitTaskAuthorizationApprovalRequestV2, PrepareTaskAuthorizationApprovalRequestV2,
+    PrepareTaskAuthorizationApprovalResponseV2,
+};
+pub use kernel_ingress::{
+    decode_revoke_task_authorization_response_v2, encode_revoke_task_authorization_response_v2,
+    RevokeTaskAuthorizationRequestV2, RevokeTaskAuthorizationResponseV2,
+};
 mod kernel_service;
 mod kernel_success;
 mod primitives;

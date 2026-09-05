@@ -65,7 +65,9 @@ mod rollback_verification_attestation;
 mod rollback_verification_evidence;
 mod store_compatibility;
 mod task_authorization;
+mod task_issuance;
 mod task_state;
+pub use task_issuance::PendingTaskAuthorizationV2;
 pub use task_state::{
     TaskAuthorizationStateV2, TaskDispatchAuthorizationV2, TaskDispatchBindingV2,
     VerifiedTaskOutcomeV2,

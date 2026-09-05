@@ -18,6 +18,346 @@ fn task() -> DurableTaskIdV2 {
 fn d(seed: u8) -> Digest32V2 {
     Digest32V2::new([seed; 32])
 }
+
+fn issuance_draft(
+    revision: u64,
+    destination: &str,
+) -> savana_kernel_protocol::v2::TaskAuthorizationDraftV2 {
+    use savana_kernel_protocol::v2::*;
+    let profile = BusinessProfileV2::new(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        "mail.send",
+        d(21),
+        d(22),
+        TaskEffectV2::Send,
+        BusinessMagnitudeV2::FixedCount(1),
+        vec![
+            BusinessFieldV2::new(
+                "body",
+                BusinessFieldRoleV2::Payload,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+            BusinessFieldV2::new(
+                "file",
+                BusinessFieldRoleV2::Resource,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+            BusinessFieldV2::new(
+                "to",
+                BusinessFieldRoleV2::Destination,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let controls = BusinessControlsV2::from_fields(
+        &profile,
+        vec![
+            (
+                "file".into(),
+                BusinessValueV2::Text("private-report".into()),
+            ),
+            ("to".into(), BusinessValueV2::Text(destination.into())),
+        ],
+    )
+    .unwrap();
+    TaskAuthorizationDraftV2::new(
+        d(30),
+        PrincipalIdV2::new([31; 32]),
+        task(),
+        revision,
+        d(2),
+        d(3),
+        7,
+        UnixMillisV2::new(1),
+        UnixMillisV2::new(1000),
+        d(32),
+        vec![TaskAuthorizationDraftClauseV2::new(
+            1,
+            vec![TaskAuthorizationDraftAlternativeV2::new(d(33), controls).unwrap()],
+            1,
+            10,
+            10,
+            vec![],
+            false,
+        )
+        .unwrap()],
+    )
+    .unwrap()
+}
+fn issued(
+    draft: &savana_kernel_protocol::v2::TaskAuthorizationDraftV2,
+    evidence: u8,
+) -> VerifiedTaskAuthorizationV2 {
+    use savana_kernel_protocol::v2::*;
+    let key = SigningKey::from_bytes(&[34; 32]);
+    let m = draft
+        .to_unsigned_authorization(
+            TaskEvidenceKindV2::AuthenticatedStructuredInput,
+            d(evidence),
+        )
+        .unwrap();
+    let s = sign_task_authorization_v2(m, &key).unwrap();
+    VerifiedTaskAuthorizationV2::verify(
+        &s,
+        &key.verifying_key(),
+        draft.principal(),
+        draft.task(),
+        d(2),
+        d(3),
+        UnixMillisV2::new(10),
+    )
+    .unwrap()
+}
+
+#[test]
+fn pending_issuance_snapshot_cannot_lose_its_installed_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(STATE_FILE_NAME);
+    let mut store = task_store(
+        &path,
+        [0x81; 32],
+        TestRollbackProtectedStateAnchorV2::default(),
+    );
+    let draft = issuance_draft(1, "Alice");
+    store
+        .record_pending_task_authorization(draft.clone(), d(40))
+        .unwrap();
+    store
+        .install_pending_task_authorization(d(40), issued(&draft, 41))
+        .unwrap();
+    let mut broken = store.snapshot.clone();
+    broken.tasks = Default::default();
+    assert_eq!(
+        validate_snapshot(&broken),
+        Err(G4Error::DurableStateCorrupt)
+    );
+}
+
+#[test]
+fn pending_issuance_before_commit_failure_leaves_no_receipt_or_grant() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(STATE_FILE_NAME);
+    let anchor = TestRollbackProtectedStateAnchorV2::default();
+    let mut store = task_store(&path, [0x81; 32], anchor.clone());
+    let draft = issuance_draft(1, "Alice");
+    store
+        .record_pending_task_authorization(draft.clone(), d(40))
+        .unwrap();
+    let head = anchor.current_head().unwrap();
+    store.set_before_next_commit_hook_for_test(|| Err(G4Error::DurableStateIo));
+    assert_eq!(
+        store.install_pending_task_authorization(d(40), issued(&draft, 41)),
+        Err(G4Error::DurableStateIo)
+    );
+    assert_eq!(head, anchor.current_head().unwrap());
+    assert!(store.task_authorization_state(task()).is_err());
+    assert!(store
+        .pending_task_authorization(d(40))
+        .unwrap()
+        .unwrap()
+        .installed_digest()
+        .is_none());
+    drop(store);
+    let mut reopened = task_store(&path, [0x81; 32], anchor);
+    assert!(reopened.task_authorization_state(task()).is_err());
+    reopened
+        .install_pending_task_authorization(d(40), issued(&draft, 41))
+        .unwrap();
+    assert_eq!(
+        reopened
+            .task_authorization_state(task())
+            .unwrap()
+            .authorization()
+            .digest(),
+        issued(&draft, 41).digest()
+    );
+}
+
+#[test]
+fn pending_issuance_uncertain_commit_recovers_receipt_and_grant_together() {
+    struct FailingAnchor(TestRollbackProtectedStateAnchorV2);
+    impl RollbackProtectedStateAnchorV2 for FailingAnchor {
+        fn current_head(&self) -> Result<RollbackProtectedStateHeadV2, G4Error> {
+            self.0.current_head()
+        }
+        fn compare_and_advance(
+            &mut self,
+            _: RollbackProtectedStateHeadV2,
+            _: RollbackProtectedStateHeadV2,
+        ) -> Result<(), G4Error> {
+            Err(G4Error::DurableStateIo)
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(STATE_FILE_NAME);
+    let anchor = TestRollbackProtectedStateAnchorV2::default();
+    let mut store = task_store(&path, [0x81; 32], anchor.clone());
+    let draft = issuance_draft(1, "Alice");
+    store
+        .record_pending_task_authorization(draft.clone(), d(40))
+        .unwrap();
+    let verified = issued(&draft, 41);
+    store.rollback_anchor = Box::new(FailingAnchor(anchor.clone()));
+    assert_eq!(
+        store.install_pending_task_authorization(d(40), verified.clone()),
+        Err(G4Error::DurableCommitUncertain)
+    );
+    assert_eq!(
+        store.install_pending_task_authorization(d(40), verified.clone()),
+        Err(G4Error::DurableCommitUncertain)
+    );
+    drop(store);
+    let mut reopened = task_store(&path, [0x81; 32], anchor);
+    assert_eq!(
+        reopened
+            .pending_task_authorization(d(40))
+            .unwrap()
+            .unwrap()
+            .installed_digest(),
+        Some(verified.digest())
+    );
+    assert_eq!(
+        reopened
+            .task_authorization_state(task())
+            .unwrap()
+            .authorization()
+            .digest(),
+        verified.digest()
+    );
+    let head = reopened.authenticated_state_head().unwrap();
+    reopened
+        .install_pending_task_authorization(d(40), verified)
+        .unwrap();
+    assert_eq!(head, reopened.authenticated_state_head().unwrap());
+}
+
+#[test]
+fn pending_issuance_is_durable_unprivileged_exact_and_installs_atomically() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(STATE_FILE_NAME);
+    let anchor = TestRollbackProtectedStateAnchorV2::default();
+    let mut store = task_store(&path, [0x81; 32], anchor.clone());
+    let draft = issuance_draft(1, "Alice");
+    let pending = store
+        .record_pending_task_authorization(draft.clone(), d(40))
+        .unwrap();
+    assert!(pending.installed_digest().is_none());
+    assert!(store.task_authorization_state(task()).is_err());
+    let head = store.current_head;
+    store
+        .record_pending_task_authorization(draft.clone(), d(40))
+        .unwrap();
+    assert_eq!(head, store.current_head);
+    assert!(store
+        .record_pending_task_authorization(issuance_draft(1, "Bob"), d(40))
+        .is_err());
+    assert_eq!(head, store.current_head);
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(!bytes
+        .windows(b"private-report".len())
+        .any(|w| w == b"private-report"));
+    drop(store);
+    let mut store = task_store(&path, [0x81; 32], anchor.clone());
+    assert_eq!(
+        store.pending_task_authorization(d(40)).unwrap().unwrap(),
+        &pending
+    );
+    let wrong = issued(&issuance_draft(1, "Bob"), 41);
+    assert!(store
+        .install_pending_task_authorization(d(40), wrong)
+        .is_err());
+    assert_eq!(head, store.current_head);
+    let verified = issued(&draft, 41);
+    store
+        .install_pending_task_authorization(d(40), verified.clone())
+        .unwrap();
+    assert_eq!(store.current_head.sequence(), head.sequence() + 1);
+    assert_eq!(
+        store
+            .task_authorization_state(task())
+            .unwrap()
+            .authorization(),
+        &verified
+    );
+    assert_eq!(
+        store
+            .pending_task_authorization(d(40))
+            .unwrap()
+            .unwrap()
+            .installed_digest(),
+        Some(verified.digest())
+    );
+    let installed_head = store.current_head;
+    store
+        .install_pending_task_authorization(d(40), verified.clone())
+        .unwrap();
+    assert_eq!(installed_head, store.current_head);
+    drop(store);
+    let mut store = task_store(&path, [0x81; 32], anchor);
+    assert_eq!(
+        store
+            .task_authorization_state(task())
+            .unwrap()
+            .authorization(),
+        &verified
+    );
+    store.revoke_task_authorization(task()).unwrap();
+    let revoked_head = store.current_head;
+    store
+        .install_pending_task_authorization(d(40), verified)
+        .unwrap();
+    assert_eq!(revoked_head, store.current_head);
+    assert!(store.task_authorization_state(task()).unwrap().revoked());
+    assert!(store
+        .record_pending_task_authorization(issuance_draft(2, "Alice"), d(42))
+        .is_err());
+}
+
+#[test]
+fn pending_amendments_compare_the_exact_predecessor_and_do_not_replace_each_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = task_store(
+        &dir.path().join(STATE_FILE_NAME),
+        [0x81; 32],
+        TestRollbackProtectedStateAnchorV2::default(),
+    );
+    let first = issuance_draft(1, "Alice");
+    store
+        .record_pending_task_authorization(first.clone(), d(40))
+        .unwrap();
+    store
+        .install_pending_task_authorization(d(40), issued(&first, 41))
+        .unwrap();
+    let a = issuance_draft(2, "Alice");
+    let b = issuance_draft(2, "Bob");
+    store
+        .record_pending_task_authorization(a.clone(), d(42))
+        .unwrap();
+    store
+        .record_pending_task_authorization(b.clone(), d(43))
+        .unwrap();
+    store
+        .install_pending_task_authorization(d(42), issued(&a, 44))
+        .unwrap();
+    let head = store.current_head;
+    assert!(store
+        .install_pending_task_authorization(d(43), issued(&b, 45))
+        .is_err());
+    assert_eq!(head, store.current_head);
+    assert_eq!(
+        store
+            .task_authorization_state(task())
+            .unwrap()
+            .authorization()
+            .material()
+            .revision(),
+        2
+    );
+}
 fn clause(
     id: u64,
     budget: u64,
@@ -536,10 +876,40 @@ fn task_state_unknown_schema_is_not_rewritten_and_legacy_effects_remain_recovery
             .state(),
         KernelDispatchStateV2::Indeterminate
     );
-    let mut unknown = store.snapshot.clone();
-    unknown.payload_schema = 4;
-    let bytes =
-        encode_encrypted_snapshot(&unknown, &store.encryption_key, store.namespace).unwrap();
+    // Construct a future payload under valid AEAD. The production encoder must
+    // not learn how to emit unknown schemas just to support this negative test.
+    let unknown = store.snapshot.clone();
+    let mut payload = encode_snapshot_payload(&unknown).unwrap();
+    assert_eq!(&payload[..2], &[0x8c, 4]);
+    payload[1] = 5;
+    let nonce = [0x71; STATE_NONCE_BYTES];
+    let aad = state_encryption_aad(
+        store.namespace,
+        unknown.sequence,
+        unknown.previous_state_digest,
+        &nonce,
+    );
+    let ciphertext = Aes256Gcm::new_from_slice(&*store.encryption_key)
+        .unwrap()
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: &payload,
+                aad: &aad,
+            },
+        )
+        .unwrap();
+    let bytes = encode_encrypted_envelope(
+        unknown.sequence,
+        unknown.previous_state_digest,
+        &nonce,
+        &ciphertext,
+    )
+    .unwrap();
+    assert!(matches!(
+        decode_encrypted_snapshot(&bytes, &store.encryption_key, store.namespace),
+        Err(G4Error::DurableStateCorrupt)
+    ));
     store.anchored_path.replace(&bytes).unwrap();
     drop(store);
     assert!(DurableG4StateV2::open_for_test_in_namespace(

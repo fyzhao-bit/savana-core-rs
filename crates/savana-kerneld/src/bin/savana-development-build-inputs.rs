@@ -302,6 +302,8 @@ fn run() -> Result<(), String> {
         "ui_settlement_public_key": placeholder_hex,
         "ingress_settlement_key_id": placeholder_hex,
         "ingress_settlement_public_key": placeholder_hex,
+        "task_authorization_key_id": placeholder_hex,
+        "task_authorization_public_key": placeholder_hex,
         "agentd_boot_id": placeholder_hex,
         "approvald_boot_id": placeholder_hex,
         "machine_boot_id": placeholder_hex,

@@ -117,6 +117,15 @@ struct TabV2 {
     input: Option<ActiveInputV2>,
     replays: Vec<ReplayV2>,
     mutation_in_flight: bool,
+    finalized_session: Option<InputSessionHandleV2>,
+    task_approvals: Vec<PendingTaskApprovalV2>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingTaskApprovalV2 {
+    request_digest: Digest32V2,
+    approval: savana_kernel_protocol::v2::TaskAuthorizationApprovalRecordHandleV2,
+    transfer: ApprovalDisplayAuthenticationTransferCapabilityV2,
 }
 
 pub struct IngressBrowserAuthorityV2 {
@@ -285,6 +294,8 @@ impl IngressBrowserAuthorityV2 {
                 input: None,
                 replays: Vec::new(),
                 mutation_in_flight: false,
+                finalized_session: None,
+                task_approvals: Vec::new(),
             });
             return Ok(tab);
         }
@@ -318,6 +329,14 @@ impl IngressBrowserAuthorityV2 {
             if tab.mutation_in_flight {
                 return Err(IngressBrowserAuthorityErrorV2::Busy);
             }
+            // Reserve replay capacity before any external mutation; never
+            // execute and then discover we cannot remember the receipt.
+            if tab.replays.len() >= MAX_REPLAYS_PER_TAB_V2 {
+                return Err(IngressBrowserAuthorityErrorV2::Busy);
+            }
+            tab.replays
+                .try_reserve(1)
+                .map_err(|_| IngressBrowserAuthorityErrorV2::Unavailable)?;
             tab.mutation_in_flight = true;
         }
         let mutation = (|| {
@@ -342,6 +361,47 @@ impl IngressBrowserAuthorityV2 {
                     ..
                 } => self.finalize_input(tab_handle, declared_content_digest, deadline)?,
                 IngressBrowserRequestV2::Abort { .. } => self.abort_input(tab_handle, deadline)?,
+                IngressBrowserRequestV2::EstablishTaskAuthorization {
+                    draft,
+                    client_request_nonce,
+                    ..
+                } => self.submit_task(tab_handle, draft, client_request_nonce, false, deadline)?,
+                IngressBrowserRequestV2::PrepareTaskAuthorizationApproval {
+                    draft,
+                    client_request_nonce,
+                    ..
+                } => self.submit_task(tab_handle, draft, client_request_nonce, true, deadline)?,
+                IngressBrowserRequestV2::CommitTaskAuthorizationApproval {
+                    request_digest, ..
+                } => self.commit_task(tab_handle, request_digest, deadline)?,
+                IngressBrowserRequestV2::RevokeTaskAuthorization {
+                    draft,
+                    client_request_nonce,
+                    ..
+                } => {
+                    let session = self
+                        .tabs
+                        .lock()
+                        .map_err(|_| IngressBrowserAuthorityErrorV2::Unavailable)?
+                        .iter()
+                        .find(|t| t.tab == tab_handle)
+                        .and_then(|t| t.finalized_session)
+                        .ok_or(IngressBrowserAuthorityErrorV2::StateConflict)?;
+                    let request =
+                        savana_kernel_protocol::v2::RevokeTaskAuthorizationRequestV2::new(
+                            session,
+                            draft,
+                            client_request_nonce,
+                        )
+                        .map_err(|_| IngressBrowserAuthorityErrorV2::StateConflict)?;
+                    let response = self
+                        .kernel
+                        .revoke_task_authorization(request, deadline)
+                        .map_err(map_kernel)?;
+                    IngressBrowserMutationResponseV2::TaskAuthorizationRevoked {
+                        authorization_digest: response.authorization_digest(),
+                    }
+                }
             })
         })();
         let response = match mutation {
@@ -374,6 +434,154 @@ impl IngressBrowserAuthorityV2 {
         });
         tab.mutation_in_flight = false;
         Ok(response)
+    }
+
+    fn submit_task(
+        &self,
+        tab_handle: IngressTabSessionCapabilityV2,
+        draft: savana_kernel_protocol::v2::TaskAuthorizationDraftV2,
+        nonce: savana_kernel_protocol::v2::Nonce32V2,
+        independent_approval: bool,
+        deadline: UnixMillisV2,
+    ) -> Result<IngressBrowserMutationResponseV2, IngressBrowserAuthorityErrorV2> {
+        let session = {
+            let mut tabs = self
+                .tabs
+                .lock()
+                .map_err(|_| IngressBrowserAuthorityErrorV2::Unavailable)?;
+            let tab = tabs
+                .iter_mut()
+                .find(|t| t.tab == tab_handle)
+                .ok_or(IngressBrowserAuthorityErrorV2::InvalidReference)?;
+            if independent_approval {
+                if tab.task_approvals.len() >= MAX_PENDING_AUTHENTICATIONS_V2 {
+                    return Err(IngressBrowserAuthorityErrorV2::Busy);
+                }
+                tab.task_approvals
+                    .try_reserve(1)
+                    .map_err(|_| IngressBrowserAuthorityErrorV2::Unavailable)?;
+            }
+            tab.finalized_session
+                .ok_or(IngressBrowserAuthorityErrorV2::StateConflict)?
+        };
+        let request = savana_kernel_protocol::v2::EstablishTaskAuthorizationRequestV2::new(
+            session, draft, nonce,
+        )
+        .map_err(|_| IngressBrowserAuthorityErrorV2::StateConflict)?;
+        if !independent_approval {
+            let receipt = self
+                .kernel
+                .establish_task_authorization(request, deadline)
+                .map_err(map_kernel)?;
+            return Ok(
+                IngressBrowserMutationResponseV2::TaskAuthorizationEstablished {
+                    request_digest: receipt.request_digest(),
+                    authorization_digest: receipt.authorization_digest(),
+                },
+            );
+        }
+        let prepared = self
+            .kernel
+            .prepare_task_authorization_approval(request, deadline)
+            .map_err(map_kernel)?;
+        let registered = self
+            .approval
+            .register_approval(
+                prepared.envelope().clone(),
+                prepared.display_authentication().clone(),
+                deadline,
+            )
+            .map_err(map_approval)?;
+        let RegisteredApprovalV2::TaskAuthorization {
+            approval,
+            display_authentication: transfer,
+        } = registered
+        else {
+            return Err(IngressBrowserAuthorityErrorV2::Unavailable);
+        };
+        let mut tabs = self
+            .tabs
+            .lock()
+            .map_err(|_| IngressBrowserAuthorityErrorV2::Unavailable)?;
+        let tab = tabs
+            .iter_mut()
+            .find(|t| t.tab == tab_handle)
+            .ok_or(IngressBrowserAuthorityErrorV2::InvalidReference)?;
+        if let Some(old) = tab
+            .task_approvals
+            .iter()
+            .find(|p| p.request_digest == prepared.request_digest())
+        {
+            if old.approval != approval || old.transfer != transfer {
+                return Err(IngressBrowserAuthorityErrorV2::StateConflict);
+            }
+        } else {
+            tab.task_approvals.push(PendingTaskApprovalV2 {
+                request_digest: prepared.request_digest(),
+                approval,
+                transfer,
+            });
+        }
+        Ok(
+            IngressBrowserMutationResponseV2::TaskAuthorizationOpenApproval {
+                request_digest: prepared.request_digest(),
+                transfer,
+            },
+        )
+    }
+
+    fn commit_task(
+        &self,
+        tab_handle: IngressTabSessionCapabilityV2,
+        request_digest: Digest32V2,
+        deadline: UnixMillisV2,
+    ) -> Result<IngressBrowserMutationResponseV2, IngressBrowserAuthorityErrorV2> {
+        let pending = self
+            .tabs
+            .lock()
+            .map_err(|_| IngressBrowserAuthorityErrorV2::Unavailable)?
+            .iter()
+            .find(|t| t.tab == tab_handle)
+            .and_then(|t| {
+                t.task_approvals
+                    .iter()
+                    .find(|p| p.request_digest == request_digest)
+            })
+            .copied()
+            .ok_or(IngressBrowserAuthorityErrorV2::InvalidReference)?;
+        match self
+            .approval
+            .get_task_authorization_approval_settlement(pending.approval, deadline)
+            .map_err(map_approval)?
+        {
+            ApprovalSettlementViewV2::Pending => Ok(
+                IngressBrowserMutationResponseV2::TaskAuthorizationOpenApproval {
+                    request_digest,
+                    transfer: pending.transfer,
+                },
+            ),
+            ApprovalSettlementViewV2::Denied { .. } | ApprovalSettlementViewV2::Expired => {
+                Ok(IngressBrowserMutationResponseV2::TaskAuthorizationRejected)
+            }
+            ApprovalSettlementViewV2::Approved { settlement } => {
+                let request =
+                    savana_kernel_protocol::v2::CommitTaskAuthorizationApprovalRequestV2::new(
+                        request_digest,
+                        settlement,
+                    )
+                    .map_err(|_| IngressBrowserAuthorityErrorV2::StateConflict)?;
+                let receipt = self
+                    .kernel
+                    .commit_task_authorization_approval(request, deadline)
+                    .map_err(map_kernel)?;
+                Ok(
+                    IngressBrowserMutationResponseV2::TaskAuthorizationEstablished {
+                        request_digest: receipt.request_digest(),
+                        authorization_digest: receipt.authorization_digest(),
+                    },
+                )
+            }
+        }
     }
 
     fn begin_input(
@@ -759,6 +967,12 @@ impl IngressBrowserAuthorityV2 {
             .iter_mut()
             .find(|tab| tab.tab == tab_handle)
             .ok_or(IngressBrowserAuthorityErrorV2::Unavailable)?;
+        if matches!(
+            response,
+            IngressBrowserMutationResponseV2::FinalizeCommitted { .. }
+        ) {
+            tab.finalized_session = tab.input.as_ref().map(|input| input.session);
+        }
         tab.input = None;
         Ok(response)
     }
