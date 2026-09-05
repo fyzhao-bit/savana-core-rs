@@ -2,14 +2,17 @@ use std::cmp::Ordering;
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use savana_kernel_protocol::v2::{
-    ActionTemplateIdV2, Digest32V2, DisplayProjectionIdV2, Ed25519KeyIdV2, ExecutorIdentityV2,
-    ImplementationIdV2, ProjectionIdV2, RoleIdV2, ToolClassIdV2, UnixMillisV2, VersionV2,
+    decode_business_profile_v2, encode_business_profile_v2, ActionCodecProfileV2,
+    ActionTemplateIdV2, BusinessProfileV2, Digest32V2, DisplayProjectionIdV2, Ed25519KeyIdV2,
+    ExecutorIdentityV2, ImplementationIdV2, ProjectionIdV2, RoleIdV2, ToolClassIdV2, UnixMillisV2,
+    VersionV2,
 };
 use sha2::{Digest as _, Sha256};
 
 use super::{AttemptKindV2, EffectSetV2, G4Error, IdentifierV2};
 
 const TOOL_DESCRIPTOR_SCHEMA_VERSION: u16 = 2;
+const PROFILE_DESCRIPTOR_SCHEMA_VERSION: u16 = 3;
 const MAX_DESCRIPTOR_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ALLOWED_ROLES: usize = 64;
 const MAX_INTERNAL_VALIDATORS: usize = 32;
@@ -168,6 +171,7 @@ pub struct UnsignedToolDescriptorV2 {
     idempotency_contract: ExecutorIdempotencyContractV2,
     not_before: UnixMillisV2,
     expires_at: UnixMillisV2,
+    business_profile: Option<BusinessProfileV2>,
 }
 
 impl UnsignedToolDescriptorV2 {
@@ -217,6 +221,7 @@ impl UnsignedToolDescriptorV2 {
             idempotency_contract,
             not_before,
             expires_at,
+            business_profile: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -260,8 +265,10 @@ impl UnsignedToolDescriptorV2 {
     }
 
     fn validate(&self) -> Result<(), G4Error> {
-        if self.schema_version != TOOL_DESCRIPTOR_SCHEMA_VERSION
-            || is_zero(self.provider_identity_digest.as_bytes())
+        if !matches!(
+            (self.schema_version, self.business_profile.is_some()),
+            (TOOL_DESCRIPTOR_SCHEMA_VERSION, false) | (PROFILE_DESCRIPTOR_SCHEMA_VERSION, true)
+        ) || is_zero(self.provider_identity_digest.as_bytes())
             || is_zero(self.argument_schema_digest.as_bytes())
             || is_zero(self.result_schema_digest.as_bytes())
             || is_zero(self.executor_identity.as_bytes())
@@ -303,7 +310,37 @@ impl UnsignedToolDescriptorV2 {
             self.connector_retry_policy.maximum_attempts,
             self.connector_retry_policy.maximum_elapsed_ns,
         )?;
+        if let Some(profile) = &self.business_profile {
+            if !self
+                .effects
+                .contains(super::task_effect_set_v2(profile.effect()))
+                || (profile.codec() == ActionCodecProfileV2::McpToolsCallJsonV1
+                    && profile.operation() != self.provider_tool_id.as_str())
+            {
+                return Err(G4Error::InvalidDescriptor);
+            }
+        }
         Ok(())
+    }
+
+    /// Explicit schema-3 manifest material. This does not sign/activate a tool;
+    /// the existing expected-publisher verification must authenticate this entire
+    /// descriptor, including the reviewed mapping, before strict use.
+    pub fn with_business_profile(mut self, profile: BusinessProfileV2) -> Result<Self, G4Error> {
+        self.schema_version = PROFILE_DESCRIPTOR_SCHEMA_VERSION;
+        self.business_profile = Some(profile);
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn business_profile(&self) -> Option<&BusinessProfileV2> {
+        self.business_profile.as_ref()
+    }
+
+    pub fn require_business_profile(&self) -> Result<&BusinessProfileV2, G4Error> {
+        self.business_profile
+            .as_ref()
+            .ok_or(G4Error::InvalidDescriptor)
     }
 
     pub const fn registry_version(&self) -> VersionV2 {
@@ -381,7 +418,13 @@ impl<C> minicbor::Encode<C> for UnsignedToolDescriptorV2 {
         encoder: &mut minicbor::Encoder<W>,
         context: &mut C,
     ) -> Result<(), minicbor::encode::Error<W::Error>> {
-        encoder.array(21)?.u16(self.schema_version)?;
+        encoder
+            .array(if self.business_profile.is_some() {
+                22
+            } else {
+                21
+            })?
+            .u16(self.schema_version)?;
         self.registry_version.encode(encoder, context)?;
         self.provider_identity_digest.encode(encoder, context)?;
         self.provider_tool_id.encode(encoder, context)?;
@@ -409,6 +452,11 @@ impl<C> minicbor::Encode<C> for UnsignedToolDescriptorV2 {
         self.idempotency_contract.encode(encoder, context)?;
         self.not_before.encode(encoder, context)?;
         self.expires_at.encode(encoder, context)?;
+        if let Some(profile) = &self.business_profile {
+            let bytes = encode_business_profile_v2(profile)
+                .map_err(|_| minicbor::encode::Error::message("invalid business profile"))?;
+            encoder.bytes(&bytes)?;
+        }
         Ok(())
     }
 }
@@ -930,8 +978,16 @@ pub(crate) fn decode_unsigned_descriptor(
         return Err(G4Error::DescriptorLimitExceeded);
     }
     let mut decoder = minicbor::Decoder::new(bytes);
-    require_array(&mut decoder, 21)?;
+    let field_count = decoder
+        .array()
+        .map_err(|_| G4Error::NonCanonicalDescriptor)?;
     let schema_version = decoder.u16().map_err(|_| G4Error::NonCanonicalDescriptor)?;
+    if !matches!(
+        (field_count, schema_version),
+        (Some(21), TOOL_DESCRIPTOR_SCHEMA_VERSION) | (Some(22), PROFILE_DESCRIPTOR_SCHEMA_VERSION)
+    ) {
+        return Err(G4Error::NonCanonicalDescriptor);
+    }
     let registry_version = decode_version(&mut decoder)?;
     let provider_identity_digest = Digest32V2::new(decode_fixed::<32>(&mut decoder)?);
     let provider_tool_id =
@@ -981,11 +1037,23 @@ pub(crate) fn decode_unsigned_descriptor(
     let idempotency_contract = decode_idempotency_contract(&mut decoder)?;
     let not_before = UnixMillisV2::new(decoder.u64().map_err(|_| G4Error::NonCanonicalDescriptor)?);
     let expires_at = UnixMillisV2::new(decoder.u64().map_err(|_| G4Error::NonCanonicalDescriptor)?);
+    let business_profile = if schema_version == PROFILE_DESCRIPTOR_SCHEMA_VERSION {
+        Some(
+            decode_business_profile_v2(
+                decoder
+                    .bytes()
+                    .map_err(|_| G4Error::NonCanonicalDescriptor)?,
+            )
+            .map_err(|_| G4Error::InvalidDescriptor)?,
+        )
+    } else {
+        None
+    };
     if decoder.position() != bytes.len() {
         return Err(G4Error::NonCanonicalDescriptor);
     }
-    let descriptor = UnsignedToolDescriptorV2::from_verified_manifest(
-        schema_version,
+    let mut descriptor = UnsignedToolDescriptorV2::from_verified_manifest(
+        TOOL_DESCRIPTOR_SCHEMA_VERSION,
         registry_version,
         provider_identity_digest,
         provider_tool_id,
@@ -1007,6 +1075,9 @@ pub(crate) fn decode_unsigned_descriptor(
         not_before,
         expires_at,
     )?;
+    if let Some(profile) = business_profile {
+        descriptor = descriptor.with_business_profile(profile)?;
+    }
     let canonical = minicbor::to_vec(&descriptor).map_err(|_| G4Error::NonCanonicalDescriptor)?;
     if canonical != bytes {
         return Err(G4Error::NonCanonicalDescriptor);

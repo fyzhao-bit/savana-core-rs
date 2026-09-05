@@ -15,6 +15,152 @@ use super::{
     VerifiedToolRegistryV2,
 };
 
+fn business_profile() -> savana_kernel_protocol::v2::BusinessProfileV2 {
+    use savana_kernel_protocol::v2::*;
+    BusinessProfileV2::new(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        "mail.send",
+        Digest32V2::new([30; 32]),
+        Digest32V2::new([31; 32]),
+        TaskEffectV2::Send,
+        BusinessMagnitudeV2::FixedCount(1),
+        vec![
+            BusinessFieldV2::new(
+                "body",
+                BusinessFieldRoleV2::Payload,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+            BusinessFieldV2::new(
+                "file",
+                BusinessFieldRoleV2::Resource,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+            BusinessFieldV2::new(
+                "to",
+                BusinessFieldRoleV2::Destination,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap()
+}
+
+#[test]
+fn business_profile_descriptor_is_explicit_signed_and_legacy_has_no_default() {
+    let old = descriptor(VersionV2::new(4, 5, 6), vec![RoleIdV2::new(1)], vec![]);
+    let legacy_bytes = minicbor::to_vec(&old).unwrap();
+    assert_eq!(old.business_profile(), None);
+    assert!(old.require_business_profile().is_err());
+    let new = old
+        .clone()
+        .with_business_profile(business_profile())
+        .unwrap();
+    assert_ne!(
+        descriptor_digest_v2(&old).unwrap(),
+        descriptor_digest_v2(&new).unwrap()
+    );
+    assert_eq!(minicbor::to_vec(&old).unwrap(), legacy_bytes);
+    let canonical = minicbor::to_vec(&new).unwrap();
+    assert_eq!(&canonical[..2], &[0x96, 0x03]);
+    assert_eq!(super::decode_unsigned_descriptor(&canonical).unwrap(), new);
+    assert_eq!(
+        super::decode_unsigned_descriptor(&legacy_bytes).unwrap(),
+        old
+    );
+    let key = SigningKey::from_bytes(&[0x41; 32]);
+    let key_id = Ed25519KeyIdV2::new([0x42; 32]);
+    let publisher = VerifiedRegistryPublisherV2::new_for_test(
+        key_id,
+        key.verifying_key().to_bytes(),
+        UnixMillisV2::new(100),
+        UnixMillisV2::new(1_000),
+    )
+    .unwrap();
+    let sign = |value: &UnsignedToolDescriptorV2| {
+        let mut message = b"SAVANA_TOOL_DESCRIPTOR_SIGNATURE_V2\0".to_vec();
+        message.extend_from_slice(descriptor_digest_v2(value).unwrap().as_bytes());
+        key.sign(&message).to_bytes()
+    };
+    let signed = SignedToolDescriptorV2::new_for_test(canonical.clone(), key_id, sign(&new));
+    assert_eq!(
+        signed
+            .verify(&publisher, VersionV2::new(4, 5, 6), UnixMillisV2::new(500))
+            .unwrap()
+            .unsigned()
+            .require_business_profile()
+            .unwrap(),
+        &business_profile()
+    );
+    let unsigned_extension = SignedToolDescriptorV2::new_for_test(canonical, key_id, sign(&old));
+    assert_eq!(
+        unsigned_extension
+            .verify(&publisher, VersionV2::new(4, 5, 6), UnixMillisV2::new(500))
+            .unwrap_err(),
+        G4Error::InvalidDescriptorSignature
+    );
+    let p = business_profile();
+    let changed_credential = savana_kernel_protocol::v2::BusinessProfileV2::new(
+        p.codec(),
+        p.operation(),
+        p.target_identity(),
+        Digest32V2::new([32; 32]),
+        p.effect(),
+        p.magnitude_rule(),
+        p.fields().to_vec(),
+    )
+    .unwrap();
+    let changed = old
+        .clone()
+        .with_business_profile(changed_credential)
+        .unwrap();
+    let tampered = SignedToolDescriptorV2::new_for_test(
+        minicbor::to_vec(changed).unwrap(),
+        key_id,
+        sign(&new),
+    );
+    assert_eq!(
+        tampered
+            .verify(&publisher, VersionV2::new(4, 5, 6), UnixMillisV2::new(500))
+            .unwrap_err(),
+        G4Error::InvalidDescriptorSignature
+    );
+    assert_eq!(
+        signed
+            .verify(&publisher, VersionV2::new(4, 5, 6), UnixMillisV2::new(900))
+            .unwrap_err(),
+        G4Error::DescriptorNotActive
+    );
+}
+
+#[test]
+fn business_profile_descriptor_refuses_tool_and_effect_mismatch() {
+    use savana_kernel_protocol::v2::{BusinessProfileV2, TaskEffectV2};
+    let old = descriptor(VersionV2::new(4, 5, 6), vec![RoleIdV2::new(1)], vec![]);
+    let p = business_profile();
+    for (operation, effect) in [
+        ("other.tool", TaskEffectV2::Send),
+        ("mail.send", TaskEffectV2::Delete),
+    ] {
+        let invalid = BusinessProfileV2::new(
+            p.codec(),
+            operation,
+            p.target_identity(),
+            p.credential_identity(),
+            effect,
+            p.magnitude_rule(),
+            p.fields().to_vec(),
+        )
+        .unwrap();
+        assert_eq!(
+            old.clone().with_business_profile(invalid).unwrap_err(),
+            G4Error::InvalidDescriptor
+        );
+    }
+}
+
 #[test]
 fn attempt_and_idempotency_contract_tags_are_exact() {
     assert_eq!(

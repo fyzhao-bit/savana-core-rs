@@ -21,8 +21,9 @@ x25519-dalek.workspace = true
 unicode-normalization.workspace = true
 zeroize.workspace = true
 ed25519-dalek.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 getrandom.workspace = true
 rustix.workspace = true
-serde_json.workspace = true

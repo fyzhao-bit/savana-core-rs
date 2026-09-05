@@ -7,6 +7,14 @@ mod browser_approval;
 mod browser_assets;
 mod browser_enrollment;
 mod browser_ingress;
+mod business_json;
+mod business_request;
+pub use business_request::{
+    decode_business_profile_v2, encode_business_profile_v2, BusinessCodecErrorV2,
+    BusinessFieldRoleV2, BusinessFieldTypeV2, BusinessFieldV2, BusinessMagnitudeV2,
+    BusinessProfileV2, BusinessRequestV2, BusinessResponseDispositionV2, BusinessValueV2,
+    MAX_BUSINESS_JSON_BYTES_V2, MAX_BUSINESS_PROFILE_BYTES_V2,
+};
 mod cbor;
 mod effect_gate_projection;
 mod handles;
