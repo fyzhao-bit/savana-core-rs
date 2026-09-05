@@ -9,6 +9,7 @@ mod browser_enrollment;
 mod browser_ingress;
 mod business_json;
 mod business_request;
+mod business_unicode;
 pub use business_request::{
     decode_business_profile_v2, encode_business_profile_v2, BusinessCodecErrorV2,
     BusinessFieldRoleV2, BusinessFieldTypeV2, BusinessFieldV2, BusinessMagnitudeV2,

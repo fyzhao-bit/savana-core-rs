@@ -166,3 +166,38 @@ pub(super) fn exact<'a>(
     }
     Ok(map)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse;
+
+    #[test]
+    fn business_json_enforces_each_structural_bound_independently() {
+        let nested = |n| format!("{}true{}", "[".repeat(n), "]".repeat(n));
+        assert!(parse(nested(5).as_bytes()).is_ok());
+        assert!(parse(nested(6).as_bytes()).is_err());
+        let array = |n| format!("[{}]", vec!["true"; n].join(","));
+        assert!(parse(array(32).as_bytes()).is_ok());
+        assert!(parse(array(33).as_bytes()).is_err());
+        let object = |n| {
+            format!(
+                "{{{}}}",
+                (0..n)
+                    .map(|i| format!("\"k{i}\":true"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
+        assert!(parse(object(32).as_bytes()).is_ok());
+        assert!(parse(object(33).as_bytes()).is_err());
+        let key = |n| format!("{{\"{}\":true}}", "a".repeat(n));
+        assert!(parse(key(128).as_bytes()).is_ok());
+        assert!(parse(key(129).as_bytes()).is_err());
+        // Eight nested arrays; 1 root + 8 arrays + 247 scalars = 256 nodes.
+        let mut children = vec![array(31); 7];
+        children.push(array(30));
+        assert!(parse(format!("[{}]", children.join(",")).as_bytes()).is_ok());
+        children[7] = array(31);
+        assert!(parse(format!("[{}]", children.join(",")).as_bytes()).is_err());
+    }
+}

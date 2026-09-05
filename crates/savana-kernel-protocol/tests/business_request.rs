@@ -453,3 +453,45 @@ fn business_request_response_profiles_reject_pending_and_distinguish_unknown() {
         BusinessResponseDispositionV2::Indeterminate
     );
 }
+
+#[test]
+fn business_request_format_and_default_ignorable_controls_never_enter_identity_fields() {
+    let p = profile(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        BusinessMagnitudeV2::CountField,
+    );
+    let source = String::from_utf8(input(1)).unwrap();
+    // Unicode 16 Cf and Default_Ignorable representatives missing from the
+    // original hand-written filter, including a supplementary-plane character.
+    for cp in [
+        0x180e, 0xfff9, 0xfffa, 0xfffb, 0x034f, 0x115f, 0x0600, 0x110bd, 0xe0100,
+    ] {
+        let ch = char::from_u32(cp).unwrap();
+        let escaped = if cp <= 0xffff {
+            format!("\\u{cp:04x}")
+        } else {
+            let n = cp - 0x10000;
+            format!(
+                "\\u{:04x}\\u{:04x}",
+                0xd800 + (n >> 10),
+                0xdc00 + (n & 0x3ff)
+            )
+        };
+        for value in [format!("x{ch}y"), format!("x{escaped}y")] {
+            for original in ["Alice", "report", "A"] {
+                let request = source.replace(&format!("\"{original}\""), &format!("\"{value}\""));
+                assert!(
+                    BusinessRequestV2::parse(&p, "request-1", request.as_bytes()).is_err(),
+                    "control U+{cp:04X} admitted"
+                );
+            }
+            let payload = source.replace("hello", &value);
+            assert_eq!(
+                BusinessRequestV2::parse(&p, "request-1", payload.as_bytes())
+                    .unwrap()
+                    .payload(),
+                format!("x{ch}y")
+            );
+        }
+    }
+}

@@ -575,7 +575,13 @@ fn identifier(s: &str, max: usize) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c))
 }
 fn control_text(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 1024 && s.trim() == s && !s.chars().any(|c| c.is_control() || matches!(c, '\u{00ad}' | '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}'))
+    !s.is_empty()
+        && s.len() <= 1024
+        && s.trim() == s
+        && !s.chars().any(|c| {
+            matches!(c, '\u{0000}'..='\u{001f}' | '\u{007f}'..='\u{009f}' | '\u{2028}' | '\u{2029}')
+                || super::business_unicode::formatting_or_ignorable(c)
+        })
 }
 fn hash(domain: &[u8], parts: &[&[u8]]) -> Digest32V2 {
     let mut h = Sha256::new();
