@@ -75,6 +75,10 @@ fn exact_replay_boundary_never_evicts_live_security_state() {
 
     let begin_connection = AuthenticatedConnection::connect(&installation, WireClient::A, 0x1200);
     let begin_request = begin_connection.begin_request(registry, KernelValue::Null, 0x2200);
+    let initial_expiry = match &begin_request.operation {
+        OperationV1::BeginRun(request) => request.ingress.unsigned.expires_at.get(),
+        _ => unreachable!(),
+    };
     let begin = begin_connection
         .submit(begin_request)
         .expect("initial BeginRun");
@@ -109,10 +113,18 @@ fn exact_replay_boundary_never_evicts_live_security_state() {
             AuthenticatedConnection::connect(&installation, WireClient::A, 0x1200 + sequence);
         connections_since_expiry += 1;
         let request = connection.ingest_request(run, KernelValue::Null, 0x2200 + sequence);
-        assert!(matches!(
-            connection.submit(request),
-            Ok(ResponsePayloadV1::IngestUserInput(_))
-        ));
+        let window = match &request.operation {
+            OperationV1::IngestUserInput(request) => (
+                request.envelope.unsigned.issued_at.get(),
+                request.envelope.unsigned.expires_at.get(),
+            ),
+            _ => unreachable!(),
+        };
+        let response = connection.submit(request);
+        assert!(
+            matches!(response, Ok(ResponsePayloadV1::IngestUserInput(_))),
+            "sequence {sequence}: {response:?}; run expiry {initial_expiry}; ingress {window:?}; client wall {:?}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()
+        );
     }
     let before = daemon.security_state_snapshot();
     let overflow = AuthenticatedConnection::connect(&installation, WireClient::A, 0x3200);

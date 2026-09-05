@@ -1285,47 +1285,194 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let prepared = policy
-            .prepare_verified_final_release_dispatch(
-                &release,
-                VerifiedQuotaLimitV2::from_verified_policy(
-                    1,
-                    Digest32V2::new([0x26; 32]),
-                    DispatchQuotaSubjectV2::final_release(binding.release_quota_subject_digest()),
-                )
-                .unwrap(),
-                &VerifiedFinalReleaseSettlementV2::from_consumed_exact_settlement(
-                    Digest32V2::new([0x27; 32]),
-                    release_id,
-                    binding.semantic_digest().unwrap(),
+        // This is a policy/dispatch-admission component test, not the native
+        // release producer or a provider-wire test. The old no-task prepare
+        // entry point deliberately refuses new work; install a real signed
+        // fixture root and construct its checked match/endorsements instead.
+        let task_request =
+            |policy: &mut DurableG4StateV2, wrong_destination: bool, wrong_evidence: bool| {
+                use savana_kernel_protocol::v2::{
+                    sign_task_authorization_v2, ActionAlternativeV2, ActionCodecProfileV2,
+                    ActionContentV2, MagnitudeUnitV2, TaskAuthorizationClauseV2,
+                    TaskAuthorizationV2, TaskEffectV2, TaskEvidenceKindV2,
+                };
+                use savana_policy_core::v2::{
+                    checked_control_endorsements_v2, ControlEvidenceV2, ControlSelectionV2,
+                    TaskDispatchAuthorizationV2, TaskMatchContextV2, VerifiedTaskAuthorizationV2,
+                };
+                let issuer = SigningKey::from_bytes(&[0x61; 32]);
+                let task_id = DurableTaskIdV2::new([0x24; 32]);
+                let principal = PrincipalIdV2::new([0x62; 32]);
+                let action = ActionAlternativeV2::new(
+                    Digest32V2::new([0x63; 32]),
+                    ActionCodecProfileV2::FixedJsonPostV1,
+                    TaskEffectV2::FinalRelease,
+                    binding.vault_segment_digest(),
                     binding.destination_digest(),
-                    binding.token_set_digest(),
-                    manifest,
-                    UnixMillisV2::new(10),
-                    UnixMillisV2::new(100),
+                    Digest32V2::new([0x64; 32]),
+                    MagnitudeUnitV2::Bytes,
                 )
-                .unwrap(),
-                ResolvedFinalReleaseTicketV2::from_resolved_kernel_ticket(
-                    Digest32V2::new([0x28; 32]),
-                    release_id,
-                    binding.semantic_digest().unwrap(),
+                .unwrap();
+                let other_action = ActionAlternativeV2::new(
+                    action.tool_descriptor_digest(),
+                    action.codec_profile(),
+                    action.effect(),
+                    action.resource_digest(),
+                    Digest32V2::new([0x71; 32]),
+                    action.parameters_digest(),
+                    action.magnitude_unit(),
                 )
-                .unwrap(),
-                VerifiedEffectGateLeaseV2::from_authenticated_ledger(
+                .unwrap();
+                let root = TaskAuthorizationV2::new(
+                    Digest32V2::new([0x65; 32]),
+                    principal,
+                    task_id,
+                    1,
                     installation,
                     manifest,
-                    7,
-                    9,
-                    false,
-                    executor,
-                    HpkeX25519KeyIdV2::new([0x29; 32]),
-                    &connector_registry,
+                    UnixMillisV2::new(1),
                     UnixMillisV2::new(10_000),
+                    TaskEvidenceKindV2::AuthenticatedStructuredInput,
+                    Digest32V2::new([0x66; 32]),
+                    Digest32V2::new([0x67; 32]),
+                    vec![TaskAuthorizationClauseV2::new(
+                        1,
+                        vec![action.clone(), other_action.clone()],
+                        1,
+                        1,
+                        1,
+                        vec![],
+                        false,
+                    )
+                    .unwrap()],
                 )
-                .unwrap(),
-                Digest32V2::new([0x2b; 32]),
-            )
-            .unwrap();
+                .unwrap();
+                let signed_root = sign_task_authorization_v2(root, &issuer).unwrap();
+                let root = VerifiedTaskAuthorizationV2::verify(
+                    &signed_root,
+                    &issuer.verifying_key(),
+                    principal,
+                    task_id,
+                    installation,
+                    manifest,
+                    UnixMillisV2::new(10),
+                )
+                .unwrap();
+                policy.install_verified_task_authorization(root).unwrap();
+                let state = policy.task_authorization_state(task_id).unwrap();
+                let root = state.authorization();
+                let content = ActionContentV2::new(
+                    root.material().authorization_id(),
+                    1,
+                    1,
+                    u64::from(wrong_destination),
+                    if wrong_destination {
+                        other_action
+                    } else {
+                        action
+                    },
+                    1,
+                    binding.release_payload_digest(),
+                    if wrong_evidence {
+                        Digest32V2::new([0x72; 32])
+                    } else {
+                        binding.evidence_digest()
+                    },
+                    Digest32V2::new([0x68; 32]),
+                    root.candidate_domain(1, UnixMillisV2::new(10))
+                        .unwrap()
+                        .digest(),
+                    state.digest(),
+                    state.revision(),
+                )
+                .unwrap();
+                let current = TaskMatchContextV2 {
+                    current_authorization: Some(root),
+                    pre_state_digest: state.digest(),
+                    pre_state_revision: state.revision(),
+                    deployment_generation: 7,
+                    now: UnixMillisV2::new(10),
+                };
+                let matched = root.match_action(&content, &current).unwrap();
+                let selections =
+                    ControlSelectionV2::from_match(&matched, Digest32V2::new([0x69; 32])).unwrap();
+                let endorsements = checked_control_endorsements_v2(
+                    &matched,
+                    &selections,
+                    ControlEvidenceV2::ExplicitAlternative,
+                    &current,
+                )
+                .unwrap();
+                TaskDispatchAuthorizationV2::new(matched, endorsements)
+            };
+        let prepare =
+            |policy: &mut DurableG4StateV2,
+             task_request: &savana_policy_core::v2::TaskDispatchAuthorizationV2| {
+                policy.prepare_task_bound_final_release_dispatch(
+                    &release,
+                    VerifiedQuotaLimitV2::from_verified_policy(
+                        1,
+                        Digest32V2::new([0x26; 32]),
+                        DispatchQuotaSubjectV2::final_release(
+                            binding.release_quota_subject_digest(),
+                        ),
+                    )
+                    .unwrap(),
+                    &VerifiedFinalReleaseSettlementV2::from_consumed_exact_settlement(
+                        Digest32V2::new([0x27; 32]),
+                        release_id,
+                        binding.semantic_digest().unwrap(),
+                        binding.destination_digest(),
+                        binding.token_set_digest(),
+                        manifest,
+                        UnixMillisV2::new(10),
+                        UnixMillisV2::new(100),
+                    )
+                    .unwrap(),
+                    ResolvedFinalReleaseTicketV2::from_resolved_kernel_ticket(
+                        Digest32V2::new([0x28; 32]),
+                        release_id,
+                        binding.semantic_digest().unwrap(),
+                    )
+                    .unwrap(),
+                    VerifiedEffectGateLeaseV2::from_authenticated_ledger(
+                        installation,
+                        manifest,
+                        7,
+                        9,
+                        false,
+                        executor,
+                        HpkeX25519KeyIdV2::new([0x29; 32]),
+                        &connector_registry,
+                        UnixMillisV2::new(10_000),
+                    )
+                    .unwrap(),
+                    Digest32V2::new([0x2b; 32]),
+                    task_request,
+                    UnixMillisV2::new(10),
+                )
+            };
+        for (wrong_destination, wrong_evidence) in [(true, false), (false, true)] {
+            let request = task_request(&mut policy, wrong_destination, wrong_evidence);
+            assert!(prepare(&mut policy, &request).is_err());
+            assert_eq!(
+                policy
+                    .task_authorization_state(DurableTaskIdV2::new([0x24; 32]))
+                    .unwrap()
+                    .clause_consumption(1),
+                Some((0, 0))
+            );
+        }
+        let request = task_request(&mut policy, false, false);
+        let prepared = prepare(&mut policy, &request).unwrap();
+
+        assert_eq!(
+            policy
+                .task_authorization_state(DurableTaskIdV2::new([0x24; 32]))
+                .unwrap()
+                .clause_consumption(1),
+            Some((1, 1))
+        );
 
         let envelope_signing_key = SigningKey::from_bytes(&envelope_seed);
         let protocol_core = crate::v2_agent_authority::protocol_dispatch_core(&prepared).unwrap();

@@ -377,8 +377,11 @@ impl TaskLedgerV2 {
                     return Err(G4Error::StateConflict);
                 }
             }
-            DispatchSubjectV2::FinalRelease { .. } => {
-                if m.content().action().effect() != TaskEffectV2::FinalRelease {
+            DispatchSubjectV2::FinalRelease { binding, .. } => {
+                if m.content().action().effect() != TaskEffectV2::FinalRelease
+                    || m.content().action().destination_digest() != binding.destination_digest()
+                    || m.content().provenance_digest() != binding.evidence_digest()
+                {
                     return Err(G4Error::StateConflict);
                 }
                 // No descriptor/plan fields exist on legacy release semantics.

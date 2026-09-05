@@ -808,6 +808,11 @@ struct PendingReleaseRecordV2 {
     durable_run_id: DurableRunIdV2,
     durable_task_id: DurableTaskIdV2,
     principal: PrincipalIdV2,
+    business_request: savana_kernel_protocol::v2::BusinessRequestV2,
+    task_match: savana_policy_core::v2::VerifiedTaskMatchV2,
+    control_selections: [savana_policy_core::v2::ControlSelectionV2; 7],
+    envelope: SignedApprovalEnvelopeV2,
+    task_action_approval: Option<savana_kernel_protocol::v2::VerifiedTaskActionApprovalV2>,
     provenance_parents: Vec<ProvenanceRecordV2>,
     policy_allowed_effects: EffectSetV2,
     vault_pending: savana_vault::PendingVaultReleaseV2,
@@ -4871,6 +4876,24 @@ impl KernelAgentAuthorityV2 {
         if now.get() >= session.expires_at.get() {
             return Err(KernelAgentAuthorityErrorV2::Expired);
         }
+        let current_root = self.require_session_task_authorization(session, now)?;
+        let owned_source = self
+            .tasks
+            .iter()
+            .find(|task| {
+                task.durable_task_id == session.durable_task_id
+                    && task.expected_principal == Some(session.principal)
+                    && task.durable_run_id == Some(session.durable_run_id)
+                    && task.active_state_manifest_digest == active_state_manifest_digest
+            })
+            .and_then(|task| task.source_input_digest)
+            .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let committed_plan = self
+            .plan_steps
+            .iter()
+            .rev()
+            .find(|step| step.run == session.run && step.task_authorization_digest == current_root)
+            .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
         let policy = self
             .policy
             .as_ref()
@@ -4885,8 +4908,13 @@ impl KernelAgentAuthorityV2 {
         if request.evidence().is_empty() {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
-        let resolved_evidence = request
-            .evidence()
+        // The released document is the session's original input. Its owned
+        // provenance is mandatory even if the untrusted caller omits it.
+        let mut evidence_handles = request.evidence().to_vec();
+        if !evidence_handles.contains(&session.initial_value) {
+            evidence_handles.insert(0, session.initial_value);
+        }
+        let resolved_evidence = evidence_handles
             .iter()
             .map(|handle| {
                 values
@@ -4939,18 +4967,25 @@ impl KernelAgentAuthorityV2 {
             b"SAVANA_FINAL_RELEASE_PAYLOAD_V2\0",
             &[plaintext.as_slice()],
         );
-        let destination_id = request.destination_projection().get().to_be_bytes();
-        let destination_digest = domain_digest(
-            b"SAVANA_FINAL_RELEASE_DESTINATION_V2\0",
-            &[&destination_id, request.executor().as_bytes()],
-        );
-        let display_id = request.display_projection().get().to_be_bytes();
-        let display_projection_digest = domain_digest(
-            b"SAVANA_FINAL_RELEASE_DISPLAY_PROJECTION_V2\0",
-            &[&display_id, &destination_id],
-        );
-        let display_text = BoundedApprovalDisplayTextV2::from_binary(plaintext.as_slice())
-            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let proposal = project_final_release_business(
+            policy,
+            session,
+            request,
+            owned_source,
+            committed_plan,
+            &plaintext,
+            evidence_digest,
+            deployment_generation,
+            now,
+        )?;
+        let destination_digest = proposal.task_match.content().action().destination_digest();
+        let display_projection_digest = proposal.display_projection_digest;
+        let state = policy
+            .durable
+            .task_authorization_state(session.durable_task_id)
+            .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+        let display_text =
+            task_bound_display(&proposal.task_match, &proposal.business_request, &state)?;
         let display_digest = approval_display_digest_v2(display_text.as_bytes());
         let display_value = KernelValueV2::text(display_text.as_str())
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
@@ -5033,6 +5068,16 @@ impl KernelAgentAuthorityV2 {
             now,
             expires_at,
         )
+        .and_then(|unsigned| {
+            unsigned.with_task_action_binding(
+                savana_kernel_protocol::v2::TaskActionApprovalBindingV2::new(
+                    proposal.task_match.content_digest(),
+                    proposal.task_match.content().authorization_id(),
+                    proposal.task_match.content().authorization_revision(),
+                    session.durable_task_id,
+                )?,
+            )
+        })
         .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
         let envelope = SignedApprovalEnvelopeV2::sign(unsigned, &self.config.envelope_signing_key)
             .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
@@ -5077,6 +5122,11 @@ impl KernelAgentAuthorityV2 {
             durable_run_id: session.durable_run_id,
             durable_task_id: session.durable_task_id,
             principal: session.principal,
+            business_request: proposal.business_request,
+            task_match: proposal.task_match,
+            control_selections: proposal.control_selections,
+            envelope: envelope.clone(),
+            task_action_approval: None,
             provenance_parents,
             policy_allowed_effects,
             vault_pending,
@@ -5120,6 +5170,12 @@ impl KernelAgentAuthorityV2 {
                     && record.approval_commitment == approval_commitment
             })
             .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        self.recheck_release_task(
+            &self.pending_releases[index],
+            active_state_manifest_digest,
+            deployment_generation,
+            now,
+        )?;
         if self.pending_releases[index].consumed {
             if let Some(ticket_commitment) = self.pending_releases[index].ticket_commitment {
                 let ticket = self
@@ -5162,6 +5218,30 @@ impl KernelAgentAuthorityV2 {
             self.pending_releases[index].consumed = true;
             return Err(KernelAgentAuthorityErrorV2::StateConflict);
         }
+        let expected = record
+            .envelope
+            .unverified_material()
+            .and_then(|envelope| envelope.task_action_context(&request.settlement().unsigned()))
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let task_action = savana_kernel_protocol::v2::verify_task_action_approval_v2(
+            request
+                .settlement()
+                .task_action_approval()
+                .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?,
+            &ed25519_dalek::VerifyingKey::from_bytes(&approval.settlement_public_key)
+                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?,
+            &expected,
+            now,
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        if expected.content_digest != record.task_match.content_digest()
+            || expected.authorization_id != record.task_match.content().authorization_id()
+            || expected.authorization_revision
+                != record.task_match.content().authorization_revision()
+            || expected.task != record.durable_task_id
+        {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
         let vault_approval =
             savana_vault::VerifiedFinalReleaseApprovalV2::from_verified_protocol_settlement(
                 verified,
@@ -5197,10 +5277,77 @@ impl KernelAgentAuthorityV2 {
         self.pending_releases[index].consumed = true;
         self.pending_releases[index].authorized = Some(authorized);
         self.pending_releases[index].settlement = Some(settlement);
+        self.pending_releases[index].task_action_approval = Some(task_action);
         self.pending_releases[index].ticket_commitment = Some(commitment);
         Ok(savana_kernel_protocol::v2::AuthorizeReleaseResponseV2::new(
             ticket,
         ))
+    }
+
+    fn recheck_release_task(
+        &self,
+        record: &PendingReleaseRecordV2,
+        manifest: Digest32V2,
+        generation: u64,
+        now: UnixMillisV2,
+    ) -> Result<(), KernelAgentAuthorityErrorV2> {
+        let session = self
+            .sessions
+            .iter()
+            .find(|s| {
+                s.run == record.run
+                    && matches!(
+                        s.status,
+                        AgentSessionStatusV2::Ready | AgentSessionStatusV2::Running
+                    )
+            })
+            .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        if record.active_state_manifest_digest != manifest
+            || session.active_state_manifest_digest != manifest
+            || self.require_session_task_authorization(session, now)?
+                != record.task_match.authorization().digest()
+        {
+            return Err(KernelAgentAuthorityErrorV2::StateConflict);
+        }
+        let policy = self
+            .policy
+            .as_ref()
+            .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?;
+        let state = policy
+            .durable
+            .task_authorization_state(record.durable_task_id)
+            .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+        if state.revoked() {
+            return Err(KernelAgentAuthorityErrorV2::StateConflict);
+        }
+        record
+            .task_match
+            .recheck(&savana_policy_core::v2::TaskMatchContextV2 {
+                current_authorization: Some(state.authorization()),
+                pre_state_digest: state.digest(),
+                pre_state_revision: state.revision(),
+                deployment_generation: generation,
+                now,
+            })
+            .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+        let descriptor = policy
+            .active_tools
+            .resolve(
+                record
+                    .task_match
+                    .content()
+                    .action()
+                    .tool_descriptor_digest(),
+                session.role,
+                now,
+            )
+            .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        if descriptor.descriptor().unsigned().business_profile()
+            != Some(record.business_request.profile())
+        {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5239,6 +5386,12 @@ impl KernelAgentAuthorityV2 {
             .position(|record| record.pending_commitment == ticket.pending_commitment)
             .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
         let pending = &self.pending_releases[pending_index];
+        self.recheck_release_task(
+            pending,
+            active_state_manifest_digest,
+            deployment_generation,
+            now,
+        )?;
         let authorized = pending
             .authorized
             .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
@@ -5263,6 +5416,19 @@ impl KernelAgentAuthorityV2 {
         {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
+        let delivery = savana_kernel_protocol::v2::decode_final_release_delivery_v2(
+            &pending.business_request.canonical_json(),
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        if delivery.payload() != plaintext.as_slice()
+            || pending.task_match.content().action().destination_digest()
+                != binding.destination_digest()
+            || pending.task_match.content().provenance_digest() != binding.evidence_digest()
+        {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        let dispatch_plaintext =
+            task_execution_plaintext(&pending.task_match, &pending.business_request)?;
         let policy = self
             .policy
             .as_mut()
@@ -5271,6 +5437,9 @@ impl KernelAgentAuthorityV2 {
             .g7
             .as_ref()
             .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?;
+        // Review the actual decoded data, not base64/CBOR that could conceal a
+        // forbidden token from the leak gate. The exact closed transport capsule
+        // is separately committed by the preseal digest below.
         let release_value = KernelValueV2::bytes(plaintext.as_slice().to_vec())
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
         let first_parent = pending
@@ -5294,7 +5463,7 @@ impl KernelAgentAuthorityV2 {
             .snapshot()
             .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
         let (prepared, release_declassification) = gate_final_release_before_durable_prepare(
-            plaintext.as_slice(),
+            &dispatch_plaintext,
             || {
                 let declassification = ProvenanceRecordV2::declassify(
                     &release_value,
@@ -5360,15 +5529,48 @@ impl KernelAgentAuthorityV2 {
                         pending.binding_digest,
                     )
                     .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+                let state = policy
+                    .durable
+                    .task_authorization_state(pending.durable_task_id)
+                    .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+                if state.revoked() {
+                    return Err(KernelAgentAuthorityErrorV2::StateConflict);
+                }
+                let approval = pending
+                    .task_action_approval
+                    .as_ref()
+                    .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
+                let endorsements = savana_policy_core::v2::checked_control_endorsements_v2(
+                    &pending.task_match,
+                    &pending.control_selections,
+                    savana_policy_core::v2::ControlEvidenceV2::ActionApproval {
+                        approval,
+                        expected_context: approval.material().context(),
+                    },
+                    &savana_policy_core::v2::TaskMatchContextV2 {
+                        current_authorization: Some(state.authorization()),
+                        pre_state_digest: state.digest(),
+                        pre_state_revision: state.revision(),
+                        deployment_generation,
+                        now,
+                    },
+                )
+                .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+                let task = savana_policy_core::v2::TaskDispatchAuthorizationV2::new(
+                    pending.task_match.clone(),
+                    endorsements,
+                );
                 policy
                     .durable
-                    .prepare_verified_final_release_dispatch(
+                    .prepare_task_bound_final_release_dispatch(
                         &release,
                         quota,
                         settlement,
                         resolved_ticket,
                         effect_lease,
                         sealed_payload_digest,
+                        &task,
+                        now,
                     )
                     .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)
             },
@@ -5387,7 +5589,7 @@ impl KernelAgentAuthorityV2 {
             .mark_release_dispatch_prepared(authorized, vault_commit, now)
             .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
         let (hpke_enc, hpke_ciphertext) = seal_execution_payload(
-            &plaintext,
+            &dispatch_plaintext,
             g7.executor_seal_public_key,
             protocol_core
                 .semantic_digest()
@@ -6752,6 +6954,152 @@ fn business_step_request_id(step: savana_kernel_protocol::v2::InternalStepIdV2) 
         id.push(HEX[usize::from(b & 15)] as char);
     }
     id
+}
+
+struct FinalReleaseBusinessProposalV2 {
+    business_request: savana_kernel_protocol::v2::BusinessRequestV2,
+    task_match: savana_policy_core::v2::VerifiedTaskMatchV2,
+    control_selections: [savana_policy_core::v2::ControlSelectionV2; 7],
+    display_projection_digest: Digest32V2,
+}
+
+/// Current release API has no independently approved clause selector. Therefore
+/// exactly one whole original-input/application-turn alternative must apply;
+/// overlapping destinations or budget buckets are refused, never guessed.
+#[allow(clippy::too_many_arguments)]
+fn project_final_release_business(
+    policy: &KernelG4G5RuntimeV2,
+    session: &SessionRecordV2,
+    request: &PrepareReleaseRequestV2,
+    owned_source: Digest32V2,
+    committed_plan: &PlanStepRecordV2,
+    plaintext: &[u8],
+    provenance: Digest32V2,
+    generation: u64,
+    now: UnixMillisV2,
+) -> Result<FinalReleaseBusinessProposalV2, KernelAgentAuthorityErrorV2> {
+    use savana_kernel_protocol::v2::{BusinessRequestV2, BusinessValueV2, TaskEffectV2};
+    if plaintext.len() > savana_kernel_protocol::v2::MAX_FINAL_RELEASE_BUSINESS_PAYLOAD_BYTES_V2 {
+        return Err(KernelAgentAuthorityErrorV2::LimitExceeded);
+    }
+    let state = policy
+        .durable
+        .task_authorization_state(session.durable_task_id)
+        .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+    let root = state.authorization();
+    let draft = policy
+        .durable
+        .installed_task_authorization_draft(root.digest())
+        .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?
+        .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
+    if state.revoked()
+        || draft.source_input_digest() != owned_source
+        || draft.principal() != session.principal
+        || draft.task() != session.durable_task_id
+        || draft.manifest_digest() != session.active_state_manifest_digest
+        || draft.deployment_generation() != generation
+        || committed_plan.run != session.run
+        || committed_plan.durable_run_id != session.durable_run_id
+        || committed_plan.durable_task_id != session.durable_task_id
+        || committed_plan.principal != session.principal
+        || committed_plan.task_authorization_digest != root.digest()
+    {
+        return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+    }
+    let mut selected = None;
+    for alternative in draft.clauses().iter().flat_map(|c| c.alternatives()) {
+        let controls = alternative.controls();
+        let profile = controls.profile();
+        if profile.effect() != TaskEffectV2::FinalRelease {
+            continue;
+        }
+        let Some(active) =
+            policy
+                .active_tools
+                .resolve(alternative.descriptor_digest(), session.role, now)
+        else {
+            continue;
+        };
+        let descriptor = active.descriptor().unsigned();
+        if descriptor.executor_identity() != request.executor()
+            || descriptor.destination_projection() != request.destination_projection()
+            || descriptor.display_projection() != request.display_projection()
+        {
+            continue;
+        }
+        if descriptor.business_profile() != Some(profile)
+            || descriptor.destination_projection_digest()
+                != compiled_projection_digest(
+                    PROJECTION_DESTINATION_DOMAIN,
+                    request.destination_projection().get(),
+                )
+            || descriptor.display_projection_digest()
+                != compiled_projection_digest(
+                    PROJECTION_DISPLAY_DOMAIN,
+                    request.display_projection().get(),
+                )
+            || *profile
+                != savana_kernel_protocol::v2::final_release_business_profile_v2(
+                    profile.target_identity(),
+                    profile.credential_identity(),
+                )
+                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?
+        {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        let business_request = BusinessRequestV2::from_fields(
+            profile,
+            &business_step_request_id(committed_plan.internal_step_id),
+            vec![
+                (
+                    "resource".into(),
+                    BusinessValueV2::Text(controls.resource().into()),
+                ),
+                (
+                    "destination".into(),
+                    BusinessValueV2::Text(controls.destination().into()),
+                ),
+                (
+                    "payload".into(),
+                    BusinessValueV2::Text(
+                        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(plaintext),
+                    ),
+                ),
+            ],
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let delivery = savana_kernel_protocol::v2::decode_final_release_delivery_v2(
+            &business_request.canonical_json(),
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        if delivery.source_input_digest() != owned_source {
+            continue;
+        }
+        if selected.is_some() {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        let task_match = match_business_proposal(
+            &state,
+            &business_request,
+            alternative.descriptor_digest(),
+            committed_plan.plan_revision_digest,
+            provenance,
+            generation,
+            now,
+        )?;
+        let control_selections = savana_policy_core::v2::ControlSelectionV2::from_match(
+            &task_match,
+            committed_plan.proposer_parent,
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        selected = Some(FinalReleaseBusinessProposalV2 {
+            business_request,
+            task_match,
+            control_selections,
+            display_projection_digest: descriptor.display_projection_digest(),
+        });
+    }
+    selected.ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9524,6 +9872,10 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn planner_active_tools() -> ActiveToolRegistryV2 {
+        planner_active_tools_with_release(false)
+    }
+
+    fn planner_active_tools_with_release(include_release: bool) -> ActiveToolRegistryV2 {
         let registry_version = VersionV2::new(1, 0, 0);
         let publisher_key = SigningKey::from_bytes(&[0xa1; 32]);
         let publisher_key_id = Ed25519KeyIdV2::new([0xa2; 32]);
@@ -9563,6 +9915,17 @@ pub(crate) mod tests {
                 ToolClassIdV2::new(33),
             ),
         ];
+        if include_release {
+            descriptors.push(verified_planner_descriptor(
+                registry_version,
+                &publisher,
+                &publisher_key,
+                publisher_key_id,
+                "release.allowed",
+                ActionTemplateIdV2::new(23),
+                ToolClassIdV2::new(34),
+            ));
+        }
         let registry = VerifiedToolRegistryV2::from_verified_descriptors(
             registry_version,
             descriptors.clone(),
@@ -9633,7 +9996,11 @@ pub(crate) mod tests {
             Digest32V2::new([0xa5; 32]),
             Digest32V2::new([0xa6; 32]),
             vec![RoleIdV2::new(1)],
-            EffectSetV2::SEND,
+            if provider_tool_id == "release.allowed" {
+                EffectSetV2::FINAL_RELEASE
+            } else {
+                EffectSetV2::SEND
+            },
             AttemptKindV2::ToolWrite,
             BoundedConnectorRetryPolicyV2::new(
                 ExecutorIdempotencyContractV2::ConnectorIdempotentByExecutionNonce,
@@ -9663,7 +10030,15 @@ pub(crate) mod tests {
         )
         .unwrap();
         let unsigned = unsigned
-            .with_business_profile(task_business_profile(provider_tool_id))
+            .with_business_profile(if provider_tool_id == "release.allowed" {
+                savana_kernel_protocol::v2::final_release_business_profile_v2(
+                    Digest32V2::new([0x28; 32]),
+                    Digest32V2::new([0x29; 32]),
+                )
+                .unwrap()
+            } else {
+                task_business_profile(provider_tool_id)
+            })
             .unwrap();
         let descriptor_digest = descriptor_digest_v2(&unsigned).unwrap();
         let mut signature_input = b"SAVANA_TOOL_DESCRIPTOR_SIGNATURE_V2\0".to_vec();
@@ -10079,6 +10454,550 @@ pub(crate) mod tests {
             release_digest,
             presealed_final_release_payload_digest(b"exact plaintext", Digest32V2::new([0x72; 32]))
         );
+    }
+
+    #[test]
+    fn final_release_projection_requires_owned_source_unique_contract_and_exact_destination() {
+        use super::*;
+        use savana_kernel_protocol::v2::*;
+        let mut f = planner_authority_fixture_with_task(true, false);
+        f.authority.policy.as_mut().unwrap().active_tools = planner_active_tools_with_release(true);
+        let s = &f.authority.sessions[0];
+        let p = f.authority.policy.as_mut().unwrap();
+        let active = p
+            .active_tools
+            .resolve_class(ToolClassIdV2::new(34), s.role, UnixMillisV2::new(100))
+            .unwrap();
+        let descriptor = active.descriptor().descriptor_digest();
+        let profile = active
+            .descriptor()
+            .unsigned()
+            .business_profile()
+            .unwrap()
+            .clone();
+        let controls = BusinessControlsV2::from_fields(
+            &profile,
+            vec![
+                (
+                    "resource".into(),
+                    BusinessValueV2::Text(format!("input:{}", "03".repeat(32))),
+                ),
+                (
+                    "destination".into(),
+                    BusinessValueV2::Text(format!("application-turn:{}", "04".repeat(32))),
+                ),
+            ],
+        )
+        .unwrap();
+        let draft = TaskAuthorizationDraftV2::new(
+            Digest32V2::new([0x38; 32]),
+            s.principal,
+            s.durable_task_id,
+            1,
+            f.authority.config.installation_id,
+            s.active_state_manifest_digest,
+            7,
+            UnixMillisV2::new(1),
+            UnixMillisV2::new(10000),
+            Digest32V2::new([3; 32]),
+            vec![TaskAuthorizationDraftClauseV2::new(
+                1,
+                vec![TaskAuthorizationDraftAlternativeV2::new(descriptor, controls).unwrap()],
+                1,
+                1,
+                1,
+                vec![],
+                false,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let key = SigningKey::from_bytes(&[0x39; 32]);
+        let signed = sign_task_authorization_v2(
+            draft
+                .to_unsigned_authorization(
+                    TaskEvidenceKindV2::AuthenticatedStructuredInput,
+                    Digest32V2::new([0x37; 32]),
+                )
+                .unwrap(),
+            &key,
+        )
+        .unwrap();
+        let verified = savana_policy_core::v2::VerifiedTaskAuthorizationV2::verify(
+            &signed,
+            &key.verifying_key(),
+            s.principal,
+            s.durable_task_id,
+            f.authority.config.installation_id,
+            s.active_state_manifest_digest,
+            UnixMillisV2::new(100),
+        )
+        .unwrap();
+        let root_digest = verified.digest();
+        p.durable
+            .record_pending_task_authorization(draft, Digest32V2::new([0x36; 32]))
+            .unwrap();
+        p.durable
+            .install_pending_task_authorization(Digest32V2::new([0x36; 32]), verified)
+            .unwrap();
+        // This fixture exercises the real native projection/matching helper, not
+        // a full ingress/agent/provider run (covered separately by Task 8).
+        let step = PlanStepRecordV2 {
+            commitment: Digest32V2::new([0x41; 32]),
+            run: s.run,
+            durable_run_id: s.durable_run_id,
+            durable_task_id: s.durable_task_id,
+            principal: s.principal,
+            role: s.role,
+            plan_revision_digest: PlanRevisionDigestV2::new([0x42; 32]),
+            internal_step_id: InternalStepIdV2::new([0x43; 32]),
+            descriptor_digest: descriptor,
+            task_authorization_digest: root_digest,
+            proposer_parent: Digest32V2::new([0x44; 32]),
+            arguments: vec![],
+        };
+        let request = PrepareReleaseRequestV2::new(
+            s.initial_document,
+            vec![s.initial_value],
+            ExecutorIdentityV2::new([0xa7; 32]),
+            ProjectionIdV2::new(3),
+            DisplayProjectionIdV2::new(4),
+        )
+        .unwrap();
+        let project = |source, request: &PrepareReleaseRequestV2, now| {
+            project_final_release_business(
+                p,
+                s,
+                request,
+                source,
+                &step,
+                b"actual vault bytes",
+                Digest32V2::new([0x45; 32]),
+                7,
+                UnixMillisV2::new(now),
+            )
+        };
+        let projected = project(Digest32V2::new([3; 32]), &request, 100).unwrap();
+        let delivered =
+            decode_final_release_delivery_v2(&projected.business_request.canonical_json()).unwrap();
+        assert_eq!(delivered.payload(), b"actual vault bytes");
+        assert_eq!(delivered.turn_binding(), Digest32V2::new([4; 32]));
+        assert_eq!(
+            projected.task_match.content().action().effect(),
+            TaskEffectV2::FinalRelease
+        );
+        assert!(project(Digest32V2::new([5; 32]), &request, 100).is_err());
+        assert!(project(Digest32V2::new([3; 32]), &request, 10000).is_err());
+        let wrong_projection = PrepareReleaseRequestV2::new(
+            s.initial_document,
+            vec![s.initial_value],
+            request.executor(),
+            ProjectionIdV2::new(9),
+            request.display_projection(),
+        )
+        .unwrap();
+        assert!(project(Digest32V2::new([3; 32]), &wrong_projection, 100).is_err());
+        assert_eq!(
+            p.durable
+                .task_authorization_state(s.durable_task_id)
+                .unwrap()
+                .clause_consumption(1),
+            Some((0, 0))
+        );
+
+        // Exercise the production prepare/authorize handlers with a real durable
+        // vault and signed fixture settlements. No browser ceremony or provider
+        // transport is claimed by this component fixture.
+        let (task, run, principal, manifest, producer) = (
+            s.durable_task_id,
+            s.durable_run_id,
+            s.principal,
+            s.active_state_manifest_digest,
+            s.producer_identity,
+        );
+        let installation = f.authority.config.installation_id;
+        let boot = f.authority.config.agentd_kernel_client_boot_id;
+        let agent = f.caller_identity;
+        let peer = Digest32V2::new([0x52; 32]);
+        #[derive(Default)]
+        struct Anchor(savana_vault::VaultStateHeadV2);
+        impl savana_vault::VaultRollbackAnchorV2 for Anchor {
+            fn current_head(
+                &self,
+            ) -> Result<savana_vault::VaultStateHeadV2, savana_vault::VaultErrorV2> {
+                Ok(self.0)
+            }
+            fn compare_and_advance(
+                &mut self,
+                expected: savana_vault::VaultStateHeadV2,
+                next: savana_vault::VaultStateHeadV2,
+            ) -> Result<(), savana_vault::VaultErrorV2> {
+                if self.0 != expected {
+                    return Err(savana_vault::VaultErrorV2::RollbackDetected);
+                }
+                self.0 = next;
+                Ok(())
+            }
+        }
+        let vault_dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(
+            vault_dir.path(),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        let mut vault = savana_vault::DurableVaultServiceV2::open(
+            &vault_dir.path().join("vault-state-v2.cbor"),
+            [0x53; 32],
+            savana_vault::DurableVaultNamespaceV2::from_verified_installation(
+                installation,
+                Digest32V2::new([0x54; 32]),
+            )
+            .unwrap(),
+            Box::<Anchor>::default(),
+            savana_vault::VaultServiceV2::from_verified_deployment(
+                installation,
+                manifest,
+                boot,
+                10,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let pending = vault
+            .create_pending_ingress(
+                savana_vault::VaultIngressMaterialV2::from_verified_gated_input(
+                    task,
+                    run,
+                    principal,
+                    Digest32V2::new([0x55; 32]),
+                    Digest32V2::new([0x56; 32]),
+                    UnixMillisV2::new(10000),
+                    b"actual vault bytes".to_vec(),
+                )
+                .unwrap(),
+                UnixMillisV2::new(100),
+            )
+            .unwrap();
+        let live = vault
+            .commit_ingress(pending, UnixMillisV2::new(101))
+            .unwrap();
+        let document = vault
+            .issue_masked_document(
+                &live,
+                savana_vault::VaultAccessContextV2::from_authenticated_agent(
+                    boot,
+                    agent,
+                    peer,
+                    run,
+                    UnixMillisV2::new(10000),
+                )
+                .unwrap(),
+                UnixMillisV2::new(102),
+            )
+            .unwrap();
+        let mut data = crate::v2_data_plane::ProductionKernelDataPlaneV2::new(
+            planner_input_runtime(),
+            vault,
+            planner_declassification_rules(true),
+            installation,
+            producer,
+            boot,
+            agent,
+            peer,
+            EffectSetV2::ALL,
+            10000,
+        )
+        .unwrap();
+        f.authority.sessions[0].initial_document = document;
+        f.authority.sessions[0].task_authorization_digest = Some(root_digest);
+        f.authority.plan_steps.push(step);
+        let mut g7 = test_g7_runtime(installation, manifest, 7, 11);
+        g7.executor = g7
+            .executor
+            .with_socket_path_for_test(vault_dir.path().join("no-executor.sock"));
+        f.authority.policy.as_mut().unwrap().install_g7(g7).unwrap();
+        let correlation = SignedDurableTaskCorrelationV2::sign(
+            UnsignedDurableTaskCorrelationV2::new(
+                installation,
+                manifest,
+                7,
+                task,
+                agent,
+                boot,
+                f.authority.config.kerneld_server_boot_id,
+                f.authority.config.machine_boot_id,
+                UnixMillisV2::new(1),
+                UnixMillisV2::new(9000),
+                UnixMillisV2::new(10000),
+            )
+            .unwrap(),
+            &f.authority.config.correlation_signing_key,
+        )
+        .unwrap();
+        f.authority.tasks.push(TaskRecordV2 {
+            preparation: NewTaskPreparationHandleV2::from_authority_entropy([0x57; 32]).unwrap(),
+            agent_task_nonce: Nonce32V2::new([0x58; 32]),
+            client_request_nonce: Nonce32V2::new([0x59; 32]),
+            durable_task_id: task,
+            active_state_manifest_digest: manifest,
+            correlation,
+            ingress_transfer: KernelIngressBootstrapTransferCapabilityV2::from_authority_entropy(
+                [0x60; 32],
+            )
+            .unwrap(),
+            status: PublicTaskStatusV2::Processing,
+            expected_principal: Some(principal),
+            claim_digest: None,
+            durable_run_id: Some(run),
+            material: None,
+            current_authentication_preparation: None,
+            source_input_digest: Some(Digest32V2::new([3; 32])),
+            task_authorization_digest: Some(root_digest),
+        });
+        let request = PrepareReleaseRequestV2::new(
+            document,
+            vec![f.prompt],
+            request.executor(),
+            request.destination_projection(),
+            request.display_projection(),
+        )
+        .unwrap();
+        let prepared = f
+            .authority
+            .prepare_release(
+                &request,
+                &f.values,
+                &mut data,
+                agent,
+                manifest,
+                7,
+                UnixMillisV2::new(200),
+            )
+            .unwrap();
+        let envelope = prepared.envelope().unverified_material().unwrap();
+        assert_eq!(
+            envelope.task_action_binding().unwrap().content_digest(),
+            f.authority.pending_releases[0].task_match.content_digest()
+        );
+        assert!(envelope
+            .display_text()
+            .as_str()
+            .contains("application-turn:"));
+        let key = SigningKey::from_bytes(&[0x9c; 32]);
+        let generic = UnsignedApprovalSettlementV2::new(
+            installation,
+            manifest,
+            7,
+            ApprovalPurposeV2::FinalRelease,
+            prepared.envelope().envelope_digest().unwrap(),
+            ApprovalDecisionV2::Approve,
+            principal,
+            Digest32V2::new([0xd1; 32]),
+            Digest32V2::new([0xd2; 32]),
+            true,
+            true,
+            false,
+            false,
+            2,
+            envelope.decision_challenge(),
+            Nonce32V2::new([0xd3; 32]),
+            UnixMillisV2::new(201),
+            UnixMillisV2::new(500),
+        )
+        .unwrap();
+        let old = SignedApprovalSettlementV2::sign(generic, &key).unwrap();
+        let consent = |receipt| {
+            AuthorizeReleaseRequestV2::new(prepared.pending(), prepared.approval(), receipt)
+                .unwrap()
+        };
+        assert!(f
+            .authority
+            .authorize_release(
+                &consent(old.clone()),
+                &mut data,
+                agent,
+                manifest,
+                7,
+                UnixMillisV2::new(202)
+            )
+            .is_err());
+        assert!(!f.authority.pending_releases[0].consumed);
+        let context = envelope.task_action_context(&generic).unwrap();
+        let mut wrong = context.clone();
+        wrong.content_digest = Digest32V2::new([0xee; 32]);
+        let proof = |context| {
+            sign_task_action_approval_v2(
+                TaskActionApprovalV2::new(
+                    context,
+                    TaskActionApprovalDecisionV2::Approve,
+                    generic.issued_at(),
+                    generic.expires_at(),
+                )
+                .unwrap(),
+                &key,
+            )
+            .unwrap()
+        };
+        assert!(f
+            .authority
+            .authorize_release(
+                &consent(old.clone().with_task_action_approval(proof(wrong)).unwrap()),
+                &mut data,
+                agent,
+                manifest,
+                7,
+                UnixMillisV2::new(202)
+            )
+            .is_err());
+        assert!(!f.authority.pending_releases[0].consumed);
+        let authorized = f
+            .authority
+            .authorize_release(
+                &consent(old.with_task_action_approval(proof(context)).unwrap()),
+                &mut data,
+                agent,
+                manifest,
+                7,
+                UnixMillisV2::new(203),
+            )
+            .unwrap();
+        assert!(f.authority.pending_releases[0].consumed);
+        assert!(f.authority.pending_releases[0]
+            .task_action_approval
+            .is_some());
+        let server = f
+            .authority
+            .policy
+            .as_ref()
+            .unwrap()
+            .g7
+            .as_ref()
+            .unwrap()
+            .executor
+            .fixture_server(SigningKey::from_bytes(&[0xb0; 32]), 2, |request| {
+                let role = EndpointRoleV2::KernelExecutor;
+                let tag = request.operation().tag();
+                if tag == 64 {
+                    KernelServiceApplicationResponseV2::success(
+                        role,
+                        request.request_id(),
+                        tag,
+                        encode_connector_registry_sync_response_v2(
+                            &ConnectorRegistrySyncResponseV2::new(
+                                ConnectorRegistrySyncStatusV2::DisabledGenesisOnly,
+                                0,
+                                Digest32V2::new([0xbf; 32]),
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap()
+                } else {
+                    assert_eq!(tag, 60);
+                    KernelServiceApplicationResponseV2::error(
+                        role,
+                        request.request_id(),
+                        tag,
+                        PublicStableCodeV2::ServiceUnavailable,
+                    )
+                    .unwrap()
+                }
+            });
+        let dispatch = DispatchReleaseRequestV2::new(authorized.ticket());
+        assert!(f
+            .authority
+            .dispatch_release(
+                RequestIdV2::new([0x61; 16]),
+                dispatch.clone(),
+                &mut data,
+                agent,
+                manifest,
+                7,
+                11,
+                UnixMillisV2::new(204)
+            )
+            .is_err());
+        assert_eq!(
+            f.authority
+                .policy
+                .as_ref()
+                .unwrap()
+                .durable
+                .task_authorization_state(task)
+                .unwrap()
+                .clause_consumption(1),
+            Some((0, 0)),
+            "missing final-release declassification rule must refuse before atomic prepare"
+        );
+        let destination = f.authority.pending_releases[0]
+            .task_match
+            .content()
+            .action()
+            .destination_digest();
+        f.authority.policy.as_mut().unwrap().declassification_rules =
+            planner_declassification_rules_with_handoffs(true, None, Some(destination));
+        let dispatched = f.authority.dispatch_release(
+            RequestIdV2::new([0x62; 16]),
+            dispatch,
+            &mut data,
+            agent,
+            manifest,
+            7,
+            11,
+            UnixMillisV2::new(205),
+        );
+        assert!(dispatched.is_err());
+        assert_eq!(f.authority.policy.as_ref().unwrap().durable.task_authorization_state(task).unwrap().clause_consumption(1), Some((1, 1)), "the real G7 path must atomically charge once before the unavailable test executor; this is not provider success: {dispatched:?}");
+        let transmitted = server.join().unwrap();
+        assert_eq!(transmitted.len(), 2);
+        let KernelServiceOperationV2::Executor(KernelExecutorOperationV2::Dispatch(sent)) =
+            transmitted[1].operation()
+        else {
+            panic!("expected actual sealed dispatch");
+        };
+        let key = SigningKey::from_bytes(&[0xc0; 32]);
+        let sealed = sent
+            .envelope()
+            .verify(
+                derive_ed25519_key_id_v2(key.verifying_key().to_bytes()),
+                key.verifying_key().to_bytes(),
+                installation,
+                manifest,
+                7,
+                11,
+                request.executor(),
+                Some(UnixMillisV2::new(205)),
+            )
+            .unwrap();
+        let recipient = StaticSecret::from([0xbc; 32]);
+        let public = X25519PublicKey::from(&recipient).to_bytes();
+        let shared = recipient
+            .diffie_hellman(&X25519PublicKey::from(*sealed.hpke_enc().as_bytes()))
+            .to_bytes();
+        let mut info = b"SAVANA_EXECUTION_HPKE_X25519_CHACHA20POLY1305_V2\0".to_vec();
+        info.extend_from_slice(sealed.hpke_enc().as_bytes());
+        info.extend_from_slice(&public);
+        let mut key_nonce = [0; 44];
+        Hkdf::<Sha256>::new(Some(sealed.dispatch_core_digest().as_bytes()), &shared)
+            .expand(&info, &mut key_nonce)
+            .unwrap();
+        let plaintext = ChaCha20Poly1305::new_from_slice(&key_nonce[..32])
+            .unwrap()
+            .decrypt(
+                Nonce::from_slice(&key_nonce[32..]),
+                Payload {
+                    msg: sealed.hpke_ciphertext(),
+                    aad: sealed.dispatch_core_digest().as_bytes(),
+                },
+            )
+            .unwrap();
+        let capsule = decode_task_execution_payload_v2(&plaintext).unwrap();
+        capsule.check_core(&sealed.core()).unwrap();
+        let delivered =
+            decode_final_release_delivery_v2(&capsule.request().canonical_json()).unwrap();
+        assert_eq!(delivered.payload(), b"actual vault bytes");
+        assert_eq!(delivered.turn_binding(), Digest32V2::new([4; 32]));
     }
 
     fn business_proposal_fixture(

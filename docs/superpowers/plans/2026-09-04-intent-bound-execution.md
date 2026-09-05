@@ -180,6 +180,24 @@ authority 31 passed. Final-release producer and whole-chain validation remain op
 
 ## Task 6: Exact request profile and executor boundary validation
 
+Native final-release checkpoint (2026-09-05): release preparation now derives a
+unique complete final-release alternative from the current authenticated draft,
+actual owned input and committed plan; the original source is mandatory evidence.
+The actual vault bytes are encoded in the reviewed closed delivery request and
+the readable action display. Both generic release consent and its separately
+signed exact TaskActionApproval are required before consuming consent. Dispatch
+rechecks the current task, preserves the raw-plaintext leak gate, and calls the
+atomic task-bound prepare before sealing the content/request capsule. Atomic
+prepare additionally rejects a release whose destination or evidence differs
+from its matched action, without consuming budget (behavior reproduced before
+the fix). A real native/vault/approval-proof fixture reaches authenticated Suite1
+IPC; the captured dispatch independently verifies, decrypts and checks its exact
+bytes/turn/core. The fixture executor deliberately returns ServiceUnavailable:
+this is not provider success or a complete issuer-to-provider experiment.
+Full feature-gated kerneld library: 310 passed. The V1 replay-boundary test passed
+in isolation (305.18 s); earlier intermittent expiry/frame failures mean the
+whole-branch result still requires a fresh run. No V1 production behavior changed.
+
 Final-release receiver checkpoint (2026-09-05): the closed fixed POST mapping now
 names `input:<digest>` and `application-turn:<digest>`, with canonical unpadded
 base64 for at most 32 KiB of actual binary payload and a count of one release.
