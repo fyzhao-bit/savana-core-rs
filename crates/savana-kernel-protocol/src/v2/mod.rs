@@ -23,7 +23,20 @@ mod kernel_success;
 mod primitives;
 mod service;
 mod signed;
+mod task_authorization;
+#[cfg(test)]
+mod task_authorization_tests;
 mod transport;
+
+pub use task_authorization::{
+    action_content_digest_v2, decode_action_content_v2, decode_signed_task_authorization_v2,
+    decode_task_authorization_v2, encode_action_content_v2, encode_signed_task_authorization_v2,
+    encode_task_authorization_v2, sign_task_authorization_v2, task_authorization_digest_v2,
+    verify_task_authorization_v2, ActionAlternativeV2, ActionCodecProfileV2, ActionContentV2,
+    MagnitudeUnitV2, SignedTaskAuthorizationV2, TaskAuthorizationClauseV2, TaskAuthorizationV2,
+    TaskEffectV2, TaskEvidenceKindV2, MAX_ACTION_ALTERNATIVES_V2, MAX_TASK_AUTHORIZATION_BYTES_V2,
+    MAX_TASK_AUTHORIZATION_CLAUSES_V2, MAX_TASK_PREDECESSORS_V2,
+};
 
 pub use application::{
     decode_kernel_service_application_request_v2, decode_kernel_service_application_response_v2,
