@@ -1376,6 +1376,29 @@ pub struct EstablishTaskAuthorizationRequestV2 {
 pub type PrepareTaskAuthorizationApprovalRequestV2 = EstablishTaskAuthorizationRequestV2;
 pub type RevokeTaskAuthorizationRequestV2 = EstablishTaskAuthorizationRequestV2;
 
+#[derive(Debug, Clone, Copy)]
+pub struct GetTaskAuthorizationContextRequestV2 {
+    authorization: IngressUiAuthorizationHandleV2,
+    session: Option<InputSessionHandleV2>,
+}
+impl GetTaskAuthorizationContextRequestV2 {
+    pub fn new(
+        authorization: IngressUiAuthorizationHandleV2,
+        session: Option<InputSessionHandleV2>,
+    ) -> Self {
+        Self {
+            authorization,
+            session,
+        }
+    }
+    pub fn authorization(&self) -> IngressUiAuthorizationHandleV2 {
+        self.authorization
+    }
+    pub fn session(&self) -> Option<InputSessionHandleV2> {
+        self.session
+    }
+}
+
 /// Recovery uses a freshly verified UI authorization, not an old input handle.
 /// The request identifies existing durable issuance only; it carries no draft.
 #[derive(Debug, Clone, Copy)]
@@ -1680,6 +1703,7 @@ pub enum KernelIngressOperationV2 {
     CommitTaskAuthorizationApproval(CommitTaskAuthorizationApprovalRequestV2),
     RevokeTaskAuthorization(RevokeTaskAuthorizationRequestV2),
     RecoverTaskAuthorization(RecoverTaskAuthorizationRequestV2),
+    GetTaskAuthorizationContext(GetTaskAuthorizationContextRequestV2),
 }
 
 impl KernelIngressOperationV2 {
@@ -1702,13 +1726,14 @@ impl KernelIngressOperationV2 {
             Self::CommitTaskAuthorizationApproval(_) => 53,
             Self::RevokeTaskAuthorization(_) => 54,
             Self::RecoverTaskAuthorization(_) => 55,
+            Self::GetTaskAuthorizationContext(_) => 56,
         }
     }
 }
 
-pub const fn kernel_ingress_operation_tags_v2() -> &'static [u16; 17] {
+pub const fn kernel_ingress_operation_tags_v2() -> &'static [u16; 18] {
     &[
-        0, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55,
+        0, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56,
     ]
 }
 
@@ -1802,6 +1827,15 @@ pub fn encode_kernel_ingress_operation_v2(
             encode_header(&mut encoder, 55, 2)?;
             encode_fixed(&mut encoder, &request.authorization)?;
             encode_fixed(&mut encoder, &request.request_digest)?;
+        }
+        KernelIngressOperationV2::GetTaskAuthorizationContext(request) => {
+            encode_header(&mut encoder, 56, 2)?;
+            encode_fixed(&mut encoder, &request.authorization)?;
+            if let Some(session) = request.session {
+                encode_fixed(&mut encoder, &session)?;
+            } else {
+                encoder.null().map_err(ProtocolError::malformed)?;
+            }
         }
     }
     Ok(encoder.into_writer())
@@ -1946,6 +1980,21 @@ pub fn decode_kernel_ingress_operation_v2(
                     decode_fixed(&mut decoder, &mut context)?,
                     decode_fixed(&mut decoder, &mut context)?,
                 )?,
+            )
+        }
+        56 => {
+            expect_array(&mut decoder, 2)?;
+            let authorization = decode_fixed(&mut decoder, &mut context)?;
+            let session = if decoder.datatype().map_err(ProtocolError::malformed)?
+                == minicbor::data::Type::Null
+            {
+                decoder.null().map_err(ProtocolError::malformed)?;
+                None
+            } else {
+                Some(decode_fixed(&mut decoder, &mut context)?)
+            };
+            KernelIngressOperationV2::GetTaskAuthorizationContext(
+                GetTaskAuthorizationContextRequestV2::new(authorization, session),
             )
         }
         _ => return Err(ProtocolError::stable(StableCode::ProtocolUnknownOperation)),

@@ -623,7 +623,7 @@ const fn tag_allowed(role: EndpointRoleV2, tag: u16) -> bool {
         EndpointRoleV2::AgentKernel => {
             tag == 0 || (tag >= 20 && tag <= 43) || (tag >= 70 && tag <= 76)
         }
-        EndpointRoleV2::IngressKernel => tag == 0 || (tag >= 40 && tag <= 55),
+        EndpointRoleV2::IngressKernel => tag == 0 || (tag >= 40 && tag <= 56),
         EndpointRoleV2::KernelExecutor => tag == 0 || (tag >= 60 && tag <= 64),
         _ => false,
     }

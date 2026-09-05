@@ -469,6 +469,21 @@ mod implementation {
                 let body = render_ingress_workspace_v2(tab);
                 write_http(&mut stream, 200, "text/html; charset=utf-8", &body)
             }
+            FixedHttpRouteV2::IngressTaskContext => {
+                let decoded = decode_ingress_browser_request_v2(request.body())
+                    .map_err(|_| IngressdDaemonErrorV2::EndpointUnavailable)?;
+                let IngressBrowserRequestV2::GetTaskAuthorizationContext { tab, .. } = decoded
+                else {
+                    return write_http(&mut stream, 400, "text/plain; charset=utf-8", b"");
+                };
+                let context = authority
+                    .task_authorization_context(tab, deadline)
+                    .map_err(|_| IngressdDaemonErrorV2::EndpointUnavailable)?;
+                let body =
+                    savana_kernel_protocol::v2::encode_task_authorization_context_v2(&context)
+                        .map_err(|_| IngressdDaemonErrorV2::EndpointUnavailable)?;
+                write_http(&mut stream, 200, "application/cbor", &body)
+            }
             route @ (FixedHttpRouteV2::IngressInputBegin
             | FixedHttpRouteV2::IngressInputChunk
             | FixedHttpRouteV2::IngressInputFinalize

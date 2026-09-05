@@ -1307,6 +1307,125 @@ impl std::fmt::Debug for KernelAgentAuthorityV2 {
 }
 
 impl KernelAgentAuthorityV2 {
+    pub(crate) fn task_authorization_context(
+        &self,
+        subject: &crate::v2_input_owner::AuthenticatedTaskContextSubjectV2,
+        now: UnixMillisV2,
+    ) -> Result<
+        savana_kernel_protocol::v2::TaskAuthorizationContextV2,
+        crate::v2_task_authority::TaskAuthorityErrorV2,
+    > {
+        use crate::v2_task_authority::TaskAuthorityErrorV2 as E;
+        use savana_kernel_protocol::v2::{
+            TaskAuthorizationContextV2, TaskAuthorizationToolContextV2,
+        };
+        self.ensure_durable_available()
+            .map_err(|_| E::Unavailable)?;
+        let p = self.policy.as_ref().ok_or(E::Unavailable)?;
+        let auth = subject.authorization();
+        let task = auth.durable_task_id().ok_or(E::Binding)?;
+        let current = p
+            .durable
+            .find_task_authorization_state(task)
+            .map_err(|_| E::State)?;
+        let mut identity = None;
+        let mut source = subject.source();
+        if let Some(state) = &current {
+            let m = state.authorization().material();
+            if state.revoked()
+                || m.principal() != auth.authenticated_principal()
+                || m.installation_digest() != auth.installation_id()
+                || m.manifest_digest() != auth.active_state_manifest_digest()
+            {
+                return Err(E::Binding);
+            }
+            identity = Some((
+                m.authorization_id(),
+                m.revision().checked_add(1).ok_or(E::State)?,
+            ));
+            if source.is_none() {
+                source = Some(
+                    p.durable
+                        .installed_task_authorization_draft(state.authorization().digest())
+                        .map_err(|_| E::State)?
+                        .ok_or(E::State)?
+                        .source_input_digest(),
+                );
+            }
+        }
+        let mut pending = Vec::new();
+        let previous = current.as_ref().map(|s| s.authorization().digest());
+        for record in p
+            .durable
+            .task_authorization_issuance_history(task)
+            .map_err(|_| E::State)?
+        {
+            let draft = record.draft();
+            if draft.principal() != auth.authenticated_principal()
+                || draft.installation_digest() != auth.installation_id()
+            {
+                return Err(E::Binding);
+            }
+            // Preserve identity even for expired first proposals: retry cannot
+            // create a fresh root identity and erase durable accounting/history.
+            if identity.is_none() {
+                identity = Some((draft.authorization_id(), 1));
+            }
+            if record.installed_digest().is_none()
+                && record.previous_authorization() == previous
+                && identity == Some((draft.authorization_id(), draft.revision()))
+                && draft.manifest_digest() == auth.active_state_manifest_digest()
+                && draft.deployment_generation() == auth.deployment_generation()
+                && now.get() >= draft.not_before().get()
+                && now.get() < draft.expires_at().get()
+                && p.active_tools
+                    .validate_task_draft_profiles(draft, p.role, now)
+                    .is_ok()
+            {
+                if source.is_none() {
+                    source = Some(draft.source_input_digest());
+                }
+                pending.push(record.request_digest());
+            }
+        }
+        let mut tools = Vec::new();
+        for r in p.active_tools.records() {
+            let descriptor = r.descriptor();
+            if p.active_tools
+                .resolve(descriptor.descriptor_digest(), p.role, now)
+                .is_none()
+            {
+                continue;
+            }
+            let Ok(profile) = descriptor.unsigned().require_business_profile() else {
+                continue;
+            };
+            tools.push(
+                TaskAuthorizationToolContextV2::new(
+                    descriptor.descriptor_digest(),
+                    descriptor.unsigned().provider_tool_id().as_str().into(),
+                    profile.clone(),
+                )
+                .map_err(|_| E::Binding)?,
+            );
+        }
+        tools.sort_by_key(|t| *t.descriptor_digest().as_bytes());
+        pending.sort_by_key(|d| *d.as_bytes());
+        TaskAuthorizationContextV2::new(
+            auth.authenticated_principal(),
+            task,
+            auth.installation_id(),
+            auth.active_state_manifest_digest(),
+            auth.deployment_generation(),
+            source.ok_or(E::State)?,
+            now,
+            auth.expires_at(),
+            identity,
+            tools,
+            pending,
+        )
+        .map_err(|_| E::Binding)
+    }
     pub(crate) fn revoke_task_authorization(
         &mut self,
         request: &savana_kernel_protocol::v2::RevokeTaskAuthorizationRequestV2,

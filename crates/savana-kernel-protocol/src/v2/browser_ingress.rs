@@ -9,6 +9,10 @@ use crate::{ProtocolError, StableCode};
 const MAX_INGRESS_BROWSER_BODY_BYTES_V2: usize = 1024 * 1024;
 
 pub enum IngressBrowserRequestV2 {
+    GetTaskAuthorizationContext {
+        tab: IngressTabSessionCapabilityV2,
+        client_request_nonce: Nonce32V2,
+    },
     Begin {
         tab: IngressTabSessionCapabilityV2,
         client_request_nonce: Nonce32V2,
@@ -63,6 +67,9 @@ pub enum IngressBrowserRequestV2 {
 impl core::fmt::Debug for IngressBrowserRequestV2 {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::GetTaskAuthorizationContext { .. } => {
+                formatter.write_str("GetTaskAuthorizationContext(<redacted>)")
+            }
             Self::RecoverTaskAuthorization { .. } => {
                 formatter.write_str("RecoverTaskAuthorization(<redacted>)")
             }
@@ -129,7 +136,8 @@ impl core::fmt::Debug for IngressBrowserRequestV2 {
 impl IngressBrowserRequestV2 {
     pub const fn tab(&self) -> IngressTabSessionCapabilityV2 {
         match self {
-            Self::Begin { tab, .. }
+            Self::GetTaskAuthorizationContext { tab, .. }
+            | Self::Begin { tab, .. }
             | Self::Append { tab, .. }
             | Self::Finalize { tab, .. }
             | Self::EstablishTaskAuthorization { tab, .. }
@@ -143,7 +151,11 @@ impl IngressBrowserRequestV2 {
 
     pub const fn client_request_nonce(&self) -> Nonce32V2 {
         match self {
-            Self::RecoverTaskAuthorization {
+            Self::GetTaskAuthorizationContext {
+                client_request_nonce,
+                ..
+            }
+            | Self::RecoverTaskAuthorization {
                 client_request_nonce,
                 ..
             } => *client_request_nonce,
@@ -236,6 +248,18 @@ pub fn encode_ingress_browser_request_v2(
 ) -> Result<Vec<u8>, ProtocolError> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
     match value {
+        IngressBrowserRequestV2::GetTaskAuthorizationContext {
+            tab,
+            client_request_nonce,
+        } => {
+            encoder
+                .array(3)
+                .and_then(|e| e.u16(10))
+                .map_err(ProtocolError::malformed)?;
+            tab.encode(&mut encoder, &mut ())
+                .and_then(|()| client_request_nonce.encode(&mut encoder, &mut ()))
+                .map_err(ProtocolError::malformed)?;
+        }
         IngressBrowserRequestV2::EstablishTaskAuthorization {
             tab,
             client_request_nonce,
@@ -436,6 +460,12 @@ pub fn decode_ingress_browser_request_v2(
                 }
             }
         }
+        (10, Some(3)) => IngressBrowserRequestV2::GetTaskAuthorizationContext {
+            tab: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+            client_request_nonce: minicbor::Decode::decode(&mut decoder, &mut context)
+                .map_err(ProtocolError::from_typed_decode)?,
+        },
         (1, Some(6)) => IngressBrowserRequestV2::Begin {
             tab: minicbor::Decode::decode(&mut decoder, &mut context)
                 .map_err(ProtocolError::from_typed_decode)?,

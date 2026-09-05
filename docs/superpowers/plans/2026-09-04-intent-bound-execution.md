@@ -293,6 +293,20 @@ final-release producer and complete integrated validation.
 
 ## Task 8: Integrated adversarial/recovery evidence and bounded state model
 
+Task 4E/7D context/editor checkpoint (2026-09-05): IngressKernel 56 and
+`/v2/task/context` expose only currently authenticated task/source metadata, active
+signed business profiles and pending issuance IDs. Input-owner authentication is
+private and separate from issuance evidence. Finalized sessions cannot be borrowed
+by another authentication; fresh same-task authentication can discover durable
+pending IDs without new input. Rust's bounded data-only context fills draft
+identities/profile/source/revision and validates closed JSON clause input. The
+fixed ingress editor supports whole alternatives, budgets and predecessor IDs,
+publishes the request ID before transport, then opens independent task approval.
+Node DOM output is decoded by Rust; checking input approval does not reupload.
+Protocol 248, native library 314, Rust client 90, ingress library 21 and Python
+SDK 16 tests passed. Public API inventory is 20 workflows / 21 types / five value
+helpers. Full-chain, deployment-profile and final-review requirements below remain.
+
 Bounded owner-model checkpoint (2026-09-05): a test-only child of the existing
 durable fixture compares real encrypted-owner transitions with a separately
 specified budget/dependency oracle. It enumerates 1,440 two-attempt traces with

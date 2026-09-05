@@ -66,18 +66,18 @@ the SDK does not create them.
 
 ## Public Python surface
 
-The intent-bound branch product surface has twenty public types:
+The intent-bound branch product surface has twenty-one public types:
 
 | Category | Public types |
 | --- | --- |
 | Connection and lifetime | `Identity`, `Client`, `Session` |
 | Values | `Handle`, `MaskedView`, `Plan`, `PlanStep`, `ApprovalRequest`, `ExecutionResult`, `ConnectorDescriptor` |
-| Task data and observations | `TaskAuthorizationDraft`, `TaskAuthorizationReceipt` |
+| Task data and observations | `TaskAuthorizationContext`, `TaskAuthorizationDraft`, `TaskAuthorizationReceipt` |
 | Choices | `IntentPrivacy`, `ContentKind` |
 | Loop control | `RunLimits`, `AgentEvent` |
 | Errors | `SavanaError`, `AuthError`, `ApprovalDenied`, `PolicyRefused` |
 
-There are eighteen business methods:
+There are twenty business methods:
 
 | # | Method | Result and implemented meaning |
 | ---: | --- | --- |
@@ -99,19 +99,71 @@ There are eighteen business methods:
 | 16 | `Session.establish_task_authorization(draft)` | Submit exact structured data on finalized authenticated ingress; returns a kernel receipt observation. |
 | 17 | `Session.approve_task_authorization(draft, approval)` | Prepare, authenticate and approve an exact task contract under purpose `task_authorization`, then commit its settlement; returns a receipt observation. |
 | 18 | `Session.revoke_task_authorization(draft)` | Revoke the exact current task draft on authenticated ingress; returns its authorization digest as 32 bytes. |
+| 19 | `Session.recover_task_authorization(request_digest, approval)` | Fresh authentication to recover an existing receipt or independently approve a pending draft; no new root identity or budget reset. |
+| 20 | `Session.task_authorization_context()` | Authenticated kernel task/source metadata, current signed profiles and pending request IDs; creates no authority. Opens fresh authenticated follow-up ingress if none exists. |
 
-Three supporting value operations are deliberately inventoried separately:
+Five supporting value operations are deliberately inventoried separately:
 
 | Supporting operation | Meaning |
 | --- | --- |
 | `ConnectorDescriptor.load(path)` | Read, bound, parse, and validate a canonical connector deployment artifact in Rust. |
 | `RunLimits.cancel()` | Set the shared cancellation flag so the loop starts no new service request. |
 | `TaskAuthorizationDraft.from_canonical_bytes(bytes)` | Validate bounded canonical draft schema 1 as untrusted data; does not sign or establish authority. |
+| `TaskAuthorizationContext.tools_json()` | Nonsecret tool names/digests and the exact control field types required by their reviewed profiles. |
+| `TaskAuthorizationContext.draft(id, clauses_json)` | Rust validates closed JSON clauses and fills kernel-owned identities, source, profile and revision into an unprivileged draft; never signs it. |
 
 They are not `Identity`, `Client`, or `Session` business workflows and do not
-increase the count of eighteen. Constructors, properties such as
+increase the count of twenty. Constructors, properties such as
 `Session.initial_document`, enum members, and async context-manager methods are
 also not counted as business methods.
+
+### Building a task draft from kernel context
+
+After committing input, call `context = await session.task_authorization_context()`.
+`json.loads(context.tools_json())` lists the currently active reviewed tool
+profiles and required control fields (role 1 resource, 2 destination, 5 parameter;
+type 1 text, 2 unsigned integer, 3 boolean). The application must let the user
+select exact whole alternatives; it must not interpret a list as permission to
+cross-pair resources and destinations. Missing profiles remain unavailable.
+
+`context.draft(authorization_id, clauses_json)` takes a 32-byte ID and UTF-8 JSON
+bytes. If `context.authorization_identity` is present, use its ID; its next
+revision is fixed by Rust. Otherwise an application may generate a fresh random
+ID for this first proposal. The clauses JSON is a list of closed objects:
+
+```json
+[
+  {
+    "clause_id": 1,
+    "alternatives": [
+      {
+        "descriptor_digest": "<64 lowercase hex characters from tools_json>",
+        "controls": [["resource", "<exact resource>"], ["destination", "<exact destination>"]]
+      }
+    ],
+    "maximum_single_magnitude": 1,
+    "total_magnitude_budget": 1,
+    "maximum_attempts": 1,
+    "predecessor_clause_ids": [],
+    "retry_after_proven_no_effect": false
+  }
+]
+```
+
+Replace the explanatory placeholders and include **every** control field required
+by the selected profile. Payload and magnitude fields are excluded from controls;
+later concrete requests still pass the separate content gates and budget checks.
+Rust rejects unknown/duplicate fields, unsupported values, unknown descriptors,
+profile mismatches and invalid clause graphs. It supplies the authenticated
+principal/task/installation/manifest/source and revision; Python never supplies
+trusted evidence or signing keys. Building a draft creates no authorization:
+`await session.approve_task_authorization(draft, approval)` runs separate consent.
+
+The read-only `context.pending_requests` property lists still-applicable issuance
+request digests, including after fresh authentication with no old input handle.
+It never returns old contract control values. Recovery does not make that old
+source a newly finalized input: new creation/amendment still requires the exact
+current finalized session. Re-reading context never installs pending drafts.
 
 Task receipt properties `request_digest` and `authorization_digest` are 32-byte
 observations, not transferable execution authority. Rust pins the issuance request

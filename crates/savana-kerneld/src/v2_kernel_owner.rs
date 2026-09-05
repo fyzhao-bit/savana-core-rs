@@ -66,6 +66,7 @@ pub(crate) enum KernelRuntimeHandlerV2 {
     CommitTaskAuthorizationApproval,
     RevokeTaskAuthorization,
     RecoverTaskAuthorization,
+    GetTaskAuthorizationContext,
 }
 
 impl KernelRuntimeHandlerV2 {
@@ -119,7 +120,8 @@ impl KernelRuntimeHandlerV2 {
             | Self::PrepareTaskAuthorizationApproval
             | Self::CommitTaskAuthorizationApproval
             | Self::RevokeTaskAuthorization
-            | Self::RecoverTaskAuthorization => EndpointRoleV2::IngressKernel,
+            | Self::RecoverTaskAuthorization
+            | Self::GetTaskAuthorizationContext => EndpointRoleV2::IngressKernel,
         }
     }
 
@@ -169,12 +171,13 @@ impl KernelRuntimeHandlerV2 {
             Self::CommitTaskAuthorizationApproval => 53,
             Self::RevokeTaskAuthorization => 54,
             Self::RecoverTaskAuthorization => 55,
+            Self::GetTaskAuthorizationContext => 56,
         }
     }
 }
 
 #[cfg(test)]
-pub(crate) const ALL_KERNEL_RUNTIME_HANDLERS_V2: [KernelRuntimeHandlerV2; 49] = [
+pub(crate) const ALL_KERNEL_RUNTIME_HANDLERS_V2: [KernelRuntimeHandlerV2; 50] = [
     KernelRuntimeHandlerV2::AgentHealth,
     KernelRuntimeHandlerV2::ClaimAgentSession,
     KernelRuntimeHandlerV2::PrepareFollowupIngress,
@@ -224,6 +227,7 @@ pub(crate) const ALL_KERNEL_RUNTIME_HANDLERS_V2: [KernelRuntimeHandlerV2; 49] = 
     KernelRuntimeHandlerV2::CommitTaskAuthorizationApproval,
     KernelRuntimeHandlerV2::RevokeTaskAuthorization,
     KernelRuntimeHandlerV2::RecoverTaskAuthorization,
+    KernelRuntimeHandlerV2::GetTaskAuthorizationContext,
 ];
 
 pub(crate) fn handler_for_operation_v2(
@@ -326,6 +330,9 @@ pub(crate) fn handler_for_operation_v2(
             }
             KernelIngressOperationV2::RecoverTaskAuthorization(_) => {
                 KernelRuntimeHandlerV2::RecoverTaskAuthorization
+            }
+            KernelIngressOperationV2::GetTaskAuthorizationContext(_) => {
+                KernelRuntimeHandlerV2::GetTaskAuthorizationContext
             }
         }),
         KernelServiceOperationV2::Connector(operation) => Ok(match operation {
@@ -681,13 +688,13 @@ mod tests {
     use super::{handler_for_operation_v2, ALL_KERNEL_RUNTIME_HANDLERS_V2};
 
     #[test]
-    fn exhaustive_handler_table_covers_all_49_kerneld_operations_once() {
-        assert_eq!(ALL_KERNEL_RUNTIME_HANDLERS_V2.len(), 49);
+    fn exhaustive_handler_table_covers_all_50_kerneld_operations_once() {
+        assert_eq!(ALL_KERNEL_RUNTIME_HANDLERS_V2.len(), 50);
         let actual = ALL_KERNEL_RUNTIME_HANDLERS_V2
             .into_iter()
             .map(|handler| (role_tag(handler.role()), handler.tag()))
             .collect::<BTreeSet<_>>();
-        assert_eq!(actual.len(), 49);
+        assert_eq!(actual.len(), 50);
 
         let expected = kernel_agent_operation_tags_v2()
             .iter()

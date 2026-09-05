@@ -286,6 +286,15 @@ impl DurableG4StateV2 {
         self.ensure_usable()?;
         Ok(self.snapshot.issuance.find(request))
     }
+    /// Read-only issuance history. Callers must authenticate the principal before
+    /// exposing even request identifiers; this API does not grant recovery rights.
+    pub fn task_authorization_issuance_history(
+        &self,
+        task: DurableTaskIdV2,
+    ) -> Result<Vec<&PendingTaskAuthorizationV2>, G4Error> {
+        self.ensure_usable()?;
+        Ok(self.snapshot.issuance.for_task(task).collect())
+    }
     pub fn installed_task_authorization_draft(
         &self,
         digest: Digest32V2,

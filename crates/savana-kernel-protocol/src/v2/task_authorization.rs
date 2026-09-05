@@ -695,8 +695,14 @@ pub fn verify_task_authorization_v2(
     Ok(material)
 }
 
+#[path = "task_context.rs"]
+mod context;
 #[path = "task_draft.rs"]
 mod draft;
+pub use context::{
+    decode_task_authorization_context_v2, encode_task_authorization_context_v2,
+    TaskAuthorizationContextV2, TaskAuthorizationToolContextV2,
+};
 pub use draft::{
     decode_task_authorization_draft_v2, encode_task_authorization_draft_v2,
     task_authorization_draft_digest_v2, TaskAuthorizationDraftAlternativeV2,

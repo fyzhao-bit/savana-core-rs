@@ -19,6 +19,7 @@ from .client import (
     Session,
     TaskAuthorizationDraft,
     TaskAuthorizationReceipt,
+    TaskAuthorizationContext,
 )
 
 __all__ = [
@@ -27,6 +28,7 @@ __all__ = [
     "Session",
     "TaskAuthorizationDraft",
     "TaskAuthorizationReceipt",
+    "TaskAuthorizationContext",
     "Handle",
     "MaskedView",
     "Plan",

@@ -57,6 +57,38 @@ impl std::fmt::Debug for TaskAuthorizationReceipt {
 }
 
 impl Session {
+    /// Observe kernel-owned identities, current signed profiles and pending
+    /// issuance identifiers on the authenticated ingress tab. This is not consent.
+    pub fn task_authorization_context(
+        &mut self,
+    ) -> Result<TaskAuthorizationContextV2, SavanaError> {
+        self.require_open()?;
+        let tab = if self.ingress.is_some() {
+            self.task_ingress_tab()?
+        } else {
+            self.fresh_task_ingress_tab()?
+        };
+        let result = (|| {
+            let request = IngressBrowserRequestV2::GetTaskAuthorizationContext {
+                tab,
+                client_request_nonce: self.nonces.nonce()?,
+            };
+            let response = self.send_browser_request(crate::BrowserRequest {
+                service: crate::BrowserService::Ingress,
+                route: BrowserRoute::IngressTaskContext,
+                origin: BrowserOrigin::Ingress,
+                content_type: crate::BrowserContentType::CanonicalCbor,
+                body: encode_ingress_browser_request_v2(&request)
+                    .map_err(|_| SavanaError::InvalidRequest)?,
+            })?;
+            decode_task_authorization_context_v2(response.body())
+                .map_err(|_| SavanaError::InvalidResponse)
+        })();
+        if result.is_err() {
+            self.state = LocalSessionState::Closed;
+        }
+        result
+    }
     /// Reauthenticate and recover an existing issuance by its observed request
     /// digest. No source upload, fresh contract ID or new issuance nonce occurs.
     /// Installed receipts do not invoke the approval callback; pending records
@@ -70,23 +102,7 @@ impl Session {
         if request_digest == [0; 32] {
             return Err(SavanaError::InvalidRequest);
         }
-        let authenticate = (|| {
-            let prepared = self.agent_action(AgentBrowserActionV2::PrepareFollowupIngress)?;
-            let AgentBrowserMutationResponseV2::FollowupOpenIngress {
-                post: FixedBrowserFormPostCarrierV2::AgentFollowupIngress(bootstrap),
-            } = prepared
-            else {
-                return Err(SavanaError::InvalidResponse);
-            };
-            self.authenticate_followup_ingress(bootstrap)
-        })();
-        let tab = match authenticate {
-            Ok(tab) => tab,
-            Err(e) => {
-                self.state = LocalSessionState::Closed;
-                return Err(e);
-            }
-        };
+        let tab = self.fresh_task_ingress_tab()?;
         let expected = Digest32V2::new(request_digest);
         let opened = self.task_mutation(
             BrowserRoute::IngressTaskRecover,
@@ -103,6 +119,26 @@ impl Session {
             return self.task_receipt(opened, expected);
         }
         self.finish_task_approval(tab, expected, opened, approval)
+    }
+
+    fn fresh_task_ingress_tab(&mut self) -> Result<IngressTabSessionCapabilityV2, SavanaError> {
+        let authenticate = (|| {
+            let prepared = self.agent_action(AgentBrowserActionV2::PrepareFollowupIngress)?;
+            let AgentBrowserMutationResponseV2::FollowupOpenIngress {
+                post: FixedBrowserFormPostCarrierV2::AgentFollowupIngress(bootstrap),
+            } = prepared
+            else {
+                return Err(SavanaError::InvalidResponse);
+            };
+            self.authenticate_followup_ingress(bootstrap)
+        })();
+        match authenticate {
+            Ok(tab) => Ok(tab),
+            Err(e) => {
+                self.state = LocalSessionState::Closed;
+                Err(e)
+            }
+        }
     }
 
     /// Explicit structured-input submission on the current authenticated ingress

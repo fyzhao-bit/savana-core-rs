@@ -1490,6 +1490,24 @@ impl CoreKernelRuntimeServicesV2 {
                     &response,
                 )
             }
+            KernelIngressOperationV2::GetTaskAuthorizationContext(request) => {
+                let subject = self
+                    .input
+                    .authenticate_task_context(
+                        &request,
+                        active_state_manifest_digest,
+                        deployment_generation,
+                        now,
+                    )
+                    .map_err(map_input_error)?;
+                let context = self
+                    .agent_authority
+                    .as_ref()
+                    .ok_or(StableCode::KernelUnavailable)?
+                    .task_authorization_context(&subject, now)
+                    .map_err(map_task_authority_error)?;
+                savana_kernel_protocol::v2::encode_task_authorization_context_v2(&context)
+            }
             KernelIngressOperationV2::RecoverTaskAuthorization(request) => {
                 use savana_kernel_protocol::v2::{
                     EstablishTaskAuthorizationResponseV2,
@@ -3144,6 +3162,107 @@ mod tests {
                 ),
                 Err(savana_kernel_protocol::StableCode::PolicyDenied),
             );
+        }
+    }
+
+    #[test]
+    fn task_context_uses_finalized_source_and_fresh_auth_without_issuing_authority() {
+        use crate::v2_agent_authority::tests::{planner_active_tools, task_issuer_agent_fixture};
+        use crate::v2_input_owner::tests::{
+            finalized_task_input_fixture, fresh_task_recovery_authentication,
+        };
+        use crate::v2_task_authority::tests::{draft, issuer, owner};
+        use savana_kernel_protocol::v2::*;
+        let (input, session, commitment) = finalized_task_input_fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let mut services = CoreKernelRuntimeServicesV2::new(8, 4096, 8, 32).unwrap();
+        services.input = input;
+        services
+            .install_agent_security(task_issuer_agent_fixture(owner(dir.path()), issuer()))
+            .unwrap();
+        let auth = IngressUiAuthorizationHandleV2::from_authority_entropy([0x41; 32]).unwrap();
+        let manifest = Digest32V2::new([0x35; 32]);
+        let read = |services: &mut CoreKernelRuntimeServicesV2, auth, session, time| {
+            services.execute_operation(
+                RequestIdV2::new([88; 16]),
+                KernelServiceOperationV2::ingress(
+                    KernelIngressOperationV2::GetTaskAuthorizationContext(
+                        GetTaskAuthorizationContextRequestV2::new(auth, session),
+                    ),
+                ),
+                UnixMillisV2::new(time),
+                manifest,
+                7,
+                9,
+                ServiceIdentityV2::new([67; 32]),
+            )
+        };
+        // No finalized source and no durable history: fail rather than inventing one.
+        assert!(read(&mut services, auth, None, 200).is_err());
+        let context = decode_task_authorization_context_v2(
+            read(&mut services, auth, Some(session), 200)
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(context.source_input_digest(), commitment);
+        assert_eq!(context.authorization_identity(), None);
+        assert!(context.pending_requests().is_empty());
+        assert_eq!(context.tools().len(), planner_active_tools().len());
+        let proposal = draft(&planner_active_tools(), commitment, 1, "Alice");
+        let built = context
+            .draft(proposal.authorization_id(), proposal.clauses().to_vec())
+            .unwrap();
+        assert_eq!(built.principal(), proposal.principal());
+        assert_eq!(built.source_input_digest(), commitment);
+        let proof = services
+            .input
+            .authenticate_task_draft_submission(
+                session,
+                &built,
+                manifest,
+                7,
+                UnixMillisV2::new(200),
+            )
+            .unwrap();
+        assert!(!proof.is_recovery());
+        assert!(read(&mut services, auth, Some(session), 1000).is_err());
+        let new_auth = fresh_task_recovery_authentication(&mut services.input, 90, false, false);
+        assert!(read(&mut services, new_auth, Some(session), 201).is_err());
+        let request = PrepareTaskAuthorizationApprovalRequestV2::new(
+            session,
+            built,
+            Nonce32V2::new([89; 32]),
+        )
+        .unwrap();
+        let pending = services
+            .agent_authority
+            .as_mut()
+            .unwrap()
+            .prepare_task_approval(&request, &proof, UnixMillisV2::new(200))
+            .unwrap();
+        let observed = decode_task_authorization_context_v2(
+            read(&mut services, new_auth, None, 201).unwrap().as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(observed.source_input_digest(), commitment);
+        assert_eq!(observed.pending_requests(), &[pending.request_digest()]);
+        assert_eq!(
+            observed.authorization_identity(),
+            Some((proposal.authorization_id(), 1))
+        );
+        assert!(services
+            .agent_authority
+            .as_ref()
+            .unwrap()
+            .recover_task_issuance_record(pending.request_digest())
+            .unwrap()
+            .installed_digest()
+            .is_none());
+        for (entropy, principal, task) in [(91, true, false), (92, false, true)] {
+            let wrong =
+                fresh_task_recovery_authentication(&mut services.input, entropy, principal, task);
+            assert!(read(&mut services, wrong, None, 201).is_err());
         }
     }
 

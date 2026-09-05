@@ -24,7 +24,7 @@ use savana_kernel_protocol::v2::{
 fn ingress_health_and_pre_input_authentication_are_closed() {
     assert_eq!(
         kernel_ingress_operation_tags_v2(),
-        &[0, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55]
+        &[0, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56]
     );
     let health = KernelIngressOperationV2::Health(KernelIngressHealthRequestV2);
     assert_eq!(

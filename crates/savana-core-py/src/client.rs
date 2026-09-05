@@ -756,6 +756,62 @@ impl PyTaskAuthorizationDraft {
     }
 }
 
+#[pyclass(name = "TaskAuthorizationContext", module = "savana_core", frozen)]
+struct PyTaskAuthorizationContext {
+    inner: savana_client::TaskAuthorizationContext,
+}
+
+#[pymethods]
+impl PyTaskAuthorizationContext {
+    #[getter]
+    fn source_input_digest<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, self.inner.source_input_digest().as_bytes())
+    }
+    #[getter]
+    fn pending_requests<'py>(&self, py: Python<'py>) -> Vec<Bound<'py, PyBytes>> {
+        self.inner
+            .pending_requests()
+            .iter()
+            .map(|d| PyBytes::new_bound(py, d.as_bytes()))
+            .collect()
+    }
+    #[getter]
+    fn authorization_identity<'py>(&self, py: Python<'py>) -> Option<(Bound<'py, PyBytes>, u64)> {
+        self.inner
+            .authorization_identity()
+            .map(|(id, revision)| (PyBytes::new_bound(py, id.as_bytes()), revision))
+    }
+    fn tools_json(&self) -> PyResult<String> {
+        self.inner
+            .tools_json()
+            .map_err(|_| map_client_error(ClientError::InvalidRequest))
+    }
+    fn draft(
+        &self,
+        authorization_id: &[u8],
+        clauses_json: &[u8],
+    ) -> PyResult<PyTaskAuthorizationDraft> {
+        let id = authorization_id
+            .try_into()
+            .map_err(|_| map_client_error(ClientError::InvalidRequest))?;
+        let draft = self
+            .inner
+            .draft_from_json(
+                savana_kernel_protocol::v2::Digest32V2::new(id),
+                clauses_json,
+            )
+            .map_err(|_| map_client_error(ClientError::InvalidRequest))?;
+        let bytes = savana_kernel_protocol::v2::encode_task_authorization_draft_v2(&draft)
+            .map_err(|_| map_client_error(ClientError::InvalidRequest))?;
+        savana_client::TaskAuthorizationDraft::from_canonical_bytes(&bytes)
+            .map(|inner| PyTaskAuthorizationDraft { inner })
+            .map_err(map_client_error)
+    }
+    fn __repr__(&self) -> &'static str {
+        "TaskAuthorizationContext(<metadata, redacted>)"
+    }
+}
+
 #[pyclass(name = "TaskAuthorizationReceipt", module = "savana_core", frozen)]
 struct PyTaskAuthorizationReceipt {
     inner: savana_client::TaskAuthorizationReceipt,
@@ -1295,6 +1351,21 @@ impl PySession {
             }
         });
         Self::finish_operation(result, self.ingress_callback_errors.as_ref())
+    }
+
+    fn task_authorization_context(&self, py: Python<'_>) -> PyResult<PyTaskAuthorizationContext> {
+        let inner = self.inner.clone();
+        let result = py.allow_threads(move || {
+            let mut state = Self::try_state(inner.as_ref())?;
+            match &mut *state {
+                SessionState::Live(session) => session
+                    .task_authorization_context()
+                    .map(|inner| PyTaskAuthorizationContext { inner }),
+                #[cfg(debug_assertions)]
+                SessionState::Debug(_) => Err(ClientError::InvalidState),
+            }
+        });
+        Self::finish(result)
     }
 
     fn establish_task_authorization(
@@ -1863,6 +1934,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyExecutionResult>()?;
     m.add_class::<PyConnectorDescriptor>()?;
     m.add_class::<PyTaskAuthorizationDraft>()?;
+    m.add_class::<PyTaskAuthorizationContext>()?;
     m.add_class::<PyTaskAuthorizationReceipt>()?;
     m.add_class::<PyRunLimits>()?;
     m.add_class::<PyAgentEvent>()?;

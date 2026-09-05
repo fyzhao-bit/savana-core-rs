@@ -530,6 +530,20 @@ impl SuiteOneIngressKernelClientV2 {
             .map_err(|_| IngressKernelClientErrorV2::Unavailable)
     }
 
+    pub fn task_authorization_context(
+        &self,
+        request: savana_kernel_protocol::v2::GetTaskAuthorizationContextRequestV2,
+        deadline: UnixMillisV2,
+    ) -> Result<savana_kernel_protocol::v2::TaskAuthorizationContextV2, IngressKernelClientErrorV2>
+    {
+        let body = self.exchange(
+            KernelIngressOperationV2::GetTaskAuthorizationContext(request),
+            deadline,
+        )?;
+        savana_kernel_protocol::v2::decode_task_authorization_context_v2(&body)
+            .map_err(|_| IngressKernelClientErrorV2::Unavailable)
+    }
+
     pub fn begin_input(
         &self,
         request: BeginInputRequestV2,

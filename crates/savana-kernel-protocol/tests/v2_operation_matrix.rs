@@ -37,7 +37,7 @@ fn all_55_kernel_operations_have_one_role_and_one_frozen_error_contract() {
             );
         }
     }
-    assert_eq!(routes.len(), 55);
+    assert_eq!(routes.len(), 56);
     assert!(kernel_service_operation_has_error_contract_v2(
         EndpointRoleV2::KernelExecutor,
         64,

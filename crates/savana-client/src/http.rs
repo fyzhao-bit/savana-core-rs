@@ -98,6 +98,7 @@ pub enum BrowserRoute {
     IngressTaskApprovalCommit,
     IngressTaskRevoke,
     IngressTaskRecover,
+    IngressTaskContext,
     AgentUiAuthenticationComplete,
     AgentView,
     AgentAction,
@@ -133,6 +134,7 @@ impl BrowserRoute {
             Self::IngressTaskApprovalCommit => "/v2/task/approval/commit",
             Self::IngressTaskRevoke => "/v2/task/revoke",
             Self::IngressTaskRecover => "/v2/task/recover",
+            Self::IngressTaskContext => "/v2/task/context",
             Self::AgentUiAuthenticationComplete => "/v2/ui-auth/complete",
             Self::AgentView => "/v2/agent/view",
             Self::AgentAction => "/v2/agent/action",
@@ -160,7 +162,8 @@ impl BrowserRoute {
             | Self::IngressTaskApprovalPrepare
             | Self::IngressTaskApprovalCommit
             | Self::IngressTaskRevoke
-            | Self::IngressTaskRecover => BrowserService::Ingress,
+            | Self::IngressTaskRecover
+            | Self::IngressTaskContext => BrowserService::Ingress,
             Self::AgentUiAuthenticationComplete | Self::AgentView | Self::AgentAction => {
                 BrowserService::Agent
             }
@@ -217,7 +220,8 @@ impl BrowserRoute {
             | Self::IngressTaskApprovalPrepare
             | Self::IngressTaskApprovalCommit
             | Self::IngressTaskRevoke
-            | Self::IngressTaskRecover => matches!(origin, BrowserOrigin::Ingress),
+            | Self::IngressTaskRecover
+            | Self::IngressTaskContext => matches!(origin, BrowserOrigin::Ingress),
             Self::AgentView | Self::AgentAction => matches!(origin, BrowserOrigin::Agent),
         }
     }

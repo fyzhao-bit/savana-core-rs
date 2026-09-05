@@ -125,6 +125,12 @@ pub(crate) struct TaskIssuanceLedgerV2 {
     records: Vec<PendingTaskAuthorizationV2>,
 }
 impl TaskIssuanceLedgerV2 {
+    pub(crate) fn for_task(
+        &self,
+        task: savana_kernel_protocol::v2::DurableTaskIdV2,
+    ) -> impl Iterator<Item = &PendingTaskAuthorizationV2> {
+        self.records.iter().filter(move |r| r.draft.task() == task)
+    }
     pub(crate) fn installed_draft(&self, digest: Digest32V2) -> Option<&TaskAuthorizationDraftV2> {
         self.records
             .iter()

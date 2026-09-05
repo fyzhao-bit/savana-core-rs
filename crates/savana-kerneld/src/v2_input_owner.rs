@@ -527,6 +527,19 @@ pub(crate) struct KernelInputOwnerV2 {
 /// Created only by the input owner after resolving verified UI authentication
 /// and either finalized input or an exact, previously persisted task draft.
 /// Recovery proof is for the existing issuance only, never input finalization.
+pub(crate) struct AuthenticatedTaskContextSubjectV2 {
+    authorization: KernelVerifiedUiAuthorizationV2,
+    source: Option<Digest32V2>,
+}
+impl AuthenticatedTaskContextSubjectV2 {
+    pub(crate) fn authorization(&self) -> KernelVerifiedUiAuthorizationV2 {
+        self.authorization
+    }
+    pub(crate) fn source(&self) -> Option<Digest32V2> {
+        self.source
+    }
+}
+
 pub(crate) struct AuthenticatedTaskDraftSubmissionV2 {
     draft_digest: Digest32V2,
     evidence_digest: Digest32V2,
@@ -560,6 +573,53 @@ impl std::fmt::Debug for KernelInputOwnerV2 {
 }
 
 impl KernelInputOwnerV2 {
+    pub(crate) fn authenticate_task_context(
+        &self,
+        request: &savana_kernel_protocol::v2::GetTaskAuthorizationContextRequestV2,
+        manifest: Digest32V2,
+        generation: u64,
+        now: UnixMillisV2,
+    ) -> Result<AuthenticatedTaskContextSubjectV2, KernelInputErrorV2> {
+        let commitment = request
+            .authorization()
+            .authority_commitment(&self.handle_key);
+        let auth = self
+            .authorizations
+            .iter()
+            .find(|r| r.commitment == commitment)
+            .ok_or(KernelInputErrorV2::InvalidReference)?
+            .authorization;
+        if auth.durable_task_id().is_none()
+            || auth.active_state_manifest_digest() != manifest
+            || auth.deployment_generation() != generation
+            || now.get() == 0
+            || now.get() >= auth.expires_at().get()
+        {
+            return Err(KernelInputErrorV2::ProvenanceMismatch);
+        }
+        let source = if let Some(session) = request.session() {
+            let commitment = session.authority_commitment(&self.handle_key);
+            let record = self
+                .sessions
+                .iter()
+                .find(|r| r.session_commitment == commitment)
+                .ok_or(KernelInputErrorV2::InvalidReference)?;
+            if record.authorization != auth || record.state != KernelInputPublicStateV2::Finalized {
+                return Err(KernelInputErrorV2::ProvenanceMismatch);
+            }
+            Some(
+                record
+                    .finalized_input_commitment
+                    .ok_or(KernelInputErrorV2::ProvenanceMismatch)?,
+            )
+        } else {
+            None
+        };
+        Ok(AuthenticatedTaskContextSubjectV2 {
+            authorization: auth,
+            source,
+        })
+    }
     pub(crate) fn authenticate_task_recovery(
         &self,
         authorization: IngressUiAuthorizationHandleV2,

@@ -14,6 +14,7 @@ ExecutionResult = _core.ExecutionResult
 ConnectorDescriptor = _core.ConnectorDescriptor
 TaskAuthorizationDraft = _core.TaskAuthorizationDraft
 TaskAuthorizationReceipt = _core.TaskAuthorizationReceipt
+TaskAuthorizationContext = _core.TaskAuthorizationContext
 RunLimits = _core.RunLimits
 AgentEvent = _core.AgentEvent
 SavanaError = _core.SavanaError
@@ -156,6 +157,9 @@ class Session:
 
     async def revoke_task_authorization(self, draft):
         return await asyncio.to_thread(self._inner.revoke_task_authorization, draft)
+
+    async def task_authorization_context(self):
+        return await asyncio.to_thread(self._inner.task_authorization_context)
 
     async def recover_task_authorization(self, request_digest, approval):
         """Reauthenticate and resume an existing issuance; never create a replacement."""

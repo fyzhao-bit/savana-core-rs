@@ -341,6 +341,9 @@ impl IngressBrowserAuthorityV2 {
         }
         let mutation = (|| {
             Ok(match request {
+                IngressBrowserRequestV2::GetTaskAuthorizationContext { .. } => {
+                    return Err(IngressBrowserAuthorityErrorV2::InvalidReference)
+                }
                 IngressBrowserRequestV2::Begin {
                     content_kind,
                     declared_total_bytes,
@@ -437,6 +440,38 @@ impl IngressBrowserAuthorityV2 {
         });
         tab.mutation_in_flight = false;
         Ok(response)
+    }
+
+    pub fn task_authorization_context(
+        &self,
+        tab_handle: IngressTabSessionCapabilityV2,
+        deadline: UnixMillisV2,
+    ) -> Result<
+        savana_kernel_protocol::v2::TaskAuthorizationContextV2,
+        IngressBrowserAuthorityErrorV2,
+    > {
+        let request = {
+            let tabs = self
+                .tabs
+                .lock()
+                .map_err(|_| IngressBrowserAuthorityErrorV2::Unavailable)?;
+            let tab = tabs
+                .iter()
+                .find(|t| t.tab == tab_handle)
+                .ok_or(IngressBrowserAuthorityErrorV2::InvalidReference)?;
+            if tab.mutation_in_flight {
+                return Err(IngressBrowserAuthorityErrorV2::Busy);
+            }
+            savana_kernel_protocol::v2::GetTaskAuthorizationContextRequestV2::new(
+                tab.authorization,
+                tab.finalized_session,
+            )
+        };
+        // Native input owner rechecks current UI authentication. Never return a
+        // cached context after expiry, restart, amendment or revocation.
+        self.kernel
+            .task_authorization_context(request, deadline)
+            .map_err(map_kernel)
     }
 
     fn recover_task(

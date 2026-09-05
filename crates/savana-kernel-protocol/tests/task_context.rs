@@ -1,0 +1,175 @@
+use savana_kernel_protocol::v2::*;
+
+fn d(n: u8) -> Digest32V2 {
+    Digest32V2::new([n; 32])
+}
+fn context() -> TaskAuthorizationContextV2 {
+    let profile = final_release_business_profile_v2(d(8), d(9)).unwrap();
+    TaskAuthorizationContextV2::new(
+        PrincipalIdV2::new([1; 32]),
+        DurableTaskIdV2::new([2; 32]),
+        d(3),
+        d(4),
+        7,
+        d(5),
+        UnixMillisV2::new(100),
+        UnixMillisV2::new(500),
+        Some((d(6), 2)),
+        vec![TaskAuthorizationToolContextV2::new(d(7), "release.allowed".into(), profile).unwrap()],
+        vec![d(10)],
+    )
+    .unwrap()
+}
+
+#[test]
+fn task_context_is_bounded_data_and_preserves_kernel_identity_when_building_draft() {
+    let context = context();
+    let encoded = encode_task_authorization_context_v2(&context).unwrap();
+    assert_eq!(
+        decode_task_authorization_context_v2(&encoded).unwrap(),
+        context
+    );
+    for length in 0..encoded.len() {
+        assert!(decode_task_authorization_context_v2(&encoded[..length]).is_err());
+    }
+    let mut trailing = encoded;
+    trailing.push(0);
+    assert!(decode_task_authorization_context_v2(&trailing).is_err());
+    assert_eq!(context.authorization_identity(), Some((d(6), 2)));
+    assert_eq!(context.pending_requests(), &[d(10)]);
+    let tool = &context.tools()[0];
+    let controls = BusinessControlsV2::from_fields(
+        tool.profile(),
+        vec![
+            (
+                "resource".into(),
+                BusinessValueV2::Text(format!("input:{}", "05".repeat(32))),
+            ),
+            (
+                "destination".into(),
+                BusinessValueV2::Text(format!("application-turn:{}", "0b".repeat(32))),
+            ),
+        ],
+    )
+    .unwrap();
+    let clause = TaskAuthorizationDraftClauseV2::new(
+        1,
+        vec![TaskAuthorizationDraftAlternativeV2::new(tool.descriptor_digest(), controls).unwrap()],
+        1,
+        1,
+        1,
+        vec![],
+        false,
+    )
+    .unwrap();
+    let draft = context.draft(d(6), vec![clause.clone()]).unwrap();
+    assert_eq!(draft.source_input_digest(), d(5));
+    assert_eq!(draft.task(), context.task());
+    assert_eq!(draft.principal(), context.principal());
+    assert_eq!(draft.revision(), 2);
+    assert!(context.draft(d(12), vec![clause]).is_err());
+    let json = serde_json::json!([{"clause_id":1,"alternatives":[{"descriptor_digest":"07".repeat(32),"controls":[["resource",format!("input:{}","05".repeat(32))],["destination",format!("application-turn:{}","0b".repeat(32))]]}],"maximum_single_magnitude":1,"total_magnitude_budget":1,"maximum_attempts":1,"predecessor_clause_ids":[],"retry_after_proven_no_effect":false}]).to_string();
+    assert_eq!(
+        context.draft_from_json(d(6), json.as_bytes()).unwrap(),
+        draft
+    );
+    assert!(context.tools_json().unwrap().contains("release.allowed"));
+    for bad in [
+        json.replace("\"clause_id\":1", "\"clause_id\":1,\"clause_id\":2"),
+        json.replace("\"clause_id\":1", "\"clause_id\":1,\"source\":\"forged\""),
+        json.replace("\"maximum_attempts\":1", "\"maximum_attempts\":1.5"),
+        json.replace(&"07".repeat(32), &"08".repeat(32)),
+    ] {
+        assert!(context.draft_from_json(d(6), bad.as_bytes()).is_err());
+    }
+    assert!(!format!("{context:?}").contains("release.allowed"));
+    assert!(TaskAuthorizationContextV2::new(
+        context.principal(),
+        context.task(),
+        d(3),
+        d(4),
+        0,
+        d(5),
+        UnixMillisV2::new(100),
+        UnixMillisV2::new(500),
+        None,
+        vec![],
+        vec![]
+    )
+    .is_err());
+    assert!(TaskAuthorizationContextV2::new(
+        context.principal(),
+        context.task(),
+        d(3),
+        d(4),
+        7,
+        d(5),
+        UnixMillisV2::new(500),
+        UnixMillisV2::new(500),
+        None,
+        vec![],
+        vec![]
+    )
+    .is_err());
+    assert!(TaskAuthorizationContextV2::new(
+        context.principal(),
+        context.task(),
+        d(3),
+        d(4),
+        7,
+        d(5),
+        UnixMillisV2::new(100),
+        UnixMillisV2::new(500),
+        None,
+        vec![tool.clone(), tool.clone()],
+        vec![]
+    )
+    .is_err());
+    assert!(TaskAuthorizationContextV2::new(
+        context.principal(),
+        context.task(),
+        d(3),
+        d(4),
+        7,
+        d(5),
+        UnixMillisV2::new(100),
+        UnixMillisV2::new(500),
+        None,
+        vec![],
+        vec![d(10), d(10)]
+    )
+    .is_err());
+}
+
+#[test]
+fn context_ingress_wire_has_no_caller_supplied_identity_or_profile() {
+    let auth = IngressUiAuthorizationHandleV2::from_authority_entropy([1; 32]).unwrap();
+    for session in [
+        None,
+        Some(InputSessionHandleV2::from_authority_entropy([2; 32]).unwrap()),
+    ] {
+        let op = KernelIngressOperationV2::GetTaskAuthorizationContext(
+            GetTaskAuthorizationContextRequestV2::new(auth, session),
+        );
+        let bytes = encode_kernel_ingress_operation_v2(&op).unwrap();
+        assert_eq!(
+            decode_kernel_ingress_operation_v2(&bytes).unwrap().tag(),
+            56
+        );
+        for len in 0..bytes.len() {
+            assert!(decode_kernel_ingress_operation_v2(&bytes[..len]).is_err());
+        }
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(decode_kernel_ingress_operation_v2(&trailing).is_err());
+    }
+    let request = IngressBrowserRequestV2::GetTaskAuthorizationContext {
+        tab: IngressTabSessionCapabilityV2::from_authority_entropy([1; 32]).unwrap(),
+        client_request_nonce: Nonce32V2::new([2; 32]),
+    };
+    let bytes = encode_ingress_browser_request_v2(&request).unwrap();
+    assert!(matches!(
+        decode_ingress_browser_request_v2(&bytes).unwrap(),
+        IngressBrowserRequestV2::GetTaskAuthorizationContext { .. }
+    ));
+}

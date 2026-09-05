@@ -1405,6 +1405,56 @@ fn task_ready_sdk_fixture() -> (
 }
 
 #[test]
+fn task_context_sdk_returns_only_kernel_metadata_without_issuing_or_approving() {
+    use savana_kernel_protocol::v2::*;
+    let (mut session, transport, _, _) = task_ready_sdk_fixture();
+    let d = support::task5::task_authorization_draft();
+    let a = &d.clauses()[0].alternatives()[0];
+    let context = TaskAuthorizationContextV2::new(
+        d.principal(),
+        d.task(),
+        d.installation_digest(),
+        d.manifest_digest(),
+        d.deployment_generation(),
+        d.source_input_digest(),
+        d.not_before(),
+        d.expires_at(),
+        Some((d.authorization_id(), 2)),
+        vec![TaskAuthorizationToolContextV2::new(
+            a.descriptor_digest(),
+            "mail.allowed".into(),
+            a.controls().profile().clone(),
+        )
+        .unwrap()],
+        vec![Digest32V2::new([0xec; 32])],
+    )
+    .unwrap();
+    transport.extend_responses(vec![cbor_response(
+        encode_task_authorization_context_v2(&context).unwrap(),
+    )]);
+    let observed = session.task_authorization_context().unwrap();
+    assert_eq!(observed, context);
+    let requests = transport.take_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].route,
+        savana_client::BrowserRoute::IngressTaskContext
+    );
+    assert!(matches!(
+        decode_ingress_browser_request_v2(&requests[0].body).unwrap(),
+        IngressBrowserRequestV2::GetTaskAuthorizationContext { .. }
+    ));
+    transport.extend_responses(vec![cbor_response(vec![0xff])]);
+    assert!(matches!(
+        session.task_authorization_context(),
+        Err(savana_client::SavanaError::InvalidResponse)
+    ));
+    transport.take_requests();
+    assert!(session.task_authorization_context().is_err());
+    assert!(transport.take_requests().is_empty());
+}
+
+#[test]
 fn task_contract_sdk_establish_and_revoke_are_exact_ingress_operations() {
     let (mut session, transport, draft, request_digest) = task_ready_sdk_fixture();
     let authorization_digest = Digest32V2::new([0xea; 32]);

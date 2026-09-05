@@ -9,11 +9,11 @@ service reset, or production credential change was performed.
 
 | Scope | Observed result | What it does not prove |
 | --- | --- | --- |
-| `cargo test --locked -p savana-kerneld --lib --features test-support,macos-development-authority` | 313 passed | Whole issuer-to-provider completion |
+| `cargo test --locked -p savana-kerneld --lib --features test-support,macos-development-authority` | 314 passed (8.58 s), after updating both operation-inventory counts | Whole issuer-to-provider completion |
 | `cargo test --locked -p savana-policy-core --lib` | 230 passed | An unbounded proof of all task traces |
 | `cargo test --locked -p savana-ingressd --lib` | 21 passed | A real user hardware ceremony in the running deployment |
-| `cargo test --locked -p savana-kernel-protocol` | 245 passed | Correct provider-internal interpretation of requests |
-| `cargo test --locked -p savana-client` | 89 passed | Live OpenClaw integration |
+| `cargo test --locked -p savana-kernel-protocol` | 248 passed | Correct provider-internal interpretation of requests |
+| Rust client `--lib --tests` | 90 passed | Live OpenClaw integration |
 | Python `test_client_sdk.py` against the locally rebuilt extension | 16 passed | Installed application behavior |
 | V1 replay boundary in isolation | Passed, 305.18 s | A clean whole-workspace run; earlier runs had intermittent expiry/frame failures |
 | Bounded task-accounting differential exploration | 1,440 traces; 984 admitted and 1,896 refused probes; 6 distinct accounting observations; 72.57 s | Arbitrary trace lengths, all policy state, or the full distributed kernel |
@@ -55,6 +55,23 @@ checks and are not omitted failures.
 - The browser recovery control checks correlated receipts and opens independent
   task approval; it never commits approval implicitly. SDK recovery performs a
   fresh credential flow without begin/chunk/finalize or new issuance operations.
+- IngressKernel 56 and the same-origin read-only POST `/v2/task/context` return
+  authenticated task/source metadata, exact active business profiles and applicable
+  pending request identifiers, never old contract control values or authority.
+  A different authentication cannot borrow a finalized input session. Fresh
+  authentication can discover existing pending IDs without uploading new source.
+  The core fixture verifies wrong principal/task, expiry, missing source and
+  unauthorized input-handle reuse refusals; context reads never install drafts.
+- The fixed browser editor builds complete alternatives, budgets and dependencies,
+  exposes the issuance request identifier before sending, and requires independent
+  task approval. A Node DOM fixture captures its real request and Rust decodes the
+  exact source/identity/revision/receiver turn. Checking input approval now reuses
+  the uploaded digest instead of beginning/uploading again. This is browser-script
+  behavior evidence, not a live hardware ceremony.
+- Python receives immutable context metadata and uses Rust's closed JSON-to-draft
+  helper; unknown/duplicate fields, mismatched descriptors and unsupported types
+  fail before submission. Public surface: 20 business methods, 21 types, five
+  separately inventoried value helpers. Debug sessions cannot fabricate context.
 - The independent accounting oracle enumerates two clauses (the second requires
   proven success of the first), two authorized complete alternatives, one invalid
   tuple probe, two prepare attempts, five first-outcome states, three owner-reopen
@@ -67,8 +84,9 @@ checks and are not omitted failures.
 
 ## Still required before code/paper closure
 
-1. Trusted task-context discovery and contract creation/editor, including stable
-   observation of pending issuance identifiers.
+1. Task-context discovery and editor are implemented and component-tested; include
+   them in the final integrated review rather than treating component tests as
+   whole-chain evidence.
 2. Reviewed production business profiles derived from actual target, pin and
    credential identities, with generator/config tests and no placeholders accepted.
 3. OpenClaw receiver reservation before contract approval and planning, binding the

@@ -271,26 +271,27 @@ network topology is:
 | Ingress | `http://localhost:8767` | bounded text/file ingestion and committed completion |
 | Approval | `http://localhost:8766` | WebAuthn and human approval ceremonies |
 
-The nineteen business methods are counted only across the three workflow
+The twenty business methods are counted only across the three workflow
 owners:
 
 | Owner | Business methods |
 | --- | --- |
 | `Identity` | `load(path)` |
 | `Client` | `session(identity, bootstrap, webauthn, approval)`, `enroll(enrollment_token, code, webauthn, identity_path)` |
-| `Session` | `ingest_text`, `ingest_file`, `establish_task_authorization`, `approve_task_authorization`, `revoke_task_authorization`, `recover_task_authorization`, `read_view`, `run_planner`, `execute`, `run_agent`, `release`, `register_connector`, `remove_connector`, `list_connectors`, `revoke`, `close` |
+| `Session` | `ingest_text`, `ingest_file`, `task_authorization_context`, `establish_task_authorization`, `approve_task_authorization`, `revoke_task_authorization`, `recover_task_authorization`, `read_view`, `run_planner`, `execute`, `run_agent`, `release`, `register_connector`, `remove_connector`, `list_connectors`, `revoke`, `close` |
 
-The twenty product types are:
+The twenty-one product types are:
 
 | Category | Types |
 | --- | --- |
 | connection and lifetime | `Identity`, `Client`, `Session` |
 | opaque and projected values | `Handle`, `MaskedView`, `Plan`, `PlanStep`, `ApprovalRequest`, `ExecutionResult`, `ConnectorDescriptor` |
-| task-contract data and observations | `TaskAuthorizationDraft`, `TaskAuthorizationReceipt` |
+| task-contract data and observations | `TaskAuthorizationContext`, `TaskAuthorizationDraft`, `TaskAuthorizationReceipt` |
 | choices | `IntentPrivacy`, `ContentKind` |
 | loop control | `RunLimits`, `AgentEvent` |
 | errors | `SavanaError`, `AuthError`, `ApprovalDenied`, `PolicyRefused` |
 
+`TaskAuthorizationContext.tools_json()`, `TaskAuthorizationContext.draft(id, clauses_json)`,
 `TaskAuthorizationDraft.from_canonical_bytes(bytes)`, `ConnectorDescriptor.load(path)` and `RunLimits.cancel()` are supporting value
 operations, not additional business workflows. Handles expose no raw bytes or
 retagging operation, and `PlanStep` exposes only an opaque step handle, not
@@ -301,7 +302,7 @@ goal with `ingest_text` and files with `ingest_file` before planning or calling
 `run_agent`.
 
 In the intent-bound branch, committed input alone does not authorize planning.
-An exact task contract is required first. The four task methods use authenticated
+An exact task contract is required first. The five task methods use authenticated
 Ingress routes; task-level approval has the distinct `task_authorization` purpose.
 Drafts are untrusted data and receipts are observations, not execution tickets;
 Python cannot sign or construct trusted evidence. Missing finalized ingress fails
@@ -309,9 +310,14 @@ closed for new issuance. `recover_task_authorization(request_digest, approval)`
 reauthenticates the same task/principal and retrieves only existing durable
 issuance; it does not upload replacement input, re-sign a grant, or reset budgets.
 Keep the observed issuance request digest for recovery. Pending drafts still need
-the dedicated task approval; inactive/expired records fail closed. The contract
-editor/context, live deployment profiles and whole-chain verification are still
-being completed; this branch is not yet deployment-ready.
+the dedicated task approval; inactive/expired records fail closed.
+`task_authorization_context()` returns authenticated task/source identities,
+currently active signed business profiles and recoverable pending request IDs,
+without issuing authority or revealing old contract controls. The fixed ingress
+editor builds complete alternatives, budgets and predecessor clauses and opens
+independent task approval. Empty profile lists remain unavailable, not permissive.
+Live deployment profiles and whole-chain verification are still being completed;
+this branch is not yet deployment-ready.
 
 The callback supplied to `Client.session` receives every truthful ingress
 approval display and must return an exact `bool`; ingress never auto-approves.

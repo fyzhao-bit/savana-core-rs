@@ -27,6 +27,7 @@ pub use http::{
     BrowserRoute, BrowserService, BrowserTransport, ClientEndpoints, LocalFixedHttpTransport,
 };
 pub use identity::Identity;
+pub use savana_kernel_protocol::v2::TaskAuthorizationContextV2 as TaskAuthorizationContext;
 pub use session::Session;
 pub use task_authorization::{TaskAuthorizationDraft, TaskAuthorizationReceipt};
 pub use types::{
