@@ -559,6 +559,107 @@ fn outcome(store: &DurableG4StateV2, p: DispatchPreparationV2, kind: u16) -> Ver
 }
 
 #[test]
+fn task_dispatch_core_binds_content_authority_and_exact_request_before_commit() {
+    let mut f = Fixture::new(vec![clause(1, 5, 2, vec![], false)]);
+    let request = f.request(1, 1);
+    let p = prepare(&mut f.store, &request, 20).unwrap();
+    let core = f.store.dispatch_core(p.execution_nonce()).unwrap();
+    let linkage = core
+        .task_binding()
+        .expect("task-bound dispatch must carry authority");
+    let binding = f.store.task_dispatch_binding(p.execution_nonce()).unwrap();
+    assert_eq!(linkage.content_digest(), request.matched.content_digest());
+    assert_eq!(
+        linkage.authorization_digest(),
+        binding.authorization_digest()
+    );
+    assert_eq!(
+        linkage.presealed_payload_digest(),
+        f.store.snapshot.dispatch.entries[0].sealed_envelope_digest
+    );
+    assert_eq!(
+        super::super::dispatch::dispatch_core_digest(&core).unwrap(),
+        p.dispatch_core_digest()
+    );
+    let super::super::dispatch::DispatchSubjectV2::FinalRelease {
+        binding,
+        approval_settlement_digest,
+    } = core.subject()
+    else {
+        panic!("release fixture")
+    };
+    let wire = savana_kernel_protocol::v2::DispatchCoreV2::new(
+        core.installation_id(),
+        core.active_state_manifest_digest(),
+        core.deployment_generation(),
+        core.effect_fence_epoch(),
+        core.durable_task_id(),
+        core.durable_run_id(),
+        core.execution_nonce(),
+        savana_kernel_protocol::v2::DispatchSubjectV2::final_release(
+            *binding,
+            *approval_settlement_digest,
+        )
+        .unwrap(),
+        core.executor_identity(),
+        core.executor_key_id(),
+        core.executor_connector_registry_digest(),
+        core.expires_at(),
+    )
+    .unwrap()
+    .with_task_binding(linkage);
+    assert_eq!(wire.semantic_digest().unwrap(), p.dispatch_core_digest());
+    let bytes = minicbor::to_vec(&core).unwrap();
+    assert_eq!(&bytes[..2], &[0x8f, 3]);
+    let restored = decode_dispatch_core(&mut minicbor::Decoder::new(&bytes)).unwrap();
+    assert_eq!(minicbor::to_vec(&restored).unwrap(), bytes);
+    let path = f.directory.path().join(STATE_FILE_NAME);
+    drop(f.store);
+    let mut store = task_store(&path, [0x81; 32], f.anchor.clone());
+    assert_eq!(
+        store
+            .dispatch_core(p.execution_nonce())
+            .unwrap()
+            .task_binding(),
+        Some(linkage)
+    );
+    let replay = prepare(&mut store, &request, 20).unwrap();
+    assert_eq!(replay.kind(), DispatchPreparationKindV2::Replay);
+    assert_eq!(p.execution_nonce(), replay.execution_nonce());
+    assert_eq!(p.dispatch_core_digest(), replay.dispatch_core_digest());
+    assert_eq!(
+        p.dispatch_subject_digest(),
+        replay.dispatch_subject_digest()
+    );
+    assert_eq!(p.state(), replay.state());
+    assert_eq!(
+        store
+            .task_authorization_state(task())
+            .unwrap()
+            .clause_consumption(1),
+        Some((1, 1))
+    );
+    let mut broken = store.snapshot.clone();
+    assert_eq!(
+        super::super::task_state::TaskLedgerV2::default().validate(&broken.dispatch),
+        Err(G4Error::DurableStateCorrupt),
+        "a bound dispatch cannot be recovered without its accounting record"
+    );
+    broken.dispatch.entries[0].core.task_binding = Some(
+        savana_kernel_protocol::v2::DispatchTaskBindingV2::new(
+            linkage.content_digest(),
+            d(0xf2),
+            linkage.presealed_payload_digest(),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        validate_snapshot(&broken),
+        Err(G4Error::DurableStateCorrupt)
+    );
+}
+
+#[test]
 fn task_state_no_effect_refunds_magnitude_once_but_never_attempts() {
     let mut f = Fixture::new(vec![clause(1, 5, 2, vec![], true)]);
     let request = f.request(1, 5);
@@ -792,6 +893,12 @@ fn task_state_unknown_schema_is_not_rewritten_and_legacy_effects_remain_recovery
     let mut legacy = f.store.snapshot.clone();
     legacy.payload_schema = 2;
     legacy.tasks = TaskLedgerV2::default();
+    // Model the actual legacy wire core, not a new task-bound core with its
+    // accounting deleted. The latter is corruption and must fail recovery.
+    legacy.dispatch.entries[0].core.task_binding = None;
+    let legacy_core_digest =
+        super::super::dispatch::dispatch_core_digest(&legacy.dispatch.entries[0].core).unwrap();
+    legacy.dispatch.entries[0].core_digest = legacy_core_digest;
     legacy.sequence = 1;
     legacy.previous_state_digest = Digest32V2::new([0; 32]);
     let bytes =
@@ -825,7 +932,7 @@ fn task_state_unknown_schema_is_not_rewritten_and_legacy_effects_remain_recovery
     store
         .reconcile_authenticated_indeterminate(
             p.execution_nonce(),
-            p.dispatch_core_digest(),
+            legacy_core_digest,
             p.dispatch_subject_digest(),
             d(0xc3),
         )

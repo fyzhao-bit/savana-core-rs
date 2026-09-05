@@ -103,6 +103,9 @@ impl ResolvedSlotRelationSemanticV2 {
 pub struct VerifiedResolvedRelationSetV2 {
     slot_count: u16,
     relations: Vec<ResolvedSlotRelationSemanticV2>,
+    // A complete task tuple is not an ontology RelationId. Keep its evidence
+    // domain separate instead of inventing ontology edges for field pairs.
+    task_relation: Option<(Digest32V2, Digest32V2, Digest32V2)>,
 }
 
 impl VerifiedResolvedRelationSetV2 {
@@ -126,7 +129,30 @@ impl VerifiedResolvedRelationSetV2 {
         Ok(Self {
             slot_count,
             relations,
+            task_relation: None,
         })
+    }
+
+    pub fn from_task_match(
+        slot_count: u16,
+        matched: &super::VerifiedTaskMatchV2,
+    ) -> Result<Self, G4Error> {
+        let mut relation = Self::from_verified_plan_envelope(slot_count, Vec::new())?;
+        let digest = super::task_authorization::hash_parts(
+            b"SAVANA_MATCHED_TASK_RELATION_V2_SCHEMA1\0",
+            &[
+                matched.authorization().digest().as_bytes(),
+                matched.content_digest().as_bytes(),
+                matched.candidates().digest().as_bytes(),
+                &matched.deployment_generation().to_be_bytes(),
+            ],
+        );
+        relation.task_relation = Some((
+            matched.authorization().material().installation_digest(),
+            matched.authorization().material().manifest_digest(),
+            digest,
+        ));
+        Ok(relation)
     }
 
     #[cfg(test)]
@@ -223,7 +249,7 @@ impl VerifiedInternalSlotMaterialV2 {
             return Err(G4Error::InvalidInternalSlotBinding);
         }
         let relation_semantics_digest = relation_semantics_digest_v2(&incident_relations)?;
-        Ok(Self {
+        let slot = Self {
             installation_id,
             active_state_manifest_digest,
             durable_run_id,
@@ -236,7 +262,41 @@ impl VerifiedInternalSlotMaterialV2 {
             value_digest,
             provenance_digest,
             relation_semantics_digest,
-        })
+        };
+        if resolved_relations.task_relation.is_some() {
+            slot.with_task_relation(resolved_relations)
+        } else {
+            Ok(slot)
+        }
+    }
+
+    /// Bind the entire checked task relation to a resolved slot. This does not
+    /// grant value effects or create ontology relations. The current owner must
+    /// still recheck the match and G5/G7 before dispatch.
+    pub fn with_task_relation(
+        mut self,
+        relations: &VerifiedResolvedRelationSetV2,
+    ) -> Result<Self, G4Error> {
+        let (installation, manifest, relation) = relations
+            .task_relation
+            .ok_or(G4Error::InvalidInternalSlotBinding)?;
+        if self.installation_id != installation
+            || self.active_state_manifest_digest != manifest
+            || self.slot_ordinal >= relations.slot_count
+            || !relations.relations.is_empty()
+            || !self.permitted_relations.is_empty()
+        {
+            return Err(G4Error::InvalidInternalSlotBinding);
+        }
+        self.relation_semantics_digest = super::task_authorization::hash_parts(
+            b"SAVANA_TASK_SLOT_RELATION_V2_SCHEMA1\0",
+            &[
+                relation.as_bytes(),
+                &relations.slot_count.to_be_bytes(),
+                &self.slot_ordinal.to_be_bytes(),
+            ],
+        );
+        Ok(self)
     }
 
     pub fn internal_slot_digest(&self) -> Result<InternalSlotDigestV2, G4Error> {
@@ -283,6 +343,9 @@ pub struct StoredValueRecordV2<'value> {
 }
 
 impl<'value> StoredValueRecordV2<'value> {
+    pub const fn value_internal_id(&self) -> ValueInternalIdV2 {
+        self.value_internal_id
+    }
     pub fn from_store(
         slot: &VerifiedInternalSlotMaterialV2,
         value: &'value KernelValueV2,
@@ -489,6 +552,42 @@ impl std::fmt::Debug for VerifiedStoredBindingsV2<'_> {
 }
 
 impl<'value> VerifiedStoredBindingsV2<'value> {
+    /// Project immutable owned values through the descriptor's closed business
+    /// grammar. This returns data, not authorization or elevated provenance.
+    /// The native caller must select the profile from its active signed registry.
+    pub fn business_request(
+        &self,
+        profile: &savana_kernel_protocol::v2::BusinessProfileV2,
+        request_id: &str,
+    ) -> Result<savana_kernel_protocol::v2::BusinessRequestV2, G4Error> {
+        use super::value::KernelScalarRefV2;
+        use savana_kernel_protocol::v2::{
+            BusinessRequestV2, BusinessValueV2, MAX_BUSINESS_JSON_BYTES_V2,
+        };
+        if self.arguments.len() != profile.fields().len() {
+            return Err(G4Error::InvalidIntentBinding);
+        }
+        let fields = self
+            .arguments
+            .iter()
+            .map(|argument| {
+                let value = match argument.value().scalar_ref() {
+                    Some(KernelScalarRefV2::Text(s)) if s.len() <= MAX_BUSINESS_JSON_BYTES_V2 => {
+                        BusinessValueV2::Text(s.to_owned())
+                    }
+                    Some(KernelScalarRefV2::I64(n)) if n >= 0 => {
+                        BusinessValueV2::Unsigned(n as u64)
+                    }
+                    Some(KernelScalarRefV2::Bool(b)) => BusinessValueV2::Boolean(b),
+                    _ => return Err(G4Error::InvalidIntentBinding),
+                };
+                Ok((argument.argument_name().as_str().to_owned(), value))
+            })
+            .collect::<Result<Vec<_>, G4Error>>()?;
+        BusinessRequestV2::from_fields(profile, request_id, fields)
+            .map_err(|_| G4Error::InvalidIntentBinding)
+    }
+
     pub fn arguments(&self) -> &[ResolvedStoredArgumentV2<'value>] {
         &self.arguments
     }

@@ -426,9 +426,13 @@ pub struct DispatchCoreV2 {
     pub(crate) executor_key_id: HpkeX25519KeyIdV2,
     pub(crate) executor_connector_registry_digest: Digest32V2,
     pub(crate) expires_at: UnixMillisV2,
+    pub(crate) task_binding: Option<savana_kernel_protocol::v2::DispatchTaskBindingV2>,
 }
 
 impl DispatchCoreV2 {
+    pub const fn task_binding(&self) -> Option<savana_kernel_protocol::v2::DispatchTaskBindingV2> {
+        self.task_binding
+    }
     pub const fn installation_id(&self) -> Digest32V2 {
         self.installation_id
     }
@@ -488,7 +492,9 @@ impl<C> minicbor::Encode<C> for DispatchCoreV2 {
         encoder: &mut minicbor::Encoder<W>,
         context: &mut C,
     ) -> Result<(), minicbor::encode::Error<W::Error>> {
-        encoder.array(14)?.u16(2)?;
+        encoder
+            .array(if self.task_binding.is_some() { 15 } else { 14 })?
+            .u16(if self.task_binding.is_some() { 3 } else { 2 })?;
         self.installation_id.encode(encoder, context)?;
         self.active_state_manifest_digest.encode(encoder, context)?;
         encoder
@@ -504,6 +510,9 @@ impl<C> minicbor::Encode<C> for DispatchCoreV2 {
         self.executor_connector_registry_digest
             .encode(encoder, context)?;
         self.expires_at.encode(encoder, context)?;
+        if let Some(binding) = self.task_binding {
+            binding.encode(encoder, context)?;
+        }
         Ok(())
     }
 }
@@ -801,6 +810,7 @@ impl KernelDispatchJournalV2 {
             executor_key_id: authority.executor_key_id,
             executor_connector_registry_digest: connector_registry_digest,
             expires_at: authority.expires_at,
+            task_binding: None,
         };
         let core_digest = dispatch_core_digest(&core)?;
         self.entries
@@ -945,6 +955,7 @@ impl KernelDispatchJournalV2 {
             executor_key_id: authority.executor_key_id,
             executor_connector_registry_digest: connector_registry_digest,
             expires_at: authority.expires_at,
+            task_binding: None,
         };
         let core_digest = dispatch_core_digest(&core)?;
         let quota_subject =
@@ -1355,7 +1366,7 @@ fn decode_fixed<const N: usize>(decoder: &mut minicbor::Decoder<'_>) -> Result<[
         .map_err(|_| G4Error::StateConflict)
 }
 
-fn preparation(
+pub(crate) fn preparation(
     entry: &KernelDispatchJournalEntryV2,
     kind: DispatchPreparationKindV2,
 ) -> DispatchPreparationV2 {

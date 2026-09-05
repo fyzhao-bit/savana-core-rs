@@ -297,11 +297,11 @@ pub use kernel_executor::{
     kernel_executor_operation_tags_v2, AcknowledgeCommittedCompletionRequestV2,
     BoundedCiphertextV2, ConnectorRegistrySyncModeV2, ConnectorRegistrySyncPageV2,
     ConnectorRegistrySyncRequestV2, ConnectorRegistrySyncScopeV2, DispatchCoreV2,
-    DispatchRequestV2, DispatchSubjectV2, ExecutorCompletionDescriptorV2, ExecutorHealthRequestV2,
-    FetchCompletionRequestV2, KernelExecutorOperationV2, QueryByExecutionNonceRequestV2,
-    SealedExecutionEnvelopePayloadV2, SignedSealedExecutionEnvelopeV2,
-    ToolExecutionSemanticBindingV2, MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTAS_V2,
-    MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTA_BYTES_V2,
+    DispatchRequestV2, DispatchSubjectV2, DispatchTaskBindingV2, ExecutorCompletionDescriptorV2,
+    ExecutorHealthRequestV2, FetchCompletionRequestV2, KernelExecutorOperationV2,
+    QueryByExecutionNonceRequestV2, SealedExecutionEnvelopePayloadV2,
+    SignedSealedExecutionEnvelopeV2, ToolExecutionSemanticBindingV2,
+    MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTAS_V2, MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTA_BYTES_V2,
 };
 pub use kernel_executor_success::{
     decode_acknowledge_committed_completion_response_v2,

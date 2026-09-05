@@ -267,6 +267,179 @@ struct Fixture {
     provenance: ProvenanceRecordV2,
 }
 
+#[test]
+fn stored_business_projection_uses_exact_owned_fields_without_coercion() {
+    use savana_kernel_protocol::v2::*;
+    let profile = BusinessProfileV2::new(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        "mail.send",
+        Digest32V2::new([71; 32]),
+        Digest32V2::new([72; 32]),
+        TaskEffectV2::Send,
+        BusinessMagnitudeV2::CountField,
+        vec![
+            BusinessFieldV2::new(
+                "body",
+                BusinessFieldRoleV2::Payload,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+            BusinessFieldV2::new(
+                "file",
+                BusinessFieldRoleV2::Resource,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+            BusinessFieldV2::new(
+                "quantity",
+                BusinessFieldRoleV2::Magnitude,
+                BusinessFieldTypeV2::Unsigned,
+            )
+            .unwrap(),
+            BusinessFieldV2::new(
+                "to",
+                BusinessFieldRoleV2::Destination,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+            BusinessFieldV2::new(
+                "urgent",
+                BusinessFieldRoleV2::Parameter,
+                BusinessFieldTypeV2::Boolean,
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let fields = |quantity, to| {
+        vec![
+            ("body", KernelValueV2::text("private payload").unwrap()),
+            ("file", KernelValueV2::text("report-A").unwrap()),
+            ("quantity", quantity),
+            ("to", to),
+            ("urgent", KernelValueV2::boolean(true)),
+        ]
+    };
+    let result = project_business_fields(
+        &profile,
+        fields(
+            KernelValueV2::integer(2),
+            KernelValueV2::text("Alice").unwrap(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(result.resource(), "report-A");
+    assert_eq!(result.destination(), "Alice");
+    assert_eq!(result.payload(), "private payload");
+    assert_eq!(result.magnitude(), 2);
+    assert_eq!(result.canonical_json(), br#"{"id":"request-1","jsonrpc":"2.0","method":"tools/call","params":{"arguments":{"body":"private payload","file":"report-A","quantity":2,"to":"Alice","urgent":true},"name":"mail.send"}}"#);
+    for quantity in [
+        KernelValueV2::integer(-1),
+        KernelValueV2::text("2").unwrap(),
+        KernelValueV2::null(),
+        KernelValueV2::bytes(vec![2]).unwrap(),
+    ] {
+        assert!(project_business_fields(
+            &profile,
+            fields(quantity, KernelValueV2::text("Alice").unwrap())
+        )
+        .is_err());
+    }
+    assert!(project_business_fields(
+        &profile,
+        fields(
+            KernelValueV2::integer(2),
+            KernelValueV2::list(vec![KernelValueV2::text("Alice").unwrap()]).unwrap()
+        )
+    )
+    .is_err());
+    let mut extra = fields(
+        KernelValueV2::integer(2),
+        KernelValueV2::text("Alice").unwrap(),
+    );
+    extra.push(("z_auth_override", KernelValueV2::text("secret").unwrap()));
+    assert!(project_business_fields(&profile, extra).is_err());
+    let bob = project_business_fields(
+        &profile,
+        fields(
+            KernelValueV2::integer(2),
+            KernelValueV2::text("Bob").unwrap(),
+        ),
+    )
+    .unwrap();
+    assert_ne!(result.destination_digest(), bob.destination_digest());
+    assert_ne!(result.digest(), bob.digest());
+}
+
+fn project_business_fields(
+    profile: &savana_kernel_protocol::v2::BusinessProfileV2,
+    fields: Vec<(&str, KernelValueV2)>,
+) -> Result<savana_kernel_protocol::v2::BusinessRequestV2, G4Error> {
+    let f = fixture();
+    let context = ProvenanceContextV2::from_authenticated_runtime(
+        ProducerIdentityV2::new([0x13; 32]),
+        f.run,
+        f.manifest,
+        UnixMillisV2::new(100),
+        UnixMillisV2::new(900),
+    )
+    .unwrap();
+    let provenance: Vec<_> = fields
+        .iter()
+        .map(|(_, value)| {
+            ProvenanceRecordV2::gated_ingress(
+                value,
+                context,
+                Digest32V2::new([0x14; 32]),
+                Digest32V2::new([0x15; 32]),
+                Digest32V2::new([0x16; 32]),
+                EffectSetV2::ALL,
+            )
+            .unwrap()
+        })
+        .collect();
+    let slots: Vec<_> = provenance
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            slot_material(
+                f.run,
+                f.manifest,
+                ValueInternalIdV2::new([100 + i as u8; 32]),
+                p.value_digest(),
+                p.provenance_digest(),
+                i as u16,
+            )
+        })
+        .collect();
+    let arguments: Vec<_> = fields
+        .iter()
+        .zip(&slots)
+        .map(|((name, _), slot)| {
+            VerifiedPlanArgumentV2::from_verified_plan(ArgumentNameV2::new(*name).unwrap(), slot)
+                .unwrap()
+        })
+        .collect();
+    let records: Vec<_> = fields
+        .iter()
+        .zip(&slots)
+        .zip(&provenance)
+        .map(|(((_, value), slot), provenance)| {
+            StoredValueRecordV2::from_store(slot, value, provenance).unwrap()
+        })
+        .collect();
+    StoredBindingResolverV2::resolve(
+        f.run,
+        f.manifest,
+        f.executor,
+        &arguments,
+        &records,
+        &[],
+        &[],
+    )?
+    .business_request(profile, "request-1")
+}
+
 fn fixture() -> Fixture {
     let run = DurableRunIdV2::new([0x11; 32]);
     let manifest = Digest32V2::new([0x12; 32]);

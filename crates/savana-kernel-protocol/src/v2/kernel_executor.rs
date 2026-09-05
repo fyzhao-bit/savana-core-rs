@@ -273,6 +273,74 @@ impl DispatchSubjectV2 {
     }
 }
 
+/// Kernel-signed linkage, not independently verified authority. The preseal
+/// commitment binds exact application plaintext AND its declassification node
+/// in the existing tool/release-specific hash domain. It is not the raw-body
+/// SHA-256, a provider response, or a TLS transcript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DispatchTaskBindingV2 {
+    content_digest: Digest32V2,
+    authorization_digest: Digest32V2,
+    presealed_payload_digest: Digest32V2,
+}
+impl DispatchTaskBindingV2 {
+    pub fn new(
+        content_digest: Digest32V2,
+        authorization_digest: Digest32V2,
+        presealed_payload_digest: Digest32V2,
+    ) -> Result<Self, ProtocolError> {
+        if [
+            content_digest,
+            authorization_digest,
+            presealed_payload_digest,
+        ]
+        .iter()
+        .any(|d| is_zero(d.as_bytes()))
+        {
+            return Err(malformed());
+        }
+        Ok(Self {
+            content_digest,
+            authorization_digest,
+            presealed_payload_digest,
+        })
+    }
+    pub const fn content_digest(self) -> Digest32V2 {
+        self.content_digest
+    }
+    pub const fn authorization_digest(self) -> Digest32V2 {
+        self.authorization_digest
+    }
+    pub const fn presealed_payload_digest(self) -> Digest32V2 {
+        self.presealed_payload_digest
+    }
+}
+impl<C> minicbor::Encode<C> for DispatchTaskBindingV2 {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut minicbor::Encoder<W>,
+        c: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        e.array(3)?;
+        self.content_digest.encode(e, c)?;
+        self.authorization_digest.encode(e, c)?;
+        self.presealed_payload_digest.encode(e, c)?;
+        Ok(())
+    }
+}
+impl<'b> minicbor::Decode<'b, V2DecodeContext> for DispatchTaskBindingV2 {
+    fn decode(
+        d: &mut minicbor::Decoder<'b>,
+        c: &mut V2DecodeContext,
+    ) -> Result<Self, minicbor::decode::Error> {
+        if d.array()? != Some(3) {
+            return Err(minicbor::decode::Error::message("invalid task binding"));
+        }
+        Self::new(d.decode_with(c)?, d.decode_with(c)?, d.decode_with(c)?)
+            .map_err(|_| minicbor::decode::Error::message("invalid task binding"))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DispatchCoreV2 {
     installation_id: Digest32V2,
@@ -288,6 +356,7 @@ pub struct DispatchCoreV2 {
     executor_key_id: HpkeX25519KeyIdV2,
     executor_connector_registry_digest: Digest32V2,
     expires_at: UnixMillisV2,
+    task_binding: Option<DispatchTaskBindingV2>,
 }
 
 impl DispatchCoreV2 {
@@ -335,7 +404,16 @@ impl DispatchCoreV2 {
             executor_key_id,
             executor_connector_registry_digest,
             expires_at,
+            task_binding: None,
         })
+    }
+
+    pub fn with_task_binding(mut self, binding: DispatchTaskBindingV2) -> Self {
+        self.task_binding = Some(binding);
+        self
+    }
+    pub const fn task_binding(self) -> Option<DispatchTaskBindingV2> {
+        self.task_binding
     }
 
     pub const fn execution_nonce(self) -> Nonce32V2 {
@@ -1469,8 +1547,8 @@ fn encode_dispatch_core(
     value: DispatchCoreV2,
 ) -> Result<(), ProtocolError> {
     encoder
-        .array(14)
-        .and_then(|encoder| encoder.u16(2))
+        .array(if value.task_binding.is_some() { 15 } else { 14 })
+        .and_then(|encoder| encoder.u16(if value.task_binding.is_some() { 3 } else { 2 }))
         .map_err(ProtocolError::malformed)?;
     encode_fixed(encoder, &value.installation_id)?;
     encode_fixed(encoder, &value.active_state_manifest_digest)?;
@@ -1486,15 +1564,20 @@ fn encode_dispatch_core(
     encode_fixed(encoder, &value.executor_identity)?;
     encode_fixed(encoder, &value.executor_key_id)?;
     encode_fixed(encoder, &value.executor_connector_registry_digest)?;
-    encode_fixed(encoder, &value.expires_at)
+    encode_fixed(encoder, &value.expires_at)?;
+    if let Some(binding) = value.task_binding {
+        encode_fixed(encoder, &binding)?;
+    }
+    Ok(())
 }
 
 fn decode_dispatch_core(
     decoder: &mut minicbor::Decoder<'_>,
     context: &mut V2DecodeContext,
 ) -> Result<DispatchCoreV2, ProtocolError> {
-    expect_array(decoder, 14)?;
-    if decoder.u16().map_err(ProtocolError::malformed)? != 2 {
+    let length = decoder.array().map_err(ProtocolError::malformed)?;
+    let schema = decoder.u16().map_err(ProtocolError::malformed)?;
+    if !matches!((length, schema), (Some(14), 2) | (Some(15), 3)) {
         return Err(malformed());
     }
     let installation_id = decode_fixed(decoder, context)?;
@@ -1510,7 +1593,7 @@ fn decode_dispatch_core(
     let executor_key_id = decode_fixed(decoder, context)?;
     let executor_connector_registry_digest = decode_fixed(decoder, context)?;
     let expires_at = decode_fixed(decoder, context)?;
-    let value = DispatchCoreV2::new(
+    let mut value = DispatchCoreV2::new(
         installation_id,
         active_state_manifest_digest,
         deployment_generation,
@@ -1526,6 +1609,9 @@ fn decode_dispatch_core(
     )?;
     if claimed_subject_digest != value.dispatch_subject_digest {
         return Err(malformed());
+    }
+    if schema == 3 {
+        value = value.with_task_binding(decode_fixed(decoder, context)?);
     }
     Ok(value)
 }

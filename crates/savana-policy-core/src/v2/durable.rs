@@ -715,18 +715,18 @@ impl DurableG4StateV2 {
             let journal_entry = next
                 .dispatch
                 .entries
-                .iter()
+                .iter_mut()
                 .find(|e| e.core.execution_nonce == preparation.execution_nonce())
-                .cloned()
                 .ok_or(G4Error::StateConflict)?;
             next.tasks.prepare(
                 task,
-                &journal_entry,
+                journal_entry,
                 self.namespace.installation_id(),
                 verified_limit.policy_binding_digest(),
                 now,
                 preparation.kind() == DispatchPreparationKindV2::Replay,
             )?;
+            let preparation = super::dispatch::preparation(journal_entry, preparation.kind());
             if preparation.kind() == DispatchPreparationKindV2::Replay {
                 return Ok(preparation);
             }
@@ -828,18 +828,18 @@ impl DurableG4StateV2 {
             let journal_entry = next
                 .dispatch
                 .entries
-                .iter()
+                .iter_mut()
                 .find(|e| e.core.execution_nonce == preparation.execution_nonce())
-                .cloned()
                 .ok_or(G4Error::StateConflict)?;
             next.tasks.prepare(
                 task,
-                &journal_entry,
+                journal_entry,
                 self.namespace.installation_id(),
                 verified_limit.policy_binding_digest(),
                 now,
                 preparation.kind() == DispatchPreparationKindV2::Replay,
             )?;
+            let preparation = super::dispatch::preparation(journal_entry, preparation.kind());
             if preparation.kind() == DispatchPreparationKindV2::Replay {
                 return Ok(preparation);
             }
@@ -2379,8 +2379,9 @@ fn decode_dispatch_entries(
 }
 
 fn decode_dispatch_core(decoder: &mut minicbor::Decoder<'_>) -> Result<DispatchCoreV2, G4Error> {
-    require_array(decoder, 14)?;
-    if decoder.u16().map_err(|_| G4Error::DurableStateCorrupt)? != 2 {
+    let length = decoder.array().map_err(|_| G4Error::DurableStateCorrupt)?;
+    let schema = decoder.u16().map_err(|_| G4Error::DurableStateCorrupt)?;
+    if !matches!((length, schema), (Some(14), 2) | (Some(15), 3)) {
         return Err(G4Error::DurableStateCorrupt);
     }
     let installation_id = Digest32V2::new(decode_fixed::<32>(decoder)?);
@@ -2399,6 +2400,15 @@ fn decode_dispatch_core(decoder: &mut minicbor::Decoder<'_>) -> Result<DispatchC
     let expires_at = savana_kernel_protocol::v2::UnixMillisV2::new(
         decoder.u64().map_err(|_| G4Error::DurableStateCorrupt)?,
     );
+    let task_binding = if schema == 3 {
+        Some(
+            decoder
+                .decode_with(&mut savana_kernel_protocol::v2::V2DecodeContext)
+                .map_err(|_| G4Error::DurableStateCorrupt)?,
+        )
+    } else {
+        None
+    };
     Ok(DispatchCoreV2 {
         installation_id,
         active_state_manifest_digest,
@@ -2413,6 +2423,7 @@ fn decode_dispatch_core(decoder: &mut minicbor::Decoder<'_>) -> Result<DispatchC
         executor_key_id,
         executor_connector_registry_digest,
         expires_at,
+        task_binding,
     })
 }
 

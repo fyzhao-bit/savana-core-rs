@@ -178,6 +178,66 @@ fn mutate_content(c: &ActionContentV2, n: usize) -> ActionContentV2 {
 }
 // Dropping whole-tuple matching allows cross-pair and summary->send escalation.
 #[test]
+fn task_relation_changes_internal_slot_binding_without_inventing_ontology_edges() {
+    let authorization = pair();
+    let one = content(&authorization, 0, alt(20, 30, TaskEffectV2::Send));
+    let two = content(&authorization, 1, alt(21, 31, TaskEffectV2::Send));
+    let a = authorization
+        .match_action(&one, &current(&authorization))
+        .unwrap();
+    let b = authorization
+        .match_action(&two, &current(&authorization))
+        .unwrap();
+    let empty = VerifiedResolvedRelationSetV2::from_verified_plan_envelope(2, vec![]).unwrap();
+    let relation_a = VerifiedResolvedRelationSetV2::from_task_match(2, &a).unwrap();
+    let relation_b = VerifiedResolvedRelationSetV2::from_task_match(2, &b).unwrap();
+    let slot = |manifest, ordinal, relation: &VerifiedResolvedRelationSetV2| {
+        VerifiedInternalSlotMaterialV2::from_resolved_envelope(
+            d(4),
+            manifest,
+            DurableRunIdV2::new([40; 32]),
+            ordinal,
+            SlotKindV2::new(1),
+            ClosedCardinalityV2::ExactlyOne,
+            super::PlannerSlotConfidentialityV2::ConfidentialAbstract,
+            vec![],
+            ValueInternalIdV2::new([41; 32]),
+            d(42),
+            d(43),
+            relation,
+        )
+    };
+    let original = slot(d(5), 0, &empty).unwrap();
+    let bound = slot(d(5), 0, &relation_a).unwrap();
+    assert_ne!(
+        original.internal_slot_digest().unwrap(),
+        bound.internal_slot_digest().unwrap()
+    );
+    assert_eq!(
+        original.clone().with_task_relation(&relation_a).unwrap(),
+        bound
+    );
+    assert_ne!(
+        bound.internal_slot_digest().unwrap(),
+        slot(d(5), 0, &relation_b)
+            .unwrap()
+            .internal_slot_digest()
+            .unwrap()
+    );
+    assert_ne!(
+        bound.internal_slot_digest().unwrap(),
+        slot(d(5), 1, &relation_a)
+            .unwrap()
+            .internal_slot_digest()
+            .unwrap()
+    );
+    assert!(slot(d(99), 0, &relation_a).is_err());
+    assert!(slot(d(5), 2, &relation_a).is_err());
+    assert!(VerifiedResolvedRelationSetV2::from_task_match(0, &a).is_err());
+    assert!(original.with_task_relation(&empty).is_err());
+}
+
+#[test]
 fn task_authorization_matches_whole_alternatives_not_cartesian_products() {
     let v = pair();
     for (i, r, dest, want) in [

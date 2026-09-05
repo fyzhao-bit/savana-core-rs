@@ -325,7 +325,7 @@ impl TaskLedgerV2 {
     pub(crate) fn prepare(
         &mut self,
         request: &TaskDispatchAuthorizationV2,
-        entry: &KernelDispatchJournalEntryV2,
+        entry: &mut KernelDispatchJournalEntryV2,
         installation: Digest32V2,
         policy: Digest32V2,
         now: UnixMillisV2,
@@ -333,7 +333,10 @@ impl TaskLedgerV2 {
     ) -> Result<(), G4Error> {
         let m = &request.matched;
         let contract = m.authorization().material();
-        let core = &entry.core;
+        // This entry is still inside the owner's private cloned snapshot. Its
+        // final core is bound only after acyclic authorization derivation below,
+        // before either snapshot or preparation can escape the transaction.
+        let core = entry.core.clone();
         if installation != core.installation_id
             || contract.installation_digest() != core.installation_id
             || contract.task() != core.durable_task_id
@@ -391,7 +394,11 @@ impl TaskLedgerV2 {
                 .iter()
                 .find(|r| r.nonce == core.execution_nonce)
                 .ok_or(G4Error::StateConflict)?;
-            if r.binding.content != *m.content()
+            let wire = core.task_binding.ok_or(G4Error::StateConflict)?;
+            if wire.content_digest() != m.content_digest()
+                || wire.authorization_digest() != r.binding.authorization_digest
+                || wire.presealed_payload_digest() != entry.sealed_envelope_digest
+                || r.binding.content != *m.content()
                 || r.binding.contract_digest != m.authorization().digest()
                 || r.binding.policy_identity != policy
                 || r.core != entry.core_digest
@@ -482,6 +489,18 @@ impl TaskLedgerV2 {
             endorsement_digests: request.endorsements.clone().map(|e| e.digest()),
             settlement: settlements,
         };
+        if entry.core.task_binding.is_some() {
+            return Err(G4Error::StateConflict);
+        }
+        entry.core.task_binding = Some(
+            savana_kernel_protocol::v2::DispatchTaskBindingV2::new(
+                m.content_digest(),
+                binding.authorization_digest,
+                entry.sealed_envelope_digest,
+            )
+            .map_err(|_| G4Error::StateConflict)?,
+        );
+        entry.core_digest = super::dispatch::dispatch_core_digest(&entry.core)?;
         let charged = state
             .counters
             .iter_mut()
@@ -699,6 +718,16 @@ impl TaskLedgerV2 {
                     KernelDispatchStateV2::FailedNoEffect => 3,
                     KernelDispatchStateV2::Indeterminate => 4,
                 };
+                if let Some(wire) = entry.core.task_binding {
+                    if wire.content_digest()
+                        != savana_kernel_protocol::v2::action_content_digest_v2(&r.binding.content)
+                            .map_err(corrupt)?
+                        || wire.authorization_digest() != r.binding.authorization_digest
+                        || wire.presealed_payload_digest() != entry.sealed_envelope_digest
+                    {
+                        return Err(G4Error::DurableStateCorrupt);
+                    }
+                }
                 if expected != r.status
                     || r.evidence != entry.effect_evidence_digest
                     || r.core != entry.core_digest
@@ -710,6 +739,14 @@ impl TaskLedgerV2 {
                     return Err(G4Error::DurableStateCorrupt);
                 }
             }
+        }
+        // The reverse association is mandatory too: a schema-3 dispatch cannot
+        // survive recovery after its task reservation/accounting was removed.
+        if dispatch.entries.iter().any(|entry| {
+            entry.core.task_binding.is_some()
+                && !nonces.contains(entry.core.execution_nonce.as_bytes())
+        }) {
+            return Err(G4Error::DurableStateCorrupt);
         }
         Ok(())
     }

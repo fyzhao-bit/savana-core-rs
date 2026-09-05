@@ -702,6 +702,8 @@ struct PlanStepRecordV2 {
     plan_revision_digest: PlanRevisionDigestV2,
     internal_step_id: savana_kernel_protocol::v2::InternalStepIdV2,
     descriptor_digest: Digest32V2,
+    task_authorization_digest: Digest32V2,
+    proposer_parent: Digest32V2,
     arguments: Vec<PlanArgumentRecordV2>,
 }
 
@@ -726,6 +728,9 @@ struct IntentRecordV2 {
     internal_step_id: savana_kernel_protocol::v2::InternalStepIdV2,
     policy_binding: savana_policy_core::v2::ToolExecutionSemanticBindingV2,
     semantic_binding: savana_kernel_protocol::v2::ToolExecutionSemanticBindingV2,
+    task_match: savana_policy_core::v2::VerifiedTaskMatchV2,
+    control_selections: [savana_policy_core::v2::ControlSelectionV2; 7],
+    business_request: savana_kernel_protocol::v2::BusinessRequestV2,
     dispatch_plaintext: Vec<u8>,
     display_plaintext: Vec<u8>,
     provenance_parents: Vec<ProvenanceRecordV2>,
@@ -3192,6 +3197,11 @@ impl KernelAgentAuthorityV2 {
                 now,
             )
             .map_err(map_value_error)?;
+        let proposer_parent = values
+            .resolve_g4_value(request.run(), committed.handle(), now)
+            .map_err(map_value_error)?
+            .provenance()
+            .provenance_digest();
         let plan_revision_digest = PlanRevisionDigestV2::new(
             domain_digest(
                 PLAN_REVISION_DOMAIN,
@@ -3253,6 +3263,8 @@ impl KernelAgentAuthorityV2 {
                         plan_revision_digest,
                         internal_step_id,
                         descriptor_digest,
+                        task_authorization_digest: record.task_authorization_digest,
+                        proposer_parent,
                         arguments,
                     });
                 }
@@ -3277,6 +3289,7 @@ impl KernelAgentAuthorityV2 {
         values: &KernelValueOwnerV2,
         caller_identity: ServiceIdentityV2,
         active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
         now: UnixMillisV2,
     ) -> Result<ProposeToolCallResponseV2, KernelAgentAuthorityErrorV2> {
         self.verify_agent_caller(caller_identity)?;
@@ -3290,6 +3303,22 @@ impl KernelAgentAuthorityV2 {
             .iter()
             .find(|record| record.commitment == step_commitment)
             .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        let session = self
+            .sessions
+            .iter()
+            .find(|session| {
+                session.run == step.run
+                    && matches!(
+                        session.status,
+                        AgentSessionStatusV2::Ready | AgentSessionStatusV2::Running
+                    )
+            })
+            .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        if self.require_session_task_authorization(session, now)? != step.task_authorization_digest
+            || session.active_state_manifest_digest != active_state_manifest_digest
+        {
+            return Err(KernelAgentAuthorityErrorV2::StateConflict);
+        }
         let tool_commitment = request.tool().authority_commitment(&self.handle_key);
         let tool = self
             .tools
@@ -3377,7 +3406,7 @@ impl KernelAgentAuthorityV2 {
             );
             slots.push(slot);
         }
-        let stored_values = slots
+        let mut stored_values = slots
             .iter()
             .zip(&resolved_values)
             .map(|(slot, resolved)| {
@@ -3385,6 +3414,7 @@ impl KernelAgentAuthorityV2 {
                     .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        stored_values.sort_by_key(|v| *v.value_internal_id().as_bytes());
         let stored = StoredBindingResolverV2::resolve(
             step.durable_run_id,
             active_state_manifest_digest,
@@ -3408,10 +3438,78 @@ impl KernelAgentAuthorityV2 {
         {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
-        let destination = projected_destination(&stored)?;
-        let display = projected_display(&stored)?;
-        let dispatch_plaintext =
-            minicbor::to_vec(&destination).map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        let profile = unsigned
+            .business_profile()
+            .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        // A request alias cannot change the application request identity. This
+        // identifier is derived from the immutable committed plan step.
+        let business_request = stored
+            .business_request(profile, &business_step_request_id(step.internal_step_id))
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let state = policy
+            .durable
+            .task_authorization_state(step.durable_task_id)
+            .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+        let task_match = match_business_proposal(
+            &state,
+            &business_request,
+            step.descriptor_digest,
+            step.plan_revision_digest,
+            stored.provenance_set_digest(),
+            deployment_generation,
+            now,
+        )?;
+        let control_selections = savana_policy_core::v2::ControlSelectionV2::from_match(
+            &task_match,
+            step.proposer_parent,
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let relations = VerifiedResolvedRelationSetV2::from_task_match(slot_count, &task_match)
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let slots = slots
+            .into_iter()
+            .map(|s| s.with_task_relation(&relations))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let plan_arguments = step
+            .arguments
+            .iter()
+            .zip(&slots)
+            .map(|(argument, slot)| {
+                VerifiedPlanArgumentV2::from_verified_plan(argument.name.clone(), slot)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let mut stored_values = slots
+            .iter()
+            .zip(&resolved_values)
+            .map(|(slot, resolved)| {
+                StoredValueRecordV2::from_store(slot, resolved.value(), resolved.provenance())
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        stored_values.sort_by_key(|v| *v.value_internal_id().as_bytes());
+        let stored = StoredBindingResolverV2::resolve(
+            step.durable_run_id,
+            active_state_manifest_digest,
+            unsigned.executor_identity(),
+            &plan_arguments,
+            &stored_values,
+            &[],
+            &[],
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        // Provenance commits names and owned value identities, not the internal
+        // slot relation hash; this second binding introduces no digest cycle.
+        if stored.provenance_set_digest() != task_match.content().provenance_digest() {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        let dispatch_plaintext = business_request.canonical_json();
+        let destination = KernelValueV2::bytes(dispatch_plaintext.clone())
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        // The G4 display commitment includes the complete content, before any
+        // action approval or final authorization digest is constructed.
+        let display = task_bound_display(&stored, &task_match)?;
         let display_plaintext =
             minicbor::to_vec(&display).map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
         let provenance_parents = resolved_values
@@ -3490,6 +3588,9 @@ impl KernelAgentAuthorityV2 {
             internal_step_id: step.internal_step_id,
             policy_binding,
             semantic_binding,
+            task_match,
+            control_selections,
+            business_request,
             dispatch_plaintext,
             display_plaintext,
             provenance_parents,
@@ -3505,6 +3606,60 @@ impl KernelAgentAuthorityV2 {
             intent,
             ActionIntentCurrentStateV2::Proposed { pending },
         ))
+    }
+
+    fn recheck_intent_task(
+        &self,
+        intent: &IntentRecordV2,
+        manifest: Digest32V2,
+        generation: u64,
+        now: UnixMillisV2,
+    ) -> Result<(), KernelAgentAuthorityErrorV2> {
+        if intent
+            .task_match
+            .authorization()
+            .material()
+            .manifest_digest()
+            != manifest
+        {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        let session = self
+            .sessions
+            .iter()
+            .find(|s| {
+                s.run == intent.run
+                    && matches!(
+                        s.status,
+                        AgentSessionStatusV2::Ready | AgentSessionStatusV2::Running
+                    )
+            })
+            .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        if self.require_session_task_authorization(session, now)?
+            != intent.task_match.authorization().digest()
+        {
+            return Err(KernelAgentAuthorityErrorV2::StateConflict);
+        }
+        let state = self
+            .policy
+            .as_ref()
+            .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?
+            .durable
+            .task_authorization_state(intent.durable_task_id)
+            .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+        if state.revoked() {
+            return Err(KernelAgentAuthorityErrorV2::StateConflict);
+        }
+        intent
+            .task_match
+            .recheck(&savana_policy_core::v2::TaskMatchContextV2 {
+                current_authorization: Some(state.authorization()),
+                pre_state_digest: state.digest(),
+                pre_state_revision: state.revision(),
+                deployment_generation: generation,
+                now,
+            })
+            .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)
     }
 
     pub(crate) fn evaluate_tool_call(
@@ -3523,6 +3678,12 @@ impl KernelAgentAuthorityV2 {
             .iter()
             .position(|record| record.pending_commitment == pending_commitment)
             .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        self.recheck_intent_task(
+            &self.intents[index],
+            active_state_manifest_digest,
+            deployment_generation,
+            now,
+        )?;
         match self.intents[index].state {
             IntentRecordStateV2::Denied => {
                 return Ok(EvaluateToolCallResponseV2::Denied {
@@ -3589,7 +3750,7 @@ impl KernelAgentAuthorityV2 {
         let slot_count = u16::try_from(intent.arguments.len())
             .map_err(|_| KernelAgentAuthorityErrorV2::LimitExceeded)?;
         let relations =
-            VerifiedResolvedRelationSetV2::from_verified_plan_envelope(slot_count, Vec::new())
+            VerifiedResolvedRelationSetV2::from_task_match(slot_count, &intent.task_match)
                 .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
         let mut resolved_values = Vec::new();
         resolved_values
@@ -3629,7 +3790,7 @@ impl KernelAgentAuthorityV2 {
             );
             slots.push(slot);
         }
-        let stored_values = slots
+        let mut stored_values = slots
             .iter()
             .zip(&resolved_values)
             .map(|(slot, resolved)| {
@@ -3637,6 +3798,7 @@ impl KernelAgentAuthorityV2 {
                     .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        stored_values.sort_by_key(|v| *v.value_internal_id().as_bytes());
         let stored = StoredBindingResolverV2::resolve(
             intent.durable_run_id,
             active_state_manifest_digest,
@@ -3647,6 +3809,22 @@ impl KernelAgentAuthorityV2 {
             &[],
         )
         .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let projected = stored
+            .business_request(
+                active
+                    .descriptor()
+                    .unsigned()
+                    .business_profile()
+                    .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?,
+                intent.business_request.request_id(),
+            )
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        if projected != intent.business_request
+            || projected.canonical_json() != intent.dispatch_plaintext
+            || stored.provenance_set_digest() != intent.task_match.content().provenance_digest()
+        {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
         let ontology_arguments = stored
             .arguments()
             .iter()
@@ -3865,6 +4043,12 @@ impl KernelAgentAuthorityV2 {
             .iter()
             .position(|record| record.pending_commitment == pending_commitment)
             .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        self.recheck_intent_task(
+            &self.intents[intent_index],
+            active_state_manifest_digest,
+            deployment_generation,
+            now,
+        )?;
         let approval_index = self
             .tool_approvals
             .iter()
@@ -3997,6 +4181,12 @@ impl KernelAgentAuthorityV2 {
             .position(|record| record.action_intent_id == ticket.action_intent_id)
             .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
         let intent = self.intents[intent_index].clone();
+        self.recheck_intent_task(
+            &intent,
+            active_state_manifest_digest,
+            deployment_generation,
+            now,
+        )?;
         if intent.state != IntentRecordStateV2::Authorized
             || intent.ticket_commitment != Some(ticket_commitment)
             || savana_policy_core::v2::tool_execution_semantic_binding_digest_v2(
@@ -4020,6 +4210,20 @@ impl KernelAgentAuthorityV2 {
             .resolve(intent.descriptor_digest, intent.role, now)
             .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
         if active.descriptor().unsigned().executor_identity() != g7.executor_identity {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        if active.descriptor().unsigned().business_profile()
+            != Some(intent.business_request.profile())
+            || intent.business_request.canonical_json() != intent.dispatch_plaintext
+            || intent
+                .business_request
+                .action_alternative(intent.descriptor_digest)
+                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?
+                != *intent.task_match.content().action()
+            || intent.business_request.payload_digest()
+                != intent.task_match.content().payload_digest()
+            || intent.business_request.magnitude() != intent.task_match.content().magnitude()
+        {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
         let expires_at = checked_deadline(now, 30_000)?;
@@ -4118,15 +4322,41 @@ impl KernelAgentAuthorityV2 {
                 )
             },
             |sealed_payload_digest| {
+                let state = policy
+                    .durable
+                    .task_authorization_state(intent.durable_task_id)
+                    .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+                if state.revoked() {
+                    return Err(KernelAgentAuthorityErrorV2::StateConflict);
+                }
+                let endorsements = savana_policy_core::v2::checked_control_endorsements_v2(
+                    &intent.task_match,
+                    &intent.control_selections,
+                    savana_policy_core::v2::ControlEvidenceV2::ExplicitAlternative,
+                    &savana_policy_core::v2::TaskMatchContextV2 {
+                        current_authorization: Some(state.authorization()),
+                        pre_state_digest: state.digest(),
+                        pre_state_revision: state.revision(),
+                        deployment_generation,
+                        now,
+                    },
+                )
+                .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+                let task = savana_policy_core::v2::TaskDispatchAuthorizationV2::new(
+                    intent.task_match.clone(),
+                    endorsements,
+                );
                 policy
                     .durable
-                    .prepare_verified_tool_dispatch(
+                    .prepare_task_bound_tool_dispatch(
                         intent.action_intent_id,
                         quota,
                         intent.approval_settlement,
                         resolved_ticket,
                         effect_lease,
                         sealed_payload_digest,
+                        &task,
+                        now,
                     )
                     .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)
             },
@@ -6417,28 +6647,103 @@ fn compiled_projection_digest(domain: &[u8], projection_id: u32) -> Digest32V2 {
     domain_digest(domain, &[&projection_id.to_be_bytes()])
 }
 
-fn projected_destination(
-    stored: &savana_policy_core::v2::VerifiedStoredBindingsV2<'_>,
-) -> Result<KernelValueV2, KernelAgentAuthorityErrorV2> {
-    let mut bytes = Vec::new();
-    for argument in stored.arguments() {
-        let name = argument.argument_name().as_str().as_bytes();
-        let canonical = minicbor::to_vec(argument.value())
-            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
-        bytes.extend_from_slice(
-            &u32::try_from(name.len())
-                .map_err(|_| KernelAgentAuthorityErrorV2::LimitExceeded)?
-                .to_be_bytes(),
-        );
-        bytes.extend_from_slice(name);
-        bytes.extend_from_slice(
-            &u32::try_from(canonical.len())
-                .map_err(|_| KernelAgentAuthorityErrorV2::LimitExceeded)?
-                .to_be_bytes(),
-        );
-        bytes.extend_from_slice(&canonical);
+fn business_step_request_id(step: savana_kernel_protocol::v2::InternalStepIdV2) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut id = String::with_capacity(69);
+    id.push_str("step-");
+    for b in step.as_bytes() {
+        id.push(HEX[usize::from(b >> 4)] as char);
+        id.push(HEX[usize::from(b & 15)] as char);
     }
-    KernelValueV2::bytes(bytes).map_err(|_| KernelAgentAuthorityErrorV2::LimitExceeded)
+    id
+}
+
+#[allow(clippy::too_many_arguments)]
+fn match_business_proposal(
+    state: &savana_policy_core::v2::TaskAuthorizationStateV2,
+    request: &savana_kernel_protocol::v2::BusinessRequestV2,
+    descriptor: Digest32V2,
+    plan_revision: PlanRevisionDigestV2,
+    provenance: Digest32V2,
+    generation: u64,
+    now: UnixMillisV2,
+) -> Result<savana_policy_core::v2::VerifiedTaskMatchV2, KernelAgentAuthorityErrorV2> {
+    if state.revoked() {
+        return Err(KernelAgentAuthorityErrorV2::StateConflict);
+    }
+    let authorization = state.authorization();
+    let action = request
+        .action_alternative(descriptor)
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+    let mut choices = authorization
+        .material()
+        .clauses()
+        .iter()
+        .flat_map(|clause| {
+            clause
+                .alternatives()
+                .iter()
+                .enumerate()
+                .filter(|(_, alternative)| **alternative == action)
+                .map(move |(index, _)| (clause.clause_id(), index as u64))
+        });
+    let (clause, alternative) = choices
+        .next()
+        .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
+    // Overlapping clauses are ambiguous without an authenticated clause choice.
+    // Do not select a different budget bucket on the agent's behalf.
+    if choices.next().is_some() {
+        return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+    }
+    let domain = authorization
+        .candidate_domain(clause, now)
+        .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+    let content = savana_kernel_protocol::v2::ActionContentV2::new(
+        authorization.material().authorization_id(),
+        authorization.material().revision(),
+        clause,
+        alternative,
+        action,
+        request.magnitude(),
+        request.payload_digest(),
+        provenance,
+        Digest32V2::new(*plan_revision.as_bytes()),
+        domain.digest(),
+        state.digest(),
+        state.revision(),
+    )
+    .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+    authorization
+        .match_action(
+            &content,
+            &savana_policy_core::v2::TaskMatchContextV2 {
+                current_authorization: Some(authorization),
+                pre_state_digest: state.digest(),
+                pre_state_revision: state.revision(),
+                deployment_generation: generation,
+                now,
+            },
+        )
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)
+}
+
+fn task_bound_display(
+    stored: &savana_policy_core::v2::VerifiedStoredBindingsV2<'_>,
+    matched: &savana_policy_core::v2::VerifiedTaskMatchV2,
+) -> Result<KernelValueV2, KernelAgentAuthorityErrorV2> {
+    // Canonical commitment projection, not model-authored explanatory text.
+    let content = savana_kernel_protocol::v2::encode_action_content_v2(matched.content())
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+    let arguments = minicbor::to_vec(projected_display(stored)?)
+        .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    let mut e = minicbor::Encoder::new(Vec::new());
+    e.array(4)
+        .and_then(|e| e.u16(1))
+        .and_then(|e| e.bytes(matched.authorization().digest().as_bytes()))
+        .and_then(|e| e.bytes(&content))
+        .and_then(|e| e.bytes(&arguments))
+        .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    KernelValueV2::bytes(e.into_writer()).map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)
 }
 
 fn projected_display(
@@ -6489,6 +6794,17 @@ pub(crate) fn protocol_dispatch_core(
     prepared: &KernelPreparedDispatchV2,
 ) -> Result<ProtocolDispatchCoreV2, KernelAgentAuthorityErrorV2> {
     let core = prepared.core();
+    let task_binding = core
+        .task_binding()
+        .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
+    if task_binding.content_digest()
+        != savana_kernel_protocol::v2::action_content_digest_v2(prepared.task_binding().content())
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?
+        || task_binding.authorization_digest() != prepared.task_binding().authorization_digest()
+        || task_binding.presealed_payload_digest() != prepared.sealed_envelope_digest()
+    {
+        return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+    }
     let subject = match core.subject() {
         savana_policy_core::v2::DispatchSubjectV2::ToolExecution {
             action_intent_id,
@@ -6520,6 +6836,7 @@ pub(crate) fn protocol_dispatch_core(
         core.executor_connector_registry_digest(),
         core.expires_at(),
     )
+    .map(|core| core.with_task_binding(task_binding))
     .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)
 }
 
@@ -8623,6 +8940,10 @@ pub(crate) mod tests {
     }
 
     fn planner_input_runtime() -> InputRuntimeV2 {
+        planner_input_runtime_with_arguments(1)
+    }
+
+    fn planner_input_runtime_with_arguments(maximum_arguments: u16) -> InputRuntimeV2 {
         const ASSET_DIGEST_DOMAIN: &[u8] = b"SAVANA_INPUT_RUNTIME_ASSET_V2\0";
         const ASSET_SIGNATURE_DOMAIN: &[u8] = b"SAVANA_INPUT_RUNTIME_ASSET_SIGNATURE_V2\0";
 
@@ -8650,7 +8971,7 @@ pub(crate) mod tests {
             .unwrap()
             .u16(1)
             .unwrap()
-            .u16(1)
+            .u16(maximum_arguments)
             .unwrap()
             .u32(65_536)
             .unwrap()
@@ -9583,6 +9904,494 @@ pub(crate) mod tests {
         );
     }
 
+    fn business_proposal_fixture(
+        resource: &str,
+        destination: &str,
+    ) -> (PlannerAuthorityFixtureV2, ProposeToolCallRequestV2) {
+        use savana_kernel_protocol::v2::{
+            sign_task_authorization_v2, BusinessControlsV2, BusinessValueV2,
+            TaskAuthorizationClauseV2, TaskAuthorizationV2, TaskEvidenceKindV2,
+        };
+        let mut f = planner_authority_fixture_with_task(true, false);
+        let s = &f.authority.sessions[0];
+        let active = f
+            .authority
+            .policy
+            .as_ref()
+            .unwrap()
+            .active_tools
+            .resolve_class(ToolClassIdV2::new(31), s.role, UnixMillisV2::new(100))
+            .unwrap();
+        let descriptor = active.descriptor().descriptor_digest();
+        let profile = active
+            .descriptor()
+            .unsigned()
+            .require_business_profile()
+            .unwrap();
+        let alternatives = [("A", "Alice"), ("B", "Bob")]
+            .iter()
+            .map(|(file, to)| {
+                BusinessControlsV2::from_fields(
+                    profile,
+                    vec![
+                        ("file".into(), BusinessValueV2::Text((*file).into())),
+                        ("to".into(), BusinessValueV2::Text((*to).into())),
+                    ],
+                )
+                .unwrap()
+                .action_alternative(descriptor)
+                .unwrap()
+            })
+            .collect();
+        let root = TaskAuthorizationV2::new(
+            Digest32V2::new([0x38; 32]),
+            s.principal,
+            s.durable_task_id,
+            1,
+            f.authority.config.installation_id,
+            s.active_state_manifest_digest,
+            UnixMillisV2::new(1),
+            UnixMillisV2::new(10000),
+            TaskEvidenceKindV2::AuthenticatedStructuredInput,
+            Digest32V2::new([0x37; 32]),
+            Digest32V2::new([0x36; 32]),
+            vec![TaskAuthorizationClauseV2::new(1, alternatives, 1, 2, 2, vec![], false).unwrap()],
+        )
+        .unwrap();
+        let key = SigningKey::from_bytes(&[0x39; 32]);
+        let root = savana_policy_core::v2::VerifiedTaskAuthorizationV2::verify(
+            &sign_task_authorization_v2(root, &key).unwrap(),
+            &key.verifying_key(),
+            s.principal,
+            s.durable_task_id,
+            f.authority.config.installation_id,
+            s.active_state_manifest_digest,
+            UnixMillisV2::new(100),
+        )
+        .unwrap();
+        let context = ProvenanceContextV2::from_authenticated_runtime(
+            s.producer_identity,
+            s.durable_run_id,
+            s.active_state_manifest_digest,
+            UnixMillisV2::new(100),
+            UnixMillisV2::new(10000),
+        )
+        .unwrap();
+        f.authority
+            .policy
+            .as_mut()
+            .unwrap()
+            .durable
+            .install_verified_task_authorization(root)
+            .unwrap();
+        f.authority.sessions[0].signed_planner_policy = SignedPlannerPolicyV2::from_verified_input(
+            planner_input_runtime_with_arguments(3)
+                .process(
+                    InputChannelV2::ChatText,
+                    "send the reports",
+                    UnixMillisV2::new(100),
+                )
+                .unwrap()
+                .planner_envelope(),
+        )
+        .unwrap();
+        let mut inputs = Vec::new();
+        for (name, text) in [
+            ("body", "private payload"),
+            ("file", resource),
+            ("to", destination),
+        ] {
+            let value = KernelValueV2::text(text).unwrap();
+            let provenance = ProvenanceRecordV2::planner_output(
+                &value,
+                context,
+                Digest32V2::new([0x86; 32]),
+                Digest32V2::new([0x87; 32]),
+                Digest32V2::new([0x88; 32]),
+                &[],
+                EffectSetV2::SEND,
+            )
+            .unwrap();
+            let handle = f
+                .values
+                .register_verified_value(f.run, value, provenance)
+                .unwrap()
+                .handle();
+            inputs.push((name, handle));
+        }
+        let prepared = f
+            .authority
+            .prepare_planner_call(
+                &PreparePlannerCallRequestV2::new(
+                    f.run,
+                    PlannerRouteIdV2::new(7),
+                    StaticTemplateIdV2::new(11),
+                    PlannerIntentKindV2::SendMessage,
+                    PlannerPurposeV2::PlannerCall,
+                    PlannerLimitsV2::new(1, 1, 3, 65536).unwrap(),
+                    inputs.iter().map(|(_, h)| *h).collect(),
+                )
+                .unwrap(),
+                &f.values,
+                f.caller_identity,
+                UnixMillisV2::new(200),
+            )
+            .unwrap();
+        let record = f.authority.planner_tickets.last().unwrap();
+        let bindings = inputs
+            .iter()
+            .map(|(name, value)| {
+                (
+                    ArgumentNameV2::new((*name).into()).unwrap(),
+                    record
+                        .slot_bindings
+                        .iter()
+                        .find(|b| b.value == *value)
+                        .unwrap()
+                        .slot
+                        .reference(),
+                )
+            })
+            .collect();
+        let plan = PlannerPlanV2::new(
+            record.envelope_nonce,
+            vec![PlannerStepV2::new(
+                1,
+                ActionTemplateIdV2::new(21),
+                ToolClassIdV2::new(31),
+                bindings,
+                vec![],
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let committed = f.commit(prepared.ticket(), plan).unwrap();
+        let tool = ToolHandleV2::from_authority_entropy([0xc1; 32]).unwrap();
+        f.authority.tools.push(ToolRecordV2 {
+            commitment: tool.authority_commitment(&f.authority.handle_key),
+            run: f.run,
+            descriptor_digest: descriptor,
+        });
+        let proposal = ProposeToolCallRequestV2::new(
+            committed.steps()[0],
+            tool,
+            inputs
+                .into_iter()
+                .map(|(name, h)| {
+                    NamedArgumentValueBindingV2::new(ArgumentNameV2::new(name.into()).unwrap(), h)
+                })
+                .collect(),
+        )
+        .unwrap();
+        (f, proposal)
+    }
+
+    #[test]
+    fn real_tool_proposal_rejects_cross_pair_before_creating_durable_intent() {
+        let (mut allowed, request) = business_proposal_fixture("A", "Alice");
+        assert!(
+            allowed
+                .authority
+                .propose_tool_call(
+                    RequestIdV2::new([0xc2; 16]),
+                    b"authenticated allowed proposal",
+                    &request,
+                    &allowed.values,
+                    allowed.caller_identity,
+                    Digest32V2::new([0x85; 32]),
+                    7,
+                    UnixMillisV2::new(202),
+                )
+                .is_ok(),
+            "exact authorized tuple must reach a durable proposed intent"
+        );
+        let (mut f, proposal) = business_proposal_fixture("A", "Bob");
+        let before = f
+            .authority
+            .policy
+            .as_ref()
+            .unwrap()
+            .durable
+            .authenticated_state_head()
+            .unwrap();
+        assert!(f
+            .authority
+            .propose_tool_call(
+                RequestIdV2::new([0xc2; 16]),
+                b"authenticated cross-pair proposal",
+                &proposal,
+                &f.values,
+                f.caller_identity,
+                Digest32V2::new([0x85; 32]),
+                7,
+                UnixMillisV2::new(202)
+            )
+            .is_err());
+        assert_eq!(
+            f.authority
+                .policy
+                .as_ref()
+                .unwrap()
+                .durable
+                .authenticated_state_head()
+                .unwrap(),
+            before
+        );
+        assert!(f.authority.intents.is_empty());
+    }
+
+    #[test]
+    fn real_tool_proposal_replays_exact_content_and_preserves_untrusted_control_origin() {
+        let (mut f, request) = business_proposal_fixture("A", "Alice");
+        let first = f
+            .authority
+            .propose_tool_call(
+                RequestIdV2::new([0xc2; 16]),
+                b"first authenticated proposal",
+                &request,
+                &f.values,
+                f.caller_identity,
+                Digest32V2::new([0x85; 32]),
+                7,
+                UnixMillisV2::new(202),
+            )
+            .unwrap();
+        let head = f
+            .authority
+            .policy
+            .as_ref()
+            .unwrap()
+            .durable
+            .authenticated_state_head()
+            .unwrap();
+        let repeated = f
+            .authority
+            .propose_tool_call(
+                RequestIdV2::new([0xc3; 16]),
+                b"first authenticated proposal",
+                &request,
+                &f.values,
+                f.caller_identity,
+                Digest32V2::new([0x85; 32]),
+                7,
+                UnixMillisV2::new(202),
+            )
+            .unwrap();
+        assert_eq!(first, repeated);
+        assert_eq!(f.authority.intents.len(), 1);
+        // The G4 request-id alias itself may be journaled; task counters must not change.
+        assert!(
+            f.authority
+                .policy
+                .as_ref()
+                .unwrap()
+                .durable
+                .authenticated_state_head()
+                .unwrap()
+                .sequence()
+                >= head.sequence()
+        );
+        let intent = &f.authority.intents[0];
+        assert_eq!(
+            intent.dispatch_plaintext,
+            intent.business_request.canonical_json()
+        );
+        assert_eq!(intent.business_request.resource(), "A");
+        assert_eq!(intent.business_request.destination(), "Alice");
+        assert_eq!(intent.task_match.candidates().candidate_count(), 2);
+        let provenance = f.authority.plan_steps[0].proposer_parent;
+        for (selection, facet) in intent
+            .control_selections
+            .iter()
+            .zip(savana_policy_core::v2::ControlFacetV2::ALL)
+        {
+            assert_eq!(selection.facet(), facet);
+            assert_eq!(selection.proposer_parent(), provenance);
+            assert_eq!(
+                selection.content_digest(),
+                intent.task_match.content_digest()
+            );
+            assert_eq!(
+                selection.integrity(),
+                savana_policy_core::v2::IntegrityV2::ExternalUntrusted
+            );
+            assert_eq!(selection.allowed_effects(), EffectSetV2::READ);
+        }
+        let state = f
+            .authority
+            .policy
+            .as_ref()
+            .unwrap()
+            .durable
+            .task_authorization_state(intent.durable_task_id)
+            .unwrap();
+        assert_eq!(state.clause_consumption(1), Some((0, 0)));
+    }
+
+    #[test]
+    fn real_tool_proposal_rejects_revoked_task_and_post_commit_slot_swap() {
+        for revoke in [false, true] {
+            let (mut f, request) = business_proposal_fixture("A", "Alice");
+            let request = if revoke {
+                let task = f.authority.plan_steps[0].durable_task_id;
+                f.authority
+                    .policy
+                    .as_mut()
+                    .unwrap()
+                    .durable
+                    .revoke_task_authorization(task)
+                    .unwrap();
+                request
+            } else {
+                let arguments = request.arguments();
+                ProposeToolCallRequestV2::new(
+                    request.step(),
+                    request.tool(),
+                    vec![
+                        NamedArgumentValueBindingV2::new(
+                            arguments[0].name().clone(),
+                            arguments[0].value(),
+                        ),
+                        NamedArgumentValueBindingV2::new(
+                            arguments[1].name().clone(),
+                            arguments[2].value(),
+                        ),
+                        NamedArgumentValueBindingV2::new(
+                            arguments[2].name().clone(),
+                            arguments[1].value(),
+                        ),
+                    ],
+                )
+                .unwrap()
+            };
+            let before = f
+                .authority
+                .policy
+                .as_ref()
+                .unwrap()
+                .durable
+                .authenticated_state_head()
+                .unwrap();
+            assert!(f
+                .authority
+                .propose_tool_call(
+                    RequestIdV2::new([0xc2; 16]),
+                    b"invalid proposal",
+                    &request,
+                    &f.values,
+                    f.caller_identity,
+                    Digest32V2::new([0x85; 32]),
+                    7,
+                    UnixMillisV2::new(202),
+                )
+                .is_err());
+            assert_eq!(
+                f.authority
+                    .policy
+                    .as_ref()
+                    .unwrap()
+                    .durable
+                    .authenticated_state_head()
+                    .unwrap(),
+                before
+            );
+            assert!(f.authority.intents.is_empty());
+        }
+    }
+
+    #[test]
+    fn real_tool_proposal_cached_evaluation_cannot_survive_generation_change_or_revocation() {
+        let (mut f, request) = business_proposal_fixture("A", "Alice");
+        let proposed = f
+            .authority
+            .propose_tool_call(
+                RequestIdV2::new([0xc2; 16]),
+                b"authenticated proposal",
+                &request,
+                &f.values,
+                f.caller_identity,
+                Digest32V2::new([0x85; 32]),
+                7,
+                UnixMillisV2::new(202),
+            )
+            .unwrap();
+        let ActionIntentCurrentStateV2::Proposed { pending } = proposed.current() else {
+            panic!("proposed")
+        };
+        let allowed = f
+            .authority
+            .evaluate_tool_call(
+                EvaluateToolCallRequestV2::new(pending),
+                &f.values,
+                f.caller_identity,
+                Digest32V2::new([0x85; 32]),
+                7,
+                UnixMillisV2::new(203),
+            )
+            .unwrap();
+        assert!(matches!(
+            allowed,
+            EvaluateToolCallResponseV2::Allowed { .. }
+        ));
+        let before = f
+            .authority
+            .policy
+            .as_ref()
+            .unwrap()
+            .durable
+            .authenticated_state_head()
+            .unwrap();
+        assert!(f
+            .authority
+            .evaluate_tool_call(
+                EvaluateToolCallRequestV2::new(pending),
+                &f.values,
+                f.caller_identity,
+                Digest32V2::new([0x85; 32]),
+                8,
+                UnixMillisV2::new(204)
+            )
+            .is_err());
+        assert_eq!(
+            f.authority
+                .policy
+                .as_ref()
+                .unwrap()
+                .durable
+                .authenticated_state_head()
+                .unwrap(),
+            before
+        );
+        let task = f.authority.intents[0].durable_task_id;
+        f.authority
+            .policy
+            .as_mut()
+            .unwrap()
+            .durable
+            .revoke_task_authorization(task)
+            .unwrap();
+        assert!(f
+            .authority
+            .evaluate_tool_call(
+                EvaluateToolCallRequestV2::new(pending),
+                &f.values,
+                f.caller_identity,
+                Digest32V2::new([0x85; 32]),
+                7,
+                UnixMillisV2::new(205)
+            )
+            .is_err());
+        assert!(f
+            .authority
+            .policy
+            .as_ref()
+            .unwrap()
+            .durable
+            .recovery_projection()
+            .unwrap()
+            .is_empty());
+    }
+
     #[test]
     fn rejected_execution_gate_leaves_real_durable_dispatch_and_quota_unmodified() {
         let installation_id = Digest32V2::new([0x89; 32]);
@@ -9591,7 +10400,7 @@ pub(crate) mod tests {
         let effect_fence_epoch = 8;
         let durable_run_id = DurableRunIdV2::new([0x83; 32]);
         let quota_subject = DispatchQuotaSubjectV2::tool_attempt(AttemptKindV2::ToolWrite);
-        let mut fixture = planner_authority_fixture();
+        let (mut fixture, proposal) = business_proposal_fixture("A", "Alice");
         fixture
             .authority
             .policy
@@ -9605,31 +10414,6 @@ pub(crate) mod tests {
             ))
             .unwrap();
 
-        let (planner_ticket, envelope_nonce, slot) =
-            fixture.prepare(PlannerLimitsV2::new(1, 1, 1, 65_536).unwrap());
-        let plan = PlannerPlanV2::new(
-            envelope_nonce,
-            vec![planner_step(1, 21, 31, slot, Vec::new())],
-        )
-        .unwrap();
-        let committed = fixture.commit(planner_ticket, plan).unwrap();
-        let step = committed.steps()[0];
-        let descriptor_digest = fixture.authority.plan_steps[0].descriptor_digest;
-        let tool = ToolHandleV2::from_authority_entropy([0xc1; 32]).unwrap();
-        fixture.authority.tools.push(ToolRecordV2 {
-            commitment: tool.authority_commitment(&fixture.authority.handle_key),
-            run: fixture.run,
-            descriptor_digest,
-        });
-        let proposal = ProposeToolCallRequestV2::new(
-            step,
-            tool,
-            vec![NamedArgumentValueBindingV2::new(
-                ArgumentNameV2::new("input".to_owned()).unwrap(),
-                fixture.prompt,
-            )],
-        )
-        .unwrap();
         let proposed = fixture
             .authority
             .propose_tool_call(
@@ -9639,6 +10423,7 @@ pub(crate) mod tests {
                 &fixture.values,
                 fixture.caller_identity,
                 active_state_manifest_digest,
+                deployment_generation,
                 UnixMillisV2::new(202),
             )
             .unwrap();

@@ -1041,6 +1041,7 @@ impl CoreKernelRuntimeServicesV2 {
                         &self.values,
                         caller_identity,
                         active_state_manifest_digest,
+                        deployment_generation,
                         now,
                     )
                     .map_err(map_agent_authority_error)?;

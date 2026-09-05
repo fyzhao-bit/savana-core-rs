@@ -131,6 +131,29 @@ Task 4 issuance details:
 
 **Files:** Modify kerneld `v2_agent_authority.rs`, `v2_value_owner.rs`, `v2_agent_durable.rs`, protocol `kernel_agent.rs`, `kernel_agent_success.rs`, semantic bindings and executor wire types; client/agentd operation forwarding where needed.
 
+Task 5A checkpoint (2026-09-05, not Task 5 completion): real tool proposals now
+project exact owned fields through the signed business profile, match a unique
+complete contract alternative before creating a durable intent, retain the
+actual committed planner provenance for all seven untrusted selections, and
+recheck task/root/state/generation at evaluation, approval and dispatch. Exact
+request-ID aliases retain the same application request ID. Overlapping clauses
+with the same complete alternative fail closed rather than choosing a budget.
+Contract relation commitments are distinct from ontology relation IDs. The G4
+display commitment includes canonical ActionContent and the root digest;
+readable trusted rendering remains Task 7. Tool prepare calls the atomic
+task-bound owner; final release and the dedicated TaskActionApproval producer
+remain unfinished. Existing G5 approval is not rebranded as that new proof.
+
+Nested dispatch cores use schema 3 / 15 fields for new task-bound records, binding
+ContentDigest, AuthorizationDigest and the preseal plaintext-plus-declassification
+commitment before the atomic commit. Legacy schema 2 / 14 fields remain readable
+for recovery only. The preseal commitment is NOT the final provider-request hash.
+Recovery rejects a new bound core with missing task accounting. Protocol/policy
+core encoding parity, exact replay, paired proposal rejection, post-commit slot
+swap, revocation, generation change and existing execution declassification gate
+have focused regression coverage. This checkpoint does not yet enforce worker
+business-request equivalence or prove the end-to-end provider path (Task 6B/8).
+
 - [ ] Test arbitrary planner steps and slot swaps through `commit_planner_value`/`propose_tool_call`, full cross-pair rejection, summary→send rejection even when global tool allowed, fabricated evidence, fresh-run budget resets, replanning within contract, declassification gate refusal before prepare.
 - [ ] Attach contract identity to durable session/run state; at proposal resolve owned values into the exact joint action and candidate domain. Do not trust planner asserted resource/destination identifiers: derive from stored bindings and registered codec mapping.
 - [ ] Preserve proposer provenance for all seven selected controls. Build ContentDigest, render approval from it, settle then endorse; construct final AuthorizationDigest only afterward. Bind intent/capability/approval/journal/seal/receipts consistently with no cycle or missing-field fallback.
