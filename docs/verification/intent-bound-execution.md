@@ -1,130 +1,166 @@
-# Intent-bound execution: implementation evidence (in progress)
+# Intent-bound execution: implementation evidence
 
-This is an engineering checkpoint, not an experimental evaluation or a claim of
-whole-system completion. Worktree: `codex/intent-bound-execution`; native release
-checkpoint `e23c9c3`, followed by authenticated recovery changes. No push, install,
-service reset, or production credential change was performed.
+Snapshot: `codex/intent-bound-execution`, 2026-09-05. This supersedes intermediate
+checkpoints in the plan. These are engineering checks, not attack-success or
+performance experiments, a formal proof, or production/hardware readiness.
+No install, service reset, credential change, push or deployment was performed.
 
-## Latest checked components (2026-09-05)
+## Implemented boundary
 
-| Scope | Observed result | What it does not prove |
-| --- | --- | --- |
-| `cargo test --locked -p savana-kerneld --lib --features test-support,macos-development-authority` | 314 passed (8.58 s), after updating both operation-inventory counts | Whole issuer-to-provider completion |
-| `cargo test --locked -p savana-policy-core --lib` | 230 passed | An unbounded proof of all task traces |
-| `cargo test --locked -p savana-ingressd --lib` | 21 passed | A real user hardware ceremony in the running deployment |
-| `cargo test --locked -p savana-kernel-protocol` | 248 passed | Correct provider-internal interpretation of requests |
-| Rust client `--lib --tests` | 90 passed | Live OpenClaw integration |
-| Python `test_client_sdk.py` against the locally rebuilt extension | 16 passed | Installed application behavior |
-| V1 replay boundary in isolation | Passed, 305.18 s | A clean whole-workspace run; earlier runs had intermittent expiry/frame failures |
-| Bounded task-accounting differential exploration | 1,440 traces; 984 admitted and 1,896 refused probes; 6 distinct accounting observations; 72.57 s | Arbitrary trace lengths, all policy state, or the full distributed kernel |
+1. Authenticated original input and context feed a bounded structured draft.
+   Native issuance verifies source/principal/task/deployment/revision. A separately
+   approved draft can install/amend authority; action approval cannot enlarge it.
+   Model output is never a signed grant.
+2. The kernel matches a complete alternative, not a Cartesian product of allowed
+   fields. Candidate completeness is relative to the entire bounded contract, not
+   the universe of runtime data/tools. Seven typed control selections are separate
+   from ordinary READ-limited provenance. Endorsement requires verified evidence.
+3. ContentDigest precedes approval; AuthorizationDigest binds all endorsements and
+   current task transition. Atomic prepare rechecks and commits task consumption,
+   approval consumption and dispatch binding together. Replanning/new runs do not
+   reset durable task budgets.
+4. New task-bound tool dispatch resolves exactly one active registered connector
+   through its exact signed descriptor. Its `provider_identity_digest` must equal
+   the connector ID (including name/tier/transport); the business profile pins the
+   real URL/TLS identity and credential slot. Missing/inactive/renamed/duplicated/
+   removed routes fail closed. No destination-digest routing fallback on this path.
+5. Closed codecs bind actual resource/destination/parameters/magnitude/payload/turn.
+   The executor checks the worker frame before recording a provider attempt. The
+   transport remains an eleven-field CBOR application frame over mTLS, **not a
+   general HTTP/MCP client**. Logical bodies support reviewed fixed POST or closed
+   JSON-RPC tools/call profiles, not arbitrary third-party schemas.
+6. Signed terminal evidence binds authorization and retained response. The reviewed
+   classifier, not worker success, determines known success. Failure/unknown cannot
+   unlock success dependencies. Attempts are permanent; only explicitly permitted
+   verified no-effect refund restores magnitude once. Historical reconciliation
+   after expiry never authorizes another effect.
+7. Verified tool results have separate task/run/commit-bound vault identities.
+   Several results coexist with immutable original input. Exact replay is
+   idempotent; changing content at a commit is refused, including after reopen.
+8. Native handles are recorded before uncertain dispatch IPC. Same-ticket retry
+   returns the exact handle without send/charge. After durable result/outcome commit,
+   terminal success is cached before cleanup ACK so a lost response cannot erase it.
+9. Context/editor and Rust/Python SDK transport bounded data/opaque handles, not
+   trusted authority constructors. OpenClaw reserves the real receiver turn before
+   input, scope approval and planning. Invalid/denied/pending scope does not plan.
 
-Protocol browser tests require the bundled Node runtime in `PATH` because the
-system Homebrew Node installation has a missing dynamic-library dependency.
-Socket fixtures ran with local test-network permission, using temporary paths.
-Python 3.14 reports the existing `asyncio.iscoroutinefunction` deprecation warning.
-The extension was linked locally with `-undefined dynamic_lookup`; no package was
-installed. Crash-hook subprocess panic messages in the policy suite are expected
-checks and are not omitted failures.
+## Integrated evidence (not a live product experiment)
 
-## Binding evidence
+`native_tool_dispatch_requires_registered_exact_profile_and_query_identity`
+runs actual input-owner authentication, native issuance, planner prepare/commit,
+proposal/evaluation, task-bound atomic prepare, signed/encrypted Suite1 IPC,
+ExecdProtocolService, effect gate, encrypted journal, worker-frame verification,
+retained-response classification, vault commit and completion ACK.
 
-- Native final release uses actual owned source input, the current authenticated
-  draft and committed plan, and one uniquely matched complete release alternative.
-  The original source remains mandatory provenance. Unsupported/ambiguous mappings
-  fail closed; current release payload support is the owned original document, not
-  arbitrary synthesized agent output.
-- Generic final-release approval alone, or a separately signed action proof for
-  different content, is rejected without consuming the approval. The exact proof
-  succeeds. G7 keeps leak checks over raw vault plaintext, not its base64 encoding.
-- The native fixture captures a real authenticated Suite1 dispatch, independently
-  verifies its signature, decrypts it and checks exact capsule content/turn/core.
-  The fixture executor returns `ServiceUnavailable` after dispatch admission. No
-  real provider effect or success is asserted by that test.
-- Atomic task prepare rejects destination/evidence cross-binding before charging.
-  The pre-fix behavioral test accepted the mismatched request; the corrected path
-  refuses it and retains zero consumption. Policy fixtures were corrected to use
-  evidence, rather than the adjacent payload-digest field.
-- The release receiver accepts only the closed application-turn-bound request for
-  its reservation and acknowledges after durable claim. Historical legacy claimed
-  records remain readable/reconcilable but do not authorize new legacy delivery.
-- Recovery destroys the input owner, reopens the encrypted task state, and checks
-  fresh authentication against task/principal/manifest/generation/time. Wrong
-  identities, unknown issuance IDs, expired authentication and revoked grants are
-  refused. Existing receipt/display recovery leaves the rollback-protected head
-  unchanged. Recovery proof cannot be reused for new structured issuance.
-- The browser recovery control checks correlated receipts and opens independent
-  task approval; it never commits approval implicitly. SDK recovery performs a
-  fresh credential flow without begin/chunk/finalize or new issuance operations.
-- IngressKernel 56 and the same-origin read-only POST `/v2/task/context` return
-  authenticated task/source metadata, exact active business profiles and applicable
-  pending request identifiers, never old contract control values or authority.
-  A different authentication cannot borrow a finalized input session. Fresh
-  authentication can discover existing pending IDs without uploading new source.
-  The core fixture verifies wrong principal/task, expiry, missing source and
-  unauthorized input-handle reuse refusals; context reads never install drafts.
-- The fixed browser editor builds complete alternatives, budgets and dependencies,
-  exposes the issuance request identifier before sending, and requires independent
-  task approval. A Node DOM fixture captures its real request and Rust decodes the
-  exact source/identity/revision/receiver turn. Checking input approval now reuses
-  the uploaded digest instead of beginning/uploading again. This is browser-script
-  behavior evidence, not a live hardware ceremony.
-- Python receives immutable context metadata and uses Rust's closed JSON-to-draft
-  helper; unknown/duplicate fields, mismatched descriptors and unsupported types
-  fail before submission. Public surface: 20 business methods, 21 types, five
-  separately inventoried value helpers. Debug sessions cannot fabricate context.
-- The independent accounting oracle enumerates two clauses (the second requires
-  proven success of the first), two authorized complete alternatives, one invalid
-  tuple probe, two prepare attempts, five first-outcome states, three owner-reopen
-  positions, stale/current matches and reused/fresh action-approval nonces. It
-  compares actual owner admission and counters, checks one-time terminal replay,
-  and reopens the real encrypted store without rewriting its head. All seven
-  selections stay untrusted/READ before separate verified action endorsement.
-  This is a bounded trace matrix over the accounting projection, not exhaustive
-  exploration of every interleaving or a proof of the entire protocol.
+| Case | Observation |
+| --- | --- |
+| Exact registered request | One controlled provider attempt; success |
+| Missing connector | Refusal before charge; zero provider attempts |
+| Correctly signed worker changes recipient | FailedNoEffect; zero attempts |
+| Provider failure | Indeterminate; one attempt, no success dependency |
+| Dispatch ACK lost, executor reopened | Same handle; verified success; one attempt |
+| Renamed connector retains old descriptor | Refusal before charge |
+| Duplicate/renamed route | Refusal before charge |
+| Two-step task with dynamic replanning | Step 2 initially refused; step 1 success permits fresh plan for step 2; another replan cannot reset either budget |
+| Completion ACK processed, reply lost, executor reopened | First query errors; next returns committed success without provider retry |
 
-## Still required before code/paper closure
+`native_final_release_checks_real_executor_provider_and_lost_acknowledgement`
+runs seven cases: success, changed turn, provider failure, unknown response,
+lost dispatch ACK, lost dispatch ACK plus executor reopen, and lost completion ACK.
+Actual original input/vault bytes, generic consent plus separately signed exact
+TaskActionApproval and G7 over raw plaintext are used. The earlier scripted
+unavailable case remains. Release supports the owned original up to 32 KiB,
+**not arbitrary synthesized agent output**.
 
-1. Task-context discovery and editor are implemented and component-tested; include
-   them in the final integrated review rather than treating component tests as
-   whole-chain evidence.
-2. Reviewed production business profiles derived from actual target, pin and
-   credential identities, with generator/config tests and no placeholders accepted.
-3. OpenClaw receiver reservation before contract approval and planning, binding the
-   real application turn rather than assigning the next result afterward.
-4. Real integrated issuer → planner → proposal → approval → atomic prepare → execd
-   → controlled provider tests, including adversarial and recovery cases.
-5. Incorporate the bounded trace evidence and its limitations into the final review;
-   broader/unbounded state exploration is not claimed.
-6. Fresh whole-workspace and feature/security verification, reviewed V2 frozen
-   manifests, and final code review. V1 production assets remain frozen.
-7. Only then revise the paper from the user's immutable LaTeX draft. Unmeasured
-   experiments must remain explicitly unmeasured; no acceptance score is implied.
-# OpenClaw pre-planning integration checkpoint (2026-09-05)
+Fixture boundaries: provider and worker are controlled **in memory**. Encoding,
+signatures, executor transitions and encrypted file reopen are real, but this is
+not OS sandbox/TLS evidence. Input uses synthetic authenticated evidence through
+the private owner boundary; approval proofs are fixture-created. Real approvald
+ceremony and browser behavior are separate component checks, not a live hardware
+ceremony. Rollback anchors are in-memory compare-and-advance fixtures.
+`intent-bound-test-support` is absent from defaults and forbidden in non-debug
+builds by compile_error.
 
-Receiver reservation now precedes input, scope collection and planning. The
-private broker's correlated `task.draft` exchange returns bounded data only;
-Rust's authenticated context constructs the unsigned draft and the existing
-independent task-approval workflow installs it. Denied/invalid/pending/refused
-scope never enters the planner or release. Existing contract identity is retained.
-The host-product broker must implement the exchange; no live broker/deployment
-is claimed. Real receiver transport tests retain a mocked SDK session, explicitly
-not a native authorization-chain experiment.
+## Bounded model and recovery
 
-Checks at this checkpoint: default `cargo test --locked --workspace` passed;
-explicit agentd `planner_privacy_e2e` test-support suite 4 passed; TypeScript
-plugin suite 65 passed against the pinned installed OpenClaw dependency via a
-temporary external test configuration. Python runtime/broker suite 42 passed.
-Five scope-ordering/refusal tests were first observed failing before integration.
-The agentd manifest now enables approval test helpers only as dev-dependencies,
-and declares the gated planner integration test's required feature. This does
-not enable test capabilities in the production default build.
-# Reviewed development profile checkpoint (2026-09-05)
+The separate accounting oracle explores 1,440 two-attempt traces: two clauses,
+two alternatives, an invalid tuple, five first outcomes, three encrypted-owner
+reopen positions, stale/current matches and reused/fresh approval nonces.
+Observed: 984 admissions, 1,896 refusals and six distinct accounting observations.
+This is a finite accounting projection, not exhaustive scheduling or a full-kernel
+proof. Existing fault hooks also cover issuance/prepare uncertain commit, durable
+rename boundaries, replay, stale revisions, concurrency and one-time refunds.
 
-The new-development materializer now signs the supported final-release mapping
-only after actual transport identities have been generated, verifies the old
-descriptor under its expected publisher before retaining it, and keeps the old
-unsupported report descriptor without a fabricated mapping. Two executable
-materializer tests passed: complete signed-registry activation and exact
-target/credential digest sensitivity; refusal of unreviewed mode/URL, zero
-identity, wrong activation and tampered old signature. No system materializer
-was run. This is new-build code, not migration or live-readiness evidence.
+## Verification record
+
+Use bundled Node in PATH for browser tests; the host Homebrew Node has an unrelated
+missing library. Socket/subprocess tests use local test permission and temporary
+paths. Locally rebuilt Python extension was not installed.
+
+```sh
+CARGO_INCREMENTAL=0 cargo test --locked --workspace -- --test-threads=2
+CARGO_INCREMENTAL=0 cargo test --locked --workspace --features \
+  savana-kerneld/test-support,savana-kerneld/macos-development-authority,savana-execd/openclaw-release-test-support,savana-platform-identity/test-support \
+  -- --test-threads=2 --skip exact_replay_boundary_never_evicts_live_security_state
+sh tools/check-frozen-v2-core.sh
+sh tools/tests/check-frozen-v2-core.sh "$PWD/tools/check-frozen-v2-core.sh"
+git diff --check
+```
+
+| Check | Observed result |
+| --- | --- |
+| Native library with test-support/development authority | 316 passed |
+| Protocol full suite | 248 passed |
+| Executor library / connector registry / isolation | 53 / 9 / 2 passed |
+| New strict route activity/removal regression | Passed |
+| New encrypted multi-result vault/replay regression | Passed |
+| Python SDK, bridge, runtime, receiver after extension rebuild | 61 passed; six existing Python 3.14 deprecation warnings |
+| OpenClaw TypeScript plugin with pinned installed dependency | 65 passed, nine files |
+| V2 snapshot/checker adversarial tests | Passed; 220 paths; negative fixture diagnostics expected |
+| Final default workspace run | Passed, exit 0; two test threads; one launchd-prerequisite test ignored |
+| Final feature workspace coverage | Sequential rerun passed, exit 0; one already-passed replay test filtered, one launchd-prerequisite test ignored; see below |
+| Final policy library / vault library | 232 / 8 passed |
+
+First full feature run failed a rollover client health request with Unavailable
+while server returned Ok. Isolated check passed (0.13 s). Inspection found a single
+two-second deadline shared across cryptographic/socket exchanges. The test fixture
+now uses fresh bounded deadlines and more scheduling time; production timeout
+rules are unchanged. The failed run is not counted as passed. Final reruns determine
+closure. The checker self-test initially lacked its required path argument;
+the corrected invocation passed. Neither failure was suppressed/skipped.
+
+A subsequent full feature run passed all 11 attack-matrix tests (308.48 s), but
+four later lifecycle tests exited 64 because a concurrent default-feature build
+replaced the shared target/debug daemon. This was a test orchestration error:
+the fixture copies CARGO_BIN_EXE_savana-kerneld, whose test-only entry point is
+absent in the default binary. The configurations are now run sequentially.
+The final feature command omits only that already-passed five-minute replay test;
+its same-snapshot evidence is retained from the full attack-matrix invocation.
+No unexecuted test is counted as passed; no claim of a single clean unfiltered
+feature-workspace invocation is made. The default workspace invocation is clean.
+
+V2 hashes cover reviewed changed paths and new task wire/issuer/control/execution
+sources. They detect source changes, not complete TCB coverage or release trust.
+V1 frozen assets remain unchanged. No production materializer was executed.
+
+## Residual limits
+
+- Full **kerneld** restart does not restore opaque execution/session query handles.
+  Task grants, accounting and dispatch records are durable; unresolved work fails
+  closed rather than gaining a budget. Automatic whole-workflow resumption is not
+  claimed. Executor reopen and durable authority recovery are separately tested.
+- Never-delivered cleanup ACK may retain executor artifacts. There is no autonomous
+  cleanup retry queue; same-owner observation is preserved, not universal
+  availability or distributed exactly-once effects.
+- Host product must implement the private broker task.draft exchange. Live browser/
+  OpenClaw/hardware deployment was not exercised or certified.
+- Only reviewed bounded codecs and structured authority are supported: no general
+  natural-language intent compiler, semantic privacy guarantee, provider-internal
+  semantics guarantee, malicious-destination defense or side-channel proof.
+- TCB includes issuer, approval service, profile publisher, kernel data plane,
+  executor supervisor and platform/deployment/credential trust, not just a small
+  Rust module. Hardware-root prerequisites and platform-specific ignored tests
+  remain explicit.
+- Attack success, benign utility, approval burden and performance require separate
+  experiments with denominators/baselines/artifacts. Regression counts are not
+  empirical security or usability results.

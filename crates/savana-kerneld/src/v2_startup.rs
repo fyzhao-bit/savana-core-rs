@@ -1528,7 +1528,7 @@ mod native {
                 RequestIdV2::new(request_id),
                 savana_kernel_protocol::v2::Nonce32V2::new(request_nonce),
                 BootIdV2::new([0xd3; 32]),
-                deadline,
+                rollover_request_deadline(),
             );
             let agent_server_result = agent_server.join().expect("agent rollover listener thread");
             assert_eq!(
@@ -1583,7 +1583,7 @@ mod native {
             });
             let health = self
                 .ingress
-                .health(deadline)
+                .health(rollover_request_deadline())
                 .expect("ingress rollover client health");
             assert!(health.ready());
             assert_eq!(health.state(), PublicServiceStateV2::Ready);
@@ -1605,7 +1605,7 @@ mod native {
         for index in 0..connection_count {
             let result = listener.serve_one(
                 UnixMillisV2::new(50),
-                Instant::now() + Duration::from_secs(3),
+                Instant::now() + Duration::from_secs(10),
             );
             if index + 1 == connection_count {
                 return result;
@@ -1659,7 +1659,10 @@ mod native {
             .duration_since(UNIX_EPOCH)
             .expect("rollover request clock")
             .as_millis() as u64;
-        UnixMillisV2::new(now + 2_000)
+        // These fixtures do real signatures and socket I/O while other workspace
+        // tests may saturate the host. Each operation gets its own test deadline;
+        // this does not change the production client's bounded I/O timeout.
+        UnixMillisV2::new(now + 10_000)
     }
 
     #[cfg(all(test, feature = "test-support"))]

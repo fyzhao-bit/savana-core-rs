@@ -15,6 +15,7 @@ test-support = [
     "savana-agentd/test-support",
     "savana-ingressd/test-support",
     "savana-policy-core/test-support",
+    "savana-execd/intent-bound-test-support",
 ]
 macos-development-authority = [
     "savana-agentd/macos-development-authority",

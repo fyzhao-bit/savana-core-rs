@@ -268,7 +268,7 @@ impl DispatchSubjectV2 {
 
     pub fn semantic_digest(self) -> Result<Digest32V2, ProtocolError> {
         let mut encoder = minicbor::Encoder::new(Vec::new());
-        encode_dispatch_subject(&mut encoder, self)?;
+        encode_dispatch_subject(&mut encoder, self, false)?;
         Ok(domain_hash(DISPATCH_SUBJECT_DOMAIN, &encoder.into_writer()))
     }
 }
@@ -410,7 +410,20 @@ impl DispatchCoreV2 {
 
     pub fn with_task_binding(mut self, binding: DispatchTaskBindingV2) -> Self {
         self.task_binding = Some(binding);
+        // Schema 3 shares the policy owner's closed attempt-kind encoding.
+        // Schema 2's historical bare integer remains byte-for-byte unchanged.
+        self.dispatch_subject_digest = self
+            .computed_subject_digest()
+            .expect("validated fixed-size dispatch subject encodes into Vec");
         self
+    }
+
+    /// Recompute using this core's schema, rather than the legacy standalone
+    /// subject representation. Callers verifying a core must use this method.
+    pub fn computed_subject_digest(self) -> Result<Digest32V2, ProtocolError> {
+        let mut encoded = minicbor::Encoder::new(Vec::new());
+        encode_dispatch_subject(&mut encoded, self.subject, self.task_binding.is_some())?;
+        Ok(domain_hash(DISPATCH_SUBJECT_DOMAIN, &encoded.into_writer()))
     }
     pub const fn task_binding(self) -> Option<DispatchTaskBindingV2> {
         self.task_binding
@@ -1451,6 +1464,7 @@ impl<'bytes> minicbor::Decode<'bytes, V2DecodeContext> for SignedSealedExecution
 fn encode_tool_execution_binding(
     encoder: &mut minicbor::Encoder<Vec<u8>>,
     value: ToolExecutionSemanticBindingV2,
+    task_bound: bool,
 ) -> Result<(), ProtocolError> {
     encoder.array(11).map_err(ProtocolError::malformed)?;
     encode_fixed(encoder, &value.plan_revision_digest)?;
@@ -1463,12 +1477,16 @@ fn encode_tool_execution_binding(
     encode_fixed(encoder, &value.display_projection_digest)?;
     encode_fixed(encoder, &value.display_digest)?;
     encode_fixed(encoder, &value.executor_identity_digest)?;
+    if task_bound {
+        encoder.array(1).map_err(ProtocolError::malformed)?;
+    }
     encode_fixed(encoder, &value.attempt_kind)
 }
 
 fn decode_tool_execution_binding(
     decoder: &mut minicbor::Decoder<'_>,
     context: &mut V2DecodeContext,
+    task_bound: bool,
 ) -> Result<ToolExecutionSemanticBindingV2, ProtocolError> {
     expect_array(decoder, 11)?;
     ToolExecutionSemanticBindingV2::new(
@@ -1482,13 +1500,19 @@ fn decode_tool_execution_binding(
         decode_fixed(decoder, context)?,
         decode_fixed(decoder, context)?,
         decode_fixed(decoder, context)?,
-        decode_fixed(decoder, context)?,
+        {
+            if task_bound {
+                expect_array(decoder, 1)?;
+            }
+            decode_fixed(decoder, context)?
+        },
     )
 }
 
 fn encode_dispatch_subject(
     encoder: &mut minicbor::Encoder<Vec<u8>>,
     value: DispatchSubjectV2,
+    task_bound: bool,
 ) -> Result<(), ProtocolError> {
     match value {
         DispatchSubjectV2::ToolExecution {
@@ -1501,7 +1525,7 @@ fn encode_dispatch_subject(
                 .and_then(|encoder| encoder.u16(1))
                 .map_err(ProtocolError::malformed)?;
             encode_fixed(encoder, &action_intent_id)?;
-            encode_tool_execution_binding(encoder, binding)?;
+            encode_tool_execution_binding(encoder, binding, task_bound)?;
             encode_optional_fixed(encoder, approval_settlement_digest)?;
         }
         DispatchSubjectV2::FinalRelease {
@@ -1522,6 +1546,7 @@ fn encode_dispatch_subject(
 fn decode_dispatch_subject(
     decoder: &mut minicbor::Decoder<'_>,
     context: &mut V2DecodeContext,
+    task_bound: bool,
 ) -> Result<DispatchSubjectV2, ProtocolError> {
     let length = decoder
         .array()
@@ -1531,7 +1556,7 @@ fn decode_dispatch_subject(
     match (tag, length) {
         (1, 4) => DispatchSubjectV2::tool_execution(
             decode_fixed(decoder, context)?,
-            decode_tool_execution_binding(decoder, context)?,
+            decode_tool_execution_binding(decoder, context, task_bound)?,
             decode_optional_fixed(decoder, context)?,
         ),
         (2, 3) => DispatchSubjectV2::final_release(
@@ -1559,7 +1584,7 @@ fn encode_dispatch_core(
     encode_fixed(encoder, &value.durable_task_id)?;
     encode_fixed(encoder, &value.durable_run_id)?;
     encode_fixed(encoder, &value.execution_nonce)?;
-    encode_dispatch_subject(encoder, value.subject)?;
+    encode_dispatch_subject(encoder, value.subject, value.task_binding.is_some())?;
     encode_fixed(encoder, &value.dispatch_subject_digest)?;
     encode_fixed(encoder, &value.executor_identity)?;
     encode_fixed(encoder, &value.executor_key_id)?;
@@ -1587,7 +1612,7 @@ fn decode_dispatch_core(
     let durable_task_id = decode_fixed(decoder, context)?;
     let durable_run_id = decode_fixed(decoder, context)?;
     let execution_nonce = decode_fixed(decoder, context)?;
-    let subject = decode_dispatch_subject(decoder, context)?;
+    let subject = decode_dispatch_subject(decoder, context, schema == 3)?;
     let claimed_subject_digest: Digest32V2 = decode_fixed(decoder, context)?;
     let executor_identity = decode_fixed(decoder, context)?;
     let executor_key_id = decode_fixed(decoder, context)?;
@@ -1607,11 +1632,11 @@ fn decode_dispatch_core(
         executor_connector_registry_digest,
         expires_at,
     )?;
-    if claimed_subject_digest != value.dispatch_subject_digest {
-        return Err(malformed());
-    }
     if schema == 3 {
         value = value.with_task_binding(decode_fixed(decoder, context)?);
+    }
+    if claimed_subject_digest != value.dispatch_subject_digest {
+        return Err(malformed());
     }
     Ok(value)
 }

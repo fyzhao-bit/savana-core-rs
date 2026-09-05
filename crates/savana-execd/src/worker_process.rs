@@ -17,6 +17,10 @@ use crate::worker_protocol::{
 const MAX_CHILD_JOB_FRAME_BYTES: usize =
     MAX_CONNECTOR_DESCRIPTOR_BYTES + MAX_CONNECTOR_RESPONSE_BYTES + 512;
 
+#[cfg(feature = "intent-bound-test-support")]
+#[path = "intent_bound_worker_fixture.rs"]
+pub(crate) mod intent_bound_fixture;
+
 enum ChildInputV2 {
     Prepare(Zeroizing<Vec<u8>>),
     Decode { response: Zeroizing<Vec<u8>> },

@@ -351,6 +351,10 @@ impl UnsignedToolDescriptorV2 {
         &self.provider_tool_id
     }
 
+    pub const fn provider_identity_digest(&self) -> Digest32V2 {
+        self.provider_identity_digest
+    }
+
     pub const fn action_template(&self) -> ActionTemplateIdV2 {
         self.action_template
     }

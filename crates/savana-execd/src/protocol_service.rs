@@ -311,6 +311,7 @@ impl ExecdProtocolServiceV2 {
                             connector_dispatch_for_subject(
                                 guard,
                                 envelope.payload().core().subject(),
+                                envelope.payload().core().task_binding().is_some(),
                             )
                         })
                         .transpose()?
@@ -464,7 +465,13 @@ impl ExecdProtocolServiceV2 {
                 };
                 let connector = registry_guard
                     .as_ref()
-                    .map(|guard| connector_dispatch_for_subject(guard, core.subject()))
+                    .map(|guard| {
+                        connector_dispatch_for_subject(
+                            guard,
+                            core.subject(),
+                            core.task_binding().is_some(),
+                        )
+                    })
                     .transpose()?
                     .flatten();
                 let envelope = encode_signed_sealed_execution_envelope_v2(request.envelope())
@@ -882,10 +889,19 @@ fn verify_query_binding(
 fn connector_dispatch_for_subject(
     guard: &ExecdConnectorRegistryGuardV2<'_>,
     subject: DispatchSubjectV2,
+    task_bound: bool,
 ) -> Result<Option<PreparedConnectorDispatchV2>, ExecdProtocolServiceErrorV2> {
     let DispatchSubjectV2::ToolExecution { binding, .. } = subject else {
         return Ok(None);
     };
+    if task_bound {
+        return Ok(Some(PreparedConnectorDispatchV2 {
+            descriptor: guard
+                .resolve_task_tool_connector(binding.tool_descriptor_digest())
+                .map_err(|_| ExecdProtocolServiceErrorV2::Binding)?,
+            active_host_allowlist: guard.active_host_allowlist().to_vec(),
+        }));
+    }
     let connector_id = binding.destination_digest();
     match guard.resolve_active_tool_connector(connector_id, binding.tool_descriptor_digest()) {
         Ok(descriptor) => Ok(Some(PreparedConnectorDispatchV2 {

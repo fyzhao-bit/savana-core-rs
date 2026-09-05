@@ -168,6 +168,42 @@ fn dispatch_is_a_typed_signed_core_and_hpke_envelope() {
     )
     .unwrap();
     let bound = core.with_task_binding(task_binding);
+    // Independent subject encoding oracle: legacy uses bare 20; schema 3 uses
+    // the policy owner's one-element closed attempt-kind tuple [20].
+    let mut legacy_binding = minicbor::to_vec(binding).unwrap();
+    assert_eq!(legacy_binding.pop(), Some(20));
+    for (candidate, tail) in [(core, vec![20]), (bound, vec![0x81, 20])] {
+        use sha2::{Digest as _, Sha256};
+        let mut expected = minicbor::Encoder::new(Vec::new());
+        expected
+            .array(4)
+            .unwrap()
+            .u16(1)
+            .unwrap()
+            .bytes(&[21; 32])
+            .unwrap();
+        expected.writer_mut().extend_from_slice(&legacy_binding);
+        expected.writer_mut().extend_from_slice(&tail);
+        expected.null().unwrap();
+        let digest: [u8; 32] = Sha256::new()
+            .chain_update(b"SAVANA_DISPATCH_SUBJECT_V2\0")
+            .chain_update(expected.into_writer())
+            .finalize()
+            .into();
+        assert_eq!(*candidate.dispatch_subject_digest().as_bytes(), digest);
+        assert_eq!(
+            candidate.computed_subject_digest().unwrap(),
+            candidate.dispatch_subject_digest()
+        );
+    }
+    assert_eq!(
+        core.dispatch_subject_digest(),
+        subject.semantic_digest().unwrap()
+    );
+    assert_ne!(
+        bound.dispatch_subject_digest(),
+        core.dispatch_subject_digest()
+    );
     assert_ne!(
         core.semantic_digest().unwrap(),
         bound.semantic_digest().unwrap()

@@ -3,6 +3,13 @@
 #[cfg(all(feature = "macos-development-authority", not(debug_assertions)))]
 compile_error!("macos-development-authority is forbidden in release builds");
 
+#[cfg(all(feature = "intent-bound-test-support", not(debug_assertions)))]
+compile_error!("intent-bound-test-support is forbidden in release builds");
+
+#[cfg(feature = "intent-bound-test-support")]
+#[doc(hidden)]
+pub mod intent_bound_test_support;
+
 #[allow(dead_code)] // Wired by the production execd runtime owner.
 mod effect_gate;
 mod runtime;
@@ -1418,8 +1425,7 @@ fn verify_protocol_dispatch_envelope(
     if payload.dispatch_core_digest() != dispatch_core_digest
         || core.dispatch_subject_digest()
             != core
-                .subject()
-                .semantic_digest()
+                .computed_subject_digest()
                 .map_err(|_| ExecdErrorV2::NonCanonicalEnvelope)?
     {
         return Err(ExecdErrorV2::NonCanonicalEnvelope);

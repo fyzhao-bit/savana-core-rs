@@ -1297,8 +1297,30 @@ impl DurableG4StateV2 {
             KernelDispatchStateV2::FailedNoEffect => ActionIntentStateV2::FailedNoEffect,
             KernelDispatchStateV2::Indeterminate => ActionIntentStateV2::Indeterminate,
         };
-        next.intents
-            .advance_verified(action_intent_id, intent_state)?;
+        let current_intent_state = next
+            .intents
+            .intents
+            .iter()
+            .find(|intent| intent.record.action_intent_id == action_intent_id)
+            .ok_or(G4Error::IntentNotFound)?
+            .current_state;
+        // A verified terminal receipt can be the first response observed after
+        // prepare (the dispatch/effect-start acknowledgement may have been lost).
+        // Advance both intent stages in this same atomic snapshot; never invent
+        // a separate effect-start receipt or loosen ordinary intent transitions.
+        if verified_terminal
+            && current_intent_state == ActionIntentStateV2::DispatchPrepared
+            && intent_state == ActionIntentStateV2::Succeeded
+        {
+            next.intents
+                .advance_verified(action_intent_id, ActionIntentStateV2::Dispatching)?;
+        }
+        // Task, dispatch and quota reconciliation above have already verified
+        // the exact replay. A repeated receipt must not fail at the intent index.
+        if current_intent_state != intent_state {
+            next.intents
+                .advance_verified(action_intent_id, intent_state)?;
+        }
         self.commit(next)?;
         Ok(state)
     }

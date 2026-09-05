@@ -256,6 +256,14 @@ impl DurableVaultServiceV2 {
         self.mutate(|service| service.ingest_verified(material, now))
     }
 
+    pub fn create_pending_tool_result(
+        &mut self,
+        material: VaultIngressMaterialV2,
+        now: UnixMillisV2,
+    ) -> Result<PendingVaultSegmentV2, VaultErrorV2> {
+        self.mutate(|service| service.create_pending_tool_result(material, now))
+    }
+
     pub fn commit_ingress(
         &mut self,
         pending: PendingVaultSegmentV2,

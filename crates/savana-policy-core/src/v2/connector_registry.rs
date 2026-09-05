@@ -1093,6 +1093,50 @@ impl ConnectorRegistryStateV2 {
         self.registered.values().map(Arc::as_ref)
     }
 
+    /// New task-bound requests identify a route through the exact signed tool
+    /// descriptor, not the business-destination projection. Require a unique
+    /// registered descriptor, its pinned connector identity (including tier/name),
+    /// current activity and the closed HTTPS profile's exact target. No fallback
+    /// to a deployment transport or an inactive/renamed/promoted connector.
+    pub fn resolve_task_tool_connector(
+        &self,
+        tool: Digest32V2,
+    ) -> Result<&ConnectorDescriptorV2, G4Error> {
+        let mut found = None;
+        for connector in self.registered_connectors() {
+            for descriptor in connector.tool_descriptors() {
+                if descriptor_digest_v2(descriptor)? != tool {
+                    continue;
+                }
+                if found.is_some()
+                    || descriptor.provider_identity_digest() != connector.connector_id()
+                    || !self.contains_connector(connector.connector_id())
+                {
+                    return Err(G4Error::InvalidDescriptor);
+                }
+                let profile = descriptor.require_business_profile()?;
+                let ConnectorTransportV2::Https {
+                    canonical_url,
+                    tls_identity_pin,
+                } = connector.transport()
+                else {
+                    return Err(G4Error::InvalidDescriptor);
+                };
+                if profile.target_identity()
+                    != savana_kernel_protocol::v2::business_target_identity_v2(
+                        canonical_url.as_str(),
+                        *tls_identity_pin,
+                    )
+                    .map_err(|_| G4Error::InvalidDescriptor)?
+                {
+                    return Err(G4Error::InvalidDescriptor);
+                }
+                found = Some(connector);
+            }
+        }
+        found.ok_or(G4Error::InvalidDescriptor)
+    }
+
     pub fn deltas(&self) -> &[ConnectorRegistryDeltaV2] {
         &self.deltas
     }
@@ -1438,11 +1482,15 @@ mod tests {
     }
 
     fn test_tool(seed: u8) -> UnsignedToolDescriptorV2 {
+        test_tool_for_provider(seed, test_digest(seed))
+    }
+
+    fn test_tool_for_provider(seed: u8, provider: Digest32V2) -> UnsignedToolDescriptorV2 {
         let contract = ExecutorIdempotencyContractV2::ConnectorIdempotentByExecutionNonce;
         UnsignedToolDescriptorV2::from_verified_manifest(
             2,
             VersionV2::new(1, 0, 0),
-            test_digest(seed),
+            provider,
             IdentifierV2::new(format!("tool-{seed}")).unwrap(),
             ActionTemplateIdV2::new(u32::from(seed) + 1),
             ToolClassIdV2::new(u32::from(seed) + 2),
@@ -1516,6 +1564,105 @@ mod tests {
         );
         delta.authority_signature = authority.sign(signature_digest.as_bytes()).to_bytes();
         encode_delta(&delta).unwrap()
+    }
+
+    #[test]
+    fn strict_task_route_rechecks_profile_activity_and_signed_removal() {
+        use savana_kernel_protocol::v2::{
+            business_target_identity_v2, ActionCodecProfileV2, BusinessFieldRoleV2,
+            BusinessFieldTypeV2, BusinessFieldV2, BusinessMagnitudeV2, BusinessProfileV2,
+            TaskEffectV2,
+        };
+        let name = BoundedConnectorNameV2::new("task-reader").unwrap();
+        let url = BoundedConnectorUrlV2::new("https://inside.example/mcp").unwrap();
+        let transport = ConnectorTransportV2::https(url.clone(), test_digest(2)).unwrap();
+        let id = connector_id_v2(ConnectorTierV2::UserRegistered, &name, &transport).unwrap();
+        let tool = test_tool_for_provider(3, id);
+        let profile = BusinessProfileV2::new(
+            ActionCodecProfileV2::McpToolsCallJsonV1,
+            "tool-3",
+            business_target_identity_v2(url.as_str(), test_digest(2)).unwrap(),
+            test_digest(4),
+            TaskEffectV2::Read,
+            BusinessMagnitudeV2::FixedCount(1),
+            vec![
+                BusinessFieldV2::new(
+                    "body",
+                    BusinessFieldRoleV2::Payload,
+                    BusinessFieldTypeV2::Text,
+                )
+                .unwrap(),
+                BusinessFieldV2::new(
+                    "file",
+                    BusinessFieldRoleV2::Resource,
+                    BusinessFieldTypeV2::Text,
+                )
+                .unwrap(),
+                BusinessFieldV2::new(
+                    "to",
+                    BusinessFieldRoleV2::Destination,
+                    BusinessFieldTypeV2::Text,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let authority = SigningKey::from_bytes(&[0xe1; 32]);
+        let genesis = test_digest(0xe2);
+        for with_profile in [false, true] {
+            let tool = if with_profile {
+                tool.clone().with_business_profile(profile.clone()).unwrap()
+            } else {
+                tool.clone()
+            };
+            let digest = descriptor_digest_v2(&tool).unwrap();
+            let descriptor = ConnectorDescriptorV2::from_decoded(
+                id,
+                name.clone(),
+                ConnectorTierV2::UserRegistered,
+                transport.clone(),
+                vec![tool],
+                EffectSetV2::READ,
+                ConnectorStructuralRoleV2::Source,
+                1,
+            )
+            .unwrap();
+            let add = signed_add_delta(1, genesis, descriptor, &authority);
+            let mut state = ConnectorRegistryStateV2::from_verified_genesis(
+                genesis,
+                authority.verifying_key().to_bytes(),
+                vec![BoundedConnectorHostV2::new("inside.example").unwrap()],
+                vec![],
+            )
+            .unwrap();
+            state.apply_canonical_delta(&add).unwrap();
+            assert_eq!(
+                state.resolve_task_tool_connector(digest).is_ok(),
+                with_profile
+            );
+            assert!(state
+                .resolve_task_tool_connector(test_digest(0xfe))
+                .is_err());
+            let mut narrowed = ConnectorRegistryStateV2::from_verified_genesis(
+                genesis,
+                authority.verifying_key().to_bytes(),
+                vec![],
+                vec![],
+            )
+            .unwrap();
+            narrowed.replay_canonical_delta(&add).unwrap();
+            assert!(narrowed.contains_registered_connector(id));
+            assert!(!narrowed.contains_connector(id));
+            assert!(narrowed.resolve_task_tool_connector(digest).is_err());
+            let remove = state.prepare_remove_delta(id, 2).unwrap();
+            let signature = authority
+                .sign(remove.signature_digest().as_bytes())
+                .to_bytes();
+            state
+                .apply_canonical_delta(remove.finalize(signature).unwrap().canonical_bytes())
+                .unwrap();
+            assert!(state.resolve_task_tool_connector(digest).is_err());
+        }
     }
 
     #[test]

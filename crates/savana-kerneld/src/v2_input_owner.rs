@@ -2087,6 +2087,70 @@ pub(crate) mod tests {
         (owner, begun.session(), finalized.input_commitment())
     }
 
+    /// Uses the real input transaction with a fixture-authenticated subject.
+    /// Authentication/hardware ceremony itself is tested separately.
+    pub(crate) fn finalized_input_for_authority_fixture(
+        task: savana_kernel_protocol::v2::DurableTaskIdV2,
+        installation: Digest32V2,
+        principal: savana_kernel_protocol::v2::PrincipalIdV2,
+        manifest: Digest32V2,
+        bytes: &[u8],
+    ) -> (KernelInputOwnerV2, super::InputSessionHandleV2, Digest32V2) {
+        let mut owner = KernelInputOwnerV2::new(4, 4096).unwrap();
+        let handle = IngressUiAuthorizationHandleV2::from_authority_entropy([0x41; 32]).unwrap();
+        let mut auth = super::KernelVerifiedUiAuthorizationV2::for_test();
+        auth.durable_task_id = Some(task);
+        auth.installation_id = installation;
+        auth.authenticated_principal = principal;
+        auth.active_state_manifest_digest = manifest;
+        owner
+            .register_verified_ui_authorization(handle, auth)
+            .unwrap();
+        let begun = owner
+            .begin(
+                BeginInputRequestV2::new(
+                    handle,
+                    ContentKindV2::ChatText,
+                    bytes.len() as u64,
+                    Some(Digest32V2::new(Sha256::digest(bytes).into())),
+                )
+                .unwrap(),
+                manifest,
+                7,
+                UnixMillisV2::new(100),
+            )
+            .unwrap();
+        let ack = owner
+            .append(append_request(&begun, 0, bytes.to_vec()))
+            .unwrap();
+        let channel = InputChannelCommitmentV2::new(
+            InputChannelV2::ChatText,
+            1,
+            0,
+            bytes.len() as u64,
+            ack.cumulative_digest(),
+        )
+        .unwrap();
+        let (finalized, ()) = owner
+            .finalize_with(
+                savana_kernel_protocol::v2::FinalizeInputRequestV2::new(
+                    begun.session(),
+                    vec![channel],
+                    InputSourceProvenanceV2::direct(
+                        InputSourceKindV2::Chat,
+                        bytes.len() as u64,
+                        Digest32V2::new(Sha256::digest(bytes).into()),
+                        VersionV2::new(1, 0, 0),
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+                |_| Ok::<(), std::convert::Infallible>(()),
+            )
+            .unwrap();
+        (owner, begun.session(), finalized.input_commitment())
+    }
+
     pub(crate) fn fresh_task_recovery_authentication(
         owner: &mut KernelInputOwnerV2,
         entropy: u8,

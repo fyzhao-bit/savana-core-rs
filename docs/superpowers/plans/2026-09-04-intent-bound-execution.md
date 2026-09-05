@@ -1,5 +1,29 @@
 # Intent-bound Execution Implementation Plan
 
+## Current closure record (2026-09-05)
+
+This table supersedes the historical checklists/checkpoints below. Those are
+retained as an execution history, not as the current incomplete-work inventory.
+The bounded first increment uses complete contract domains only; general registry
+candidate inference, natural-language compilation, full kerneld session resumption
+and live hardware/product deployment are not claimed.
+
+- [x] Tasks 1–3: closed protocol, joint matching/separate endorsements, atomic task accounting.
+- [x] Tasks 4–5: native authenticated issuance/amendment/revocation/recovery; actual planner/proposal/approval/dispatch integration.
+- [x] Task 6: reviewed request/response profiles, actual worker/provider boundary and terminal evidence; tool routing and schema parity verified.
+- [x] Task 7: readable exact approval, context/editor, Rust/Python facade and receiver-before-planning integration; reviewed V2 manifest refreshed.
+- [x] Task 8: native nine-case tool and seven-case release paths, dynamic dependent task, executor reopen/ACK-loss recovery, bounded 1,440-trace accounting model, default workspace and feature coverage, final scoped source review.
+- [ ] Task 9: revise paper and supporting summaries, compile/render and verify.
+
+Detailed commands, failed runs, platform prerequisites and limits are in
+`docs/verification/intent-bound-execution.md`; mechanisms map to executable
+evidence in `docs/verification/intent-bound-claims.md`. Feature coverage combines
+the passed 308.48-second attack matrix with the clean sequential feature rerun
+which filtered only that already-tested replay case. No unexecuted test is counted
+as passed. Code changes stay local; no deployment or push.
+
+## Historical implementation checklist
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement the approved task-authorization/selection/execution design in the existing Rust production path, verify it, then revise the paper to match evidence.

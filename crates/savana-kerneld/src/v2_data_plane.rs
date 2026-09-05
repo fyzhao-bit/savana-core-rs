@@ -355,7 +355,7 @@ impl KernelIngressCommitSinkV2 for ProductionKernelDataPlaneV2 {
         .map_err(map_vault_error)?;
         let pending = self
             .vault
-            .create_pending_ingress(ingress, now)
+            .create_pending_tool_result(ingress, now)
             .map_err(map_vault_error)?;
         let live = self
             .vault

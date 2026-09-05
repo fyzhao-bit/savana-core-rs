@@ -21,6 +21,7 @@ pub use durable::{
 
 const VAULT_SEGMENT_DOMAIN: &[u8] = b"SAVANA_VAULT_SEGMENT_V2\0";
 const VAULT_INTERNAL_ID_DOMAIN: &[u8] = b"SAVANA_VAULT_SEGMENT_INTERNAL_ID_V2\0";
+const TOOL_RESULT_INTERNAL_ID_DOMAIN: &[u8] = b"SAVANA_VAULT_TOOL_RESULT_INTERNAL_ID_V2\0";
 const CAPABILITY_HASH_DOMAIN: &[u8] = b"SAVANA_VAULT_CAPABILITY_HASH_V2\0";
 const CAPABILITY_DERIVATION_DOMAIN: &[u8] = b"SAVANA_VAULT_CAPABILITY_DERIVATION_V2\0";
 const DISPATCH_SUBJECT_DOMAIN: &[u8] = b"SAVANA_DISPATCH_SUBJECT_V2\0";
@@ -685,6 +686,26 @@ impl VaultServiceV2 {
         material: VaultIngressMaterialV2,
         now: UnixMillisV2,
     ) -> Result<PendingVaultSegmentV2, VaultErrorV2> {
+        self.create_pending_material(material, now, false)
+    }
+
+    /// Kernel-internal result insertion, after exact executor completion proof
+    /// verification. Each commit has a separate domain-separated segment; it
+    /// never replaces the task's immutable original ingress. Not an agent API.
+    pub fn create_pending_tool_result(
+        &mut self,
+        material: VaultIngressMaterialV2,
+        now: UnixMillisV2,
+    ) -> Result<PendingVaultSegmentV2, VaultErrorV2> {
+        self.create_pending_material(material, now, true)
+    }
+
+    fn create_pending_material(
+        &mut self,
+        material: VaultIngressMaterialV2,
+        now: UnixMillisV2,
+        tool_result: bool,
+    ) -> Result<PendingVaultSegmentV2, VaultErrorV2> {
         self.accept_time(now)?;
         if now.get() >= material.expires_at.get() {
             return Err(VaultErrorV2::Expired);
@@ -694,7 +715,11 @@ impl VaultServiceV2 {
         // segment. The capability remains secret because it is derived with
         // the persisted, installation-scoped capability key.
         let internal_id = domain_hash_many(
-            VAULT_INTERNAL_ID_DOMAIN,
+            if tool_result {
+                TOOL_RESULT_INTERNAL_ID_DOMAIN
+            } else {
+                VAULT_INTERNAL_ID_DOMAIN
+            },
             &[
                 self.installation_id.as_bytes(),
                 self.active_state_manifest_digest.as_bytes(),
@@ -718,11 +743,27 @@ impl VaultServiceV2 {
             internal_id,
             &material,
         );
-        if let Some(existing) = self
-            .segments
-            .iter()
-            .find(|segment| segment.durable_task_id == material.durable_task_id)
-        {
+        if let Some(existing) = self.segments.iter().find(|segment| {
+            if tool_result {
+                segment.internal_id == internal_id
+            } else {
+                // Result records are recognized by their separate, bound
+                // identity domain, without changing historical ingress IDs
+                // or rewriting the encrypted snapshot format.
+                segment.durable_task_id == material.durable_task_id
+                    && segment.internal_id
+                        != domain_hash_many(
+                            TOOL_RESULT_INTERNAL_ID_DOMAIN,
+                            &[
+                                self.installation_id.as_bytes(),
+                                self.active_state_manifest_digest.as_bytes(),
+                                segment.durable_task_id.as_bytes(),
+                                segment.durable_run_id.as_bytes(),
+                                segment.input_commit_digest.as_bytes(),
+                            ],
+                        )
+            }
+        }) {
             if existing.internal_id != internal_id
                 || existing.durable_run_id != material.durable_run_id
                 || existing.authenticated_principal != material.authenticated_principal
@@ -1951,6 +1992,87 @@ mod tests {
             UnixMillisV2::new(20_000),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn durable_tool_results_are_distinct_replayable_and_cannot_replace_original_input() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.path().join("vault-state-v2.cbor");
+        let namespace = DurableVaultNamespaceV2::from_verified_installation(
+            Digest32V2::new([1; 32]),
+            Digest32V2::new([0x70; 32]),
+        )
+        .unwrap();
+        let anchor = TestRollbackAnchor::default();
+        let mut owner = DurableVaultServiceV2::open(
+            &path,
+            [0x71; 32],
+            namespace,
+            Box::new(anchor.clone()),
+            service(),
+        )
+        .unwrap();
+        let original = owner
+            .create_pending_ingress(ingress(b"original"), UnixMillisV2::new(100))
+            .unwrap();
+        owner
+            .commit_ingress(original, UnixMillisV2::new(100))
+            .unwrap();
+        let mut documents = Vec::new();
+        for seed in [7, 8] {
+            let mut result = ingress(&[seed]);
+            result.input_commit_digest = Digest32V2::new([seed; 32]);
+            let pending = owner
+                .create_pending_tool_result(result.clone(), UnixMillisV2::new(101))
+                .unwrap();
+            let live = owner
+                .commit_ingress(pending, UnixMillisV2::new(101))
+                .unwrap();
+            documents.push(
+                owner
+                    .issue_masked_document(&live, access(9), UnixMillisV2::new(101))
+                    .unwrap(),
+            );
+            let replay = owner
+                .create_pending_tool_result(result.clone(), UnixMillisV2::new(101))
+                .unwrap();
+            assert_eq!(replay.internal_id, pending.internal_id);
+            result.sensitive_bytes = Zeroizing::new(b"substituted".to_vec());
+            assert!(matches!(
+                owner.create_pending_tool_result(result, UnixMillisV2::new(101)),
+                Err(VaultErrorV2::StateConflict)
+            ));
+        }
+        assert_eq!(owner.segment_count(), 3);
+        assert!(matches!(
+            owner.create_pending_ingress(ingress(b"replacement"), UnixMillisV2::new(103)),
+            Err(VaultErrorV2::StateConflict)
+        ));
+        drop(owner);
+        let mut owner =
+            DurableVaultServiceV2::open(&path, [0x71; 32], namespace, Box::new(anchor), service())
+                .unwrap();
+        assert_eq!(owner.segment_count(), 3);
+        for (document, seed) in documents.iter().zip([7, 8]) {
+            assert_eq!(
+                owner
+                    .read_agent_bytes_for_authenticated_agent(
+                        document,
+                        BootIdV2::new([3; 32]),
+                        ServiceIdentityV2::new([8; 32]),
+                        Digest32V2::new([9; 32]),
+                        UnixMillisV2::new(104),
+                    )
+                    .unwrap()
+                    .as_slice(),
+                &[seed]
+            );
+        }
+        let replay = owner
+            .create_pending_ingress(ingress(b"original"), UnixMillisV2::new(104))
+            .unwrap();
+        assert_eq!(replay.internal_id, original.internal_id);
     }
 
     fn release_material(seed: u8) -> VaultReleaseMaterialV2 {
