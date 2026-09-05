@@ -162,7 +162,7 @@ impl Session {
         )
     }
 
-    fn run_approval(
+    pub(crate) fn run_approval(
         &mut self,
         transfer: ApprovalDisplayAuthenticationTransferCapabilityV2,
         source_origin: BrowserOrigin,

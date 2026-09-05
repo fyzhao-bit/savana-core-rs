@@ -66,17 +66,18 @@ the SDK does not create them.
 
 ## Public Python surface
 
-The product surface has exactly eighteen public types:
+The intent-bound branch product surface has twenty public types:
 
 | Category | Public types |
 | --- | --- |
 | Connection and lifetime | `Identity`, `Client`, `Session` |
 | Values | `Handle`, `MaskedView`, `Plan`, `PlanStep`, `ApprovalRequest`, `ExecutionResult`, `ConnectorDescriptor` |
+| Task data and observations | `TaskAuthorizationDraft`, `TaskAuthorizationReceipt` |
 | Choices | `IntentPrivacy`, `ContentKind` |
 | Loop control | `RunLimits`, `AgentEvent` |
 | Errors | `SavanaError`, `AuthError`, `ApprovalDenied`, `PolicyRefused` |
 
-There are exactly fifteen business methods:
+There are eighteen business methods:
 
 | # | Method | Result and implemented meaning |
 | ---: | --- | --- |
@@ -95,18 +96,37 @@ There are exactly fifteen business methods:
 | 13 | `Session.list_connectors()` | Return session-bound handles for the authoritative connector snapshot. |
 | 14 | `Session.revoke(document)` | Revoke the supplied document handle. |
 | 15 | `Session.close()` | Close the existing agent session; repeated facade closes return `None`. |
+| 16 | `Session.establish_task_authorization(draft)` | Submit exact structured data on finalized authenticated ingress; returns a kernel receipt observation. |
+| 17 | `Session.approve_task_authorization(draft, approval)` | Prepare, authenticate and approve an exact task contract under purpose `task_authorization`, then commit its settlement; returns a receipt observation. |
+| 18 | `Session.revoke_task_authorization(draft)` | Revoke the exact current task draft on authenticated ingress; returns its authorization digest as 32 bytes. |
 
-Two supporting value operations are deliberately inventoried separately:
+Three supporting value operations are deliberately inventoried separately:
 
 | Supporting operation | Meaning |
 | --- | --- |
 | `ConnectorDescriptor.load(path)` | Read, bound, parse, and validate a canonical connector deployment artifact in Rust. |
 | `RunLimits.cancel()` | Set the shared cancellation flag so the loop starts no new service request. |
+| `TaskAuthorizationDraft.from_canonical_bytes(bytes)` | Validate bounded canonical draft schema 1 as untrusted data; does not sign or establish authority. |
 
 They are not `Identity`, `Client`, or `Session` business workflows and do not
-increase the fixed count of fifteen. Constructors, properties such as
+increase the count of eighteen. Constructors, properties such as
 `Session.initial_document`, enum members, and async context-manager methods are
 also not counted as business methods.
+
+Task receipt properties `request_digest` and `authorization_digest` are 32-byte
+observations, not transferable execution authority. Rust pins the issuance request
+identity and refuses a mismatching receipt, wrong approval purpose, unknown schema
+or noncanonical draft. The fixed Ingress routes are `/v2/task/establish`,
+`/v2/task/approval/prepare`, `/v2/task/approval/commit`, and `/v2/task/revoke`.
+The latter routes require the same authenticated ingress tab; an Agent session
+without finalized ingress cannot call them. Transport uncertainty closes the SDK
+session without blindly resubmitting a grant under a new nonce. Task approval is
+not a way to expand a single action's consent.
+
+Current branch limitation: these are implemented transport/ceremony workflows,
+not a finished contract editor or fresh-session recovery UI. Final-release and
+deployment integration remain incomplete. Ordinary `ingest_text` does not infer
+a task contract, and no automatic natural-language authority compiler is claimed.
 
 ## Opaque values and truthful projections
 
@@ -307,8 +327,8 @@ git diff 00c57bc -- crates/savana-agentd crates/savana-ingressd \
   crates/savana-approvald crates/savana-kerneld crates/savana-execd
 ```
 
-The Python API tests inventory the exact eighteen types, fifteen business
-methods, the two supporting operations, callback behavior, ingestion `None`
+The Python API tests inventory the twenty types, eighteen business
+methods, the three supporting operations, callback behavior, ingestion `None`
 result, opaque values, redaction, async worker behavior, and close semantics.
 The example above is syntax-compiled during final documentation verification;
 the API calls and callback shapes are covered by those binding tests.

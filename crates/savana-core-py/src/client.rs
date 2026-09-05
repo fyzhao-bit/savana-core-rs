@@ -140,6 +140,7 @@ fn purpose_name(purpose: ApprovalPurpose) -> &'static str {
         ApprovalPurpose::ToolExecution => "tool_execution",
         ApprovalPurpose::FinalRelease => "final_release",
         ApprovalPurpose::ConnectorRegistration => "connector_registration",
+        ApprovalPurpose::TaskAuthorization => "task_authorization",
     }
 }
 
@@ -737,6 +738,44 @@ impl PyConnectorDescriptor {
     }
 }
 
+#[pyclass(name = "TaskAuthorizationDraft", module = "savana_core", frozen)]
+struct PyTaskAuthorizationDraft {
+    inner: savana_client::TaskAuthorizationDraft,
+}
+
+#[pymethods]
+impl PyTaskAuthorizationDraft {
+    #[staticmethod]
+    fn from_canonical_bytes(bytes: &[u8]) -> PyResult<Self> {
+        savana_client::TaskAuthorizationDraft::from_canonical_bytes(bytes)
+            .map(|inner| Self { inner })
+            .map_err(map_client_error)
+    }
+    fn __repr__(&self) -> &'static str {
+        "TaskAuthorizationDraft(<untrusted, redacted>)"
+    }
+}
+
+#[pyclass(name = "TaskAuthorizationReceipt", module = "savana_core", frozen)]
+struct PyTaskAuthorizationReceipt {
+    inner: savana_client::TaskAuthorizationReceipt,
+}
+
+#[pymethods]
+impl PyTaskAuthorizationReceipt {
+    #[getter]
+    fn request_digest<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, self.inner.request_digest())
+    }
+    #[getter]
+    fn authorization_digest<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, self.inner.authorization_digest())
+    }
+    fn __repr__(&self) -> &'static str {
+        "TaskAuthorizationReceipt(<observation>)"
+    }
+}
+
 #[pyclass(name = "RunLimits", module = "savana_core", frozen)]
 struct PyRunLimits {
     inner: ClientRunLimits,
@@ -1258,6 +1297,70 @@ impl PySession {
         Self::finish_operation(result, self.ingress_callback_errors.as_ref())
     }
 
+    fn establish_task_authorization(
+        &self,
+        py: Python<'_>,
+        draft: &PyTaskAuthorizationDraft,
+    ) -> PyResult<PyTaskAuthorizationReceipt> {
+        let draft = draft.inner.clone();
+        let inner = self.inner.clone();
+        let result = py.allow_threads(move || {
+            let mut state = Self::try_state(inner.as_ref())?;
+            match &mut *state {
+                SessionState::Live(session) => session
+                    .establish_task_authorization(&draft)
+                    .map(|inner| PyTaskAuthorizationReceipt { inner }),
+                #[cfg(debug_assertions)]
+                SessionState::Debug(_) => Err(ClientError::InvalidState),
+            }
+        });
+        Self::finish(result)
+    }
+
+    fn approve_task_authorization(
+        &self,
+        py: Python<'_>,
+        draft: &PyTaskAuthorizationDraft,
+        approval: Py<PyAny>,
+    ) -> PyResult<PyTaskAuthorizationReceipt> {
+        let draft = draft.inner.clone();
+        let errors = Arc::new(CallbackErrors::default());
+        let callback = PythonApproval {
+            callback: approval,
+            errors: errors.clone(),
+        };
+        let inner = self.inner.clone();
+        let result = py.allow_threads(move || {
+            let mut state = Self::try_state(inner.as_ref())?;
+            match &mut *state {
+                SessionState::Live(session) => session
+                    .approve_task_authorization(&draft, &callback)
+                    .map(|inner| PyTaskAuthorizationReceipt { inner }),
+                #[cfg(debug_assertions)]
+                SessionState::Debug(_) => Err(ClientError::InvalidState),
+            }
+        });
+        Self::finish_operation(result, errors.as_ref())
+    }
+
+    fn revoke_task_authorization<'py>(
+        &self,
+        py: Python<'py>,
+        draft: &PyTaskAuthorizationDraft,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let draft = draft.inner.clone();
+        let inner = self.inner.clone();
+        let result = py.allow_threads(move || {
+            let mut state = Self::try_state(inner.as_ref())?;
+            match &mut *state {
+                SessionState::Live(session) => session.revoke_task_authorization(&draft),
+                #[cfg(debug_assertions)]
+                SessionState::Debug(_) => Err(ClientError::InvalidState),
+            }
+        });
+        Self::finish(result).map(|digest| PyBytes::new_bound(py, &digest))
+    }
+
     fn read_view(&self, py: Python<'_>, handle: &PyHandle) -> PyResult<PyMaskedView> {
         let handle = handle.live_arc()?;
         let inner = self.inner.clone();
@@ -1731,6 +1834,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyApprovalRequest>()?;
     m.add_class::<PyExecutionResult>()?;
     m.add_class::<PyConnectorDescriptor>()?;
+    m.add_class::<PyTaskAuthorizationDraft>()?;
+    m.add_class::<PyTaskAuthorizationReceipt>()?;
     m.add_class::<PyRunLimits>()?;
     m.add_class::<PyAgentEvent>()?;
     #[cfg(debug_assertions)]

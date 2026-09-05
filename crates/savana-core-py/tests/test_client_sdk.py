@@ -16,6 +16,8 @@ CORE_TYPES = {
     "Identity",
     "Client",
     "Session",
+    "TaskAuthorizationDraft",
+    "TaskAuthorizationReceipt",
     "Handle",
     "MaskedView",
     "Plan",
@@ -36,6 +38,9 @@ CORE_TYPES = {
 SESSION_METHODS = {
     "ingest_text",
     "ingest_file",
+    "establish_task_authorization",
+    "approve_task_authorization",
+    "revoke_task_authorization",
     "read_view",
     "run_planner",
     "execute",
@@ -49,10 +54,11 @@ SESSION_METHODS = {
 }
 
 # These are value construction/control helpers, not Identity/Client/Session
-# business workflows, so they are inventoried separately from the fixed 15.
+# business workflows, so they are inventoried separately from the 18 workflows.
 SUPPORTING_VALUE_METHODS = {
     savana.ConnectorDescriptor: {"load"},
     savana.RunLimits: {"cancel"},
+    savana.TaskAuthorizationDraft: {"from_canonical_bytes"},
 }
 
 
@@ -62,6 +68,16 @@ def public_methods(cls):
         for name in vars(cls)
         if not name.startswith("_") and callable(getattr(cls, name))
     }
+
+
+def test_task_authorization_data_cannot_construct_authority_or_bypass_validation():
+    for malformed in (b"", b"\x80", b"\x81\x01", b"\x9f\xff"):
+        with pytest.raises(savana.SavanaError):
+            savana.TaskAuthorizationDraft.from_canonical_bytes(malformed)
+    with pytest.raises(TypeError):
+        savana.TaskAuthorizationReceipt()
+    assert not hasattr(savana.TaskAuthorizationDraft, "sign")
+    assert not hasattr(savana.TaskAuthorizationReceipt, "authorize")
 
 
 def scripted_session(*, delay_seconds=0.0):
@@ -81,7 +97,7 @@ def test_public_surface_is_exactly_the_approved_types_and_business_methods():
     assert public_methods(savana.Identity) == {"load"}
     assert public_methods(savana.Client) == {"session", "enroll"}
     assert public_methods(savana.Session) == SESSION_METHODS
-    assert 1 + 2 + len(SESSION_METHODS) == 15
+    assert 1 + 2 + len(SESSION_METHODS) == 18
     for value_type, methods in SUPPORTING_VALUE_METHODS.items():
         assert public_methods(value_type) == methods
     assert "fetch" not in vars(savana.Session)

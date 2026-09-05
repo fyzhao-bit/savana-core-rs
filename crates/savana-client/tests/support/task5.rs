@@ -272,3 +272,67 @@ pub fn approval_responses(
         cbor_response(encode_approval_decision_browser_finish_response_v2(finish).unwrap()),
     ]
 }
+pub fn task_authorization_draft() -> savana_kernel_protocol::v2::TaskAuthorizationDraftV2 {
+    use savana_kernel_protocol::v2::*;
+    let d = |n| Digest32V2::new([n; 32]);
+    let profile = BusinessProfileV2::new(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        "mail.send",
+        d(1),
+        d(2),
+        TaskEffectV2::Send,
+        BusinessMagnitudeV2::FixedCount(1),
+        vec![
+            BusinessFieldV2::new(
+                "body",
+                BusinessFieldRoleV2::Payload,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+            BusinessFieldV2::new(
+                "file",
+                BusinessFieldRoleV2::Resource,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+            BusinessFieldV2::new(
+                "to",
+                BusinessFieldRoleV2::Destination,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let controls = BusinessControlsV2::from_fields(
+        &profile,
+        vec![
+            ("file".into(), BusinessValueV2::Text("A".into())),
+            ("to".into(), BusinessValueV2::Text("Alice".into())),
+        ],
+    )
+    .unwrap();
+    TaskAuthorizationDraftV2::new(
+        d(3),
+        PrincipalIdV2::new([4; 32]),
+        DurableTaskIdV2::new([5; 32]),
+        1,
+        d(6),
+        d(7),
+        1,
+        UnixMillisV2::new(1),
+        UnixMillisV2::new(100),
+        d(8),
+        vec![TaskAuthorizationDraftClauseV2::new(
+            1,
+            vec![TaskAuthorizationDraftAlternativeV2::new(d(9), controls).unwrap()],
+            1,
+            1,
+            1,
+            vec![],
+            false,
+        )
+        .unwrap()],
+    )
+    .unwrap()
+}

@@ -125,6 +125,7 @@ pub enum ApprovalPurpose {
     ToolExecution,
     FinalRelease,
     ConnectorRegistration,
+    TaskAuthorization,
 }
 
 pub struct ApprovalRequest {

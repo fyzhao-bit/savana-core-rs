@@ -17,12 +17,16 @@ from .client import (
     RunLimits,
     SavanaError,
     Session,
+    TaskAuthorizationDraft,
+    TaskAuthorizationReceipt,
 )
 
 __all__ = [
     "Identity",
     "Client",
     "Session",
+    "TaskAuthorizationDraft",
+    "TaskAuthorizationReceipt",
     "Handle",
     "MaskedView",
     "Plan",

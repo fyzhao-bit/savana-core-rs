@@ -93,6 +93,10 @@ pub enum BrowserRoute {
     IngressInputChunk,
     IngressInputFinalize,
     IngressInputAbort,
+    IngressTaskEstablish,
+    IngressTaskApprovalPrepare,
+    IngressTaskApprovalCommit,
+    IngressTaskRevoke,
     AgentUiAuthenticationComplete,
     AgentView,
     AgentAction,
@@ -123,6 +127,10 @@ impl BrowserRoute {
             Self::IngressInputChunk => "/v2/input/chunk",
             Self::IngressInputFinalize => "/v2/input/finalize",
             Self::IngressInputAbort => "/v2/input/abort",
+            Self::IngressTaskEstablish => "/v2/task/establish",
+            Self::IngressTaskApprovalPrepare => "/v2/task/approval/prepare",
+            Self::IngressTaskApprovalCommit => "/v2/task/approval/commit",
+            Self::IngressTaskRevoke => "/v2/task/revoke",
             Self::AgentUiAuthenticationComplete => "/v2/ui-auth/complete",
             Self::AgentView => "/v2/agent/view",
             Self::AgentAction => "/v2/agent/action",
@@ -145,7 +153,11 @@ impl BrowserRoute {
             | Self::IngressInputBegin
             | Self::IngressInputChunk
             | Self::IngressInputFinalize
-            | Self::IngressInputAbort => BrowserService::Ingress,
+            | Self::IngressInputAbort
+            | Self::IngressTaskEstablish
+            | Self::IngressTaskApprovalPrepare
+            | Self::IngressTaskApprovalCommit
+            | Self::IngressTaskRevoke => BrowserService::Ingress,
             Self::AgentUiAuthenticationComplete | Self::AgentView | Self::AgentAction => {
                 BrowserService::Agent
             }
@@ -197,7 +209,11 @@ impl BrowserRoute {
             Self::IngressInputBegin
             | Self::IngressInputChunk
             | Self::IngressInputFinalize
-            | Self::IngressInputAbort => matches!(origin, BrowserOrigin::Ingress),
+            | Self::IngressInputAbort
+            | Self::IngressTaskEstablish
+            | Self::IngressTaskApprovalPrepare
+            | Self::IngressTaskApprovalCommit
+            | Self::IngressTaskRevoke => matches!(origin, BrowserOrigin::Ingress),
             Self::AgentView | Self::AgentAction => matches!(origin, BrowserOrigin::Agent),
         }
     }

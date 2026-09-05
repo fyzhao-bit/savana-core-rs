@@ -100,31 +100,38 @@ JARVIS 仍是可信控制集成，并通过带外方式提供一次性 session b
 | Ingress | `http://localhost:8767` | 有界文本/文件输入以及 committed completion |
 | Approval | `http://localhost:8766` | WebAuthn 和人工审批 ceremony |
 
-十五个 business method 只统计三个 workflow owner：
+十八个 business method 只统计三个 workflow owner：
 
 | Owner | Business method |
 | --- | --- |
 | `Identity` | `load(path)` |
 | `Client` | `session(identity, bootstrap, webauthn, approval)`、`enroll(enrollment_token, code, webauthn, identity_path)` |
-| `Session` | `ingest_text`、`ingest_file`、`read_view`、`run_planner`、`execute`、`run_agent`、`release`、`register_connector`、`remove_connector`、`list_connectors`、`revoke`、`close` |
+| `Session` | `ingest_text`、`ingest_file`、`establish_task_authorization`、`approve_task_authorization`、`revoke_task_authorization`、`read_view`、`run_planner`、`execute`、`run_agent`、`release`、`register_connector`、`remove_connector`、`list_connectors`、`revoke`、`close` |
 
-十八个产品类型如下：
+二十个产品类型如下：
 
 | 分类 | 类型 |
 | --- | --- |
 | 连接和生命周期 | `Identity`、`Client`、`Session` |
 | opaque 及投影值 | `Handle`、`MaskedView`、`Plan`、`PlanStep`、`ApprovalRequest`、`ExecutionResult`、`ConnectorDescriptor` |
+| 任务合同数据与回执 | `TaskAuthorizationDraft`、`TaskAuthorizationReceipt` |
 | 选择项 | `IntentPrivacy`、`ContentKind` |
 | loop 控制 | `RunLimits`、`AgentEvent` |
 | 错误 | `SavanaError`、`AuthError`、`ApprovalDenied`、`PolicyRefused` |
 
-`ConnectorDescriptor.load(path)` 和 `RunLimits.cancel()` 是 supporting value
+`TaskAuthorizationDraft.from_canonical_bytes(bytes)`、`ConnectorDescriptor.load(path)` 和 `RunLimits.cancel()` 是 supporting value
 operation，不是额外 business workflow。`Handle` 不暴露原始 bytes，也不能
 retag；`PlanStep` 只暴露 opaque step handle，不虚构 `kind`、`reads` 或
 `effect`。输入方法只返回 committed completion（Python 中为 `None`），
 不会伪造 document handle。因此 `run_planner(intent_privacy)` 没有 `goal`
 或 `inputs` 参数；调用 planning 或 `run_agent` 之前，必须先用
 `ingest_text` 提交 goal，并用 `ingest_file` 提交文件。
+
+当前 intent-bound 分支中，输入提交成功不等于允许规划：还必须先建立精确的
+任务合同。新增三个任务方法走已认证的 Ingress，任务审批用途为独立的
+`task_authorization`。草稿只是非可信数据，回执只是观察结果，不是执行票据；
+Python 无法签名或构造可信证据。缺少已完成的认证输入时直接拒绝。
+合同编辑器/恢复、最终释放接入和部署闭合仍在完成中，本分支暂不可部署。
 
 传给 `Client.session` 的 callback 会收到每一个真实的 ingress 审批 display，
 并且必须返回严格的 `bool`；ingress 永远不会自动批准。`read_view` 只接受

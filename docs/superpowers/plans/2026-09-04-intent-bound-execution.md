@@ -218,6 +218,19 @@ Execution split: implement and review shared bounded request/response types, can
 
 ## Task 7: Human-readable trusted approval and SDK closure
 
+Task 7B SDK checkpoint (2026-09-05, not full Task 7 completion): Rust and the
+asynchronous Python facade now expose `establish_task_authorization`,
+`approve_task_authorization`, and `revoke_task_authorization`. They transport only
+bounded unsigned drafts and receipt observations over the four existing same-origin
+Ingress task routes. Dedicated task-purpose credential approval cannot be replaced
+by a tool-purpose approval. Wrong issuance receipts close the client without a new
+nonce retry. Public inventory is now 18 business methods and 20 Python product
+types; English/Chinese READMEs and API inventory tests match. Rust client 88 passed;
+Python SDK 15 passed against a newly built local extension, without installation.
+Full Python-target compilation passed. Still open: contract editor/context,
+fresh authenticated-session recovery, reviewed live profiles, deployment hashes,
+final-release producer and complete integrated validation.
+
 **Files:** Modify protocol approval display/browser asset modules, approvald handlers, `crates/savana-client`, `crates/savana-core-py` wrappers and README API documentation; deployment manifest/schema files where new purpose/schema is registered.
 
 - [ ] Test trusted display of exact resource→destination pairs, tool/effect/magnitude/unit/budget/preconditions; HTML/control-character attacks; critical oversize fields refused rather than silently truncated. Test task amendments clearly distinct from per-action approval.

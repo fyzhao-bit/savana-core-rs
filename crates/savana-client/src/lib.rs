@@ -10,6 +10,7 @@ mod http;
 mod identity;
 mod ingress;
 mod session;
+mod task_authorization;
 mod types;
 
 use std::sync::Arc;
@@ -27,6 +28,7 @@ pub use http::{
 };
 pub use identity::Identity;
 pub use session::Session;
+pub use task_authorization::{TaskAuthorizationDraft, TaskAuthorizationReceipt};
 pub use types::{
     AgentEvent, ApprovalPurpose, ApprovalRequest, ConnectorDescriptor, ContentKind,
     ExecutionResult, ExecutionStatus, IntentPrivacy, MaskedView, Plan, PlanStep, RunLimits,

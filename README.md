@@ -271,26 +271,27 @@ network topology is:
 | Ingress | `http://localhost:8767` | bounded text/file ingestion and committed completion |
 | Approval | `http://localhost:8766` | WebAuthn and human approval ceremonies |
 
-The fifteen business methods are counted only across the three workflow
+The eighteen business methods are counted only across the three workflow
 owners:
 
 | Owner | Business methods |
 | --- | --- |
 | `Identity` | `load(path)` |
 | `Client` | `session(identity, bootstrap, webauthn, approval)`, `enroll(enrollment_token, code, webauthn, identity_path)` |
-| `Session` | `ingest_text`, `ingest_file`, `read_view`, `run_planner`, `execute`, `run_agent`, `release`, `register_connector`, `remove_connector`, `list_connectors`, `revoke`, `close` |
+| `Session` | `ingest_text`, `ingest_file`, `establish_task_authorization`, `approve_task_authorization`, `revoke_task_authorization`, `read_view`, `run_planner`, `execute`, `run_agent`, `release`, `register_connector`, `remove_connector`, `list_connectors`, `revoke`, `close` |
 
-The eighteen product types are:
+The twenty product types are:
 
 | Category | Types |
 | --- | --- |
 | connection and lifetime | `Identity`, `Client`, `Session` |
 | opaque and projected values | `Handle`, `MaskedView`, `Plan`, `PlanStep`, `ApprovalRequest`, `ExecutionResult`, `ConnectorDescriptor` |
+| task-contract data and observations | `TaskAuthorizationDraft`, `TaskAuthorizationReceipt` |
 | choices | `IntentPrivacy`, `ContentKind` |
 | loop control | `RunLimits`, `AgentEvent` |
 | errors | `SavanaError`, `AuthError`, `ApprovalDenied`, `PolicyRefused` |
 
-`ConnectorDescriptor.load(path)` and `RunLimits.cancel()` are supporting value
+`TaskAuthorizationDraft.from_canonical_bytes(bytes)`, `ConnectorDescriptor.load(path)` and `RunLimits.cancel()` are supporting value
 operations, not additional business workflows. Handles expose no raw bytes or
 retagging operation, and `PlanStep` exposes only an opaque step handle, not
 invented `kind`, `reads`, or `effect` fields. Ingestion returns committed
@@ -298,6 +299,14 @@ completion (`None` in Python), not a fabricated document handle. Consequently
 `run_planner(intent_privacy)` has no `goal` or `inputs` arguments: commit the
 goal with `ingest_text` and files with `ingest_file` before planning or calling
 `run_agent`.
+
+In the intent-bound branch, committed input alone does not authorize planning.
+An exact task contract is required first. The three task methods use authenticated
+Ingress routes; task-level approval has the distinct `task_authorization` purpose.
+Drafts are untrusted data and receipts are observations, not execution tickets;
+Python cannot sign or construct trusted evidence. Missing finalized ingress fails
+closed. The contract editor/recovery, final-release integration and deployment
+closure are still being completed; this branch is not yet deployment-ready.
 
 The callback supplied to `Client.session` receives every truthful ingress
 approval display and must return an exact `bool`; ingress never auto-approves.
