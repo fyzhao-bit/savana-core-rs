@@ -138,6 +138,7 @@ fn facet_digest(m: &VerifiedTaskMatchV2, facet: ControlFacetV2) -> Digest32V2 {
 #[derive(Debug, Clone, Copy)]
 pub enum ControlEvidenceV2<'a> {
     ExplicitAlternative,
+    /// One complete alternative and exactly one allowed positive magnitude.
     CompleteContractSingleton,
     ActionApproval {
         approval: &'a VerifiedTaskActionApprovalV2,
@@ -172,7 +173,9 @@ impl CheckedEvidence {
         match self {
             Self::ExplicitAlternative => Ok(()),
             Self::CompleteContractSingleton => {
-                if m.candidates().candidate_count() == 1 {
+                if m.candidates().candidate_count() == 1
+                    && m.clause().maximum_single_magnitude() == 1
+                {
                     Ok(())
                 } else {
                     Err(Error::EvidenceMismatch)

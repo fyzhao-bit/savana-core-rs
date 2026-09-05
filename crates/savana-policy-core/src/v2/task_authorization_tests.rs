@@ -17,6 +17,13 @@ fn alt(resource: u8, destination: u8, effect: TaskEffectV2) -> ActionAlternative
     .unwrap()
 }
 fn contract(alts: Vec<ActionAlternativeV2>, revision: u64) -> TaskAuthorizationV2 {
+    contract_with_limit(alts, revision, 5)
+}
+fn contract_with_limit(
+    alts: Vec<ActionAlternativeV2>,
+    revision: u64,
+    maximum_single_magnitude: u64,
+) -> TaskAuthorizationV2 {
     TaskAuthorizationV2::new(
         d(1),
         PrincipalIdV2::new([2; 32]),
@@ -29,7 +36,16 @@ fn contract(alts: Vec<ActionAlternativeV2>, revision: u64) -> TaskAuthorizationV
         TaskEvidenceKindV2::AuthenticatedStructuredInput,
         d(6),
         d(7),
-        vec![TaskAuthorizationClauseV2::new(1, alts, 5, 20, 4, vec![], false).unwrap()],
+        vec![TaskAuthorizationClauseV2::new(
+            1,
+            alts,
+            maximum_single_magnitude,
+            20,
+            4,
+            vec![],
+            false,
+        )
+        .unwrap()],
     )
     .unwrap()
 }
@@ -61,13 +77,21 @@ fn content(
     index: u64,
     action: ActionAlternativeV2,
 ) -> ActionContentV2 {
+    content_with_magnitude(v, index, action, 2)
+}
+fn content_with_magnitude(
+    v: &VerifiedTaskAuthorizationV2,
+    index: u64,
+    action: ActionAlternativeV2,
+    magnitude: u64,
+) -> ActionContentV2 {
     ActionContentV2::new(
         d(1),
         v.material().revision(),
         1,
         index,
         action,
-        2,
+        magnitude,
         d(12),
         d(13),
         d(14),
@@ -206,8 +230,12 @@ fn task_authorization_rejects_malformed_current_and_candidate_bindings() {
 // A singleton, even pinned by the user, never promotes planner control labels.
 #[test]
 fn task_authorization_all_seven_selections_remain_untrusted_read() {
-    let v = verified(contract(vec![alt(20, 30, TaskEffectV2::Send)], 1));
-    let c = content(&v, 0, alt(20, 30, TaskEffectV2::Send));
+    let v = verified(contract_with_limit(
+        vec![alt(20, 30, TaskEffectV2::Send)],
+        1,
+        1,
+    ));
+    let c = content_with_magnitude(&v, 0, alt(20, 30, TaskEffectV2::Send), 1);
     let m = v.match_action(&c, &current(&v)).unwrap();
     assert!(ControlSelectionV2::from_match(&m, d(0)).is_err());
     let s = ControlSelectionV2::from_match(&m, d(40)).unwrap();
@@ -729,8 +757,12 @@ fn task_authorization_verified_wrapper_checks_trust_context() {
 
 #[test]
 fn task_authorization_endorsement_preserves_only_verified_settlement_identity() {
-    let v = verified(contract(vec![alt(20, 30, TaskEffectV2::Send)], 1));
-    let c = content(&v, 0, alt(20, 30, TaskEffectV2::Send));
+    let v = verified(contract_with_limit(
+        vec![alt(20, 30, TaskEffectV2::Send)],
+        1,
+        1,
+    ));
+    let c = content_with_magnitude(&v, 0, alt(20, 30, TaskEffectV2::Send), 1);
     let m = v.match_action(&c, &current(&v)).unwrap();
     let s = ControlSelectionV2::from_match(&m, d(40)).unwrap();
     let ctx = approval_context(&c);
@@ -752,6 +784,49 @@ fn task_authorization_endorsement_preserves_only_verified_settlement_identity() 
             assert_eq!(e.settlement_digest().zip(e.settlement_nonce()), expected);
             assert_eq!(e.settlement_nonce().is_some(), expected.is_some());
             assert_eq!(e.settlement_digest().is_some(), expected.is_some());
+        }
+    }
+}
+
+// One tuple still permits two whole actions when positive magnitude may be 1 or 2.
+#[test]
+fn task_authorization_singleton_requires_a_unique_positive_magnitude() {
+    for maximum in [1, 2] {
+        let v = verified(contract_with_limit(
+            vec![alt(20, 30, TaskEffectV2::Send)],
+            1,
+            maximum,
+        ));
+        for magnitude in 1..=maximum {
+            let c = content_with_magnitude(&v, 0, alt(20, 30, TaskEffectV2::Send), magnitude);
+            let m = v.match_action(&c, &current(&v)).unwrap();
+            let s = ControlSelectionV2::from_match(&m, d(40)).unwrap();
+            let singleton = checked_control_endorsements_v2(
+                &m,
+                &s,
+                ControlEvidenceV2::CompleteContractSingleton,
+                &current(&v),
+            );
+            assert_eq!(
+                singleton.is_ok(),
+                maximum == 1,
+                "maximum={maximum}, magnitude={magnitude}"
+            );
+            if let Ok(e) = singleton {
+                assert!(authorization_digest_v2(&m, &e, d(50), d(51), &current(&v)).is_ok());
+            }
+            let ctx = approval_context(&c);
+            let a = approval(&ctx);
+            for evidence in [
+                ControlEvidenceV2::ExplicitAlternative,
+                ControlEvidenceV2::ActionApproval {
+                    approval: &a,
+                    expected_context: &ctx,
+                },
+            ] {
+                let e = checked_control_endorsements_v2(&m, &s, evidence, &current(&v)).unwrap();
+                assert!(authorization_digest_v2(&m, &e, d(50), d(51), &current(&v)).is_ok());
+            }
         }
     }
 }
