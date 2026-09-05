@@ -1,4 +1,6 @@
 //! Adversarial tests of the real owner, encrypted snapshot and single commit.
+#[path = "task_authorization_model.rs"]
+mod bounded_model;
 use super::*;
 use crate::v2::durable_tests::{
     release_action, shared_connector_registry, signed_task, task_clause, task_request, task_store,

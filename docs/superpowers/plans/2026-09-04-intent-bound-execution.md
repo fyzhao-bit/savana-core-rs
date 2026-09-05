@@ -293,6 +293,17 @@ final-release producer and complete integrated validation.
 
 ## Task 8: Integrated adversarial/recovery evidence and bounded state model
 
+Bounded owner-model checkpoint (2026-09-05): a test-only child of the existing
+durable fixture compares real encrypted-owner transitions with a separately
+specified budget/dependency oracle. It enumerates 1,440 two-attempt traces with
+two clauses/two authorized alternatives, an invalid tuple probe, five outcomes,
+three reopen positions, stale/current matches and reused/fresh approval nonces.
+Observed 984 admissions, 1,896 refusals and 6 distinct accounting projections;
+72.57 s. Location is `src/v2/task_authorization_model.rs` to reuse private fixture
+capabilities without exposing them in the production API. This is a bounded
+trace matrix, not all protocol interleavings or a full-kernel proof. The integrated
+issuer-to-provider test, whole-branch run and final review below remain open.
+
 **Files:** Add `crates/savana-kerneld/tests/intent_bound_execution.rs`, shared real-component test fixtures as needed, `crates/savana-policy-core/tests/task_authorization_model.rs`, `docs/verification/intent-bound-execution.md`.
 
 - [ ] Execute actual authenticated ingress→planner commit→proposal→approval→durable prepare→execd→controlled mock-provider path. Include permitted dynamic multi-step task and summary-only/cross-pair/malicious-worker negative cases with observed kernel state and provider counters.

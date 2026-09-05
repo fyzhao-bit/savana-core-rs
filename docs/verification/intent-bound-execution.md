@@ -16,6 +16,7 @@ service reset, or production credential change was performed.
 | `cargo test --locked -p savana-client` | 89 passed | Live OpenClaw integration |
 | Python `test_client_sdk.py` against the locally rebuilt extension | 16 passed | Installed application behavior |
 | V1 replay boundary in isolation | Passed, 305.18 s | A clean whole-workspace run; earlier runs had intermittent expiry/frame failures |
+| Bounded task-accounting differential exploration | 1,440 traces; 984 admitted and 1,896 refused probes; 6 distinct accounting observations; 72.57 s | Arbitrary trace lengths, all policy state, or the full distributed kernel |
 
 Protocol browser tests require the bundled Node runtime in `PATH` because the
 system Homebrew Node installation has a missing dynamic-library dependency.
@@ -54,6 +55,15 @@ checks and are not omitted failures.
 - The browser recovery control checks correlated receipts and opens independent
   task approval; it never commits approval implicitly. SDK recovery performs a
   fresh credential flow without begin/chunk/finalize or new issuance operations.
+- The independent accounting oracle enumerates two clauses (the second requires
+  proven success of the first), two authorized complete alternatives, one invalid
+  tuple probe, two prepare attempts, five first-outcome states, three owner-reopen
+  positions, stale/current matches and reused/fresh action-approval nonces. It
+  compares actual owner admission and counters, checks one-time terminal replay,
+  and reopens the real encrypted store without rewriting its head. All seven
+  selections stay untrusted/READ before separate verified action endorsement.
+  This is a bounded trace matrix over the accounting projection, not exhaustive
+  exploration of every interleaving or a proof of the entire protocol.
 
 ## Still required before code/paper closure
 
@@ -65,7 +75,8 @@ checks and are not omitted failures.
    real application turn rather than assigning the next result afterward.
 4. Real integrated issuer → planner → proposal → approval → atomic prepare → execd
    → controlled provider tests, including adversarial and recovery cases.
-5. Independent bounded transition exploration and its actual bounds/state counts.
+5. Incorporate the bounded trace evidence and its limitations into the final review;
+   broader/unbounded state exploration is not claimed.
 6. Fresh whole-workspace and feature/security verification, reviewed V2 frozen
    manifests, and final code review. V1 production assets remain frozen.
 7. Only then revise the paper from the user's immutable LaTeX draft. Unmeasured
