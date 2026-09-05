@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 
+#[cfg(target_os = "macos")]
+#[path = "../development_profiles.rs"]
+mod development_profiles;
+
 #[cfg(all(feature = "macos-development-authority", not(debug_assertions)))]
 compile_error!("macos-development-authority is forbidden in release builds");
 
@@ -70,6 +74,7 @@ mod macos {
         let kernel_authority = ed25519(&mut issued)?;
         let kernel_correlation = ed25519(&mut issued)?;
         let task_authorization = ed25519(&mut issued)?;
+        let registry_publisher = ed25519(&mut issued)?;
         let agent_approval = ed25519(&mut issued)?;
         let ingress_approval = ed25519(&mut issued)?;
         let admin_approval = ed25519(&mut issued)?;
@@ -304,6 +309,7 @@ mod macos {
                 kernel_authority: &kernel_authority,
                 kernel_correlation: &kernel_correlation,
                 task_authorization: &task_authorization,
+                registry_publisher: &registry_publisher,
                 agent_approval: &agent_approval,
                 ingress_approval: &ingress_approval,
                 admin_approval: &admin_approval,
@@ -334,6 +340,7 @@ mod macos {
         kernel_authority: &'a Ed25519Material,
         kernel_correlation: &'a Ed25519Material,
         task_authorization: &'a Ed25519Material,
+        registry_publisher: &'a Ed25519Material,
         agent_approval: &'a Ed25519Material,
         ingress_approval: &'a Ed25519Material,
         admin_approval: &'a Ed25519Material,
@@ -478,8 +485,6 @@ mod macos {
         } else if connector_authority_mode(&kernel)? {
             return Err("disabled connector authority changed during materialization".to_owned());
         }
-        write_json(&root.join("config/kerneld-bootstrap-v2.json"), &kernel)?;
-
         let planner_spki = read_bounded(
             &root.join("config/tls/planner-server-spki-v2.der"),
             MAX_CERTIFICATE_BYTES,
@@ -997,6 +1002,24 @@ mod macos {
             release_credential_identity,
         )?;
         write_json(&root.join("config/execd-bootstrap-v2.json"), &exec)?;
+
+        // Materialize only the reviewed release mapping after the real transport
+        // pins and credential identities exist. The legacy report descriptor is
+        // retained without a profile and cannot enter strict execution.
+        let legacy_path = root.join("config/policy/development-draft-report-tool-v2.cbor");
+        let release_path = root.join("config/policy/development-final-release-tool-v3.cbor");
+        let (reviewed_kernel, legacy, release) = crate::development_profiles::materialize(
+            &kernel,
+            &exec,
+            &read_bounded(&legacy_path, 8 * 1024 * 1024)?,
+            &legacy_path,
+            &release_path,
+            &SigningKey::from_bytes(&patch.registry_publisher.seed),
+        )?;
+        write_new(&release_path, &release, 0o444)?;
+        replace_file(&legacy_path, &legacy)?;
+        kernel = reviewed_kernel;
+        write_json(&root.join("config/kerneld-bootstrap-v2.json"), &kernel)?;
 
         let mut template = read_json(&root.join("config/development-manifest-template-v2.json"))?;
         set_hex(

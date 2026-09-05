@@ -118,3 +118,13 @@ Five scope-ordering/refusal tests were first observed failing before integration
 The agentd manifest now enables approval test helpers only as dev-dependencies,
 and declares the gated planner integration test's required feature. This does
 not enable test capabilities in the production default build.
+# Reviewed development profile checkpoint (2026-09-05)
+
+The new-development materializer now signs the supported final-release mapping
+only after actual transport identities have been generated, verifies the old
+descriptor under its expected publisher before retaining it, and keeps the old
+unsupported report descriptor without a fabricated mapping. Two executable
+materializer tests passed: complete signed-registry activation and exact
+target/credential digest sensitivity; refusal of unreviewed mode/URL, zero
+identity, wrong activation and tampered old signature. No system materializer
+was run. This is new-build code, not migration or live-readiness evidence.
