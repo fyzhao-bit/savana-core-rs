@@ -1066,8 +1066,10 @@ impl DurableG4StateV2 {
         self.reconcile_final_release_dispatch_with_outcome(entry.proof, true)
     }
 
-    /// Records a kernel-local no-effect recovery only while the dispatch WAL
-    /// proves that execution never crossed the effect-start boundary.
+    /// Records kernel-local no-effect recovery for legacy, non-task-bound rows
+    /// only while the dispatch WAL proves execution never crossed effect start.
+    /// Task-bound rows reject this bare recovery claim and require an expected-key
+    /// signed no-effect receipt through the verified outcome/reconciliation path.
     ///
     /// This path is used when the executor has no journal row after a crash;
     /// it cannot produce an executor receipt because no executor operation
