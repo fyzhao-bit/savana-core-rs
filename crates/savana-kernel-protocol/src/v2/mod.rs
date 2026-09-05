@@ -11,17 +11,17 @@ mod business_json;
 mod business_request;
 mod business_unicode;
 mod final_release_business;
-pub use final_release_business::{
-    decode_final_release_delivery_v2, final_release_business_profile_v2,
-    final_release_business_request_v2, FinalReleaseDeliveryV2,
-    MAX_FINAL_RELEASE_BUSINESS_PAYLOAD_BYTES_V2,
-};
 pub use business_request::{
     decode_business_controls_v2, decode_business_profile_v2, encode_business_controls_v2,
     encode_business_profile_v2, BusinessCodecErrorV2, BusinessControlsV2, BusinessFieldRoleV2,
     BusinessFieldTypeV2, BusinessFieldV2, BusinessMagnitudeV2, BusinessProfileV2,
     BusinessRequestV2, BusinessResponseDispositionV2, BusinessValueV2, MAX_BUSINESS_JSON_BYTES_V2,
     MAX_BUSINESS_PROFILE_BYTES_V2,
+};
+pub use final_release_business::{
+    decode_final_release_delivery_v2, final_release_business_profile_v2,
+    final_release_business_request_v2, FinalReleaseDeliveryV2,
+    MAX_FINAL_RELEASE_BUSINESS_PAYLOAD_BYTES_V2,
 };
 mod cbor;
 mod effect_gate_projection;
@@ -47,7 +47,9 @@ pub use kernel_ingress::{
     PrepareTaskAuthorizationApprovalResponseV2,
 };
 pub use kernel_ingress::{
-    decode_revoke_task_authorization_response_v2, encode_revoke_task_authorization_response_v2,
+    decode_recover_task_authorization_response_v2, decode_revoke_task_authorization_response_v2,
+    encode_recover_task_authorization_response_v2, encode_revoke_task_authorization_response_v2,
+    RecoverTaskAuthorizationRequestV2, RecoverTaskAuthorizationResponseV2,
     RevokeTaskAuthorizationRequestV2, RevokeTaskAuthorizationResponseV2,
 };
 mod kernel_service;

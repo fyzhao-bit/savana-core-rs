@@ -53,11 +53,19 @@ pub enum IngressBrowserRequestV2 {
         client_request_nonce: Nonce32V2,
         draft: super::TaskAuthorizationDraftV2,
     },
+    RecoverTaskAuthorization {
+        tab: IngressTabSessionCapabilityV2,
+        client_request_nonce: Nonce32V2,
+        request_digest: Digest32V2,
+    },
 }
 
 impl core::fmt::Debug for IngressBrowserRequestV2 {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::RecoverTaskAuthorization { .. } => {
+                formatter.write_str("RecoverTaskAuthorization(<redacted>)")
+            }
             Self::RevokeTaskAuthorization { .. } => {
                 formatter.write_str("RevokeTaskAuthorization(<redacted>)")
             }
@@ -128,12 +136,17 @@ impl IngressBrowserRequestV2 {
             | Self::PrepareTaskAuthorizationApproval { tab, .. }
             | Self::CommitTaskAuthorizationApproval { tab, .. }
             | Self::RevokeTaskAuthorization { tab, .. }
+            | Self::RecoverTaskAuthorization { tab, .. }
             | Self::Abort { tab, .. } => *tab,
         }
     }
 
     pub const fn client_request_nonce(&self) -> Nonce32V2 {
         match self {
+            Self::RecoverTaskAuthorization {
+                client_request_nonce,
+                ..
+            } => *client_request_nonce,
             Self::RevokeTaskAuthorization {
                 client_request_nonce,
                 ..
@@ -266,10 +279,26 @@ pub fn encode_ingress_browser_request_v2(
             tab,
             client_request_nonce,
             request_digest,
+        }
+        | IngressBrowserRequestV2::RecoverTaskAuthorization {
+            tab,
+            client_request_nonce,
+            request_digest,
         } => {
+            if request_digest.as_bytes() == &[0; 32] {
+                return Err(malformed());
+            }
+            let tag = if matches!(
+                value,
+                IngressBrowserRequestV2::RecoverTaskAuthorization { .. }
+            ) {
+                9
+            } else {
+                7
+            };
             encoder
                 .array(4)
-                .and_then(|e| e.u16(7))
+                .and_then(|e| e.u16(tag))
                 .map_err(ProtocolError::malformed)?;
             tab.encode(&mut encoder, &mut ())
                 .and_then(|()| client_request_nonce.encode(&mut encoder, &mut ()))
@@ -383,7 +412,7 @@ pub fn decode_ingress_browser_request_v2(
                 }
             }
         }
-        (7, Some(4)) => {
+        (7 | 9, Some(4)) => {
             let tab = minicbor::Decode::decode(&mut decoder, &mut context)
                 .map_err(ProtocolError::from_typed_decode)?;
             let client_request_nonce = minicbor::Decode::decode(&mut decoder, &mut context)
@@ -393,10 +422,18 @@ pub fn decode_ingress_browser_request_v2(
             if request_digest.as_bytes() == &[0; 32] {
                 return Err(malformed());
             }
-            IngressBrowserRequestV2::CommitTaskAuthorizationApproval {
-                tab,
-                client_request_nonce,
-                request_digest,
+            if tag == 9 {
+                IngressBrowserRequestV2::RecoverTaskAuthorization {
+                    tab,
+                    client_request_nonce,
+                    request_digest,
+                }
+            } else {
+                IngressBrowserRequestV2::CommitTaskAuthorizationApproval {
+                    tab,
+                    client_request_nonce,
+                    request_digest,
+                }
             }
         }
         (1, Some(6)) => IngressBrowserRequestV2::Begin {

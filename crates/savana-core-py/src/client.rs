@@ -1343,6 +1343,34 @@ impl PySession {
         Self::finish_operation(result, errors.as_ref())
     }
 
+    fn recover_task_authorization(
+        &self,
+        py: Python<'_>,
+        request_digest: &[u8],
+        approval: Py<PyAny>,
+    ) -> PyResult<PyTaskAuthorizationReceipt> {
+        let digest: [u8; 32] = request_digest
+            .try_into()
+            .map_err(|_| map_client_error(ClientError::InvalidRequest))?;
+        let errors = Arc::new(CallbackErrors::default());
+        let callback = PythonApproval {
+            callback: approval,
+            errors: errors.clone(),
+        };
+        let inner = self.inner.clone();
+        let result = py.allow_threads(move || {
+            let mut state = Self::try_state(inner.as_ref())?;
+            match &mut *state {
+                SessionState::Live(session) => session
+                    .recover_task_authorization(digest, &callback)
+                    .map(|inner| PyTaskAuthorizationReceipt { inner }),
+                #[cfg(debug_assertions)]
+                SessionState::Debug(_) => Err(ClientError::InvalidState),
+            }
+        });
+        Self::finish_operation(result, errors.as_ref())
+    }
+
     fn revoke_task_authorization<'py>(
         &self,
         py: Python<'py>,

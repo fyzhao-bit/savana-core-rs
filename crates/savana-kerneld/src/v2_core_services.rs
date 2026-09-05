@@ -1490,6 +1490,80 @@ impl CoreKernelRuntimeServicesV2 {
                     &response,
                 )
             }
+            KernelIngressOperationV2::RecoverTaskAuthorization(request) => {
+                use savana_kernel_protocol::v2::{
+                    EstablishTaskAuthorizationResponseV2,
+                    PrepareTaskAuthorizationApprovalResponseV2,
+                    RecoverTaskAuthorizationResponseV2 as R,
+                };
+                let agent = self
+                    .agent_authority
+                    .as_ref()
+                    .ok_or(StableCode::KernelUnavailable)?;
+                let pending = agent
+                    .recover_task_issuance_record(request.request_digest())
+                    .map_err(map_task_authority_error)?;
+                let proof = self
+                    .input
+                    .authenticate_task_recovery(
+                        request.authorization(),
+                        &pending,
+                        active_state_manifest_digest,
+                        deployment_generation,
+                        now,
+                    )
+                    .map_err(map_input_error)?;
+                agent
+                    .validate_task_issuance_recovery(&pending, now)
+                    .map_err(map_task_authority_error)?;
+                let response = if let Some(digest) = pending.installed_digest() {
+                    // Observation only: never invoke issuance or task activation.
+                    R::Installed(
+                        EstablishTaskAuthorizationResponseV2::new(pending.request_digest(), digest)
+                            .map_err(|_| StableCode::KernelUnavailable)?,
+                    )
+                } else {
+                    let (envelope, display) =
+                        match (pending.envelope(), pending.display_authentication()) {
+                            (Some(e), Some(d)) => (e.clone(), d.clone()),
+                            (None, None) => {
+                                let (e, d) = self
+                                    .ingress_authority
+                                    .as_ref()
+                                    .ok_or(StableCode::KernelUnavailable)?
+                                    .prepare_task_authorization_display(
+                                        pending.draft(),
+                                        &proof,
+                                        now,
+                                    )
+                                    .map_err(map_ingress_authority_error)?;
+                                self.agent_authority
+                                    .as_mut()
+                                    .ok_or(StableCode::KernelUnavailable)?
+                                    .attach_task_approval(
+                                        pending.request_digest(),
+                                        e.clone(),
+                                        d.clone(),
+                                        active_state_manifest_digest,
+                                        deployment_generation,
+                                        now,
+                                    )
+                                    .map_err(map_task_authority_error)?;
+                                (e, d)
+                            }
+                            _ => return Err(StableCode::KernelUnavailable),
+                        };
+                    R::Approval(
+                        PrepareTaskAuthorizationApprovalResponseV2::new(
+                            pending.request_digest(),
+                            envelope,
+                            display,
+                        )
+                        .map_err(|_| StableCode::KernelUnavailable)?,
+                    )
+                };
+                savana_kernel_protocol::v2::encode_recover_task_authorization_response_v2(&response)
+            }
             KernelIngressOperationV2::RevokeTaskAuthorization(request) => {
                 let proof = self
                     .input
@@ -2747,6 +2821,158 @@ mod tests {
     }
 
     #[test]
+    fn fresh_authenticated_task_recovery_reuses_durable_issuance_without_new_input_or_grant() {
+        use crate::v2_agent_authority::tests::{
+            planner_active_tools, task_issuer_agent_fixture, TestG4StateAnchorV2,
+        };
+        use crate::v2_input_owner::tests::{
+            finalized_task_input_fixture, fresh_task_recovery_authentication,
+        };
+        use crate::v2_task_authority::tests::{draft, ingress, issuer};
+        use savana_kernel_protocol::v2::*;
+        use savana_policy_core::v2::{
+            DurableG4StateV2, DurableStateNamespaceV2, RollbackProtectedStateAnchorV2,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        for approved_draft in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let anchor = TestG4StateAnchorV2::default();
+            let open = || {
+                DurableG4StateV2::open(
+                    &dir.path().join("kernel-g4-state-v2.cbor"),
+                    [72; 32],
+                    DurableStateNamespaceV2::from_verified_installation(
+                        Digest32V2::new([0x30; 32]),
+                        Digest32V2::new([73; 32]),
+                    )
+                    .unwrap(),
+                    Box::new(anchor.clone()),
+                )
+                .unwrap()
+            };
+            let new_services = |owner| {
+                let mut s = CoreKernelRuntimeServicesV2::new(8, 4096, 8, 32).unwrap();
+                s.ingress_authority = Some(ingress(true));
+                s.install_agent_security(task_issuer_agent_fixture(owner, issuer()))
+                    .unwrap();
+                s
+            };
+            let execute = |s: &mut CoreKernelRuntimeServicesV2, operation, time| {
+                s.execute_operation(
+                    RequestIdV2::new([80; 16]),
+                    KernelServiceOperationV2::ingress(operation),
+                    UnixMillisV2::new(time),
+                    Digest32V2::new([0x35; 32]),
+                    7,
+                    9,
+                    ServiceIdentityV2::new([67; 32]),
+                )
+            };
+            let mut services = new_services(open());
+            let (input, session, commitment) = finalized_task_input_fixture();
+            services.input = input;
+            let request = EstablishTaskAuthorizationRequestV2::new(
+                session,
+                draft(&planner_active_tools(), commitment, 1, "Alice"),
+                Nonce32V2::new([88; 32]),
+            )
+            .unwrap();
+            let first = execute(
+                &mut services,
+                if approved_draft {
+                    KernelIngressOperationV2::PrepareTaskAuthorizationApproval(request)
+                } else {
+                    KernelIngressOperationV2::EstablishTaskAuthorization(request)
+                },
+                200,
+            )
+            .unwrap();
+            let expected = if approved_draft {
+                RecoverTaskAuthorizationResponseV2::Approval(
+                    decode_prepare_task_authorization_approval_response_v2(first.as_bytes())
+                        .unwrap(),
+                )
+            } else {
+                RecoverTaskAuthorizationResponseV2::Installed(
+                    decode_establish_task_authorization_response_v2(first.as_bytes()).unwrap(),
+                )
+            };
+            let id = match &expected {
+                RecoverTaskAuthorizationResponseV2::Approval(p) => p.request_digest(),
+                RecoverTaskAuthorizationResponseV2::Installed(p) => p.request_digest(),
+            };
+            let before = anchor.current_head().unwrap();
+            drop(services); // Input/session handles and browser state really disappear.
+            let mut recovered = new_services(open());
+            assert_eq!(recovered.input.retained_plaintext_bytes(), 0);
+            for (i, bad_principal, bad_task, bad_id, time) in [
+                (90, true, false, false, 201),
+                (91, false, true, false, 201),
+                (92, false, false, true, 201),
+                (93, false, false, false, 500),
+            ] {
+                let auth = fresh_task_recovery_authentication(
+                    &mut recovered.input,
+                    i,
+                    bad_principal,
+                    bad_task,
+                );
+                let req = RecoverTaskAuthorizationRequestV2::new(
+                    auth,
+                    if bad_id {
+                        Digest32V2::new([99; 32])
+                    } else {
+                        id
+                    },
+                )
+                .unwrap();
+                assert!(execute(
+                    &mut recovered,
+                    KernelIngressOperationV2::RecoverTaskAuthorization(req),
+                    time
+                )
+                .is_err());
+            }
+            let auth = fresh_task_recovery_authentication(&mut recovered.input, 94, false, false);
+            let req = RecoverTaskAuthorizationRequestV2::new(auth, id).unwrap();
+            for _ in 0..2 {
+                let response = execute(
+                    &mut recovered,
+                    KernelIngressOperationV2::RecoverTaskAuthorization(req),
+                    202,
+                )
+                .unwrap();
+                assert_eq!(
+                    response.as_bytes(),
+                    encode_recover_task_authorization_response_v2(&expected).unwrap()
+                );
+                assert_eq!(anchor.current_head().unwrap(), before, "recovery must not sign/install another grant, reset counters, or rewrite the existing display");
+            }
+            if !approved_draft {
+                drop(recovered);
+                let mut owner = open();
+                owner
+                    .revoke_task_authorization(DurableTaskIdV2::new([0x2f; 32]))
+                    .unwrap();
+                drop(owner);
+                let revoked_head = anchor.current_head().unwrap();
+                let mut recovered = new_services(open());
+                let auth =
+                    fresh_task_recovery_authentication(&mut recovered.input, 95, false, false);
+                let req = RecoverTaskAuthorizationRequestV2::new(auth, id).unwrap();
+                assert!(execute(
+                    &mut recovered,
+                    KernelIngressOperationV2::RecoverTaskAuthorization(req),
+                    203
+                )
+                .is_err());
+                assert_eq!(anchor.current_head().unwrap(), revoked_head);
+            }
+        }
+    }
+
+    #[test]
     fn finalize_gate_refusal_preserves_retryable_session_and_exact_bytes() {
         for refused_mode in [
             ApprovalRuleModeV2::NoRule,
@@ -2919,6 +3145,78 @@ mod tests {
                 Err(savana_kernel_protocol::StableCode::PolicyDenied),
             );
         }
+    }
+
+    #[test]
+    fn recovery_of_persisted_draft_without_display_requires_new_task_approval() {
+        use crate::v2_agent_authority::tests::{planner_active_tools, task_issuer_agent_fixture};
+        use crate::v2_input_owner::tests::{
+            finalized_task_input_fixture, fresh_task_recovery_authentication,
+        };
+        use crate::v2_task_authority::tests::{draft, ingress, issuer, owner};
+        use savana_kernel_protocol::v2::*;
+        let registry = planner_active_tools();
+        let (input, session, commitment) = finalized_task_input_fixture();
+        let draft = draft(&registry, commitment, 1, "Alice");
+        let proof = input
+            .authenticate_task_draft_submission(
+                session,
+                &draft,
+                Digest32V2::new([0x35; 32]),
+                7,
+                UnixMillisV2::new(200),
+            )
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut durable = owner(dir.path());
+        let issuer = issuer();
+        let request_digest = Digest32V2::new([88; 32]);
+        issuer
+            .prepare(
+                &mut durable,
+                &registry,
+                RoleIdV2::new(1),
+                &proof,
+                draft.clone(),
+                request_digest,
+                UnixMillisV2::new(200),
+            )
+            .unwrap();
+        drop(input);
+        let mut services = CoreKernelRuntimeServicesV2::new(8, 4096, 8, 32).unwrap();
+        services.ingress_authority = Some(ingress(true));
+        services
+            .install_agent_security(task_issuer_agent_fixture(durable, issuer))
+            .unwrap();
+        let auth = fresh_task_recovery_authentication(&mut services.input, 90, false, false);
+        let request = RecoverTaskAuthorizationRequestV2::new(auth, request_digest).unwrap();
+        let response = services
+            .execute_operation(
+                RequestIdV2::new([80; 16]),
+                KernelServiceOperationV2::ingress(
+                    KernelIngressOperationV2::RecoverTaskAuthorization(request),
+                ),
+                UnixMillisV2::new(201),
+                Digest32V2::new([0x35; 32]),
+                7,
+                9,
+                ServiceIdentityV2::new([67; 32]),
+            )
+            .unwrap();
+        let RecoverTaskAuthorizationResponseV2::Approval(prepared) =
+            decode_recover_task_authorization_response_v2(response.as_bytes()).unwrap()
+        else {
+            panic!("recovery must not install a grant without task approval");
+        };
+        let agent = services.agent_authority.as_ref().unwrap();
+        let pending = agent.recover_task_issuance_record(request_digest).unwrap();
+        assert_eq!(pending.draft(), &draft);
+        assert_eq!(pending.envelope(), Some(prepared.envelope()));
+        assert_eq!(pending.installed_digest(), None);
+        assert_eq!(
+            prepared.envelope().unverified_material().unwrap().purpose(),
+            ApprovalPurposeV2::TaskAuthorization
+        );
     }
 
     #[test]

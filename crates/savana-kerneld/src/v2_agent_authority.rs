@@ -1355,6 +1355,64 @@ impl KernelAgentAuthorityV2 {
         savana_kernel_protocol::v2::RevokeTaskAuthorizationResponseV2::new(digest)
             .map_err(|_| E::Binding)
     }
+    pub(crate) fn recover_task_issuance_record(
+        &self,
+        request: Digest32V2,
+    ) -> Result<
+        savana_policy_core::v2::PendingTaskAuthorizationV2,
+        crate::v2_task_authority::TaskAuthorityErrorV2,
+    > {
+        use crate::v2_task_authority::TaskAuthorityErrorV2 as E;
+        self.ensure_durable_available()
+            .map_err(|_| E::Unavailable)?;
+        self.policy
+            .as_ref()
+            .ok_or(E::Unavailable)?
+            .durable
+            .pending_task_authorization(request)
+            .map_err(|_| E::State)?
+            .cloned()
+            .ok_or(E::State)
+    }
+
+    pub(crate) fn validate_task_issuance_recovery(
+        &self,
+        pending: &savana_policy_core::v2::PendingTaskAuthorizationV2,
+        now: UnixMillisV2,
+    ) -> Result<(), crate::v2_task_authority::TaskAuthorityErrorV2> {
+        use crate::v2_task_authority::TaskAuthorityErrorV2 as E;
+        let p = self.policy.as_ref().ok_or(E::Unavailable)?;
+        p.active_tools
+            .validate_task_draft_profiles(pending.draft(), p.role, now)
+            .map_err(|_| E::Binding)?;
+        if let Some(digest) = pending.installed_digest() {
+            let state = p
+                .durable
+                .task_authorization_state(pending.draft().task())
+                .map_err(|_| E::State)?;
+            if state.revoked() || state.authorization().digest() != digest {
+                return Err(E::State);
+            }
+        } else {
+            // A pending amendment cannot be revived after a different revision
+            // was installed (or the predecessor was revoked).
+            let current = p
+                .durable
+                .find_task_authorization_state(pending.draft().task())
+                .map_err(|_| E::State)?;
+            if current.as_ref().is_some_and(|s| s.revoked())
+                || current.map(|s| s.authorization().digest()) != pending.previous_authorization()
+            {
+                return Err(E::State);
+            }
+            self.task_issuer
+                .as_ref()
+                .ok_or(E::Unavailable)?
+                .verify_recovered_display(pending, now)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn prepare_task_approval(
         &mut self,
         request: &savana_kernel_protocol::v2::PrepareTaskAuthorizationApprovalRequestV2,

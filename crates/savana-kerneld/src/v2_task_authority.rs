@@ -26,6 +26,43 @@ pub(crate) struct KernelTaskAuthorizationIssuerV2 {
     settlement_key: [u8; 32],
 }
 impl KernelTaskAuthorizationIssuerV2 {
+    pub(crate) fn verify_recovered_display(
+        &self,
+        pending: &PendingTaskAuthorizationV2,
+        now: UnixMillisV2,
+    ) -> Result<(), TaskAuthorityErrorV2> {
+        let draft = pending.draft();
+        match (pending.envelope(), pending.display_authentication()) {
+            (None, None) => Ok(()),
+            (Some(envelope), Some(display)) => {
+                envelope
+                    .verify(
+                        derive_ed25519_key_id_v2(self.envelope_key),
+                        self.envelope_key,
+                        self.installation,
+                        draft.manifest_digest(),
+                        draft.deployment_generation(),
+                        ApprovalPurposeV2::TaskAuthorization,
+                        draft.principal(),
+                        now,
+                    )
+                    .map_err(binding)?;
+                display
+                    .verify(
+                        derive_ed25519_key_id_v2(self.envelope_key),
+                        self.envelope_key,
+                        self.installation,
+                        draft.manifest_digest(),
+                        draft.deployment_generation(),
+                        now,
+                    )
+                    .map_err(binding)?;
+                Ok(())
+            }
+            _ => Err(TaskAuthorityErrorV2::State),
+        }
+    }
+
     /// Revocation only removes authority. It is a separate authenticated typed
     /// operation, never a side effect of a planner request or ordinary chat.
     pub(crate) fn revoke(
@@ -36,7 +73,8 @@ impl KernelTaskAuthorizationIssuerV2 {
         now: UnixMillisV2,
     ) -> Result<Digest32V2, TaskAuthorityErrorV2> {
         let auth = proof.authorization();
-        if proof.draft_digest() != task_authorization_draft_digest_v2(draft).map_err(binding)?
+        if proof.is_recovery()
+            || proof.draft_digest() != task_authorization_draft_digest_v2(draft).map_err(binding)?
             || auth.installation_id() != self.installation
             || draft.installation_digest() != self.installation
             || auth.durable_task_id() != Some(draft.task())
@@ -109,7 +147,9 @@ impl KernelTaskAuthorizationIssuerV2 {
         now: UnixMillisV2,
     ) -> Result<PendingTaskAuthorizationV2, TaskAuthorityErrorV2> {
         let auth = proof.authorization();
-        if proof.draft_digest() != task_authorization_draft_digest_v2(&draft).map_err(binding)?
+        if proof.is_recovery()
+            || proof.draft_digest()
+                != task_authorization_draft_digest_v2(&draft).map_err(binding)?
             || self.installation != draft.installation_digest()
             || auth.installation_id() != self.installation
             || auth.durable_task_id() != Some(draft.task())
@@ -516,6 +556,50 @@ pub(crate) mod tests {
             .is_err());
         }
         issuer();
+    }
+
+    #[test]
+    fn recovery_authentication_cannot_be_rebranded_as_new_structured_input() {
+        let registry = planner_active_tools();
+        let (input, session, commitment) = finalized_task_input_fixture();
+        let draft = draft(&registry, commitment, 1, "Alice");
+        let proof = input
+            .authenticate_task_draft_submission(session, &draft, d(0x35), 7, UnixMillisV2::new(200))
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut owner = owner(dir.path());
+        let issuer = issuer();
+        let pending = issuer
+            .prepare(
+                &mut owner,
+                &registry,
+                RoleIdV2::new(1),
+                &proof,
+                draft.clone(),
+                d(74),
+                UnixMillisV2::new(200),
+            )
+            .unwrap();
+        drop(input);
+        let mut fresh = crate::v2_input_owner::KernelInputOwnerV2::new(4, 4096).unwrap();
+        let auth = crate::v2_input_owner::tests::fresh_task_recovery_authentication(
+            &mut fresh, 90, false, false,
+        );
+        let recovery = fresh
+            .authenticate_task_recovery(auth, &pending, d(0x35), 7, UnixMillisV2::new(201))
+            .unwrap();
+        assert!(matches!(
+            issuer.issue_structured(
+                &mut owner,
+                &registry,
+                RoleIdV2::new(1),
+                &recovery,
+                d(74),
+                UnixMillisV2::new(201)
+            ),
+            Err(TaskAuthorityErrorV2::Binding)
+        ));
+        assert!(owner.task_authorization_state(draft.task()).is_err());
     }
 
     pub(crate) fn ingress(

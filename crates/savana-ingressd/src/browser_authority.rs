@@ -374,6 +374,9 @@ impl IngressBrowserAuthorityV2 {
                 IngressBrowserRequestV2::CommitTaskAuthorizationApproval {
                     request_digest, ..
                 } => self.commit_task(tab_handle, request_digest, deadline)?,
+                IngressBrowserRequestV2::RecoverTaskAuthorization { request_digest, .. } => {
+                    self.recover_task(tab_handle, request_digest, deadline)?
+                }
                 IngressBrowserRequestV2::RevokeTaskAuthorization {
                     draft,
                     client_request_nonce,
@@ -436,6 +439,50 @@ impl IngressBrowserAuthorityV2 {
         Ok(response)
     }
 
+    fn recover_task(
+        &self,
+        tab_handle: IngressTabSessionCapabilityV2,
+        request_digest: Digest32V2,
+        deadline: UnixMillisV2,
+    ) -> Result<IngressBrowserMutationResponseV2, IngressBrowserAuthorityErrorV2> {
+        let authorization = self
+            .tabs
+            .lock()
+            .map_err(|_| IngressBrowserAuthorityErrorV2::Unavailable)?
+            .iter()
+            .find(|t| t.tab == tab_handle)
+            .ok_or(IngressBrowserAuthorityErrorV2::InvalidReference)?
+            .authorization;
+        let request = savana_kernel_protocol::v2::RecoverTaskAuthorizationRequestV2::new(
+            authorization,
+            request_digest,
+        )
+        .map_err(|_| IngressBrowserAuthorityErrorV2::InvalidReference)?;
+        match self
+            .kernel
+            .recover_task_authorization(request, deadline)
+            .map_err(map_kernel)?
+        {
+            savana_kernel_protocol::v2::RecoverTaskAuthorizationResponseV2::Installed(receipt) => {
+                if receipt.request_digest() != request_digest {
+                    return Err(IngressBrowserAuthorityErrorV2::Unavailable);
+                }
+                Ok(
+                    IngressBrowserMutationResponseV2::TaskAuthorizationEstablished {
+                        request_digest,
+                        authorization_digest: receipt.authorization_digest(),
+                    },
+                )
+            }
+            savana_kernel_protocol::v2::RecoverTaskAuthorizationResponseV2::Approval(prepared) => {
+                if prepared.request_digest() != request_digest {
+                    return Err(IngressBrowserAuthorityErrorV2::Unavailable);
+                }
+                self.register_task_display(tab_handle, prepared, deadline)
+            }
+        }
+    }
+
     fn submit_task(
         &self,
         tab_handle: IngressTabSessionCapabilityV2,
@@ -484,6 +531,37 @@ impl IngressBrowserAuthorityV2 {
             .kernel
             .prepare_task_authorization_approval(request, deadline)
             .map_err(map_kernel)?;
+        self.register_task_display(tab_handle, prepared, deadline)
+    }
+
+    fn register_task_display(
+        &self,
+        tab_handle: IngressTabSessionCapabilityV2,
+        prepared: savana_kernel_protocol::v2::PrepareTaskAuthorizationApprovalResponseV2,
+        deadline: UnixMillisV2,
+    ) -> Result<IngressBrowserMutationResponseV2, IngressBrowserAuthorityErrorV2> {
+        {
+            let mut tabs = self
+                .tabs
+                .lock()
+                .map_err(|_| IngressBrowserAuthorityErrorV2::Unavailable)?;
+            let tab = tabs
+                .iter_mut()
+                .find(|t| t.tab == tab_handle)
+                .ok_or(IngressBrowserAuthorityErrorV2::InvalidReference)?;
+            if !tab
+                .task_approvals
+                .iter()
+                .any(|p| p.request_digest == prepared.request_digest())
+            {
+                if tab.task_approvals.len() >= MAX_PENDING_AUTHENTICATIONS_V2 {
+                    return Err(IngressBrowserAuthorityErrorV2::Busy);
+                }
+                tab.task_approvals
+                    .try_reserve(1)
+                    .map_err(|_| IngressBrowserAuthorityErrorV2::Unavailable)?;
+            }
+        }
         let registered = self
             .approval
             .register_approval(

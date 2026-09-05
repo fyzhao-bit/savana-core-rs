@@ -474,6 +474,7 @@ mod implementation {
             | FixedHttpRouteV2::IngressInputFinalize
             | FixedHttpRouteV2::IngressTaskEstablish
             | FixedHttpRouteV2::IngressTaskRevoke
+            | FixedHttpRouteV2::IngressTaskRecover
             | FixedHttpRouteV2::IngressTaskApprovalPrepare
             | FixedHttpRouteV2::IngressTaskApprovalCommit
             | FixedHttpRouteV2::IngressInputAbort) => {
@@ -515,6 +516,9 @@ mod implementation {
             ) | (
                 FixedHttpRouteV2::IngressTaskRevoke,
                 IngressBrowserRequestV2::RevokeTaskAuthorization { .. }
+            ) | (
+                FixedHttpRouteV2::IngressTaskRecover,
+                IngressBrowserRequestV2::RecoverTaskAuthorization { .. }
             ) | (
                 FixedHttpRouteV2::IngressTaskApprovalPrepare,
                 IngressBrowserRequestV2::PrepareTaskAuthorizationApproval { .. }

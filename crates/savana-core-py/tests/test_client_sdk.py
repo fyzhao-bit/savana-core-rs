@@ -41,6 +41,7 @@ SESSION_METHODS = {
     "establish_task_authorization",
     "approve_task_authorization",
     "revoke_task_authorization",
+    "recover_task_authorization",
     "read_view",
     "run_planner",
     "execute",
@@ -54,7 +55,7 @@ SESSION_METHODS = {
 }
 
 # These are value construction/control helpers, not Identity/Client/Session
-# business workflows, so they are inventoried separately from the 18 workflows.
+# business workflows, so they are inventoried separately from the 19 workflows.
 SUPPORTING_VALUE_METHODS = {
     savana.ConnectorDescriptor: {"load"},
     savana.RunLimits: {"cancel"},
@@ -92,12 +93,27 @@ def transport_session(*, delay_seconds=0.0):
     )
 
 
+@pytest.mark.asyncio
+async def test_recovery_never_uses_debug_authority_or_accepts_malformed_identity():
+    session = scripted_session()
+    calls = []
+
+    async def approval(request):
+        calls.append(request)
+        return True
+
+    for digest in (b"", b"short", b"\x01" * 33, b"\x00" * 32, b"\x01" * 32):
+        with pytest.raises(savana.SavanaError):
+            await session.recover_task_authorization(digest, approval)
+    assert calls == []
+
+
 def test_public_surface_is_exactly_the_approved_types_and_business_methods():
     assert set(savana.__all__) == CORE_TYPES
     assert public_methods(savana.Identity) == {"load"}
     assert public_methods(savana.Client) == {"session", "enroll"}
     assert public_methods(savana.Session) == SESSION_METHODS
-    assert 1 + 2 + len(SESSION_METHODS) == 18
+    assert 1 + 2 + len(SESSION_METHODS) == 19
     for value_type, methods in SUPPORTING_VALUE_METHODS.items():
         assert public_methods(value_type) == methods
     assert "fetch" not in vars(savana.Session)

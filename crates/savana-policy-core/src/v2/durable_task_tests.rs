@@ -400,7 +400,17 @@ impl Fixture {
         }
     }
     fn request(&self, id: u64, magnitude: u64) -> TaskDispatchAuthorizationV2 {
-        task_request(&self.store, task(), id, magnitude, d(0x92), d(0x93), d(9))
+        // Use the release record's evidence, not its adjacent raw payload
+        // digest: atomic prepare now checks this cross-binding explicitly.
+        task_request(
+            &self.store,
+            task(),
+            id,
+            magnitude,
+            d(0x92),
+            release(20).binding().evidence_digest(),
+            d(9),
+        )
     }
     fn amend(&mut self, rev: u64, clauses: Vec<TaskAuthorizationClauseV2>) -> Result<(), G4Error> {
         self.store
@@ -1013,7 +1023,15 @@ fn task_state_unknown_schema_is_not_rewritten_and_legacy_effects_remain_recovery
     )
     .unwrap();
     store.install_verified_task_authorization(verified).unwrap();
-    let request = task_request(&store, new_task, 1, 1, d(0xb9), d(0xba), d(9));
+    let request = task_request(
+        &store,
+        new_task,
+        1,
+        1,
+        d(0xb9),
+        release(21).binding().evidence_digest(),
+        d(9),
+    );
     prepare(&mut store, &request, 21).unwrap();
     assert_eq!(store.recovery_projection().unwrap().len(), 2);
     assert_eq!(

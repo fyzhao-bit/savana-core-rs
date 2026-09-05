@@ -271,14 +271,14 @@ network topology is:
 | Ingress | `http://localhost:8767` | bounded text/file ingestion and committed completion |
 | Approval | `http://localhost:8766` | WebAuthn and human approval ceremonies |
 
-The eighteen business methods are counted only across the three workflow
+The nineteen business methods are counted only across the three workflow
 owners:
 
 | Owner | Business methods |
 | --- | --- |
 | `Identity` | `load(path)` |
 | `Client` | `session(identity, bootstrap, webauthn, approval)`, `enroll(enrollment_token, code, webauthn, identity_path)` |
-| `Session` | `ingest_text`, `ingest_file`, `establish_task_authorization`, `approve_task_authorization`, `revoke_task_authorization`, `read_view`, `run_planner`, `execute`, `run_agent`, `release`, `register_connector`, `remove_connector`, `list_connectors`, `revoke`, `close` |
+| `Session` | `ingest_text`, `ingest_file`, `establish_task_authorization`, `approve_task_authorization`, `revoke_task_authorization`, `recover_task_authorization`, `read_view`, `run_planner`, `execute`, `run_agent`, `release`, `register_connector`, `remove_connector`, `list_connectors`, `revoke`, `close` |
 
 The twenty product types are:
 
@@ -301,12 +301,17 @@ goal with `ingest_text` and files with `ingest_file` before planning or calling
 `run_agent`.
 
 In the intent-bound branch, committed input alone does not authorize planning.
-An exact task contract is required first. The three task methods use authenticated
+An exact task contract is required first. The four task methods use authenticated
 Ingress routes; task-level approval has the distinct `task_authorization` purpose.
 Drafts are untrusted data and receipts are observations, not execution tickets;
 Python cannot sign or construct trusted evidence. Missing finalized ingress fails
-closed. The contract editor/recovery, final-release integration and deployment
-closure are still being completed; this branch is not yet deployment-ready.
+closed for new issuance. `recover_task_authorization(request_digest, approval)`
+reauthenticates the same task/principal and retrieves only existing durable
+issuance; it does not upload replacement input, re-sign a grant, or reset budgets.
+Keep the observed issuance request digest for recovery. Pending drafts still need
+the dedicated task approval; inactive/expired records fail closed. The contract
+editor/context, live deployment profiles and whole-chain verification are still
+being completed; this branch is not yet deployment-ready.
 
 The callback supplied to `Client.session` receives every truthful ingress
 approval display and must return an exact `bool`; ingress never auto-approves.

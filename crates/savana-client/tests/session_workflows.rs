@@ -1457,6 +1457,94 @@ fn task_contract_sdk_establish_and_revoke_are_exact_ingress_operations() {
 }
 
 #[test]
+fn task_recovery_sdk_uses_fresh_authentication_and_no_input_or_new_issuance() {
+    for (pending, decision, wrong_receipt) in [
+        (false, true, false),
+        (true, true, false),
+        (true, false, false),
+        (false, true, true),
+    ] {
+        let request_digest = Digest32V2::new([0xe8; 32]);
+        let authorization_digest = Digest32V2::new([0xe9; 32]);
+        // Keep only the real SDK's existing follow-up authentication flow; no
+        // begin/chunk/finalize response is supplied to this recovery fixture.
+        let mut responses = successful_ingress_responses(1);
+        responses.truncate(6);
+        let receipt = || {
+            cbor_response(
+                encode_ingress_browser_mutation_response_v2(
+                    IngressBrowserMutationResponseV2::TaskAuthorizationEstablished {
+                        request_digest: if wrong_receipt {
+                            Digest32V2::new([0xef; 32])
+                        } else {
+                            request_digest
+                        },
+                        authorization_digest,
+                    },
+                )
+                .unwrap(),
+            )
+        };
+        if pending {
+            responses.push(cbor_response(encode_ingress_browser_mutation_response_v2(IngressBrowserMutationResponseV2::TaskAuthorizationOpenApproval {
+                request_digest, transfer: ApprovalDisplayAuthenticationTransferCapabilityV2::from_authority_entropy([0xeb;32]).unwrap(),
+            }).unwrap()));
+            responses.extend(support::task5::approval_responses(
+                ApprovalPurposeV2::TaskAuthorization,
+                if decision {
+                    ApprovalDecisionBrowserFinishResponseV2::Approved
+                } else {
+                    ApprovalDecisionBrowserFinishResponseV2::Denied
+                },
+            ));
+        }
+        responses.push(receipt());
+        let (mut session, transport, _) = authenticated_session_with_dependencies(
+            responses,
+            Arc::new(RecordingWebAuthn::default()),
+            Arc::new(FixedNonces::new()),
+        );
+        transport.take_requests();
+        let callback = support::task5::RecordingDecision::new(decision);
+        let result = session.recover_task_authorization(*request_digest.as_bytes(), &callback);
+        assert_eq!(result.is_ok(), decision && !wrong_receipt);
+        if let Ok(receipt) = result {
+            assert_eq!(
+                receipt.authorization_digest(),
+                authorization_digest.as_bytes()
+            );
+        }
+        let requests = transport.take_requests();
+        assert!(requests
+            .iter()
+            .any(|r| r.route == BrowserRoute::IngressUiAuthenticationComplete));
+        assert!(requests.iter().all(|r| !matches!(
+            r.route,
+            BrowserRoute::IngressInputBegin
+                | BrowserRoute::IngressInputChunk
+                | BrowserRoute::IngressInputFinalize
+                | BrowserRoute::IngressTaskEstablish
+                | BrowserRoute::IngressTaskApprovalPrepare
+        )));
+        let recovery = requests
+            .iter()
+            .filter(|r| r.route == BrowserRoute::IngressTaskRecover)
+            .collect::<Vec<_>>();
+        assert_eq!(recovery.len(), 1);
+        assert!(
+            matches!(decode_ingress_browser_request_v2(&recovery[0].body).unwrap(), IngressBrowserRequestV2::RecoverTaskAuthorization { request_digest: d, .. } if d == request_digest)
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.route == BrowserRoute::IngressTaskApprovalCommit)
+                .count(),
+            usize::from(pending && decision)
+        );
+    }
+}
+
+#[test]
 fn task_contract_sdk_requires_dedicated_ceremony_and_exact_receipt() {
     for (purpose, decision, wrong_receipt) in [
         (ApprovalPurposeV2::TaskAuthorization, true, false),

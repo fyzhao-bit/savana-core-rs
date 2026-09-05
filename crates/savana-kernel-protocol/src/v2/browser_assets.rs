@@ -364,6 +364,60 @@ pub const SAVANA_BROWSER_SCRIPT_V2: &[u8] = br####""use strict";
   const runIngress = (main) => {
     if (!main || !main.dataset.ingressTab) return;
     const tab = decode(b64urlDecode(main.dataset.ingressTab));
+    const recovery = document.createElement("section");
+    const heading = document.createElement("h2");
+    heading.textContent = "Recover an existing task authorization";
+    const explanation = document.createElement("p");
+    explanation.textContent = "Use the previously observed issuance request digest. Recovery does not create a new grant or reset its budget. Pending drafts still require task approval.";
+    const requestInput = document.createElement("input");
+    requestInput.id = "savana-task-request";
+    requestInput.setAttribute("aria-label", "Issuance request digest (64 hexadecimal characters)");
+    requestInput.setAttribute("maxlength", "64");
+    requestInput.setAttribute("autocomplete", "off");
+    const recover = document.createElement("button");
+    recover.id = "savana-task-recover";
+    recover.type = "button";
+    recover.textContent = "Recover existing authorization";
+    let pendingRecovery = null;
+    const digestBytes = value => {
+      if (!/^[0-9a-fA-F]{64}$/.test(value) || /^0{64}$/.test(value)) throw new Error("Enter the exact nonzero 64-character request digest");
+      return Uint8Array.from(value.match(/../g), v => parseInt(v, 16));
+    };
+    recover.addEventListener("click", () => (async () => {
+      recover.disabled = true;
+      const expected = pendingRecovery || digestBytes(requestInput.value.trim());
+      const response = decode(await post(
+        pendingRecovery ? "/v2/task/approval/commit" : "/v2/task/recover",
+        cborArray(cborUnsigned(pendingRecovery ? 7 : 9), cborBytes(tab), cborBytes(nonce()), cborBytes(expected))
+      ));
+      if (Array.isArray(response) && response.length === 1 && response[0] === 9) {
+        pendingRecovery = null;
+        requestInput.disabled = false;
+        recover.textContent = "Recover existing authorization";
+        status("Task authorization approval was denied.", true);
+      } else {
+        if (!Array.isArray(response) || response.length !== 3
+          || !(response[1] instanceof Uint8Array) || response[1].length !== 32
+          || !response[1].every((b, i) => b === expected[i])
+          || !(response[2] instanceof Uint8Array) || response[2].length !== 32
+          || response[2].every(b => b === 0)) throw new Error("Task recovery response mismatch");
+        if (response[0] === 7) {
+          pendingRecovery = null;
+          requestInput.disabled = false;
+          recover.textContent = "Recover existing authorization";
+          status("Recovered existing task authorization receipt. No new grant or budget was created.");
+        } else if (response[0] === 8) {
+          pendingRecovery = expected;
+          requestInput.disabled = true;
+          transferForm("http://localhost:8766", "/v2/ui-auth/accept", response[2], true);
+          recover.textContent = "Check task approval";
+          status("Complete the separate task approval page, then check approval here.");
+        } else throw new Error("Unexpected task recovery status");
+      }
+      recover.disabled = false;
+    })().catch(fail));
+    recovery.append(heading, explanation, requestInput, recover);
+    main.append(recovery);
     const submit = $("#savana-ingress-submit");
     const input = $("#savana-ingress-input");
     submit.addEventListener("click", async () => {
@@ -656,5 +710,71 @@ const waitFor = async (predicate) => {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn ingress_dom_recovers_existing_issuance_without_upload_or_implicit_approval() {
+        let script = std::str::from_utf8(SAVANA_BROWSER_SCRIPT_V2).unwrap();
+        for mode in ["installed", "pending", "wrong-receipt"] {
+            let mut harness = format!(
+                "const mode = {mode:?}; const browserScript = {};",
+                serde_json::to_string(script).unwrap()
+            );
+            harness.push_str(r####"
+const assert = require('assert');
+const elements = new Map();
+const transfers = [];
+const element = tag => ({tagName: tag.toUpperCase(), dataset: {}, value: '', textContent: '', disabled: false,
+  set id(v) { elements.set('#' + v, this); }, setAttribute() {}, append() {}, replaceChildren() {},
+  submit() { transfers.push(this.action); },
+  addEventListener(event, fn) { this[event] = fn; }});
+const main = element('main'); main.dataset.ingressTab = Buffer.from([0x58,32,...new Uint8Array(32).fill(1)]).toString('base64url');
+elements.set('main', main);
+for (const [id,tag] of [['savana-status','p'], ['savana-ingress-input','textarea'], ['savana-ingress-submit','button']]) { const e=element(tag); e.id=id; }
+globalThis.document = {querySelector: s => elements.get(s) ?? null, createElement: element, body: element('body')};
+globalThis.location = {port:'8767',pathname:'/v2/input'};
+const calls=[];
+globalThis.fetch = async (path, options) => {
+  calls.push([path, new Uint8Array(options.body)]);
+  assert.equal(path, calls.length === 1 ? '/v2/task/recover' : '/v2/task/approval/commit');
+  const tag = mode === 'pending' && calls.length === 1 ? 8 : 7;
+  const bytes = Uint8Array.of(0x83,tag,0x58,32,...new Uint8Array(32).fill(mode === 'wrong-receipt' ? 4 : 2),0x58,32,...new Uint8Array(32).fill(3));
+  return {ok:true,status:200,arrayBuffer:async()=>bytes.buffer};
+};
+eval(browserScript);
+const wait = async predicate => { for(let i=0;i<100;i++) { if(predicate()) return; await new Promise(r=>setTimeout(r,1)); } throw new Error('browser recovery did not complete: '+elements.get('#savana-status').textContent); };
+(async()=>{
+ await wait(()=>elements.has('#savana-task-recover'));
+ elements.get('#savana-task-request').value = '02'.repeat(32);
+ elements.get('#savana-task-recover').click();
+ if (mode === 'wrong-receipt') {
+   await wait(()=>elements.get('#savana-status').textContent === 'Task recovery response mismatch');
+   assert.equal(calls.length,1); assert.equal(transfers.length,0);
+   assert.equal(elements.get('#savana-task-recover').disabled,true);
+   return;
+ }
+ if (mode === 'pending') {
+   await wait(()=>elements.get('#savana-status').textContent.includes('Complete the separate task approval page'));
+   assert.equal(calls.length,1, 'no implicit commit before the user checks approval');
+   assert.deepEqual(transfers, ['http://localhost:8766/v2/ui-auth/accept']);
+   assert.equal(elements.get('#savana-task-request').disabled,true);
+   elements.get('#savana-task-recover').click();
+ }
+ await wait(()=>elements.get('#savana-status').textContent.includes('Recovered existing task authorization'));
+ assert.equal(calls.length,mode === 'pending' ? 2 : 1); assert.equal(calls[0][1][0],0x84); assert.equal(calls[0][1][1],9);
+ assert.deepEqual([...calls[0][1].slice(-32)], [...new Uint8Array(32).fill(2)]);
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"####);
+            let output = Command::new("node")
+                .arg("-e")
+                .arg(harness)
+                .output()
+                .expect("Node.js is required for browser behavior tests");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 }

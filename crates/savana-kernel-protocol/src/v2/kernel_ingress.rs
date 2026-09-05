@@ -1376,6 +1376,83 @@ pub struct EstablishTaskAuthorizationRequestV2 {
 pub type PrepareTaskAuthorizationApprovalRequestV2 = EstablishTaskAuthorizationRequestV2;
 pub type RevokeTaskAuthorizationRequestV2 = EstablishTaskAuthorizationRequestV2;
 
+/// Recovery uses a freshly verified UI authorization, not an old input handle.
+/// The request identifies existing durable issuance only; it carries no draft.
+#[derive(Debug, Clone, Copy)]
+pub struct RecoverTaskAuthorizationRequestV2 {
+    authorization: IngressUiAuthorizationHandleV2,
+    request_digest: Digest32V2,
+}
+impl RecoverTaskAuthorizationRequestV2 {
+    pub fn new(
+        authorization: IngressUiAuthorizationHandleV2,
+        request_digest: Digest32V2,
+    ) -> Result<Self, ProtocolError> {
+        if is_zero(request_digest.as_bytes()) {
+            return Err(malformed());
+        }
+        Ok(Self {
+            authorization,
+            request_digest,
+        })
+    }
+    pub fn authorization(&self) -> IngressUiAuthorizationHandleV2 {
+        self.authorization
+    }
+    pub fn request_digest(&self) -> Digest32V2 {
+        self.request_digest
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum RecoverTaskAuthorizationResponseV2 {
+    Installed(EstablishTaskAuthorizationResponseV2),
+    Approval(PrepareTaskAuthorizationApprovalResponseV2),
+}
+pub fn encode_recover_task_authorization_response_v2(
+    value: &RecoverTaskAuthorizationResponseV2,
+) -> Result<Vec<u8>, ProtocolError> {
+    let (tag, bytes) = match value {
+        RecoverTaskAuthorizationResponseV2::Installed(v) => {
+            (1, encode_establish_task_authorization_response_v2(v)?)
+        }
+        RecoverTaskAuthorizationResponseV2::Approval(v) => (
+            2,
+            encode_prepare_task_authorization_approval_response_v2(v)?,
+        ),
+    };
+    let mut e = minicbor::Encoder::new(Vec::new());
+    e.array(2)
+        .and_then(|e| e.u8(tag))
+        .and_then(|e| e.bytes(&bytes))
+        .map_err(ProtocolError::malformed)?;
+    Ok(e.into_writer())
+}
+pub fn decode_recover_task_authorization_response_v2(
+    bytes: &[u8],
+) -> Result<RecoverTaskAuthorizationResponseV2, ProtocolError> {
+    scan_single(bytes)?;
+    let mut d = minicbor::Decoder::new(bytes);
+    expect_array(&mut d, 2)?;
+    let tag = d.u8().map_err(ProtocolError::malformed)?;
+    let inner = d.bytes().map_err(ProtocolError::malformed)?;
+    let value = match tag {
+        1 => RecoverTaskAuthorizationResponseV2::Installed(
+            decode_establish_task_authorization_response_v2(inner)?,
+        ),
+        2 => RecoverTaskAuthorizationResponseV2::Approval(
+            decode_prepare_task_authorization_approval_response_v2(inner)?,
+        ),
+        _ => return Err(malformed()),
+    };
+    if d.position() != bytes.len()
+        || encode_recover_task_authorization_response_v2(&value)? != bytes
+    {
+        return Err(malformed());
+    }
+    Ok(value)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RevokeTaskAuthorizationResponseV2 {
     authorization_digest: Digest32V2,
@@ -1602,6 +1679,7 @@ pub enum KernelIngressOperationV2 {
     PrepareTaskAuthorizationApproval(PrepareTaskAuthorizationApprovalRequestV2),
     CommitTaskAuthorizationApproval(CommitTaskAuthorizationApprovalRequestV2),
     RevokeTaskAuthorization(RevokeTaskAuthorizationRequestV2),
+    RecoverTaskAuthorization(RecoverTaskAuthorizationRequestV2),
 }
 
 impl KernelIngressOperationV2 {
@@ -1623,13 +1701,14 @@ impl KernelIngressOperationV2 {
             Self::PrepareTaskAuthorizationApproval(_) => 52,
             Self::CommitTaskAuthorizationApproval(_) => 53,
             Self::RevokeTaskAuthorization(_) => 54,
+            Self::RecoverTaskAuthorization(_) => 55,
         }
     }
 }
 
-pub const fn kernel_ingress_operation_tags_v2() -> &'static [u16; 16] {
+pub const fn kernel_ingress_operation_tags_v2() -> &'static [u16; 17] {
     &[
-        0, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54,
+        0, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55,
     ]
 }
 
@@ -1718,6 +1797,11 @@ pub fn encode_kernel_ingress_operation_v2(
             encode_header(&mut encoder, 53, 2)?;
             encode_fixed(&mut encoder, &request.request_digest)?;
             encode_fixed(&mut encoder, &request.settlement)?;
+        }
+        KernelIngressOperationV2::RecoverTaskAuthorization(request) => {
+            encode_header(&mut encoder, 55, 2)?;
+            encode_fixed(&mut encoder, &request.authorization)?;
+            encode_fixed(&mut encoder, &request.request_digest)?;
         }
     }
     Ok(encoder.into_writer())
@@ -1850,6 +1934,15 @@ pub fn decode_kernel_ingress_operation_v2(
             expect_array(&mut decoder, 2)?;
             KernelIngressOperationV2::CommitTaskAuthorizationApproval(
                 CommitTaskAuthorizationApprovalRequestV2::new(
+                    decode_fixed(&mut decoder, &mut context)?,
+                    decode_fixed(&mut decoder, &mut context)?,
+                )?,
+            )
+        }
+        55 => {
+            expect_array(&mut decoder, 2)?;
+            KernelIngressOperationV2::RecoverTaskAuthorization(
+                RecoverTaskAuthorizationRequestV2::new(
                     decode_fixed(&mut decoder, &mut context)?,
                     decode_fixed(&mut decoder, &mut context)?,
                 )?,

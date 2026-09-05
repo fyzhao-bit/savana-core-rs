@@ -86,6 +86,7 @@ pub enum FixedHttpRouteV2 {
     IngressTaskApprovalPrepare,
     IngressTaskApprovalCommit,
     IngressTaskRevoke,
+    IngressTaskRecover,
     AgentUiAuthenticationComplete,
     AgentView,
     AgentAction,
@@ -477,6 +478,9 @@ fn route(
         (FixedHttpServiceV2::Ingress, "POST", "/v2/task/revoke") => {
             FixedHttpRouteV2::IngressTaskRevoke
         }
+        (FixedHttpServiceV2::Ingress, "POST", "/v2/task/recover") => {
+            FixedHttpRouteV2::IngressTaskRecover
+        }
         (FixedHttpServiceV2::Ingress, "POST", "/v2/task/approval/prepare") => {
             FixedHttpRouteV2::IngressTaskApprovalPrepare
         }
@@ -572,6 +576,7 @@ fn validate_origin(
         | FixedHttpRouteV2::IngressInputFinalize
         | FixedHttpRouteV2::IngressTaskEstablish
         | FixedHttpRouteV2::IngressTaskRevoke
+        | FixedHttpRouteV2::IngressTaskRecover
         | FixedHttpRouteV2::IngressTaskApprovalPrepare
         | FixedHttpRouteV2::IngressTaskApprovalCommit
         | FixedHttpRouteV2::IngressInputAbort => origin == Some(FixedOriginV2::Ingress8767),
@@ -703,6 +708,7 @@ mod tests {
         for path in [
             "/v2/task/establish",
             "/v2/task/revoke",
+            "/v2/task/recover",
             "/v2/task/approval/prepare",
             "/v2/task/approval/commit",
         ] {

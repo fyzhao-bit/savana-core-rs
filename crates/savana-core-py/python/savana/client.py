@@ -157,6 +157,13 @@ class Session:
     async def revoke_task_authorization(self, draft):
         return await asyncio.to_thread(self._inner.revoke_task_authorization, draft)
 
+    async def recover_task_authorization(self, request_digest, approval):
+        """Reauthenticate and resume an existing issuance; never create a replacement."""
+        loop = asyncio.get_running_loop()
+        return await asyncio.to_thread(
+            self._inner.recover_task_authorization, request_digest, _bridge(approval, loop)
+        )
+
     async def run_planner(self, intent_privacy):
         return await asyncio.to_thread(
             self._inner.run_planner,

@@ -127,6 +127,25 @@ Task 4 issuance details:
 - Actual protocol approval issuance is in approvald `protocol_service.rs`, with persistence in `protocol_durable.rs` / `protocol_state_owner.rs` and UI ceremony in `ui_authority.rs`. It uses protocol signed envelopes and verified WebAuthn assertions; changing only the older service type in `lib.rs` is not sufficient. New task-root approval purpose must be role-bound to trusted ingress, and task-action settlement must be derived from the stored exact kernel envelope after the real verified ceremony, never from agent-supplied binding fields.
 - Preserve display declassification requirements: adding a task-root purpose must not create an agent-callable path for displaying arbitrary sensitive data without its existing gate. Authenticated structured input and approved drafts must be distinguishable evidence sources selected by the trusted handler, not a user/agent supplied `trusted` flag.
 
+Task 4D/7C recovery checkpoint (2026-09-05): IngressKernel 55 and the fixed
+same-origin `/v2/task/recover` route resolve existing durable issuance using
+fresh task/principal-bound UI authentication, without an old input handle.
+Installed current receipts are observations only (no re-sign, activation or
+counter mutation); revoked/replaced/expired state is refused. Existing approval
+display pairs retain their exact signed bytes. A persisted draft that crashed
+before display creation gets the real display gate and still requires separate
+task approval. Recovery proof is internally scoped and rejected by structured
+issuance/revocation, not rebranded as new finalized input. The actual browser has
+a request-digest recovery control; Rust/Python adds
+`recover_task_authorization(request_digest, approval)` with fresh authentication
+and no upload. Inventory: 19 business methods, 20 types. Pending recovery needs
+the previously observed issuance request digest; creation editor/context remains
+open. No deployment. Checks: kerneld library 313, policy library 230, ingress
+library 21, protocol 245, Rust client 89 and Python SDK 16 passed. Browser DOM
+tests cover installed/pending recovery, no implicit commit and wrong receipts.
+Two old policy fixtures used a payload digest where evidence belongs; they now
+use the release accessor and the stronger production checks remain unchanged.
+
 ## Task 5: Connect planner proposals, G4–G7, approvals and release
 
 **Files:** Modify kerneld `v2_agent_authority.rs`, `v2_value_owner.rs`, `v2_agent_durable.rs`, protocol `kernel_agent.rs`, `kernel_agent_success.rs`, semantic bindings and executor wire types; client/agentd operation forwarding where needed.

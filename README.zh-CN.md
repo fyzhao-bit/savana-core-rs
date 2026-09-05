@@ -100,13 +100,13 @@ JARVIS 仍是可信控制集成，并通过带外方式提供一次性 session b
 | Ingress | `http://localhost:8767` | 有界文本/文件输入以及 committed completion |
 | Approval | `http://localhost:8766` | WebAuthn 和人工审批 ceremony |
 
-十八个 business method 只统计三个 workflow owner：
+十九个 business method 只统计三个 workflow owner：
 
 | Owner | Business method |
 | --- | --- |
 | `Identity` | `load(path)` |
 | `Client` | `session(identity, bootstrap, webauthn, approval)`、`enroll(enrollment_token, code, webauthn, identity_path)` |
-| `Session` | `ingest_text`、`ingest_file`、`establish_task_authorization`、`approve_task_authorization`、`revoke_task_authorization`、`read_view`、`run_planner`、`execute`、`run_agent`、`release`、`register_connector`、`remove_connector`、`list_connectors`、`revoke`、`close` |
+| `Session` | `ingest_text`、`ingest_file`、`establish_task_authorization`、`approve_task_authorization`、`revoke_task_authorization`、`recover_task_authorization`、`read_view`、`run_planner`、`execute`、`run_agent`、`release`、`register_connector`、`remove_connector`、`list_connectors`、`revoke`、`close` |
 
 二十个产品类型如下：
 
@@ -128,10 +128,14 @@ retag；`PlanStep` 只暴露 opaque step handle，不虚构 `kind`、`reads` 或
 `ingest_text` 提交 goal，并用 `ingest_file` 提交文件。
 
 当前 intent-bound 分支中，输入提交成功不等于允许规划：还必须先建立精确的
-任务合同。新增三个任务方法走已认证的 Ingress，任务审批用途为独立的
+任务合同。四个任务方法走已认证的 Ingress，任务审批用途为独立的
 `task_authorization`。草稿只是非可信数据，回执只是观察结果，不是执行票据；
-Python 无法签名或构造可信证据。缺少已完成的认证输入时直接拒绝。
-合同编辑器/恢复、最终释放接入和部署闭合仍在完成中，本分支暂不可部署。
+Python 无法签名或构造可信证据。新建授权缺少已完成的认证输入时直接拒绝。
+`recover_task_authorization(request_digest, approval)` 会重新认证同一用户和任务，
+只恢复已有的持久化签发记录，不上传替代输入、不重新签发授权、不重置额度。
+请保留已观察到的签发请求摘要用于恢复；待批准草稿仍需独立任务审批，
+失效或过期的记录直接拒绝。合同编辑器/上下文、部署配置和完整链路验证仍在
+完成中，本分支暂不可部署。
 
 传给 `Client.session` 的 callback 会收到每一个真实的 ingress 审批 display，
 并且必须返回严格的 `bool`；ingress 永远不会自动批准。`read_view` 只接受

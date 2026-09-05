@@ -57,6 +57,54 @@ impl std::fmt::Debug for TaskAuthorizationReceipt {
 }
 
 impl Session {
+    /// Reauthenticate and recover an existing issuance by its observed request
+    /// digest. No source upload, fresh contract ID or new issuance nonce occurs.
+    /// Installed receipts do not invoke the approval callback; pending records
+    /// still require the dedicated real task-approval ceremony.
+    pub fn recover_task_authorization(
+        &mut self,
+        request_digest: [u8; 32],
+        approval: &dyn ApprovalCallback,
+    ) -> Result<TaskAuthorizationReceipt, SavanaError> {
+        self.require_open()?;
+        if request_digest == [0; 32] {
+            return Err(SavanaError::InvalidRequest);
+        }
+        let authenticate = (|| {
+            let prepared = self.agent_action(AgentBrowserActionV2::PrepareFollowupIngress)?;
+            let AgentBrowserMutationResponseV2::FollowupOpenIngress {
+                post: FixedBrowserFormPostCarrierV2::AgentFollowupIngress(bootstrap),
+            } = prepared
+            else {
+                return Err(SavanaError::InvalidResponse);
+            };
+            self.authenticate_followup_ingress(bootstrap)
+        })();
+        let tab = match authenticate {
+            Ok(tab) => tab,
+            Err(e) => {
+                self.state = LocalSessionState::Closed;
+                return Err(e);
+            }
+        };
+        let expected = Digest32V2::new(request_digest);
+        let opened = self.task_mutation(
+            BrowserRoute::IngressTaskRecover,
+            IngressBrowserRequestV2::RecoverTaskAuthorization {
+                tab,
+                client_request_nonce: self.nonces.nonce()?,
+                request_digest: expected,
+            },
+        )?;
+        if matches!(
+            opened,
+            IngressBrowserMutationResponseV2::TaskAuthorizationEstablished { .. }
+        ) {
+            return self.task_receipt(opened, expected);
+        }
+        self.finish_task_approval(tab, expected, opened, approval)
+    }
+
     /// Explicit structured-input submission on the current authenticated ingress
     /// tab. The native input owner authenticates the exact finalized input; the
     /// SDK does not infer a contract from ordinary chat or planner output.
@@ -97,6 +145,16 @@ impl Session {
                 draft: draft.material.clone(),
             },
         )?;
+        self.finish_task_approval(tab, expected, opened, approval)
+    }
+
+    fn finish_task_approval(
+        &mut self,
+        tab: IngressTabSessionCapabilityV2,
+        expected: Digest32V2,
+        opened: IngressBrowserMutationResponseV2,
+        approval: &dyn ApprovalCallback,
+    ) -> Result<TaskAuthorizationReceipt, SavanaError> {
         let transfer = match opened {
             IngressBrowserMutationResponseV2::TaskAuthorizationOpenApproval {
                 request_digest,

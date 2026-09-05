@@ -524,14 +524,19 @@ pub(crate) struct KernelInputOwnerV2 {
     extractions: Vec<ParserExtractionRecordV2>,
 }
 
-/// Created only by the input owner after resolving an actual finalized input
-/// session and its verified UI authentication. No wire `trusted` flag exists.
+/// Created only by the input owner after resolving verified UI authentication
+/// and either finalized input or an exact, previously persisted task draft.
+/// Recovery proof is for the existing issuance only, never input finalization.
 pub(crate) struct AuthenticatedTaskDraftSubmissionV2 {
     draft_digest: Digest32V2,
     evidence_digest: Digest32V2,
     authorization: KernelVerifiedUiAuthorizationV2,
+    recovery_request: Option<Digest32V2>,
 }
 impl AuthenticatedTaskDraftSubmissionV2 {
+    pub(crate) fn is_recovery(&self) -> bool {
+        self.recovery_request.is_some()
+    }
     pub(crate) fn draft_digest(&self) -> Digest32V2 {
         self.draft_digest
     }
@@ -555,6 +560,56 @@ impl std::fmt::Debug for KernelInputOwnerV2 {
 }
 
 impl KernelInputOwnerV2 {
+    pub(crate) fn authenticate_task_recovery(
+        &self,
+        authorization: IngressUiAuthorizationHandleV2,
+        pending: &savana_policy_core::v2::PendingTaskAuthorizationV2,
+        manifest: Digest32V2,
+        generation: u64,
+        now: UnixMillisV2,
+    ) -> Result<AuthenticatedTaskDraftSubmissionV2, KernelInputErrorV2> {
+        let commitment = authorization.authority_commitment(&self.handle_key);
+        let auth = self
+            .authorizations
+            .iter()
+            .find(|r| r.commitment == commitment)
+            .ok_or(KernelInputErrorV2::InvalidReference)?
+            .authorization;
+        let draft = pending.draft();
+        if auth.durable_task_id() != Some(draft.task())
+            || auth.authenticated_principal() != draft.principal()
+            || auth.installation_id() != draft.installation_digest()
+            || auth.active_state_manifest_digest() != manifest
+            || draft.manifest_digest() != manifest
+            || auth.deployment_generation() != generation
+            || draft.deployment_generation() != generation
+            || now.get() == 0
+            || now.get() >= auth.expires_at().get()
+            || now.get() < draft.not_before().get()
+            || now.get() >= draft.expires_at().get()
+        {
+            return Err(KernelInputErrorV2::ProvenanceMismatch);
+        }
+        let draft_digest = pending
+            .draft_digest()
+            .map_err(|_| KernelInputErrorV2::ProvenanceMismatch)?;
+        Ok(AuthenticatedTaskDraftSubmissionV2 {
+            draft_digest,
+            recovery_request: Some(pending.request_digest()),
+            evidence_digest: domain_hash_many(
+                b"SAVANA_TASK_RECOVERY_AUTHENTICATION_V2\0",
+                &[
+                    pending.request_digest().as_bytes(),
+                    draft_digest.as_bytes(),
+                    auth.settlement_digest().as_bytes(),
+                    auth.authentication_context_digest().as_bytes(),
+                    auth.binding_digest().as_bytes(),
+                ],
+            ),
+            authorization: auth,
+        })
+    }
+
     /// This method is for the dedicated typed ingress operation only, never for
     /// interpreting chat text or planner output as user authorization.
     pub(crate) fn authenticate_task_draft_submission(
@@ -604,6 +659,7 @@ impl KernelInputOwnerV2 {
             draft_digest,
             evidence_digest,
             authorization: auth,
+            recovery_request: None,
         })
     }
 
@@ -1431,7 +1487,7 @@ impl KernelInputOwnerV2 {
     }
 
     #[cfg(test)]
-    fn retained_plaintext_bytes(&self) -> usize {
+    pub(crate) fn retained_plaintext_bytes(&self) -> usize {
         let session_bytes: usize = self
             .sessions
             .iter()
@@ -1969,6 +2025,30 @@ pub(crate) mod tests {
         assert_eq!(finalized.channels()[0].bytes(), b"abc");
         assert_eq!(owner.retained_plaintext_bytes(), 0);
         (owner, begun.session(), finalized.input_commitment())
+    }
+
+    pub(crate) fn fresh_task_recovery_authentication(
+        owner: &mut KernelInputOwnerV2,
+        entropy: u8,
+        wrong_principal: bool,
+        wrong_task: bool,
+    ) -> IngressUiAuthorizationHandleV2 {
+        let handle = IngressUiAuthorizationHandleV2::from_authority_entropy([entropy; 32]).unwrap();
+        let mut auth = super::KernelVerifiedUiAuthorizationV2::for_test();
+        auth.settlement_digest = Digest32V2::new([entropy; 32]);
+        auth.authentication_context_digest = Digest32V2::new([entropy.wrapping_add(1); 32]);
+        if wrong_principal {
+            auth.authenticated_principal =
+                savana_kernel_protocol::v2::PrincipalIdV2::new([0x77; 32]);
+        }
+        if wrong_task {
+            auth.durable_task_id =
+                Some(savana_kernel_protocol::v2::DurableTaskIdV2::new([0x78; 32]));
+        }
+        owner
+            .register_verified_ui_authorization(handle, auth)
+            .unwrap();
+        handle
     }
 
     #[test]
