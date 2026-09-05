@@ -182,6 +182,48 @@ impl VerifiedConnectorExecutionRuntimeV2 {
             None => transport.verified_deployment_target(),
         }
         .map_err(|_| ExecdProtocolServiceErrorV2::Binding)?;
+        let envelope = owner
+            .sealed_execution_envelope(query.execution_nonce(), deadline)
+            .map_err(ExecdProtocolServiceErrorV2::Owner)?;
+        let envelope =
+            savana_kernel_protocol::v2::decode_signed_sealed_execution_envelope_v2(&envelope)
+                .map_err(|_| ExecdProtocolServiceErrorV2::Binding)?;
+        let core = envelope.payload().core();
+        if envelope.payload().dispatch_core_digest() != query.dispatch_core_digest()
+            || core.dispatch_subject_digest() != query.dispatch_subject_digest()
+        {
+            return Err(ExecdProtocolServiceErrorV2::Binding);
+        }
+        let business = if core.task_binding().is_some() {
+            let body = savana_kernel_protocol::v2::decode_task_execution_payload_v2(&payload)
+                .map_err(|_| ExecdProtocolServiceErrorV2::Binding)?;
+            body.check_core(&core)
+                .map_err(|_| ExecdProtocolServiceErrorV2::Binding)?;
+            let identity = savana_kernel_protocol::v2::business_target_identity_v2(
+                target.canonical_url().as_str(),
+                target.tls_identity_pin(),
+            )
+            .map_err(|_| ExecdProtocolServiceErrorV2::Binding)?;
+            if body.request().profile().target_identity() != identity
+                || body.request().profile().credential_identity()
+                    != transport
+                        .business_credential_identity()
+                        .map_err(|_| ExecdProtocolServiceErrorV2::Binding)?
+            {
+                return Err(ExecdProtocolServiceErrorV2::Binding);
+            }
+            Some(body.request().clone())
+        } else {
+            // Historical records may be queried/reconciled, never sent through
+            // this production provider path without task/request authority.
+            return Err(ExecdProtocolServiceErrorV2::Binding);
+        };
+        // The worker receives only the fixed business request. It does not get
+        // to construct or edit the kernel's content/authorization metadata.
+        let payload = match &business {
+            Some(request) => Zeroizing::new(request.canonical_json()),
+            None => payload,
+        };
         let descriptor_deadline = UnixMillisV2::new(
             now.get()
                 .checked_add(30_000)
@@ -198,6 +240,9 @@ impl VerifiedConnectorExecutionRuntimeV2 {
             )
             .map_err(|_| ExecdProtocolServiceErrorV2::Binding)?;
         let mut provider = OwnerBackedProviderAttemptV2::new(owner, transport, &target, now);
+        if let Some(request) = &business {
+            provider = provider.with_business_request(request.clone());
+        }
         let outcome = self.supervisor.prepare_and_decode(
             &descriptor,
             payload,
@@ -222,7 +267,15 @@ impl VerifiedConnectorExecutionRuntimeV2 {
             Ok(ConnectorWorkerOutcomeV2::Completion {
                 result,
                 result_digest,
-            }) => self.complete(owner, query, result, result_digest, now, deadline),
+            }) => complete_checked_business_result(
+                owner,
+                query,
+                result,
+                result_digest,
+                business.as_ref(),
+                now,
+                deadline,
+            ),
             Ok(ConnectorWorkerOutcomeV2::Indeterminate) => {
                 owner
                     .record_indeterminate(
@@ -239,7 +292,6 @@ impl VerifiedConnectorExecutionRuntimeV2 {
     }
 
     fn complete(
-        &self,
         owner: &ExecdStateOwnerV2,
         query: ExecdQueryV2,
         result: Zeroizing<Vec<u8>>,
@@ -334,6 +386,7 @@ impl VerifiedConnectorExecutionRuntimeV2 {
         &self,
         owner: &ExecdStateOwnerV2,
         query: ExecdQueryV2,
+        task_payload: Option<savana_kernel_protocol::v2::TaskExecutionPayloadV2>,
         now: UnixMillisV2,
         deadline: Instant,
     ) -> Result<(), ExecdProtocolServiceErrorV2> {
@@ -353,6 +406,25 @@ impl VerifiedConnectorExecutionRuntimeV2 {
                 Ok(())
             }
             ExecdJournalStateV2::ProviderResponseRetained => {
+                if !retained_business_succeeded(
+                    owner,
+                    query,
+                    task_payload.as_ref().map(|p| p.request()),
+                    deadline,
+                )? {
+                    owner
+                        .record_indeterminate_recovery(
+                            query.execution_nonce(),
+                            domain_digest(
+                                b"SAVANA_TASK_RESPONSE_NOT_VERIFIED_SUCCESS_V2\0",
+                                query.dispatch_core_digest().as_bytes(),
+                            ),
+                            now,
+                            deadline,
+                        )
+                        .map_err(ExecdProtocolServiceErrorV2::Owner)?;
+                    return Ok(());
+                }
                 let retained = owner
                     .retained_provider_response(query.execution_nonce(), deadline)
                     .map_err(ExecdProtocolServiceErrorV2::Owner)?;
@@ -389,7 +461,15 @@ impl VerifiedConnectorExecutionRuntimeV2 {
                     Ok(ConnectorWorkerOutcomeV2::Completion {
                         result,
                         result_digest,
-                    }) => self.complete(owner, query, result, result_digest, now, deadline),
+                    }) => complete_checked_business_result(
+                        owner,
+                        query,
+                        result,
+                        result_digest,
+                        task_payload.as_ref().map(|p| p.request()),
+                        now,
+                        deadline,
+                    ),
                     Ok(ConnectorWorkerOutcomeV2::FailedBeforeEffect)
                     | Ok(ConnectorWorkerOutcomeV2::Indeterminate)
                     | Err(_) => {
@@ -444,11 +524,65 @@ impl PreparedDispatchProcessorV2 for VerifiedConnectorExecutionRuntimeV2 {
         &self,
         owner: &ExecdStateOwnerV2,
         query: ExecdQueryV2,
+        task_payload: Option<savana_kernel_protocol::v2::TaskExecutionPayloadV2>,
         now: UnixMillisV2,
         deadline: Instant,
     ) -> Result<(), ExecdProtocolServiceErrorV2> {
-        self.recover_inner(owner, query, now, deadline)
+        self.recover_inner(owner, query, task_payload, now, deadline)
     }
+}
+
+/// The only completion entry used by both live workers and retained-response
+/// recovery. A worker's signed result never substitutes for the provider fact.
+pub(crate) fn complete_checked_business_result(
+    owner: &ExecdStateOwnerV2,
+    query: ExecdQueryV2,
+    result: Zeroizing<Vec<u8>>,
+    result_digest: Digest32V2,
+    business: Option<&savana_kernel_protocol::v2::BusinessRequestV2>,
+    now: UnixMillisV2,
+    deadline: Instant,
+) -> Result<(), ExecdProtocolServiceErrorV2> {
+    if !retained_business_succeeded(owner, query, business, deadline)? {
+        owner
+            .record_indeterminate_recovery(
+                query.execution_nonce(),
+                domain_digest(
+                    b"SAVANA_TASK_RESPONSE_NOT_VERIFIED_SUCCESS_V2\0",
+                    query.dispatch_core_digest().as_bytes(),
+                ),
+                now,
+                deadline,
+            )
+            .map_err(ExecdProtocolServiceErrorV2::Owner)?;
+        return Ok(());
+    }
+    VerifiedConnectorExecutionRuntimeV2::complete(
+        owner,
+        query,
+        result,
+        result_digest,
+        now,
+        deadline,
+    )
+}
+
+fn retained_business_succeeded(
+    owner: &ExecdStateOwnerV2,
+    query: ExecdQueryV2,
+    business: Option<&savana_kernel_protocol::v2::BusinessRequestV2>,
+    deadline: Instant,
+) -> Result<bool, ExecdProtocolServiceErrorV2> {
+    let Some(request) = business else {
+        return Ok(true);
+    }; // Explicit historical records only.
+    let retained = owner
+        .retained_provider_response(query.execution_nonce(), deadline)
+        .map_err(ExecdProtocolServiceErrorV2::Owner)?;
+    Ok(matches!(
+        request.classify_response(retained.bytes()),
+        Ok(savana_kernel_protocol::v2::BusinessResponseDispositionV2::Succeeded)
+    ))
 }
 
 fn worker_error_digest(query: ExecdQueryV2, error: ConnectorWorkerSupervisorErrorV2) -> Digest32V2 {

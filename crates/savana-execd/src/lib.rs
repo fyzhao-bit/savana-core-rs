@@ -714,6 +714,11 @@ impl ExecdServiceV2 {
         let canonical_payload = encode_executor_completion_payload_v2(&payload)
             .map_err(|_| ExecdErrorV2::DurableState)?;
         let stored = StoredExecutorCompletionV2::new(descriptor, canonical_payload)?;
+        let evidence_digest = task_completion_evidence_for_entry(
+            &self.entries[entry_index],
+            descriptor,
+            evidence_digest,
+        )?;
         self.record_terminal(
             nonce,
             evidence_digest,
@@ -721,7 +726,7 @@ impl ExecdServiceV2 {
             ExecutorReceiptKindV2::KnownSuccess,
             &[ExecdJournalStateV2::ProviderResponseRetained],
             ExecdJournalStateV2::CompletionAvailable,
-            true,
+            false,
         )?;
         self.entries[entry_index].completion = Some(stored.clone());
         Ok(stored)
@@ -744,7 +749,10 @@ impl ExecdServiceV2 {
         {
             return Err(ExecdErrorV2::IllegalTransition);
         }
-        ensure_live(entry, now)?;
+        // No new attempt: only finish evidence for the already retained result.
+        if now.get() < entry.payload.issued_at.get() {
+            return Err(ExecdErrorV2::InvalidTime);
+        }
         let audit = ExecutorFinalReleaseAuditEvidenceV2::new(audit_evidence.clone())
             .map_err(|_| ExecdErrorV2::Capacity)?;
         let effect_receipt = entry
@@ -850,6 +858,11 @@ impl ExecdServiceV2 {
         let canonical_payload = encode_executor_completion_payload_v2(&payload)
             .map_err(|_| ExecdErrorV2::DurableState)?;
         let stored = StoredExecutorCompletionV2::new(descriptor, canonical_payload)?;
+        let evidence_digest = task_completion_evidence_for_entry(
+            &self.entries[entry_index],
+            descriptor,
+            evidence_digest,
+        )?;
         self.record_terminal(
             nonce,
             evidence_digest,
@@ -1199,6 +1212,37 @@ impl ExecutorReceiptKindV2 {
             _ => Err(ExecdErrorV2::InvalidReceipt),
         }
     }
+}
+
+fn task_completion_evidence_for_entry(
+    entry: &ExecdJournalEntryV2,
+    completion: ExecutorCompletionDescriptorV2,
+    legacy_evidence: Digest32V2,
+) -> Result<Digest32V2, ExecdErrorV2> {
+    let envelope = match decode_signed_sealed_execution_envelope_v2(&entry.canonical_envelope) {
+        Ok(envelope) => envelope,
+        // The older private envelope fixture is test-only; production admission
+        // has always required the protocol envelope. Never downgrade corrupt bytes.
+        #[cfg(test)]
+        Err(_) => return Ok(legacy_evidence),
+        #[cfg(not(test))]
+        Err(_) => return Err(ExecdErrorV2::DurableState),
+    };
+    let Some(binding) = envelope.payload().core().task_binding() else {
+        return Ok(legacy_evidence);
+    };
+    let query = project_entry(entry);
+    savana_kernel_protocol::v2::task_completion_evidence_digest_v2(
+        binding.authorization_digest(),
+        query
+            .prepared_request_digest()
+            .ok_or(ExecdErrorV2::IllegalTransition)?,
+        query
+            .retained_provider_response_digest()
+            .ok_or(ExecdErrorV2::IllegalTransition)?,
+        completion,
+    )
+    .map_err(|_| ExecdErrorV2::InvalidReceipt)
 }
 
 #[derive(Debug, Clone)]
@@ -2012,6 +2056,107 @@ mod tests {
         assert_eq!(first.state(), ExecdJournalStateV2::Prepared);
     }
 
+    #[test]
+    fn task_terminal_receipt_binds_actual_request_response_and_completion_after_expiry() {
+        use savana_kernel_protocol::v2::{
+            task_completion_evidence_digest_v2, DispatchTaskBindingV2,
+        };
+        let (values, kernel_key, receipt_key, deployment) = fixture();
+        let nonce = Nonce32V2::new([0xa1; 32]);
+        let binding = ToolExecutionSemanticBindingV2::new(
+            PlanRevisionDigestV2::new([1; 32]),
+            InternalStepIdV2::new([2; 32]),
+            Digest32V2::new([3; 32]),
+            Digest32V2::new([4; 32]),
+            Digest32V2::new([5; 32]),
+            Digest32V2::new([6; 32]),
+            Digest32V2::new([7; 32]),
+            Digest32V2::new([8; 32]),
+            Digest32V2::new([9; 32]),
+            values.executor_identity,
+            AttemptKindV2::new(1),
+        )
+        .unwrap();
+        let request = stale_registry_dispatch_request(
+            values,
+            &kernel_key,
+            HpkeX25519KeyIdV2::new([10; 32]),
+            nonce,
+            DispatchSubjectV2::tool_execution(ActionIntentIdV2::new([11; 32]), binding, None)
+                .unwrap(),
+        );
+        let authorization = Digest32V2::new([12; 32]);
+        let core = request
+            .envelope()
+            .payload()
+            .core()
+            .clone()
+            .with_task_binding(
+                DispatchTaskBindingV2::new(
+                    Digest32V2::new([13; 32]),
+                    authorization,
+                    Digest32V2::new([14; 32]),
+                )
+                .unwrap(),
+            );
+        let envelope = SignedSealedExecutionEnvelopeV2::sign(
+            SealedExecutionEnvelopePayloadV2::new(
+                core.clone(),
+                Digest32V2::new([15; 32]),
+                FixedBytes32V2::new([16; 32]),
+                BoundedCiphertextV2::new(vec![17; 64]).unwrap(),
+            )
+            .unwrap(),
+            &kernel_key,
+        )
+        .unwrap();
+        let mut service = ExecdServiceV2::new(deployment);
+        service
+            .accept_signed_dispatch(
+                &encode_signed_sealed_execution_envelope_v2(&envelope).unwrap(),
+                UnixMillisV2::new(200),
+            )
+            .unwrap();
+        let actual_request = Digest32V2::new([18; 32]);
+        let predecessor = service
+            .prepare_provider_attempt(nonce, actual_request, UnixMillisV2::new(210))
+            .unwrap();
+        service
+            .record_effect_started(predecessor, UnixMillisV2::new(211))
+            .unwrap();
+        service
+            .record_provider_response(nonce, b"retained by transport, not the worker".to_vec())
+            .unwrap();
+        let response_digest = service.retained_provider_response(nonce).unwrap().digest();
+        let completion = service.record_tool_completion(nonce, b"worker decoded result".to_vec(),
+            Digest32V2::new([99; 32]), UnixMillisV2::new(20_000))
+            .expect("recording a retained outcome must not restart effects or require a live dispatch grant");
+        let terminal = service.terminal_receipt(nonce).unwrap();
+        terminal
+            .verify(values.receipt_key_id, &receipt_key.verifying_key())
+            .unwrap();
+        let decoded = super::decode_signed_receipt(terminal.canonical_bytes()).unwrap();
+        assert_eq!(
+            decoded.evidence_digest,
+            task_completion_evidence_digest_v2(
+                authorization,
+                actual_request,
+                response_digest,
+                completion.descriptor()
+            )
+            .unwrap()
+        );
+        assert_ne!(decoded.evidence_digest, Digest32V2::new([99; 32]));
+        assert_eq!(
+            decoded.dispatch_core_digest,
+            core.semantic_digest().unwrap()
+        );
+        assert_eq!(decoded.execution_nonce, nonce);
+        assert!(service
+            .prepare_provider_attempt(nonce, actual_request, UnixMillisV2::new(20_001))
+            .is_err());
+    }
+
     fn signed_envelope_at_fence(
         values: Fixture,
         kernel_key: &SigningKey,
@@ -2230,6 +2375,7 @@ mod tests {
             &self,
             _owner: &ExecdStateOwnerV2,
             _query: ExecdQueryV2,
+            _task_payload: Option<savana_kernel_protocol::v2::TaskExecutionPayloadV2>,
             _now: UnixMillisV2,
             _deadline: Instant,
         ) -> Result<(), ExecdProtocolServiceErrorV2> {
@@ -2262,6 +2408,7 @@ mod tests {
             &self,
             _owner: &ExecdStateOwnerV2,
             _query: ExecdQueryV2,
+            _task_payload: Option<savana_kernel_protocol::v2::TaskExecutionPayloadV2>,
             _now: UnixMillisV2,
             _deadline: Instant,
         ) -> Result<(), ExecdProtocolServiceErrorV2> {
@@ -2296,6 +2443,7 @@ mod tests {
             &self,
             _owner: &ExecdStateOwnerV2,
             _query: ExecdQueryV2,
+            _task_payload: Option<savana_kernel_protocol::v2::TaskExecutionPayloadV2>,
             _now: UnixMillisV2,
             _deadline: Instant,
         ) -> Result<(), ExecdProtocolServiceErrorV2> {
@@ -2383,6 +2531,127 @@ mod tests {
             owner,
             registry,
         )
+    }
+
+    #[test]
+    fn worker_success_cannot_override_retained_failure_unknown_or_malformed_response() {
+        use savana_kernel_protocol::v2::*;
+        let profile = BusinessProfileV2::new(
+            ActionCodecProfileV2::FixedJsonPostV1,
+            "/submit",
+            Digest32V2::new([1; 32]),
+            Digest32V2::new([2; 32]),
+            TaskEffectV2::Send,
+            BusinessMagnitudeV2::FixedCount(1),
+            vec![
+                BusinessFieldV2::new(
+                    "body",
+                    BusinessFieldRoleV2::Payload,
+                    BusinessFieldTypeV2::Text,
+                )
+                .unwrap(),
+                BusinessFieldV2::new(
+                    "resource",
+                    BusinessFieldRoleV2::Resource,
+                    BusinessFieldTypeV2::Text,
+                )
+                .unwrap(),
+                BusinessFieldV2::new(
+                    "to",
+                    BusinessFieldRoleV2::Destination,
+                    BusinessFieldTypeV2::Text,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let business = BusinessRequestV2::from_fields(
+            &profile,
+            "request-1",
+            vec![
+                ("body".into(), BusinessValueV2::Text("test".into())),
+                ("resource".into(), BusinessValueV2::Text("A".into())),
+                ("to".into(), BusinessValueV2::Text("Alice".into())),
+            ],
+        )
+        .unwrap();
+        for (response, succeeds) in [
+            (r#"{"request_id":"request-1","status":"succeeded"}"#, true),
+            (r#"{"request_id":"request-1","status":"failed"}"#, false),
+            (
+                r#"{"request_id":"request-1","status":"indeterminate"}"#,
+                false,
+            ),
+            (r#"{"request_id":"other","status":"succeeded"}"#, false),
+            (
+                r#"{"request_id":"request-1","status":"failed","status":"succeeded"}"#,
+                false,
+            ),
+            (
+                r#"{"request_id":"request-1","status":"succeeded","redirect":"evil"}"#,
+                false,
+            ),
+            ("worker says success", false),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let genesis = Digest32V2::new([0xb1; 32]);
+            let (values, key, seal_id, seal_key, _deployment, owner, _registry) =
+                protocol_registry_fixture(root.path(), genesis);
+            let nonce = Nonce32V2::new([0xb2; 32]);
+            let request =
+                sealed_registry_dispatch_request(values, &key, seal_id, seal_key, genesis, nonce);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            owner
+                .accept_signed_dispatch(
+                    encode_signed_sealed_execution_envelope_v2(request.envelope()).unwrap(),
+                    UnixMillisV2::new(200),
+                    deadline,
+                )
+                .unwrap();
+            let predecessor = owner
+                .prepare_provider_attempt(
+                    nonce,
+                    Digest32V2::new([0xb3; 32]),
+                    UnixMillisV2::new(210),
+                    deadline,
+                )
+                .unwrap();
+            owner
+                .record_effect_started(predecessor, UnixMillisV2::new(211), deadline)
+                .unwrap();
+            owner
+                .record_provider_response(nonce, response.as_bytes().to_vec(), deadline)
+                .unwrap();
+            let query = owner.query(nonce, deadline).unwrap();
+            crate::connector_runtime::complete_checked_business_result(
+                &owner,
+                query,
+                Zeroizing::new(b"untrusted worker claims success".to_vec()),
+                Digest32V2::new([0xb4; 32]),
+                Some(&business),
+                UnixMillisV2::new(20_000),
+                deadline,
+            )
+            .unwrap();
+            let after = owner.query(nonce, deadline).unwrap();
+            assert_eq!(
+                after.state(),
+                if succeeds {
+                    ExecdJournalStateV2::CompletionAvailable
+                } else {
+                    ExecdJournalStateV2::Indeterminate
+                }
+            );
+            assert_eq!(
+                after.retained_provider_response_digest(),
+                query.retained_provider_response_digest()
+            );
+            assert_eq!(
+                after.prepared_request_digest(),
+                query.prepared_request_digest()
+            );
+        }
     }
 
     fn sealed_registry_dispatch_request(

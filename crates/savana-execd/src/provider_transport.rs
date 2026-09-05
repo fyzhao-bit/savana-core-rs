@@ -167,6 +167,10 @@ impl VerifiedRustlsProviderTransportV2 {
 }
 
 impl ProviderTransportV2 for VerifiedRustlsProviderTransportV2 {
+    fn business_credential_identity(&self) -> Result<Digest32V2, ConnectorWorkerSupervisorErrorV2> {
+        Ok(self.credential_handle_identity_digest)
+    }
+
     fn verified_deployment_target(
         &self,
     ) -> Result<VerifiedProviderTargetV2, ConnectorWorkerSupervisorErrorV2> {

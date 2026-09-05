@@ -61,6 +61,113 @@ fn input(quantity: u64) -> Vec<u8> {
 }
 
 #[test]
+fn task_execution_payload_is_closed_content_bound_and_redacts_debug() {
+    let profile = profile(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        BusinessMagnitudeV2::CountField,
+    );
+    let request = BusinessRequestV2::parse(&profile, "request-1", &input(1)).unwrap();
+    let content = ActionContentV2::new(
+        d(20),
+        1,
+        1,
+        0,
+        request.action_alternative(d(21)).unwrap(),
+        1,
+        request.payload_digest(),
+        d(22),
+        d(23),
+        d(24),
+        d(25),
+        1,
+    )
+    .unwrap();
+    let payload = TaskExecutionPayloadV2::new(content.clone(), request.clone()).unwrap();
+    let bytes = encode_task_execution_payload_v2(&payload).unwrap();
+    assert_eq!(decode_task_execution_payload_v2(&bytes).unwrap(), payload);
+    assert!(!format!("{payload:?}").contains("hello"));
+    assert!(!format!("{payload:?}").contains("Alice"));
+    for end in 0..bytes.len() {
+        assert!(decode_task_execution_payload_v2(&bytes[..end]).is_err());
+    }
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(decode_task_execution_payload_v2(&trailing).is_err());
+    let mut unknown = bytes.clone();
+    unknown[1] = 2;
+    assert!(decode_task_execution_payload_v2(&unknown).is_err());
+    let altered = String::from_utf8(input(1)).unwrap().replace("Alice", "Bob");
+    assert!(TaskExecutionPayloadV2::new(
+        content.clone(),
+        BusinessRequestV2::parse(&profile, "request-1", altered.as_bytes()).unwrap()
+    )
+    .is_err());
+    assert!(TaskExecutionPayloadV2::new(
+        content.clone(),
+        BusinessRequestV2::parse(&profile, "request-1", &input(2)).unwrap()
+    )
+    .is_err());
+    let altered_payload = String::from_utf8(input(1))
+        .unwrap()
+        .replace("hello", "secret");
+    assert!(TaskExecutionPayloadV2::new(
+        content.clone(),
+        BusinessRequestV2::parse(&profile, "request-1", altered_payload.as_bytes()).unwrap()
+    )
+    .is_err());
+    let subject = DispatchSubjectV2::tool_execution(
+        ActionIntentIdV2::new([30; 32]),
+        ToolExecutionSemanticBindingV2::new(
+            PlanRevisionDigestV2::new([23; 32]),
+            InternalStepIdV2::new([31; 32]),
+            d(21),
+            d(32),
+            d(22),
+            d(33),
+            d(34),
+            d(35),
+            d(36),
+            d(37),
+            AttemptKindV2::new(2),
+        )
+        .unwrap(),
+        None,
+    )
+    .unwrap();
+    let core = DispatchCoreV2::new(
+        d(38),
+        d(39),
+        1,
+        1,
+        DurableTaskIdV2::new([40; 32]),
+        DurableRunIdV2::new([41; 32]),
+        Nonce32V2::new([42; 32]),
+        subject,
+        ExecutorIdentityV2::new([43; 32]),
+        HpkeX25519KeyIdV2::new([44; 32]),
+        d(45),
+        UnixMillisV2::new(100),
+    )
+    .unwrap();
+    assert!(payload.check_core(&core).is_err());
+    let bound = core.clone().with_task_binding(
+        DispatchTaskBindingV2::new(action_content_digest_v2(&content).unwrap(), d(46), d(47))
+            .unwrap(),
+    );
+    assert!(payload.check_core(&bound).is_ok());
+    assert!(payload
+        .check_core(
+            &core.with_task_binding(DispatchTaskBindingV2::new(d(99), d(46), d(47)).unwrap())
+        )
+        .is_err());
+    assert_ne!(
+        business_target_identity_v2("https://provider.example/one", d(1)).unwrap(),
+        business_target_identity_v2("https://provider.example/two", d(1)).unwrap()
+    );
+    assert!(business_target_identity_v2("http://provider.example", d(1)).is_err());
+}
+
+#[test]
 fn business_request_roundtrip_and_independent_controls() {
     let p = profile(
         ActionCodecProfileV2::McpToolsCallJsonV1,

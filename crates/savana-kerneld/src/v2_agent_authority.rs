@@ -3504,8 +3504,8 @@ impl KernelAgentAuthorityV2 {
         if stored.provenance_set_digest() != task_match.content().provenance_digest() {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
-        let dispatch_plaintext = business_request.canonical_json();
-        let destination = KernelValueV2::bytes(dispatch_plaintext.clone())
+        let dispatch_plaintext = task_execution_plaintext(&task_match, &business_request)?;
+        let destination = KernelValueV2::bytes(business_request.canonical_json())
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
         // The G4 display commitment includes the complete content, before any
         // action approval or final authorization digest is constructed.
@@ -3820,7 +3820,8 @@ impl KernelAgentAuthorityV2 {
             )
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
         if projected != intent.business_request
-            || projected.canonical_json() != intent.dispatch_plaintext
+            || task_execution_plaintext(&intent.task_match, &projected)?
+                != intent.dispatch_plaintext
             || stored.provenance_set_digest() != intent.task_match.content().provenance_digest()
         {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
@@ -4214,7 +4215,8 @@ impl KernelAgentAuthorityV2 {
         }
         if active.descriptor().unsigned().business_profile()
             != Some(intent.business_request.profile())
-            || intent.business_request.canonical_json() != intent.dispatch_plaintext
+            || task_execution_plaintext(&intent.task_match, &intent.business_request)?
+                != intent.dispatch_plaintext
             || intent
                 .business_request
                 .action_alternative(intent.descriptor_digest)
@@ -4401,7 +4403,7 @@ impl KernelAgentAuthorityV2 {
             .executor
             .dispatch(request_id, deadline, DispatchRequestV2::new(envelope))
             .map_err(map_executor_client_error)?;
-        let status = public_executor_status(response.status());
+        let status = public_unreconciled_executor_status(response.status());
         let execution = mint_handle(ExecutionHandleV2::from_authority_entropy)?;
         let commitment = execution.authority_commitment(&self.handle_key);
         self.executions
@@ -4527,15 +4529,26 @@ impl KernelAgentAuthorityV2 {
                     now,
                 )?,
             ExecutorStatusV2::FailedNoEffect { .. } => {
-                let evidence = domain_digest(
-                    b"SAVANA_AUTHENTICATED_FAILED_NO_EFFECT_STATUS_V2\0",
-                    &[nonce.as_bytes(), core.as_bytes(), subject.as_bytes()],
-                );
+                let (key_id, public_key) = self.executor_receipt_identity()?;
+                let outcome = verify_task_no_effect_response(
+                    &self
+                        .policy
+                        .as_ref()
+                        .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?
+                        .durable,
+                    &response,
+                    nonce,
+                    core,
+                    subject,
+                    key_id,
+                    public_key,
+                    now,
+                )?;
                 self.policy
                     .as_mut()
                     .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?
                     .durable
-                    .reconcile_authenticated_failed_no_effect(nonce, core, subject, evidence)
+                    .reconcile_task_outcome(outcome)
                     .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
                 PublicExecutionStatusV2::FailedNoEffect {
                     class: PublicFailureClassV2::Connector,
@@ -4619,6 +4632,17 @@ impl KernelAgentAuthorityV2 {
             .effect_started_receipt()
             .verify(receipt_key_id, receipt_public_key)
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let task_outcome = verify_task_completion_response(
+            &self
+                .policy
+                .as_ref()
+                .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?
+                .durable,
+            &response,
+            receipt_key_id,
+            receipt_public_key,
+            now,
+        )?;
         let result = match response.payload() {
             savana_kernel_protocol::v2::ExecutorCompletionPayloadV2::ToolResult { result } => {
                 if completion.tool_result_digest()
@@ -4713,13 +4737,7 @@ impl KernelAgentAuthorityV2 {
             .as_mut()
             .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?
             .durable
-            .reconcile_authenticated_completion(
-                response.effect_started_receipt(),
-                receipt_key_id,
-                receipt_public_key,
-                commit_digest,
-                now,
-            )
+            .reconcile_task_outcome(task_outcome)
             .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
         self.policy
             .as_ref()
@@ -5335,7 +5353,7 @@ impl KernelAgentAuthorityV2 {
                 DispatchRequestV2::new(envelope),
             )
             .map_err(map_executor_client_error)?;
-        let status = public_executor_status(response.status());
+        let status = public_unreconciled_executor_status(response.status());
         vault
             .mark_release_dispatching(vault_prepared, now)
             .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
@@ -5424,6 +5442,27 @@ impl KernelAgentAuthorityV2 {
                 self.commit_release_completion(request_id, index, *completion, vault, now)?
             }
             ExecutorStatusV2::FailedNoEffect { .. } => {
+                let (key_id, public_key) = self.executor_receipt_identity()?;
+                let outcome = verify_task_no_effect_response(
+                    &self
+                        .policy
+                        .as_ref()
+                        .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?
+                        .durable,
+                    &response,
+                    nonce,
+                    core,
+                    subject,
+                    key_id,
+                    public_key,
+                    now,
+                )?;
+                self.policy
+                    .as_mut()
+                    .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?
+                    .durable
+                    .reconcile_task_outcome(outcome)
+                    .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
                 let pending = self
                     .pending_releases
                     .iter()
@@ -5545,25 +5584,22 @@ impl KernelAgentAuthorityV2 {
                 return Err(KernelAgentAuthorityErrorV2::BindingMismatch)
             }
         };
-        let completion_evidence_digest = domain_digest(
-            b"SAVANA_AUTHENTICATED_EXECUTOR_COMPLETION_V2\0",
-            &[
-                response.effect_started_receipt_digest().as_bytes(),
-                final_release_receipt_digest.as_bytes(),
-                release_audit_digest.as_bytes(),
-            ],
-        );
+        let task_outcome = verify_task_completion_response(
+            &self
+                .policy
+                .as_ref()
+                .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?
+                .durable,
+            &response,
+            receipt_key_id,
+            receipt_public_key,
+            now,
+        )?;
         self.policy
             .as_mut()
             .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?
             .durable
-            .reconcile_authenticated_completion(
-                response.effect_started_receipt(),
-                receipt_key_id,
-                receipt_public_key,
-                completion_evidence_digest,
-                now,
-            )
+            .reconcile_task_outcome(task_outcome)
             .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
         vault
             .commit_known_release(
@@ -6727,6 +6763,19 @@ fn match_business_proposal(
         .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)
 }
 
+fn task_execution_plaintext(
+    matched: &savana_policy_core::v2::VerifiedTaskMatchV2,
+    request: &savana_kernel_protocol::v2::BusinessRequestV2,
+) -> Result<Vec<u8>, KernelAgentAuthorityErrorV2> {
+    let payload = savana_kernel_protocol::v2::TaskExecutionPayloadV2::new(
+        matched.content().clone(),
+        request.clone(),
+    )
+    .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+    savana_kernel_protocol::v2::encode_task_execution_payload_v2(&payload)
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)
+}
+
 fn task_bound_display(
     stored: &savana_policy_core::v2::VerifiedStoredBindingsV2<'_>,
     matched: &savana_policy_core::v2::VerifiedTaskMatchV2,
@@ -6762,6 +6811,86 @@ fn projected_display(
         bytes.extend_from_slice(argument.provenance_digest().as_bytes());
     }
     KernelValueV2::bytes(bytes).map_err(|_| KernelAgentAuthorityErrorV2::LimitExceeded)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_task_no_effect_response(
+    durable: &savana_policy_core::v2::DurableG4StateV2,
+    response: &savana_kernel_protocol::v2::QueryByExecutionNonceResponseV2,
+    nonce: Nonce32V2,
+    core: Digest32V2,
+    subject: Digest32V2,
+    key_id: Ed25519KeyIdV2,
+    public_key: [u8; 32],
+    now: UnixMillisV2,
+) -> Result<savana_policy_core::v2::VerifiedTaskOutcomeV2, KernelAgentAuthorityErrorV2> {
+    if !matches!(response.status(), ExecutorStatusV2::FailedNoEffect { .. }) {
+        return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+    }
+    let receipt = savana_policy_core::v2::SignedExecutorDispositionReceiptV2::from_canonical_bytes(
+        response
+            .terminal_receipt()
+            .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?,
+    )
+    .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+    let outcome = durable
+        .verify_task_outcome(&receipt, key_id, public_key, now)
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+    if outcome.is_known_success()
+        || outcome.execution_nonce() != nonce
+        || outcome.dispatch_core_digest() != core
+        || outcome.dispatch_subject_digest() != subject
+    {
+        return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+    }
+    Ok(outcome)
+}
+
+fn public_unreconciled_executor_status(status: &ExecutorStatusV2) -> PublicExecutionStatusV2 {
+    // Dispatch acknowledgement is not durable task reconciliation. Query the
+    // signed terminal record before caching a terminal status or refunding.
+    match status {
+        ExecutorStatusV2::FailedNoEffect { .. } | ExecutorStatusV2::Indeterminate { .. } => {
+            PublicExecutionStatusV2::Dispatching
+        }
+        other => public_executor_status(other),
+    }
+}
+
+fn verify_task_completion_response(
+    durable: &savana_policy_core::v2::DurableG4StateV2,
+    response: &savana_kernel_protocol::v2::FetchCompletionResponseV2,
+    key_id: Ed25519KeyIdV2,
+    public_key: [u8; 32],
+    now: UnixMillisV2,
+) -> Result<savana_policy_core::v2::VerifiedTaskOutcomeV2, KernelAgentAuthorityErrorV2> {
+    let evidence = response
+        .task_outcome()
+        .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
+    let receipt = savana_policy_core::v2::SignedExecutorDispositionReceiptV2::from_canonical_bytes(
+        evidence.terminal_receipt(),
+    )
+    .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+    let verified = durable
+        .verify_task_outcome(&receipt, key_id, public_key, now)
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+    let binding = durable
+        .task_dispatch_binding(response.execution_nonce())
+        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+    if !verified.is_known_success()
+        || verified.execution_nonce() != response.execution_nonce()
+        || verified.dispatch_core_digest() != response.dispatch_core_digest()
+        || verified.dispatch_subject_digest() != response.dispatch_subject_digest()
+        || verified.authorization_digest() != binding.authorization_digest()
+        || verified.authorization_digest() != evidence.authorization_digest()
+        || verified.evidence_digest()
+            != evidence
+                .evidence_digest(response.completion())
+                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?
+    {
+        return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+    }
+    Ok(verified)
 }
 
 fn protocol_trace(
@@ -10193,7 +10322,12 @@ pub(crate) mod tests {
         );
         let intent = &f.authority.intents[0];
         assert_eq!(
-            intent.dispatch_plaintext,
+            savana_kernel_protocol::v2::decode_task_execution_payload_v2(
+                &intent.dispatch_plaintext
+            )
+            .unwrap()
+            .request()
+            .canonical_json(),
             intent.business_request.canonical_json()
         );
         assert_eq!(intent.business_request.resource(), "A");

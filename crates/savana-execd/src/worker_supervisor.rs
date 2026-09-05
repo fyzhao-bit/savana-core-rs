@@ -97,6 +97,11 @@ pub(crate) trait DurableProviderAttemptV2 {
 /// Credential-bearing transport owned by execd. The codec worker never
 /// receives this object or any credential material.
 pub(crate) trait ProviderTransportV2: Send {
+    /// Exact credential identity measured from this transport's installed
+    /// client credential. Unsupported transports cannot run task-bound work.
+    fn business_credential_identity(&self) -> Result<Digest32V2, ConnectorWorkerSupervisorErrorV2> {
+        Err(ConnectorWorkerSupervisorErrorV2::ProviderAttemptFailed)
+    }
     /// Returns the manifest-bound provider target used by the pre-existing
     /// deployment connector/release path.
     fn verified_deployment_target(
@@ -347,6 +352,7 @@ pub(crate) struct OwnerBackedProviderAttemptV2<'a> {
     transport: &'a mut dyn ProviderTransportV2,
     target: &'a VerifiedProviderTargetV2,
     now: UnixMillisV2,
+    expected_business: Option<savana_kernel_protocol::v2::BusinessRequestV2>,
 }
 
 impl<'a> OwnerBackedProviderAttemptV2<'a> {
@@ -361,7 +367,16 @@ impl<'a> OwnerBackedProviderAttemptV2<'a> {
             transport,
             target,
             now,
+            expected_business: None,
         }
+    }
+
+    pub(crate) fn with_business_request(
+        mut self,
+        request: savana_kernel_protocol::v2::BusinessRequestV2,
+    ) -> Self {
+        self.expected_business = Some(request);
+        self
     }
 
     #[cfg(test)]
@@ -376,6 +391,7 @@ impl<'a> OwnerBackedProviderAttemptV2<'a> {
             transport,
             target,
             now,
+            expected_business: None,
         }
     }
 }
@@ -394,6 +410,22 @@ impl DurableProviderAttemptV2 for OwnerBackedProviderAttemptV2<'_> {
             || query.dispatch_subject_digest() != job.dispatch_subject_digest()
         {
             return Err(ConnectorWorkerSupervisorErrorV2::ProviderAttemptFailed);
+        }
+        if let Some(expected) = &self.expected_business {
+            expected
+                .verify_equivalent(prepared.request())
+                .map_err(|_| ConnectorWorkerSupervisorErrorV2::ProtocolViolation)?;
+            let target = savana_kernel_protocol::v2::business_target_identity_v2(
+                self.target.canonical_url().as_str(),
+                self.target.tls_identity_pin(),
+            )
+            .map_err(|_| ConnectorWorkerSupervisorErrorV2::ProviderAttemptFailed)?;
+            if expected.profile().target_identity() != target
+                || expected.profile().credential_identity()
+                    != self.transport.business_credential_identity()?
+            {
+                return Err(ConnectorWorkerSupervisorErrorV2::ProviderAttemptFailed);
+            }
         }
         let request = VerifiedProviderRequestV2::bind(
             self.target.clone(),
@@ -998,6 +1030,11 @@ mod tests {
     }
 
     impl ProviderTransportV2 for FakeTransport {
+        fn business_credential_identity(
+            &self,
+        ) -> Result<Digest32V2, ConnectorWorkerSupervisorErrorV2> {
+            Ok(Digest32V2::new([9; 32]))
+        }
         fn verified_deployment_target(
             &self,
         ) -> Result<VerifiedProviderTargetV2, ConnectorWorkerSupervisorErrorV2> {
@@ -1183,6 +1220,151 @@ mod tests {
         assert_eq!(provider_frames.load(Ordering::SeqCst), 1);
         assert_eq!(launches.load(Ordering::SeqCst), 1);
         assert!(!killed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn task_bound_worker_request_mutations_stop_before_prepare_or_provider_attempt() {
+        use savana_kernel_protocol::v2::{
+            business_target_identity_v2, ActionCodecProfileV2, BusinessFieldRoleV2,
+            BusinessFieldTypeV2, BusinessFieldV2, BusinessMagnitudeV2, BusinessProfileV2,
+            BusinessRequestV2, TaskEffectV2,
+        };
+        let json = r#"{"id":"call-1","jsonrpc":"2.0","method":"tools/call","params":{"arguments":{"body":"private payload","file":"A","to":"Alice"},"name":"mail.send"}}"#;
+        let profile = |target, credential| {
+            BusinessProfileV2::new(
+                ActionCodecProfileV2::McpToolsCallJsonV1,
+                "mail.send",
+                target,
+                credential,
+                TaskEffectV2::Send,
+                BusinessMagnitudeV2::FixedCount(1),
+                vec![
+                    BusinessFieldV2::new(
+                        "body",
+                        BusinessFieldRoleV2::Payload,
+                        BusinessFieldTypeV2::Text,
+                    )
+                    .unwrap(),
+                    BusinessFieldV2::new(
+                        "file",
+                        BusinessFieldRoleV2::Resource,
+                        BusinessFieldTypeV2::Text,
+                    )
+                    .unwrap(),
+                    BusinessFieldV2::new(
+                        "to",
+                        BusinessFieldRoleV2::Destination,
+                        BusinessFieldTypeV2::Text,
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap()
+        };
+        let target_identity = business_target_identity_v2(
+            "https://provider.example/mcp",
+            Digest32V2::new([0x70; 32]),
+        )
+        .unwrap();
+        let mutations = vec![
+            json.into(),
+            json.replace("Alice", "Bob"),
+            json.replace("\"A\"", "\"B\""),
+            json.replace("mail.send", "mail.delete"),
+            json.replace("tools/call", "tools/list"),
+            json.replace("private payload", "other payload"),
+            json.replace("\"to\":\"Alice\"", "\"to\":\"Alice\",\"to\":\"Bob\""),
+            json.replace(
+                "\"to\":\"Alice\"",
+                "\"to\":\"Alice\",\"redirect\":\"https://evil.example\"",
+            ),
+            json.replace(
+                "\"jsonrpc\":\"2.0\"",
+                "\"jsonrpc\":\"2.0\",\"authorization\":\"fake\"",
+            ),
+            json.into(), // wrong bound credential
+            json.into(), // wrong bound gateway target
+        ];
+        for (case, bytes) in mutations.iter().enumerate() {
+            let fixture = fixture(ConnectorCodecJobModeV2::PrepareAndDecode);
+            let job = verify_connector_worker_job(
+                &fixture.descriptor,
+                &trust(&fixture),
+                UnixMillisV2::new(100),
+            )
+            .unwrap();
+            let transcript_material =
+                crate::worker_protocol::prepared_transcript_material(&job, bytes.as_bytes(), 1024)
+                    .unwrap();
+            let transcript = connector_transcript_step(
+                connector_transcript_begin(&job),
+                1,
+                1,
+                0,
+                &transcript_material,
+            );
+            let frame = crate::worker_protocol::encode_connector_prepared_frame(
+                &job,
+                &fixture.ephemeral,
+                bytes.as_bytes(),
+                1024,
+                transcript,
+            )
+            .unwrap();
+            let ConnectorWorkerFrameV2::Prepared(prepared) =
+                crate::worker_protocol::decode_connector_worker_frame(&frame, &job).unwrap()
+            else {
+                panic!("signed prepared frame")
+            };
+            let steps = Arc::new(Mutex::new(Vec::new()));
+            let prepared_digest = Arc::new(Mutex::new(None));
+            let journal = FakeJournal {
+                steps: steps.clone(),
+                prepared_digest: prepared_digest.clone(),
+            };
+            let mut transport = FakeTransport {
+                steps: steps.clone(),
+                prepared_digest: prepared_digest.clone(),
+            };
+            let target = transport.verified_deployment_target().unwrap();
+            let p = profile(
+                if case == 10 {
+                    Digest32V2::new([99; 32])
+                } else {
+                    target_identity
+                },
+                Digest32V2::new([if case == 9 { 99 } else { 9 }; 32]),
+            );
+            let expected = BusinessRequestV2::parse(&p, "call-1", json.as_bytes()).unwrap();
+            let mut attempt = OwnerBackedProviderAttemptV2::from_parts(
+                &journal,
+                &mut transport,
+                &target,
+                UnixMillisV2::new(110),
+            )
+            .with_business_request(expected);
+            let result = attempt.execute_and_retain(
+                &job,
+                &prepared,
+                Instant::now() + Duration::from_secs(1),
+            );
+            if case == 0 {
+                assert!(result.is_ok());
+                assert_eq!(
+                    steps.lock().unwrap().as_slice(),
+                    ["query", "prepare", "effect-started", "transport", "retain"]
+                );
+                assert!(prepared_digest.lock().unwrap().is_some());
+            } else {
+                assert!(result.is_err(), "hostile case {case}");
+                assert_eq!(
+                    steps.lock().unwrap().as_slice(),
+                    ["query"],
+                    "provider attempts must remain zero: {case}"
+                );
+                assert!(prepared_digest.lock().unwrap().is_none());
+            }
+        }
     }
 
     #[test]

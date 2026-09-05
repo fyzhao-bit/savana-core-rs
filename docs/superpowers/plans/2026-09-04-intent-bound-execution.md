@@ -162,6 +162,29 @@ business-request equivalence or prove the end-to-end provider path (Task 6B/8).
 
 ## Task 6: Exact request profile and executor boundary validation
 
+Task 6B execution-boundary checkpoint (2026-09-05): the real tool seal now
+contains a closed ActionContent/business-request capsule. The executor verifies
+its preseal/core binding, actual target and credential identities and compares
+the worker request before the provider-attempt journal transition. New execution
+without a supported profile is refused. The custom outer CBOR/mTLS frame is
+unchanged. Both live completion and retained-response recovery classify the
+transport-retained response using the pinned closed response codec; a worker's
+success cannot override failure, unknown, wrong-ID or malformed responses.
+Signed terminal evidence binds AuthorizationDigest, the actual journaled outer
+application request digest, retained response digest and completion descriptor.
+Native consumers verify it before result commit/dependency advancement. Signed
+no-effect query evidence replaces fabricated status digests for task refunds;
+dispatch acknowledgement alone no longer caches a terminal result. Historical
+terminal reconciliation can finish after expiry, without starting another effect.
+
+Checkpoint checks: protocol full suite 239 passed; policy library 230 passed;
+executor library 53 passed (local mTLS socket tests outside sandbox); native agent
+authority subset 30 passed. Exact request mutation test includes a positive
+provider-attempt control; actual retained-owner tests cover seven response cases.
+These are component/handler checks, NOT the Task 8 complete issuer-to-provider
+experiment. Dedicated action approval, real final-release producer, production
+profile deployment and full-branch verification still prevent overall completion.
+
 **Files:** Create protocol `business_request.rs`; modify policy descriptor/codec mappings, kerneld action projection; execd `worker_supervisor.rs`, `connector_runtime.rs`, `provider_transport.rs`, executor journal and protocol executor types.
 
 Execution split: implement and review shared bounded request/response types, canonical codecs and signed descriptor mapping as Task 6A immediately after Task 3. This foundation supplies Tasks 4–5 with exact resource/destination/parameter/magnitude projections and displayable values. Integrate actual pre-provider validation, journal binding and authoritative outcome production as Task 6B after Task 5. Neither subtask alone completes Task 6 or establishes end-to-end enforcement.

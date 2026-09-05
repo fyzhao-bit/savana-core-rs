@@ -52,12 +52,19 @@ mod signed;
 pub use signed::TaskAuthorizationChangeV2;
 mod task_action_approval;
 mod task_authorization;
+mod task_completion;
+mod task_execution_payload;
 pub use task_action_approval::{
     decode_signed_task_action_approval_v2, decode_task_action_approval_v2,
     encode_signed_task_action_approval_v2, encode_task_action_approval_v2,
     sign_task_action_approval_v2, verify_task_action_approval_v2, SignedTaskActionApprovalV2,
     TaskActionApprovalContextV2, TaskActionApprovalDecisionV2, TaskActionApprovalV2,
     VerifiedTaskActionApprovalV2, MAX_TASK_ACTION_APPROVAL_BYTES_V2,
+};
+pub use task_completion::{task_completion_evidence_digest_v2, TaskCompletionEvidenceV2};
+pub use task_execution_payload::{
+    business_target_identity_v2, decode_task_execution_payload_v2,
+    encode_task_execution_payload_v2, TaskExecutionPayloadV2, MAX_TASK_EXECUTION_PAYLOAD_BYTES_V2,
 };
 #[cfg(test)]
 mod task_action_approval_tests;

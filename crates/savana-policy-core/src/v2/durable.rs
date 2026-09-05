@@ -946,7 +946,21 @@ impl DurableG4StateV2 {
         now: UnixMillisV2,
     ) -> Result<VerifiedTaskOutcomeV2, G4Error> {
         self.ensure_usable()?;
-        let entry = self.dispatch_entry_for_receipt(receipt, expected_key_id, public_key, now)?;
+        let entry = self
+            .snapshot
+            .dispatch
+            .entries
+            .iter()
+            .find_map(|entry| {
+                receipt
+                    .verify_terminal_for_entry(entry, expected_key_id, public_key, now)
+                    .ok()
+                    .map(|proof| VerifiedReceiptEntryV2 {
+                        core: entry.core.clone(),
+                        proof,
+                    })
+            })
+            .ok_or(G4Error::StateConflict)?;
         if !matches!(
             entry.proof.disposition.kind(),
             AuthenticatedEffectDispositionKindV2::KnownSuccess

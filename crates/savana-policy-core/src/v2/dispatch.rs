@@ -1102,6 +1102,27 @@ impl SignedExecutorDispositionReceiptV2 {
         })
     }
 
+    /// Reconcile a historical terminal fact, never grant another execution.
+    /// A dispatch deadline limits starting effects, not receipt delivery.
+    pub(crate) fn verify_terminal_for_entry(
+        &self,
+        entry: &KernelDispatchJournalEntryV2,
+        expected_key_id: Ed25519KeyIdV2,
+        public_key: [u8; 32],
+        now: UnixMillisV2,
+    ) -> Result<VerifiedExecutorDispositionV2, G4Error> {
+        let payload = decode_receipt_payload(&self.canonical_payload)?;
+        if payload.issued_at.get() > now.get()
+            || !matches!(
+                payload.kind,
+                ExecutorDispositionKindV2::KnownSuccess | ExecutorDispositionKindV2::FailedNoEffect
+            )
+        {
+            return Err(G4Error::StateConflict);
+        }
+        self.verify_stored_for_entry(entry, expected_key_id, public_key)
+    }
+
     pub(crate) fn verify_stored_for_entry(
         &self,
         entry: &KernelDispatchJournalEntryV2,

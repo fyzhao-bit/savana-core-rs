@@ -559,6 +559,49 @@ fn outcome(store: &DurableG4StateV2, p: DispatchPreparationV2, kind: u16) -> Ver
 }
 
 #[test]
+fn task_terminal_outcome_survives_expiry_but_rejects_future_wrong_key_and_nonterminal() {
+    for kind in [2, 3] {
+        let mut f = Fixture::new(vec![clause(1, 5, 2, vec![], true)]);
+        let request = f.request(1, 1);
+        let p = prepare(&mut f.store, &request, 20).unwrap();
+        let key_id = Ed25519KeyIdV2::new([0xc2; 32]);
+        let key = SigningKey::from_bytes(&[0xc1; 32])
+            .verifying_key()
+            .to_bytes();
+        let expiry = f
+            .store
+            .dispatch_core(p.execution_nonce())
+            .unwrap()
+            .expires_at;
+        assert!(f
+            .store
+            .verify_task_outcome(&receipt(p, kind), key_id, key, UnixMillisV2::new(9))
+            .is_err());
+        assert!(f
+            .store
+            .verify_task_outcome(&receipt(p, kind), key_id, [0x99; 32], expiry)
+            .is_err());
+        for nonterminal in [1, 4] {
+            assert!(f
+                .store
+                .verify_task_outcome(&receipt(p, nonterminal), key_id, key, expiry)
+                .is_err());
+        }
+        let verified = f
+            .store
+            .verify_task_outcome(&receipt(p, kind), key_id, key, expiry)
+            .expect("expiry stops new execution, not signed historical outcome reconciliation");
+        f.store.reconcile_task_outcome(verified.clone()).unwrap();
+        let after = f.store.task_authorization_state(task()).unwrap().digest();
+        f.store.reconcile_task_outcome(verified).unwrap();
+        assert_eq!(
+            f.store.task_authorization_state(task()).unwrap().digest(),
+            after
+        );
+    }
+}
+
+#[test]
 fn task_dispatch_core_binds_content_authority_and_exact_request_before_commit() {
     let mut f = Fixture::new(vec![clause(1, 5, 2, vec![], false)]);
     let request = f.request(1, 1);

@@ -99,6 +99,27 @@ pub struct VerifiedTaskOutcomeV2 {
     pub(crate) proof: VerifiedExecutorDispositionV2,
     pub(crate) authorization_digest: Digest32V2,
 }
+impl VerifiedTaskOutcomeV2 {
+    pub fn execution_nonce(&self) -> Nonce32V2 {
+        self.proof.execution_nonce
+    }
+    pub fn dispatch_core_digest(&self) -> Digest32V2 {
+        self.proof.dispatch_core_digest
+    }
+    pub fn dispatch_subject_digest(&self) -> Digest32V2 {
+        self.proof.dispatch_subject_digest
+    }
+    pub fn authorization_digest(&self) -> Digest32V2 {
+        self.authorization_digest
+    }
+    pub fn evidence_digest(&self) -> Digest32V2 {
+        self.proof.evidence_digest
+    }
+    pub fn is_known_success(&self) -> bool {
+        self.proof.disposition.kind()
+            == super::quota::AuthenticatedEffectDispositionKindV2::KnownSuccess
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ClauseCounter {

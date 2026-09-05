@@ -828,15 +828,36 @@ impl DispatchResponseV2 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryByExecutionNonceResponseV2 {
     status: ExecutorStatusV2,
+    terminal_receipt: Option<Vec<u8>>,
 }
 
 impl QueryByExecutionNonceResponseV2 {
     pub const fn new(status: ExecutorStatusV2) -> Self {
-        Self { status }
+        Self {
+            status,
+            terminal_receipt: None,
+        }
     }
 
     pub const fn status(&self) -> &ExecutorStatusV2 {
         &self.status
+    }
+
+    /// Untrusted transport bytes. The consumer must verify the expected executor
+    /// signature, exact dispatch and no-effect disposition before any refund.
+    pub fn with_terminal_receipt(mut self, receipt: Vec<u8>) -> Result<Self, ProtocolError> {
+        if !matches!(self.status, ExecutorStatusV2::FailedNoEffect { .. })
+            || receipt.is_empty()
+            || receipt.len() > 1024
+        {
+            return Err(malformed());
+        }
+        self.terminal_receipt = Some(receipt);
+        Ok(self)
+    }
+
+    pub fn terminal_receipt(&self) -> Option<&[u8]> {
+        self.terminal_receipt.as_deref()
     }
 }
 
@@ -971,6 +992,7 @@ pub struct FetchCompletionResponseV2 {
     effect_started_receipt_digest: Digest32V2,
     completion: ExecutorCompletionDescriptorV2,
     payload: ExecutorCompletionPayloadV2,
+    task_outcome: Option<super::TaskCompletionEvidenceV2>,
 }
 
 impl FetchCompletionResponseV2 {
@@ -1005,7 +1027,16 @@ impl FetchCompletionResponseV2 {
             effect_started_receipt_digest,
             completion,
             payload,
+            task_outcome: None,
         })
+    }
+
+    pub fn with_task_outcome(mut self, outcome: super::TaskCompletionEvidenceV2) -> Self {
+        self.task_outcome = Some(outcome);
+        self
+    }
+    pub fn task_outcome(&self) -> Option<&super::TaskCompletionEvidenceV2> {
+        self.task_outcome.as_ref()
     }
 
     pub const fn execution_nonce(&self) -> Nonce32V2 {
@@ -1142,11 +1173,55 @@ status_response_codec!(
     decode_dispatch_response_v2,
     DispatchResponseV2
 );
-status_response_codec!(
-    encode_query_by_execution_nonce_response_v2,
-    decode_query_by_execution_nonce_response_v2,
-    QueryByExecutionNonceResponseV2
-);
+pub fn encode_query_by_execution_nonce_response_v2(
+    value: &QueryByExecutionNonceResponseV2,
+) -> Result<Vec<u8>, ProtocolError> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder
+        .array(if value.terminal_receipt.is_some() {
+            3
+        } else {
+            1
+        })
+        .map_err(ProtocolError::malformed)?;
+    encode_executor_status(&mut encoder, &value.status)?;
+    if let Some(receipt) = &value.terminal_receipt {
+        encoder
+            .u16(1)
+            .and_then(|e| e.bytes(receipt))
+            .map_err(ProtocolError::malformed)?;
+    }
+    Ok(encoder.into_writer())
+}
+
+pub fn decode_query_by_execution_nonce_response_v2(
+    bytes: &[u8],
+) -> Result<QueryByExecutionNonceResponseV2, ProtocolError> {
+    exact_decode(
+        bytes,
+        |decoder, context| {
+            let length = decoder.array().map_err(ProtocolError::malformed)?;
+            if !matches!(length, Some(1) | Some(3)) {
+                return Err(malformed());
+            }
+            let response =
+                QueryByExecutionNonceResponseV2::new(decode_executor_status(decoder, context)?);
+            if length == Some(3) {
+                if decoder.u16().map_err(ProtocolError::malformed)? != 1 {
+                    return Err(malformed());
+                }
+                let receipt = decoder.bytes().map_err(ProtocolError::malformed)?;
+                if receipt.len() > 1024 {
+                    return Err(malformed());
+                }
+                response.with_terminal_receipt(receipt.to_vec())
+            } else {
+                Ok(response)
+            }
+        },
+        encode_query_by_execution_nonce_response_v2,
+    )
+}
 
 pub fn encode_acknowledge_committed_completion_response_v2(
     value: &AcknowledgeCommittedCompletionResponseV2,
@@ -1177,7 +1252,7 @@ pub fn encode_fetch_completion_response_v2(
 ) -> Result<Vec<u8>, ProtocolError> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
     encoder
-        .array(7)
+        .array(if value.task_outcome.is_some() { 8 } else { 7 })
         .and_then(|encoder| encoder.bytes(value.execution_nonce.as_bytes()))
         .and_then(|encoder| encoder.bytes(value.dispatch_core_digest.as_bytes()))
         .and_then(|encoder| encoder.bytes(value.dispatch_subject_digest.as_bytes()))
@@ -1189,6 +1264,16 @@ pub fn encode_fetch_completion_response_v2(
         .map_err(ProtocolError::malformed)?;
     encode_completion_descriptor(&mut encoder, value.completion)?;
     encode_completion_payload(&mut encoder, &value.payload)?;
+    if let Some(outcome) = &value.task_outcome {
+        encoder
+            .array(5)
+            .and_then(|e| e.u16(1))
+            .and_then(|e| e.bytes(outcome.authorization_digest().as_bytes()))
+            .and_then(|e| e.bytes(outcome.application_request_digest().as_bytes()))
+            .and_then(|e| e.bytes(outcome.retained_response_digest().as_bytes()))
+            .and_then(|e| e.bytes(outcome.terminal_receipt()))
+            .map_err(ProtocolError::malformed)?;
+    }
     Ok(encoder.into_writer())
 }
 
@@ -1198,8 +1283,11 @@ pub fn decode_fetch_completion_response_v2(
     exact_decode(
         bytes,
         |decoder, context| {
-            expect_array(decoder, 7)?;
-            FetchCompletionResponseV2::new(
+            let fields = decoder.array().map_err(ProtocolError::malformed)?;
+            if fields != Some(7) && fields != Some(8) {
+                return Err(malformed());
+            }
+            let response = FetchCompletionResponseV2::new(
                 Nonce32V2::new(decode_fixed::<32>(decoder)?),
                 Digest32V2::new(decode_fixed::<32>(decoder)?),
                 Digest32V2::new(decode_fixed::<32>(decoder)?),
@@ -1208,6 +1296,28 @@ pub fn decode_fetch_completion_response_v2(
                 Digest32V2::new(decode_fixed::<32>(decoder)?),
                 decode_completion_descriptor(decoder, context)?,
                 decode_completion_payload(decoder, context)?,
+            )?;
+            if fields == Some(7) {
+                return Ok(response);
+            }
+            expect_array(decoder, 5)?;
+            if decoder.u16().map_err(ProtocolError::malformed)? != 1 {
+                return Err(malformed());
+            }
+            let authorization = Digest32V2::new(decode_fixed::<32>(decoder)?);
+            let request = Digest32V2::new(decode_fixed::<32>(decoder)?);
+            let retained = Digest32V2::new(decode_fixed::<32>(decoder)?);
+            let receipt = decoder.bytes().map_err(ProtocolError::malformed)?;
+            if receipt.is_empty() || receipt.len() > 1024 {
+                return Err(malformed());
+            }
+            Ok(
+                response.with_task_outcome(super::TaskCompletionEvidenceV2::new(
+                    authorization,
+                    request,
+                    retained,
+                    receipt.to_vec(),
+                )?),
             )
         },
         encode_fetch_completion_response_v2,
