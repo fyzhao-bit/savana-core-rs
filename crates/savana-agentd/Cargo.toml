@@ -42,6 +42,12 @@ signal-hook.workspace = true
 
 [dev-dependencies]
 tempfile = "=3.23.0"
+savana-approvald = { path = "../savana-approvald", features = ["test-support"] }
+
+[[test]]
+name = "planner_privacy_e2e"
+path = "tests/planner_privacy_e2e.rs"
+required-features = ["test-support"]
 
 [[test]]
 name = "macos_startup"

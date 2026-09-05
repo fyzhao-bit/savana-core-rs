@@ -152,6 +152,50 @@ the whole agent loop; there is no retry, replan, substitute tool, or fallback.
 OpenClaw receives only `turn.event {event: "approval_required", purpose}`.
 It never receives the display or ID and cannot answer an approval through chat.
 
+### Task scope before planning
+
+The bridge reserves the exact receiver turn **before input and planning**. After
+input finalization, it obtains authenticated `task_authorization_context` from
+Rust and requests explicit clause data over the private broker socket:
+
+```json
+{
+  "protocol_version": 1,
+  "type": "task.draft",
+  "draft_id": "fresh-43-character-base64url-value",
+  "source_input_digest": "64-lowercase-hex-characters",
+  "release_destination": "application-turn:64-lowercase-hex-characters",
+  "tools_json": "unpadded-base64url-of-active-profile-metadata",
+  "next_revision": 1,
+  "deadline_unix_ms": 1900000000000
+}
+```
+
+The product-owned scope editor returns exactly `protocol_version`,
+`type: "task.draft_result"`, the same `draft_id`, and `clauses_json` (unpadded
+base64url UTF-8 bytes, at most 512 KiB), or `null` to decline. The clause grammar
+is documented in `docs/client-sdk-v2.md`. No chat text, raw protected input,
+credential or source/principal/task override is accepted through that grammar.
+The editor must use the supplied source and exact release destination for any
+final-release alternative; substituting another destination will not deliver to
+this turn. Tool metadata contains only active signed profiles, not a grant.
+
+Rust constructs and validates the unsigned draft, retaining an existing
+authorization identity/revision. The bridge then invokes
+`approve_task_authorization`; its separate `task_authorization` approval and
+credential ceremony must succeed **before** `run_agent`. Returning clause data
+does not approve it. Neither missing broker support nor an empty/malformed draft
+falls back to implicit authority. Pending uncertain issuances stop the turn with
+`policy_refused`; resolve them using the dedicated SDK/Ingress recovery flow
+before retrying. Consumed budgets are not reset by making a new bridge turn.
+
+The FD 3 product broker is a deployment integration supplied by the host product,
+not an implementation shipped in this plugin. It must implement this new scope
+exchange as well as the existing credential/approval exchanges. The standalone
+Savana Ingress editor is implemented in Rust's browser assets. Transport tests
+use a test-double SDK session and are not evidence of a complete native
+issuer-to-provider run or of a live OpenClaw deployment.
+
 ## OpenClaw configuration
 
 The production profile must explicitly select `savana/agent`, pin the model to

@@ -99,3 +99,22 @@ checks and are not omitted failures.
    manifests, and final code review. V1 production assets remain frozen.
 7. Only then revise the paper from the user's immutable LaTeX draft. Unmeasured
    experiments must remain explicitly unmeasured; no acceptance score is implied.
+# OpenClaw pre-planning integration checkpoint (2026-09-05)
+
+Receiver reservation now precedes input, scope collection and planning. The
+private broker's correlated `task.draft` exchange returns bounded data only;
+Rust's authenticated context constructs the unsigned draft and the existing
+independent task-approval workflow installs it. Denied/invalid/pending/refused
+scope never enters the planner or release. Existing contract identity is retained.
+The host-product broker must implement the exchange; no live broker/deployment
+is claimed. Real receiver transport tests retain a mocked SDK session, explicitly
+not a native authorization-chain experiment.
+
+Checks at this checkpoint: default `cargo test --locked --workspace` passed;
+explicit agentd `planner_privacy_e2e` test-support suite 4 passed; TypeScript
+plugin suite 65 passed against the pinned installed OpenClaw dependency via a
+temporary external test configuration. Python runtime/broker suite 42 passed.
+Five scope-ordering/refusal tests were first observed failing before integration.
+The agentd manifest now enables approval test helpers only as dev-dependencies,
+and declares the gated planner integration test's required feature. This does
+not enable test capabilities in the production default build.

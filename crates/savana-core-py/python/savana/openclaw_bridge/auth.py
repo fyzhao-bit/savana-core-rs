@@ -23,7 +23,7 @@ MAX_AUTH_FIELD_BYTES = 512 * 1024
 MAX_APPROVAL_DISPLAY_BYTES = 16 * 1024
 MAX_APPROVAL_IDS = 65_536
 APPROVAL_PURPOSES = frozenset(
-    {"ingress", "tool_execution", "final_release", "connector_registration"}
+    {"ingress", "tool_execution", "final_release", "connector_registration", "task_authorization"}
 )
 _APPROVAL_ID = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 
@@ -96,6 +96,64 @@ class WebAuthnBroker:
     async def next(self) -> str:
         """Obtain a fresh one-use session bootstrap on the same private channel."""
         return await asyncio.to_thread(self._next_bootstrap)
+
+    def request_task_draft(
+        self,
+        context: Any,
+        turn_binding: bytes,
+        deadline_unix_ms: int,
+        cancel_event: threading.Event | None = None,
+    ) -> bytes | None:
+        """Return bounded unsigned clause JSON from the out-of-band scope editor.
+
+        No raw input or credentials are sent. The response cannot select source,
+        principal, task, profile or revision; Rust fills those from the context.
+        This is deliberately separate from approval.decide and WebAuthn.
+        """
+        source = context.source_input_digest
+        tools = context.tools_json()
+        identity = context.authorization_identity
+        if (
+            not isinstance(turn_binding, bytes) or len(turn_binding) != 32 or not any(turn_binding)
+            or not isinstance(source, bytes) or len(source) != 32 or not any(source)
+            or not isinstance(tools, str)
+            or type(deadline_unix_ms) is not int
+            or not int(time.time() * 1000) < deadline_unix_ms <= (1 << 63) - 1
+        ):
+            raise AuthBrokerError("task draft request is invalid")
+        tools_bytes = tools.encode("utf-8", errors="strict")
+        if len(tools_bytes) > MAX_AUTH_FIELD_BYTES:
+            raise AuthBrokerError("task draft request is oversized")
+        request_id = self._fresh_approval_id()
+        request = {
+            "protocol_version": AUTH_PROTOCOL_VERSION,
+            "type": "task.draft",
+            "draft_id": request_id,
+            "source_input_digest": source.hex(),
+            "release_destination": "application-turn:" + turn_binding.hex(),
+            "tools_json": _encode_binary(tools_bytes),
+            "next_revision": 1 if identity is None else identity[1],
+            "deadline_unix_ms": deadline_unix_ms,
+        }
+        encoded = json.dumps(request, separators=(",", ":"), sort_keys=True).encode("ascii")
+        remaining = (deadline_unix_ms - int(time.time() * 1000)) / 1000.0
+        response = self._roundtrip(
+            encoded,
+            monotonic_deadline=time.monotonic() + min(self._timeout_seconds, remaining),
+            cancel_event=cancel_event,
+        )
+        if (
+            frozenset(response) != {"protocol_version", "type", "draft_id", "clauses_json"}
+            or type(response.get("protocol_version")) is not int
+            or response["protocol_version"] != AUTH_PROTOCOL_VERSION
+            or response.get("type") != "task.draft_result"
+            or not isinstance(response.get("draft_id"), str)
+            or not secrets.compare_digest(response["draft_id"], request_id)
+        ):
+            raise AuthBrokerError("task draft response is invalid")
+        if response["clauses_json"] is None:
+            return None
+        return _decode_binary(response["clauses_json"])
 
     def decide_approval(
         self,

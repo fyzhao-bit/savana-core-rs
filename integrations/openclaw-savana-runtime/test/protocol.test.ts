@@ -9,6 +9,14 @@ import {
 } from "../src/protocol.js";
 
 describe("bridge protocol", () => {
+  it("preserves task-level approval as a distinct closed purpose", () => {
+    const message = {
+      protocol_version: 1, request_id: 2, type: "turn.event",
+      event: "approval_required", purpose: "task_authorization",
+    };
+    expect(decodeBridgeMessage(JSON.stringify(message) + "\n")).toEqual(message);
+    expect(() => decodeBridgeMessage(JSON.stringify({ ...message, purpose: "auto_authorize" }) + "\n")).toThrow(ProtocolError);
+  });
   it("encodes the closed initialize and turn unions", () => {
     expect(
       encodeBridgeMessage({

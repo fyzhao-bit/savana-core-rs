@@ -119,6 +119,7 @@ _PURPOSES = {
     "tool_execution",
     "final_release",
     "connector_registration",
+    "task_authorization",
 }
 _STATUSES = {
     "succeeded",

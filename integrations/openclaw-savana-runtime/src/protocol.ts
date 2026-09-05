@@ -14,7 +14,8 @@ export type ApprovalPurpose =
   | "ingress"
   | "tool_execution"
   | "final_release"
-  | "connector_registration";
+  | "connector_registration"
+  | "task_authorization";
 
 export type FailureCode =
   | "authentication_failed"
@@ -203,6 +204,7 @@ const PURPOSES = new Set<ApprovalPurpose>([
   "tool_execution",
   "final_release",
   "connector_registration",
+  "task_authorization",
 ]);
 const STATUSES = new Set([
   "succeeded",
