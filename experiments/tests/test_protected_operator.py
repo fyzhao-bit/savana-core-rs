@@ -97,4 +97,30 @@ class OperatorTests(unittest.TestCase):
                 self.assertEqual(submit.call_count,1)
 
 
+    def test_forward_mode_leaves_every_plan_decision_to_the_kernel(self):
+        from savana_bench.planner_authors import compromised_draft
+        contract=_TASKS[0];d=dict(installation=(b'i'*32).hex(),store=(b's'*32).hex(),planner=(b'p'*32).hex(),
+            application_turn=(b'u'*32).hex(),
+            descriptors={contract.tool:(b't'*32).hex(),'dojo.calendar.day':(b'y'*32).hex(),
+                         'savana.final_result_release':(b'r'*32).hex()})
+        now=time.time_ns()//1000000
+        ids=dict(task=b'a'*32,root=b'b'*32,observer=b'o'*32,application_turn=b'u'*32,planner=b'p'*32,
+            model_profile=1,not_before=now,expires_at=now+120000)
+        draft=compromised_draft('drop_release',contract=contract,release_descriptor=b'r'*32,
+            descriptors={contract.tool:b't'*32,'dojo.calendar.day':b'y'*32},**ids)
+        command=dict(schema=1,installation=list(b'i'*32),store=list(b's'*32),request=list(b'q'*32),
+            not_before=now,expires_at=now+120000,operation=dict(kind='compile_planning',task=list(b'a'*32),draft=draft))
+        request=dict(kind='compile',contract=contract.task_id,command=command)
+        with tempfile.TemporaryDirectory() as tmp:
+            op=FiniteOperator(d,Ed25519PrivateKey.generate(),tmp)
+            with patch.object(op,'_submit',return_value=dict(kind='planning_enrolled',task=list(b'a'*32),profile=list(b'f'*32))) as submit:
+                with self.assertRaises(Exception):op.compile(request)
+                with self.assertRaises(ValueError):op.compile(dict(request,mode='sign_anything'))
+                self.assertEqual(submit.call_count,0)
+                forwarded=dict(request,mode='forward_untrusted_plan')
+                self.assertEqual(op.compile(forwarded)['profile'],(b'f'*32).hex())
+                self.assertEqual(submit.call_args.args[2],command)
+                self.assertEqual(json.loads((Path(tmp)/(b'a'*32).hex()/'request.json').read_bytes())['mode'],
+                                 'forward_untrusted_plan')
+
 if __name__=='__main__':unittest.main()

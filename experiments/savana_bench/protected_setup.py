@@ -101,7 +101,8 @@ class PlanningRequest:
 
 
 async def provision_owner_episode(*, contract, deployment, broker, operator, model_profile=1,
-                                  progress=lambda stage: None, consent=None):
+                                  progress=lambda stage: None, consent=None, plan_author=None,
+                                  operator_mode='reviewed'):
     """One actual task from authenticated ingress through native recipe admission.
 
     Random values below are request/scope IDs, never task/run/root identities.
@@ -142,10 +143,21 @@ async def provision_owner_episode(*, contract, deployment, broker, operator, mod
                 release_descriptor=digest32(deployment['descriptors']['savana.final_result_release']),
                 planner=digest32(deployment['planner']),model_profile=model_profile,
                 store=digest32(deployment['store']),request_id=os.urandom(32),approval=approval,
-                consent=consent)
+                consent=consent,plan_author=plan_author,
+                descriptors={k:digest32(v) for k,v in deployment['descriptors'].items()})
             progress('operator_compile')
-            compiled=await asyncio.to_thread(operator.exchange,dict(kind='compile',contract=contract.task_id,
-                command=json.loads(request.command)))
+            compile_request=dict(kind='compile',contract=contract.task_id,command=json.loads(request.command))
+            if operator_mode!='reviewed':
+                compile_request['mode']=operator_mode
+            try:
+                compiled=await asyncio.to_thread(operator.exchange,compile_request)
+            except RuntimeError as error:
+                # An untrusted plan gets one EXACT replay of the retained signed
+                # bytes, so a refusal is told apart from a lost reply. Never a
+                # new request, root or task.
+                if operator_mode=='reviewed' or getattr(error,'stage',None)!='kernel': raise
+                progress('operator_compile_replay')
+                compiled=await asyncio.to_thread(operator.exchange,compile_request)
             if compiled['task_id']!=request.task_id.hex(): raise ValueError('operator_task_mismatch')
             progress('owner_private_handoff')
             session=await ingress.into_private_session()
@@ -166,7 +178,7 @@ async def provision_owner_episode(*, contract, deployment, broker, operator, mod
 async def authorize_and_prepare(*, ingress, contract, authorization_id,
         tool_descriptor, release_descriptor, application_turn, observer,
         planner, model_profile, store, request_id, approval,
-        clock_ms=lambda: time.time_ns() // 1_000_000, consent=None):
+        clock_ms=lambda: time.time_ns() // 1_000_000, consent=None, plan_author=None, descriptors=None):
     """After a separate text commit, obtain real root consent and prepare a plan.
 
     No automatic retry or implicit approval fallback. On uncertain delivery retain the issuance in
@@ -199,10 +211,17 @@ async def authorize_and_prepare(*, ingress, contract, authorization_id,
     now = clock_ms()
     if type(now) is not int or not binding["not_before"] <= now < binding["expires_at"] - 2:
         raise ValueError("task_expired_after_approval")
-    authored = prepare_draft(contract, task=digest32(binding["task"]), root=root,
-        observer=observer, tool_descriptor=tool_descriptor, release_descriptor=release_descriptor,
+    ids = dict(task=digest32(binding["task"]), root=root, observer=observer,
         application_turn=application_turn, planner=planner, model_profile=model_profile,
         not_before=now, expires_at=binding["expires_at"])
+    if plan_author is None:
+        authored = prepare_draft(contract, tool_descriptor=tool_descriptor,
+            release_descriptor=release_descriptor, **ids)
+    else:
+        # Untrusted planner experiment: whatever the author returns is compiled
+        # by the kernel against the owner's root above; nothing here vets it.
+        authored = dict(task=list(ids["task"]), planning_draft=plan_author(contract, dict(ids,
+            descriptors=dict(descriptors or {}), release_descriptor=release_descriptor)))
     command = dict(schema=1, installation=list(digest32(binding["installation"])),
         store=list(store), request=list(request_id), not_before=now, expires_at=binding["expires_at"],
         operation=dict(kind="compile_planning", task=authored["task"], draft=authored["planning_draft"]))

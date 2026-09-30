@@ -121,8 +121,14 @@ def main(argv=()):
     import argparse
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--software-benchmark',action='store_true')
+    # Untrusted-planner experiment: honest | poisoned | compromised[:names].
+    parser.add_argument('--planner-experiment')
     args=parser.parse_args(argv)
     identity_profile=None
+    if args.planner_experiment is not None:
+        from .planner_experiment import experiment_cases
+        experiment_cases(args.planner_experiment)
+        if not args.software_benchmark: raise ValueError('planner_experiment_requires_software_benchmark')
     if args.software_benchmark:
         from .benchmark_identity import load_profile
         identity_profile=load_profile()
@@ -155,11 +161,18 @@ def main(argv=()):
         wait_for_browser_start(broker,identity_profile)
         key_fd = open_model_credential()
         try:
-            summary = run(output=output, config=config, auth_fd=broker.fileno(),
-                model_key_fd=key_fd, model_listener_fd=fd, identity_profile=identity_profile)
+            if args.planner_experiment is not None:
+                from .planner_experiment import run as run_planner
+                summary = run_planner(output=output, config=config, auth_fd=broker.fileno(),
+                    model_key_fd=key_fd, model_listener_fd=fd, identity_profile=identity_profile,
+                    experiment=args.planner_experiment)
+            else:
+                summary = run(output=output, config=config, auth_fd=broker.fileno(),
+                    model_key_fd=key_fd, model_listener_fd=fd, identity_profile=identity_profile)
         finally:
             os.close(key_fd)
-    print(json.dumps({k:summary[k] for k in ('run_status','protected_episodes_scored','total_model_calls','blockers')}))
+    print(json.dumps({k:summary[k] for k in ('run_status','protected_episodes_scored','episodes_attempted',
+                                             'total_model_calls','blockers') if k in summary}))
     return 0 if summary['run_status']=='complete' else 2
 
 

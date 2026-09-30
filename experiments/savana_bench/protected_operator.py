@@ -23,6 +23,23 @@ from .protected_endpoint import digest32
 SOCKET = '/run/savana-experiment-operator/operator.sock'
 STATE = '/var/lib/savana-experiment-operator'
 MAX = 262144
+# reviewed: sign only the byte-identical reviewed plan (the finite subset).
+# forward_untrusted_plan: sign an untrusted planner's draft unread (experiment).
+MODES = ('reviewed', 'forward_untrusted_plan')
+# Closed failure stage in a not_confirmed reply. The kernel's own admin reply
+# carries no reason, so 'kernel' means only: these exact signed bytes were
+# submitted and the kernel did not confirm them (a refusal or an unknown).
+STAGES = ('kernel', 'operator')
+
+
+class KernelNotConfirmed(Exception):
+    """The kernel did not confirm an exact, retained signed command."""
+
+
+class OperatorNotConfirmed(RuntimeError):
+    def __init__(self, stage=None):
+        super().__init__('operator_not_confirmed_preserve_task')
+        self.stage = stage if stage in STAGES else None
 
 
 def read_exact(channel, size):
@@ -74,7 +91,8 @@ class OperatorClient:
             send(channel,request)
             result=receive(channel)
         if type(result) is not dict or set(result)!={'status','result'} or result['status']!='ready':
-            raise RuntimeError('operator_not_confirmed_preserve_task')
+            detail=result.get('result') if type(result) is dict and result.get('status')=='not_confirmed' else None
+            raise OperatorNotConfirmed(detail.get('stage') if type(detail) is dict and set(detail)=={'stage'} else None)
         return result['result']
 
 
@@ -123,16 +141,19 @@ class FiniteOperator:
         while True:
             try:
                 receipt=asyncio.run(submit_signed(raw,signature))
-                document=json.loads(receipt.private_json())
-                retain(directory/(name+'.receipt.json'),canonical(document))
-                return document['result']
             except Exception:
-                if time.monotonic()>=deadline: raise
+                if time.monotonic()>=deadline: raise KernelNotConfirmed(name) from None
                 # Exact request replay only; no new root, run or input pin.
                 time.sleep(.5)
+                continue
+            document=json.loads(receipt.private_json())
+            retain(directory/(name+'.receipt.json'),canonical(document))
+            return document['result']
 
     def compile(self, request):
-        if set(request)!={'kind','contract','command'} or request['kind']!='compile':
+        mode=request.get('mode','reviewed') if type(request) is dict else None
+        if (set(request)-{'mode'}!={'kind','contract','command'} or request['kind']!='compile'
+            or mode not in MODES):
             raise ValueError('closed_compile_request')
         contract=next((c for c in _TASKS if c.task_id==request['contract']),None)
         if contract is None: raise ValueError('unreviewed_contract')
@@ -145,8 +166,10 @@ class FiniteOperator:
         op=command['operation']
         if set(op)!={'kind','task','draft'} or op['kind']!='compile_planning': raise ValueError('compile_only')
         draft=op['draft']
-        task=bytes(op['task']);root=bytes(draft['root']);turn=bytes(draft['final_release']['turn'])
-        if turn!=digest32(d['application_turn']): raise ValueError('application_turn_mismatch')
+        task=bytes(op['task'])
+        if mode=='reviewed':
+            root=bytes(draft['root']);turn=bytes(draft['final_release']['turn'])
+            if turn!=digest32(d['application_turn']): raise ValueError('application_turn_mismatch')
         if len(task)!=32 or not any(task) or type(command['not_before']) is not int or type(command['expires_at']) is not int:
             raise ValueError('task_binding')
         directory=self.directory/task.hex()
@@ -159,12 +182,15 @@ class FiniteOperator:
             now=time.time_ns()//1_000_000
             if not now-300000<=command['not_before']<=now<command['expires_at']<=now+300000:
                 raise ValueError('bounded_fresh_task')
-        expected=prepare_draft(contract,task=task,root=root,observer=bytes(draft['observer_scope']),
-            tool_descriptor=digest32(d['descriptors'][contract.tool]),
-            release_descriptor=digest32(d['descriptors']['savana.final_result_release']),application_turn=turn,
-            planner=digest32(d['planner']),model_profile=1,
-            not_before=command['not_before'],expires_at=command['expires_at'])['planning_draft']
-        if draft!=expected: raise ValueError('not_the_reviewed_finite_plan')
+        if mode=='reviewed':
+            expected=prepare_draft(contract,task=task,root=root,observer=bytes(draft['observer_scope']),
+                tool_descriptor=digest32(d['descriptors'][contract.tool]),
+                release_descriptor=digest32(d['descriptors']['savana.final_result_release']),application_turn=turn,
+                planner=digest32(d['planner']),model_profile=1,
+                not_before=command['not_before'],expires_at=command['expires_at'])['planning_draft']
+            if draft!=expected: raise ValueError('not_the_reviewed_finite_plan')
+        # forward_untrusted_plan: an untrusted planner authored the draft and this
+        # operator signs it unread, so every plan refusal is the kernel's own.
         retain(directory/'request.json',canonical(request))
         result=self._submit(directory,'compile',command)
         if result['kind']!='planning_enrolled' or result['task']!=list(task): raise ValueError('compile_receipt')
@@ -179,11 +205,12 @@ class FiniteOperator:
             'operation':dict(kind='prepare_planning_execution',task=list(task),root=root)}
         prepared=self._submit(directory,'prepare',command,wait=True)
         prior=json.loads(private_read(directory/'compile.receipt.json'))['result']
+        forwarded=json.loads(private_read(directory/'request.json')).get('mode','reviewed')=='forward_untrusted_plan'
         approval=prepared['approval']
         if (prepared['kind']!='planning_execution_prepared' or prepared['task']!=list(task)
             or approval['task']!=list(task) or approval['root']!=root or approval['profile']!=prior['profile']
-            or approval['recipe_schema']!=2 or len(approval['bindings'])!=1
-            or approval['bindings'][0]['operation']!=1 or not approval['inputs_digest']):
+            or approval['recipe_schema']!=2 or not approval['inputs_digest']
+            or (not forwarded and (len(approval['bindings'])!=1 or approval['bindings'][0]['operation']!=1))):
             raise ValueError('kernel_recipe_binding')
         from savana.managed_admin import prepare_artifact
         native=prepare_artifact('recipe_approval',canonical(approval))
@@ -224,11 +251,13 @@ def main():
                 try:
                     pid,peer,gid=struct.unpack('3i',channel.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
                     if pid<=0 or peer!=uid or gid!=uid: raise ValueError('experiment_peer_required')
-                    result=operator.handle(receive(channel))
-                    send(channel,dict(status='ready',result=result))
+                    reply=dict(status='ready',result=operator.handle(receive(channel)))
+                except KernelNotConfirmed:
+                    reply=dict(status='not_confirmed',result=dict(stage='kernel'))
                 except Exception:
-                    try: send(channel,dict(status='not_confirmed',result=None))
-                    except OSError: pass
+                    reply=dict(status='not_confirmed',result=dict(stage='operator'))
+                try: send(channel,reply)
+                except OSError: pass
 
 
 if __name__=='__main__': main()

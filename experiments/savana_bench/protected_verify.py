@@ -35,6 +35,63 @@ def publication_chain(path, expected_head):
     return events
 
 
+def verify_published_episode(directory, local, case, row, profile):
+    """Offline checks for one published episode; returns the official (utility, attacker)."""
+    if profile is not None:
+        votes=[e for e in local if e['kind']=='benchmark_consent']
+        if ([v.get('purpose') for v in votes]!=['ingress','task_authorization','tool_execution','final_release']
+            or any(v.get('decision')!='approve' or v.get('human_review') is not False
+                or v.get('policy')!='finite_calendar_preconsent_v1' for v in votes)):
+            raise ValueError('finite_consent_evidence_missing')
+    if not row["attempted"] or row.get("model_calls", 0) < 1:
+        raise ValueError("unattempted_episode_scored")
+    initial = [e for e in local if e["kind"] == "episode_input"]
+    final = [e for e in local if e["kind"] == "episode_observation"]
+    tools = [e for e in local if e["kind"] == "official_tool_result"]
+    received = [e for e in local if e["kind"] == "result_received"]
+    if any(len(v) != 1 for v in (initial, final, tools, received)):
+        raise ValueError("missing_episode_evidence")
+    initial, final, tool, received = initial[0], final[0], tools[0], received[0]
+    suite, task, injection, contract, values, env = official_case(case)
+    if initial["contract"] != contract.document() or initial["injections"] != values:
+        raise ValueError("task_or_attack_mismatch")
+    if initial["environment"] != env.model_dump(mode="json"):
+        raise ValueError("initial_environment_mismatch")
+    if tool["tool"] != contract.upstream_tool or tool["arguments"] != dict(contract.arguments):
+        raise ValueError("official_function_trace_mismatch")
+    payload = base64.b64decode(final["output_base64"], validate=True)
+    received_bytes = base64.urlsafe_b64decode(received["payload_base64"] + "="*(-len(received["payload_base64"]) % 4))
+    if payload != received_bytes or payload != canonical(tool["response"]):
+        raise ValueError("output_not_the_received_tool_result")
+    if hashlib.sha256(payload).hexdigest() != received["payload_sha256"]:
+        raise ValueError("received_payload_digest")
+    chain = publication_chain(directory/f"publication-{row['episode']:02d}.jsonl", row["publication_audit_head"])
+    if [e["kind"] for e in chain] != ["private_wait_started", "private_publication_committed",
+            "private_payload_verified", "private_episode_observed"]:
+        raise ValueError("publication_not_confirmed")
+    metadata = {k: v for k, v in chain[1].items() if k != "kind"}
+    if metadata != final["publication"] or chain[-1]["status"] != "published":
+        raise ValueError("publication_metadata_mismatch")
+    payload_digest = hashlib.sha256(b"SAVANA_FINAL_RELEASE_PAYLOAD_V2\0"
+        + len(payload).to_bytes(8, "big") + payload).hexdigest()
+    if metadata["payload_digest"] != payload_digest or chain[2]["payload_digest"] != payload_digest:
+        raise ValueError("native_payload_commitment_mismatch")
+    for key in ("task_id", "run_id", "root_digest", "destination_digest"):
+        if chain[0][key] != metadata[key]:
+            raise ValueError("publication_scope_rebound")
+    if chain[2]["commit_digest"] != metadata["commit_digest"] or chain[2]["payload_bytes"] != len(payload):
+        raise ValueError("verified_payload_rebound")
+    before = restore_environment(type(env), initial["environment"])
+    after = restore_environment(type(env), final["environment"])
+    if after.model_dump(mode="json") != tool["environment"]:
+        raise ValueError("unexplained_post_tool_environment_change")
+    utility, attacker = score_outcome(suite=suite, task=task, injection=injection,
+        contract=contract, before=before, after=after,
+        provider=SimpleNamespace(audit=[dict(invoked=True)]),
+        outcome=PrivateOutcome("published", "complete", 0, metadata, payload))
+    return utility, attacker
+
+
 def verify(directory):
     events, head = verify_chain((directory/"events.jsonl").read_bytes().splitlines())
     completion = json.loads((directory/"completion.json").read_bytes())
@@ -79,58 +136,7 @@ def verify(directory):
             if row["utility"] is not None or row["attacker_success"] is not None:
                 raise ValueError("unknown_is_not_safety")
         else:
-            if profile is not None:
-                votes=[e for e in local if e['kind']=='benchmark_consent']
-                if ([v.get('purpose') for v in votes]!=['ingress','task_authorization','tool_execution','final_release']
-                    or any(v.get('decision')!='approve' or v.get('human_review') is not False
-                        or v.get('policy')!='finite_calendar_preconsent_v1' for v in votes)):
-                    raise ValueError('finite_consent_evidence_missing')
-            if not row["attempted"] or row.get("model_calls", 0) < 1:
-                raise ValueError("unattempted_episode_scored")
-            initial = [e for e in local if e["kind"] == "episode_input"]
-            final = [e for e in local if e["kind"] == "episode_observation"]
-            tools = [e for e in local if e["kind"] == "official_tool_result"]
-            received = [e for e in local if e["kind"] == "result_received"]
-            if any(len(v) != 1 for v in (initial, final, tools, received)):
-                raise ValueError("missing_episode_evidence")
-            initial, final, tool, received = initial[0], final[0], tools[0], received[0]
-            suite, task, injection, contract, values, env = official_case(case)
-            if initial["contract"] != contract.document() or initial["injections"] != values:
-                raise ValueError("task_or_attack_mismatch")
-            if initial["environment"] != env.model_dump(mode="json"):
-                raise ValueError("initial_environment_mismatch")
-            if tool["tool"] != contract.upstream_tool or tool["arguments"] != dict(contract.arguments):
-                raise ValueError("official_function_trace_mismatch")
-            payload = base64.b64decode(final["output_base64"], validate=True)
-            received_bytes = base64.urlsafe_b64decode(received["payload_base64"] + "="*(-len(received["payload_base64"]) % 4))
-            if payload != received_bytes or payload != canonical(tool["response"]):
-                raise ValueError("output_not_the_received_tool_result")
-            if hashlib.sha256(payload).hexdigest() != received["payload_sha256"]:
-                raise ValueError("received_payload_digest")
-            chain = publication_chain(directory/f"publication-{index:02d}.jsonl", row["publication_audit_head"])
-            if [e["kind"] for e in chain] != ["private_wait_started", "private_publication_committed",
-                    "private_payload_verified", "private_episode_observed"]:
-                raise ValueError("publication_not_confirmed")
-            metadata = {k: v for k, v in chain[1].items() if k != "kind"}
-            if metadata != final["publication"] or chain[-1]["status"] != "published":
-                raise ValueError("publication_metadata_mismatch")
-            payload_digest = hashlib.sha256(b"SAVANA_FINAL_RELEASE_PAYLOAD_V2\0"
-                + len(payload).to_bytes(8, "big") + payload).hexdigest()
-            if metadata["payload_digest"] != payload_digest or chain[2]["payload_digest"] != payload_digest:
-                raise ValueError("native_payload_commitment_mismatch")
-            for key in ("task_id", "run_id", "root_digest", "destination_digest"):
-                if chain[0][key] != metadata[key]:
-                    raise ValueError("publication_scope_rebound")
-            if chain[2]["commit_digest"] != metadata["commit_digest"] or chain[2]["payload_bytes"] != len(payload):
-                raise ValueError("verified_payload_rebound")
-            before = restore_environment(type(env), initial["environment"])
-            after = restore_environment(type(env), final["environment"])
-            if after.model_dump(mode="json") != tool["environment"]:
-                raise ValueError("unexplained_post_tool_environment_change")
-            utility, attacker = score_outcome(suite=suite, task=task, injection=injection,
-                contract=contract, before=before, after=after,
-                provider=SimpleNamespace(audit=[dict(invoked=True)]),
-                outcome=PrivateOutcome("published", "complete", 0, metadata, payload))
+            utility, attacker = verify_published_episode(directory, local, case, row, profile)
             if row["utility"] != utility or row["attacker_success"] != attacker:
                 raise ValueError("official_oracle_replay_mismatch")
         rows.append(row)

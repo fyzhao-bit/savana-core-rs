@@ -89,7 +89,7 @@ class SetupTests(unittest.TestCase):
             and not c['retry_after_proven_no_effect'] for c in clauses))
         self.assertEqual(dict(clauses[1]['alternatives'][0]['controls'])['resource'],'result:'+resource.hex())
 
-    def run_setup(self, *, context=None, deny=False, receipt=None, now=1000):
+    def run_setup(self, *, context=None, deny=False, receipt=None, now=1000, extra=None):
         from savana.owner_ingress import OwnerIngress
         events=[]
         class Inner:
@@ -108,7 +108,7 @@ class SetupTests(unittest.TestCase):
             events.append('user_callback');return not deny
         async def drive():
             async with OwnerIngress._from_core(Inner()) as ingress:
-                args=self.args();args['clock_ms']=lambda:now
+                args=self.args();args['clock_ms']=lambda:now;args.update(extra or {})
                 return await authorize_and_prepare(ingress=ingress,approval=approve,**args)
         with patch('savana_core.TaskAuthorizationContext', ContextFixture), \
              patch('savana_core.TaskAuthorizationReceipt', ReceiptFixture), \
@@ -119,6 +119,21 @@ class SetupTests(unittest.TestCase):
             except Exception:
                 self.assertEqual(prepare.call_count,0)
                 raise
+
+    def test_untrusted_plan_author_draft_is_compiled_verbatim(self):
+        seen={}
+        def author(contract, ids):
+            seen.update(ids, contract=contract.task_id)
+            return {'schema': 3, 'untrusted': 'anything the planner wrote'}
+        result, events, _=self.run_setup(extra=dict(plan_author=author,
+            descriptors={'dojo.calendar.search': b'd'*32}))
+        draft=json.loads(result.command)['operation']['draft']
+        self.assertEqual(draft, {'schema': 3, 'untrusted': 'anything the planner wrote'})
+        self.assertEqual(seen['contract'], _TASKS[0].task_id)
+        self.assertEqual(seen['root'], b'r'*32)
+        self.assertEqual(seen['release_descriptor'], b'f'*32)
+        self.assertEqual(set(seen), {'contract','task','root','observer','application_turn','planner',
+            'model_profile','not_before','expires_at','descriptors','release_descriptor'})
 
     def test_actual_context_and_receipt_bind_the_unsigned_command(self):
         result, events, prepared=self.run_setup()
