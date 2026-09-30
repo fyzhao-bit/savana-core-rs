@@ -48,6 +48,14 @@ pub(crate) struct PreparedVerifiedRunAdmissionV2 {
     initial_handle: ValueHandleV2,
     initial_commitment: Digest32V2,
     initial_value_digest: Digest32V2,
+    owner_input: Option<PreparedOwnerInputV2>,
+}
+
+/// Reserved slot for the consented owner document of a private session.
+struct PreparedOwnerInputV2 {
+    handle: ValueHandleV2,
+    commitment: Digest32V2,
+    value_digest: Digest32V2,
 }
 
 impl PreparedVerifiedRunAdmissionV2 {
@@ -298,7 +306,79 @@ impl KernelValueOwnerV2 {
             initial_handle,
             initial_commitment,
             initial_value_digest,
+            owner_input: None,
         })
+    }
+
+    /// Reserve the owner document beside the run's initial value. Only a
+    /// GatedIngress value of the same producer, run and manifest qualifies;
+    /// all failure happens here, before the run is committed.
+    pub(crate) fn prepare_owner_input_v04(
+        &mut self,
+        admission: &mut PreparedVerifiedRunAdmissionV2,
+        value: &KernelValueV2,
+        provenance: &ProvenanceRecordV2,
+    ) -> Result<(), KernelValueErrorV2> {
+        let run = &admission.run_record;
+        let value_digest = value_digest_v2(value).map_err(map_g3_error)?;
+        if admission.owner_input.is_some()
+            || !matches!(
+                provenance.source_kind(),
+                savana_policy_core::v2::SourceKindV2::GatedIngress { .. }
+            )
+            || provenance.value_digest() != value_digest
+            || provenance.producer_identity() != run.producer_identity
+            || provenance.run_internal_id() != run.durable_run_id
+            || provenance.active_state_manifest_digest() != run.active_state_manifest_digest
+        {
+            return Err(KernelValueErrorV2::WrongRun);
+        }
+        if self.values.len() + 2 > self.maximum_values {
+            return Err(KernelValueErrorV2::LimitExceeded);
+        }
+        self.values
+            .try_reserve(2)
+            .map_err(|_| KernelValueErrorV2::Unavailable)?;
+        let handle = self.mint_random_value_handle()?;
+        admission.owner_input = Some(PreparedOwnerInputV2 {
+            handle,
+            commitment: handle.authority_commitment(&self.handle_key),
+            value_digest,
+        });
+        Ok(())
+    }
+
+    /// Commit a run prepared with `prepare_owner_input_v04`. An owner value
+    /// that does not match its reservation is dropped, never substituted.
+    pub(crate) fn commit_verified_run_admission_with_owner_input_v04(
+        &mut self,
+        mut admission: PreparedVerifiedRunAdmissionV2,
+        initial_value: KernelValueV2,
+        provenance: ProvenanceRecordV2,
+        owner_input: Option<(KernelValueV2, ProvenanceRecordV2)>,
+    ) -> (RunHandleV2, KernelDerivedValueV2, Option<ValueHandleV2>) {
+        let reserved = admission.owner_input.take();
+        let run_commitment = admission.run_record.commitment;
+        let (run, initial) =
+            self.commit_verified_run_admission(admission, initial_value, provenance);
+        let owner = match (reserved, owner_input) {
+            (Some(reserved), Some((value, provenance)))
+                if value_digest_v2(&value).is_ok_and(|d| d == reserved.value_digest)
+                    && provenance.value_digest() == reserved.value_digest =>
+            {
+                self.values.push(ValueRecordV2 {
+                    commitment: reserved.commitment,
+                    identity: ValueInternalIdV2::new(*reserved.commitment.as_bytes()),
+                    run_commitment,
+                    value,
+                    provenance,
+                    derive_request_digest: None,
+                });
+                Some(reserved.handle)
+            }
+            _ => None,
+        };
+        (run, initial, owner)
     }
 
     pub(crate) fn commit_verified_run_admission(

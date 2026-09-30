@@ -332,6 +332,9 @@ pub(crate) struct PreparedAgentClaimMaterialV2 {
     policy_allowed_effects: EffectSetV2,
     signed_planner_policy: SignedPlannerPolicyV2,
     expires_at: UnixMillisV2,
+    /// Consented owner document for kernel-internal fused input derivation.
+    /// It is registered only for private sessions, never returned to Agent.
+    owner_input: Option<(KernelValueV2, ProvenanceRecordV2)>,
 }
 
 impl std::fmt::Debug for PreparedAgentClaimMaterialV2 {
@@ -357,7 +360,18 @@ impl PreparedAgentClaimMaterialV2 {
             && self.initial_document == other.initial_document
             && self.policy_allowed_effects == other.policy_allowed_effects
             && self.signed_planner_policy == other.signed_planner_policy
-            && self.expires_at == other.expires_at)
+            && self.expires_at == other.expires_at
+            && match (&self.owner_input, &other.owner_input) {
+                (None, None) => true,
+                (Some((a, pa)), Some((b, pb))) => {
+                    pa == pb
+                        && savana_policy_core::v2::value_digest_v2(a)
+                            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?
+                            == savana_policy_core::v2::value_digest_v2(b)
+                                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?
+                }
+                _ => false,
+            })
     }
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_verified_ingress(
@@ -369,12 +383,29 @@ impl PreparedAgentClaimMaterialV2 {
         policy_allowed_effects: EffectSetV2,
         signed_planner_policy: SignedPlannerPolicyV2,
         expires_at: UnixMillisV2,
+        owner_input: Option<(KernelValueV2, ProvenanceRecordV2)>,
     ) -> Result<Self, KernelAgentAuthorityErrorV2> {
         if is_zero(durable_run_id.as_bytes())
             || is_zero(producer_identity.as_bytes())
             || expires_at.get() == 0
         {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        if let Some((value, owner)) = &owner_input {
+            // Same authenticated ingress, run, manifest and lifetime as the
+            // masked agent value; only a GatedIngress source is an owner input.
+            if !matches!(
+                owner.source_kind(),
+                savana_policy_core::v2::SourceKindV2::GatedIngress { .. }
+            ) || owner.producer_identity() != producer_identity
+                || owner.run_internal_id() != durable_run_id
+                || owner.active_state_manifest_digest() != provenance.active_state_manifest_digest()
+                || owner.expires_at() != expires_at
+                || savana_policy_core::v2::value_digest_v2(value)
+                    .map_or(true, |digest| digest != owner.value_digest())
+            {
+                return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+            }
         }
         Ok(Self {
             durable_run_id,
@@ -385,6 +416,7 @@ impl PreparedAgentClaimMaterialV2 {
             policy_allowed_effects,
             signed_planner_policy,
             expires_at,
+            owner_input,
         })
     }
 }
@@ -511,6 +543,9 @@ struct SessionRecordV2 {
     revision: RunRevisionObservationV2,
     initial_document: MaskedDocumentHandleV2,
     initial_value: ValueHandleV2,
+    /// Kernel-internal handle of the consented owner document (private
+    /// sessions only). Never returned to Agent, browser or model workers.
+    owner_input_value: Option<ValueHandleV2>,
     status: AgentSessionStatusV2,
     task_authorization_digest: Option<Digest32V2>,
 }
@@ -3082,6 +3117,8 @@ impl KernelAgentAuthorityV2 {
             revision,
             initial_document: material.initial_document,
             initial_value: initial.handle(),
+            // Agent-claimed sessions receive only the masked view.
+            owner_input_value: None,
             status: AgentSessionStatusV2::Running,
             task_authorization_digest: None,
         });
@@ -8840,7 +8877,7 @@ fn encode_prepared_claim_material(
     let provenance = encode_provenance_record_v2(&material.provenance)
         .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
     encoder
-        .array(8)
+        .array(if material.owner_input.is_some() { 10 } else { 8 })
         .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
     encode_recovery_value(encoder, &material.durable_run_id)?;
     encode_recovery_value(encoder, &material.producer_identity)?;
@@ -8871,7 +8908,16 @@ fn encode_prepared_claim_material(
     for action_template in &material.signed_planner_policy.allowed_action_templates {
         encode_recovery_value(encoder, action_template)?;
     }
-    encode_recovery_value(encoder, &material.expires_at)
+    encode_recovery_value(encoder, &material.expires_at)?;
+    if let Some((value, owner)) = &material.owner_input {
+        let owner = encode_provenance_record_v2(owner)
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        encode_recovery_value(encoder, value)?;
+        encoder
+            .bytes(&owner)
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    }
+    Ok(())
 }
 
 fn decode_recovery_fixed<const N: usize>(
@@ -8969,7 +9015,13 @@ fn decode_prepared_claim_material(
     decoder: &mut minicbor::Decoder<'_>,
     context: &mut V2DecodeContext,
 ) -> Result<PreparedAgentClaimMaterialV2, KernelAgentAuthorityErrorV2> {
-    require_recovery_array(decoder, 8)?;
+    // 8 fields before owner-input retention; 10 with the owner document.
+    let fields = decoder
+        .array()
+        .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+    if !matches!(fields, Some(8 | 10)) {
+        return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+    }
     let durable_run_id = decode_recovery_value(decoder, context)?;
     let producer_identity = decode_recovery_value(decoder, context)?;
     let initial_value = decode_recovery_value(decoder, context)?;
@@ -9021,6 +9073,20 @@ fn decode_prepared_claim_material(
         allowed_action_templates,
     };
     let expires_at = decode_recovery_value(decoder, context)?;
+    let owner_input = if fields == Some(10) {
+        let value = decode_recovery_value(decoder, context)?;
+        let owner_bytes = decoder
+            .bytes()
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        if owner_bytes.is_empty() || owner_bytes.len() > 8 * 1024 * 1024 {
+            return Err(KernelAgentAuthorityErrorV2::LimitExceeded);
+        }
+        let owner = decode_provenance_record_v2(owner_bytes)
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        Some((value, owner))
+    } else {
+        None
+    };
     PreparedAgentClaimMaterialV2::from_verified_ingress(
         durable_run_id,
         producer_identity,
@@ -9030,6 +9096,7 @@ fn decode_prepared_claim_material(
         policy_allowed_effects,
         signed_planner_policy,
         expires_at,
+        owner_input,
     )
 }
 
@@ -9351,6 +9418,7 @@ pub(crate) mod tests {
                 )
                 .unwrap(),
                 UnixMillisV2::new(10000),
+                None,
             )
             .unwrap()
         };
@@ -9641,6 +9709,7 @@ pub(crate) mod tests {
             .unwrap(),
             initial_document: MaskedDocumentHandleV2::from_authority_entropy([0x96; 32]).unwrap(),
             initial_value: prompt,
+            owner_input_value: None,
             status: AgentSessionStatusV2::Ready,
             task_authorization_digest: None,
         });

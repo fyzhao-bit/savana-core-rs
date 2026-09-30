@@ -15,8 +15,10 @@ impl KernelAgentAuthorityV2 {
             && matches!(s.status, AgentSessionStatusV2::Ready | AgentSessionStatusV2::Running))
             .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
         self.require_current_session_task_authorization(s, now)?;
-        let (run, run_id, initial, manifest, session_expiry) =
-            (s.run, s.durable_run_id, s.initial_value, s.active_state_manifest_digest, s.expires_at);
+        // The session's initial value is the masked agent view. Fixed inputs
+        // come only from the separately retained, consented owner document.
+        let (run, run_id, owner_input, manifest, session_expiry) =
+            (s.run, s.durable_run_id, s.owner_input_value, s.active_state_manifest_digest, s.expires_at);
         let task_id = DurableTaskIdV2::new(task);
         let p = self.policy.as_ref().ok_or(KernelAgentAuthorityErrorV2::Unavailable)?;
         let current = p.declassification_rules.generation_snapshot()
@@ -34,7 +36,8 @@ impl KernelAgentAuthorityV2 {
         } else {
             let active = p.durable.active_fused_plan_v04(task_id, now)
                 .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
-            let input = values.resolve_g4_value(run, initial, now).map_err(map_value_error)?;
+            let owner = owner_input.ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
+            let input = values.resolve_g4_value(run, owner, now).map_err(map_value_error)?;
             let document = FusedInputDocumentV04::from_owned_value(input.value())
                 .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
             let expected = active.compiled().operations().iter().flat_map(|o| &o.bindings)
@@ -45,7 +48,7 @@ impl KernelAgentAuthorityV2 {
             }
             let mut bindings = Vec::new();
             for input in &document.inputs {
-                let value = values.derive_owner_input_text_v04(run, initial, input.slot, now)
+                let value = values.derive_owner_input_text_v04(run, owner, input.slot, now)
                     .map_err(map_value_error)?;
                 bindings.push(fused_compiler::FusedLocalValueBindingV04 { slot: input.slot, value: value.handle() });
             }

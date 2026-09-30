@@ -86,6 +86,9 @@ pub(crate) struct AcceptedKernelIngressV2 {
     agent_value: KernelValueV2,
     provenance: ProvenanceRecordV2,
     live_vault_segment: savana_vault::LiveVaultSegmentV2,
+    /// Consented owner document with its GatedIngress provenance, only for
+    /// kernel-internal fused input derivation. Never an agent or model view.
+    owner_input: Option<(KernelValueV2, ProvenanceRecordV2)>,
 }
 
 impl std::fmt::Debug for AcceptedKernelIngressV2 {
@@ -109,6 +112,10 @@ impl AcceptedKernelIngressV2 {
 
     pub(crate) const fn live_vault_segment(&self) -> &savana_vault::LiveVaultSegmentV2 {
         &self.live_vault_segment
+    }
+
+    pub(crate) fn take_owner_input(&mut self) -> Option<(KernelValueV2, ProvenanceRecordV2)> {
+        self.owner_input.take()
     }
 
     pub(crate) fn into_parts(
@@ -200,6 +207,7 @@ pub(crate) fn accept_ingress_into_kernel(
         agent_value: normalized_value,
         provenance,
         live_vault_segment,
+        owner_input: None,
     })
 }
 
@@ -338,6 +346,7 @@ pub(crate) fn accept_finalized_input_into_kernel(
         agent_value: masked_value,
         provenance: masked_provenance,
         live_vault_segment,
+        owner_input: Some((normalized_value, provenance)),
     })
 }
 

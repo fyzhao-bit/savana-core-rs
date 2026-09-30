@@ -329,7 +329,7 @@ impl KernelAgentAuthorityV2 {
                 .min(e.expires_at().get())
                 .min(verified.expires_at().get()),
         );
-        let admission = values
+        let mut admission = values
             .prepare_verified_run_admission(
                 material.producer_identity,
                 material.durable_run_id,
@@ -341,6 +341,13 @@ impl KernelAgentAuthorityV2 {
                 &material.provenance,
             )
             .map_err(map_value_error)?;
+        // The masked value stays the session input; the consented owner
+        // document is reserved beside it for kernel-only fused derivation.
+        if let Some((owner_value, owner_provenance)) = material.owner_input.as_ref() {
+            values
+                .prepare_owner_input_v04(&mut admission, owner_value, owner_provenance)
+                .map_err(map_value_error)?;
+        }
         let run = admission.run_handle();
         let initial = admission.initial_value();
         let revision = RunRevisionObservationV2::new(
@@ -361,10 +368,13 @@ impl KernelAgentAuthorityV2 {
             .material
             .take()
             .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
-        values.commit_verified_run_admission(
+        // Commit is infallible after reservation; a missing owner handle only
+        // makes later fused preparation fail closed.
+        let (_, _, owner_input_value) = values.commit_verified_run_admission_with_owner_input_v04(
             admission,
             material.initial_value,
             material.provenance,
+            material.owner_input,
         );
         self.sessions.push(SessionRecordV2 {
             session,
@@ -381,6 +391,7 @@ impl KernelAgentAuthorityV2 {
             revision,
             initial_document: material.initial_document,
             initial_value: initial.handle(),
+            owner_input_value,
             status: AgentSessionStatusV2::Running,
             task_authorization_digest: Some(pending.root),
         });

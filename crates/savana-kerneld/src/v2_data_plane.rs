@@ -126,6 +126,8 @@ impl KernelIngressCommitSinkV2 for ProductionKernelDataPlaneV2 {
             expires_at,
         )
         .map_err(|_| StableCode::PolicyDenied)?;
+        let mut accepted = accepted;
+        let owner_input = accepted.take_owner_input();
         let (gated, initial_value, provenance, live) = accepted.into_parts();
         let signed_planner_policy =
             SignedPlannerPolicyV2::from_verified_input(gated.planner_envelope())
@@ -151,6 +153,7 @@ impl KernelIngressCommitSinkV2 for ProductionKernelDataPlaneV2 {
             self.policy_allowed_effects,
             signed_planner_policy,
             expires_at,
+            owner_input,
         )
         .map_err(|_| StableCode::KernelUnavailable)
     }

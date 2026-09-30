@@ -41,6 +41,7 @@ fn private_session_accept_case(case: u8) {
         session.policy_allowed_effects,
         session.signed_planner_policy,
         UnixMillisV2::new(1000),
+        None,
     )
     .unwrap();
     let correlation = SignedDurableTaskCorrelationV2::sign(
