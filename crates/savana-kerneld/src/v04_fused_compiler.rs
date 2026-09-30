@@ -468,6 +468,51 @@ impl KernelAgentAuthorityV2 {
                 if next_only {
                     return Err(KernelAgentAuthorityErrorV2::StateConflict);
                 }
+                // Its derived value does not exist yet, but its RULE does: the
+                // owner's pinned exact values plus the declared edges must form
+                // an alternative the owner signed, before any operation runs.
+                let descriptor = policy
+                    .active_tools
+                    .resolve_class(lowered.tool_class(), session.role, now)
+                    .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+                let business = descriptor
+                    .descriptor()
+                    .unsigned()
+                    .require_business_profile()
+                    .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+                let derived: std::collections::BTreeMap<_, _> =
+                    savana_policy_core::v2::fused_operation_derived_rules_v04(operation, business)
+                        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?
+                        .into_iter()
+                        .collect();
+                let mut resolved = Vec::new();
+                for b in operation.bindings.iter().filter(|b| b.result_of.is_none()) {
+                    let handle = bindings
+                        .iter()
+                        .find(|v| v.slot == b.slot)
+                        .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?
+                        .value;
+                    resolved.push((
+                        b.argument.clone(),
+                        values.resolve_g4_value(run, handle, now).map_err(map_value_error)?,
+                    ));
+                }
+                let exact: Vec<_> = resolved
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.value()))
+                    .collect();
+                let state = policy
+                    .durable
+                    .task_authorization_state(session.durable_task_id)
+                    .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+                savana_policy_core::v2::check_result_operation_rule_v04(
+                    business,
+                    descriptor.descriptor().descriptor_digest(),
+                    &exact,
+                    &derived,
+                    state.authorization().material(),
+                )
+                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
                 continue;
             }
             let descriptor = policy
@@ -508,26 +553,9 @@ impl KernelAgentAuthorityV2 {
                 .unsigned()
                 .require_business_profile()
                 .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
-            let mut derived_controls = Vec::new();
-            for b in &operation.bindings {
-                if let (Some(source_clause), Some(path), Some(max_bytes)) =
-                    (b.result_source_clause, b.result_path.as_ref(), b.result_max_bytes)
-                {
-                    let field = business
-                        .fields()
-                        .iter()
-                        .find(|f| f.name() == b.argument)
-                        .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
-                    let rule = savana_kernel_protocol::v2::ResultDerivedControlV2::new(
-                        source_clause,
-                        path.clone(),
-                        field.kind(),
-                        max_bytes,
-                    )
+            let derived_controls =
+                savana_policy_core::v2::fused_operation_derived_rules_v04(operation, business)
                     .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
-                    derived_controls.push((b.argument.clone(), rule));
-                }
-            }
             // Logical operation identity is independent of its new ordinal or
             // plan version. Actual parameters remain bound in G4 and the profile.
             let identity = domain_digest(

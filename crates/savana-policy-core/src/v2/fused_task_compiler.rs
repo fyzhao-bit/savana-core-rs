@@ -376,3 +376,88 @@ pub fn compile_fused_task_v04(
 #[cfg(test)]
 #[path = "fused_task_compiler_tests.rs"]
 mod tests;
+
+/// Prepare-time G4 structure check for an operation that consumes a
+/// result-derived value, run before ANY operation of the task executes.
+///
+/// A derived field's control digest commits to the owner-signed RULE (source
+/// clause, path, kind, bound), never to the value, so the owner's exact values
+/// (already pinned) plus the plan's declared rules fully determine the action
+/// alternative. It must be one the owner signed; otherwise a planner-chosen
+/// edge (a literal target, another path or bound, a different source) is
+/// refused here instead of when the write is proposed after the read ran.
+pub fn check_result_operation_rule_v04(
+    profile: &savana_kernel_protocol::v2::BusinessProfileV2,
+    descriptor: Digest32V2,
+    exact: &[(String, &super::KernelValueV2)],
+    derived: &BTreeMap<String, savana_kernel_protocol::v2::ResultDerivedControlV2>,
+    authorization: &savana_kernel_protocol::v2::TaskAuthorizationV2,
+) -> Result<(), G4Error> {
+    use super::value::KernelScalarRefV2;
+    use savana_kernel_protocol::v2::{BusinessControlsV2, BusinessValueV2};
+    let mut fields = Vec::new();
+    for field in profile.fields() {
+        if matches!(field.role(), BusinessFieldRoleV2::Payload | BusinessFieldRoleV2::Magnitude)
+            || derived.contains_key(field.name())
+        {
+            continue;
+        }
+        let value = exact
+            .iter()
+            .find(|(name, _)| name == field.name())
+            .map(|(_, value)| value)
+            .ok_or(G4Error::InvalidIntentBinding)?;
+        fields.push((
+            field.name().to_owned(),
+            match value.scalar_ref() {
+                Some(KernelScalarRefV2::Text(s)) => BusinessValueV2::Text(s.to_owned()),
+                Some(KernelScalarRefV2::I64(n)) if n >= 0 => BusinessValueV2::Unsigned(n as u64),
+                Some(KernelScalarRefV2::Bool(b)) => BusinessValueV2::Boolean(b),
+                _ => return Err(G4Error::InvalidIntentBinding),
+            },
+        ));
+    }
+    let alternative = BusinessControlsV2::from_fields_with_derived(profile, fields, derived.clone())
+        .and_then(|controls| controls.action_alternative(descriptor))
+        .map_err(|_| G4Error::InvalidIntentBinding)?;
+    if authorization
+        .clauses()
+        .iter()
+        .any(|clause| clause.alternatives().contains(&alternative))
+    {
+        Ok(())
+    } else {
+        Err(G4Error::StateConflict)
+    }
+}
+
+/// The owner-signed result-derived rules one compiled operation declares:
+/// source clause and path/bound from the compiler-set binding, kind from the
+/// signed descriptor field. G4 (at prepare and at dispatch) matches under
+/// exactly these.
+pub fn fused_operation_derived_rules_v04(
+    operation: &Operation,
+    profile: &savana_kernel_protocol::v2::BusinessProfileV2,
+) -> Result<Vec<(String, savana_kernel_protocol::v2::ResultDerivedControlV2)>, G4Error> {
+    let mut rules = Vec::new();
+    for b in &operation.bindings {
+        if let (Some(source_clause), Some(path), Some(max_bytes)) =
+            (b.result_source_clause, b.result_path.as_ref(), b.result_max_bytes)
+        {
+            let field = profile
+                .fields()
+                .iter()
+                .find(|f| f.name() == b.argument)
+                .ok_or(G4Error::InvalidIntentBinding)?;
+            let rule = savana_kernel_protocol::v2::ResultDerivedControlV2::new(
+                source_clause,
+                path.clone(),
+                field.kind(),
+                max_bytes,
+            )
+            .map_err(|_| G4Error::InvalidIntentBinding)?;
+            rules.push((b.argument.clone(), rule));
+        }
+    }
+    Ok(rules)
+}

@@ -513,3 +513,98 @@ fn compiler_allows_a_result_edge_into_a_nonpayload_field_structurally() {
     to.result_of = Some(1);
     assert!(compile_fused_task_v04(&whole_to, &auth, &registry, RoleIdV2::new(1), at(100)).is_err());
 }
+
+#[test]
+fn prepare_refuses_a_result_edge_the_owner_did_not_sign_before_any_effect() {
+    let field = |name, role| BusinessFieldV2::new(name, role, BusinessFieldTypeV2::Text).unwrap();
+    let profile = BusinessProfileV2::new(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        "dojo.file.append",
+        d(30),
+        d(31),
+        TaskEffectV2::Update,
+        BusinessMagnitudeV2::FixedCount(1),
+        vec![
+            field("body", BusinessFieldRoleV2::Payload),
+            field("content", BusinessFieldRoleV2::Parameter),
+            field("file_id", BusinessFieldRoleV2::Resource),
+            field("to", BusinessFieldRoleV2::Destination),
+        ],
+    )
+    .unwrap();
+    let path: Vec<String> = ["result", "content", "0", "text", "$json", "0", "id_"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let rule = |path: Vec<String>, bound| {
+        [(
+            "file_id".to_string(),
+            ResultDerivedControlV2::new(1, path, BusinessFieldTypeV2::Text, bound).unwrap(),
+        )]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let signed = BusinessControlsV2::from_fields_with_derived(
+        &profile,
+        vec![
+            ("content".into(), BusinessValueV2::Text("Escape room".into())),
+            ("to".into(), BusinessValueV2::Text("private-result".into())),
+        ],
+        rule(path.clone(), 64),
+    )
+    .unwrap()
+    .action_alternative(d(21))
+    .unwrap();
+    let read = BusinessControlsV2::from_fields(
+        &profile,
+        vec![
+            ("content".into(), BusinessValueV2::Text("x".into())),
+            ("file_id".into(), BusinessValueV2::Text("y".into())),
+            ("to".into(), BusinessValueV2::Text("private-result".into())),
+        ],
+    )
+    .unwrap()
+    .action_alternative(d(20))
+    .unwrap();
+    let root = TaskAuthorizationV2::new(
+        d(40), PrincipalIdV2::new([30; 32]), DurableTaskIdV2::new([31; 32]), 1, d(32), d(33),
+        at(1), at(1000), TaskEvidenceKindV2::AuthenticatedStructuredInput, d(34), d(35),
+        vec![
+            TaskAuthorizationClauseV2::new(1, vec![read], 1, 1, 1, vec![], false).unwrap(),
+            TaskAuthorizationClauseV2::new(2, vec![signed], 1, 1, 1, vec![1], false).unwrap(),
+        ],
+    )
+    .unwrap();
+    let text = |s: &str| KernelValueV2::text(s).unwrap();
+    let (content, to, literal) = (text("Escape room"), text("private-result"), text("13"));
+    let owner = [("content".to_string(), &content), ("to".to_string(), &to)];
+    // The owner-signed edge, with the owner's exact values: admitted.
+    assert!(check_result_operation_rule_v04(&profile, d(21), &owner, &rule(path.clone(), 64), &root).is_ok());
+    // Another path (the second search result), a wider bound, or another
+    // descriptor: refused before any operation runs.
+    let mut second = path.clone();
+    second[5] = "1".into();
+    for (rules, descriptor) in [
+        (rule(second, 64), d(21)),
+        (rule(path.clone(), 1024), d(21)),
+        (rule(path.clone(), 64), d(22)),
+    ] {
+        assert_eq!(
+            check_result_operation_rule_v04(&profile, descriptor, &owner, &rules, &root),
+            Err(G4Error::StateConflict)
+        );
+    }
+    // A literal target (no edge) or tampered content: refused.
+    let literal_target = [
+        ("content".to_string(), &content),
+        ("file_id".to_string(), &literal),
+        ("to".to_string(), &to),
+    ];
+    assert!(check_result_operation_rule_v04(
+        &profile, d(21), &literal_target, &std::collections::BTreeMap::new(), &root
+    )
+    .is_err());
+    let tampered = text("Transfer approved");
+    let tampered_owner = [("content".to_string(), &tampered), ("to".to_string(), &to)];
+    assert!(check_result_operation_rule_v04(&profile, d(21), &tampered_owner, &rule(path, 64), &root).is_err());
+}
