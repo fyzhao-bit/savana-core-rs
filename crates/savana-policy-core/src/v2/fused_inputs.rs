@@ -271,9 +271,10 @@ impl RecoveredFusedInputsV04 {
         &mut self,
         slot: [u8; 16],
         input: &Input,
+        extract: Option<(&[String], u16)>,
         now: u64,
     ) -> Result<(), G4Error> {
-        let (value, provenance) = input.result_text()?;
+        let (value, provenance) = input.result_value(extract)?;
         if provenance.run_internal_id() != self.run
             || provenance.active_state_manifest_digest() != self.manifest
             || now < provenance.created_at().get()
@@ -329,7 +330,14 @@ impl FusedOwnedResultV04 {
     }
 }
 impl Input {
-    fn result_text(&self) -> Result<(KernelValueV2, ProvenanceRecordV2), G4Error> {
+    /// A whole-result edge (`extract` None) decodes the result as UTF-8 text for
+    /// the payload; a path edge extracts one scalar at the signed JSON path. The
+    /// derive op is folded into the value's provenance, so `add_result` and
+    /// `check_result_argument` must pass the SAME extract to agree on the digest.
+    fn result_value(
+        &self,
+        extract: Option<(&[String], u16)>,
+    ) -> Result<(KernelValueV2, ProvenanceRecordV2), G4Error> {
         let (raw, p) = self.decode()?;
         let context = super::ProvenanceContextV2::from_authenticated_runtime(
             p.producer_identity(),
@@ -339,13 +347,15 @@ impl Input {
             p.expires_at(),
         )
         .map_err(|_| G4Error::StateConflict)?;
-        ProvenanceRecordV2::derived(
-            context,
-            super::DeriveOperationV2::decode_utf8(),
-            &[(&raw, &p)],
-            p.label().effects(),
-        )
-        .map_err(|_| G4Error::StateConflict)
+        let operation = match extract {
+            None => super::DeriveOperationV2::decode_utf8(),
+            Some((path, max_bytes)) => {
+                super::DeriveOperationV2::select_result_json_path_v04(path.to_vec(), max_bytes)
+                    .map_err(|_| G4Error::StateConflict)?
+            }
+        };
+        ProvenanceRecordV2::derived(context, operation, &[(&raw, &p)], p.label().effects())
+            .map_err(|_| G4Error::StateConflict)
     }
     fn result_identity(&self, slot: [u8; 16]) -> ValueInternalIdV2 {
         ValueInternalIdV2::new(
@@ -360,8 +370,9 @@ impl Input {
         &self,
         slot: [u8; 16],
         argument: &super::StableActionArgumentBindingV2,
+        extract: Option<(&[String], u16)>,
     ) -> Result<(), G4Error> {
-        let (_, p) = self.result_text()?;
+        let (_, p) = self.result_value(extract)?;
         if argument.value_internal_id() != self.result_identity(slot)
             || argument.value_digest() != p.value_digest()
             || argument.provenance_digest() != p.provenance_digest()

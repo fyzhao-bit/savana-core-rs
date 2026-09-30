@@ -715,9 +715,15 @@ impl FusedPlanningTableV04 {
                     .iter()
                     .find(|e| e.operation == source && e.result_commit.is_some())
                 {
+                    let extract = b
+                        .result_path
+                        .as_deref()
+                        .zip(b.result_max_bytes)
+                        .map(|(path, max)| (path, max));
                     recovered.add_result(
                         b.slot,
                         e.result_value.as_ref().ok_or(G4Error::StateConflict)?,
+                        extract,
                         now.get(),
                     )?;
                 }
@@ -1253,15 +1259,24 @@ impl FusedPlanningTableV04 {
         }
         for b in &op.bindings {
             if let Some(source) = b.result_of {
-                if !descriptor
+                use savana_kernel_protocol::v2::BusinessFieldRoleV2;
+                let field = descriptor
                     .require_business_profile()?
                     .fields()
                     .iter()
-                    .any(|f| {
-                        f.name() == b.argument
-                            && f.role() == savana_kernel_protocol::v2::BusinessFieldRoleV2::Payload
-                    })
-                {
+                    .find(|f| f.name() == b.argument)
+                    .ok_or(G4Error::StateConflict)?;
+                // A whole-result edge fills only the payload; a path edge fills a
+                // Resource/Destination/Parameter, never the payload or magnitude.
+                let role_ok = if b.result_path.is_some() {
+                    !matches!(
+                        field.role(),
+                        BusinessFieldRoleV2::Payload | BusinessFieldRoleV2::Magnitude
+                    )
+                } else {
+                    field.role() == BusinessFieldRoleV2::Payload
+                };
+                if !role_ok {
                     return Err(G4Error::StateConflict);
                 }
                 let e = record
@@ -1275,10 +1290,11 @@ impl FusedPlanningTableV04 {
                     .iter()
                     .find(|a| a.argument_name().as_str() == b.argument)
                     .ok_or(G4Error::StateConflict)?;
+                let extract = b.result_path.as_deref().zip(b.result_max_bytes);
                 e.result_value
                     .as_ref()
                     .ok_or(G4Error::StateConflict)?
-                    .check_result_argument(b.slot, argument)?;
+                    .check_result_argument(b.slot, argument, extract)?;
             }
         }
         let mut actual_names: Vec<_> = intent
