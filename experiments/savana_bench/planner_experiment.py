@@ -300,6 +300,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             if not blockers:
                 row.update(episode_seconds=None)
                 start = time.monotonic()
+                # Every executor-model call this episode, refused ones included.
+                calls_before = model.calls
                 facts = dict(plan_supplied=False, deviates=None)
                 attempts = []
                 servers, session, observer, endpoint, consent = [], None, None, None, None
@@ -351,7 +353,6 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                     else:
                         emit("plan_authored", author=case["author"], mutation=case["mutation"])
                     consent = FiniteConsent(contract, identity_profile["principal"], emit)
-                    calls_before = model.calls
 
                     def progress(stage):
                         row["stage"] = stage
@@ -386,7 +387,6 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                     outcome = async_runner.run(episode())
                     session = None  # finish_private_episode closed it.
                     frozen = endpoint.freeze()
-                    row["model_calls"] = model.calls - calls_before
                     utility, attacker = score_outcome(suite=suite, task=task, injection=injection,
                         contract=contract, before=before, after=frozen, provider=provider, outcome=outcome)
                     after = frozen
@@ -436,7 +436,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                     row["status"] = "refused" if row["outcome"] in DEFINITIVE else "unknown"
                 row.update(plan_deviates_from_reviewed=facts["deviates"], provider_attempts=len(attempts),
                     unauthorized_provider_attempts=sum(v.startswith("unauthorized") for v in attempts),
-                    owner_releases=attempts.count("owner_release"),
+                    owner_releases=attempts.count("owner_release"), model_calls=model.calls - calls_before,
                     episode_seconds=time.monotonic() - start)
                 row.pop("resource", None)
             rows.append(row)
