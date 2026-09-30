@@ -17,7 +17,7 @@ import struct
 import time
 
 from .agentdojo_provider import canonical
-from .agentdojo_tasks import _TASKS, prepare_draft
+from .agentdojo_tasks import all_contracts, prepare_draft
 from .protected_endpoint import digest32
 
 SOCKET = '/run/savana-experiment-operator/operator.sock'
@@ -155,7 +155,7 @@ class FiniteOperator:
         if (set(request)-{'mode'}!={'kind','contract','command'} or request['kind']!='compile'
             or mode not in MODES):
             raise ValueError('closed_compile_request')
-        contract=next((c for c in _TASKS if c.task_id==request['contract']),None)
+        contract=next((c for c in all_contracts() if c.contract_id==request['contract']),None)
         if contract is None: raise ValueError('unreviewed_contract')
         command=request['command']
         if set(command)!={'schema','installation','store','request','not_before','expires_at','operation'}:
@@ -183,8 +183,9 @@ class FiniteOperator:
             if not now-300000<=command['not_before']<=now<command['expires_at']<=now+300000:
                 raise ValueError('bounded_fresh_task')
         if mode=='reviewed':
+            steps=tuple(digest32(d['descriptors'][st.tool]) for st in contract.steps())
             expected=prepare_draft(contract,task=task,root=root,observer=bytes(draft['observer_scope']),
-                tool_descriptor=digest32(d['descriptors'][contract.tool]),
+                tool_descriptor=steps[0],step_descriptors=steps,
                 release_descriptor=digest32(d['descriptors']['savana.final_result_release']),application_turn=turn,
                 planner=digest32(d['planner']),model_profile=1,
                 not_before=command['not_before'],expires_at=command['expires_at'])['planning_draft']
@@ -205,12 +206,15 @@ class FiniteOperator:
             'operation':dict(kind='prepare_planning_execution',task=list(task),root=root)}
         prepared=self._submit(directory,'prepare',command,wait=True)
         prior=json.loads(private_read(directory/'compile.receipt.json'))['result']
-        forwarded=json.loads(private_read(directory/'request.json')).get('mode','reviewed')=='forward_untrusted_plan'
+        original=json.loads(private_read(directory/'request.json'))
+        forwarded=original.get('mode','reviewed')=='forward_untrusted_plan'
+        operations=len(next(c for c in all_contracts() if c.contract_id==original['contract']).steps())
         approval=prepared['approval']
         if (prepared['kind']!='planning_execution_prepared' or prepared['task']!=list(task)
             or approval['task']!=list(task) or approval['root']!=root or approval['profile']!=prior['profile']
             or approval['recipe_schema']!=2 or not approval['inputs_digest']
-            or (not forwarded and (len(approval['bindings'])!=1 or approval['bindings'][0]['operation']!=1))):
+            or (not forwarded and [b['operation'] for b in approval['bindings']]
+                != list(range(1,operations+1)))):
             raise ValueError('kernel_recipe_binding')
         from savana.managed_admin import prepare_artifact
         native=prepare_artifact('recipe_approval',canonical(approval))

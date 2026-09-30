@@ -67,7 +67,9 @@ def _wrapper_source(pyname, upstream, field_names):
     return "\n".join(lines)
 
 
-def calendar_provider(environment):
+def calendar_provider(environment, max_calls=1):
+    """One call per reviewed operation: a read-only contract gets exactly one,
+    a read -> write contract exactly two. Never more than the plan can use."""
     from agentdojo.default_suites.v1.tools.calendar_client import (
         get_day_calendar_events, search_calendar_events,
     )
@@ -108,4 +110,4 @@ def calendar_provider(environment):
         adapter.__name__ = operation
         functions.append(make_function(adapter))
     runtime = FunctionsRuntime(functions)
-    return AgentDojoProvider(runtime, environment, max_calls=1)
+    return AgentDojoProvider(runtime, environment, max_calls=max_calls)

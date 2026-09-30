@@ -27,7 +27,7 @@ class EpisodeEndpoint:
             ("task_id", "run_id", "root_digest", "destination_digest", "application_turn", "resource")}
         self.tool_url, self.release_url = tool_url, release_url
         self._lock = threading.Lock()
-        self._seen, self._result, self._payload = {}, None, None
+        self._seen, self._results, self._payload = {}, [], None
         self._release_id, self._closed, self._failed = None, False, False
 
     def exchange(self, frame):
@@ -39,7 +39,7 @@ class EpisodeEndpoint:
                 if prior != frame.wire_digest or response is None:
                     raise ValueError("executor_nonce_rebound_or_unknown")
                 return response
-            if len(self._seen) >= 2:
+            if len(self._seen) >= len(self.contract.steps()) + 1:
                 raise ValueError("episode_attempt_limit")
             self._seen[frame.nonce] = (frame.wire_digest, None)
             # Write-ahead evidence before any official function is invoked.
@@ -72,16 +72,23 @@ class EpisodeEndpoint:
         if canonical(request) != frame.payload or type(request) is not dict:
             raise ValueError("noncanonical_business_request")
         if request.get("method") == "tools/call":
-            if (frame.url != self.tool_url or self._result is not None or self._payload is not None
-                or request.get("params") != {"name": self.contract.tool, "arguments": self.contract.values()}):
+            number = len(self._results)
+            if (frame.url != self.tool_url or self._payload is not None
+                or number >= len(self.contract.steps())
+                or request.get("params") != self.expected_tool_params(number)):
                 raise ValueError("reviewed_tool_request_mismatch")
+            step = self.contract.steps()[number]
             response = self.provider.exchange(frame.payload)
             result = decode(response)
             if result["result"]["structuredContent"]["savana_status"] != "succeeded":
                 raise ValueError("official_tool_outcome_unknown")
-            self._result = response
-            self.emit("official_tool_result", tool=self.contract.upstream_tool,
-                arguments=dict(self.contract.arguments), response=result,
+            self._results.append(response)
+            # Exactly what the official function received: the fixed synthetic
+            # controls are checked and dropped by the provider adapter.
+            from .agentdojo_calendar import SENTINELS
+            self.emit("official_tool_result", operation=number + 1, tool=step.upstream_tool,
+                arguments={k: v for k, v in request["params"]["arguments"].items() if k not in SENTINELS},
+                response=result,
                 environment=self.provider.env.model_dump(mode="json"))
             return response
         if (frame.url != self.release_url or set(request) != {"method", "path", "request_id", "body"}
@@ -98,7 +105,8 @@ class EpisodeEndpoint:
         raw = body["payload"].encode("ascii")
         payload = base64.b64decode(raw + b"=" * (-len(raw) % 4), altchars=b"-_", validate=True)
         if (base64.urlsafe_b64encode(payload).rstrip(b"=") != raw or len(payload) > 32768
-            or self._result is None or payload != self._result or self._payload is not None):
+            or len(self._results) != len(self.contract.steps())
+            or payload != self._results[-1] or self._payload is not None):
             raise ValueError("final_release_payload_mismatch")
         # The receiver stores bytes before acknowledging. The kernel commit is
         # observed independently through PrivateSession, never inferred here.
@@ -107,6 +115,18 @@ class EpisodeEndpoint:
             destination=body["destination"], request_id=request["request_id"])
         self._payload = payload
         return canonical({"request_id": request["request_id"], "status": "succeeded"})
+
+    def expected_tool_params(self, number):
+        """The one authorized call for reviewed operation `number` (0-based);
+        derived fields are recomputed HERE from the actual earlier results. The
+        kernel extracts independently; a disagreement refuses the call before
+        the provider runs."""
+        from .agentdojo_tasks import expected_step_call
+        return expected_step_call(self.contract, number, self._results)
+
+    def completed_results(self):
+        with self._lock:
+            return list(self._results)
 
     async def receive_publication(self, *, task_id, run_id, release_id, destination_digest):
         with self._lock:

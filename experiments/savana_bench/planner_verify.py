@@ -53,7 +53,12 @@ def _submitted_draft(case, contract, local):
     ids = _ids(event["ids"])
     descriptors = {k: bytes.fromhex(v) for k, v in event["descriptors"].items()}
     release = bytes.fromhex(event["release_descriptor"])
-    if case["mutation"] is not None:
+    steps = tuple(descriptors[st.tool] for st in contract.steps())
+    reviewed = prepare_draft(contract, tool_descriptor=steps[0], step_descriptors=steps,
+                             release_descriptor=release, **ids)["planning_draft"]
+    if case["author"] == "reviewed":
+        expected = reviewed
+    elif case["mutation"] is not None:
         expected = compromised_draft(case["mutation"], contract=contract, descriptors=descriptors,
                                      release_descriptor=release, **ids)
     else:
@@ -64,8 +69,6 @@ def _submitted_draft(case, contract, local):
                                release_descriptor=release, **ids)
     if json.loads(canonical(expected)) != event["draft"]:
         raise ValueError("submitted_draft_is_not_the_author_output")
-    reviewed = prepare_draft(contract, tool_descriptor=descriptors[contract.tool], release_descriptor=release,
-                             **ids)["planning_draft"]
     deviates = event["draft"] != json.loads(canonical(reviewed))
     if event["deviates_from_reviewed"] is not deviates:
         raise ValueError("plan_deviation_claim")
@@ -86,7 +89,7 @@ def verify_episode(directory, local, case, row, profile, turns):
                 raise ValueError("author_failure_with_plan")
         elif len(authored) != 1 or authored[0]["author"] != "deepseek" or authored[0]["goal"] != case["goal"]:
             raise ValueError("plan_author_evidence")
-    elif len(authored) != 1 or authored[0] != dict(authored[0], author="adversary", mutation=case["mutation"]):
+    elif len(authored) != 1 or authored[0] != dict(authored[0], author=case["author"], mutation=case["mutation"]):
         raise ValueError("adversary_plan_evidence")
     if row["outcome"] == "plan_unencodable":
         try:
@@ -126,14 +129,16 @@ def verify_episode(directory, local, case, row, profile, turns):
     turn = bindings[0]["application_turn"] if bindings else None
     if turn is not None:
         turns.add(turn)
-    verdicts = []
+    verdicts, prior = [], []
     for event in local:
+        if event["kind"] == "official_tool_result":
+            prior.append(canonical(event["response"]))
         if event["kind"] not in ("provider_attempt", "provider_attempt_unbound"):
             continue
         payload = base64.b64decode(event["payload_base64"], validate=True)
         verdict = ("unauthorized_unbound" if event["kind"] == "provider_attempt_unbound" else
                    classify_provider_attempt(payload, contract=contract, resource=resource,
-                                             application_turn=turn or ""))
+                                             application_turn=turn or "", prior_results=tuple(prior)))
         if event["verdict"] != verdict:
             raise ValueError("provider_attempt_verdict")
         verdicts.append(verdict)
@@ -157,7 +162,8 @@ def verify_episode(directory, local, case, row, profile, turns):
         after = restore_environment(type(env), final)
         tools = [e for e in local if e["kind"] == "official_tool_result"]
         observed = score_outcome(suite=suite, task=task, injection=injection, contract=contract,
-            before=before, after=after, provider=SimpleNamespace(audit=[dict(invoked=True)] * len(tools)),
+            before=before, after=after, provider=SimpleNamespace(audit=[
+                dict(invoked=True, upstream=e["tool"], arguments=e["arguments"]) for e in tools]),
             outcome=None)
         if (row["observed_utility"], row["observed_attacker_success"]) != observed:
             raise ValueError("official_oracle_replay_mismatch")

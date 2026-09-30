@@ -10,7 +10,8 @@ import json
 import time
 
 from .agentdojo_provider import canonical
-from .agentdojo_tasks import prepare_draft, reviewed_task, owner_document
+from .agentdojo_tasks import (EFFECT_CODES, ROLE_CODES, all_contracts, catalog_tool,
+    owner_document, prepare_draft)
 from .protected_endpoint import digest32
 
 
@@ -44,19 +45,23 @@ def _context_binding(context):
 
 
 def reviewed_clauses(contract, context, *, tool_descriptor, release_descriptor,
-                     application_turn):
-    """Build two bounded clauses using actual registered profile metadata.
+                     application_turn, step_descriptors=None):
+    """Build one bounded clause per reviewed operation plus the final release,
+    using actual registered profile metadata.
 
     Numeric field/effect tags are the closed V2 protocol discriminants. The
     native context.draft call below revalidates the full profile/control codec.
     Tool-output bytes, attack labels, oracle answers and model proposals are
-    deliberately not arguments to this function.
+    deliberately not arguments to this function. A result-derived field is
+    signed as an edge (source clause, path, bound), never as a value.
     """
-    if reviewed_task(contract.task_id, contract.prompt) != contract:
+    if contract not in all_contracts():
         raise ValueError("unreviewed_contract")
-    for value in (tool_descriptor, release_descriptor, application_turn):
+    steps = contract.steps()
+    descriptors = tuple(step_descriptors) if step_descriptors is not None else (tool_descriptor,)
+    for value in (*descriptors, release_descriptor, application_turn):
         _bytes32(value)
-    if tool_descriptor == release_descriptor:
+    if len(descriptors) != len(steps) or release_descriptor in descriptors or len(set(descriptors)) != len(descriptors):
         raise ValueError("separate_release_descriptor_required")
     tools = json.loads(context.tools_json())
     def registered(digest):
@@ -64,25 +69,35 @@ def reviewed_clauses(contract, context, *, tool_descriptor, release_descriptor,
         if len(selected) != 1:
             raise ValueError("registered_descriptor_required")
         return selected[0]
-    tool, release = registered(tool_descriptor), registered(release_descriptor)
-    roles = {"calendar": 1, "to": 2}
-    expected = sorted((k, roles.get(k, 5), 1) for k in contract.values() if k != "body")
     def fields(profile):
         return sorted((f["name"], f["role"], f["type"]) for f in profile["fields"])
-    if (tool["name"] != contract.tool or tool["operation"] != contract.tool
-            or tool["effect"] != 1 or fields(tool) != expected
-            or release["effect"] != 7 or release["operation"] != "/savana/final-result-release"
+    release = registered(release_descriptor)
+    if (release["effect"] != 7 or release["operation"] != "/savana/final-result-release"
             or fields(release) != [("destination", 2, 1), ("resource", 1, 1)]):
         raise ValueError("reviewed_descriptor_profile_mismatch")
-    resource = _bytes32(context.final_result_resource(1, tool_descriptor))
-    def clause(number, descriptor, controls, after):
-        return dict(clause_id=number, alternatives=[dict(descriptor_digest=descriptor.hex(),
-            controls=sorted([name, value] for name, value in controls.items()))],
+    def clause(number, descriptor, controls, after, derived=()):
+        alternative = dict(descriptor_digest=descriptor.hex(),
+            controls=sorted([name, value] for name, value in controls.items()))
+        if derived:
+            alternative["derived_controls"] = sorted([field, dict(source_clause=source,
+                path=list(path), kind=1, max_bytes=bound)] for field, source, path, bound in derived)
+        return dict(clause_id=number, alternatives=[alternative],
             maximum_single_magnitude=1, total_magnitude_budget=1, maximum_attempts=1,
             predecessor_clause_ids=after, retry_after_proven_no_effect=False)
-    clauses = [clause(1, tool_descriptor, {k: v for k, v in contract.values().items() if k != "body"}, []),
-        clause(2, release_descriptor, dict(resource="result:"+resource.hex(),
-            destination="application-turn:"+application_turn.hex()), [1])]
+    clauses = []
+    for number, (step, descriptor) in enumerate(zip(steps, descriptors), 1):
+        tool, reviewed = registered(descriptor), catalog_tool(step.tool)
+        payload = [f["name"] for f in reviewed["fields"] if f["role"] == "payload"]
+        expected = sorted((f["name"], ROLE_CODES[f["role"]], 1) for f in reviewed["fields"]
+                          if f["role"] != "payload")
+        if (tool["name"] != step.tool or tool["operation"] != step.tool
+                or tool["effect"] != EFFECT_CODES[reviewed["effect"]] or fields(tool) != expected):
+            raise ValueError("reviewed_descriptor_profile_mismatch")
+        controls = {k: v for k, v in step.values if k not in payload}
+        clauses.append(clause(number, descriptor, controls, list(range(1, number)), step.derived))
+    resource = _bytes32(context.final_result_resource(len(steps), descriptors[-1]))
+    clauses.append(clause(len(steps) + 1, release_descriptor, dict(resource="result:"+resource.hex(),
+        destination="application-turn:"+application_turn.hex()), list(range(1, len(steps) + 1))))
     return clauses, resource
 
 
@@ -139,14 +154,15 @@ async def provision_owner_episode(*, contract, deployment, broker, operator, mod
                 # reader is signed for exactly this turn's destination.
                 authorization_id=os.urandom(32),application_turn=digest32(deployment['application_turn']),
                 observer=os.urandom(32),
-                tool_descriptor=digest32(deployment['descriptors'][contract.tool]),
+                tool_descriptor=digest32(deployment['descriptors'][contract.steps()[0].tool]),
+                step_descriptors=tuple(digest32(deployment['descriptors'][st.tool]) for st in contract.steps()),
                 release_descriptor=digest32(deployment['descriptors']['savana.final_result_release']),
                 planner=digest32(deployment['planner']),model_profile=model_profile,
                 store=digest32(deployment['store']),request_id=os.urandom(32),approval=approval,
                 consent=consent,plan_author=plan_author,
                 descriptors={k:digest32(v) for k,v in deployment['descriptors'].items()})
             progress('operator_compile')
-            compile_request=dict(kind='compile',contract=contract.task_id,command=json.loads(request.command))
+            compile_request=dict(kind='compile',contract=contract.contract_id,command=json.loads(request.command))
             if operator_mode!='reviewed':
                 compile_request['mode']=operator_mode
             try:
@@ -178,7 +194,8 @@ async def provision_owner_episode(*, contract, deployment, broker, operator, mod
 async def authorize_and_prepare(*, ingress, contract, authorization_id,
         tool_descriptor, release_descriptor, application_turn, observer,
         planner, model_profile, store, request_id, approval,
-        clock_ms=lambda: time.time_ns() // 1_000_000, consent=None, plan_author=None, descriptors=None):
+        clock_ms=lambda: time.time_ns() // 1_000_000, consent=None, plan_author=None, descriptors=None,
+        step_descriptors=None):
     """After a separate text commit, obtain real root consent and prepare a plan.
 
     No automatic retry or implicit approval fallback. On uncertain delivery retain the issuance in
@@ -199,7 +216,8 @@ async def authorize_and_prepare(*, ingress, contract, authorization_id,
     context = await ingress.task_authorization_context()
     binding = _context_binding(context)
     clauses, resource = reviewed_clauses(contract, context, tool_descriptor=tool_descriptor,
-        release_descriptor=release_descriptor, application_turn=application_turn)
+        release_descriptor=release_descriptor, application_turn=application_turn,
+        step_descriptors=step_descriptors)
     draft = context.draft(authorization_id, canonical(clauses))
     if consent is not None:
         consent.bind_root(context,clauses,authorization_id)
@@ -216,7 +234,7 @@ async def authorize_and_prepare(*, ingress, contract, authorization_id,
         not_before=now, expires_at=binding["expires_at"])
     if plan_author is None:
         authored = prepare_draft(contract, tool_descriptor=tool_descriptor,
-            release_descriptor=release_descriptor, **ids)
+            release_descriptor=release_descriptor, step_descriptors=step_descriptors, **ids)
     else:
         # Untrusted planner experiment: whatever the author returns is compiled
         # by the kernel against the owner's root above; nothing here vets it.

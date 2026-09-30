@@ -10,16 +10,47 @@ import hashlib
 import re
 import time
 
-from .agentdojo_tasks import _TASKS
+from .agentdojo_tasks import EFFECT_NAMES, all_contracts, catalog_tool
 from .benchmark_identity import strict_json
+
+
+def _roles(step):
+    """(payload, resource, destination) field names of a reviewed step's tool."""
+    fields = catalog_tool(step.tool)["fields"]
+    return tuple(next(f["name"] for f in fields if f["role"] == r) for r in ("payload", "resource", "destination"))
+
+
+def _signed_edges(step):
+    """The clause-draft form of a step's owner-signed derived edges."""
+    return sorted([field, dict(source_clause=source, path=list(path), kind=1, max_bytes=bound)]
+                  for field, source, path, bound in step.derived)
+
+
+def _displayed_edges(step):
+    """What the native displays must show for those edges (the meaning text
+    is the kernel's fixed explanation and is not part of the check)."""
+    return {field: dict(source_clause=source, path=list(path), type="Text", max_bytes=bound)
+            for field, source, path, bound in step.derived}
+
+
+def _edges_match(shown, step):
+    if not step.derived:
+        return shown is None
+    if type(shown) is not dict or set(shown) != {f for f, *_ in step.derived}:
+        return False
+    return all(type(v) is dict and {k: v.get(k) for k in ("source_clause", "path", "type", "max_bytes")}
+               == _displayed_edges(step)[f] for f, v in shown.items())
 
 
 class FiniteConsent:
     def __init__(self, contract, principal, emit):
-        if (contract not in _TASKS or type(principal) is not str
+        if (contract not in all_contracts() or type(principal) is not str
             or not re.fullmatch('[0-9a-f]{64}',principal) or principal=='0'*64):
             raise ValueError('finite_consent_catalog')
         self.contract,self.principal,self.emit=contract,principal,emit
+        self.steps=contract.steps();self.action=0
+        # Read-only contracts keep their original policy label and behavior.
+        self.policy='finite_calendar_preconsent_v1' if len(self.steps)==1 else 'finite_write_preconsent_v1'
         self.stage='ingress';self.task=self.binding=self.clauses=self.authorization=None
         self.profiles=None;self.failed=False
 
@@ -31,23 +62,28 @@ class FiniteConsent:
             raise ValueError('consent_context_binding')
         if type(authorization) is not bytes or len(authorization)!=32 or not any(authorization):
             raise ValueError('consent_root_identity')
-        if type(clauses) is not list or len(clauses)!=2:
+        n=len(self.steps)
+        if type(clauses) is not list or len(clauses)!=n+1:
             raise ValueError('consent_fixed_clauses')
         profiles={x['descriptor_digest']:x for x in strict_json(context.tools_json())}
-        for n,c in enumerate(clauses,1):
-            expected=dict(clause_id=n,maximum_single_magnitude=1,total_magnitude_budget=1,
-                maximum_attempts=1,predecessor_clause_ids=[] if n==1 else [1],retry_after_proven_no_effect=False)
+        for number,c in enumerate(clauses,1):
+            expected=dict(clause_id=number,maximum_single_magnitude=1,total_magnitude_budget=1,
+                maximum_attempts=1,predecessor_clause_ids=list(range(1,number)),retry_after_proven_no_effect=False)
             if (type(c) is not dict or set(c)!=set(expected)|{'alternatives'}
                 or any(c[k]!=v or type(c[k]) is not type(v) for k,v in expected.items())
                 or type(c['alternatives']) is not list or len(c['alternatives'])!=1):
                 raise ValueError('consent_fixed_budget')
             a=c['alternatives'][0]
-            if set(a)!={'descriptor_digest','controls'}: raise ValueError('consent_fixed_alternative')
+            step=self.steps[number-1] if number<=n else None
+            keys={'descriptor_digest','controls'}|({'derived_controls'} if step is not None and step.derived else set())
+            if set(a)!=keys: raise ValueError('consent_fixed_alternative')
             controls=dict(a['controls'])
             if len(a['controls'])!=len(controls): raise ValueError('consent_duplicate_control')
-            if n==1:
-                if (controls!={k:v for k,v in self.contract.values().items() if k!='body'}
-                    or profiles[a['descriptor_digest']]['operation']!=self.contract.tool):
+            if step is not None:
+                payload=_roles(step)[0]
+                if (controls!={k:v for k,v in step.values if k!=payload}
+                    or profiles[a['descriptor_digest']]['operation']!=step.tool
+                    or (step.derived and a['derived_controls']!=_signed_edges(step))):
                     raise ValueError('consent_fixed_tool')
             elif (set(controls)!={'resource','destination'}
                 or not re.fullmatch('result:[0-9a-f]{64}',controls['resource'])
@@ -69,14 +105,18 @@ class FiniteConsent:
             else: raise ValueError('consent_purpose')
             self.emit('benchmark_consent',purpose=purpose,decision='approve',
                 contract_sha256=self.contract.digest(),display_sha256=hashlib.sha256(display.encode()).hexdigest(),
-                policy='finite_calendar_preconsent_v1',human_review=False)
+                policy=self.policy,human_review=False)
         except BaseException:
             self.failed=True
             self.emit('benchmark_consent',purpose=purpose,decision='refuse',
-                policy='finite_calendar_preconsent_v1',human_review=False)
+                policy=self.policy,human_review=False)
             raise
-        self.stage={'ingress':'task_authorization','task_authorization':'tool_execution',
-                    'tool_execution':'final_release','final_release':'complete'}[purpose]
+        if purpose=='tool_execution':
+            self.action+=1
+            self.stage='tool_execution' if self.action<len(self.steps) else 'final_release'
+        else:
+            self.stage={'ingress':'task_authorization','task_authorization':'tool_execution',
+                        'final_release':'complete'}[purpose]
         return True
 
     def _ingress(self, display):
@@ -92,7 +132,8 @@ class FiniteConsent:
     def _root(self, d):
         b=self.binding
         if b is None: raise ValueError('consent_root_not_bound')
-        expected=dict(rendering_schema=1,operation='Create task authorization',
+        derived=any(st.derived for st in self.steps)
+        expected=dict(rendering_schema=2 if derived else 1,operation='Create task authorization',
             authorization_id=self.authorization,revision=1,expected_previous_revision=0,
             principal=self.principal,task=self.task,installation_digest=b['installation'],
             manifest_digest=b['manifest'],deployment_generation=b['generation'],
@@ -100,39 +141,62 @@ class FiniteConsent:
         if (type(d) is not dict or set(d)!=set(expected)|{'scope','clauses'}
             or any(d[k]!=v or type(d[k]) is not type(v) for k,v in expected.items())
             or not b['not_before']<=time.time_ns()//1000000<b['expires_at']
-            or type(d['clauses']) is not list or len(d['clauses'])!=2):
+            or type(d['clauses']) is not list or len(d['clauses'])!=len(self.clauses)):
             raise ValueError('consent_root_scope')
         for actual,expected in zip(d['clauses'],self.clauses):
             if (set(actual)!=set(expected) or any(actual[k]!=v for k,v in expected.items() if k!='alternatives')
                 or len(actual['alternatives'])!=1): raise ValueError('consent_root_budget')
             alternative=actual['alternatives'][0];ref=expected['alternatives'][0]
             profile=self.profiles[ref['descriptor_digest']]
+            number=expected['clause_id'];step=self.steps[number-1] if number<=len(self.steps) else None
+            effect='FinalRelease' if step is None else EFFECT_NAMES[catalog_tool(step.tool)['effect']]
             if (alternative['alternative_index']!=0 or alternative['descriptor_digest']!=ref['descriptor_digest']
                 or alternative['operation']!=profile['operation']
                 or alternative['fields']!=dict(ref['controls'])
-                or alternative['effect']!=('Read' if expected['clause_id']==1 else 'FinalRelease')
-                or alternative['magnitude_rule']!={'kind':'FixedCount','count':1}):
+                or alternative['effect']!=effect
+                or alternative['magnitude_rule']!={'kind':'FixedCount','count':1}
+                or ('derived_fields' in alternative if step is None
+                    else not _edges_match(alternative.get('derived_fields'),step))):
                 raise ValueError('consent_root_alternative')
 
     def _action(self, d, purpose):
-        number=1 if purpose=='tool_execution' else 2
+        n=len(self.steps)
+        number=self.action+1 if purpose=='tool_execution' else n+1
+        if number>n+1: raise ValueError('consent_action_order')
+        step=self.steps[number-1] if purpose=='tool_execution' else None
         clause=self.clauses[number-1];alternative=clause['alternatives'][0]
         profile=self.profiles[alternative['descriptor_digest']]
-        expected=dict(rendering_schema=1,authorization_id=self.authorization,authorization_revision=1,
+        expected=dict(rendering_schema=2 if step is not None and step.derived else 1,
+            authorization_id=self.authorization,authorization_revision=1,
             task=self.task,principal=self.principal,clause_id=number,alternative_index=0,
             descriptor_digest=alternative['descriptor_digest'],operation=profile['operation'],
-            effect='Read' if number==1 else 'FinalRelease',magnitude=1,
+            effect='FinalRelease' if step is None else EFFECT_NAMES[catalog_tool(step.tool)['effect']],magnitude=1,
             attempts_used=0,attempts_after_prepare=1,maximum_attempts=1,magnitude_charged=0,
             magnitude_after_prepare=1,maximum_single_magnitude=1,total_magnitude_budget=1,
-            requires_verified_success_of_clauses=[] if number==1 else [1],
+            requires_verified_success_of_clauses=list(range(1,number)),
             no_effect_magnitude_refund_permitted=False)
         if type(d) is not dict or any(d.get(k)!=v or type(d.get(k)) is not type(v) for k,v in expected.items()):
             raise ValueError('consent_action_scope')
         r=d['exact_business_request']
-        if number==1:
+        if step is not None:
+            _,resource,destination=_roles(step)
             if (set(r)!={'jsonrpc','id','method','params'} or r['jsonrpc']!='2.0' or r['method']!='tools/call'
-                or r['params']!={'name':self.contract.tool,'arguments':self.contract.values()}
-                or d['resource']!='primary' or d['destination']!='private-result'):
+                or type(r['params']) is not dict or set(r['params'])!={'name','arguments'}
+                or r['params']['name']!=step.tool or type(r['params']['arguments']) is not dict
+                or not _edges_match(d.get('derived_fields'),step)):
+                raise ValueError('consent_action_arguments')
+            arguments=dict(r['params']['arguments'])
+            # A derived field is approved as the SOURCE the owner signed (the
+            # kernel-extracted value at that path), never as a planner literal;
+            # it must still be a well-formed bounded text value.
+            for field,_,_,bound in step.derived:
+                value=arguments.pop(field,None)
+                if (type(value) is not str or not value or value.strip()!=value
+                    or len(value.encode())>bound or any(ord(ch)<32 for ch in value)):
+                    raise ValueError('consent_derived_value')
+            if (arguments!=step.value_map()
+                or d['resource']!=r['params']['arguments'][resource]
+                or d['destination']!=r['params']['arguments'][destination]):
                 raise ValueError('consent_action_arguments')
         else:
             controls=dict(alternative['controls'])

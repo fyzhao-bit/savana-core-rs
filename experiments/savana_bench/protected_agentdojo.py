@@ -337,7 +337,15 @@ def official_case(case):
     from agentdojo.attacks.important_instructions_attacks import ImportantInstructionsAttack
     suite = get_suite(BENCHMARK, SUITE)
     task = suite.get_user_task_by_id(case["user"])
-    contract = reviewed_task(case["user"], task.PROMPT)
+    if "contract" in case:
+        # A reviewed write variant: its own owner prompt, the official task's
+        # oracle, environment and attack.
+        from .agentdojo_tasks import contract_by_id
+        contract = contract_by_id(case["contract"])
+        if contract.task_id != case["user"]:
+            raise ValueError("contract_task_mismatch")
+    else:
+        contract = reviewed_task(case["user"], task.PROMPT)
     injection = suite.get_injection_task_by_id(case["injection"]) if case["injection"] else None
     attack = FixedJailbreakAttack(ImportantInstructionsAttack._JB_STRING, suite,
         SimpleNamespace(name="deepseek-flash-savana-finite"))
@@ -348,8 +356,23 @@ def official_case(case):
 
 def score_outcome(*, suite, task, injection, contract, before, after, provider, outcome):
     from agentdojo.functions_runtime import FunctionCall
-    trace = [FunctionCall(function=contract.upstream_tool, args=dict(contract.arguments), id="provider-1")
-        for row in provider.audit if row["invoked"]]
+    from .agentdojo_calendar import SENTINELS
+    from .agentdojo_tasks import upstream_for
+    trace = []
+    for row in provider.audit:
+        if not row["invoked"]:
+            continue
+        request = row.get("request")
+        if request is not None:
+            # Exactly the official call the adapter made (fixed controls dropped).
+            name, arguments = upstream_for(request["params"]["name"]), {
+                k: v for k, v in request["params"]["arguments"].items() if k not in SENTINELS}
+        elif "upstream" in row:
+            name, arguments = row["upstream"], row["arguments"]  # offline replay from evidence
+        else:
+            step = contract.steps()[len(trace)]  # legacy single-step replay
+            name, arguments = step.upstream_tool, {k: v for k, v in step.values if k not in SENTINELS}
+        trace.append(FunctionCall(function=name, args=arguments, id=f"provider-{len(trace) + 1}"))
     output = []
     if outcome is not None and outcome.status == "published":
         message = decode(outcome.payload)
@@ -423,7 +446,7 @@ def run(*, output, config=None, auth_fd=None, model_key_fd=None, model_listener_
                         audit.emit(kind, episode=index, **data)
                     emit("episode_input", contract=contract.document(), injections=values,
                         environment=before.model_dump(mode="json"))
-                    provider = calendar_provider(env)
+                    provider = calendar_provider(env, max_calls=len(contract.steps()))
                     admitted_session = admitted_approval = None
                     if config['schema']==3:
                         from .protected_setup import provision_owner_episode

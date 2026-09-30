@@ -37,11 +37,14 @@ def publication_chain(path, expected_head):
 
 def verify_published_episode(directory, local, case, row, profile):
     """Offline checks for one published episode; returns the official (utility, attacker)."""
+    suite, task, injection, contract, values, env = official_case(case)
+    steps = contract.steps()
     if profile is not None:
         votes=[e for e in local if e['kind']=='benchmark_consent']
-        if ([v.get('purpose') for v in votes]!=['ingress','task_authorization','tool_execution','final_release']
+        policy='finite_calendar_preconsent_v1' if len(steps)==1 else 'finite_write_preconsent_v1'
+        if ([v.get('purpose') for v in votes]!=['ingress','task_authorization',*['tool_execution']*len(steps),'final_release']
             or any(v.get('decision')!='approve' or v.get('human_review') is not False
-                or v.get('policy')!='finite_calendar_preconsent_v1' for v in votes)):
+                or v.get('policy')!=policy for v in votes)):
             raise ValueError('finite_consent_evidence_missing')
     if not row["attempted"] or row.get("model_calls", 0) < 1:
         raise ValueError("unattempted_episode_scored")
@@ -49,16 +52,24 @@ def verify_published_episode(directory, local, case, row, profile):
     final = [e for e in local if e["kind"] == "episode_observation"]
     tools = [e for e in local if e["kind"] == "official_tool_result"]
     received = [e for e in local if e["kind"] == "result_received"]
-    if any(len(v) != 1 for v in (initial, final, tools, received)):
+    if any(len(v) != 1 for v in (initial, final, received)) or len(tools) != len(steps):
         raise ValueError("missing_episode_evidence")
-    initial, final, tool, received = initial[0], final[0], tools[0], received[0]
-    suite, task, injection, contract, values, env = official_case(case)
+    initial, final, tool, received = initial[0], final[0], tools[-1], received[0]
     if initial["contract"] != contract.document() or initial["injections"] != values:
         raise ValueError("task_or_attack_mismatch")
     if initial["environment"] != env.model_dump(mode="json"):
         raise ValueError("initial_environment_mismatch")
-    if tool["tool"] != contract.upstream_tool or tool["arguments"] != dict(contract.arguments):
-        raise ValueError("official_function_trace_mismatch")
+    # Each official call, in order, is the reviewed operation with its derived
+    # fields recomputed here from the earlier logged results at the signed path.
+    from .agentdojo_calendar import SENTINELS
+    from .agentdojo_tasks import expected_step_call
+    prior = []
+    for number, event in enumerate(tools):
+        expected = expected_step_call(contract, number, prior)
+        if (event["tool"] != steps[number].upstream_tool
+                or event["arguments"] != {k: v for k, v in expected["arguments"].items() if k not in SENTINELS}):
+            raise ValueError("official_function_trace_mismatch")
+        prior.append(canonical(event["response"]))
     payload = base64.b64decode(final["output_base64"], validate=True)
     received_bytes = base64.urlsafe_b64decode(received["payload_base64"] + "="*(-len(received["payload_base64"]) % 4))
     if payload != received_bytes or payload != canonical(tool["response"]):
@@ -87,7 +98,8 @@ def verify_published_episode(directory, local, case, row, profile):
         raise ValueError("unexplained_post_tool_environment_change")
     utility, attacker = score_outcome(suite=suite, task=task, injection=injection,
         contract=contract, before=before, after=after,
-        provider=SimpleNamespace(audit=[dict(invoked=True)]),
+        provider=SimpleNamespace(audit=[dict(invoked=True, upstream=e["tool"], arguments=e["arguments"])
+                                        for e in tools]),
         outcome=PrivateOutcome("published", "complete", 0, metadata, payload))
     return utility, attacker
 
