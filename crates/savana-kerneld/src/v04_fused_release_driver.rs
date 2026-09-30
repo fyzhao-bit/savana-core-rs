@@ -4,13 +4,14 @@ use super::*;
 use savana_kernel_protocol::v2::*;
 
 impl KernelAgentAuthorityV2 {
+    /// Returns true only when the owner's private session received it.
     fn notify_fused_publication_v04(
         &self,
         task: DurableTaskIdV2,
         now: UnixMillisV2,
-    ) -> Result<(), KernelAgentAuthorityErrorV2> {
+    ) -> Result<bool, KernelAgentAuthorityErrorV2> {
         let Some(publication) = self.fused_publication_v04(task)? else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(session) = self.private_session_authentications.iter().find(|s| {
             s.consumed
@@ -20,7 +21,7 @@ impl KernelAgentAuthorityV2 {
                     now.get() >= e.issued_at().get() && now.get() < e.expires_at().get()
                 })
         }) else {
-            return Ok(());
+            return Ok(false);
         };
         let e = session
             .envelope
@@ -54,7 +55,8 @@ impl KernelAgentAuthorityV2 {
                 publication,
                 UnixMillisV2::new(now.get().saturating_add(5000).min(e.expires_at().get())),
             )
-            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        Ok(true)
     }
 
     pub(super) fn tick_fused_releases_v04(
@@ -78,38 +80,12 @@ impl KernelAgentAuthorityV2 {
         let g = active
             .generation_snapshot()
             .map_err(|_| StableCode::KernelUnavailable)?;
-        let mut jobs = self
-            .fused_release_recovery
-            .iter()
-            .enumerate()
-            .filter_map(|(i, r)| {
-                let core = r.dispatch?;
-                if core.active_state_manifest_digest() != g.active_state_manifest_digest()
-                    || core.deployment_generation() != g.deployment_generation()
-                    || core.effect_fence_epoch() != g.effect_fence_epoch()
-                {
-                    return None;
-                }
-                Some((*core.durable_task_id().as_bytes(), None, Some(i)))
-            })
-            .collect::<Vec<_>>();
-        for s in &self.sessions {
-            if jobs.iter().any(|j| j.0 == *s.durable_task_id.as_bytes()) {
-                continue;
-            }
-            if self
-                .prepare_fused_final_result_v04(
-                    s.run,
-                    g.active_state_manifest_digest(),
-                    g.deployment_generation(),
-                    g.effect_fence_epoch(),
-                    now,
-                )
-                .is_ok_and(|c| c.release().is_some())
-            {
-                jobs.push((*s.durable_task_id.as_bytes(), Some(s.run), None));
-            }
-        }
+        let mut jobs = self.fused_release_jobs_v04(
+            g.active_state_manifest_digest(),
+            g.deployment_generation(),
+            g.effect_fence_epoch(),
+            now,
+        );
         jobs.sort_by_key(|j| j.0);
         let p = self.policy.as_mut().ok_or(StableCode::KernelUnavailable)?;
         let index = p
@@ -139,7 +115,14 @@ impl KernelAgentAuthorityV2 {
         // Notification is a derived owner-only observation, never permission to
         // execute, release again or refund. Failure leaves the durable original
         // commit intact and a later paced tick may send the same metadata.
-        let _ = self.notify_fused_publication_v04(DurableTaskIdV2::new(task), clock());
+        if let Ok(true) = self.notify_fused_publication_v04(DurableTaskIdV2::new(task), clock()) {
+            if let Some(r) = self.fused_release_recovery.iter_mut().find(|r| {
+                r.dispatch
+                    .is_some_and(|c| *c.durable_task_id().as_bytes() == task)
+            }) {
+                r.owner_notified = true;
+            }
+        }
         self.ensure_durable_available()
             .map_err(|_| StableCode::KernelUnavailable)?;
         self.policy
@@ -149,6 +132,54 @@ impl KernelAgentAuthorityV2 {
             .authenticated_state_head()
             .map_err(|_| StableCode::KernelUnavailable)?;
         Ok(())
+    }
+
+    /// Candidates for the one-job-per-tick release rotation: this
+    /// generation's unsettled history, then sessions whose final release is
+    /// prepared. Settled history (committed, acknowledged and delivered to the
+    /// owner) is not work: rotating it would delay every live release by one
+    /// turn per finished task until none completes within its authorization.
+    pub(super) fn fused_release_jobs_v04(
+        &self,
+        manifest: Digest32V2,
+        generation: u64,
+        fence: u64,
+        now: UnixMillisV2,
+    ) -> Vec<([u8; 32], Option<RunHandleV2>, Option<usize>)> {
+        let mut jobs = self
+            .fused_release_recovery
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| !r.settled())
+            .filter_map(|(i, r)| {
+                let core = r.dispatch?;
+                if core.active_state_manifest_digest() != manifest
+                    || core.deployment_generation() != generation
+                    || core.effect_fence_epoch() != fence
+                {
+                    return None;
+                }
+                Some((*core.durable_task_id().as_bytes(), None, Some(i)))
+            })
+            .collect::<Vec<_>>();
+        for s in &self.sessions {
+            if jobs.iter().any(|j| j.0 == *s.durable_task_id.as_bytes())
+                || self.fused_release_recovery.iter().any(|r| {
+                    r.settled()
+                        && r.dispatch
+                            .is_some_and(|c| c.durable_task_id() == s.durable_task_id)
+                })
+            {
+                continue;
+            }
+            if self
+                .prepare_fused_final_result_v04(s.run, manifest, generation, fence, now)
+                .is_ok_and(|c| c.release().is_some())
+            {
+                jobs.push((*s.durable_task_id.as_bytes(), Some(s.run), None));
+            }
+        }
+        jobs
     }
 
     pub(super) fn restore_fused_release_dispatches_v04(
@@ -379,7 +410,10 @@ impl KernelAgentAuthorityV2 {
             )
             .map_err(map_executor_client_error)?;
         let completion = match query.status() {
-            ExecutorStatusV2::Acknowledged if r.commit.is_some() => return Ok(()),
+            ExecutorStatusV2::Acknowledged if r.commit.is_some() => {
+                self.fused_release_recovery[index].acknowledged = true;
+                return Ok(());
+            }
             ExecutorStatusV2::CompletionAvailable { completion, .. } => *completion,
             ExecutorStatusV2::FailedNoEffect { .. } => {
                 let outcome = verify_task_no_effect_response(

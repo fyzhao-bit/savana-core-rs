@@ -12,6 +12,17 @@ pub(super) struct FusedReleaseRecoveryV04 {
     pub(super) dispatch: Option<ProtocolDispatchCoreV2>,
     pub(super) completion: Option<savana_kernel_protocol::v2::ExecutorCompletionDescriptorV2>,
     pub(super) commit: Option<Digest32V2>,
+    /// Transient, never archived: execd acknowledged the committed completion
+    /// and the owner's session received the publication in this process. Such
+    /// history leaves the release rotation; a restart reconciles it again.
+    pub(super) acknowledged: bool,
+    pub(super) owner_notified: bool,
+}
+
+impl FusedReleaseRecoveryV04 {
+    pub(super) fn settled(&self) -> bool {
+        self.commit.is_some() && self.acknowledged && self.owner_notified
+    }
 }
 
 impl KernelAgentAuthorityV2 {
@@ -176,6 +187,8 @@ impl KernelAgentAuthorityV2 {
                         .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?)
                 },
                 commit: decode_optional_recovery_value(d, c)?,
+                acknowledged: false,
+                owner_notified: false,
             };
             let material = self.validate_fused_release_archive_v04(&r)?;
             let task = material.task_action_binding().unwrap().task();
@@ -365,6 +378,8 @@ impl KernelAgentAuthorityV2 {
             dispatch: None,
             completion: None,
             commit: None,
+            acknowledged: false,
+            owner_notified: false,
         };
         self.validate_fused_release_archive_v04(&r)?;
         self.fused_release_recovery.push(r);

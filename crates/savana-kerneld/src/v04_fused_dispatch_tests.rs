@@ -1868,6 +1868,23 @@ fn assert_fused_final_release(
             f.authority.fused_release_recovery[0].commit,
             Some(committed)
         );
+        // Committed and acknowledged history keeps its rotation turn until the
+        // owner has been notified; settled history then stops taking turns.
+        assert!(f.authority.fused_release_recovery[0].acknowledged);
+        assert!(!f.authority.fused_release_recovery[0].settled());
+        let task = *core.durable_task_id().as_bytes();
+        let jobs = |f: &PlannerAuthorityFixtureV2| {
+            f.authority.fused_release_jobs_v04(
+                core.active_state_manifest_digest(),
+                core.deployment_generation(),
+                core.effect_fence_epoch(),
+                UnixMillisV2::new(at + 3),
+            )
+        };
+        assert_eq!(jobs(f), vec![(task, None, Some(0))]);
+        f.authority.fused_release_recovery[0].owner_notified = true;
+        assert!(f.authority.fused_release_recovery[0].settled());
+        assert!(jobs(f).is_empty());
     } else {
         let status = f
             .authority
