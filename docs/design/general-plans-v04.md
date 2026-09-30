@@ -127,9 +127,49 @@ interpreter with per-suite static policies). No bespoke attacks on CaMeL.
 ## Order of work
 
 1. result-derived control end to end (unlocks slack `+field`, workspace/slack
-   `+text_extract`); tests at each layer.
+   `+text_extract`); tests at each layer. **DONE** — protocol, compiler, runtime
+   extraction, G7, G4 matching, rendering, admission; 10 commits, unit + one
+   integration test.
 2. owner-text constant origin + planner drafts the root.
 3. computed origin (time+duration first).
 4. general AgentDojo connector adapter (workspace writes) + scoring via the
    official oracle.
 5. run honest / poisoned / official-injection; compare with CaMeL+DeepSeek.
+
+## Full-dojo read pipeline (prerequisite, DONE)
+
+The protected deployment is now catalog-driven: `agentdojo_tasks.TOOL_CATALOG`
+(7 reviewed read tools) is the single source; `catalog_json()` is committed as
+`deploy/linux/integration/read-tool-catalog-v04.json`, copied into the stage by
+`assemble.py`, and read by `protected_experiment_profile.rs` to ship one signed
+descriptor + business profile per read tool (+ the fixed final-result-release
+tool) on one `dojo-workspace` connector. `agentdojo_calendar.calendar_provider`
+serves every catalog operation. 13 reviewed read TaskContracts exist. Reads are
+necessary plumbing but do NOT show the differentiator: a read has no
+corruptible downstream action, so Savana and CaMeL both show no attack surface
+there and Savana's raw-result utility is lower. The differentiator is writes.
+
+## Write-task support (the differentiator vs CaMeL)
+
+CaMeL gives P-LLM literals `sources={User}`, so a literal recipient/destination
+written by the (untrusted) planner is allowed immediately. Savana fixes the
+destination/payload origin in the owner-signed root and the kernel supplies the
+value, so an injection that tries to redirect a write's destination or smuggle a
+payload cannot satisfy the signed edge. Sequenced smallest-first:
+
+- **W1 — write descriptors + validator rule.** The catalog may declare
+  authorizing-effect tools; the generator ships their descriptors declaring
+  `IntentFlowConfinement`. Candidate kernel rule: an authorizing-effect
+  descriptor must declare `IntentFlowConfinement` or be refused admission.
+- **W2 — `append_to_file` differentiator (scalar).** Read a scalar, append the
+  kernel-derived value to an owner-fixed `file_id`. No arrays, no computed
+  values; reuses the result-derived control. First end-to-end task that shows
+  the structural difference. Provider adapter + official-oracle scoring of the
+  side effect.
+- **W3 — array (text-list) fields** for `recipients`/`participants`
+  (`send_email`, `create_calendar_event`). New field/value type, list control
+  digest, MCP list encode/decode, list rendering; scalar digests stay
+  byte-identical.
+- **W4 — computed origin** (`start_time + duration -> end_time` first).
+- **W5 — expand runner to the ~50 derived-write tasks; fresh-host run
+  (honest / poisoned / official injection); same-condition CaMeL comparison.**
