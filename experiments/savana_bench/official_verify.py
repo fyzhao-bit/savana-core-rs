@@ -44,21 +44,25 @@ def restore_environment(env_type, snapshot):
     Restore every typed field after construction and require a lossless dump.
     This is offline evidence decoding only, never runtime authorization.
     """
-    from pydantic import TypeAdapter
+    from pydantic import BaseModel, TypeAdapter
     env = env_type.model_validate(snapshot)
-    for name in ('inbox', 'calendar', 'cloud_drive'):
+    # Every suite's top-level components (workspace, travel, banking, slack).
+    for name in type(env).model_fields:
         component = getattr(env, name)
+        if not isinstance(component, BaseModel) or not isinstance(snapshot.get(name), dict):
+            continue
         for field, info in type(component).model_fields.items():
             if field in snapshot[name]:
                 setattr(component, field, TypeAdapter(info.annotation).validate_python(snapshot[name][field]))
     # Canonical JSON sorts mapping keys. The upstream computed inbox lists
     # retain observable within-status order; recover it from those lists.
     # This does not claim to reconstruct arbitrary cross-status insertion order.
-    emails = env.inbox.emails
-    ordered = [m['id_'] for kind in ('received', 'sent', 'drafts') for m in snapshot['inbox'][kind]]
-    if set(ordered) != set(emails) or len(ordered) != len(emails):
-        raise ValueError('ambiguous_email_snapshot')
-    env.inbox.emails = {key:emails[key] for key in ordered}
+    if 'inbox' in type(env).model_fields:
+        emails = env.inbox.emails
+        ordered = [m['id_'] for kind in ('received', 'sent', 'drafts') for m in snapshot['inbox'][kind]]
+        if set(ordered) != set(emails) or len(ordered) != len(emails):
+            raise ValueError('ambiguous_email_snapshot')
+        env.inbox.emails = {key:emails[key] for key in ordered}
     if env.model_dump(mode='json') != snapshot:
         raise ValueError('environment_snapshot_not_lossless')
     return env
@@ -163,6 +167,7 @@ def verify(folder):
         raise ValueError('score_or_call_count_mismatch')
     return dict(schema='agentdojo-official-oracle-replay-v1', integrity_verified=True,
         official_oracles_replayed=True, savana_protected=False, full_benchmark=False,
+        suite=manifest['suite'], suite_complete=manifest.get('suite_complete', False),
         audit_head=head, event_count=len(events), metrics=rates(rows), usage=usage, rows=rows)
 
 

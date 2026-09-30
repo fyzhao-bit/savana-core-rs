@@ -13,8 +13,8 @@ from unittest.mock import patch
 
 class FakeRelay:
     instances=[]
-    def __init__(self,key):
-        self.calls=0; self.closed=False; self.instances.append(self)
+    def __init__(self,key,**limits):
+        self.calls=0; self.closed=False; self.limits=limits; self.instances.append(self)
     def call(self,request):
         self.calls+=1
         return dict(model='deepseek-flash',choices=[dict(finish_reason='stop',

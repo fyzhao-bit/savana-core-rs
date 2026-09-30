@@ -51,7 +51,8 @@ class Audit:
         frame(dict(kind='audit', event=row))
 
 
-def run(output):
+def run(output, *, suite_name='workspace', tasks=TASKS, injections=INJECTIONS,
+        max_total_calls=176, max_calls_per_episode=16):
     import agentdojo
     from agentdojo.agent_pipeline.base_pipeline_element import BasePipelineElement
     from agentdojo.agent_pipeline.agent_pipeline import load_system_message
@@ -68,17 +69,27 @@ def run(output):
         raise RuntimeError('agentdojo_version_mismatch')
     output.mkdir(mode=0o700)
     audit = Audit(output / 'events.jsonl')
-    suite = get_suite('v1.2.2', 'workspace')
-    cases = [dict(group='benign', user=t, injection=None) for t in TASKS]
-    cases += [dict(group='attacker_capability', user=t, injection=None) for t in INJECTIONS]
-    cases += [dict(group='attack', user=t, injection=i) for t in TASKS for i in INJECTIONS]
+    suite = get_suite('v1.2.2', suite_name)
+    # 'all' is the complete official suite, in AgentDojo's own task order.
+    tasks = tuple(suite.user_tasks) if tasks == 'all' else tuple(tasks)
+    injections = tuple(suite.injection_tasks) if injections == 'all' else tuple(injections)
+    if (not tasks or len(set(tasks)) != len(tasks) or len(set(injections)) != len(injections)
+            or any(t not in suite.user_tasks for t in tasks)
+            or any(i not in suite.injection_tasks for i in injections)
+            or type(max_total_calls) is not int or max_total_calls < 1
+            or type(max_calls_per_episode) is not int or not 1 <= max_calls_per_episode <= 16):
+        raise ValueError('closed_case_selection')
+    suite_complete = set(tasks) == set(suite.user_tasks) and set(injections) == set(suite.injection_tasks)
+    cases = [dict(group='benign', user=t, injection=None) for t in tasks]
+    cases += [dict(group='attacker_capability', user=t, injection=None) for t in injections]
+    cases += [dict(group='attack', user=t, injection=i) for t in tasks for i in injections]
     package = Path(agentdojo.__file__).parent
     sources = {str(p.relative_to(package)): hashlib.sha256(p.read_bytes()).hexdigest()
                for p in sorted(package.rglob('*')) if p.is_file() and p.suffix in ('.py', '.yaml', '.json')}
-    audit.emit('manifest', package_version='0.1.35', benchmark_version='v1.2.2', suite='workspace',
-        group='undefended', savana_protected=False, full_benchmark=False, cases=cases,
-        attack='important_instructions_no_names', max_model_calls_per_episode=16,
-        max_total_model_calls=176, model='deepseek-flash', immutable_model_revision=False,
+    audit.emit('manifest', package_version='0.1.35', benchmark_version='v1.2.2', suite=suite_name,
+        group='undefended', savana_protected=False, full_benchmark=False, suite_complete=suite_complete,
+        cases=cases, attack='important_instructions_no_names', max_model_calls_per_episode=max_calls_per_episode,
+        max_total_model_calls=max_total_calls, model='deepseek-flash', immutable_model_revision=False,
         platform=platform.platform(), python=sys.version, package_sources=sources,
         runner_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         channel_version=2,
@@ -106,8 +117,8 @@ def run(output):
             for element in (SystemMessage(load_system_message(None)), InitQuery()):
                 args = element.query(*args)
             query, runtime, env, messages, extra_args = args
-            for step in range(16):
-                if total_calls >= 176:
+            for step in range(max_calls_per_episode):
+                if total_calls >= max_total_calls:
                     raise RuntimeError('global_call_budget')
                 converted = [_message_to_openai(m, 'deepseek-flash') for m in messages]
                 # DeepSeek uses system, whereas current OpenAI adapter emits developer.
@@ -160,8 +171,8 @@ def run(output):
             # No exception repr: transport exceptions can contain sensitive context.
         row['wall_seconds'] = time.monotonic() - start
         rows.append(row); audit.emit('episode_score', **row)
-    summary = dict(official_tasks_and_oracles=True, full_benchmark=False, savana_protected=False, rows=rows,
-                   total_model_calls=total_calls)
+    summary = dict(official_tasks_and_oracles=True, full_benchmark=False, savana_protected=False,
+                   suite=suite_name, suite_complete=suite_complete, rows=rows, total_model_calls=total_calls)
     (output / 'summary.json').write_bytes(encode(summary))
     audit.emit('summary', summary=summary)
     audit.file.close()
@@ -171,4 +182,12 @@ def run(output):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', type=Path, required=True)
-    run(parser.parse_args().output)
+    parser.add_argument('--suite', default='workspace', choices=('workspace', 'travel', 'banking', 'slack'))
+    parser.add_argument('--tasks', default=','.join(TASKS), help="comma list or 'all'")
+    parser.add_argument('--injections', default=','.join(INJECTIONS), help="comma list or 'all'")
+    parser.add_argument('--max-total-calls', type=int, default=176)
+    parser.add_argument('--max-calls-per-episode', type=int, default=16)
+    a = parser.parse_args()
+    select = lambda v: 'all' if v == 'all' else tuple(x for x in v.split(',') if x)
+    run(a.output, suite_name=a.suite, tasks=select(a.tasks), injections=select(a.injections),
+        max_total_calls=a.max_total_calls, max_calls_per_episode=a.max_calls_per_episode)

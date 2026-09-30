@@ -95,4 +95,42 @@ class OfficialAuditTests(unittest.TestCase):
         self.assertTrue(restored.inbox.search_emails('Synthetic subject'))
 
 
+    def test_isolated_failure_ends_only_its_call_until_consecutive_limit(self):
+        connection=MagicMock(); connection.getresponse.return_value.status=500
+        with patch('savana_bench.official_relay.http.client.HTTPSConnection',return_value=connection) as factory:
+            relay=OfficialRelay('synthetic-secret',max_calls=10,isolate_failures=True,max_consecutive_failures=2)
+            with self.assertRaises(RuntimeError): relay.call(self.request())
+            self.assertFalse(relay.failed)
+            with self.assertRaises(RuntimeError): relay.call(self.request())
+            self.assertTrue(relay.failed)  # Repeated failure still closes the relay.
+            with self.assertRaises(RuntimeError): relay.call(self.request())
+            self.assertEqual((factory.call_count,relay.calls,relay.failures),(2,2,2))
+        with self.assertRaises(ValueError): OfficialRelay('synthetic-secret',max_calls=0)
+
+    def test_replay_restores_every_suite_environment(self):
+        from agentdojo.task_suite.load_suites import get_suite
+        from savana_bench.official_verify import restore_environment
+        for name in ('workspace','travel','banking','slack'):
+            env=get_suite('v1.2.2',name).load_and_inject_default_environment({})
+            if name=='banking':
+                env.bank_account.transactions=env.bank_account.transactions[1:]
+                env.user_account.street='Synthetic Street 1'
+            if name=='slack':
+                env.slack.channels.append('synthetic-channel')
+            snapshot=json.loads(encode(env.model_dump(mode='json')))
+            self.assertEqual(restore_environment(type(env),snapshot).model_dump(mode='json'),snapshot,name)
+
+    def test_upstream_attack_template_equivalence_for_complete_banking(self):
+        from types import SimpleNamespace
+        from agentdojo.task_suite.load_suites import get_suite
+        from agentdojo.attacks.base_attacks import FixedJailbreakAttack
+        from agentdojo.attacks.important_instructions_attacks import ImportantInstructionsAttack, ImportantInstructionsAttackNoNames
+        suite=get_suite('v1.2.2','banking')
+        upstream=ImportantInstructionsAttackNoNames(suite,SimpleNamespace(name='gpt-4o-2024-05-13'))
+        adapted=FixedJailbreakAttack(ImportantInstructionsAttack._JB_STRING,suite,SimpleNamespace(name='deepseek-flash'))
+        for task in suite.user_tasks.values():
+            for injection in suite.injection_tasks.values():
+                self.assertEqual(upstream.attack(task,injection),adapted.attack(task,injection))
+
+
 if __name__=='__main__': unittest.main()
