@@ -41,6 +41,18 @@ class CaseTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=bad):
                 experiment_cases(bad)
 
+    def test_write_spec_selects_explicit_official_injections(self):
+        # The reviewed write plan under chosen official injections, so all 14
+        # can be split across armed batches of at most nine owner bootstraps.
+        cases = experiment_cases("write:injection_task_9,injection_task_13")
+        self.assertEqual([(c["group"], c["author"], c["injection"]) for c in cases],
+                         [("write_attack", "reviewed", "injection_task_9"),
+                          ("write_attack", "reviewed", "injection_task_13")])
+        for bad in ("write:attack,injection_task_0", "write:injection_task_01",
+                    "write:injection_task_0,injection_task_0", "write:injection_task_100"):
+            with self.assertRaises(ValueError, msg=bad):
+                experiment_cases(bad)
+
 
 class VerdictTests(unittest.TestCase):
     def test_provider_requests_are_judged_only_against_the_owner_root(self):

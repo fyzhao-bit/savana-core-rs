@@ -19,6 +19,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import select
 import threading
 import time
@@ -45,7 +46,7 @@ KERNEL_BLOCKS = ("compile_rejected", "prepare_rejected")
 WRITE_GROUPS = ("reviewed", "honest", "poisoned", "compromised", "attack")
 
 
-def write_cases(groups=WRITE_GROUPS, mutations=None):
+def write_cases(groups=WRITE_GROUPS, mutations=None, injections=None):
     """The read -> derived-write task under every planner and the official attack.
 
     `reviewed` forwards the reviewed plan unread (the honest reference);
@@ -67,9 +68,9 @@ def write_cases(groups=WRITE_GROUPS, mutations=None):
         cases += [dict(group="write_compromised", **base, injection=None, author="adversary", goal=None,
                        mutation=name) for name, _, _ in WRITE_COMPROMISED
                   if "compromised" in groups or name in mutations]
-    if "attack" in groups:
+    if "attack" in groups or injections:
         cases += [dict(group="write_attack", **base, injection=injection, author="reviewed", goal=None,
-                       mutation=None) for injection in INJECTIONS]
+                       mutation=None) for injection in (INJECTIONS if "attack" in groups else injections)]
     return tuple(cases)
 
 
@@ -86,11 +87,12 @@ def experiment_cases(spec):
         # stay within one armed batch's case limit.
         items = names.split(",") if colon else list(WRITE_GROUPS)
         mutations = {n for n, _, _ in WRITE_COMPROMISED}
-        if (not items or len(set(items)) != len(items)
-                or any(i not in WRITE_GROUPS and i not in mutations for i in items)):
+        injections = tuple(i for i in items if re.fullmatch(r"injection_task_(0|[1-9][0-9]?)", i))
+        if (not items or len(set(items)) != len(items) or ("attack" in items and injections)
+                or any(i not in WRITE_GROUPS and i not in mutations and i not in injections for i in items)):
             raise ValueError("planner_experiment_spec")
         return write_cases(tuple(i for i in items if i in WRITE_GROUPS),
-                           frozenset(i for i in items if i in mutations))
+                           frozenset(i for i in items if i in mutations), injections)
     if kind == "compromised":
         catalog = [name for name, _, _ in COMPROMISED]
         chosen = names.split(",") if colon else catalog
