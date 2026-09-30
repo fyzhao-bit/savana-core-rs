@@ -807,3 +807,141 @@ fn task_draft_controls_bound_total_escaped_fields_not_only_individual_text() {
         "builder must not create a controls value that its own decoder rejects"
     );
 }
+
+#[test]
+fn exact_only_controls_stay_byte_identical_with_derived_support() {
+    // A control set with no derived fields must encode exactly as before, so
+    // every previously signed root stays valid.
+    let p = profile(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        BusinessMagnitudeV2::CountField,
+    );
+    let fields = vec![
+        ("file".into(), BusinessValueV2::Text("A".into())),
+        ("to".into(), BusinessValueV2::Text("Alice".into())),
+        ("subject".into(), BusinessValueV2::Text("report".into())),
+    ];
+    let controls = BusinessControlsV2::from_fields(&p, fields).unwrap();
+    let encoded = encode_business_controls_v2(&controls).unwrap();
+    // Discriminant 1, array of 3: the unchanged v1 layout.
+    assert_eq!(encoded[0], 0x83);
+    assert_eq!(encoded[1], 1);
+    assert_eq!(decode_business_controls_v2(&encoded).unwrap(), controls);
+}
+
+#[test]
+fn derived_destination_never_collides_with_a_literal_request() {
+    let p = profile(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        BusinessMagnitudeV2::CountField,
+    );
+    // "to" (Destination) is the value at result[0].participants of clause 1.
+    let mut derived = std::collections::BTreeMap::new();
+    derived.insert(
+        "to".to_string(),
+        ResultDerivedControlV2::new(
+            1,
+            vec!["participants".into(), "0".into()],
+            BusinessFieldTypeV2::Text,
+            256,
+        )
+        .unwrap(),
+    );
+    let controls = BusinessControlsV2::from_fields_with_derived(
+        &p,
+        vec![
+            ("file".into(), BusinessValueV2::Text("A".into())),
+            ("subject".into(), BusinessValueV2::Text("report".into())),
+        ],
+        derived,
+    )
+    .unwrap();
+    // The derived alternative round-trips (discriminant 2).
+    let encoded = encode_business_controls_v2(&controls).unwrap();
+    assert_eq!(encoded[1], 2);
+    assert_eq!(decode_business_controls_v2(&encoded).unwrap(), controls);
+
+    let derived_alt = controls.action_alternative(d(90)).unwrap();
+    // No literal "to" value can produce this alternative: the destination digest
+    // lives under the derived domain, so every concrete request differs.
+    for recipient in ["a@x.com", "attacker@evil.com", "Alice"] {
+        let literal = BusinessControlsV2::from_fields(
+            &p,
+            vec![
+                ("file".into(), BusinessValueV2::Text("A".into())),
+                ("subject".into(), BusinessValueV2::Text("report".into())),
+                ("to".into(), BusinessValueV2::Text(recipient.into())),
+            ],
+        )
+        .unwrap();
+        assert_ne!(literal.action_alternative(d(90)).unwrap(), derived_alt);
+    }
+    // The non-derived fields still bind exactly: a different resource still differs.
+    let mut same_rule = std::collections::BTreeMap::new();
+    same_rule.insert(
+        "to".to_string(),
+        ResultDerivedControlV2::new(1, vec!["participants".into(), "0".into()], BusinessFieldTypeV2::Text, 256).unwrap(),
+    );
+    let other_resource = BusinessControlsV2::from_fields_with_derived(
+        &p,
+        vec![
+            ("file".into(), BusinessValueV2::Text("B".into())),
+            ("subject".into(), BusinessValueV2::Text("report".into())),
+        ],
+        same_rule,
+    )
+    .unwrap();
+    assert_ne!(other_resource.action_alternative(d(90)).unwrap(), derived_alt);
+}
+
+#[test]
+fn derived_controls_validate_coverage_disjointness_and_kind() {
+    let p = profile(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        BusinessMagnitudeV2::CountField,
+    );
+    let rule = |kind| ResultDerivedControlV2::new(1, vec!["x".into()], kind, 32).unwrap();
+
+    // A field both exact and derived is rejected.
+    let mut both = std::collections::BTreeMap::new();
+    both.insert("to".to_string(), rule(BusinessFieldTypeV2::Text));
+    assert!(BusinessControlsV2::from_fields_with_derived(
+        &p,
+        vec![
+            ("file".into(), BusinessValueV2::Text("A".into())),
+            ("subject".into(), BusinessValueV2::Text("report".into())),
+            ("to".into(), BusinessValueV2::Text("Alice".into())),
+        ],
+        both,
+    )
+    .is_err());
+
+    // A missing controlled field (neither exact nor derived) is rejected.
+    let mut only_to = std::collections::BTreeMap::new();
+    only_to.insert("to".to_string(), rule(BusinessFieldTypeV2::Text));
+    assert!(BusinessControlsV2::from_fields_with_derived(
+        &p,
+        vec![("file".into(), BusinessValueV2::Text("A".into()))],
+        only_to,
+    )
+    .is_err());
+
+    // A derived rule whose kind mismatches the field kind is rejected
+    // ("to" is Text, rule says Unsigned).
+    let mut wrong_kind = std::collections::BTreeMap::new();
+    wrong_kind.insert("to".to_string(), rule(BusinessFieldTypeV2::Unsigned));
+    assert!(BusinessControlsV2::from_fields_with_derived(
+        &p,
+        vec![
+            ("file".into(), BusinessValueV2::Text("A".into())),
+            ("subject".into(), BusinessValueV2::Text("report".into())),
+        ],
+        wrong_kind,
+    )
+    .is_err());
+
+    // Rule bounds: clause 0, empty/over-long path, zero max_bytes.
+    assert!(ResultDerivedControlV2::new(0, vec!["x".into()], BusinessFieldTypeV2::Text, 8).is_err());
+    assert!(ResultDerivedControlV2::new(1, vec!["".into()], BusinessFieldTypeV2::Text, 8).is_err());
+    assert!(ResultDerivedControlV2::new(1, vec!["x".into()], BusinessFieldTypeV2::Text, 0).is_err());
+}

@@ -4,10 +4,83 @@
 //! user authentication/approval before the issuer may grant any authority.
 use super::*;
 
+/// An owner-signed edge, not a value: field F takes the scalar the kernel
+/// extracts, at dispatch, from the verified result of `source_clause` at `path`.
+/// A compromised planner cannot forge this into a literal value, because a
+/// derived control commits (below) under a domain no literal request produces.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ResultDerivedControlV2 {
+    source_clause: u64,
+    path: Vec<String>,
+    kind: BusinessFieldTypeV2,
+    max_bytes: u16,
+}
+impl ResultDerivedControlV2 {
+    pub fn new(
+        source_clause: u64,
+        path: Vec<String>,
+        kind: BusinessFieldTypeV2,
+        max_bytes: u16,
+    ) -> Result<Self, BusinessCodecErrorV2> {
+        if source_clause == 0
+            || max_bytes == 0
+            || path.len() > 16
+            || path
+                .iter()
+                .any(|s| s.is_empty() || s.len() > 128 || s.chars().any(char::is_control))
+        {
+            return Err(BusinessCodecErrorV2::Malformed);
+        }
+        Ok(Self {
+            source_clause,
+            path,
+            kind,
+            max_bytes,
+        })
+    }
+    pub fn source_clause(&self) -> u64 {
+        self.source_clause
+    }
+    pub fn path(&self) -> &[String] {
+        &self.path
+    }
+    pub fn kind(&self) -> BusinessFieldTypeV2 {
+        self.kind
+    }
+    pub fn max_bytes(&self) -> u16 {
+        self.max_bytes
+    }
+    fn put<W: minicbor::encode::Write>(
+        &self,
+        e: &mut minicbor::Encoder<W>,
+    ) -> Result<(), BusinessCodecErrorV2> {
+        e.array(4)
+            .and_then(|e| e.u64(self.source_clause))
+            .and_then(|e| e.array(self.path.len() as u64))
+            .map_err(malformed)?;
+        for segment in &self.path {
+            e.str(segment).map_err(malformed)?;
+        }
+        e.u16(self.kind as u16)
+            .and_then(|e| e.u16(self.max_bytes))
+            .map_err(malformed)?;
+        Ok(())
+    }
+    /// Canonical rule bytes, folded into the field's control digest.
+    fn canonical(&self) -> Vec<u8> {
+        let mut e = minicbor::Encoder::new(Vec::new());
+        self.put(&mut e).expect("validated rule");
+        e.into_writer()
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct BusinessControlsV2 {
     profile: BusinessProfileV2,
     values: BTreeMap<String, Json>,
+    /// Result-derived control fields, disjoint from `values`. Empty for every
+    /// exact-only control, whose encoding and digests stay byte-identical.
+    derived: BTreeMap<String, ResultDerivedControlV2>,
 }
 impl std::fmt::Debug for BusinessControlsV2 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -21,13 +94,21 @@ impl BusinessControlsV2 {
         profile: &BusinessProfileV2,
         fields: Vec<(String, BusinessValueV2)>,
     ) -> Result<Self, BusinessCodecErrorV2> {
-        Self::from_map(profile, field_map(fields)?)
+        Self::from_map(profile, field_map(fields)?, BTreeMap::new())
+    }
+    pub fn from_fields_with_derived(
+        profile: &BusinessProfileV2,
+        fields: Vec<(String, BusinessValueV2)>,
+        derived: BTreeMap<String, ResultDerivedControlV2>,
+    ) -> Result<Self, BusinessCodecErrorV2> {
+        Self::from_map(profile, field_map(fields)?, derived)
     }
     fn from_map(
         profile: &BusinessProfileV2,
         values: BTreeMap<String, Json>,
+        derived: BTreeMap<String, ResultDerivedControlV2>,
     ) -> Result<Self, BusinessCodecErrorV2> {
-        let fields: Vec<_> = profile
+        let controlled: Vec<_> = profile
             .fields
             .iter()
             .filter(|f| {
@@ -37,25 +118,41 @@ impl BusinessControlsV2 {
                 )
             })
             .collect();
-        if values.len() != fields.len() {
+        // Exact and derived controls must partition exactly the controlled
+        // fields: none omitted, none both, none unknown.
+        if values.len() + derived.len() != controlled.len()
+            || values.keys().any(|name| derived.contains_key(name))
+        {
             return Err(BusinessCodecErrorV2::Malformed);
         }
-        for field in fields {
-            validate_field(
-                field,
-                values
-                    .get(&field.name)
-                    .ok_or(BusinessCodecErrorV2::Malformed)?,
-            )?;
+        for field in &controlled {
+            if let Some(rule) = derived.get(&field.name) {
+                // A derived control may not choose the payload (handled as the
+                // whole prior result) and its type must match the field.
+                if rule.kind != field.kind {
+                    return Err(BusinessCodecErrorV2::Malformed);
+                }
+            } else {
+                validate_field(
+                    field,
+                    values
+                        .get(&field.name)
+                        .ok_or(BusinessCodecErrorV2::Malformed)?,
+                )?;
+            }
         }
         let result = Self {
             profile: profile.clone(),
             values,
+            derived,
         };
         if result.canonical_values_json().len() > MAX_BUSINESS_JSON_BYTES_V2 {
             return Err(BusinessCodecErrorV2::Limit);
         }
         Ok(result)
+    }
+    pub fn derived(&self) -> &BTreeMap<String, ResultDerivedControlV2> {
+        &self.derived
     }
     pub fn profile(&self) -> &BusinessProfileV2 {
         &self.profile
@@ -81,9 +178,9 @@ impl BusinessControlsV2 {
             descriptor,
             self.profile.codec,
             self.profile.effect,
-            resource_digest(&self.profile, &self.values),
-            destination_digest(&self.profile, &self.values),
-            parameters_digest(&self.profile, &self.values),
+            resource_digest(&self.profile, &self.values, &self.derived),
+            destination_digest(&self.profile, &self.values, &self.derived),
+            parameters_digest(&self.profile, &self.values, &self.derived),
             if self.profile.magnitude == BusinessMagnitudeV2::Utf8PayloadBytes {
                 MagnitudeUnitV2::Bytes
             } else {
@@ -150,76 +247,193 @@ fn text_role<'a>(
         .expect("validated role");
     values[&field.name].text().expect("validated text")
 }
+fn role_field<'profile>(
+    profile: &'profile BusinessProfileV2,
+    role: BusinessFieldRoleV2,
+) -> &'profile BusinessFieldV2 {
+    profile
+        .fields
+        .iter()
+        .find(|f| f.role == role)
+        .expect("validated role")
+}
+fn text_role_digest(
+    profile: &BusinessProfileV2,
+    values: &BTreeMap<String, Json>,
+    derived: &BTreeMap<String, ResultDerivedControlV2>,
+    role: BusinessFieldRoleV2,
+    exact_domain: &[u8],
+    derived_domain: &[u8],
+) -> Digest32V2 {
+    let field = role_field(profile, role);
+    match derived.get(&field.name) {
+        // A derived control commits to its rule under a distinct domain, so a
+        // literal request (which carries no rule) can never collide with it.
+        Some(rule) => hash(derived_domain, &[profile.target.as_bytes(), &rule.canonical()]),
+        None => hash(
+            exact_domain,
+            &[
+                profile.target.as_bytes(),
+                values[&field.name].text().expect("validated text").as_bytes(),
+            ],
+        ),
+    }
+}
 pub(super) fn resource_digest(
     profile: &BusinessProfileV2,
     values: &BTreeMap<String, Json>,
+    derived: &BTreeMap<String, ResultDerivedControlV2>,
 ) -> Digest32V2 {
-    hash(
+    text_role_digest(
+        profile,
+        values,
+        derived,
+        BusinessFieldRoleV2::Resource,
         b"SAVANA_BUSINESS_RESOURCE_V2_SCHEMA1\0",
-        &[
-            profile.target.as_bytes(),
-            text_role(profile, values, BusinessFieldRoleV2::Resource).as_bytes(),
-        ],
+        b"SAVANA_BUSINESS_RESOURCE_DERIVED_V2_SCHEMA1\0",
     )
 }
 pub(super) fn destination_digest(
     profile: &BusinessProfileV2,
     values: &BTreeMap<String, Json>,
+    derived: &BTreeMap<String, ResultDerivedControlV2>,
 ) -> Digest32V2 {
-    hash(
+    text_role_digest(
+        profile,
+        values,
+        derived,
+        BusinessFieldRoleV2::Destination,
         b"SAVANA_BUSINESS_DESTINATION_V2_SCHEMA1\0",
-        &[
-            profile.target.as_bytes(),
-            text_role(profile, values, BusinessFieldRoleV2::Destination).as_bytes(),
-        ],
+        b"SAVANA_BUSINESS_DESTINATION_DERIVED_V2_SCHEMA1\0",
     )
 }
 pub(super) fn parameters_digest(
     profile: &BusinessProfileV2,
     values: &BTreeMap<String, Json>,
+    derived: &BTreeMap<String, ResultDerivedControlV2>,
 ) -> Digest32V2 {
-    let parameters = profile
+    // profile.fields are strictly name-sorted, so Parameter fields visit in
+    // canonical (name) order for both the exact map and the derived rules.
+    let exact: BTreeMap<String, Json> = profile
+        .fields
+        .iter()
+        .filter(|f| f.role == BusinessFieldRoleV2::Parameter && !derived.contains_key(&f.name))
+        .map(|f| (f.name.clone(), values[&f.name].clone()))
+        .collect();
+    let derived_params: Vec<(&String, &ResultDerivedControlV2)> = profile
         .fields
         .iter()
         .filter(|f| f.role == BusinessFieldRoleV2::Parameter)
-        .map(|f| (f.name.clone(), values[&f.name].clone()))
+        .filter_map(|f| derived.get(&f.name).map(|rule| (&f.name, rule)))
         .collect();
-    hash(
-        b"SAVANA_BUSINESS_PARAMETERS_V2_SCHEMA1\0",
-        &[&Json::Object(parameters).canonical()],
-    )
+    let exact_json = Json::Object(exact).canonical();
+    if derived_params.is_empty() {
+        hash(b"SAVANA_BUSINESS_PARAMETERS_V2_SCHEMA1\0", &[&exact_json])
+    } else {
+        let mut rules = Vec::new();
+        let mut encoder = minicbor::Encoder::new(&mut rules);
+        encoder.array(derived_params.len() as u64).expect("bounded");
+        for (name, rule) in derived_params {
+            encoder.str(name).expect("bounded");
+            rule.put(&mut encoder).expect("validated rule");
+        }
+        hash(
+            b"SAVANA_BUSINESS_PARAMETERS_V2_SCHEMA2\0",
+            &[&exact_json, &rules],
+        )
+    }
 }
 
 pub fn encode_business_controls_v2(
     value: &BusinessControlsV2,
 ) -> Result<Vec<u8>, BusinessCodecErrorV2> {
     let mut e = minicbor::Encoder::new(Vec::new());
-    e.array(3)
-        .and_then(|e| e.u16(1))
-        .and_then(|e| {
-            e.bytes(&encode_business_profile_v2(&value.profile).expect("validated profile"))
-        })
-        .and_then(|e| e.bytes(&value.canonical_values_json()))
-        .map_err(malformed)?;
+    if value.derived.is_empty() {
+        // Exact-only controls keep the byte-identical v1 shape [1, profile, json].
+        e.array(3)
+            .and_then(|e| e.u16(1))
+            .and_then(|e| {
+                e.bytes(&encode_business_profile_v2(&value.profile).expect("validated profile"))
+            })
+            .and_then(|e| e.bytes(&value.canonical_values_json()))
+            .map_err(malformed)?;
+    } else {
+        e.array(4)
+            .and_then(|e| e.u16(2))
+            .and_then(|e| {
+                e.bytes(&encode_business_profile_v2(&value.profile).expect("validated profile"))
+            })
+            .and_then(|e| e.bytes(&value.canonical_values_json()))
+            .and_then(|e| e.array(value.derived.len() as u64))
+            .map_err(malformed)?;
+        // BTreeMap iterates name-sorted, so the encoding is canonical.
+        for (name, rule) in &value.derived {
+            e.str(name).map_err(malformed)?;
+            rule.put(&mut e)?;
+        }
+    }
     Ok(e.into_writer())
 }
 pub fn decode_business_controls_v2(
     bytes: &[u8],
 ) -> Result<BusinessControlsV2, BusinessCodecErrorV2> {
-    if bytes.len() > MAX_BUSINESS_PROFILE_BYTES_V2 + MAX_BUSINESS_JSON_BYTES_V2 + 128 {
+    // Room for up to 32 derived rules (name + 16 path segments of 128 bytes each).
+    if bytes.len() > MAX_BUSINESS_PROFILE_BYTES_V2 + MAX_BUSINESS_JSON_BYTES_V2 + 128 + 96 * 1024 {
         return Err(BusinessCodecErrorV2::Limit);
     }
     let mut d = minicbor::Decoder::new(bytes);
-    if d.array().map_err(malformed)? != Some(3) || d.u16().map_err(malformed)? != 1 {
+    // Exact-only controls are [1, profile, json]; controls with result-derived
+    // fields are [2, profile, json, {name -> rule}] in name-sorted order.
+    let (length, discriminant) = (d.array().map_err(malformed)?, d.u16().map_err(malformed)?);
+    if (length, discriminant) != (Some(3), 1) && (length, discriminant) != (Some(4), 2) {
         return Err(BusinessCodecErrorV2::Unsupported);
     }
     let profile = decode_business_profile_v2(d.bytes().map_err(malformed)?)?;
     let Json::Object(values) = business_json::parse(d.bytes().map_err(malformed)?)? else {
         return Err(BusinessCodecErrorV2::Malformed);
     };
-    let result = BusinessControlsV2::from_map(&profile, values)?;
+    let mut derived = BTreeMap::new();
+    if discriminant == 2 {
+        let count = d.array().map_err(malformed)?.ok_or(BusinessCodecErrorV2::Malformed)?;
+        if count == 0 || count > 32 {
+            return Err(BusinessCodecErrorV2::Malformed);
+        }
+        for _ in 0..count {
+            let name = d.str().map_err(malformed)?.to_owned();
+            let rule = decode_result_derived_control(&mut d)?;
+            if derived.insert(name, rule).is_some() {
+                return Err(BusinessCodecErrorV2::Malformed);
+            }
+        }
+    }
+    let result = BusinessControlsV2::from_map(&profile, values, derived)?;
     if d.position() != bytes.len() || encode_business_controls_v2(&result)? != bytes {
         return Err(BusinessCodecErrorV2::Malformed);
     }
     Ok(result)
+}
+
+fn decode_result_derived_control(
+    d: &mut minicbor::Decoder<'_>,
+) -> Result<ResultDerivedControlV2, BusinessCodecErrorV2> {
+    if d.array().map_err(malformed)? != Some(4) {
+        return Err(BusinessCodecErrorV2::Malformed);
+    }
+    let source_clause = d.u64().map_err(malformed)?;
+    let segments = d.array().map_err(malformed)?.ok_or(BusinessCodecErrorV2::Malformed)?;
+    if segments > 16 {
+        return Err(BusinessCodecErrorV2::Malformed);
+    }
+    let mut path = Vec::new();
+    for _ in 0..segments {
+        path.push(d.str().map_err(malformed)?.to_owned());
+    }
+    let kind = match d.u16().map_err(malformed)? {
+        1 => BusinessFieldTypeV2::Text,
+        2 => BusinessFieldTypeV2::Unsigned,
+        3 => BusinessFieldTypeV2::Boolean,
+        _ => return Err(BusinessCodecErrorV2::Unsupported),
+    };
+    let max_bytes = d.u16().map_err(malformed)?;
+    ResultDerivedControlV2::new(source_clause, path, kind, max_bytes)
 }

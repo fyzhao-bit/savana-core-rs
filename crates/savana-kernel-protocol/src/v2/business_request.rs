@@ -28,7 +28,10 @@ use std::collections::BTreeMap;
 
 #[path = "business_controls.rs"]
 mod controls;
-pub use controls::{decode_business_controls_v2, encode_business_controls_v2, BusinessControlsV2};
+pub use controls::{
+    decode_business_controls_v2, encode_business_controls_v2, BusinessControlsV2,
+    ResultDerivedControlV2,
+};
 
 pub const MAX_BUSINESS_JSON_BYTES_V2: usize = 64 * 1024;
 pub const MAX_BUSINESS_PROFILE_BYTES_V2: usize = 16 * 1024;
@@ -402,10 +405,10 @@ impl BusinessRequestV2 {
         self.text_role(BusinessFieldRoleV2::Payload)
     }
     pub fn resource_digest(&self) -> Digest32V2 {
-        controls::resource_digest(&self.profile, &self.fields)
+        controls::resource_digest(&self.profile, &self.fields, &std::collections::BTreeMap::new())
     }
     pub fn destination_digest(&self) -> Digest32V2 {
-        controls::destination_digest(&self.profile, &self.fields)
+        controls::destination_digest(&self.profile, &self.fields, &std::collections::BTreeMap::new())
     }
     pub fn payload_digest(&self) -> Digest32V2 {
         hash(
@@ -443,7 +446,7 @@ impl BusinessRequestV2 {
         .map_err(malformed)
     }
     pub fn parameters_digest(&self) -> Digest32V2 {
-        controls::parameters_digest(&self.profile, &self.fields)
+        controls::parameters_digest(&self.profile, &self.fields, &std::collections::BTreeMap::new())
     }
     pub fn digest(&self) -> Digest32V2 {
         hash(

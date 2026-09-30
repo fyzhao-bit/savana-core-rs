@@ -17,7 +17,8 @@ pub use business_request::{
     decode_business_controls_v2, decode_business_profile_v2, encode_business_controls_v2,
     encode_business_profile_v2, BusinessCodecErrorV2, BusinessControlsV2, BusinessFieldRoleV2,
     BusinessFieldTypeV2, BusinessFieldV2, BusinessMagnitudeV2, BusinessProfileV2,
-    BusinessRequestV2, BusinessResponseDispositionV2, BusinessValueV2, MAX_BUSINESS_JSON_BYTES_V2,
+    BusinessRequestV2, BusinessResponseDispositionV2, BusinessValueV2, ResultDerivedControlV2,
+    MAX_BUSINESS_JSON_BYTES_V2,
     MAX_BUSINESS_PROFILE_BYTES_V2,
 };
 pub use final_release_business::{
