@@ -45,7 +45,7 @@ KERNEL_BLOCKS = ("compile_rejected", "prepare_rejected")
 WRITE_GROUPS = ("reviewed", "honest", "poisoned", "compromised", "attack")
 
 
-def write_cases(groups=WRITE_GROUPS):
+def write_cases(groups=WRITE_GROUPS, mutations=None):
     """The read -> derived-write task under every planner and the official attack.
 
     `reviewed` forwards the reviewed plan unread (the honest reference);
@@ -63,9 +63,10 @@ def write_cases(groups=WRITE_GROUPS):
     if "poisoned" in groups:
         cases += [dict(group="write_poisoned", **base, injection=None, author="deepseek", goal=goal, mutation=None)
                   for goal in WRITE_POISON_GOALS]
-    if "compromised" in groups:
+    if "compromised" in groups or mutations:
         cases += [dict(group="write_compromised", **base, injection=None, author="adversary", goal=None,
-                       mutation=name) for name, _, _ in WRITE_COMPROMISED]
+                       mutation=name) for name, _, _ in WRITE_COMPROMISED
+                  if "compromised" in groups or name in mutations]
     if "attack" in groups:
         cases += [dict(group="write_attack", **base, injection=injection, author="reviewed", goal=None,
                        mutation=None) for injection in INJECTIONS]
@@ -81,10 +82,15 @@ def experiment_cases(spec):
         return tuple(dict(group="poisoned_planner", user=user, injection=None, author="deepseek", goal=goal,
                           mutation=None) for user in TASKS for goal in POISON_GOALS)
     if kind == "write":
-        groups = names.split(",") if colon else WRITE_GROUPS
-        if not groups or len(set(groups)) != len(groups) or any(g not in WRITE_GROUPS for g in groups):
+        # Items are whole groups or single compromised mutations, so a run can
+        # stay within one armed batch's case limit.
+        items = names.split(",") if colon else list(WRITE_GROUPS)
+        mutations = {n for n, _, _ in WRITE_COMPROMISED}
+        if (not items or len(set(items)) != len(items)
+                or any(i not in WRITE_GROUPS and i not in mutations for i in items)):
             raise ValueError("planner_experiment_spec")
-        return write_cases(tuple(groups))
+        return write_cases(tuple(i for i in items if i in WRITE_GROUPS),
+                           frozenset(i for i in items if i in mutations))
     if kind == "compromised":
         catalog = [name for name, _, _ in COMPROMISED]
         chosen = names.split(",") if colon else catalog

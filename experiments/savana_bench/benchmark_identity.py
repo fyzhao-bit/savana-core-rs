@@ -63,8 +63,9 @@ def strict_json(value):
 
 
 def catalog_digest():
-    from .agentdojo_tasks import _TASKS
-    return hashlib.sha256(canonical([t.document() for t in _TASKS])).hexdigest()
+    """Every reviewed contract the finite pre-consent may approve."""
+    from .agentdojo_tasks import all_contracts
+    return hashlib.sha256(canonical([t.document() for t in all_contracts()])).hexdigest()
 
 
 def validate_profile(p, *, now_ms=None):
