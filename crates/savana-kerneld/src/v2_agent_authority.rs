@@ -1840,6 +1840,8 @@ impl KernelAgentAuthorityV2 {
             .durable.managed_admin_receipt_v04(&proof).map_err(|_| StableCode::PolicyDenied)? {
             return Ok(receipt);
         }
+        // Before compiling, not inside the pure compiler, which never sees owner text.
+        self.check_compile_owner_views_v04(&proof).map_err(|_| StableCode::PolicyDenied)?;
         if let Some((task, root)) = proof.planning_execution_request(now).map_err(|_| StableCode::PolicyDenied)? {
             return self.prepare_owner_execution_review_v04(&proof, task, root, values, now)
                 .map_err(|_| StableCode::PolicyDenied);

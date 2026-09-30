@@ -125,6 +125,14 @@ impl VerifiedManagedAdminCommandV04 {
             _ => None,
         })
     }
+    /// The untrusted draft of a compile command, for host checks that need
+    /// kernel-held owner material the pure compiler does not see.
+    pub fn compile_planning_draft(&self) -> Option<([u8; 32], &super::FusedTaskDraftV04)> {
+        match &self.command.operation {
+            ManagedAdminOperationV04::CompilePlanning { task, draft } => Some((*task, draft)),
+            _ => None,
+        }
+    }
     /// Select expected key, installation and owner store independently of bytes.
     pub fn verify(
         bytes: &[u8],

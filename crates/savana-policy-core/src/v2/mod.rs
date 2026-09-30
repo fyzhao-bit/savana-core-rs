@@ -18,7 +18,10 @@ mod fused_plan_adapter;
 mod fused_planning;
 mod fused_recipe;
 mod fused_task_compiler;
-pub use fused_task_compiler::{compile_fused_task_v04, FusedTaskDraftV04, FusedTaskOperationV04};
+pub use fused_task_compiler::{
+    check_fused_owner_views_v04, compile_fused_task_v04, fused_owner_view_v04, FusedTaskDraftV04,
+    FusedTaskOperationV04,
+};
 pub use fused_inputs::{FusedOwnedInputV04, FusedOwnedResultV04, RecoveredFusedInputV04, RecoveredFusedInputsV04};
 mod fused_recipe_approval;
 pub use fused_model_exchange::{

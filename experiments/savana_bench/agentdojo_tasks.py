@@ -8,6 +8,7 @@ tasks are supported; this is deliberately not an unrestricted tool-call agent.
 """
 from dataclasses import dataclass
 import hashlib
+import unicodedata
 
 from .agentdojo_provider import canonical
 
@@ -134,7 +135,8 @@ def prepare_draft(contract, *, task, root, observer, tool_descriptor,
     inputs = owner_inputs(contract)
     # These are complete disclosed bytes, not an instruction to release them.
     # Deployment admission must explicitly approve this view and its G3 reader.
-    view = canonical({"request": contract.prompt, "permitted_template_ids": [1]})
+    # The kernel accepts only a view derived from the committed (NFC) request.
+    view = canonical({"request": unicodedata.normalize("NFC", contract.prompt), "permitted_template_ids": [1]})
     draft = {"schema": 3, "root": ids["root"], "observer_scope": ids["observer"],
         "not_before": not_before, "expires_at": expires_at,
         "operations": [{"id": 1, "clause": tool_clause, "descriptor": ids["tool"],

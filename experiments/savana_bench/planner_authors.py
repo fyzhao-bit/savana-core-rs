@@ -13,6 +13,7 @@ import http.client
 import json
 import ssl
 import time
+import unicodedata
 
 from .agentdojo_provider import canonical
 from .agentdojo_tasks import _TASKS, owner_inputs, prepare_draft
@@ -177,7 +178,8 @@ def encode_plan(plan, *, contract, task, root, observer, planner, model_profile,
             "tool": op["tool"], "after": list(op["after"]),
             "bindings": [{"argument": f, "slot": list(slot_for(op["bindings"][f]))} for f in order]})
     template_ids = sorted({t["id"] for t in plan["templates"]})
-    view = canonical({"request": contract.prompt, "permitted_template_ids": template_ids})
+    # The kernel derives the only acceptable view from the committed (NFC) request.
+    view = canonical({"request": unicodedata.normalize("NFC", contract.prompt), "permitted_template_ids": template_ids})
     release = plan["release"]
     if release is None:
         final_release = source = None

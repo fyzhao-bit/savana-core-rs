@@ -411,3 +411,59 @@ fn fused_task_compiler_signed_administration_is_atomic_replayable_and_requires_l
         receipt
     );
 }
+
+#[test]
+fn fused_task_compiler_bounds_model_budget_by_owner_attempts() {
+    // Fixture root: two operation clauses, one signed attempt each.
+    let (original, auth, registry) = fixture();
+    let compile = |draft: &FusedTaskDraftV04| {
+        compile_fused_task_v04(draft, &auth, &registry, RoleIdV2::new(1), at(100))
+    };
+    assert!(compile(&original).is_ok());
+    let mut two = original.clone();
+    two.rounds[0].max_deliveries = 2;
+    assert!(compile(&two).is_ok());
+    // A well-formed advised round: one advisor + one planner delivery = 2.
+    let mut advised = original.clone();
+    advised.rounds[0].advisor = Some([22; 32]);
+    advised.rounds[0].advice_cut = 500;
+    advised.delivery_schedule[0].opens_at = 500;
+    assert!(compile(&advised).is_ok());
+    for case in 0..4 {
+        let mut draft = original.clone();
+        match case {
+            0 => draft.rounds[0].max_deliveries = 3,
+            1 => draft.rounds[0].max_deliveries = 8,
+            // An advisor delivery is a model call too.
+            2 => {
+                draft = advised.clone();
+                draft.rounds[0].max_deliveries = 2;
+            }
+            // A replacement needs a later round.
+            _ => draft.max_replacements = 1,
+        }
+        assert!(compile(&draft).is_err(), "case {case}");
+    }
+}
+
+#[test]
+fn fused_owner_view_is_fixed_canonical_json_of_the_owner_request() {
+    assert_eq!(
+        fused_owner_view_v04("Who is invited?", &[1]).unwrap(),
+        br#"{"permitted_template_ids":[1],"request":"Who is invited?"}"#.to_vec()
+    );
+    // Same bytes as the experiment's canonical JSON (sorted keys, raw UTF-8).
+    assert_eq!(
+        fused_owner_view_v04("日历 \"x\"\n", &[1, 2]).unwrap(),
+        "{\"permitted_template_ids\":[1,2],\"request\":\"日历 \\\"x\\\"\\n\"}".as_bytes()
+    );
+    let (mut draft, _, _) = fixture();
+    draft.rounds[0].public_view = fused_owner_view_v04("Who is invited?", &[1]).unwrap();
+    assert!(check_fused_owner_views_v04(&draft, Some("Who is invited?")).is_ok());
+    assert!(check_fused_owner_views_v04(&draft, Some("Who else is invited?")).is_err());
+    assert!(check_fused_owner_views_v04(&draft, None).is_err());
+    draft.rounds[0].template_ids = vec![2];
+    assert!(check_fused_owner_views_v04(&draft, Some("Who is invited?")).is_err());
+    draft.rounds[0].public_view.clear();
+    assert!(check_fused_owner_views_v04(&draft, None).is_ok());
+}

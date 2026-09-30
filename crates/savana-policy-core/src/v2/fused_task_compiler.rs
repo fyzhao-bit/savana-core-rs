@@ -102,6 +102,42 @@ impl FusedTaskDraftV04 {
 /// the role-filtered live registry. The result is still an UNSIGNED profile:
 /// admission needs administrator approval, G3 needs its independent rules, and
 /// every effect still needs owned values, matching controls and G4--G7.
+/// The only non-empty model view an untrusted draft may carry: the owner's
+/// committed request and the round's own template ids, in this fixed canonical
+/// JSON (sorted keys, no whitespace). The kernel derives it from owner material;
+/// a planner can neither add nor reword text the model reads.
+pub fn fused_owner_view_v04(request: &str, template_ids: &[u16]) -> Result<Vec<u8>, G4Error> {
+    #[derive(Serialize)]
+    struct View<'a> {
+        permitted_template_ids: &'a [u16],
+        request: &'a str,
+    }
+    serde_json::to_vec(&View {
+        permitted_template_ids: template_ids,
+        request,
+    })
+    .map_err(|_| G4Error::StateConflict)
+}
+
+/// Host check before compiling an untrusted draft, which the pure compiler cannot
+/// do because it never sees owner text. `request` is the task's committed owner
+/// request, or None when the host holds none; then only empty views pass.
+pub fn check_fused_owner_views_v04(
+    draft: &FusedTaskDraftV04,
+    request: Option<&str>,
+) -> Result<(), G4Error> {
+    for round in &draft.rounds {
+        if round.public_view.is_empty() {
+            continue;
+        }
+        let request = request.ok_or(G4Error::StateConflict)?;
+        if round.public_view != fused_owner_view_v04(request, &round.template_ids)? {
+            return Err(G4Error::StateConflict);
+        }
+    }
+    Ok(())
+}
+
 pub fn compile_fused_task_v04(
     draft: &FusedTaskDraftV04,
     parent: &VerifiedTaskAuthorizationV2,
@@ -193,6 +229,7 @@ pub fn compile_fused_task_v04(
         }
     }
     let mut operations = Vec::new();
+    let mut owner_attempts = 0_u64;
     for op in &draft.operations {
         let descriptor = registry
             .resolve(Digest32V2::new(op.descriptor), role, now)
@@ -240,6 +277,7 @@ pub fn compile_fused_task_v04(
         }) {
             return Err(G4Error::StateConflict);
         }
+        owner_attempts = owner_attempts.saturating_add(clause.maximum_attempts());
         // Reject malformed explicit dependencies, do not silently repair them.
         if op.after.iter().any(|id| *id == 0 || *id == op.id)
             || op.after.windows(2).any(|w| w[0] >= w[1])
@@ -259,6 +297,18 @@ pub fn compile_fused_task_v04(
             bindings: op.bindings.clone(),
             after: after.into_iter().collect(),
         });
+    }
+    // Model interaction is bounded by the owner's root, not by the draft: each
+    // model delivery (planner or advisor) must be able to lead to an attempt the
+    // owner signed, and a replacement needs a later round. A draft cannot claim
+    // budget its own structure and root leave unused.
+    let deliveries: u64 = draft
+        .rounds
+        .iter()
+        .map(|r| u64::from(r.max_deliveries) * if r.advisor.is_some() { 2 } else { 1 })
+        .sum();
+    if deliveries > owner_attempts || usize::from(draft.max_replacements) >= draft.rounds.len() {
+        return Err(G4Error::StateConflict);
     }
     let dynamic = draft.rounds.iter().any(|r| !r.observations.is_empty());
     let profile = FusedPlanningProfileV04 {
