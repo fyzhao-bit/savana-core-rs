@@ -177,6 +177,8 @@ fn policy() -> Policy {
             action_template: id,
             bindings: vec![SlotBinding {
                 result_of: None,
+                result_path: None,
+                result_max_bytes: None,
                 argument: "input".into(),
                 slot: [id as u8; 16],
             }],
@@ -220,25 +222,46 @@ fn policy() -> Policy {
 }
 
 #[test]
-fn result_edges_require_schema_two_declared_predecessors_and_payload_slots() {
+fn result_edges_require_schema_two_declared_predecessors_and_wellformed_paths() {
     let mut good = policy();
     good.schema = 2;
+    // Whole-result (payload) edge: no path, no bound.
     good.operations[1].bindings[0].argument = "body".into();
     good.operations[1].bindings[0].result_of = Some(1);
     good.validate().unwrap();
     let encoded = bytes(&good);
     let restored: Policy = serde_json::from_slice(&encoded).unwrap();
     assert_eq!(restored.commitment().unwrap(), good.commitment().unwrap());
-    for case in 0..7 {
+
+    // A result edge into a non-payload field is now structurally valid here;
+    // whether that field may be result-derived is the compiler's and G4's call.
+    let mut derived = good.clone();
+    derived.operations[1].bindings[0].argument = "to".into();
+    derived.operations[1].bindings[0].result_path = Some(vec!["participants".into(), "0".into()]);
+    derived.operations[1].bindings[0].result_max_bytes = Some(256);
+    derived.validate().unwrap();
+
+    for case in 0..9 {
         let mut bad = good.clone();
         match case {
             0 => bad.schema = 1,
             1 => bad.operations[1].after.clear(),
             2 => bad.operations[1].bindings[0].result_of = Some(2),
             3 => bad.operations[1].bindings[0].result_of = Some(99),
-            4 => bad.operations[1].bindings[0].argument = "to".into(),
-            5 => bad.operations[1].bindings[0].slot = [1; 16],
-            _ => bad.templates[0].order = vec![2, 1, 3],
+            4 => bad.operations[1].bindings[0].slot = [1; 16],
+            5 => bad.templates[0].order = vec![2, 1, 3],
+            // A path without a bound, or a bound without a path, is malformed.
+            6 => bad.operations[1].bindings[0].result_path = Some(vec!["x".into()]),
+            7 => {
+                bad = derived.clone();
+                bad.operations[1].bindings[0].result_max_bytes = None;
+            }
+            // A zero bound and an over-deep path are malformed.
+            _ => {
+                bad = derived.clone();
+                bad.operations[1].bindings[0].result_path =
+                    Some((0..17).map(|i| i.to_string()).collect());
+            }
         }
         assert!(
             bad.validate().is_err(),

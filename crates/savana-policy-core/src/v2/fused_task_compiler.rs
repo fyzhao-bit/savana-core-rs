@@ -259,8 +259,21 @@ pub fn compile_fused_task_v04(
                 .zip(business.fields())
                 .any(|(binding, field)| {
                     binding.argument != field.name()
-                        || (binding.result_of.is_some()
-                            && field.role() != BusinessFieldRoleV2::Payload)
+                        // A whole-result edge (no path) may only fill the
+                        // payload. A path-extracted edge may fill a Resource,
+                        // Destination or Parameter, never the payload or a
+                        // magnitude. Whether the owner signed THIS path/bound is
+                        // checked at G4 against the signed control (the compiler
+                        // sees no owner values, only slots), so a mismatch fails
+                        // there; this is the structural gate only.
+                        || match (binding.result_of.is_some(), binding.result_path.is_some()) {
+                            (false, _) => false,
+                            (true, false) => field.role() != BusinessFieldRoleV2::Payload,
+                            (true, true) => matches!(
+                                field.role(),
+                                BusinessFieldRoleV2::Payload | BusinessFieldRoleV2::Magnitude
+                            ),
+                        }
                 })
         {
             return Err(G4Error::InvalidDescriptor);

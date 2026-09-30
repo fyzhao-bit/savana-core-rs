@@ -9,6 +9,8 @@ fn install_inputs(s: &mut DurableG4StateV2) {
     let mut p = profile();
     p.policy.operations[0].bindings = vec![SlotBinding {
         result_of: None,
+        result_path: None,
+        result_max_bytes: None,
         argument: "body".into(),
         slot: [1; 16],
     }];

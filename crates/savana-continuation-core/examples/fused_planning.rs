@@ -36,6 +36,8 @@ fn main() {
                 action_template: id,
                 bindings: vec![SlotBinding {
                     result_of: None,
+                    result_path: None,
+                    result_max_bytes: None,
                     argument: "input".into(),
                     slot: [id as u8; 16],
                 }],

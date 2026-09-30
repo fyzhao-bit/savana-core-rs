@@ -24,6 +24,8 @@ fn setup_with_final_source(
             action_template: 1,
             bindings: vec![SlotBinding {
                 result_of: None,
+                result_path: None,
+                result_max_bytes: None,
                 argument: "body".into(),
                 slot: [7; 16],
             }],

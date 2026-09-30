@@ -217,6 +217,8 @@ mod tests {
                 argument: "body".into(),
                 slot: [7; 16],
                 result_of: Some(1),
+                result_path: None,
+                result_max_bytes: None,
             }],
         };
         let mut a = approval();

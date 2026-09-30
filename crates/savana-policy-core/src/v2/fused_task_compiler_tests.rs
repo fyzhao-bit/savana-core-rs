@@ -162,6 +162,8 @@ fn fixture() -> (
                         argument: (*arg).into(),
                         slot: [id as u8 * 10 + n as u8; 16],
                         result_of: None,
+                        result_path: None,
+                        result_max_bytes: None,
                     })
                     .collect(),
                 after: vec![],
@@ -466,4 +468,47 @@ fn fused_owner_view_is_fixed_canonical_json_of_the_owner_request() {
     assert!(check_fused_owner_views_v04(&draft, Some("Who is invited?")).is_err());
     draft.rounds[0].public_view.clear();
     assert!(check_fused_owner_views_v04(&draft, None).is_ok());
+}
+
+#[test]
+fn compiler_allows_a_result_edge_into_a_nonpayload_field_structurally() {
+    // A path-extracted edge into the Destination ("to") is structurally valid;
+    // whether the owner signed THIS path is checked at G4, not here.
+    let (base, auth, registry) = fixture();
+    let mut draft = base.clone();
+    draft.operations[1].after = vec![1];
+    let to = draft.operations[1]
+        .bindings
+        .iter_mut()
+        .find(|b| b.argument == "to")
+        .unwrap();
+    to.result_of = Some(1);
+    to.result_path = Some(vec!["participants".into(), "0".into()]);
+    to.result_max_bytes = Some(256);
+    assert!(compile_fused_task_v04(&draft, &auth, &registry, RoleIdV2::new(1), at(100)).is_ok());
+
+    // The same edge onto the payload ("body") is rejected: the payload takes the
+    // whole result, never a path extraction.
+    let mut on_payload = base.clone();
+    on_payload.operations[1].after = vec![1];
+    let body = on_payload.operations[1]
+        .bindings
+        .iter_mut()
+        .find(|b| b.argument == "body")
+        .unwrap();
+    body.result_of = Some(1);
+    body.result_path = Some(vec!["participants".into()]);
+    body.result_max_bytes = Some(256);
+    assert!(compile_fused_task_v04(&on_payload, &auth, &registry, RoleIdV2::new(1), at(100)).is_err());
+
+    // A whole-result edge (no path) onto a non-payload field is rejected.
+    let mut whole_to = base.clone();
+    whole_to.operations[1].after = vec![1];
+    let to = whole_to.operations[1]
+        .bindings
+        .iter_mut()
+        .find(|b| b.argument == "to")
+        .unwrap();
+    to.result_of = Some(1);
+    assert!(compile_fused_task_v04(&whole_to, &auth, &registry, RoleIdV2::new(1), at(100)).is_err());
 }

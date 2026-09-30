@@ -35,6 +35,15 @@ pub struct SlotBinding {
     /// Signed private data edge, not a model-supplied value. Schema 2 or 3.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_of: Option<u16>,
+    /// For a result edge into a non-payload field: the fixed JSON path the
+    /// kernel extracts a scalar from, and the byte bound on a text scalar.
+    /// Absent means the whole-result edge into the payload field (`body`). The
+    /// owner-signed control authorizes which field, path and bound; the compiler
+    /// and G4 enforce that match, so a planner cannot widen this edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_path: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_max_bytes: Option<u16>,
 }
 
 /// Private compiler input. Never serialize this registry to a model implicitly.
@@ -122,20 +131,35 @@ impl Policy {
                     .after
                     .iter()
                     .any(|id| *id == operation.id || !self.operations.iter().any(|o| o.id == *id))
-                || operation.bindings.iter().any(|b| {
-                    b.slot == [0; 16]
+                || operation.bindings.iter().any(|b| b.slot == [0; 16]
+                        // Structural edge checks only: a result edge needs
+                        // schema >= 2 and a declared predecessor source. Which
+                        // FIELD (payload vs a non-payload role) and which PATH
+                        // are authorized is the compiler's and G4's job, against
+                        // the owner-signed control; this crate sees no roles.
                         || b.result_of.is_some_and(|source| {
-                            self.schema < 2
-                                || b.argument != "body"
-                                || !operation.after.contains(&source)
+                            self.schema < 2 || !operation.after.contains(&source)
+                        })
+                        // A path/bound may appear only together, on a result
+                        // edge, with a well-formed path and a non-zero bound: a
+                        // whole-result (payload) edge carries neither.
+                        || (b.result_path.is_some() != b.result_max_bytes.is_some())
+                        || (b.result_path.is_some() && b.result_of.is_none())
+                        || b.result_max_bytes == Some(0)
+                        || b.result_path.as_ref().is_some_and(|path| {
+                            path.len() > 16
+                                || path.iter().any(|s| {
+                                    s.is_empty()
+                                        || s.len() > 128
+                                        || s.chars().any(char::is_control)
+                                })
                         })
                         || b.argument.is_empty()
                         || b.argument.len() > 64
                         || !b
                             .argument
                             .bytes()
-                            .all(|c| c.is_ascii_alphanumeric() || c == b'_')
-                })
+                            .all(|c| c.is_ascii_alphanumeric() || c == b'_'))
                 || !operation
                     .bindings
                     .windows(2)
