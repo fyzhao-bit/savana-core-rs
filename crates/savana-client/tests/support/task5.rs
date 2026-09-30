@@ -122,7 +122,7 @@ pub fn html_response(body: Vec<u8>) -> Result<BrowserResponse, SavanaError> {
 pub fn authentication_html<T: minicbor::Encode<()>>(purpose: &str, capability: T) -> Vec<u8> {
     let capability = URL_SAFE_NO_PAD.encode(minicbor::to_vec(capability).unwrap());
     format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Savana authentication</title></head><body><main data-purpose=\"{purpose}\" data-pre-authentication=\"{capability}\"><h1>Hardware authentication required</h1><button id=\"savana-authenticate\" type=\"button\">Use security key</button><p id=\"savana-status\">The opaque capability is held only in this page.</p></main><script src=\"/v2/savana-ui.js\" defer></script></body></html>"
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Savana authentication</title></head><body><main data-purpose=\"{purpose}\" data-pre-authentication=\"{capability}\"><h1>User verification required</h1><button id=\"savana-authenticate\" type=\"button\">Use passkey or security key</button><p id=\"savana-status\">The opaque capability is held only in this page.</p></main><script src=\"/v2/savana-ui.js\" defer></script></body></html>"
     )
     .into_bytes()
 }

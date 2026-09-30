@@ -683,6 +683,41 @@ impl DeploymentTransactionV2 {
         }
         Ok(())
     }
+
+    /// Bind the unchanged external transaction signatures to a TPM V3 ledger.
+    /// No V2 ledger/signature is fabricated or used as a conversion bridge.
+    /// This alone does not attest the live head, staging or bootstrap closure.
+    pub fn validate_authenticated_pre_state_v3(
+        &self,
+        selected: &super::VerifiedDeploymentLedgerRecordV3,
+        deployment_trust_root_set_digest: Digest32V2,
+        activation_trust_root_set_digest: Digest32V2,
+        release_trust_root_set_digest: Digest32V2,
+        declassification_trust_root_set_digest: Digest32V2,
+    ) -> Result<(), DeploymentControlErrorV2> {
+        let expected = self.intent.expected_pre_state();
+        let state = selected.state();
+        let m = state.material();
+        if m.installation != self.intent.installation_id()
+            || m.epoch != expected.installation_epoch()
+            || m.generation != expected.ledger_generation()
+            || state.payload_digest() != expected.ledger_record_payload_digest()
+            || m.phase != expected.phase()
+            || &m.active_activation != expected.active_activation()
+            || m.effects_fenced != expected.effects_fenced()
+            || m.fence_epoch != expected.effect_fence_epoch()
+            || m.active_manifest != expected.active_manifest_digest()
+            || m.highest_ever.digest()? != expected.highest_ever_digest()
+            || m.identity_profile != expected.install_identity_profile_signed_digest()
+            || deployment_trust_root_set_digest != expected.deployment_trust_root_set_digest()
+            || activation_trust_root_set_digest != expected.activation_trust_root_set_digest()
+            || release_trust_root_set_digest != expected.release_trust_root_set_digest()
+            || declassification_trust_root_set_digest != expected.declassification_trust_root_set_digest()
+        {
+            return Err(DeploymentControlErrorV2::TransactionBindingMismatch);
+        }
+        Ok(())
+    }
 }
 
 fn validate_rollback_grant_shape(

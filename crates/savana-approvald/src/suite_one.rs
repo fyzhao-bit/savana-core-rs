@@ -95,6 +95,7 @@ impl ApprovalSuiteOneServerV2 {
             EndpointRoleV2::AgentApproval
                 | EndpointRoleV2::IngressApproval
                 | EndpointRoleV2::ApprovalAdmin
+                | EndpointRoleV2::KernelApproval
         ) || client_public_key == [0; 32]
             || replay_capacity == 0
             || replay_capacity > MAX_HANDSHAKE_REPLAYS_V2
@@ -188,12 +189,87 @@ impl ApprovalSuiteOneServerV2 {
         deadline: Instant,
     ) -> Result<Vec<u8>, ApprovalUiAuthorityErrorV2> {
         match operation {
+            ApprovalServiceOperationV2::AttachPrivatePublicationV04 {
+                session,
+                publication,
+            } => {
+                self.authority.attach_private_publication_v04(
+                    session,
+                    publication,
+                    now,
+                    deadline,
+                )?;
+                Ok(vec![0x80])
+            }
+            ApprovalServiceOperationV2::AttachPrivateReleaseApprovalV04 {
+                session,
+                approval,
+                root,
+            } => {
+                self.authority
+                    .attach_private_release_approval_v04(session, approval, root, now, deadline)?;
+                Ok(vec![0x80])
+            }
+            ApprovalServiceOperationV2::GetKernelReleaseApprovalSettlement { approval } => {
+                let view = self
+                    .authority
+                    .get_kernel_release_approval_settlement(approval, now, deadline)?;
+                encode_approval_settlement_view_v2(&view)
+                    .map_err(|_| ApprovalUiAuthorityErrorV2::Unavailable)
+            }
+            ApprovalServiceOperationV2::AttachPrivateApprovalV04 {
+                session,
+                approval,
+                root,
+            } => {
+                self.authority
+                    .attach_private_approval_v04(session, approval, root, now, deadline)?;
+                Ok(vec![0x80])
+            }
+            ApprovalServiceOperationV2::RegisterPrivateSessionV04 { envelope } => {
+                let registered = self
+                    .authority
+                    .register_private_session_v04(envelope, now, deadline)?;
+                savana_kernel_protocol::v2::encode_registered_private_session_v04(registered)
+                    .map_err(|_| ApprovalUiAuthorityErrorV2::Unavailable)
+            }
+            ApprovalServiceOperationV2::GetPrivateSessionAuthenticationV04 { record } => {
+                let settlement = self
+                    .authority
+                    .private_session_authentication_v04(record, now, deadline)?;
+                savana_kernel_protocol::v2::encode_private_session_authentication_v04(
+                    settlement.as_ref(),
+                )
+                .map_err(|_| ApprovalUiAuthorityErrorV2::Unavailable)
+            }
             ApprovalServiceOperationV2::AgentHealth
+            | ApprovalServiceOperationV2::KernelHealth
             | ApprovalServiceOperationV2::IngressHealth
             | ApprovalServiceOperationV2::AdminHealth => encode_approval_health_response_v2(
                 ApprovalHealthResponseV2::new(PublicServiceStateV2::Ready),
             )
             .map_err(|_| ApprovalUiAuthorityErrorV2::Unavailable),
+            ApprovalServiceOperationV2::RegisterKernelApproval {
+                envelope,
+                display_authentication,
+            } => {
+                let registered = self.authority.register_approval(
+                    EndpointRoleV2::KernelApproval,
+                    envelope,
+                    display_authentication,
+                    now,
+                    deadline,
+                )?;
+                encode_registered_approval_v2(registered)
+                    .map_err(|_| ApprovalUiAuthorityErrorV2::Unavailable)
+            }
+            ApprovalServiceOperationV2::GetKernelApprovalSettlement { approval } => {
+                let view = self
+                    .authority
+                    .get_kernel_approval_settlement(approval, now, deadline)?;
+                encode_approval_settlement_view_v2(&view)
+                    .map_err(|_| ApprovalUiAuthorityErrorV2::Unavailable)
+            }
             ApprovalServiceOperationV2::RegisterAgentApproval {
                 envelope,
                 display_authentication,
@@ -427,6 +503,18 @@ fn error_response(
         operation_tag,
         if operation_tag == 0 {
             PublicStableCodeV2::ServiceUnavailable
+        } else if operation_tag == 21
+            || (role == EndpointRoleV2::IngressApproval && operation_tag == 25)
+            || (role == EndpointRoleV2::KernelApproval && matches!(operation_tag, 23 | 26))
+        {
+            // Query responses have a smaller closed error vocabulary. Do not
+            // turn an invalid capability or busy owner into a dropped stream.
+            match code {
+                PublicStableCodeV2::ApprovalBindingMismatch
+                | PublicStableCodeV2::ApprovalReplay => PublicStableCodeV2::InvalidReference,
+                PublicStableCodeV2::Overloaded => PublicStableCodeV2::ServiceUnavailable,
+                other => other,
+            }
         } else {
             code
         },

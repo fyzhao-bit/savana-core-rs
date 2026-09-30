@@ -41,6 +41,7 @@ serde_json.workspace = true
 signal-hook.workspace = true
 
 [dev-dependencies]
+savana-continuation-core = { path = "../savana-continuation-core" }
 tempfile = "=3.23.0"
 savana-approvald = { path = "../savana-approvald", features = ["test-support"] }
 

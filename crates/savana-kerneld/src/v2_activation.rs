@@ -61,12 +61,14 @@ impl VerifiedInheritedKerneldListenersV2 {
 pub(crate) fn take_kerneld_systemd_listeners_v2(
     agent_listener_identity: Digest32V2,
     ingress_listener_identity: Digest32V2,
-) -> Result<VerifiedInheritedKerneldListenersV2, DeploymentTrustErrorV2> {
-    let inherited = savana_platform_identity::take_systemd_unix_listeners_v2(&[
-        AGENT_KERNEL_FD_NAME_V2,
-        INGRESS_KERNEL_FD_NAME_V2,
-    ])
-    .map_err(|_| DeploymentTrustErrorV2::UnsafeSocket)?;
+    managed_admin: bool,
+) -> Result<(VerifiedInheritedKerneldListenersV2, Option<UnixListener>), DeploymentTrustErrorV2> {
+    let mut names = vec![AGENT_KERNEL_FD_NAME_V2, INGRESS_KERNEL_FD_NAME_V2];
+    if managed_admin {
+        names.push(crate::v04_managed_admin::FD_NAME);
+    }
+    let inherited = savana_platform_identity::take_systemd_unix_listeners_v2(&names)
+        .map_err(|_| DeploymentTrustErrorV2::UnsafeSocket)?;
     let mut inherited = inherited.into_iter();
     let (agent_name, agent_listener) = inherited
         .next()
@@ -76,13 +78,27 @@ pub(crate) fn take_kerneld_systemd_listeners_v2(
         .next()
         .ok_or(DeploymentTrustErrorV2::UnsafeSocket)?
         .into_parts();
+    let admin = if managed_admin {
+        let (name, listener) = inherited
+            .next()
+            .ok_or(DeploymentTrustErrorV2::UnsafeSocket)?
+            .into_parts();
+        if name != crate::v04_managed_admin::FD_NAME {
+            return Err(DeploymentTrustErrorV2::UnsafeSocket);
+        }
+        crate::v04_managed_admin::verify_listener(&listener)
+            .map_err(|_| DeploymentTrustErrorV2::UnsafeSocket)?;
+        Some(listener)
+    } else {
+        None
+    };
     if inherited.next().is_some()
         || agent_name != AGENT_KERNEL_FD_NAME_V2
         || ingress_name != INGRESS_KERNEL_FD_NAME_V2
     {
         return Err(DeploymentTrustErrorV2::UnsafeSocket);
     }
-    verify_kerneld_inherited_listeners_v2(
+    let verified = verify_kerneld_inherited_listeners_v2(
         [
             InheritedListenerV2::new(AGENT_KERNEL_FD_NAME_V2, agent_listener),
             InheritedListenerV2::new(INGRESS_KERNEL_FD_NAME_V2, ingress_listener),
@@ -95,7 +111,8 @@ pub(crate) fn take_kerneld_systemd_listeners_v2(
             Path::new(INGRESS_KERNEL_SOCKET_PATH_V2),
             ingress_listener_identity,
         ),
-    )
+    )?;
+    Ok((verified, admin))
 }
 
 pub(crate) fn verify_kerneld_inherited_listeners_v2(

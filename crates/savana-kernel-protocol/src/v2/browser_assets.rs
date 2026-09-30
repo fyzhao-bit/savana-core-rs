@@ -160,7 +160,7 @@ pub const SAVANA_BROWSER_SCRIPT_V2: &[u8] = br####""use strict";
   const assertion = (credential) => {
     const response = credential.response;
     if (!response.userHandle || response.userHandle.byteLength !== 32) {
-      throw new Error("hardware credential did not return its bound principal");
+      throw new Error("credential did not return its bound principal");
     }
     return cborArray(
       cborBytes(new Uint8Array(credential.rawId)),
@@ -230,7 +230,7 @@ pub const SAVANA_BROWSER_SCRIPT_V2: &[u8] = br####""use strict";
   const finishAuthentication = async (purpose, preAuthentication) => {
     const tag = purpose === "ingress" ? 1 : purpose === "approval-display" ? 2 : 3;
     const requestNonce = nonce();
-    status("Waiting for the hardware authenticator...");
+    status("Waiting for your passkey or security key...");
     const begun = decode(await post(
       "/v2/ui-auth/begin",
       cborArray(cborUnsigned(tag), cborBytes(preAuthentication), cborBytes(requestNonce))
@@ -241,7 +241,7 @@ pub const SAVANA_BROWSER_SCRIPT_V2: &[u8] = br####""use strict";
     const credential = await navigator.credentials.get({
       publicKey: webAuthnOptions(begun[2])
     });
-    if (!credential) throw new Error("hardware authentication was cancelled");
+    if (!credential) throw new Error("authentication was cancelled");
     const finished = decode(await post(
       "/v2/ui-auth/finish",
       cborArray(
@@ -269,7 +269,11 @@ pub const SAVANA_BROWSER_SCRIPT_V2: &[u8] = br####""use strict";
   const showApproval = async (tab) => {
     const view = decode(await post("/v2/approval/display", cborBytes(tab)));
     const main = $("main");
+    const statusNode = $("#savana-status") || document.createElement("p");
+    statusNode.id = "savana-status";
     main.replaceChildren();
+    delete main.dataset.preAuthentication;
+    main.append(statusNode);
     const heading = document.createElement("h1");
     heading.textContent = "Review Savana approval";
     const summary = document.createElement("pre");
@@ -278,7 +282,7 @@ pub const SAVANA_BROWSER_SCRIPT_V2: &[u8] = br####""use strict";
     deny.textContent = "Deny";
     const approve = document.createElement("button");
     approve.textContent = "Approve";
-    main.append(heading, summary, deny, approve);
+    main.append(heading, summary, deny, approve, statusNode);
     const decide = async (decision) => {
       deny.disabled = true;
       approve.disabled = true;
@@ -295,11 +299,12 @@ pub const SAVANA_BROWSER_SCRIPT_V2: &[u8] = br####""use strict";
         "/v2/approval/decision/finish",
         cborArray(cborBytes(begun[0]), cborBytes(requestNonce), assertion(credential))
       ));
+      if (result !== decision) throw new Error("Approval response does not match your decision");
       status(result === 2 ? "Approved. You may close this page." : "Denied. You may close this page.");
     };
     deny.addEventListener("click", () => decide(1).catch(fail));
     approve.addEventListener("click", () => decide(2).catch(fail));
-    status("Confirm the exact digest projection with your hardware authenticator.");
+    status("Confirm the exact digest projection with your passkey or security key.");
   };
 
   const runEnrollment = (main) => {
@@ -307,26 +312,34 @@ pub const SAVANA_BROWSER_SCRIPT_V2: &[u8] = br####""use strict";
     const handleInput = $("#savana-enrollment-handle");
     const codeInput = $("#savana-enrollment-code");
     if (!start || !handleInput || !codeInput) throw new Error("enrollment controls are missing");
-    start.addEventListener("click", async () => {
+    let attempted = false;
+    start.addEventListener("click", () => (async () => {
+      if (attempted) return;
+      attempted = true;
       start.disabled = true;
+      status("Starting credential registration...");
       const enrollment = decode(b64urlDecode(handleInput.value.trim()));
       if (!(enrollment instanceof Uint8Array) || enrollment.length !== 32) {
         throw new Error("invalid enrollment handle");
       }
       const code = codeInput.value;
       if (!code || code.length > 256) throw new Error("invalid enrollment code");
+      // Never retain or automatically replay a one-time credential after an
+      // uncertain request. A fresh enrollment must be explicitly initiated.
+      codeInput.value = "";
+      handleInput.value = "";
       const beginNonce = nonce();
       const begun = decode(await post(
         "/v2/webauthn/enroll/begin",
         cborArray(cborBytes(enrollment), cborBytes(beginNonce), cborText(code))
       ));
-      codeInput.value = "";
-      handleInput.value = "";
-      const credential = await navigator.credentials.create({
-        publicKey: webAuthnOptions(begun[1])
-      });
+      const creationOptions = webAuthnOptions(begun[1]);
+      status(creationOptions.attestation === "none"
+        ? "Create a passkey. It may sync across your devices; this profile does not attest device-bound hardware."
+        : "Register an attested, non-backup hardware security key.");
+      const credential = await navigator.credentials.create({ publicKey: creationOptions });
       if (!credential || !credential.response || !credential.response.attestationObject) {
-        throw new Error("hardware enrollment was cancelled");
+        throw new Error("credential enrollment was cancelled");
       }
       const finished = decode(await post(
         "/v2/webauthn/enroll/finish",
@@ -339,10 +352,66 @@ pub const SAVANA_BROWSER_SCRIPT_V2: &[u8] = br####""use strict";
         )
       ));
       status(`Credential enrolled (${b64urlEncode(finished[0])}).`);
-    });
+    })().catch(() => {
+      codeInput.value = "";
+      handleInput.value = "";
+      status("Registration was not confirmed. The code may have expired, the connection may have failed, or verification was cancelled. Do not assume a credential was registered. Ask the administrator to check the outcome before starting a new registration.", true);
+    }));
+  };
+
+  const runPrivateSession = (main) => {
+    if (!main || main.dataset.privateSession !== "true") return;
+    const input = $("#savana-private-transfer");
+    const button = $("#savana-private-connect");
+    if (main.dataset.privateTransfer) {
+      input.value = main.dataset.privateTransfer;
+      main.removeAttribute("data-private-transfer");
+    }
+    button.addEventListener("click", () => (async () => {
+      button.disabled = true;
+      const text = input.value.trim();
+      if (!/^[A-Za-z0-9_-]{43}$/.test(text)) throw new Error("invalid private session handoff");
+      const transfer = b64urlDecode(text);
+      input.value = "";
+      const begun = decode(await post("/v04/session/begin", cborArray(cborUnsigned(4), cborBytes(transfer))));
+      if (!Array.isArray(begun) || begun.length !== 2 || begun[0] !== 4) throw new Error("invalid private session challenge");
+      status("Authenticate this private task session. This does not approve tools or result publication.");
+      const credential = await navigator.credentials.get({ publicKey: webAuthnOptions(begun[1]) });
+      if (!credential) throw new Error("authentication was cancelled");
+      const finished = decode(await post("/v04/session/finish", cborArray(cborUnsigned(4), cborBytes(transfer), assertion(credential))));
+      if (!Array.isArray(finished) || finished.length !== 2 || finished[0] !== 4
+          || !(finished[1] instanceof Uint8Array) || finished[1].length !== 32) throw new Error("invalid private session response");
+      input.remove();
+      button.remove();
+      status("Authentication complete. Waiting for the kernel to validate this task session.");
+      const browser = finished[1];
+      const actions = $("#savana-private-actions");
+      let offered = null;
+      const poll = async () => {
+        const response = decode(await post("/v04/session/poll", cborArray(cborUnsigned(4), cborBytes(browser))));
+        if (!Array.isArray(response) || response.length !== 2 || response[0] !== 4
+          || (response[1] !== null && (!(response[1] instanceof Uint8Array) || response[1].length !== 32))) throw new Error("Invalid private handoff");
+        const transfer = response[1];
+        if (transfer === null) {
+          if (offered) actions.replaceChildren();
+          offered = null;
+        } else if (!offered || !transfer.every((b, i) => b === offered[i])) {
+          offered = transfer;
+          const review = document.createElement("button");
+          review.type = "button";
+          review.textContent = "Review pending action";
+          review.addEventListener("click", () => transferForm("http://localhost:8766", "/v04/private-approval/accept", transfer, true));
+          actions.replaceChildren(review);
+          status("A pending action needs your separate review and approval.");
+        }
+        setTimeout(() => poll().catch(error => { browser.fill(0); actions.replaceChildren(); fail(error); }), 1500);
+      };
+      await poll();
+    })().catch(error => { button.disabled = false; fail(error); }));
   };
 
   const runApproval = (main) => {
+    if (main && main.dataset.privateSession === "true") return runPrivateSession(main);
     if (main && main.dataset.enrollment === "true") {
       runEnrollment(main);
       return;
@@ -428,6 +497,20 @@ pub const SAVANA_BROWSER_SCRIPT_V2: &[u8] = br####""use strict";
     const editorBody = document.createElement("div");
     editor.append(editorTitle, loadContext, editorBody);
     main.append(editor);
+    const privateSession = document.createElement("button");
+    privateSession.id = "savana-open-private-session";
+    privateSession.type = "button";
+    privateSession.textContent = "Open private task session";
+    privateSession.addEventListener("click", () => (async () => {
+      privateSession.disabled = true;
+      const response = decode(await post("/v04/session/open", cborArray(cborUnsigned(11), cborBytes(tab), cborBytes(nonce()))));
+      if (!Array.isArray(response) || response.length !== 2 || response[0] !== 4
+          || !(response[1] instanceof Uint8Array) || response[1].length !== 32) throw new Error("Invalid private session handoff");
+      transferForm("http://localhost:8766", "/v04/session/accept", response[1], true);
+      privateSession.disabled = false;
+      status("Authenticate on the private session page. Tool approvals remain separate.");
+    })().catch(error => { privateSession.disabled = false; fail(error); }));
+    main.append(privateSession);
     const hex = bytes => [...bytes].map(b => b.toString(16).padStart(2, "0")).join("");
     const u64 = value => {
       if (!/^(0|[1-9][0-9]{0,19})$/.test(value)) throw new Error("Use an unsigned decimal integer");
@@ -732,6 +815,133 @@ mod tests {
     use super::SAVANA_BROWSER_SCRIPT_V2;
 
     #[test]
+    fn enrollment_reports_uncertainty_without_replaying_codes() {
+        let script = serde_json::to_string(std::str::from_utf8(SAVANA_BROWSER_SCRIPT_V2).unwrap()).unwrap();
+        let harness = format!("const browserScript = {script};") + r####"
+const assert = require('assert/strict'), vm = require('vm');
+const bytes = b => Buffer.concat([Buffer.from([0x58,b.length]),b]);
+const pair = (a,b) => Buffer.concat([Buffer.from([0x82]),bytes(a),bytes(b)]);
+(async()=>{
+for(const mode of ['invalid','network','expired','cancel','finish-failure','success']) {
+  const nodes = new Map(), calls = [];
+  const node = () => ({value:'',textContent:'',disabled:false,dataset:{},
+    setAttribute(k,v){this[k]=v;},addEventListener(k,v){this[k]=v;}});
+  const main=node(), handle=node(), code=node(), button=node(), status=node();
+  main.dataset.enrollment='true';
+  handle.value=mode==='invalid'?'AA':bytes(Buffer.alloc(32,1)).toString('base64url');
+  code.value='one-time-secret';
+  for(const [key,value] of [['main',main],['#savana-enrollment-handle',handle],
+      ['#savana-enrollment-code',code],['#savana-enrollment-start',button],['#savana-status',status]]) nodes.set(key,value);
+  const context={Uint8Array,TextEncoder,TextDecoder,Error,crypto:require('crypto').webcrypto,
+    location:{port:'8766'},document:{querySelector:s=>nodes.get(s)},
+    atob:s=>Buffer.from(s,'base64').toString('binary'),btoa:s=>Buffer.from(s,'binary').toString('base64'),
+    navigator:{credentials:{create:async()=>{
+      assert.equal(code.value,''); assert.equal(handle.value,'');
+      if(mode==='cancel') throw Error('private authenticator details');
+      return {rawId:Buffer.alloc(16,1),response:{clientDataJSON:Buffer.from('{}'),attestationObject:Buffer.alloc(32,2)}};
+    }}},fetch:async path=>{
+      calls.push(path); assert.equal(code.value,''); assert.equal(handle.value,'');
+      if(mode==='network'||(mode==='finish-failure'&&calls.length===2)) throw Error('private network details');
+      if(mode==='expired') return {ok:false,status:403};
+      const body=calls.length===1?pair(Buffer.alloc(32,3),Buffer.from('{"challenge":"AA","attestation":"none"}')):
+        Buffer.concat([Buffer.from([0x81]),bytes(Buffer.alloc(32,4))]);
+      return {ok:true,arrayBuffer:async()=>body};
+    }};
+  vm.runInNewContext(browserScript,context);
+  const settle=async check=>{for(let i=0;i<100;i++){if(check())return;await Promise.resolve();}throw Error('UI did not settle');};
+  await settle(()=>typeof button.click==='function');
+  button.click();
+  await settle(()=>status['data-failed']==='true'||status.textContent.startsWith('Credential enrolled'));
+  assert.equal(code.value,''); assert.equal(handle.value,''); assert.equal(button.disabled,true);
+  assert.equal(status.textContent.includes('private '),false,'do not expose raw errors');
+  assert.equal(status['data-failed'],mode==='success'?'false':'true');
+  const count=calls.length; button.click(); await Promise.resolve(); await Promise.resolve();
+  assert.equal(calls.length,count,'never replay enrollment automatically');
+  assert.equal(count,mode==='invalid'?0:['success','finish-failure'].includes(mode)?2:1);
+}
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"####;
+        let output = Command::new("node").arg("-e").arg(harness).output().expect("Node.js required");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[test]
+    fn private_session_browser_authenticates_then_offers_only_separate_approval() {
+        let script =
+            serde_json::to_string(std::str::from_utf8(SAVANA_BROWSER_SCRIPT_V2).unwrap()).unwrap();
+        let harness = format!("const browserScript = {script};")
+            + r####"
+const assert = require('assert/strict');
+globalThis.crypto = require('crypto').webcrypto;
+const timers = [], calls = [], forms = [], elements = new Map();
+globalThis.setTimeout = callback => { timers.push(callback); return timers.length; };
+const element = tag => ({ dataset:{}, children:[], value:'', disabled:false, textContent:'',
+  setAttribute(name,value){ this[name]=value; },
+  append(...nodes){ this.children.push(...nodes); },
+  replaceChildren(...nodes){ this.children = nodes; },
+  addEventListener(kind,fn){ this[kind] = fn; },
+  remove(){ this.removed = true; },
+  removeAttribute(name){ if(name==='data-private-transfer') delete this.dataset.privateTransfer; },
+  submit(){ forms.push(this); }
+});
+const main=element('main'), input=element('input'), button=element('button'), status=element('p'), actions=element('div');
+const handoff=Buffer.alloc(32,2), cap=Buffer.alloc(32,3), approval=Buffer.alloc(32,4);
+main.dataset={privateSession:'true', privateTransfer:handoff.toString('base64url')};
+elements.set('main',main); elements.set('#savana-private-transfer',input); elements.set('#savana-private-connect',button);
+elements.set('#savana-status',status); elements.set('#savana-private-actions',actions);
+globalThis.document={querySelector:s=>elements.get(s),createElement:element,body:element('body')};
+globalThis.location={port:'8766',pathname:'/v04/session/accept'};
+globalThis.localStorage={setItem(){throw Error('private token persisted');},getItem(){throw Error('private token read');}};
+Object.defineProperty(globalThis,'navigator',{value:{credentials:{get:async ({publicKey})=>{
+  assert.equal(publicKey.userVerification,'required');
+  assert.equal(input.value,'');
+  assert.equal(main.dataset.privateTransfer,undefined);
+  return {rawId:Buffer.alloc(32,5),response:{authenticatorData:Buffer.alloc(37,6),clientDataJSON:Buffer.from('{}'),signature:Buffer.alloc(70,7),userHandle:Buffer.alloc(32,8)}};
+}}}});
+const response = b => Buffer.concat([Buffer.from([0x82,4,0x58,b.length]),b]);
+globalThis.fetch=async(path,options)=>{
+  calls.push([path,Buffer.from(options.body)]);
+  assert.equal(options.method,'POST');
+  let bytes;
+  if(path==='/v04/session/begin'){
+    assert.deepEqual(Buffer.from(options.body),response(handoff));
+    bytes=response(Buffer.from('{"challenge":"AA","userVerification":"required"}'));
+  } else if(path==='/v04/session/finish') bytes=response(cap);
+  else if(path==='/v04/session/poll'){
+    assert.deepEqual(Buffer.from(options.body),response(cap)); bytes=response(approval);
+  } else throw Error('unexpected private API '+path);
+  return {ok:true,arrayBuffer:async()=>bytes};
+};
+eval(browserScript);
+const settle=async predicate=>{for(let i=0;i<100;i++){if(predicate())return;await Promise.resolve();}throw Error('UI did not finish: '+status.textContent);};
+(async()=>{
+  await settle(()=>typeof button.click==='function');
+  button.click();
+  await settle(()=>actions.children.length===1);
+  assert.equal(forms.length,0,'identity authentication must not silently approve or navigate');
+  assert.deepEqual(calls.map(c=>c[0]),['/v04/session/begin','/v04/session/finish','/v04/session/poll']);
+  assert.equal(input.removed,true); assert.equal(button.removed,true);
+  actions.children[0].click();
+  assert.equal(forms.length,1);
+  assert.equal(forms[0].action,'http://localhost:8766/v04/private-approval/accept');
+  assert.equal(forms[0].target,'_blank'); assert.equal(forms[0].rel,'noopener');
+  assert.equal(forms[0].children[0].value,approval.toString('base64url'));
+  assert.equal(timers.length,1);
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"####;
+        let output = Command::new("node")
+            .arg("-e")
+            .arg(harness)
+            .output()
+            .expect("Node.js is required for browser behavior tests");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn planner_intent_opt_out_is_separate_and_does_not_replace_private_default() {
         let script = std::str::from_utf8(SAVANA_BROWSER_SCRIPT_V2).unwrap();
         assert!(script.contains("agentButton(controls, \"Run planner\", (button) => act(2"));
@@ -741,10 +951,11 @@ mod tests {
 
     #[test]
     fn approval_dom_renders_complete_non_ascii_text_without_byte_summary() {
-        let browser_script = std::str::from_utf8(SAVANA_BROWSER_SCRIPT_V2).unwrap();
-        let mut harness = String::from("const browserScript = ");
-        harness.push_str(&serde_json::to_string(browser_script).unwrap());
-        harness.push_str(
+        for decision in [1, 2, 3] {
+            let browser_script = std::str::from_utf8(SAVANA_BROWSER_SCRIPT_V2).unwrap();
+            let mut harness = format!("const decision = {decision}; const browserScript = ");
+            harness.push_str(&serde_json::to_string(browser_script).unwrap());
+            harness.push_str(
             r####";
 const exactText = "批准：é漢字 — " + "approval artifact ".repeat(6);
 const elements = new Map();
@@ -754,9 +965,10 @@ const element = (tag) => ({
   dataset: {},
   disabled: false,
   textContent: "",
+  children: [],
   setAttribute() {},
-  append() {},
-  replaceChildren() {},
+  append(...nodes) { for (const node of nodes) { this.children.push(node); if (node.id) elements.set('#' + node.id, node); } },
+  replaceChildren() { this.children = []; elements.delete('#savana-status'); },
   addEventListener(kind, listener) { this[kind] = listener; }
 });
 const main = element("main");
@@ -765,6 +977,7 @@ const preAuthentication = Uint8Array.of(0x58, 0x20, ...new Uint8Array(32).fill(0
 main.dataset.preAuthentication = Buffer.from(preAuthentication).toString("base64url");
 const authenticate = element("button");
 const status = element("p");
+status.id = 'savana-status';
 elements.set("main", main);
 elements.set("#savana-authenticate", authenticate);
 elements.set("#savana-status", status);
@@ -819,7 +1032,9 @@ const node = new Uint8Array(32).fill(0x55);
 const responses = new Map([
   ["/v2/ui-auth/begin", array(unsigned(2), bytes(new Uint8Array(32).fill(0x33)), bytes(new TextEncoder().encode('{"challenge":"AA"}')))],
   ["/v2/ui-auth/finish", array(unsigned(2), bytes(new Uint8Array(32).fill(0x44)))],
-  ["/v2/approval/display", array(array(unsigned(2)), bytes(projection), bytes(digest), text(exactText), bytes(node))]
+  ["/v2/approval/display", array(array(unsigned(2)), bytes(projection), bytes(digest), text(exactText), bytes(node))],
+  ["/v2/approval/decision/begin", array(bytes(new Uint8Array(32).fill(0x66)), bytes(new TextEncoder().encode('{"challenge":"AA"}')))],
+  ["/v2/approval/decision/finish", unsigned(decision)]
 ]);
 globalThis.fetch = async (path) => {
   const response = responses.get(path);
@@ -846,20 +1061,27 @@ const waitFor = async (predicate) => {
     throw new Error(`expected exact DOM text ${JSON.stringify(exactText)}, got ${JSON.stringify(approvalText)}`);
   }
   if (approvalText.includes("bytes:")) throw new Error("diagnostic byte summary reached approval DOM");
+  await waitFor(() => main.children.some(n => n.textContent === 'Approve' && typeof n.click === 'function'));
+  if (main.dataset.preAuthentication !== undefined) throw new Error('old pre-authentication remains in the page');
+  if (elements.get('#savana-status') !== status) throw new Error('approval removed its status element');
+  const button = main.children.find(n => n.textContent === (decision === 1 ? 'Deny' : 'Approve'));
+  button.click();
+  await waitFor(() => status.textContent === (decision === 3 ? 'Approval response does not match your decision' : decision === 2 ? 'Approved. You may close this page.' : 'Denied. You may close this page.'));
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 "####,
         );
-        let output = Command::new("node")
-            .arg("-e")
-            .arg(harness)
-            .output()
-            .expect("Node.js is required for fixed browser asset behavior tests");
-        assert!(
-            output.status.success(),
-            "browser behavior failed:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+            let output = Command::new("node")
+                .arg("-e")
+                .arg(harness)
+                .output()
+                .expect("Node.js is required for fixed browser asset behavior tests");
+            assert!(
+                output.status.success(),
+                "browser behavior failed:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     #[test]

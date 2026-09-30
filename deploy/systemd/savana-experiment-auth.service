@@ -1,0 +1,31 @@
+[Unit]
+Description=Savana experiment interactive passkey broker
+Requires=savana-experiment-auth.socket
+After=savana-experiment-auth.socket
+[Service]
+Type=exec
+User=root
+Group=root
+Sockets=savana-experiment-auth.socket
+StateDirectory=savana-experiment-auth
+StateDirectoryMode=0700
+Environment=PYTHONPATH=/opt/savana-protected/python:/opt/savana-protected/experiments
+Environment=PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1
+ExecStart=/opt/savana-bench-venv/bin/python -m savana_bench.protected_auth
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET
+IPAddressDeny=any
+IPAddressAllow=localhost
+ReadWritePaths=/var/lib/savana-experiment-auth
+InaccessiblePaths=-/var/lib/savana -/etc/savana/credentials/kerneld -/etc/savana/credentials/agentd -/etc/savana/credentials/ingressd -/etc/savana/credentials/approvald -/etc/savana/credentials/execd -/etc/savana/credentials/ownerctl -/etc/savana/credentials/approvalctl -/etc/savana/credentials/experiment-operator
+LimitCORE=0
+Restart=no

@@ -8,6 +8,9 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 
+# Private/raw experiment artifacts stay local; publish reviewed evidence separately.
+/experiments/results/
+
 # maturin / PyO3 build artifacts placed into the source tree
 *.so
 *.pyd

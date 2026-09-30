@@ -70,8 +70,6 @@ mod implementation {
     #[cfg(target_os = "macos")]
     const APPROVAL_SERVER_PUBLIC_KEY_PATH_V2: &str =
         "/Library/Application Support/Savana/Development/config/ingressd/keys/approvald-v2.pub";
-    #[cfg(target_os = "linux")]
-    const CREDENTIAL_DIRECTORY_V2: &str = "/run/credentials/savana-ingressd.service";
     #[cfg(target_os = "macos")]
     const CREDENTIAL_DIRECTORY_V2: &str =
         "/Library/Application Support/Savana/Development/credentials/ingressd";
@@ -469,6 +467,19 @@ mod implementation {
                 let body = render_ingress_workspace_v2(tab);
                 write_http(&mut stream, 200, "text/html; charset=utf-8", &body)
             }
+            FixedHttpRouteV2::IngressPrivateSessionV04 => {
+                let decoded = decode_ingress_browser_request_v2(request.body())
+                    .map_err(|_| IngressdDaemonErrorV2::EndpointUnavailable)?;
+                let IngressBrowserRequestV2::OpenPrivateSessionV04 { tab, .. } = decoded else {
+                    return write_http(&mut stream, 400, "text/plain; charset=utf-8", b"");
+                };
+                let transfer = authority
+                    .open_private_session_v04(tab, deadline)
+                    .map_err(|_| IngressdDaemonErrorV2::EndpointUnavailable)?;
+                let body = savana_kernel_protocol::v2::encode_private_session_begin_v04(transfer)
+                    .map_err(|_| IngressdDaemonErrorV2::EndpointUnavailable)?;
+                write_http(&mut stream, 200, "application/cbor", &body)
+            }
             FixedHttpRouteV2::IngressTaskContext => {
                 let decoded = decode_ingress_browser_request_v2(request.body())
                     .map_err(|_| IngressdDaemonErrorV2::EndpointUnavailable)?;
@@ -669,6 +680,18 @@ mod implementation {
             .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)
     }
 
+    #[cfg(target_os = "linux")]
+    fn read_credential_32(name: &str) -> Result<[u8; 32], IngressdDaemonErrorV2> {
+        let bytes = savana_platform_identity::read_linux_service_credential_v2(
+            savana_platform_identity::LinuxCredentialServiceV2::Ingress,
+            name,
+            32,
+        )
+        .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)?;
+        bytes.as_slice().try_into().map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)
+    }
+
+    #[cfg(target_os = "macos")]
     fn read_credential_32(name: &str) -> Result<[u8; 32], IngressdDaemonErrorV2> {
         let path = Path::new(CREDENTIAL_DIRECTORY_V2).join(name);
         #[cfg(target_os = "linux")]

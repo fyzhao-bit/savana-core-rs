@@ -1,0 +1,5 @@
+# Optional local benchmark runtime. No model keys, downloads or API calls.
+# The conformance runner additionally records the installed source digest.
+agentdojo==0.1.35
+# Provider TLS identity binding (SPKI), pinned to the locally verified runtime.
+cryptography==50.0.0

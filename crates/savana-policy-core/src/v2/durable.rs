@@ -23,6 +23,10 @@ use savana_kernel_protocol::v2::{
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
+use super::continuation_state::{
+    ContinuationStorageUpdateV04, ContinuationStorageViewV04, ContinuationTableV04,
+    VerifiedContinuationStorageV04,
+};
 use super::descriptor::decode_unsigned_descriptor;
 use super::digest::{
     argument_digest_v2, provenance_set_digest_v2, token_set_digest_v2, ArgumentDigestEntryV2,
@@ -93,6 +97,15 @@ const MAX_PROJECTION_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const DESTINATION_DIGEST_DOMAIN: &[u8] = b"SAVANA_DESTINATION_V2\0";
 const DISPLAY_DIGEST_DOMAIN: &[u8] = b"SAVANA_DISPLAY_V2\0";
 #[cfg(test)]
+#[path = "durable_continuation_dispatch_tests.rs"]
+mod continuation_dispatch_tests;
+#[cfg(test)]
+#[path = "durable_continuation_tests.rs"]
+mod continuation_tests;
+#[cfg(test)]
+#[path = "durable_fused_planning_tests.rs"]
+mod fused_planning_tests;
+#[cfg(test)]
 #[path = "durable_task_tests.rs"]
 mod task_tests;
 
@@ -108,6 +121,7 @@ struct DurableG4SnapshotV2 {
     dispatch: KernelDispatchJournalV2,
     tasks: TaskLedgerV2,
     issuance: TaskIssuanceLedgerV2,
+    continuations: ContinuationTableV04,
 }
 
 impl Default for DurableG4SnapshotV2 {
@@ -123,6 +137,7 @@ impl Default for DurableG4SnapshotV2 {
             dispatch: KernelDispatchJournalV2::default(),
             tasks: TaskLedgerV2::default(),
             issuance: TaskIssuanceLedgerV2::default(),
+            continuations: ContinuationTableV04::default(),
         }
     }
 }
@@ -238,6 +253,843 @@ impl std::fmt::Debug for DurableG4StateV2 {
 }
 
 impl DurableG4StateV2 {
+    /// Only the trusted host scheduler reads this; no private progress is sent
+    /// to models. Revoked, expired and authority-replaced tasks are excluded.
+    pub fn scheduled_fused_work_v04(
+        &self,
+        now: UnixMillisV2,
+    ) -> Result<Vec<super::FusedScheduledWorkV04>, G4Error> {
+        self.ensure_usable()?;
+        Ok(self
+            .snapshot
+            .continuations
+            .planning
+            .scheduled_work(&self.snapshot.tasks, now))
+    }
+    pub(super) fn fused_observation_parents_v04(
+        &self,
+        task: DurableTaskIdV2,
+        round: u16,
+        now: UnixMillisV2,
+    ) -> Result<Vec<super::ProvenanceRecordV2>, G4Error> {
+        self.ensure_usable()?;
+        self.snapshot.continuations.planning.observation_parents(
+            task,
+            round,
+            &self.snapshot.tasks,
+            now,
+        )
+    }
+
+    pub(super) fn fused_model_release_binding_v04(
+        &self,
+        task: DurableTaskIdV2,
+        now: UnixMillisV2,
+    ) -> Result<[u8; 32], G4Error> {
+        self.ensure_usable()?;
+        self.snapshot
+            .continuations
+            .planning
+            .release_binding(task, &self.snapshot.tasks, now)
+    }
+    /// Private mode-selection guard. Enrollment is not inferred from a model or
+    /// request flag; it is read from the authenticated durable owner.
+    pub fn fused_planning_enrolled_v04(&self, task: DurableTaskIdV2) -> Result<bool, G4Error> {
+        self.ensure_usable()?;
+        Ok(self.snapshot.continuations.planning.enrolled(task))
+    }
+
+    /// Signed private planning opt-in. Does not activate strict inference or
+    /// install a network publisher. Original task authority is mandatory.
+    pub fn install_fused_planning_v04(
+        &mut self,
+        profile: super::VerifiedFusedPlanningProfileV04,
+        now: UnixMillisV2,
+    ) -> Result<(), G4Error> {
+        self.ensure_usable()?;
+        // Historical effects cannot be retroactively assigned to new operations.
+        if self
+            .snapshot
+            .dispatch
+            .entries
+            .iter()
+            .any(|e| e.core.durable_task_id == profile.task())
+        {
+            return Err(G4Error::StateConflict);
+        }
+        let mut next = self.snapshot.clone();
+        if next
+            .continuations
+            .planning
+            .install(profile, &next.tasks, now)?
+        {
+            self.commit(next)?;
+        }
+        Ok(())
+    }
+
+    /// Commit and anchor before returning a frozen view to the private release
+    /// checker. Failure/uncertainty returns no view. This is NOT a send grant.
+    pub fn update_fused_planning_v04(
+        &mut self,
+        task: DurableTaskIdV2,
+        expected_revision: u64,
+        update: super::FusedPlanningUpdateV04,
+        now: UnixMillisV2,
+    ) -> Result<super::FusedPlanningResultV04, G4Error> {
+        self.ensure_usable()?;
+        // The active started-prefix is advanced by the same commit as G7. A
+        // replacement cannot manufacture a fresh view of outstanding work.
+        let mut next = self.snapshot.clone();
+        let (changed, result) = next.continuations.planning.update(
+            task,
+            expected_revision,
+            update,
+            &next.tasks,
+            now,
+        )?;
+        if changed {
+            self.commit(next)?;
+        }
+        Ok(result)
+    }
+
+    /// Private candidate read, not an executable grant or an activated plan.
+    pub fn compiled_fused_plan_v04(
+        &self,
+        task: DurableTaskIdV2,
+        round: u16,
+        now: UnixMillisV2,
+    ) -> Result<savana_continuation_core::planning::CompiledPlan, G4Error> {
+        self.ensure_usable()?;
+        self.snapshot
+            .continuations
+            .planning
+            .compiled(task, round, &self.snapshot.tasks, now)
+    }
+
+    /// Read only the active candidate, never the latest unactivated proposal.
+    /// A returned snapshot is not a grant and may be superseded before G7.
+    pub fn active_fused_plan_v04(
+        &self,
+        task: DurableTaskIdV2,
+        now: UnixMillisV2,
+    ) -> Result<super::ActiveFusedPlanV04, G4Error> {
+        self.ensure_usable()?;
+        self.snapshot
+            .continuations
+            .planning
+            .active_plan(task, &self.snapshot.tasks, now)
+    }
+
+    /// Read-only private recovery after a lost response; no new job or send.
+    pub fn fused_planning_status_v04(
+        &self,
+        task: DurableTaskIdV2,
+        now: UnixMillisV2,
+    ) -> Result<super::FusedPlanningStatusV04, G4Error> {
+        self.ensure_usable()?;
+        self.snapshot
+            .continuations
+            .planning
+            .status(task, &self.snapshot.tasks, now)
+    }
+
+    /// Host-private bridge from a frozen G4 intent to the exact active operation.
+    /// No model-selected IDs, implicit value rebinding, reservation or I/O. G7
+    /// repeats activation/material/dependency checks under its commit guard.
+    /// Original dispatches retain their original selector after replacement.
+    pub fn bind_fused_dispatch_v04(
+        &self,
+        action_intent_id: ActionIntentIdV2,
+        mut task: TaskDispatchAuthorizationV2,
+        deployment_generation: u64,
+        now: UnixMillisV2,
+    ) -> Result<TaskDispatchAuthorizationV2, G4Error> {
+        self.ensure_usable()?;
+        let task_id = task.matched.authorization().material().task();
+        let intent = &self
+            .snapshot
+            .intents
+            .intents
+            .iter()
+            .find(|e| e.record.action_intent_id == action_intent_id)
+            .ok_or(G4Error::IntentNotFound)?
+            .record;
+        let authorization = task.matched.authorization().material();
+        if intent.durable_task_id != task_id
+            || intent.installation_id != self.namespace.installation_id()
+            || intent.installation_id != authorization.installation_digest()
+            || intent.active_state_manifest_digest != authorization.manifest_digest()
+            || task.matched.deployment_generation() != deployment_generation
+            || self.snapshot.legacy_intents.contains(&action_intent_id)
+        {
+            return Err(G4Error::StateConflict);
+        }
+        // Mode comes from the intent's durable task, not an unrelated root
+        // passed to make an enrolled operation look like a legacy operation.
+        if !self
+            .snapshot
+            .continuations
+            .planning
+            .enrolled(intent.durable_task_id)
+        {
+            return if task.fused_operation.is_none() && task.fused_recipe.is_none() {
+                Ok(task)
+            } else {
+                Err(G4Error::StateConflict)
+            };
+        }
+        let (reference, replay) = self.snapshot.continuations.planning.select_execution(
+            intent,
+            task.matched.content(),
+            &self.snapshot.dispatch,
+            &self.snapshot.tasks,
+            task.fused_recipe.as_ref(),
+            deployment_generation,
+            now,
+        )?;
+        if task.fused_operation.is_some_and(|hint| hint != reference) {
+            return Err(G4Error::StateConflict);
+        }
+        if !replay {
+            let state = self.task_authorization_state(task_id)?;
+            if state.revoked() {
+                return Err(G4Error::StateConflict);
+            }
+            task.matched
+                .recheck(&super::TaskMatchContextV2 {
+                    current_authorization: Some(state.authorization()),
+                    pre_state_digest: state.digest(),
+                    pre_state_revision: state.revision(),
+                    deployment_generation,
+                    now,
+                })
+                .map_err(|_| G4Error::StateConflict)?;
+        }
+        task.fused_operation = Some(reference);
+        Ok(task)
+    }
+
+    /// Host-only pin of already G1–G4-owned inputs, never an untrusted ingress.
+    /// The host holds its current deployment lease and authenticates the run.
+    pub fn pin_fused_inputs_v04(
+        &mut self,
+        task: DurableTaskIdV2,
+        run: DurableRunIdV2,
+        generation: u64,
+        inputs: Vec<super::FusedOwnedInputV04>,
+        now: UnixMillisV2,
+    ) -> Result<(), G4Error> {
+        self.ensure_usable()?;
+        let root = self
+            .snapshot
+            .tasks
+            .current(task)?
+            .ok_or(G4Error::StateConflict)?;
+        let snapshot = super::fused_inputs::InputSnapshot::new(
+            run,
+            root.authorization().material().manifest_digest(),
+            generation,
+            now.get(),
+            inputs,
+        );
+        let mut next = self.snapshot.clone();
+        if next
+            .continuations
+            .planning
+            .pin_inputs(task, snapshot, &next.tasks, now)?
+        {
+            self.commit(next)?;
+        }
+        Ok(())
+    }
+    /// Authenticated private recovery, not disclosure or permission to execute.
+    pub fn fused_inputs_pinned_v04(&self, task: DurableTaskIdV2) -> Result<bool, G4Error> {
+        self.ensure_usable()?;
+        Ok(self.snapshot.continuations.planning.inputs_pinned(task))
+    }
+    /// Only call for the authenticated task under a current deployment lease.
+    pub fn recover_fused_inputs_v04(
+        &self,
+        task: DurableTaskIdV2,
+        generation: u64,
+        now: UnixMillisV2,
+    ) -> Result<super::RecoveredFusedInputsV04, G4Error> {
+        self.ensure_usable()?;
+        self.snapshot.continuations.planning.recover_inputs(
+            task,
+            generation,
+            &self.snapshot.tasks,
+            now,
+        )
+    }
+
+    /// Signed private administrator operations and their exact retry receipt are
+    /// committed atomically. This never installs a root authorization, resets
+    /// consumption, executes a tool, or publishes a value to the Agent.
+    pub fn apply_managed_admin_v04(
+        &mut self,
+        proof: &super::VerifiedManagedAdminCommandV04,
+        now: UnixMillisV2,
+    ) -> Result<super::ManagedAdminReceiptV04, G4Error> {
+        self.apply_managed_admin_inner_v04(proof, None, None, now)
+    }
+
+    /// Native host entry with its live role-filtered tool registry. The registry
+    /// and role are deployment objects, never decoded from administrator bytes.
+    pub fn apply_managed_admin_with_tools_v04(
+        &mut self,
+        proof: &super::VerifiedManagedAdminCommandV04,
+        registry: &super::ActiveToolRegistryV2,
+        role: savana_kernel_protocol::v2::RoleIdV2,
+        now: UnixMillisV2,
+    ) -> Result<super::ManagedAdminReceiptV04, G4Error> {
+        self.apply_managed_admin_inner_v04(proof, Some((registry, role)), None, now)
+    }
+
+    /// Private historical replay, including after expiry. No new authority.
+    pub fn managed_admin_receipt_v04(&self, proof: &super::VerifiedManagedAdminCommandV04)
+        -> Result<Option<super::ManagedAdminReceiptV04>, G4Error> {
+        self.ensure_usable()?;
+        if proof.command.installation != *self.namespace.installation_id().as_bytes()
+            || proof.command.store != *self.namespace.store_id().as_bytes() { return Err(G4Error::StateConflict); }
+        self.snapshot.continuations.admin.replay(proof)
+    }
+
+    /// The host supplies a draft built from owned, pinned inputs and real G4
+    /// material. Persisting this review is NOT installation of its approval.
+    pub fn record_fused_execution_review_v04(&mut self,
+        proof: &super::VerifiedManagedAdminCommandV04,
+        run: DurableRunIdV2, approval: super::FusedRecipeApprovalV04, now: UnixMillisV2,
+    ) -> Result<super::ManagedAdminReceiptV04, G4Error> {
+        self.apply_managed_admin_inner_v04(proof, None, Some((run, approval)), now)
+    }
+
+    fn apply_managed_admin_inner_v04(
+        &mut self,
+        proof: &super::VerifiedManagedAdminCommandV04,
+        tools: Option<(
+            &super::ActiveToolRegistryV2,
+            savana_kernel_protocol::v2::RoleIdV2,
+        )>,
+        prepared: Option<(DurableRunIdV2, super::FusedRecipeApprovalV04)>,
+        now: UnixMillisV2,
+    ) -> Result<super::ManagedAdminReceiptV04, G4Error> {
+        use super::managed_admin::{
+            signature, ManagedAdminOperationV04 as Op, ManagedAdminResultV04 as ResultValue,
+        };
+        self.ensure_usable()?;
+        if proof.command.installation != *self.namespace.installation_id().as_bytes()
+            || proof.command.store != *self.namespace.store_id().as_bytes()
+        {
+            return Err(G4Error::StateConflict);
+        }
+        if let Some(receipt) = self.snapshot.continuations.admin.replay(proof)? {
+            return Ok(receipt); // historical observation only; no authority restored
+        }
+        proof.current(now)?;
+        let mut next = self.snapshot.clone();
+        let result = match &proof.command.operation {
+            Op::PreparePlanningExecution { task, root } => {
+                let (run, approval) = prepared.ok_or(G4Error::StateConflict)?;
+                let task_id = DurableTaskIdV2::new(*task);
+                let state = next.tasks.current(task_id)?.ok_or(G4Error::StateConflict)?;
+                let active = next.continuations.planning.active_plan(task_id, &next.tasks, now)?;
+                let inputs = next.continuations.planning.recover_inputs(task_id,
+                    approval.deployment_generation, &next.tasks, now)?;
+                approval.signing_digest()?;
+                if state.revoked() || state.authorization().digest().as_bytes() != root
+                    || approval.task != *task || approval.root != *root
+                    || approval.installation != proof.command.installation
+                    || approval.manifest != *inputs.manifest().as_bytes()
+                    || inputs.run() != run || approval.profile != active.profile_digest()
+                    || approval.recipe_schema != 2 || approval.inputs_digest != active.input_commitment()
+                    || approval.not_before != proof.command.not_before
+                    || approval.expires_at > active.expires_at().get()
+                    || approval.expires_at > proof.command.expires_at
+                    || next.dispatch.entries.iter().any(|e| e.core.durable_task_id == task_id) {
+                    return Err(G4Error::StateConflict);
+                }
+                ResultValue::PlanningExecutionPrepared { task: *task, run: *run.as_bytes(), approval: Box::new(approval) }
+            }
+            Op::CompilePlanning { task, draft } => {
+                let task_id = DurableTaskIdV2::new(*task);
+                if next
+                    .dispatch
+                    .entries
+                    .iter()
+                    .any(|e| e.core.durable_task_id == task_id)
+                {
+                    return Err(G4Error::StateConflict);
+                }
+                let (registry, role) = tools.ok_or(G4Error::StateConflict)?;
+                let parent = next.tasks.current(task_id)?.ok_or(G4Error::StateConflict)?;
+                if parent.revoked() {
+                    return Err(G4Error::StateConflict);
+                }
+                let profile = super::compile_fused_task_v04(
+                    draft,
+                    parent.authorization(),
+                    registry,
+                    role,
+                    now,
+                )?;
+                let digest = profile.signing_digest()?;
+                let verified = super::VerifiedFusedPlanningProfileV04::from_compiled_admin(
+                    profile,
+                    parent.authorization(),
+                    now,
+                )?;
+                next.continuations
+                    .planning
+                    .install(verified, &next.tasks, now)?;
+                ResultValue::PlanningEnrolled {
+                    task: *task,
+                    profile: digest,
+                }
+            }
+            Op::ApprovePlanningRecipes {
+                approval,
+                approval_signature,
+            } => {
+                let task = DurableTaskIdV2::new(approval.task);
+                if next
+                    .dispatch
+                    .entries
+                    .iter()
+                    .any(|e| e.core.durable_task_id == task)
+                {
+                    return Err(G4Error::StateConflict);
+                }
+                let verified =
+                    super::fused_recipe_approval::VerifiedFusedRecipeApprovalV04::verify(
+                        &serde_json::to_vec(approval).map_err(|_| G4Error::StateConflict)?,
+                        &signature(approval_signature)?,
+                        &proof.issuer,
+                    )?;
+                next.continuations
+                    .planning
+                    .install_recipe_approval(verified, &next.tasks, now)?;
+                ResultValue::PlanningRecipesApproved {
+                    task: approval.task,
+                    approval: approval.signing_digest()?,
+                }
+            }
+            Op::EnrollPlanning {
+                profile,
+                profile_signature,
+            } => {
+                let task = DurableTaskIdV2::new(profile.task);
+                if next
+                    .dispatch
+                    .entries
+                    .iter()
+                    .any(|e| e.core.durable_task_id == task)
+                {
+                    return Err(G4Error::StateConflict);
+                }
+                let parent = next.tasks.current(task)?.ok_or(G4Error::StateConflict)?;
+                let verified = super::VerifiedFusedPlanningProfileV04::verify(
+                    &serde_json::to_vec(profile).map_err(|_| G4Error::StateConflict)?,
+                    &signature(profile_signature)?,
+                    &proof.issuer,
+                    parent.authorization(),
+                    now,
+                )?;
+                next.continuations
+                    .planning
+                    .install(verified, &next.tasks, now)?;
+                ResultValue::PlanningEnrolled {
+                    task: profile.task,
+                    profile: profile.signing_digest()?,
+                }
+            }
+            Op::RegisterSource {
+                policy,
+                signature: sig,
+            } => {
+                if policy.resource_issuer == proof.issuer.to_bytes() {
+                    return Err(G4Error::StateConflict);
+                }
+                let verified = super::VerifiedManagedSourceV04::verify(
+                    &serde_json::to_vec(policy).map_err(|_| G4Error::StateConflict)?,
+                    &signature(sig)?,
+                    &proof.issuer,
+                    self.namespace.installation_id(),
+                    now,
+                )?;
+                next.continuations.install_managed_source(
+                    verified,
+                    self.namespace.installation_id(),
+                    now,
+                )?;
+                ResultValue::SourceRegistered {
+                    source: policy.source,
+                    namespace: policy.namespace,
+                }
+            }
+            Op::CreateResource {
+                source,
+                namespace,
+                label,
+                content,
+            } => {
+                let resource = next
+                    .continuations
+                    .managed
+                    .create(*source, *namespace, label, content, now)?;
+                ResultValue::ResourceCreated { resource }
+            }
+            Op::UpdateResource {
+                resource,
+                expected_revision,
+                value,
+            } => {
+                next.continuations.managed.update(
+                    *resource,
+                    *expected_revision,
+                    value
+                        .as_ref()
+                        .map(|v| (v.label.as_str(), v.content.as_slice())),
+                    now,
+                )?;
+                let revision = next.continuations.managed.view(*resource)?.revision;
+                ResultValue::ResourceUpdated {
+                    resource: *resource,
+                    revision,
+                }
+            }
+            Op::EnrollTask {
+                profile,
+                profile_signature,
+                dispatch,
+                dispatch_signature,
+            } => {
+                if dispatch.resource_issuer == proof.issuer.to_bytes() {
+                    return Err(G4Error::StateConflict);
+                }
+                next.continuations
+                    .managed
+                    .require_registered_policy(dispatch, profile.installation)?;
+                let state = next
+                    .tasks
+                    .current(DurableTaskIdV2::new(profile.task))?
+                    .ok_or(G4Error::StateConflict)?;
+                let storage = super::VerifiedContinuationStorageV04::verify(
+                    &serde_json::to_vec(profile).map_err(|_| G4Error::StateConflict)?,
+                    &signature(profile_signature)?,
+                    &proof.issuer,
+                    state.authorization(),
+                    now,
+                )?;
+                let accounting = super::VerifiedContinuationDispatchPolicyV04::verify(
+                    &serde_json::to_vec(dispatch).map_err(|_| G4Error::StateConflict)?,
+                    &signature(dispatch_signature)?,
+                    &proof.issuer,
+                    profile,
+                    now,
+                )?;
+                next.continuations.install(storage, &next.tasks, now)?;
+                next.continuations.install_dispatch(
+                    accounting,
+                    &next.tasks,
+                    &next.dispatch,
+                    now,
+                )?;
+                ResultValue::TaskEnrolled {
+                    task: profile.task,
+                    profile: profile.signing_digest()?,
+                }
+            }
+        };
+        let receipt = next.continuations.admin.append(proof, result)?;
+        self.commit(next)?;
+        Ok(receipt)
+    }
+
+    /// Trusted host admission, after authentication/task matching/G3 and before
+    /// G7. No caller-provided source, revision, signature or fallback key. This
+    /// read-only step does not debit; G7 rechecks the issued revision atomically.
+    pub fn bind_managed_dispatch_input_v04(
+        &self,
+        intent: ActionIntentIdV2,
+        request: TaskDispatchAuthorizationV2,
+        exact_plaintext: &[u8],
+        signer: Option<&ed25519_dalek::SigningKey>,
+        now: UnixMillisV2,
+    ) -> Result<TaskDispatchAuthorizationV2, G4Error> {
+        self.ensure_usable()?;
+        if request.continuation_resource.is_some() {
+            return Err(G4Error::StateConflict);
+        }
+        let intent_record = self
+            .snapshot
+            .intents
+            .intents
+            .iter()
+            .find(|r| r.record.action_intent_id == intent)
+            .ok_or(G4Error::IntentNotFound)?;
+        let task = intent_record.record.durable_task_id;
+        if request.matched.authorization().material().task() != task {
+            return Err(G4Error::StateConflict);
+        }
+        if !self.snapshot.continuations.dispatch_enabled(task) {
+            return Ok(request);
+        }
+        let payload = savana_kernel_protocol::v2::decode_task_execution_payload_v2(exact_plaintext)
+            .map_err(|_| G4Error::StateConflict)?;
+        if payload.content() != request.matched.content() {
+            return Err(G4Error::StateConflict);
+        }
+        // The original G7 record, not a fresh source lookup, owns replay input.
+        // G7 and the post-G3 pre-seal check still validate that original record.
+        if self
+            .snapshot
+            .dispatch
+            .entries
+            .iter()
+            .any(|e| e.core.subject.tool_action_intent_id() == Some(intent))
+        {
+            return Ok(request);
+        }
+        let key = self.snapshot.continuations.managed_admission_key(
+            &self.snapshot.tasks,
+            task,
+            &payload,
+            now,
+        )?;
+        let evidence = self.issue_managed_resource_evidence_v04(
+            task,
+            request.matched.content(),
+            key,
+            signer.ok_or(G4Error::StateConflict)?,
+            now,
+        )?;
+        Ok(request.with_continuation_resource(evidence))
+    }
+
+    /// Additional pre-seal check for managed source inputs. Call only AFTER the
+    /// current G3/reader gate. Success is not a transferable execution capability.
+    /// External/non-managed tasks retain their existing path.
+    pub fn check_managed_execution_handoff_v04(
+        &self,
+        prepared: &super::KernelPreparedDispatchV2,
+        exact_plaintext: &[u8],
+        declassification_node: Digest32V2,
+        now: UnixMillisV2,
+    ) -> Result<(), G4Error> {
+        self.ensure_usable()?;
+        let entry = self
+            .snapshot
+            .dispatch
+            .entries
+            .iter()
+            .find(|e| e.core.execution_nonce == prepared.preparation().execution_nonce())
+            .ok_or(G4Error::StateConflict)?;
+        if entry.core_digest != prepared.preparation().dispatch_core_digest()
+            || entry.core.durable_task_id != prepared.core().durable_task_id()
+            || entry.sealed_envelope_digest != prepared.sealed_envelope_digest()
+            || entry.consumed_ticket_digest != prepared.consumed_ticket_digest()
+        {
+            return Err(G4Error::StateConflict);
+        }
+        self.snapshot.continuations.check_execution_handoff(
+            entry,
+            &self.snapshot.tasks,
+            exact_plaintext,
+            declassification_node,
+            now,
+        )
+    }
+
+    /// Private original-input read for host audit/bridge code. Checks exact task,
+    /// original nonce and dispatch-core identity; never refreshes a missing pin.
+    /// This is NOT a G3 handoff, executor ticket or effect-time authorization.
+    pub fn managed_execution_snapshot_v04(
+        &self,
+        task: DurableTaskIdV2,
+        execution: Nonce32V2,
+        expected_core: Digest32V2,
+    ) -> Result<super::ManagedExecutionSnapshotV04, G4Error> {
+        self.ensure_usable()?;
+        let entry = self
+            .snapshot
+            .dispatch
+            .entries
+            .iter()
+            .find(|e| e.core.execution_nonce == execution)
+            .ok_or(G4Error::StateConflict)?;
+        if entry.core.durable_task_id != task || entry.core_digest != expected_core {
+            return Err(G4Error::StateConflict);
+        }
+        self.snapshot
+            .continuations
+            .execution_snapshot(task, execution)
+    }
+
+    /// Private authenticated source administration; not an Agent tool. This
+    /// registers a first-party source, never an arbitrary path-based adapter.
+    pub fn install_managed_source_v04(
+        &mut self,
+        source: super::VerifiedManagedSourceV04,
+        now: UnixMillisV2,
+    ) -> Result<(), G4Error> {
+        self.ensure_usable()?;
+        let mut next = self.snapshot.clone();
+        if next.continuations.install_managed_source(
+            source,
+            self.namespace.installation_id(),
+            now,
+        )? {
+            self.commit(next)?;
+        }
+        Ok(())
+    }
+
+    /// Private source ingestion. The host must authenticate the writer. No
+    /// business-effect permission is implied by creating an object here.
+    pub fn create_managed_resource_v04(
+        &mut self,
+        source: [u8; 32],
+        namespace: [u8; 32],
+        label: &str,
+        content: &[u8],
+        now: UnixMillisV2,
+    ) -> Result<savana_continuation_core::ledger::ResourceKey, G4Error> {
+        self.ensure_usable()?;
+        let mut next = self.snapshot.clone();
+        let key = next
+            .continuations
+            .managed
+            .create(source, namespace, label, content, now)?;
+        self.commit(next)?;
+        Ok(key)
+    }
+
+    /// Private authenticated source edit/delete with optimistic revision. None
+    /// deletes current content but retains the ID forever within this source.
+    pub fn update_managed_resource_v04(
+        &mut self,
+        key: savana_continuation_core::ledger::ResourceKey,
+        expected_revision: u64,
+        value: Option<(&str, &[u8])>,
+        now: UnixMillisV2,
+    ) -> Result<(), G4Error> {
+        self.ensure_usable()?;
+        let mut next = self.snapshot.clone();
+        if next
+            .continuations
+            .managed
+            .update(key, expected_revision, value, now)?
+        {
+            self.commit(next)?;
+        }
+        Ok(())
+    }
+
+    /// Private read; never serialize this to the model or public status channel.
+    pub fn managed_resource_v04(
+        &self,
+        key: savana_continuation_core::ledger::ResourceKey,
+    ) -> Result<super::ManagedResourceViewV04, G4Error> {
+        self.ensure_usable()?;
+        self.snapshot.continuations.managed.view(key)
+    }
+
+    /// Source identity evidence, not execution authority. The trusted host
+    /// supplies a separately provisioned issuer key. G7 rechecks current object
+    /// revision under its owner transaction; no read/issue TOCTOU exemption.
+    pub fn issue_managed_resource_evidence_v04(
+        &self,
+        task: DurableTaskIdV2,
+        action: &savana_kernel_protocol::v2::ActionContentV2,
+        key: savana_continuation_core::ledger::ResourceKey,
+        signer: &ed25519_dalek::SigningKey,
+        now: UnixMillisV2,
+    ) -> Result<super::ContinuationResourceEvidenceV04, G4Error> {
+        use ed25519_dalek::Signer;
+        self.ensure_usable()?;
+        if signer.verifying_key().to_bytes() != self.snapshot.continuations.resource_issuer(task)? {
+            return Err(G4Error::StateConflict);
+        }
+        let fact = self.snapshot.continuations.managed_fact(
+            &self.snapshot.tasks,
+            task,
+            action,
+            key,
+            now,
+        )?;
+        let signature = signer.sign(&fact.signing_digest()?).to_bytes();
+        super::ContinuationResourceEvidenceV04::from_signed(
+            &serde_json::to_vec(&fact).map_err(|_| G4Error::StateConflict)?,
+            &signature,
+        )
+    }
+
+    /// Enroll an unused task in additional G7 stable-resource accounting. This
+    /// does not issue any execution permission or reset pre-existing history.
+    pub fn install_continuation_dispatch_policy_v04(
+        &mut self,
+        policy: super::VerifiedContinuationDispatchPolicyV04,
+        now: UnixMillisV2,
+    ) -> Result<(), G4Error> {
+        self.ensure_usable()?;
+        let mut next = self.snapshot.clone();
+        if next
+            .continuations
+            .install_dispatch(policy, &next.tasks, &next.dispatch, now)?
+        {
+            self.commit(next)?;
+        }
+        Ok(())
+    }
+
+    /// Signed bounded STORAGE registration. No execution/disclosure authority.
+    /// The trusted host authenticates the administrator and selects issuer trust.
+    pub fn install_continuation_storage_v04(
+        &mut self,
+        profile: VerifiedContinuationStorageV04,
+        now: UnixMillisV2,
+    ) -> Result<(), G4Error> {
+        self.ensure_usable()?;
+        let mut next = self.snapshot.clone();
+        if next.continuations.install(profile, &next.tasks, now)? {
+            self.commit(next)?;
+        }
+        Ok(())
+    }
+
+    /// Atomic with this owner's encrypted state and anti-rollback anchor.
+    /// A recorded reservation is bookkeeping, NOT a substitute for G7 prepare.
+    pub fn update_continuation_storage_v04(
+        &mut self,
+        task: DurableTaskIdV2,
+        expected_revision: u64,
+        updates: Vec<ContinuationStorageUpdateV04>,
+        now: UnixMillisV2,
+    ) -> Result<(), G4Error> {
+        self.ensure_usable()?;
+        let mut next = self.snapshot.clone();
+        if next
+            .continuations
+            .update(task, expected_revision, updates, &next.tasks, now)?
+        {
+            self.commit(next)?;
+        }
+        Ok(())
+    }
+
+    /// Private audit/recovery view, including retained history after revocation.
+    /// The caller authenticates the reader; bytes are not an outbound capability.
+    pub fn continuation_storage_v04(
+        &self,
+        task: DurableTaskIdV2,
+    ) -> Result<ContinuationStorageViewV04, G4Error> {
+        self.ensure_usable()?;
+        self.snapshot.continuations.view(task)
+    }
+
     /// Persist before showing approval. This stores unprivileged material only.
     pub fn record_pending_task_authorization(
         &mut self,
@@ -604,11 +1456,134 @@ impl DurableG4StateV2 {
         self.snapshot.quota.counter(durable_run_id, subject)
     }
 
+    /// Historical query-only records. Does not create a ticket, renew a session
+    /// or require today's root/plan to authorize yesterday's effect settlement.
+    pub fn recover_fused_executions_v04(
+        &self,
+        task: DurableTaskIdV2,
+    ) -> Result<Vec<super::RecoveredFusedExecutionV04>, G4Error> {
+        self.ensure_usable()?;
+        self.snapshot.continuations.planning.recover_executions(
+            task,
+            &self.snapshot.tasks,
+            &self.snapshot.dispatch,
+            &self.snapshot.intents,
+        )
+    }
+
+    /// Trusted scheduler inventory, including revoked/expired historical tasks.
+    /// Old executions without a persisted result scope are never reconstructed.
+    /// This carries no authority to resend or to publish an observation.
+    pub fn recover_all_scoped_fused_executions_v04(
+        &self,
+    ) -> Result<Vec<super::RecoveredFusedExecutionV04>, G4Error> {
+        self.ensure_usable()?;
+        self.snapshot
+            .continuations
+            .planning
+            .recover_scoped_executions(
+                &self.snapshot.tasks,
+                &self.snapshot.dispatch,
+                &self.snapshot.intents,
+            )
+    }
+
+    /// Host-private checkpoint after the exact signed outcome and vault commit,
+    /// before executor cleanup. A reference cannot be replaced or attached to
+    /// an uncompleted effect. It stores no plaintext or process document handle.
+    pub fn record_fused_result_commit_v04(
+        &mut self,
+        task: DurableTaskIdV2,
+        nonce: Nonce32V2,
+        commit: Digest32V2,
+    ) -> Result<(), G4Error> {
+        self.ensure_usable()?;
+        let mut next = self.snapshot.clone();
+        if !next.continuations.planning.record_result_commit(
+            task,
+            nonce,
+            commit,
+            &next.dispatch,
+            None,
+        )? {
+            return Ok(());
+        }
+        self.commit(next)
+    }
+
+    /// Commit downstream data and its original success checkpoint atomically,
+    /// before executor cleanup. Never a model/public input or effect grant.
+    pub fn record_fused_result_value_v04(
+        &mut self,
+        task: DurableTaskIdV2,
+        nonce: Nonce32V2,
+        commit: Digest32V2,
+        value: super::FusedOwnedResultV04,
+    ) -> Result<(), G4Error> {
+        self.ensure_usable()?;
+        let mut next = self.snapshot.clone();
+        if !next.continuations.planning.record_result_commit(
+            task,
+            nonce,
+            commit,
+            &next.dispatch,
+            Some(value.0),
+        )? {
+            return Ok(());
+        }
+        self.commit(next)
+    }
+
+    /// Trusted host query; only declared downstream edges require retaining
+    /// bounded result data. Ordinary terminal results keep their existing path.
+    pub fn fused_execution_needs_result_v04(
+        &self,
+        task: DurableTaskIdV2,
+        nonce: Nonce32V2,
+    ) -> Result<bool, G4Error> {
+        self.ensure_usable()?;
+        self.snapshot
+            .continuations
+            .planning
+            .needs_result_value(task, nonce)
+    }
+
+    /// Private candidate only: this never declassifies, charges a publication,
+    /// signs an approval, creates a vault release or returns a public response.
+    pub fn fused_final_result_candidate_v04(
+        &self,
+        task: DurableTaskIdV2,
+        now: UnixMillisV2,
+    ) -> Result<super::FusedFinalResultCandidateV04, G4Error> {
+        self.ensure_usable()?;
+        self.snapshot.continuations.planning.final_result(
+            task,
+            &self.snapshot.tasks,
+            &self.snapshot.dispatch,
+            now,
+        )
+    }
+
     pub fn recovery_projection(
         &self,
     ) -> Result<Vec<super::KernelDispatchRecoveryProjectionV2>, G4Error> {
         self.ensure_usable()?;
         self.snapshot.dispatch.recovery_projection()
+    }
+
+    /// Historical metadata only; confers no send or plaintext authority.
+    pub fn recover_final_release_core_v04(
+        &self,
+        release: savana_kernel_protocol::v2::DurableReleaseIdV2,
+    ) -> Result<Option<DispatchCoreV2>, G4Error> {
+        self.ensure_usable()?;
+        let mut cores = self.snapshot.dispatch.entries.iter().filter(|e|
+            matches!(&e.core.subject, DispatchSubjectV2::FinalRelease { binding, .. } if binding.durable_release_id() == release));
+        let result = cores.next().map(|e| e.core.clone());
+        if cores.next().is_some() {
+            return Err(G4Error::DurableStateCorrupt);
+        }
+        Ok(result)
     }
 
     pub fn authenticated_state_head(&self) -> Result<RollbackProtectedStateHeadV2, G4Error> {
@@ -736,13 +1711,36 @@ impl DurableG4StateV2 {
                 preparation.kind() == DispatchPreparationKindV2::Replay,
             )?;
             let preparation = super::dispatch::preparation(journal_entry, preparation.kind());
+            next.continuations.prepare_dispatch(
+                journal_entry,
+                &next.tasks,
+                task.continuation_resource.as_ref(),
+                now,
+                preparation.kind() == DispatchPreparationKindV2::Replay,
+            )?;
+            next.continuations.planning.prepare_execution(
+                task.fused_operation,
+                task.fused_recipe.as_ref(),
+                task.fused_result_scope.as_ref(),
+                &intent.record,
+                &next.dispatch,
+                &next.tasks,
+                preparation.execution_nonce(),
+                preparation.kind() == DispatchPreparationKindV2::Replay,
+                now,
+            )?;
             if preparation.kind() == DispatchPreparationKindV2::Replay {
                 return Ok(preparation);
             }
             next.quota.reserve_or_replay(
                 verified_limit,
                 intent.record.durable_run_id,
-                journal_entry.quota_subject,
+                next.dispatch
+                    .entries
+                    .iter()
+                    .find(|e| e.core.execution_nonce == preparation.execution_nonce())
+                    .ok_or(G4Error::StateConflict)?
+                    .quota_subject,
                 preparation.dispatch_subject_digest(),
                 preparation.execution_nonce(),
             )?;
@@ -821,6 +1819,72 @@ impl DurableG4StateV2 {
         now: UnixMillisV2,
     ) -> Result<DispatchPreparationV2, G4Error> {
         self.ensure_usable()?;
+        // Continuation-resource publishing remains unsupported. Fused terminal
+        // publishing has its own checked path, never an ordinary release bypass.
+        if self
+            .snapshot
+            .continuations
+            .dispatch_enabled(task.matched.authorization().material().task())
+            || task.continuation_resource.is_some()
+        {
+            return Err(G4Error::StateConflict);
+        }
+        let enrolled = self
+            .snapshot
+            .continuations
+            .planning
+            .enrolled(task.matched.authorization().material().task());
+        if enrolled != task.fused_final_result.is_some() {
+            return Err(G4Error::StateConflict);
+        }
+        if let Some((digest, request)) = &task.fused_final_result {
+            let candidate = self.fused_final_result_candidate_v04(
+                task.matched.authorization().material().task(),
+                now,
+            )?;
+            let spec = candidate.release().ok_or(G4Error::StateConflict)?;
+            let original = self
+                .recover_fused_executions_v04(candidate.task())?
+                .into_iter()
+                .find(|e| e.core() == candidate.core())
+                .ok_or(G4Error::StateConflict)?;
+            let resource = savana_kernel_protocol::v2::fused_final_result_resource_v04(
+                candidate.task(),
+                candidate.source(),
+                original.descriptor(),
+            )
+            .map_err(|_| G4Error::StateConflict)?;
+            let delivery = savana_kernel_protocol::v2::decode_final_result_release_delivery_v04(
+                &request.canonical_json(),
+            )
+            .map_err(|_| G4Error::StateConflict)?;
+            if candidate.digest() != *digest
+                || candidate.root() != task.matched.authorization().digest()
+                || candidate.core().durable_run_id() != release.durable_run_id()
+                || spec.clause != task.matched.content().clause_id()
+                || delivery.resource() != resource
+                || delivery.turn_binding().as_bytes() != &spec.turn
+                || delivery.payload() != candidate.private_payload()
+                || task.matched.content().action()
+                    != &request
+                        .action_alternative(Digest32V2::new(spec.descriptor))
+                        .map_err(|_| G4Error::StateConflict)?
+                || task.matched.content().payload_digest() != request.payload_digest()
+                || request.profile()
+                    != &savana_kernel_protocol::v2::final_result_release_business_profile_v04(
+                        request.profile().target_identity(),
+                        request.profile().credential_identity(),
+                    )
+                    .map_err(|_| G4Error::StateConflict)?
+                || release.binding().release_payload_digest()
+                    != super::task_authorization::hash_parts(
+                        b"SAVANA_FINAL_RELEASE_PAYLOAD_V2\0",
+                        &[candidate.private_payload()],
+                    )
+            {
+                return Err(G4Error::StateConflict);
+            }
+        }
         let guard_authority = authority.clone();
         guard_authority.while_current_connector_registry_head(|connector_registry_digest| {
             let mut next = self.snapshot.clone();
@@ -1474,7 +2538,58 @@ impl DurableG4StateV2 {
 
     fn commit(&mut self, mut next: DurableG4SnapshotV2) -> Result<(), G4Error> {
         // Migration happens only as part of an ordinary successful transaction.
-        next.payload_schema = PAYLOAD_SCHEMA_VERSION;
+        // Existing deployments stay schema 4 until explicitly installing the
+        // signed v0.4 storage (5), dispatch (6), source (7), execution pin (8),
+        // explicit managed input handoff policy (9), admin retry journal (10),
+        // fused-planning outbox (11), exact fused execution bindings (12),
+        // signed delivery slots and durable scheduler cursor (13), or separate
+        // immutable recipe approval (14), atomic recipe execution receipt (15),
+        // immutable owner-authenticated local inputs (16), or historical fused
+        // result scopes/checkpoints (17).
+        // Recipe approval alone grants no effect.
+        // Never downgrade and never backfill historical inputs from current data.
+        next.payload_schema = if next.continuations.planning.has_result_scopes()
+            || self.snapshot.payload_schema >= 17
+        {
+            17
+        } else if next.continuations.planning.has_inputs() || self.snapshot.payload_schema >= 16 {
+            16
+        } else if next.continuations.planning.has_recipe_executions()
+            || self.snapshot.payload_schema >= 15
+        {
+            15
+        } else if next.continuations.planning.has_recipe_approvals()
+            || self.snapshot.payload_schema >= 14
+        {
+            14
+        } else if next.continuations.planning.has_delivery_schedule()
+            || self.snapshot.payload_schema >= 13
+        {
+            13
+        } else if next.continuations.planning.has_execution_bindings()
+            || self.snapshot.payload_schema >= 12
+        {
+            12
+        } else if !next.continuations.planning.is_empty() || self.snapshot.payload_schema >= 11 {
+            11
+        } else if !next.continuations.admin.is_empty() || self.snapshot.payload_schema >= 10 {
+            10
+        } else if next.continuations.managed.has_handoff_policy()
+            || self.snapshot.payload_schema >= 9
+        {
+            9
+        } else if next.continuations.has_execution_snapshots() || self.snapshot.payload_schema >= 8
+        {
+            8
+        } else if !next.continuations.managed.is_empty() || self.snapshot.payload_schema >= 7 {
+            7
+        } else if next.continuations.has_dispatch_policies() || self.snapshot.payload_schema >= 6 {
+            6
+        } else if !next.continuations.is_empty() || self.snapshot.payload_schema >= 5 {
+            5
+        } else {
+            PAYLOAD_SCHEMA_VERSION
+        };
         next.sequence = self
             .current_head
             .sequence
@@ -1629,6 +2744,7 @@ fn encode_snapshot_payload(snapshot: &DurableG4SnapshotV2) -> Result<Zeroizing<V
             2 => 9,
             3 => 11,
             4 => 12,
+            5..=17 => 13,
             _ => return Err(G4Error::DurableStateCorrupt),
         })
         .and_then(|encoder| encoder.u16(snapshot.payload_schema))
@@ -1660,6 +2776,11 @@ fn encode_snapshot_payload(snapshot: &DurableG4SnapshotV2) -> Result<Zeroizing<V
     if snapshot.payload_schema >= 4 {
         encoder
             .bytes(&snapshot.issuance.encode()?)
+            .map_err(|_| G4Error::DurableStateCorrupt)?;
+    }
+    if snapshot.payload_schema >= 5 {
+        encoder
+            .bytes(&snapshot.continuations.encode()?)
             .map_err(|_| G4Error::DurableStateCorrupt)?;
     }
     Ok(Zeroizing::new(encoder.into_writer()))
@@ -2026,7 +3147,7 @@ fn decode_snapshot_payload(payload: &[u8]) -> Result<DurableG4SnapshotV2, G4Erro
     let payload_schema = decoder.u16().map_err(|_| G4Error::DurableStateCorrupt)?;
     if !matches!(
         (payload_schema, fields),
-        (2, Some(9)) | (3, Some(11)) | (4, Some(12))
+        (2, Some(9)) | (3, Some(11)) | (4, Some(12)) | (5..=17, Some(13))
     ) {
         return Err(G4Error::DurableStateCorrupt);
     }
@@ -2057,6 +3178,11 @@ fn decode_snapshot_payload(payload: &[u8]) -> Result<DurableG4SnapshotV2, G4Erro
     } else {
         TaskIssuanceLedgerV2::default()
     };
+    let continuations = if payload_schema >= 5 {
+        ContinuationTableV04::decode(decoder.bytes().map_err(|_| G4Error::DurableStateCorrupt)?)?
+    } else {
+        ContinuationTableV04::default()
+    };
     if decoder.position() != payload.len() {
         return Err(G4Error::DurableStateCorrupt);
     }
@@ -2064,6 +3190,7 @@ fn decode_snapshot_payload(payload: &[u8]) -> Result<DurableG4SnapshotV2, G4Erro
         payload_schema,
         tasks,
         issuance,
+        continuations,
         legacy_intents,
         sequence,
         previous_state_digest,
@@ -2540,6 +3667,53 @@ fn decode_final_release_binding(
 }
 
 fn validate_snapshot(snapshot: &DurableG4SnapshotV2) -> Result<(), G4Error> {
+    if (snapshot.payload_schema < 12 && snapshot.continuations.planning.has_execution_bindings())
+        || (snapshot.payload_schema == 12
+            && !snapshot.continuations.planning.has_execution_bindings())
+        || (snapshot.payload_schema < 13 && snapshot.continuations.planning.has_delivery_schedule())
+        || (snapshot.payload_schema == 13
+            && !snapshot.continuations.planning.has_delivery_schedule())
+        || (snapshot.payload_schema < 14 && snapshot.continuations.planning.has_recipe_approvals())
+        || (snapshot.payload_schema == 14
+            && !snapshot.continuations.planning.has_recipe_approvals())
+        || (snapshot.payload_schema < 15 && snapshot.continuations.planning.has_recipe_executions())
+        || (snapshot.payload_schema == 15
+            && !snapshot.continuations.planning.has_recipe_executions())
+        || ((snapshot.payload_schema >= 16) != snapshot.continuations.planning.has_inputs())
+        || ((snapshot.payload_schema >= 17) != snapshot.continuations.planning.has_result_scopes())
+    {
+        return Err(G4Error::DurableStateCorrupt);
+    }
+    if snapshot.payload_schema < 11 && !snapshot.continuations.planning.is_empty() {
+        return Err(G4Error::DurableStateCorrupt);
+    }
+    if snapshot.payload_schema < 10 && !snapshot.continuations.admin.is_empty() {
+        return Err(G4Error::DurableStateCorrupt);
+    }
+    if snapshot.payload_schema < 9 && snapshot.continuations.managed.has_handoff_policy() {
+        return Err(G4Error::DurableStateCorrupt);
+    }
+    if snapshot.payload_schema < 8 && snapshot.continuations.has_execution_snapshots() {
+        return Err(G4Error::DurableStateCorrupt);
+    }
+    if snapshot.payload_schema < 7 && !snapshot.continuations.managed.is_empty() {
+        return Err(G4Error::DurableStateCorrupt);
+    }
+    if snapshot.payload_schema < 6 && snapshot.continuations.has_dispatch_policies() {
+        return Err(G4Error::DurableStateCorrupt);
+    }
+    if snapshot.payload_schema < 5 && !snapshot.continuations.is_empty() {
+        return Err(G4Error::DurableStateCorrupt);
+    }
+    snapshot.continuations.validate(&snapshot.tasks)?;
+    snapshot.continuations.planning.validate_executions(
+        &snapshot.tasks,
+        &snapshot.dispatch,
+        &snapshot.intents,
+    )?;
+    snapshot
+        .continuations
+        .validate_dispatch(&snapshot.tasks, &snapshot.dispatch)?;
     snapshot.tasks.validate(&snapshot.dispatch)?;
     snapshot.issuance.validate()?;
     snapshot

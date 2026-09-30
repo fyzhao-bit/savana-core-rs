@@ -41,15 +41,17 @@ pub enum ClosedDeclassificationPurposeV2 {
     ApprovalDisplay = 3,
     ExecutionHandoff = 4,
     FinalRelease = 5,
+    FusedModelCall = 6,
 }
 
 impl ClosedDeclassificationPurposeV2 {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::AgentIngressMasking,
         Self::PlannerCall,
         Self::ApprovalDisplay,
         Self::ExecutionHandoff,
         Self::FinalRelease,
+        Self::FusedModelCall,
     ];
 
     pub const fn tag(self) -> u16 {
@@ -67,6 +69,7 @@ impl ClosedDeclassificationPurposeV2 {
             Self::ApprovalDisplay => "approval-display",
             Self::ExecutionHandoff => "execution-handoff",
             Self::FinalRelease => "final-release",
+            Self::FusedModelCall => "fused-model-call",
         }
     }
 
@@ -146,7 +149,7 @@ impl DeclassificationRuleV2 {
         }
         match (transition_tag, reader_identities.as_deref()) {
             (1..=3, None) => {}
-            (4..=5, Some(readers))
+            (4..=6, Some(readers))
                 if !readers.is_empty()
                     && readers.len() as u64
                         <= DeploymentHardLimitsV2::compiled().max_declassification_readers()
@@ -157,7 +160,7 @@ impl DeclassificationRuleV2 {
             _ => return Err(DeploymentControlErrorV2::InvalidDeclassificationRuleSet),
         }
         match (transition_tag, consent_max_age_ms) {
-            (1..=4, None) | (5, None) => {}
+            (1..=6, None) => {}
             (5, Some(age)) if (1..=MAX_APPROVAL_AGE_MS_V2).contains(&age) => {}
             _ => return Err(DeploymentControlErrorV2::InvalidDeclassificationRuleSet),
         }
@@ -422,6 +425,7 @@ pub fn declassification_implementation_digest_v2(transition_tag: u16) -> Option<
         3 => b"build-approval-display-v1",
         4 => b"build-execution-envelope-v1",
         5 => b"build-final-release-v1",
+        6 => b"build-fused-model-envelope-exact-recipient-v1",
         _ => return None,
     };
     let mut hash = Sha256::new();
@@ -429,7 +433,7 @@ pub fn declassification_implementation_digest_v2(transition_tag: u16) -> Option<
     hash.update(transition_tag.to_be_bytes());
     hash.update(1_u16.to_be_bytes());
     hash.update(contract);
-    if matches!(transition_tag, 1 | 2) {
+    if matches!(transition_tag, 1 | 2 | 6) {
         hash.update(savana_leak_gate::pattern_set_digest());
     }
     Some(Digest32V2::new(hash.finalize().into()))

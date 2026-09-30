@@ -207,6 +207,7 @@ impl KernelServiceHandshakeEdgeV2 {
                 | EndpointRoleV2::AgentApproval
                 | EndpointRoleV2::IngressApproval
                 | EndpointRoleV2::ApprovalAdmin
+                | EndpointRoleV2::KernelApproval
         ) || self.active_state_manifest_sequence == 0
             || self.deployment_generation == 0
             || self.effect_fence_epoch == 0

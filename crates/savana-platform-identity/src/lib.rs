@@ -4,7 +4,62 @@ use core::fmt;
 
 mod deployment_invocation;
 #[cfg(target_os = "linux")]
+mod linux_tpm;
+#[cfg(target_os = "linux")]
+mod linux_tpm_journal;
+#[cfg(target_os = "linux")]
+mod linux_credentials;
+#[cfg(target_os = "linux")]
+mod linux_readiness;
+#[cfg(target_os = "linux")]
+pub use linux_readiness::notify_linux_service_ready_v2;
+#[cfg(target_os = "linux")]
+pub use linux_credentials::{read_linux_kerneld_credential_v3, read_linux_service_credential_v2,
+    validate_linux_kerneld_credential_directory_v3, LinuxCredentialServiceV2};
+#[cfg(target_os = "linux")]
+mod linux_tpm_authority;
+#[cfg(target_os = "linux")]
+pub use linux_tpm_authority::{run_linux_tpm_authority_v3, LinuxTpmAuthorityClientV3};
+mod tpm_signature_v3;
+mod tpm_wire;
+mod tpm_policy;
+mod tpm_nv;
+mod tpm_enrollment;
+mod tpm_enrollment_tool;
+mod deployment_record_v3;
+pub use deployment_record_v3::{DeploymentRecordScopeV3, VerifiedDeploymentRecordEnvelopeV3};
+#[cfg(target_os = "linux")]
+mod linux_deployment_journal_v3;
+#[cfg(target_os = "linux")]
+pub use linux_deployment_journal_v3::LinuxDeploymentJournalV3;
+#[cfg(any(test, target_os = "linux"))]
+pub use deployment_record_v3::runtime::DeploymentJournalSnapshotV3;
+#[cfg(any(test, target_os = "linux"))]
+mod tpm_first_install;
+#[cfg(target_os = "linux")]
+mod linux_tpm_first_install;
+#[cfg(target_os = "linux")]
+pub use linux_tpm_first_install::run_linux_tpm_first_install_v3;
+pub use tpm_enrollment_tool::process_tpm_enrollment_request_v3;
+pub use tpm_enrollment::{TpmEnrollmentV3, TpmEnrollmentProposalV3, TpmClientIdentityV3, TpmStoreV3};
+pub use tpm_nv::{TpmNvBindingV3, TpmStateHeadV3};
+pub use tpm_policy::TpmPcrPolicyV3;
+#[cfg(target_os = "linux")]
+pub use linux_tpm::LinuxTpmDeploymentSignerV3;
+pub use tpm_signature_v3::{
+    TpmSignatureEnvelopeV3, TpmSignatureErrorV3, TpmSignatureRequestV3, TpmSigningBindingV3,
+    TpmSigningPublicV3, VerifiedTpmSignatureV3,
+};
+#[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod linux_broker;
+#[cfg(target_os = "linux")]
+mod linux_owner_control;
+#[cfg(target_os = "linux")]
+pub use linux_owner_control::{
+    connect_owner_control_reverse_v2, OwnerControlRendezvousV2, OWNER_CONTROL_REVERSE_MAGIC_V2,
+};
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -22,11 +77,15 @@ pub use deployment_invocation::{
     StagedDeploymentTransactionBytesV2,
 };
 #[cfg(target_os = "linux")]
+pub use deployment_invocation::{LinuxMeasuredStagingTreeV3, MeasuredStagingEntryV3};
+#[cfg(target_os = "linux")]
 pub use linux::{
     measure_current_linux_process_v2, measure_linux_peer_v2, pin_current_linux_service_v2,
     take_systemd_listeners_v2, take_systemd_unix_listeners_v2, InheritedSystemdListenerV2,
     InheritedUnixListenerV2, PinnedLinuxPeerMeasurementV2,
 };
+#[cfg(target_os = "linux")]
+pub use linux_broker::run_linux_identity_broker_v2;
 #[cfg(target_os = "macos")]
 pub use macos::{
     current_process_audit_token_v2, measure_macos_peer_v2, measure_macos_static_code_v2,

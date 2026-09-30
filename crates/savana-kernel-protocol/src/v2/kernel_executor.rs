@@ -486,6 +486,23 @@ impl DispatchCoreV2 {
         encode_dispatch_core(&mut encoder, self)?;
         Ok(domain_hash(DISPATCH_CORE_DOMAIN, &encoder.into_writer()))
     }
+
+    pub fn canonical_bytes(self) -> Result<Vec<u8>, ProtocolError> {
+        let mut e = minicbor::Encoder::new(Vec::new());
+        encode_dispatch_core(&mut e, self)?;
+        Ok(e.into_writer())
+    }
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        if bytes.len() > 8192 {
+            return Err(ProtocolError::malformed("dispatch core length"));
+        }
+        let mut d = minicbor::Decoder::new(bytes);
+        let core = decode_dispatch_core(&mut d, &mut V2DecodeContext)?;
+        if d.position() != bytes.len() || core.canonical_bytes()? != bytes {
+            return Err(ProtocolError::malformed("noncanonical dispatch core"));
+        }
+        Ok(core)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

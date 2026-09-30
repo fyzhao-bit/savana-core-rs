@@ -32,6 +32,37 @@ pub enum ApprovalServiceOperationV2 {
     AgentHealth,
     IngressHealth,
     AdminHealth,
+    KernelHealth,
+    RegisterPrivateSessionV04 {
+        envelope: SignedUiAuthenticationEnvelopeV2,
+    },
+    GetPrivateSessionAuthenticationV04 {
+        record: ApprovalUiRecordHandleV2,
+    },
+    AttachPrivateApprovalV04 {
+        session: ApprovalUiRecordHandleV2,
+        approval: ToolApprovalRecordHandleV2,
+        root: Digest32V2,
+    },
+    AttachPrivateReleaseApprovalV04 {
+        session: ApprovalUiRecordHandleV2,
+        approval: ReleaseApprovalRecordHandleV2,
+        root: Digest32V2,
+    },
+    GetKernelReleaseApprovalSettlement {
+        approval: ReleaseApprovalRecordHandleV2,
+    },
+    AttachPrivatePublicationV04 {
+        session: ApprovalUiRecordHandleV2,
+        publication: super::PrivatePublicationV04,
+    },
+    RegisterKernelApproval {
+        envelope: SignedApprovalEnvelopeV2,
+        display_authentication: SignedUiAuthenticationEnvelopeV2,
+    },
+    GetKernelApprovalSettlement {
+        approval: ToolApprovalRecordHandleV2,
+    },
     RegisterAgentApproval {
         envelope: SignedApprovalEnvelopeV2,
         display_authentication: SignedUiAuthenticationEnvelopeV2,
@@ -79,6 +110,15 @@ pub enum ApprovalServiceOperationV2 {
 impl ApprovalServiceOperationV2 {
     pub const fn role(&self) -> EndpointRoleV2 {
         match self {
+            Self::KernelHealth
+            | Self::RegisterPrivateSessionV04 { .. }
+            | Self::GetPrivateSessionAuthenticationV04 { .. }
+            | Self::AttachPrivateApprovalV04 { .. }
+            | Self::AttachPrivateReleaseApprovalV04 { .. }
+            | Self::AttachPrivatePublicationV04 { .. }
+            | Self::GetKernelReleaseApprovalSettlement { .. }
+            | Self::RegisterKernelApproval { .. }
+            | Self::GetKernelApprovalSettlement { .. } => EndpointRoleV2::KernelApproval,
             Self::AgentHealth
             | Self::RegisterAgentApproval { .. }
             | Self::GetAgentApprovalSettlement { .. }
@@ -101,11 +141,19 @@ impl ApprovalServiceOperationV2 {
 
     pub const fn tag(&self) -> u16 {
         match self {
-            Self::AgentHealth | Self::IngressHealth | Self::AdminHealth => 0,
-            Self::RegisterAgentApproval { .. } | Self::RegisterIngressApproval { .. } => 20,
-            Self::GetAgentApprovalSettlement { .. } | Self::GetIngressApprovalSettlement { .. } => {
-                21
-            }
+            Self::AgentHealth | Self::IngressHealth | Self::AdminHealth | Self::KernelHealth => 0,
+            Self::RegisterPrivateSessionV04 { .. } => 22,
+            Self::GetPrivateSessionAuthenticationV04 { .. } => 23,
+            Self::AttachPrivateApprovalV04 { .. } => 24,
+            Self::AttachPrivateReleaseApprovalV04 { .. } => 25,
+            Self::GetKernelReleaseApprovalSettlement { .. } => 26,
+            Self::AttachPrivatePublicationV04 { .. } => 27,
+            Self::RegisterAgentApproval { .. }
+            | Self::RegisterIngressApproval { .. }
+            | Self::RegisterKernelApproval { .. } => 20,
+            Self::GetAgentApprovalSettlement { .. }
+            | Self::GetIngressApprovalSettlement { .. }
+            | Self::GetKernelApprovalSettlement { .. } => 21,
             Self::RegisterAgentUiAuthentication { .. }
             | Self::RegisterIngressUiAuthentication { .. } => 22,
             Self::ConsumeAgentUiAuthenticationSettlement { .. }
@@ -569,18 +617,22 @@ pub fn decode_registered_approval_v2(
             display_authentication: minicbor::Decode::decode(&mut decoder, &mut context)
                 .map_err(ProtocolError::from_typed_decode)?,
         },
-        (EndpointRoleV2::AgentApproval, 2) => RegisteredApprovalV2::Tool {
-            approval: minicbor::Decode::decode(&mut decoder, &mut context)
-                .map_err(ProtocolError::from_typed_decode)?,
-            display_authentication: minicbor::Decode::decode(&mut decoder, &mut context)
-                .map_err(ProtocolError::from_typed_decode)?,
-        },
-        (EndpointRoleV2::AgentApproval, 3) => RegisteredApprovalV2::Release {
-            approval: minicbor::Decode::decode(&mut decoder, &mut context)
-                .map_err(ProtocolError::from_typed_decode)?,
-            display_authentication: minicbor::Decode::decode(&mut decoder, &mut context)
-                .map_err(ProtocolError::from_typed_decode)?,
-        },
+        (EndpointRoleV2::AgentApproval | EndpointRoleV2::KernelApproval, 2) => {
+            RegisteredApprovalV2::Tool {
+                approval: minicbor::Decode::decode(&mut decoder, &mut context)
+                    .map_err(ProtocolError::from_typed_decode)?,
+                display_authentication: minicbor::Decode::decode(&mut decoder, &mut context)
+                    .map_err(ProtocolError::from_typed_decode)?,
+            }
+        }
+        (EndpointRoleV2::AgentApproval | EndpointRoleV2::KernelApproval, 3) => {
+            RegisteredApprovalV2::Release {
+                approval: minicbor::Decode::decode(&mut decoder, &mut context)
+                    .map_err(ProtocolError::from_typed_decode)?,
+                display_authentication: minicbor::Decode::decode(&mut decoder, &mut context)
+                    .map_err(ProtocolError::from_typed_decode)?,
+            }
+        }
         (EndpointRoleV2::AgentApproval, 4) => RegisteredApprovalV2::Connector {
             approval: minicbor::Decode::decode(&mut decoder, &mut context)
                 .map_err(ProtocolError::from_typed_decode)?,
@@ -820,7 +872,63 @@ pub fn decode_revoke_credential_response_v2(
 fn encode_operation_body(value: &ApprovalServiceOperationV2) -> Result<Vec<u8>, ProtocolError> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
     match value {
+        ApprovalServiceOperationV2::AttachPrivatePublicationV04 {
+            session,
+            publication,
+        } => {
+            encoder.array(2).map_err(ProtocolError::malformed)?;
+            session
+                .encode(&mut encoder, &mut ())
+                .map_err(ProtocolError::malformed)?;
+            encoder
+                .bytes(&super::encode_private_publication_v04(*publication)?)
+                .map_err(ProtocolError::malformed)?;
+        }
+        ApprovalServiceOperationV2::AttachPrivateReleaseApprovalV04 {
+            session,
+            approval,
+            root,
+        } => {
+            encoder.array(3).map_err(ProtocolError::malformed)?;
+            session
+                .encode(&mut encoder, &mut ())
+                .and_then(|()| approval.encode(&mut encoder, &mut ()))
+                .and_then(|()| root.encode(&mut encoder, &mut ()))
+                .map_err(ProtocolError::malformed)?;
+        }
+        ApprovalServiceOperationV2::GetKernelReleaseApprovalSettlement { approval } => {
+            encoder.array(1).map_err(ProtocolError::malformed)?;
+            approval
+                .encode(&mut encoder, &mut ())
+                .map_err(ProtocolError::malformed)?;
+        }
+        ApprovalServiceOperationV2::AttachPrivateApprovalV04 {
+            session,
+            approval,
+            root,
+        } => {
+            encoder.array(3).map_err(ProtocolError::malformed)?;
+            session
+                .encode(&mut encoder, &mut ())
+                .and_then(|()| approval.encode(&mut encoder, &mut ()))
+                .and_then(|()| root.encode(&mut encoder, &mut ()))
+                .map_err(ProtocolError::malformed)?;
+        }
+        ApprovalServiceOperationV2::GetPrivateSessionAuthenticationV04 { record } => {
+            encoder.array(1).map_err(ProtocolError::malformed)?;
+            record
+                .encode(&mut encoder, &mut ())
+                .map_err(ProtocolError::malformed)?;
+        }
+        ApprovalServiceOperationV2::RegisterPrivateSessionV04 { envelope } => {
+            let bytes = encode_signed_ui_authentication_envelope_v2(envelope)?;
+            encoder
+                .array(1)
+                .and_then(|e| e.bytes(&bytes))
+                .map_err(ProtocolError::malformed)?;
+        }
         ApprovalServiceOperationV2::AgentHealth
+        | ApprovalServiceOperationV2::KernelHealth
         | ApprovalServiceOperationV2::IngressHealth
         | ApprovalServiceOperationV2::AdminHealth => {
             encoder.array(0).map_err(ProtocolError::malformed)?;
@@ -832,6 +940,10 @@ fn encode_operation_body(value: &ApprovalServiceOperationV2) -> Result<Vec<u8>, 
         | ApprovalServiceOperationV2::RegisterIngressApproval {
             envelope,
             display_authentication,
+        }
+        | ApprovalServiceOperationV2::RegisterKernelApproval {
+            envelope,
+            display_authentication,
         } => {
             let envelope = encode_signed_approval_envelope_v2(envelope)?;
             let display = encode_signed_ui_authentication_envelope_v2(display_authentication)?;
@@ -839,6 +951,12 @@ fn encode_operation_body(value: &ApprovalServiceOperationV2) -> Result<Vec<u8>, 
                 .array(2)
                 .and_then(|encoder| encoder.bytes(&envelope))
                 .and_then(|encoder| encoder.bytes(&display))
+                .map_err(ProtocolError::malformed)?;
+        }
+        ApprovalServiceOperationV2::GetKernelApprovalSettlement { approval } => {
+            encoder.array(1).map_err(ProtocolError::malformed)?;
+            approval
+                .encode(&mut encoder, &mut ())
                 .map_err(ProtocolError::malformed)?;
         }
         ApprovalServiceOperationV2::GetIngressApprovalSettlement { approval } => {
@@ -920,6 +1038,82 @@ fn decode_operation_body(
 ) -> Result<ApprovalServiceOperationV2, ProtocolError> {
     let mut decoder = minicbor::Decoder::new(bytes);
     let value = match (role, tag) {
+        (EndpointRoleV2::KernelApproval, 27) => {
+            require_array(&mut decoder, 2)?;
+            ApprovalServiceOperationV2::AttachPrivatePublicationV04 {
+                session: ApprovalUiRecordHandleV2::decode(&mut decoder, &mut V2DecodeContext)
+                    .map_err(ProtocolError::from_typed_decode)?,
+                publication: super::decode_private_publication_v04(
+                    decoder.bytes().map_err(ProtocolError::malformed)?,
+                )?,
+            }
+        }
+        (EndpointRoleV2::KernelApproval, 25) => {
+            require_array(&mut decoder, 3)?;
+            ApprovalServiceOperationV2::AttachPrivateReleaseApprovalV04 {
+                session: ApprovalUiRecordHandleV2::decode(&mut decoder, &mut V2DecodeContext)
+                    .map_err(ProtocolError::from_typed_decode)?,
+                approval: ReleaseApprovalRecordHandleV2::decode(&mut decoder, &mut V2DecodeContext)
+                    .map_err(ProtocolError::from_typed_decode)?,
+                root: Digest32V2::decode(&mut decoder, &mut V2DecodeContext)
+                    .map_err(ProtocolError::from_typed_decode)?,
+            }
+        }
+        (EndpointRoleV2::KernelApproval, 26) => {
+            require_array(&mut decoder, 1)?;
+            ApprovalServiceOperationV2::GetKernelReleaseApprovalSettlement {
+                approval: ReleaseApprovalRecordHandleV2::decode(&mut decoder, &mut V2DecodeContext)
+                    .map_err(ProtocolError::from_typed_decode)?,
+            }
+        }
+        (EndpointRoleV2::KernelApproval, 24) => {
+            require_array(&mut decoder, 3)?;
+            ApprovalServiceOperationV2::AttachPrivateApprovalV04 {
+                session: ApprovalUiRecordHandleV2::decode(&mut decoder, &mut V2DecodeContext)
+                    .map_err(ProtocolError::from_typed_decode)?,
+                approval: ToolApprovalRecordHandleV2::decode(&mut decoder, &mut V2DecodeContext)
+                    .map_err(ProtocolError::from_typed_decode)?,
+                root: Digest32V2::decode(&mut decoder, &mut V2DecodeContext)
+                    .map_err(ProtocolError::from_typed_decode)?,
+            }
+        }
+        (EndpointRoleV2::KernelApproval, 22) => {
+            require_array(&mut decoder, 1)?;
+            ApprovalServiceOperationV2::RegisterPrivateSessionV04 {
+                envelope: decode_signed_ui_authentication_envelope_v2(
+                    decoder.bytes().map_err(ProtocolError::malformed)?,
+                )?,
+            }
+        }
+        (EndpointRoleV2::KernelApproval, 23) => {
+            require_array(&mut decoder, 1)?;
+            ApprovalServiceOperationV2::GetPrivateSessionAuthenticationV04 {
+                record: minicbor::Decode::decode(&mut decoder, &mut V2DecodeContext)
+                    .map_err(ProtocolError::from_typed_decode)?,
+            }
+        }
+        (EndpointRoleV2::KernelApproval, 0) => {
+            require_array(&mut decoder, 0)?;
+            ApprovalServiceOperationV2::KernelHealth
+        }
+        (EndpointRoleV2::KernelApproval, 20) => {
+            require_array(&mut decoder, 2)?;
+            ApprovalServiceOperationV2::RegisterKernelApproval {
+                envelope: decode_signed_approval_envelope_v2(
+                    decoder.bytes().map_err(ProtocolError::malformed)?,
+                )?,
+                display_authentication: decode_signed_ui_authentication_envelope_v2(
+                    decoder.bytes().map_err(ProtocolError::malformed)?,
+                )?,
+            }
+        }
+        (EndpointRoleV2::KernelApproval, 21) => {
+            require_array(&mut decoder, 1)?;
+            ApprovalServiceOperationV2::GetKernelApprovalSettlement {
+                approval: minicbor::Decode::decode(&mut decoder, &mut V2DecodeContext)
+                    .map_err(ProtocolError::from_typed_decode)?,
+            }
+        }
         (EndpointRoleV2::AgentApproval, 0) => {
             require_array(&mut decoder, 0)?;
             ApprovalServiceOperationV2::AgentHealth
@@ -1148,6 +1342,76 @@ mod tests {
     use ed25519_dalek::SigningKey;
 
     use super::*;
+    #[test]
+    fn kernel_approval_wire_role_is_closed_and_canonical() {
+        let approval = ToolApprovalRecordHandleV2::from_authority_entropy([0x71; 32]).unwrap();
+        for operation in [
+            ApprovalServiceOperationV2::KernelHealth,
+            ApprovalServiceOperationV2::GetKernelApprovalSettlement { approval },
+            ApprovalServiceOperationV2::AttachPrivateReleaseApprovalV04 {
+                session: ApprovalUiRecordHandleV2::from_authority_entropy([4; 32]).unwrap(),
+                approval: ReleaseApprovalRecordHandleV2::from_authority_entropy([3; 32]).unwrap(),
+                root: Digest32V2::new([5; 32]),
+            },
+            ApprovalServiceOperationV2::GetKernelReleaseApprovalSettlement {
+                approval: ReleaseApprovalRecordHandleV2::from_authority_entropy([3; 32]).unwrap(),
+            },
+        ] {
+            let tag = operation.tag();
+            let request = ApprovalServiceRequestV2::new(
+                RequestIdV2::new([1; 16]),
+                UnixMillisV2::new(200),
+                operation,
+            )
+            .unwrap();
+            let bytes = encode_approval_service_request_v2(&request).unwrap();
+            assert_eq!(
+                decode_approval_service_request_v2(&bytes, EndpointRoleV2::KernelApproval, tag)
+                    .unwrap(),
+                request
+            );
+            for role in [
+                EndpointRoleV2::AgentApproval,
+                EndpointRoleV2::IngressApproval,
+                EndpointRoleV2::ApprovalAdmin,
+            ] {
+                assert!(decode_approval_service_request_v2(&bytes, role, tag).is_err());
+            }
+        }
+        for tag in [22, 23, 24, 25, 100, 101] {
+            assert!(decode_operation_body(EndpointRoleV2::KernelApproval, tag, &[0x80]).is_err());
+        }
+        let registered = RegisteredApprovalV2::Tool {
+            approval,
+            display_authentication:
+                ApprovalDisplayAuthenticationTransferCapabilityV2::from_authority_entropy([2; 32])
+                    .unwrap(),
+        };
+        let bytes = encode_registered_approval_v2(registered).unwrap();
+        assert_eq!(
+            decode_registered_approval_v2(&bytes, EndpointRoleV2::KernelApproval).unwrap(),
+            registered
+        );
+        let release = RegisteredApprovalV2::Release {
+            approval: ReleaseApprovalRecordHandleV2::from_authority_entropy([3; 32]).unwrap(),
+            display_authentication:
+                ApprovalDisplayAuthenticationTransferCapabilityV2::from_authority_entropy([2; 32])
+                    .unwrap(),
+        };
+        assert_eq!(
+            decode_registered_approval_v2(
+                &encode_registered_approval_v2(release).unwrap(),
+                EndpointRoleV2::KernelApproval
+            )
+            .unwrap(),
+            release
+        );
+        assert!(decode_registered_approval_v2(
+            &encode_registered_approval_v2(release).unwrap(),
+            EndpointRoleV2::IngressApproval
+        )
+        .is_err());
+    }
     use crate::v2::{
         Digest32V2, DurableRunIdV2, DurableTaskIdV2, FixedOriginV2, Nonce32V2, PrincipalIdV2,
         ServiceIdentityV2, SignedAgentAuthenticationClosureDescriptorV2, UiAuthenticationBindingV2,

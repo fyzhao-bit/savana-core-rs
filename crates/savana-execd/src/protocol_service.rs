@@ -794,21 +794,21 @@ fn open_execution_payload(
         .map(Zeroizing::new)
         .map_err(|_| ())?;
     if let Some(binding) = payload.core().task_binding() {
-        let domain: &[u8] = match payload.core().subject() {
+        let digest = match payload.core().subject() {
             savana_kernel_protocol::v2::DispatchSubjectV2::ToolExecution { .. } => {
-                b"SAVANA_PRESEALED_EXECUTOR_PAYLOAD_V2\0"
+                savana_kernel_protocol::v2::presealed_tool_payload_digest_v2(
+                    &plaintext,
+                    payload.declassification_provenance_digest(),
+                )
             }
             savana_kernel_protocol::v2::DispatchSubjectV2::FinalRelease { .. } => {
-                b"SAVANA_PRESEALED_FINAL_RELEASE_PAYLOAD_V2\0"
+                savana_kernel_protocol::v2::presealed_release_payload_digest_v2(
+                    &plaintext,
+                    payload.declassification_provenance_digest(),
+                )
             }
         };
-        let mut hash = Sha256::new();
-        hash.update(domain);
-        hash.update((plaintext.len() as u64).to_be_bytes());
-        hash.update(plaintext.as_slice());
-        hash.update(32u64.to_be_bytes());
-        hash.update(payload.declassification_provenance_digest().as_bytes());
-        if Digest32V2::new(hash.finalize().into()) != binding.presealed_payload_digest() {
+        if digest != binding.presealed_payload_digest() {
             return Err(());
         }
         let body = savana_kernel_protocol::v2::decode_task_execution_payload_v2(&plaintext)

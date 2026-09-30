@@ -4,11 +4,75 @@ mod binding;
 mod commit_attestation;
 mod connector_registry;
 mod connector_store;
+mod continuation_dispatch;
+mod continuation_state;
+mod fused_execution_recovery;
+mod fused_final_result;
+pub use fused_final_result::FusedFinalResultCandidateV04;
+mod fused_inputs;
+mod fused_input_document;
+pub use fused_input_document::{FusedInputDocumentV04, FusedInputTextV04};
+pub use fused_execution_recovery::{FusedResultScopeV04, RecoveredFusedExecutionV04};
+mod fused_model_exchange;
+mod fused_plan_adapter;
+mod fused_planning;
+mod fused_recipe;
+mod fused_task_compiler;
+pub use fused_task_compiler::{compile_fused_task_v04, FusedTaskDraftV04, FusedTaskOperationV04};
+pub use fused_inputs::{FusedOwnedInputV04, FusedOwnedResultV04, RecoveredFusedInputV04, RecoveredFusedInputsV04};
+mod fused_recipe_approval;
+pub use fused_model_exchange::{
+    exchange_fused_model_v04, exchange_scheduled_fused_model_v04, DisabledFusedModelTransportV04,
+    FusedModelExchangeOutcomeV04, FusedModelReleaseContextV04, FusedModelTransportErrorV04,
+    FusedModelTransportV04, MAX_FUSED_MODEL_EXCHANGE_MS_V04, MAX_FUSED_MODEL_REPLY_BYTES_V04,
+};
+pub use fused_plan_adapter::{lower_fused_plan_v04, lower_fused_plan_with_tools_v04};
+pub use fused_planning::{
+    fused_execution_commitment_v04, ActiveFusedPlanV04, FusedDeliverySlotV04,
+    FusedExecutionBindingV04, FusedFinalReleaseV04, FusedOperationRefV04, FusedPlanningProfileV04,
+    FusedPlanningResultV04, FusedPlanningStatusV04, FusedPlanningUpdateV04, FusedScheduledWorkV04,
+    VerifiedFusedPlanningProfileV04,
+};
+pub use fused_recipe::FusedExecutionRecipeV04;
+pub use fused_recipe_approval::{FusedRecipeApprovalV04, FusedRecipeBindingV04};
+mod managed_admin;
+mod managed_execution;
+pub use managed_admin::{
+    ManagedAdminCommandV04, ManagedAdminOperationV04, ManagedAdminReceiptV04,
+    ManagedAdminResultV04, ManagedAdminValueV04, VerifiedManagedAdminCommandV04,
+};
+mod managed_resource;
+pub use continuation_dispatch::{
+    ContinuationChargeBasisV04, ContinuationChargeRuleV04, ContinuationDispatchPolicyV04,
+    ContinuationMagnitudeV04, ContinuationResourceEvidenceV04, ContinuationResourceFactV04,
+    VerifiedContinuationDispatchPolicyV04,
+};
+pub use continuation_state::{
+    ContinuationStorageProfileV04, ContinuationStorageUpdateV04, ContinuationStorageViewV04,
+    VerifiedContinuationStorageV04,
+};
+pub use managed_execution::ManagedExecutionSnapshotV04;
+pub use managed_resource::{
+    managed_resource_locator_v04, managed_resource_selector_digest_v04, ManagedInputProjectionV04,
+    ManagedResourceViewV04, ManagedSourcePolicyV04, VerifiedManagedSourceV04,
+};
 mod declassification;
 mod deployment_authorization;
 mod deployment_control;
 mod deployment_failure;
 mod deployment_ledger;
+mod deployment_ledger_v3;
+#[cfg(target_os = "linux")]
+mod deployment_staging_v3;
+#[cfg(target_os = "linux")]
+pub use deployment_staging_v3::{VerifiedDeploymentStagingV3, VerifiedNativeDeploymentPreparationV3};
+#[cfg(test)]
+mod deployment_v3_test_support;
+pub use deployment_ledger_v3::{DeploymentLedgerHistoryV3, DeploymentLedgerMaterialV3, DeploymentLedgerStateV3,
+    VerifiedDeploymentLedgerRecordV3};
+mod deployment_evidence_v3;
+pub use deployment_evidence_v3::{CommitClaimsV3, VerificationClaimsV3,
+    VerifiedCommitAttestationV3, VerifiedVerificationEvidenceV3};
 mod deployment_limits;
 mod deployment_manifest;
 mod deployment_manifest_claim;

@@ -264,6 +264,38 @@ impl DurableVaultServiceV2 {
         self.mutate(|service| service.create_pending_tool_result(material, now))
     }
 
+    pub fn recover_committed_tool_result(
+        &mut self,
+        task: DurableTaskIdV2,
+        run: DurableRunIdV2,
+        principal: PrincipalIdV2,
+        commit: Digest32V2,
+        expires_at: UnixMillisV2,
+        now: UnixMillisV2,
+    ) -> Result<LiveVaultSegmentV2, VaultErrorV2> {
+        self.mutate(|service| {
+            service.recover_committed_tool_result(task, run, principal, commit, expires_at, now)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_committed_tool_result_release(
+        &mut self,
+        task: DurableTaskIdV2,
+        run: DurableRunIdV2,
+        principal: PrincipalIdV2,
+        commit: Digest32V2,
+        expires: UnixMillisV2,
+        material: VaultReleaseMaterialV2,
+        now: UnixMillisV2,
+    ) -> Result<PendingVaultReleaseV2, VaultErrorV2> {
+        self.mutate(|s| {
+            s.prepare_committed_tool_result_release(
+                task, run, principal, commit, expires, material, now,
+            )
+        })
+    }
+
     pub fn commit_ingress(
         &mut self,
         pending: PendingVaultSegmentV2,

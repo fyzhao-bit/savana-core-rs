@@ -204,6 +204,8 @@ fn substitute_path() {
 compile_error!("test-support cannot be enabled in a release build");
 #[cfg(all(feature = "macos-development-authority", not(debug_assertions)))]
 compile_error!("macos-development-authority is forbidden in release builds");
+#[cfg(all(feature = "linux-file-backed-integration", not(debug_assertions)))]
+compile_error!("linux-file-backed-integration is forbidden in release builds");
 
 mod audit;
 #[allow(dead_code)]
@@ -237,6 +239,9 @@ mod socket;
 mod startup_identity_tests;
 #[allow(dead_code)]
 mod state;
+mod v04_managed_admin;
+#[cfg(unix)]
+mod v04_model_workers;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod v2_activation;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -271,6 +276,7 @@ mod v2_input_owner;
 mod v2_kernel_owner;
 #[allow(dead_code)] // Activated by the final V2 daemon startup path.
 mod v2_listener;
+mod v2_managed_resource;
 #[allow(dead_code)] // Activated by the V2 startup recovery pass.
 mod v2_recovery;
 #[allow(dead_code)] // Activated by the V2 authenticated dispatch routes.
@@ -278,6 +284,8 @@ mod v2_runtime;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod v2_server;
 mod v2_startup;
+#[cfg(target_os = "linux")]
+mod tpm_anchor_v3;
 #[allow(dead_code)] // Activated by the V2 authenticated dispatch routes.
 mod v2_state_owner;
 mod v2_task_authority;

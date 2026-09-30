@@ -39,12 +39,13 @@ fn worker(byte: u8) -> ArtifactIdentityV2 {
 }
 
 fn artifact(artifact_type: ClosedArtifactTypeV2, byte: u8) -> ArtifactIdentityV2 {
+    use sha2::Digest as _;
     ArtifactIdentityV2::new(
         artifact_type,
         ClosedTargetOsV2::Linux,
         ClosedTargetArchitectureV2::X86_64,
         1,
-        digest(byte),
+        Digest32V2::new(sha2::Sha256::digest([byte]).into()),
         digest(byte.wrapping_add(1)),
         digest(byte.wrapping_add(2)),
     )
@@ -784,6 +785,25 @@ fn complete_security_state_manifest_round_trips_and_rejects_signature_mutation()
         &grant_verifier,
     )
     .expect("signed transaction");
+    assert_manifest_staging_binding(&desired_manifest, &transaction);
+    assert_manifest_highwater_binding(&desired_manifest);
+    #[cfg(target_os = "linux")]
+    assert_measured_manifest_binding(
+        &desired_manifest,
+        &root_set,
+        &transaction,
+        &grant_signer,
+        &transaction_signer,
+        &grant_verifier,
+        [
+            migration_plan.canonical_bytes(),
+            artifact_install_plan.canonical_bytes(),
+            service_transition_plan.canonical_bytes(),
+            isolated_e2e_plan.canonical_bytes(),
+            evidence_contract.canonical_bytes(),
+            protected_acceptance_plan.canonical_bytes(),
+        ],
+    );
     let transaction_verifier = DeploymentAuthorizationVerifierV2::new(
         derive_ed25519_key_id_v2(transaction_signer.verifying_key().to_bytes()),
         1,
@@ -1317,6 +1337,334 @@ fn complete_security_state_manifest_round_trips_and_rejects_signature_mutation()
     assert_eq!(
         armed.selected_record().signed_record_digest(),
         armed_ledger.signed_record_digest()
+    );
+}
+
+fn assert_manifest_highwater_binding(manifest: &SecurityStateManifestV2) {
+    use savana_policy_core::v2::{HighWaterEntryV2, HighestEverV2};
+    let prior =
+        HighestEverV2::new([HighWaterEntryV2::new(0, digest(250), 1).unwrap(); 29]).unwrap();
+    let current = manifest.normal_update_highwater(&prior).unwrap();
+    assert_eq!(manifest.normal_update_highwater(&current).unwrap(), current);
+    for domain in ClosedSecurityDomainV2::ALL {
+        let entry = current.entry(domain);
+        for conflict in [
+            HighWaterEntryV2::new(
+                entry.sequence() + 1,
+                entry.content_digest(),
+                entry.key_epoch(),
+            )
+            .unwrap(),
+            HighWaterEntryV2::new(entry.sequence(), digest(254), entry.key_epoch()).unwrap(),
+            HighWaterEntryV2::new(0, entry.content_digest(), entry.key_epoch() + 1).unwrap(),
+        ] {
+            let mut entries = *current.entries();
+            entries[domain.index()] = conflict;
+            let history = HighestEverV2::new(entries).unwrap();
+            assert!(
+                manifest.normal_update_highwater(&history).is_err(),
+                "domain {domain:?}"
+            );
+        }
+    }
+}
+
+fn manifest_staging_entries(
+    manifest: &SecurityStateManifestV2,
+) -> Vec<savana_policy_core::v2::StagingEntryV2> {
+    use savana_policy_core::v2::{ClosedStagingPathIdV2 as P, StagingEntryV2 as E};
+    let mut entries: Vec<_> = (1..=6)
+        .map(|n| {
+            E::new_regular(
+                P::from_tag(n).unwrap(),
+                1,
+                digest(n as u8),
+                0o600,
+                digest(240),
+                digest(241),
+            )
+            .unwrap()
+        })
+        .collect();
+    entries
+        .push(E::new_directory(P::ArtifactPayloadRoot, 0o700, digest(240), digest(241)).unwrap());
+    for tag in 10..=44 {
+        let path = P::from_tag(tag).unwrap();
+        let file = manifest
+            .material()
+            .file_tree
+            .entries()
+            .iter()
+            .find(|e| Some(e.logical_path_id()) == path.target_logical_path())
+            .unwrap();
+        let artifact = file.artifact_identity().unwrap();
+        entries.push(
+            E::new_regular(
+                path,
+                artifact.byte_length(),
+                artifact.sha256(),
+                0o600,
+                digest(240),
+                digest(241),
+            )
+            .unwrap(),
+        );
+    }
+    entries
+}
+
+fn assert_manifest_staging_binding(
+    manifest: &SecurityStateManifestV2,
+    transaction: &DeploymentTransactionV2,
+) {
+    use savana_policy_core::v2::{StagingEntryV2, StagingTreeV2};
+    manifest.validate_transaction_binding(transaction).unwrap();
+    let entries = manifest_staging_entries(manifest);
+    manifest
+        .validate_staged_payloads(&StagingTreeV2::new(entries.clone()).unwrap())
+        .unwrap();
+    // Every one of the 35 payloads is checked, not only the executable closure.
+    for index in 7..entries.len() {
+        let mut missing = entries.clone();
+        missing.remove(index);
+        assert!(manifest
+            .validate_staged_payloads(&StagingTreeV2::new(missing).unwrap())
+            .is_err());
+        for change_size in [false, true] {
+            let mut wrong = entries.clone();
+            let e = &entries[index];
+            wrong[index] = StagingEntryV2::new_regular(
+                e.logical_path_id(),
+                e.size() + u64::from(change_size),
+                if change_size { e.sha256() } else { digest(254) },
+                0o600,
+                digest(240),
+                digest(241),
+            )
+            .unwrap();
+            assert!(manifest
+                .validate_staged_payloads(&StagingTreeV2::new(wrong).unwrap())
+                .is_err());
+        }
+    }
+    let mut material = manifest.material().clone();
+    // A different release may be independently signed, but cannot be the
+    // manifest that this transaction authorizes. Signature mutations are
+    // separately tested above; here even verified objects must bind exactly.
+    material.target_platform = PlatformLockV2::new(
+        ClosedTargetOsV2::Linux,
+        ClosedTargetArchitectureV2::X86_64,
+        digest(209),
+        digest(211),
+        digest(212),
+        digest(213),
+        digest(214),
+    )
+    .unwrap();
+    let mut changed_intent = transaction.intent().material().clone();
+    changed_intent.target_platform = material.target_platform;
+    assert_signed_manifest_transaction_rejected(manifest, changed_intent);
+    let mut changed_intent = transaction.intent().material().clone();
+    changed_intent.desired_manifest_digest = digest(254);
+    assert_signed_manifest_transaction_rejected(manifest, changed_intent);
+}
+
+fn assert_signed_manifest_transaction_rejected(
+    manifest: &SecurityStateManifestV2,
+    material: DeploymentTransactionIntentMaterialV2,
+) {
+    let signer = ed25519_dalek::SigningKey::from_bytes(&[67; 32]);
+    let verifier = DeploymentAuthorizationVerifierV2::new(
+        derive_ed25519_key_id_v2(signer.verifying_key().to_bytes()),
+        1,
+        signer.verifying_key().to_bytes(),
+    )
+    .unwrap();
+    let intent = DeploymentTransactionIntentV2::new(material).unwrap();
+    let grant = RollbackGrantV2::new_signed_for_test(
+        &intent,
+        RecoveryPhaseHighWaterV2::normal(std::array::from_fn(|i| digest(70 + i as u8))).unwrap(),
+        40,
+        &signer,
+        1,
+    )
+    .unwrap();
+    let transaction = DeploymentTransactionV2::new_signed_for_test(
+        intent,
+        grant,
+        &ed25519_dalek::SigningKey::from_bytes(&[68; 32]),
+        1,
+        &verifier,
+    )
+    .unwrap();
+    assert!(manifest.validate_transaction_binding(&transaction).is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+fn assert_measured_manifest_binding(
+    manifest: &SecurityStateManifestV2,
+    roots: &ReleaseTrustRootSetV2,
+    original: &DeploymentTransactionV2,
+    grant_signer: &ed25519_dalek::SigningKey,
+    transaction_signer: &ed25519_dalek::SigningKey,
+    grant_verifier: &DeploymentAuthorizationVerifierV2,
+    plans: [&[u8]; 6],
+) {
+    use savana_platform_identity::{DeploymentApplySelectorV2, FixedDeploymentSpoolV2};
+    use savana_policy_core::v2::{
+        ClosedStagingPathIdV2 as P, StagingEntryV2 as E, StagingTreeV2, VerifiedDeploymentStagingV3,
+    };
+    use sha2::Digest as _;
+    let acl = Digest32V2::new(sha2::Sha256::digest(b"savana.linux-staging.v3.empty-acl\0").into());
+    let xattr =
+        Digest32V2::new(sha2::Sha256::digest(b"savana.linux-staging.v3.empty-xattr\0").into());
+    let mut entries: Vec<_> = plans
+        .iter()
+        .enumerate()
+        .map(|(i, bytes)| {
+            E::new_regular(
+                P::from_tag(i as u16 + 1).unwrap(),
+                bytes.len() as u64,
+                Digest32V2::new(sha2::Sha256::digest(bytes).into()),
+                0o600,
+                acl,
+                xattr,
+            )
+            .unwrap()
+        })
+        .collect();
+    entries.push(E::new_directory(P::ArtifactPayloadRoot, 0o700, acl, xattr).unwrap());
+    entries.extend(
+        manifest_staging_entries(manifest)
+            .into_iter()
+            .skip(7)
+            .map(|e| {
+                E::new_regular(e.logical_path_id(), e.size(), e.sha256(), 0o600, acl, xattr)
+                    .unwrap()
+            }),
+    );
+    let tree = StagingTreeV2::new(entries).unwrap();
+    let mut material = original.intent().material().clone();
+    material.staging_tree_digest = tree.merkle_root();
+    let intent = DeploymentTransactionIntentV2::new(material).unwrap();
+    let grant = RollbackGrantV2::new_signed_for_test(
+        &intent,
+        RecoveryPhaseHighWaterV2::normal(std::array::from_fn(|i| digest(70 + i as u8))).unwrap(),
+        40,
+        grant_signer,
+        1,
+    )
+    .unwrap();
+    let transaction = DeploymentTransactionV2::new_signed_for_test(
+        intent,
+        grant,
+        transaction_signer,
+        1,
+        grant_verifier,
+    )
+    .unwrap();
+    let selector = savana_policy_core::v2::staging_selector_v2(
+        transaction.intent().transaction_id(),
+        tree.merkle_root(),
+    );
+    let leaf: String = selector
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let selector = DeploymentApplySelectorV2::parse_arguments(
+        ["deploy".into(), "apply".into(), leaf.clone().into()].into_iter(),
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join(leaf);
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::create_dir(dir.join("ArtifactPayloadRoot")).unwrap();
+    for path in [
+        root.path().to_path_buf(),
+        dir.clone(),
+        dir.join("ArtifactPayloadRoot"),
+    ] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let write = |path: std::path::PathBuf, bytes: &[u8], mode| {
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    for (name, bytes) in [
+        "MigrationPlan",
+        "ArtifactInstallPlan",
+        "ServiceTransitionPlan",
+        "IsolatedE2EPlan",
+        "EvidenceContract",
+        "ProtectedAcceptancePlan",
+    ]
+    .iter()
+    .zip(plans)
+    {
+        write(dir.join(format!("{name}V2.cbor")), bytes, 0o600);
+    }
+    for e in tree.entries().iter().skip(7) {
+        let byte = (0..=255u8)
+            .find(|b| Digest32V2::new(sha2::Sha256::digest([*b]).into()) == e.sha256())
+            .unwrap();
+        write(
+            dir.join("ArtifactPayloadRoot")
+                .join(e.logical_path_id().tag().to_string()),
+            &[byte],
+            0o600,
+        );
+    }
+    write(
+        dir.join("DeploymentTransactionV2.cbor"),
+        transaction.canonical_bytes(),
+        0o400,
+    );
+    let spool = FixedDeploymentSpoolV2::open_for_test(root.path()).unwrap();
+    let mut staging = VerifiedDeploymentStagingV3::open(&spool, selector, &transaction).unwrap();
+    assert_eq!(
+        staging
+            .verify_manifest(&transaction, manifest.canonical_bytes(), roots, 20)
+            .unwrap(),
+        *manifest
+    );
+    assert!(staging
+        .verify_manifest(original, manifest.canonical_bytes(), roots, 20)
+        .is_err());
+    assert!(
+        staging
+            .verify_manifest(&transaction, manifest.canonical_bytes(), roots, 10)
+            .is_err(),
+        "transaction is not yet valid"
+    );
+    assert!(
+        staging
+            .verify_manifest(&transaction, manifest.canonical_bytes(), roots, 21)
+            .is_err(),
+        "release components expired while the transaction is still valid"
+    );
+    assert!(
+        staging
+            .verify_manifest(&transaction, manifest.canonical_bytes(), roots, 29)
+            .is_err(),
+        "transaction expiry is exclusive"
+    );
+    assert!(staging
+        .verify_manifest(&transaction, manifest.canonical_bytes(), roots, 31)
+        .is_err());
+    let mut forged = manifest.canonical_bytes().to_vec();
+    *forged.last_mut().unwrap() ^= 1;
+    assert!(staging
+        .verify_manifest(&transaction, &forged, roots, 20)
+        .is_err());
+    write(dir.join("ArtifactPayloadRoot/44"), &[255], 0o600);
+    assert!(staging
+        .verify_manifest(&transaction, manifest.canonical_bytes(), roots, 20)
+        .is_err());
+    assert!(
+        staging.revalidate().is_err(),
+        "a changed retained file poisons the lease"
     );
 }
 

@@ -530,6 +530,20 @@ impl SuiteOneIngressKernelClientV2 {
             .map_err(|_| IngressKernelClientErrorV2::Unavailable)
     }
 
+    pub fn open_private_session_v04(
+        &self,
+        request: savana_kernel_protocol::v2::GetTaskAuthorizationContextRequestV2,
+        deadline: UnixMillisV2,
+    ) -> Result<savana_kernel_protocol::v2::PrivateSessionTransferV04, IngressKernelClientErrorV2>
+    {
+        let body = self.exchange(
+            KernelIngressOperationV2::OpenPrivateSessionV04(request),
+            deadline,
+        )?;
+        savana_kernel_protocol::v2::decode_private_session_begin_v04(&body)
+            .map_err(|_| IngressKernelClientErrorV2::Unavailable)
+    }
+
     pub fn task_authorization_context(
         &self,
         request: savana_kernel_protocol::v2::GetTaskAuthorizationContextRequestV2,

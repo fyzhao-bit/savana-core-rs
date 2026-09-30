@@ -359,9 +359,19 @@ mod tests {
             .unwrap();
         client.write_all(b"SAVANA1\0").unwrap();
         client.write_all(&[0_u8; 12]).unwrap();
-        client.shutdown(std::net::Shutdown::Write).unwrap();
+        // The unpublished listener may close before this half-close (macOS
+        // reports ENOTCONN). That is the expected fail-closed behavior, not a
+        // test failure. Keep the no-response/no-dispatch checks below intact.
+        if let Err(error) = client.shutdown(std::net::Shutdown::Write) {
+            assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
+        }
         let mut byte = [0_u8; 1];
-        assert_eq!(client.read(&mut byte).unwrap(), 0);
+        match client.read(&mut byte) {
+            Ok(count) => assert_eq!(count, 0),
+            // Linux can reset a stream when closing with unread client bytes.
+            // It is still a no-response rejection, not an application reply.
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset),
+        }
         assert!(matches!(
             server.join().unwrap(),
             Err(V2ListenerError::NativeIdentity)

@@ -1,5 +1,5 @@
 %% Implementation-grounded draft, 2026-09-05; production snapshot 73e0684.
-%% Independent task-trace specification and finite model added separately.
+%% Independent task-trace specification and additive private-continuation prototype.
 %% User attachment preserved. Empirical evaluation pending; not submission-ready.
 \documentclass[letterpaper,twocolumn,10pt]{article}
 \IfFileExists{usenix-2020-09.sty}
@@ -13,7 +13,7 @@
 \usepackage{url}
 \usepackage[hidelinks]{hyperref}
 \hypersetup{
-  pdftitle={Savana: Binding Agent Actions to Authorized Task Traces},
+  pdftitle={Savana: Binding Private Agent Continuations to Task Authority},
   pdfauthor={Anonymous authors}
 }
 \newcommand{\sys}{Savana}
@@ -23,35 +23,33 @@
 \newcommand{\AD}{\ensuremath{\mathsf{AD}}}
 \newcolumntype{Y}{>{\raggedright\arraybackslash}X}
 \date{}
-\title{\Large\bf \sys{}: Binding Agent Actions to Authorized Task Traces}
+\title{\Large\bf \sys{}: Binding Private Agent Continuations to Task Authority}
 \author{Anonymous authors}
 \begin{document}
 \maketitle
 \thispagestyle{empty}
 
 \begin{abstract}
-Tool-using language-model agents interpret attacker-controlled content while
-proposing actions under a user's credentials. Even if an agent sees only trusted
-context, an arbitrary planner output is not evidence that the user authorized
-its choice. \sys{} binds monitored requests to a separately authenticated,
-bounded task contract. The kernel checks complete action alternatives rather
-than independent field allowlists, records seven non-authoritative control
-selections, and produces action-scoped endorsements only from checked evidence
-within that contract. Task accounting, approvals and dispatch commitments are
-consumed atomically, so replanning and fresh identifiers do not reset authority.
-The executor checks the actual application request before a provider attempt
-and verifies completion from the retained response. Existing information-flow
-and declassification gates remain mandatory. We implement this path in the Rust
-runtime and client integration. Native fixtures exercise dependent multi-step
-execution, malicious workers, lost acknowledgements and executor recovery.
-An independent event-history specification defines seven prefix invariants.
-Finite exploration exhausts eleven declared model configurations and detects
-eleven intentionally weakened variants; a separate oracle exercises real Rust
-accounting. These are bounded verification witnesses, not a Rust refinement
-proof or empirical attack-success or performance results. The prototype
-supports closed request profiles and structured authorization; it does not claim
-general natural-language intent inference, provider-internal semantics, or
-complete crash availability.
+Tool-using agents need runtime data to determine their next steps, but that data
+must not silently create authority or become unnecessary planner context.
+\sys{} studies continuity of independently authenticated task authority through
+discovery, planning and actual execution. An existing Rust path enforces complete
+action relations, checked control evidence, atomic task accounting and
+request/response binding. An additive Rust research prototype instantiates
+fixed, authenticated rules over objects discovered at runtime. Separately
+authenticated source metadata and a pinned directory determine exact
+object/version/recipient tuples; arbitrary signed prose does not grant authority.
+A closed planner interface exposes opaque slots and cached progress views,
+not private fields or arbitrary predicates. Durable reservations and attempt
+fences preserve consumption across rediscovery and restart. We state the
+projection's permitted leakage and exercise adaptive paired-world transcripts.
+Twenty-six prototype tests include 48 paired configurations; separate native
+fixtures, a Rust accounting oracle and eleven finite trace-model configurations
+support the earlier static-contract path. These are bounded implementation
+witnesses, not an unbounded noninterference or Rust refinement proof. The new
+prototype is not wired into production RPC/approval/dispatch, and its offline
+controller is not evidence of LLM utility. Comparative security, utility,
+disclosure, approval-cost and performance experiments remain unrun.
 \end{abstract}
 
 \section{Introduction}
@@ -99,6 +97,16 @@ the durable reservation, the request emitted by the executor, and the
 completion evidence used by subsequent actions. A signature at only one
 boundary does not establish continuity at the others.
 
+An unresolved usability boundary is that useful task objects may be unknown at
+issuance. For example, a user may authorize requesting missing invoices for this
+month's orders, once per order and only from the corresponding verified merchant.
+Pre-enumerating every order is impractical; giving a model arbitrary recipient
+or payload choice is unnecessary. We therefore explore \emph{fixed rules with
+late-bound objects}: authenticated facts instantiate a rule without modifying
+it. The model selects an opaque ready instance; a trusted owner fills the exact
+request. Closed progress observations support another discovery or action step
+without revealing order text, amounts or contact addresses.
+
 \sys{} introduces a task contract before planning. It groups complete
 alternatives into stable clauses with magnitude limits, attempt budgets
 and success dependencies. The model may generate new plans within this
@@ -118,17 +126,16 @@ The retained response, interpreted by a reviewed codec, determines whether
 a successor's success dependency is satisfied.
 
 \paragraph{Contributions and their limits.}
-First, we define task-authorized traces independently of the implementation's
-admission decisions, with obligations for authority origin, binding,
-consumption, dependencies, outcomes, attempts and acknowledgement order
-(\S\ref{sec:argument}). Constructional counterexamples show why selected local
-checks do not imply these composed obligations.
-Second, we implement their bounded realization from authenticated issuance
-through actual requests and verified outcomes in the existing Rust runtime
-(\S\ref{sec:contract}--\S\ref{sec:implementation}).
-Third, we provide a finite model-to-specification checker, explicit faulty
-variants, a source/commit-boundary correspondence map and complementary Rust
-witnesses (\S\ref{sec:evidence}). Empirical comparison remains unrun.
+First, we formulate the joint obligation of late-bound task authority and
+controlled planner observation, and implement an evidence-grounded continuation
+owner with a declared leakage projection (\S\ref{sec:continuations}).
+Second, we realize bounded task-trace enforcement in the existing Rust runtime
+(\S\ref{sec:contract}--\S\ref{sec:implementation}) and state an independent
+prefix specification (\S\ref{sec:argument}). The new continuation crate is
+deliberately separate from that production path, not an assumed composition.
+Third, we provide paired-world/protocol/persistence tests for the continuation
+prototype and complementary native, accounting and finite-model witnesses for
+the earlier path (\S\ref{sec:evidence}). Empirical comparison remains unrun.
 This is neither a more expressive general policy language nor a claim that
 prior systems cannot realize equivalent enforcement. Establishing a useful
 systems contribution beyond composition of known mechanisms still requires
@@ -151,6 +158,13 @@ deployment identity/key selection, cryptographic primitives and OS isolation.
 It is distributed across services, not just a small Rust policy module.
 A worker signature identifies a transcript, not its honesty; the supervisor
 must still validate its meaning.
+
+The continuation experiment additionally trusts an issuer, a structured order
+fact service, an independent merchant-directory service and the local owner.
+Their keys are deployment-selected and role-separated. Only the closed
+serialized planner port is adversarial; handing its caller the owner, keys or
+transport would violate this boundary. The library facade is not process
+isolation, and the offline fixture does not establish a secure deployment.
 
 We assume adversaries cannot obtain trusted signing keys, alter trusted process
 memory, defeat configured OS isolation, or roll back a correctly deployed trusted
@@ -494,8 +508,9 @@ answers are not supported by this producer and are not claimed as implemented.
 \section{Runtime and Client Integration}
 \label{sec:implementation}
 
-\sys{} extends existing Rust services rather than introducing a parallel
-demonstration monitor. Authenticated ingress supplies original input; kerneld
+The existing V2 task-contract path extends Rust services; the continuation
+prototype in Section~\ref{sec:continuations} remains separate. Authenticated
+ingress supplies original input; kerneld
 owns task authority, policy, provenance and the vault; approvald verifies user
 ceremonies; execd supervises workers and external attempts. The agent and its
 model remain proposers. Typed, authenticated service protocols and opaque handles
@@ -657,12 +672,148 @@ all concrete transitions and crash cuts. Classical checked endorsement informs
 the design but supplies no automatic language-level noninterference or
 robust-integrity theorem for this runtime~\cite{askarov2011}.
 
+\section{Evidence-Grounded Private Continuations}
+\label{sec:continuations}
+
+\subsection{Fixed authority, newly discovered objects}
+
+The additive \code{savana-private-workflow} crate implements one bounded
+program: request missing invoices for a particular account and month. Its
+signed root binds installation, task, principal, deployment, source identities,
+an immutable directory version, executor target/credential/descriptor identities,
+validity and discovery/object/disclosure limits. Order IDs are absent from the
+root. Only revision~1 and a fixed request/disclosure program are supported;
+changing the rule requires new authenticated authority, not a planner update.
+
+The owner creates a private discovery nonce. The order service and directory
+service sign distinct, canonical closed-schema messages binding that nonce,
+root digest, source and observation window. The owner rejects another query's
+facts, future/expired observations, decreasing source versions and a different
+directory snapshot. A repeated version must preserve authority-relevant
+metadata. A qualifying order must belong to the named account/month, be marked
+as missing an invoice and join to the directory on merchant identity.
+The resulting order/version/merchant/contact tuple is indivisible. A later
+observation cannot replace a prior instance or replenish its opportunity.
+
+These are trusted \emph{scoped assertions}, not semantic truth inferred from a
+signature. The source service is trusted for the enumerated metadata fields.
+Amounts and untrusted notes may be present in a signed message, but are excluded
+from selection, consistency hashes, handle construction and request payloads.
+This also prevents a repeated-version refusal from becoming an equality oracle
+for a hidden note. The source's truthfulness and the directory's intended
+meaning remain assumptions.
+
+Knowledge growth can make new concrete instances ready without changing the
+root rule. We do not call this monotonic shrinking of the concrete action set.
+The prototype's ceilings are 32 distinct orders, eight discovery rounds,
+128 public view revisions and one reservation per order. It supports neither
+arbitrary policy programs nor inferred authorization from natural language.
+
+\subsection{Durable instantiation and request binding}
+
+Fact acceptance and derived instances commit in one encrypted owner snapshot
+before a new view is available. Selecting a ready handle with the current view
+epoch commits one permanent reservation. Replanning or rediscovering that order
+does not allocate another identity. A fixed template constructs the payload;
+the existing V2 business codec binds order, version, merchant, recipient, payload,
+operation, target and credential into the request. The owner checks actual
+worker bytes with that codec before committing a transport-attempt fence.
+
+The trusted transport callback runs only after the fence commit. Its response
+bytes are retained durably before request-specific classification. Only matching
+success becomes Done; all other outcomes are Unknown, with no refund or retry.
+The outcome commits before its public status changes. An attempted operation
+without a retained response reopens Unknown; a retained response can be classified
+after reopen without transport. This conservative rule can lose availability
+even if a crash occurred before the provider was called.
+
+The file store uses an exclusive lock, private directory/files, AES-256-GCM with
+namespace/sequence/previous-head binding, file and directory synchronization,
+and the existing G4 rollback-anchor interface. Anchor uncertainty poisons the
+owner. Reopen accepts at most one authenticated adjacent replacement with the
+expected predecessor; stale/tampered state or a missing advanced state is denied.
+The supplied test anchor is in memory, not hardware. The provider must enforce
+the order-version precondition; local binding does not prove remote business
+semantics or provider-internal exactly-once effects.
+
+\subsection{A closed, bounded observation interface}
+
+The planner can Observe, Discover at a view epoch, or RequestInvoice using a
+view epoch and opaque handle. It cannot supply a predicate, private field name,
+recipient, payload, rule amendment, success assertion or callback to a semantic
+mapper. Handles are PRFs of a random task-private key and slot index, never
+content digests. Private query/root/evidence identities and request bytes have
+no fields in the planner reply type.
+
+The view contains a schema, epoch, discovery flags and ordered opaque slots
+with Ready, Pending, Done, Unknown or Unavailable status. Repeated observations
+return the same cache. Internal fence/retention commits do not change its epoch
+when the public projection is unchanged. Disclosure limits count distinct view
+revisions, not repeated transmission of a cache. Exhaustion persists across
+reopen; private outcomes still commit, but further views are unavailable.
+Malformed, unsupported, stale and denied commands share one serialized refusal.
+
+\paragraph{Permitted leakage, not blanket secrecy.}
+Let $L$ expose the root program and bounds, ordered slot count/equality across
+rounds, eligibility/freshness and protocol-consistency progress, coarse outcomes,
+discovery availability and view revisions. Object IDs, contact bytes, amounts,
+notes and evidence hashes are not disclosed. Counts and state changes are
+intentional leakage. Timing, scheduling, network framing and provider behavior
+are outside this serialized-interface claim. A quota on yes/no queries alone
+would not establish it; arbitrary predicates are absent from the interface.
+
+Our relational target compares runs with the same allowed leakage events,
+consistently renamed private objects and coupled handle randomness, driven by
+the same adaptive planner. Their serialized planner transcripts should agree.
+Closed projection fields, value-independent handles and no hidden-field
+consistency checks supply the implementation argument for this bounded
+program. Paired executions test it; we have not mechanized an unbounded
+noninterference theorem or equivalence between arbitrary private user intents.
+The earlier S1--S7 finite graphs do not cover this new state machine.
+
+\paragraph{Integration and autonomy boundary.}
+This is a runnable Rust reference owner, not a new production endpoint. It
+reuses V2 request/profile parsing and the anchor interface, but produces no
+production dispatch grant. Authenticated rule approval, fact-service transports,
+active registry/manifest checks, G1--G7, existing action approvals and native
+executor integration are not connected to it. Existing production checks remain
+unchanged. The demonstration controller is deterministic; this workflow can
+also be scripted. Real planning utility, including tasks without a prewritten
+complete graph, must be demonstrated separately rather than inferred from the
+presence of opaque handles or a loop.
+
 \section{Engineering Evidence}
 \label{sec:evidence}
 
 This section reports executable witnesses from the implementation snapshot,
 not research benchmark results. The claim-to-code map and full verification
 record accompany the source.
+
+\subsection{Private-continuation prototype}
+
+Twenty-six Rust tests cover root/key/context binding, closed canonical parsing,
+dynamic metadata selection, signature/nonce/time errors, immutable tuple and
+directory checks, rediscovery, permanent budgets, actual-request/route mutation,
+retained-response classification and revocation. Failures injected before/after
+discovery, reservation, attempt, retention and completion commits test that an
+uncommitted result is not published and an uncertain attempt is not retried.
+Concrete file tests exercise locking, encrypted reopen, rollback, deletion,
+tampering, wrong keys/namespaces, permissions and link rejection.
+
+A three-round adaptive paired-world test changes private IDs, merchants,
+contacts, amounts and notes while preserving declared leakage. It chooses
+subsequent commands from the shared view, reopens owners, compares transcripts
+and confirms that the actual private requests differ. A second matrix checks
+48 configurations: eight eligibility masks, three outcome classes and two
+disclosure limits. A same-version hidden-field-update test checks that such a
+change does not affect acceptance. A negative contrast confirms that different
+slot counts are observable. These are finite correctness witnesses, not
+independent attack trials, a leakage-rate estimate or a general privacy proof.
+
+The offline example discovers two objects in two rounds, makes two controlled
+provider-callback calls and reopens encrypted storage without redispatch.
+It uses demo keys and a process-local anchor, and contacts neither a real
+provider nor an LLM. These results are separate from the native fixtures below.
 
 \subsection{Native integration fixtures}
 
@@ -789,6 +940,13 @@ RQ1 asks whether complete task-trace enforcement reduces unauthorized
 benign utility survives bounded contracts and fail-closed uncertainty. RQ3 asks
 which boundary contributes protection beyond an equivalent static policy.
 RQ4 measures mediation and recovery costs, including authority authoring.
+RQ5 asks whether evidence-grounded late binding preserves useful autonomy at a
+specified disclosure boundary. Compare against pre-enumerated contracts,
+per-action user approval, equivalent dynamic policies and a non-LLM workflow
+controller. Include discovery of new objects, source-version conflicts and
+uncertain outcomes; report where the fixed prototype cannot express a task.
+Measure both authorized task completion and cumulative allowed observations,
+not merely absence of raw strings in a prompt.
 
 Tasks should include summary-only requests, correlated multi-recipient delivery,
 dependent read/modify/send workflows, budgeted repeated actions and receiver-bound
@@ -896,6 +1054,12 @@ primitives~\cite{costa2025fides}. Our task-root check is complementary to data-f
 confinement: a permissible flow alone does not establish that the task requested
 the effect. This observation is not an experimentally demonstrated bypass of
 either system.
+Fides already studies data-dependent tasks and constrained inspection; returning
+an opaque variable or a bounded type is not our novelty claim. Our continuation
+experiment instead makes fixed-rule instantiation, a closed progress projection
+and durable per-object consumption explicit in one narrow implementation.
+Whether that combination adds useful capability beyond equally configured
+existing systems remains a comparative research question.
 
 Progent's revised design uses symbolic tool/argument policies, with solver-checked
 narrowing and explicit approval for expansion~\cite{shi2025progent}.
@@ -938,6 +1102,14 @@ unanticipated work. Current profiles require manual review and do not cover
 arbitrary MCP schemas. Extending them introduces semantic and TCB obligations,
 not merely additional parsing code.
 
+The continuation prototype relaxes pre-enumeration only for its fixed invoice
+program. It does not implement general dynamic scopes, mutable directories,
+automatic root amendment, natural-language fact certification or production
+UI/SDK integration. Its trusted fact services, transport, external anchor and
+API isolation assumptions must be realized in an actual deployment. The
+paired-world evidence is separate from the finite static-contract model;
+neither implies verification of their composition.
+
 Full kernel-session recovery, autonomous cleanup of never-delivered ACKs,
 arbitrary synthesized final answers and a live hardware-backed browser/product
 session are not established by this increment. Deployment signing, hardware
@@ -952,7 +1124,11 @@ complete action relations, state-bound endorsement and durable accounting.
 The execution boundary checks the request actually attempted and the response
 used as evidence for subsequent steps. An independent prefix specification,
 finite negative controls and implementation witnesses make the composition
-obligations explicit, with stated recovery and codec limits.
+obligations explicit, with stated recovery and codec limits. An additive
+private-continuation prototype now instantiates authenticated fixed rules over
+runtime-discovered objects and exposes only a declared bounded progress view.
+Its request, persistence and paired-world witnesses are not a production
+integration or evidence of general autonomous-planning utility.
 Empirical security, utility, approval-cost and performance comparisons remain
 necessary before drawing a publication-level effectiveness conclusion.
 
@@ -979,21 +1155,24 @@ Before submission, an anonymous, frozen artifact must include reproducible build
 instructions, pinned dependencies and all measured experiment inputs/outputs.
 No anonymous artifact URL or benchmark dataset is asserted to exist yet.
 
-The primary native witnesses are in the kernel's agent-authority module, with
-debug-only executor support. The accounting oracle is test-only policy code;
-vault tests cover encrypted multi-result replay. The verification record names
-exact commands and the source snapshot. Reproduction must run differing Cargo
-feature configurations sequentially or in separate target directories because
-integration fixtures copy package executables. Platform prerequisites and
-test-only keys must not be mistaken for production trust material.
+Native witnesses use the kernel's agent-authority module and debug-only
+executor support; test-only policy and vault cases cover accounting and replay.
+Verification records name exact commands and source snapshots. Run differing
+Cargo feature configurations sequentially or in separate target directories:
+fixtures copy package executables. Test-only keys are not production trust
+material.
 
-The finite checker is in \code{verification/task_trace}, uses Python's standard
-library, and regenerates the committed results in CI. Its contract inputs,
-fault variants, coverage requirements and source hashes are available without
-live model calls or platform credentials. It is a research artifact, not a
-component loaded by the production authority path.
+The finite checker uses only Python's standard library and regenerates recorded
+results in CI. Contracts, fault variants, coverage and source hashes need no
+model calls or platform credentials. This research artifact is not loaded in
+production.
 
-\section{Illustrative Trace and Witness Boundary}
+The continuation crate includes an offline example, encrypted storage, fault
+injection and paired-world tests. Its README specifies planner/host APIs,
+leakage and the unimplemented production bridge. Linux/macOS CI jobs are
+configured; no remote run is claimed here.
+
+\section{Native Witness Boundary}
 
 The native two-step fixture predeclares $(A,\mathrm{Alice})$ and
 $(B,\mathrm{Bob})$, each with one attempt. Step 2 requires verified step-1

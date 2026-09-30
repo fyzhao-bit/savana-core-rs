@@ -116,6 +116,16 @@ pub(crate) trait KernelIngressCommitSinkV2: Send + 'static {
         now: UnixMillisV2,
     ) -> Result<savana_vault::AuthorizedVaultReleaseV2, StableCode>;
 
+    fn prepare_fused_result_release(
+        &mut self,
+        _candidate: &savana_policy_core::v2::FusedFinalResultCandidateV04,
+        _principal: PrincipalIdV2,
+        _material: savana_vault::VaultReleaseMaterialV2,
+        _now: UnixMillisV2,
+    ) -> Result<savana_vault::PendingVaultReleaseV2, StableCode> {
+        Err(StableCode::KernelUnavailable)
+    }
+
     fn mark_release_dispatch_prepared(
         &mut self,
         authorized: savana_vault::AuthorizedVaultReleaseV2,
@@ -146,6 +156,20 @@ pub(crate) trait KernelIngressCommitSinkV2: Send + 'static {
         now: UnixMillisV2,
     ) -> Result<(), StableCode>;
 
+    #[allow(clippy::too_many_arguments)]
+    fn commit_recovered_release(
+        &mut self,
+        _release: savana_kernel_protocol::v2::DurableReleaseIdV2,
+        _nonce: savana_kernel_protocol::v2::Nonce32V2,
+        _core: Digest32V2,
+        _subject: Digest32V2,
+        _receipt: Digest32V2,
+        _audit: Digest32V2,
+        _now: UnixMillisV2,
+    ) -> Result<(), StableCode> {
+        Err(StableCode::KernelUnavailable)
+    }
+
     fn mark_release_indeterminate(
         &mut self,
         prepared: savana_vault::VaultDispatchPreparedV2,
@@ -164,6 +188,19 @@ pub(crate) trait KernelIngressCommitSinkV2: Send + 'static {
         expires_at: UnixMillisV2,
         now: UnixMillisV2,
     ) -> Result<MaskedDocumentHandleV2, StableCode>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn recover_tool_result(
+        &mut self,
+        _task: DurableTaskIdV2,
+        _run: savana_kernel_protocol::v2::DurableRunIdV2,
+        _principal: PrincipalIdV2,
+        _commit: Digest32V2,
+        _expires_at: UnixMillisV2,
+        _now: UnixMillisV2,
+    ) -> Result<MaskedDocumentHandleV2, StableCode> {
+        Err(StableCode::KernelUnavailable)
+    }
 }
 
 pub(crate) struct CoreKernelRuntimeServicesV2 {
@@ -1490,6 +1527,24 @@ impl CoreKernelRuntimeServicesV2 {
                     &response,
                 )
             }
+            KernelIngressOperationV2::OpenPrivateSessionV04(request) => {
+                let subject = self
+                    .input
+                    .authenticate_task_context(
+                        &request,
+                        active_state_manifest_digest,
+                        deployment_generation,
+                        now,
+                    )
+                    .map_err(map_input_error)?;
+                let transfer = self
+                    .agent_authority
+                    .as_mut()
+                    .ok_or(StableCode::KernelUnavailable)?
+                    .open_private_session_v04(&subject, now)
+                    .map_err(map_agent_authority_error)?;
+                savana_kernel_protocol::v2::encode_private_session_begin_v04(transfer)
+            }
             KernelIngressOperationV2::GetTaskAuthorizationContext(request) => {
                 let subject = self
                     .input
@@ -1751,6 +1806,44 @@ impl CoreKernelRuntimeServicesV2 {
 }
 
 impl KernelRuntimeServicesV2 for CoreKernelRuntimeServicesV2 {
+    fn tick_fused_planning(&mut self) -> Result<(), StableCode> {
+        if !self.readiness.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let Some(authority) = self.agent_authority.as_mut() else {
+            return Ok(());
+        };
+        // Read real wall time inside the owner, not when a tick entered its queue.
+        let mut failed_clock = false;
+        let result = authority.tick_private_workflows_v04(
+            &mut self.values,
+            self.ingress_commit_sink
+                .as_deref_mut()
+                .map(|s| s as &mut dyn KernelIngressCommitSinkV2),
+            || match crate::v04_managed_admin::now() {
+                Ok(now) => now,
+                Err(_) => {
+                    failed_clock = true;
+                    UnixMillisV2::new(0)
+                }
+            },
+        );
+        if failed_clock {
+            Err(StableCode::KernelUnavailable)
+        } else {
+            result
+        }
+    }
+    fn managed_admin(
+        &mut self,
+        submission: crate::v04_managed_admin::AdminSubmissionV04,
+    ) -> Result<savana_policy_core::v2::ManagedAdminReceiptV04, StableCode> {
+        self.agent_authority
+            .as_mut()
+            .ok_or(StableCode::KernelUnavailable)?
+            .apply_managed_admin(submission, &mut self.values)
+    }
+
     fn execute(
         &mut self,
         request: KernelRuntimeRequestV2,

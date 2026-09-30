@@ -1704,6 +1704,7 @@ pub enum KernelIngressOperationV2 {
     RevokeTaskAuthorization(RevokeTaskAuthorizationRequestV2),
     RecoverTaskAuthorization(RecoverTaskAuthorizationRequestV2),
     GetTaskAuthorizationContext(GetTaskAuthorizationContextRequestV2),
+    OpenPrivateSessionV04(GetTaskAuthorizationContextRequestV2),
 }
 
 impl KernelIngressOperationV2 {
@@ -1727,13 +1728,14 @@ impl KernelIngressOperationV2 {
             Self::RevokeTaskAuthorization(_) => 54,
             Self::RecoverTaskAuthorization(_) => 55,
             Self::GetTaskAuthorizationContext(_) => 56,
+            Self::OpenPrivateSessionV04(_) => 57,
         }
     }
 }
 
-pub const fn kernel_ingress_operation_tags_v2() -> &'static [u16; 18] {
+pub const fn kernel_ingress_operation_tags_v2() -> &'static [u16; 19] {
     &[
-        0, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56,
+        0, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57,
     ]
 }
 
@@ -1828,8 +1830,9 @@ pub fn encode_kernel_ingress_operation_v2(
             encode_fixed(&mut encoder, &request.authorization)?;
             encode_fixed(&mut encoder, &request.request_digest)?;
         }
-        KernelIngressOperationV2::GetTaskAuthorizationContext(request) => {
-            encode_header(&mut encoder, 56, 2)?;
+        KernelIngressOperationV2::GetTaskAuthorizationContext(request)
+        | KernelIngressOperationV2::OpenPrivateSessionV04(request) => {
+            encode_header(&mut encoder, value.tag(), 2)?;
             encode_fixed(&mut encoder, &request.authorization)?;
             if let Some(session) = request.session {
                 encode_fixed(&mut encoder, &session)?;
@@ -1982,7 +1985,7 @@ pub fn decode_kernel_ingress_operation_v2(
                 )?,
             )
         }
-        56 => {
+        56 | 57 => {
             expect_array(&mut decoder, 2)?;
             let authorization = decode_fixed(&mut decoder, &mut context)?;
             let session = if decoder.datatype().map_err(ProtocolError::malformed)?
@@ -1993,9 +1996,12 @@ pub fn decode_kernel_ingress_operation_v2(
             } else {
                 Some(decode_fixed(&mut decoder, &mut context)?)
             };
-            KernelIngressOperationV2::GetTaskAuthorizationContext(
-                GetTaskAuthorizationContextRequestV2::new(authorization, session),
-            )
+            let request = GetTaskAuthorizationContextRequestV2::new(authorization, session);
+            if tag == 57 {
+                KernelIngressOperationV2::OpenPrivateSessionV04(request)
+            } else {
+                KernelIngressOperationV2::GetTaskAuthorizationContext(request)
+            }
         }
         _ => return Err(ProtocolError::stable(StableCode::ProtocolUnknownOperation)),
     };

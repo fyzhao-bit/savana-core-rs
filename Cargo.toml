@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "crates/libsavana-ner",
   "crates/savana-client",
+  "crates/savana-continuation-core",
   "crates/savana-agentd",
   "crates/savana-approvald",
   "crates/savana-execd",
@@ -14,6 +15,7 @@ members = [
   "crates/savana-core-py",
   "crates/savana-openclaw-release",
   "crates/savana-policy-core",
+  "crates/savana-private-workflow",
   "crates/savana-platform-identity",
   "crates/savana-vault",
 ]
@@ -62,4 +64,13 @@ ort = { version = "=2.0.0-rc.10", default-features = false, features = ["ndarray
 
 [profile.release]
 panic = "abort"
+overflow-checks = true
+
+# Native peer measurement hashes whole executables within a bounded broker
+# exchange. Unoptimized SHA-256 exceeds that budget on the ARM64 integration
+# host when two reciprocal measurements queue. Keep verification and deadlines
+# unchanged; optimize only the hashing implementation, not the debug trust mode.
+[profile.dev.package.sha2]
+opt-level = 3
+debug-assertions = true
 overflow-checks = true

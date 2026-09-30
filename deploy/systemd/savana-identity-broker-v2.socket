@@ -1,0 +1,15 @@
+[Unit]
+Description=Savana native cross-UID measurement socket
+
+[Socket]
+ListenStream=/run/savana-identity/measurement-v2.sock
+FileDescriptorName=identity-measurement-v2
+SocketUser=root
+SocketGroup=savana-identity
+SocketMode=0660
+DirectoryMode=0755
+RemoveOnStop=yes
+Service=savana-identity-broker-v2.service
+
+[Install]
+WantedBy=sockets.target

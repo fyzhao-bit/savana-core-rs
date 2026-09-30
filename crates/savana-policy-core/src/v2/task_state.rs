@@ -25,13 +25,60 @@ const MAX_RECORDS: usize = 65_536;
 pub struct TaskDispatchAuthorizationV2 {
     pub(crate) matched: VerifiedTaskMatchV2,
     pub(crate) endorsements: [ControlEndorsementV2; 7],
+    pub(crate) continuation_resource: Option<super::ContinuationResourceEvidenceV04>,
+    pub(crate) fused_operation: Option<super::FusedOperationRefV04>,
+    pub(crate) fused_recipe: Option<super::FusedExecutionRecipeV04>,
+    pub(crate) fused_result_scope: Option<super::FusedResultScopeV04>,
+    pub(crate) fused_final_result:
+        Option<(Digest32V2, savana_kernel_protocol::v2::BusinessRequestV2)>,
 }
 impl TaskDispatchAuthorizationV2 {
     pub fn new(matched: VerifiedTaskMatchV2, endorsements: [ControlEndorsementV2; 7]) -> Self {
         Self {
             matched,
             endorsements,
+            continuation_resource: None,
+            fused_operation: None,
+            fused_recipe: None,
+            fused_result_scope: None,
+            fused_final_result: None,
         }
+    }
+
+    /// Evidence is untrusted until rechecked inside guarded G7 preparation.
+    pub fn with_continuation_resource(
+        mut self,
+        evidence: super::ContinuationResourceEvidenceV04,
+    ) -> Self {
+        self.continuation_resource = Some(evidence);
+        self
+    }
+
+    /// Merely selects an operation; G7 must authenticate and bind actual work.
+    pub fn with_fused_operation(mut self, operation: super::FusedOperationRefV04) -> Self {
+        self.fused_operation = Some(operation);
+        self
+    }
+
+    /// Attach locally constructed exact-draft evidence, not a model hash or a
+    /// G6 approval. The owner checks it again inside the atomic G7 transaction.
+    pub fn with_fused_recipe(mut self, recipe: super::FusedExecutionRecipeV04) -> Self {
+        self.fused_recipe = Some(recipe);
+        self
+    }
+
+    pub fn with_fused_result_scope(mut self, scope: super::FusedResultScopeV04) -> Self {
+        self.fused_result_scope = Some(scope);
+        self
+    }
+    /// Not authority: G7 rereads the original result and signed root atomically.
+    pub fn with_fused_final_result(
+        mut self,
+        candidate: Digest32V2,
+        request: savana_kernel_protocol::v2::BusinessRequestV2,
+    ) -> Self {
+        self.fused_final_result = Some((candidate, request));
+        self
     }
 }
 

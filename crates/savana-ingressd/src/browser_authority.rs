@@ -341,7 +341,8 @@ impl IngressBrowserAuthorityV2 {
         }
         let mutation = (|| {
             Ok(match request {
-                IngressBrowserRequestV2::GetTaskAuthorizationContext { .. } => {
+                IngressBrowserRequestV2::GetTaskAuthorizationContext { .. }
+                | IngressBrowserRequestV2::OpenPrivateSessionV04 { .. } => {
                     return Err(IngressBrowserAuthorityErrorV2::InvalidReference)
                 }
                 IngressBrowserRequestV2::Begin {
@@ -440,6 +441,34 @@ impl IngressBrowserAuthorityV2 {
         });
         tab.mutation_in_flight = false;
         Ok(response)
+    }
+
+    pub fn open_private_session_v04(
+        &self,
+        tab_handle: IngressTabSessionCapabilityV2,
+        deadline: UnixMillisV2,
+    ) -> Result<savana_kernel_protocol::v2::PrivateSessionTransferV04, IngressBrowserAuthorityErrorV2>
+    {
+        let request = {
+            let tabs = self
+                .tabs
+                .lock()
+                .map_err(|_| IngressBrowserAuthorityErrorV2::Unavailable)?;
+            let tab = tabs
+                .iter()
+                .find(|t| t.tab == tab_handle)
+                .ok_or(IngressBrowserAuthorityErrorV2::InvalidReference)?;
+            if tab.mutation_in_flight {
+                return Err(IngressBrowserAuthorityErrorV2::Busy);
+            }
+            savana_kernel_protocol::v2::GetTaskAuthorizationContextRequestV2::new(
+                tab.authorization,
+                tab.finalized_session,
+            )
+        };
+        self.kernel
+            .open_private_session_v04(request, deadline)
+            .map_err(map_kernel)
     }
 
     pub fn task_authorization_context(

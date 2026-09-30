@@ -1,0 +1,21 @@
+{
+  "schema": "savana-model-matrix-draft-v1",
+  "status": "preparation_only_not_run",
+  "primary_variable": "reviewer_model",
+  "hold_fixed": ["planner", "attacker", "task_split", "authorization", "tool_budget", "context_budget", "sampling", "hardware_class"],
+  "models": [
+    {"id": "Qwen/Qwen3.5-0.8B", "total_parameters_b": 0.8, "enabled": false, "revision": null, "deployment": "local", "source": "https://huggingface.co/Qwen/Qwen3.5-0.8B"},
+    {"id": "Qwen/Qwen3.5-2B", "total_parameters_b": 2, "enabled": false, "revision": null, "deployment": "local", "source": "https://huggingface.co/Qwen/Qwen3.5-2B"},
+    {"id": "Qwen/Qwen3.5-4B", "total_parameters_b": 4, "enabled": false, "revision": null, "deployment": "local", "source": "https://huggingface.co/Qwen/Qwen3.5-4B"},
+    {"id": "Qwen/Qwen3.5-9B", "total_parameters_b": 9, "enabled": false, "revision": null, "deployment": "local", "source": "https://huggingface.co/Qwen/Qwen3.5-9B"},
+    {"id": "Qwen/Qwen3.5-27B", "total_parameters_b": 27, "enabled": false, "revision": null, "deployment": "local_capacity_pending", "source": "https://huggingface.co/Qwen/Qwen3.5-27B"},
+    {"id": "DeepSeek-V4.1-Flash", "total_parameters_b": 552, "active_input_parameters_b": 8, "active_output_parameters_b": 16, "enabled": false, "revision": null, "deployment": "separate_budget_and_trust_boundary_required", "source": "https://deepseek.com/news/deepseek-v4-1-flash/"},
+    {"id": "JEV", "enabled": false, "revision": null, "deployment": "user_model_identity_and_access_confirmation_required", "candidate_source": "https://typesafe.ai/"}
+  ],
+  "notes": [
+    "Draft choices, not installed models or measured results. Never compare MoE active parameters with dense total parameters as equivalent size.",
+    "Pin weight/tokenizer/template/runtime revisions, precision, reasoning mode and hardware before measurement.",
+    "A provider-hosted reviewer is not a trusted local reviewer. Do not send private ReviewView to a remote endpoint through this experiment tool.",
+    "JEV is unresolved. If TypeSafe Jev is intended, compare typed review decisions on a shared schema, not unrestricted chat-agent capability."
+  ]
+}

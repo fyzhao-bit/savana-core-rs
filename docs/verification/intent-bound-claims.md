@@ -23,11 +23,24 @@ is an executable witness, not a theorem or a measured population result.
 | Bounded Rust accounting exploration | test-only policy `task_authorization_model.rs` | 1,440 differential traces, 984 admitted/1,896 refused probes, six accounting observations | Real Rust accounting projection, not a distributed refinement proof |
 | Independent prefix specification and finite graph checking | Research-only `verification/task_trace/spec.py`, `model.py`, `check.py`; manual `docs/research/task-trace-rust-map.md` | Eleven exhausted graphs; 11,788 states / 59,003 edges; eleven faulty variants detected; fourteen checker tests | Separate finite configurations, idealized authority/storage; model-to-spec conformance, not Rust extraction or proof |
 
+## Additive private-continuation prototype (not a production path)
+
+| New mechanism | Research code | Executable evidence | Boundary |
+| --- | --- | --- | --- |
+| Fixed signed rules, runtime objects | `savana-private-workflow/src/domain.rs`, `runtime.rs` | Root/source/query/time/metadata tests; rediscovery and tuple-replacement tests | One account/month invoice program; trusted scoped fact services; no natural-language authority inference |
+| Private closed planner feedback | `planner.rs`, projection in `runtime.rs` | Three-round adaptive paired-world run, 48-configuration matrix, hidden-field consistency regression, count-leakage contrast | Declared count/progress/status leakage; not timing secrecy or a general noninterference theorem |
+| Durable one-use continuations | `runtime.rs`, `store.rs` | Six execution-boundary and six issuance/reservation failure variants; real file/anchor uncertainty and rollback tests | Same exclusive host owner; externally supplied anchor; test anchor in memory |
+| Exact private requests | `codec.rs`, existing protocol `BusinessRequestV2` | Worker-field/route mutation, fixed payload, retained-response tests; offline example | Reuses codec only; does not produce a production dispatch capability; transport/provider semantics trusted |
+
+All new test names are in the crate's `src/tests.rs`. The old 11 finite graphs
+do not model this state machine. The new crate is not loaded by the current V2
+RPC, approval, registry or executor path; see [its verification record](private-continuations.md).
+
 ## Claims deliberately not made
 
-The revised paper maps this table to Sections 3–7 (implemented mechanisms),
-Section 8 (independent prefix specification and conditional argument), Section 9 (bounded verification/engineering evidence),
-Section 10 (unrun experiments) and Section 12 (limitations). It uses code snapshot
+The paper separates the existing contract/runtime mechanisms, independent trace
+argument, new private-continuation experiment, engineering evidence, unrun
+experiments and limitations. The production snapshot remains
 73e0684. The original paper build is recorded in the verification file; the
 research-only specification/model increment and updated PDF checks are recorded
 in [the new verification record](task-trace-model.md).

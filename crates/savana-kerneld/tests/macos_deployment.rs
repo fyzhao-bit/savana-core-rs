@@ -1666,7 +1666,7 @@ fn build_input_generator_emits_cryptographically_bound_runtime_inputs() {
             .iter()
             .map(|rule| rule.purpose())
             .collect::<Vec<_>>(),
-        ClosedDeclassificationPurposeV2::ALL
+        ClosedDeclassificationPurposeV2::ALL[..5]
     );
     assert_eq!(
         declassification_rules.signed_digest().as_bytes(),

@@ -1,4 +1,28 @@
 use base64::Engine as _;
+#[path = "v04_fused_action_driver.rs"]
+mod fused_action_driver;
+#[path = "v04_fused_actions.rs"]
+mod fused_actions;
+#[path = "v04_fused_approval_delivery.rs"]
+mod fused_approval_delivery;
+#[path = "v04_fused_approval_recovery.rs"]
+mod fused_approval_recovery;
+#[path = "v04_fused_compiler.rs"]
+mod fused_compiler;
+#[path = "v04_fused_input_admission.rs"]
+mod fused_input_admission;
+#[path = "v04_fused_final_result.rs"]
+mod fused_final_result;
+#[path = "v04_fused_host.rs"]
+mod fused_host;
+#[path = "v04_fused_recovery_driver.rs"]
+mod fused_recovery_driver;
+#[path = "v04_fused_release_driver.rs"]
+mod fused_release_driver;
+#[path = "v04_fused_release_recovery.rs"]
+mod fused_release_recovery;
+#[path = "v04_private_session.rs"]
+mod private_session;
 use chacha20poly1305::aead::{Aead as _, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit as _, Nonce};
 use ed25519_dalek::{Signer as _, SigningKey};
@@ -53,6 +77,7 @@ use savana_kernel_protocol::v2::{
     ValueHandleV2, MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTAS_V2,
     MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTA_BYTES_V2,
 };
+use savana_kernel_protocol::StableCode;
 use savana_policy_core::v2::{
     connector_host_allowlist_digest_v2, decode_provenance_record_v2, encode_provenance_record_v2,
     provenance_digest_v2, value_digest_v2, ActiveToolRegistryV2, ClosedCardinalityV2,
@@ -246,9 +271,9 @@ fn presealed_execution_payload_digest(
     exact_plaintext: &[u8],
     declassification_node_digest: Digest32V2,
 ) -> Digest32V2 {
-    domain_digest(
-        b"SAVANA_PRESEALED_EXECUTOR_PAYLOAD_V2\0",
-        &[exact_plaintext, declassification_node_digest.as_bytes()],
+    savana_kernel_protocol::v2::presealed_tool_payload_digest_v2(
+        exact_plaintext,
+        declassification_node_digest,
     )
 }
 
@@ -256,9 +281,9 @@ fn presealed_final_release_payload_digest(
     exact_plaintext: &[u8],
     declassification_node_digest: Digest32V2,
 ) -> Digest32V2 {
-    domain_digest(
-        b"SAVANA_PRESEALED_FINAL_RELEASE_PAYLOAD_V2\0",
-        &[exact_plaintext, declassification_node_digest.as_bytes()],
+    savana_kernel_protocol::v2::presealed_release_payload_digest_v2(
+        exact_plaintext,
+        declassification_node_digest,
     )
 }
 
@@ -692,6 +717,7 @@ struct PlanArgumentRecordV2 {
     value: ValueHandleV2,
 }
 
+#[derive(Clone)]
 struct PlanStepRecordV2 {
     commitment: Digest32V2,
     run: savana_kernel_protocol::v2::RunHandleV2,
@@ -707,8 +733,23 @@ struct PlanStepRecordV2 {
     arguments: Vec<PlanArgumentRecordV2>,
 }
 
+struct PreparedToolIntentV2 {
+    material: VerifiedActionIntentMaterialV2,
+    recipe_slots: Vec<VerifiedInternalSlotMaterialV2>,
+    policy_binding: savana_policy_core::v2::ToolExecutionSemanticBindingV2,
+    semantic_binding: savana_kernel_protocol::v2::ToolExecutionSemanticBindingV2,
+    task_match: savana_policy_core::v2::VerifiedTaskMatchV2,
+    control_selections: [savana_policy_core::v2::ControlSelectionV2; 7],
+    business_request: savana_kernel_protocol::v2::BusinessRequestV2,
+    dispatch_plaintext: Vec<u8>,
+    display_plaintext: Vec<u8>,
+    provenance_parents: Vec<ProvenanceRecordV2>,
+    policy_allowed_effects: EffectSetV2,
+}
+
 #[derive(Clone)]
 struct IntentRecordV2 {
+    fused: Option<fused_actions::FusedIntentBindingV04>,
     intent: ActionIntentHandleV2,
     pending: PendingToolCallHandleV2,
     intent_commitment: Digest32V2,
@@ -758,6 +799,12 @@ enum IntentRecordStateV2 {
     Authorized,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IntentAccessV2 {
+    LegacyAgent,
+    PrivateFused,
+}
+
 struct ExecutionTicketRecordV2 {
     ticket: ExecutionTicketHandleV2,
     commitment: Digest32V2,
@@ -768,8 +815,14 @@ struct ExecutionTicketRecordV2 {
 struct ExecutionRecordV2 {
     execution: ExecutionHandleV2,
     commitment: Digest32V2,
-    ticket_commitment: Digest32V2,
+    ticket_commitment: Option<Digest32V2>,
+    // Authenticated historical result scope; present for private executions,
+    // including recovery with no volatile session/intent/ticket at all.
+    fused_recovery: Option<savana_policy_core::v2::RecoveredFusedExecutionV04>,
     action_intent_id: ActionIntentIdV2,
+    active_state_manifest_digest: Digest32V2,
+    deployment_generation: u64,
+    effect_fence_epoch: u64,
     execution_nonce: Nonce32V2,
     dispatch_core_digest: Digest32V2,
     dispatch_subject_digest: Digest32V2,
@@ -794,6 +847,8 @@ struct ToolApprovalRecordV2 {
 }
 
 struct PendingReleaseRecordV2 {
+    private_candidate: Option<Digest32V2>,
+    display_authentication: SignedUiAuthenticationEnvelopeV2,
     // The handles are held so the record owns them for its lifetime; the
     // release path authenticates against the commitments below instead.
     #[allow(dead_code)]
@@ -802,7 +857,7 @@ struct PendingReleaseRecordV2 {
     #[allow(dead_code)]
     approval: ReleaseKernelApprovalHandleV2,
     approval_commitment: Digest32V2,
-    document: MaskedDocumentHandleV2,
+    document: Option<MaskedDocumentHandleV2>,
     #[allow(dead_code)]
     run: savana_kernel_protocol::v2::RunHandleV2,
     durable_run_id: DurableRunIdV2,
@@ -874,6 +929,19 @@ impl KernelToolApprovalConfigV2 {
 }
 
 pub(crate) struct KernelG4G5RuntimeV2 {
+    // Endpoint implementations are trusted deployment adapters, not Agent data.
+    // Empty in production until the explicitly deferred cloud adapter exists.
+    fused_workers: Vec<Box<dyn savana_policy_core::v2::FusedModelTransportV04 + Send>>,
+    fused_last_task: Option<DurableTaskIdV2>,
+    fused_workflow_phase: u8,
+    fused_action_last_task: Option<[u8; 32]>,
+    fused_action_not_before: u64,
+    fused_release_last_task: Option<[u8; 32]>,
+    fused_release_not_before: u64,
+    fused_approval_client: Option<savana_approvald::ApprovalSuiteOneClientV2>,
+    fused_recovery_last_nonce: Option<[u8; 32]>,
+    fused_recovery_not_before: u64,
+    fused_cleanup_confirmed: std::collections::BTreeSet<[u8; 32]>,
     declassification_rules: ActiveDeclassificationRuleSetV2,
     active_tools: ActiveToolRegistryV2,
     validators: VerifiedInternalValidatorRegistryV2,
@@ -1224,6 +1292,17 @@ impl KernelG4G5RuntimeV2 {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
         Ok(Self {
+            fused_workers: Vec::new(),
+            fused_last_task: None,
+            fused_workflow_phase: 0,
+            fused_action_last_task: None,
+            fused_action_not_before: 0,
+            fused_release_last_task: None,
+            fused_release_not_before: 0,
+            fused_approval_client: None,
+            fused_recovery_last_nonce: None,
+            fused_recovery_not_before: 0,
+            fused_cleanup_confirmed: std::collections::BTreeSet::new(),
             declassification_rules,
             active_tools,
             validators,
@@ -1234,6 +1313,27 @@ impl KernelG4G5RuntimeV2 {
             approval,
             g7: None,
         })
+    }
+
+    pub(crate) fn install_fused_workers_v04(
+        &mut self,
+        workers: Vec<savana_agentd::UnixMtlsFusedModelTransportV04>,
+    ) -> Result<(), KernelAgentAuthorityErrorV2> {
+        use savana_policy_core::v2::FusedModelTransportV04;
+        let identities: std::collections::BTreeSet<_> =
+            workers.iter().map(|w| w.recipient_identity()).collect();
+        if !self.fused_workers.is_empty()
+            || workers.len() > 8
+            || identities.len() != workers.len()
+            || identities.contains(&[0; 32])
+        {
+            return Err(KernelAgentAuthorityErrorV2::StateConflict);
+        }
+        self.fused_workers = workers
+            .into_iter()
+            .map(|w| Box::new(w) as Box<dyn FusedModelTransportV04 + Send>)
+            .collect();
+        Ok(())
     }
 
     pub(crate) fn install_g7(
@@ -1264,16 +1364,23 @@ pub(crate) struct KernelAgentAuthorityV2 {
     execution_tickets: Vec<ExecutionTicketRecordV2>,
     executions: Vec<ExecutionRecordV2>,
     tool_approvals: Vec<ToolApprovalRecordV2>,
+    fused_approval_recovery: Vec<fused_approval_recovery::FusedApprovalRecoveryV04>,
+    fused_release_recovery: Vec<fused_release_recovery::FusedReleaseRecoveryV04>,
+    private_session_authentications: Vec<private_session::PrivateSessionAuthenticationV04>,
     pending_releases: Vec<PendingReleaseRecordV2>,
     release_tickets: Vec<ReleaseTicketRecordV2>,
     releases: Vec<ReleaseRecordV2>,
     policy: Option<KernelG4G5RuntimeV2>,
     task_issuer: Option<crate::v2_task_authority::KernelTaskAuthorizationIssuerV2>,
+    managed_resource_issuer: Option<crate::v2_managed_resource::KernelManagedResourceIssuerV04>,
+    managed_admin: Option<crate::v04_managed_admin::AdminTrustV04>,
     durable_state: Option<DurableKernelAgentAuthorityStateV2>,
     durable_poisoned: bool,
     #[cfg(test)]
     execution_declassification_gate_test_observation:
         Option<ExecutionDeclassificationGateTestObservationV2>,
+    #[cfg(test)]
+    fused_recovery_fault: Option<fused_actions::FusedRecoveryFaultV04>,
 }
 
 impl std::fmt::Debug for KernelAgentAuthorityV2 {
@@ -1661,6 +1768,59 @@ impl KernelAgentAuthorityV2 {
         Ok(())
     }
 
+    pub(crate) fn install_managed_resource_issuer(
+        &mut self,
+        issuer: crate::v2_managed_resource::KernelManagedResourceIssuerV04,
+    ) -> Result<(), KernelAgentAuthorityErrorV2> {
+        if self.managed_resource_issuer.is_some() {
+            return Err(KernelAgentAuthorityErrorV2::StateConflict);
+        }
+        self.managed_resource_issuer = Some(issuer);
+        Ok(())
+    }
+
+    pub(crate) fn install_managed_admin(
+        &mut self,
+        trust: crate::v04_managed_admin::AdminTrustV04,
+    ) -> Result<(), StableCode> {
+        if self.managed_admin.is_some() {
+            return Err(StableCode::PolicyDenied);
+        }
+        self.managed_admin = Some(trust);
+        Ok(())
+    }
+
+    pub(crate) fn apply_managed_admin(
+        &mut self,
+        submission: crate::v04_managed_admin::AdminSubmissionV04,
+        values: &mut KernelValueOwnerV2,
+    ) -> Result<savana_policy_core::v2::ManagedAdminReceiptV04, StableCode> {
+        let trust = self
+            .managed_admin
+            .as_ref()
+            .ok_or(StableCode::PolicyDenied)?;
+        let proof = trust.verify(&submission)?;
+        let now = crate::v04_managed_admin::now()?;
+        if let Some(receipt) = self.policy.as_ref().ok_or(StableCode::KernelUnavailable)?
+            .durable.managed_admin_receipt_v04(&proof).map_err(|_| StableCode::PolicyDenied)? {
+            return Ok(receipt);
+        }
+        if let Some((task, root)) = proof.planning_execution_request(now).map_err(|_| StableCode::PolicyDenied)? {
+            return self.prepare_owner_execution_review_v04(&proof, task, root, values, now)
+                .map_err(|_| StableCode::PolicyDenied);
+        }
+        let policy = self.policy.as_mut().ok_or(StableCode::KernelUnavailable)?;
+        policy
+            .durable
+            .apply_managed_admin_with_tools_v04(
+                &proof,
+                &policy.active_tools,
+                policy.role,
+                now,
+            )
+            .map_err(|_| StableCode::PolicyDenied)
+    }
+
     pub(crate) fn establish_task_authorization(
         &mut self,
         request: &savana_kernel_protocol::v2::EstablishTaskAuthorizationRequestV2,
@@ -1738,15 +1898,22 @@ impl KernelAgentAuthorityV2 {
             execution_tickets: Vec::new(),
             executions: Vec::new(),
             tool_approvals: Vec::new(),
+            fused_approval_recovery: Vec::new(),
+            fused_release_recovery: Vec::new(),
+            private_session_authentications: Vec::new(),
             pending_releases: Vec::new(),
             release_tickets: Vec::new(),
             releases: Vec::new(),
             policy: None,
             task_issuer: None,
+            managed_resource_issuer: None,
+            managed_admin: None,
             durable_state: None,
             durable_poisoned: false,
             #[cfg(test)]
             execution_declassification_gate_test_observation: None,
+            #[cfg(test)]
+            fused_recovery_fault: None,
         })
     }
 
@@ -1808,26 +1975,35 @@ impl KernelAgentAuthorityV2 {
     }
 
     fn encode_recovery_snapshot(&self) -> Result<Vec<u8>, KernelAgentAuthorityErrorV2> {
-        self.encode_recovery_snapshot_schema(3)
+        self.encode_recovery_snapshot_schema(5)
     }
 
     fn encode_recovery_snapshot_schema(
         &self,
         schema: u16,
     ) -> Result<Vec<u8>, KernelAgentAuthorityErrorV2> {
-        if !matches!(schema, 2 | 3) {
+        if !matches!(schema, 2..=5)
+            || (schema < 4 && !self.fused_approval_recovery.is_empty())
+            || (schema < 5 && !self.fused_release_recovery.is_empty())
+        {
             return Err(KernelAgentAuthorityErrorV2::Unavailable);
         }
         let mut encoder = minicbor::Encoder::new(Vec::new());
         encoder
-            .array(4)
+            .array(if schema == 5 {
+                6
+            } else if schema == 4 {
+                5
+            } else {
+                4
+            })
             .and_then(|encoder| encoder.u16(schema))
             .and_then(|encoder| encoder.bytes(self.recovery_security_binding().as_bytes()))
             .and_then(|encoder| encoder.array(self.tasks.len() as u64))
             .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
         for task in &self.tasks {
             encoder
-                .array(if schema == 3 { 15 } else { 13 })
+                .array(if schema >= 3 { 15 } else { 13 })
                 .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
             encode_recovery_value(&mut encoder, &task.preparation)?;
             encode_recovery_value(&mut encoder, &task.agent_task_nonce)?;
@@ -1863,7 +2039,7 @@ impl KernelAgentAuthorityV2 {
                         .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
                 }
             }
-            if schema == 3 {
+            if schema >= 3 {
                 encode_optional_recovery_value(&mut encoder, task.source_input_digest.as_ref())?;
                 encode_optional_recovery_value(
                     &mut encoder,
@@ -1899,6 +2075,12 @@ impl KernelAgentAuthorityV2 {
                 .and_then(|encoder| encoder.bool(record.restart_tombstoned))
                 .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
         }
+        if schema >= 4 {
+            self.encode_fused_approval_recovery_v04(&mut encoder)?;
+        }
+        if schema == 5 {
+            self.encode_fused_release_recovery_v04(&mut encoder)?;
+        }
         Ok(encoder.into_writer())
     }
 
@@ -1909,23 +2091,29 @@ impl KernelAgentAuthorityV2 {
     ) -> Result<(), KernelAgentAuthorityErrorV2> {
         if !self.tasks.is_empty()
             || !self.authentication_preparations.is_empty()
+            || !self.fused_approval_recovery.is_empty()
+            || !self.fused_release_recovery.is_empty()
             || bytes.is_empty()
             || bytes.len() > 128 * 1024 * 1024
         {
             return Err(KernelAgentAuthorityErrorV2::Unavailable);
         }
         let mut decoder = minicbor::Decoder::new(bytes);
-        if decoder
+        let fields = decoder
             .array()
-            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?
-            != Some(4)
-        {
-            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
-        }
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
         let schema = decoder
             .u16()
             .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
-        if !matches!(schema, 2 | 3)
+        if !matches!(schema, 2..=5)
+            || fields
+                != Some(if schema == 5 {
+                    6
+                } else if schema == 4 {
+                    5
+                } else {
+                    4
+                })
             || Digest32V2::new(decode_recovery_fixed::<32>(&mut decoder)?)
                 != self.recovery_security_binding()
         {
@@ -1942,7 +2130,7 @@ impl KernelAgentAuthorityV2 {
                 .to_bytes(),
         );
         for _ in 0..task_count {
-            require_recovery_array(&mut decoder, if schema == 3 { 15 } else { 13 })?;
+            require_recovery_array(&mut decoder, if schema >= 3 { 15 } else { 13 })?;
             let mut context = V2DecodeContext;
             let preparation = decode_recovery_value(&mut decoder, &mut context)?;
             let agent_task_nonce = decode_recovery_value(&mut decoder, &mut context)?;
@@ -1969,12 +2157,12 @@ impl KernelAgentAuthorityV2 {
                 Some(decode_prepared_claim_material(&mut decoder, &mut context)?)
             };
             let current_authentication_preparation = decode_optional_recovery_u32(&mut decoder)?;
-            let source_input_digest: Option<Digest32V2> = if schema == 3 {
+            let source_input_digest: Option<Digest32V2> = if schema >= 3 {
                 decode_optional_recovery_value(&mut decoder, &mut context)?
             } else {
                 None
             };
-            let task_authorization_digest: Option<Digest32V2> = if schema == 3 {
+            let task_authorization_digest: Option<Digest32V2> = if schema >= 3 {
                 decode_optional_recovery_value(&mut decoder, &mut context)?
             } else {
                 None
@@ -2007,7 +2195,26 @@ impl KernelAgentAuthorityV2 {
                             .map_or(true, |digest| digest != material.provenance.value_digest())
                 })
                 || expected_principal.is_some() != claim_digest.is_some()
-                || material.is_some() != (expected_principal.is_some() && durable_run_id.is_some())
+                || expected_principal.is_some() != durable_run_id.is_some()
+                || (material.is_some() && expected_principal.is_none())
+                // Admission consumes the plaintext material, but its task/run
+                // identity must survive as a fail-closed tombstone. Only a
+                // post-admission or terminal task may lack committed material;
+                // a Ready task must never be reconstructed from identity alone.
+                || (material.is_none()
+                    && expected_principal.is_some()
+                    && !matches!(
+                        status,
+                        PublicTaskStatusV2::Running
+                            | PublicTaskStatusV2::Dispatching
+                            | PublicTaskStatusV2::Succeeded
+                            | PublicTaskStatusV2::EffectSucceededOutputQuarantined { .. }
+                            | PublicTaskStatusV2::PolicyDenied { .. }
+                            | PublicTaskStatusV2::FailedNoEffect { .. }
+                            | PublicTaskStatusV2::Indeterminate
+                            | PublicTaskStatusV2::Cancelled
+                            | PublicTaskStatusV2::Expired
+                    ))
             {
                 return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
             }
@@ -2119,6 +2326,12 @@ impl KernelAgentAuthorityV2 {
                     restart_tombstoned,
                 });
         }
+        if schema >= 4 {
+            self.decode_fused_approval_recovery_v04(&mut decoder, &mut V2DecodeContext)?;
+        }
+        if schema == 5 {
+            self.decode_fused_release_recovery_v04(&mut decoder, &mut V2DecodeContext)?;
+        }
         if decoder.position() != bytes.len()
             || self.tasks.iter().enumerate().any(|(task_index, task)| {
                 task.current_authentication_preparation
@@ -2229,6 +2442,7 @@ impl KernelAgentAuthorityV2 {
             task.agent_task_nonce == request.agent_task_nonce()
                 && task.client_request_nonce == request.client_request_nonce()
         }) {
+            self.require_public_task_v04(existing.durable_task_id)?;
             return Ok(PrepareNewIngressResponseV2::Reconciled {
                 preparation: existing.preparation,
                 correlation: existing.correlation.clone(),
@@ -2477,6 +2691,7 @@ impl KernelAgentAuthorityV2 {
             .iter()
             .position(|task| task.preparation == request.preparation())
             .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        self.require_public_task_v04(self.tasks[task_index].durable_task_id)?;
         if !matches!(
             self.tasks[task_index].status,
             PublicTaskStatusV2::Ready { .. }
@@ -2659,6 +2874,7 @@ impl KernelAgentAuthorityV2 {
             .position(|record| record.preparation == preparation)
             .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
         let record = &self.authentication_preparations[record_index];
+        self.require_public_task_v04(self.tasks[record.task_index].durable_task_id)?;
         if record.consumed {
             return Err(KernelAgentAuthorityErrorV2::AlreadyConsumed);
         }
@@ -2721,6 +2937,7 @@ impl KernelAgentAuthorityV2 {
             return Err(KernelAgentAuthorityErrorV2::AlreadyConsumed);
         }
         let task_index = self.authorizations[authorization_index].task_index;
+        self.require_public_task_v04(self.tasks[task_index].durable_task_id)?;
         let task = &mut self.tasks[task_index];
         if task.active_state_manifest_digest != active_state_manifest_digest {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
@@ -2914,6 +3131,7 @@ impl KernelAgentAuthorityV2 {
         if &task.correlation != request.correlation() {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
+        self.require_public_task_v04(task.durable_task_id)?;
         Ok(GetKernelTaskStatusResponseV2::new(task.status))
     }
 
@@ -2944,6 +3162,7 @@ impl KernelAgentAuthorityV2 {
                 now,
             )
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        self.require_public_task_v04(unsigned.durable_task_id())?;
         let task = self
             .tasks
             .iter_mut()
@@ -2987,6 +3206,7 @@ impl KernelAgentAuthorityV2 {
             .iter()
             .find(|session| session.session == request.session())
             .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        self.require_public_task_v04(session.durable_task_id)?;
         let revision = matches!(
             session.status,
             AgentSessionStatusV2::Ready | AgentSessionStatusV2::Running
@@ -2997,6 +3217,28 @@ impl KernelAgentAuthorityV2 {
     }
 
     fn require_session_task_authorization(
+        &self,
+        session: &SessionRecordV2,
+        now: UnixMillisV2,
+    ) -> Result<Digest32V2, KernelAgentAuthorityErrorV2> {
+        // Explicit fused enrollment cannot silently use the legacy planner or
+        // existing cached session as a bypass of its not-yet-active publisher.
+        if self
+            .policy
+            .as_ref()
+            .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?
+            .durable
+            .fused_planning_enrolled_v04(session.durable_task_id)
+            .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?
+        {
+            return Err(KernelAgentAuthorityErrorV2::StateConflict);
+        }
+        self.require_current_session_task_authorization(session, now)
+    }
+
+    // Private compilation still checks the complete live root; only the
+    // public legacy-entry prohibition is factored out, not any root check.
+    fn require_current_session_task_authorization(
         &self,
         session: &SessionRecordV2,
         now: UnixMillisV2,
@@ -3520,6 +3762,141 @@ impl KernelAgentAuthorityV2 {
                 return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
             }
         }
+        let prepared = self.prepare_tool_intent_material(
+            step,
+            values,
+            active_state_manifest_digest,
+            deployment_generation,
+            now,
+        )?;
+        let step = step.clone();
+        self.commit_prepared_tool_intent(
+            request_id,
+            authenticated_canonical_request,
+            &step,
+            prepared,
+            None,
+            active_state_manifest_digest,
+        )
+    }
+
+    /// Shared G4 commit. Admission/route authorization is performed by the
+    /// legacy proposer or by the lease-guarded private fused owner, never a model.
+    fn commit_prepared_tool_intent(
+        &mut self,
+        request_id: savana_kernel_protocol::v2::RequestIdV2,
+        authenticated_canonical_request: &[u8],
+        step: &PlanStepRecordV2,
+        prepared: PreparedToolIntentV2,
+        fused: Option<fused_actions::FusedIntentBindingV04>,
+        active_state_manifest_digest: Digest32V2,
+    ) -> Result<ProposeToolCallResponseV2, KernelAgentAuthorityErrorV2> {
+        if authenticated_canonical_request.is_empty() || self.intents.len() >= self.maximum_records
+        {
+            return Err(KernelAgentAuthorityErrorV2::LimitExceeded);
+        }
+        let PreparedToolIntentV2 {
+            material,
+            recipe_slots: _,
+            policy_binding,
+            semantic_binding,
+            task_match,
+            control_selections,
+            business_request,
+            dispatch_plaintext,
+            display_plaintext,
+            provenance_parents,
+            policy_allowed_effects,
+        } = prepared;
+        let action = self
+            .policy
+            .as_mut()
+            .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?
+            .durable
+            .create_or_replay_verified_intent(
+                request_id,
+                authenticated_canonical_request,
+                self.config.installation_id,
+                active_state_manifest_digest,
+                step.durable_run_id,
+                step.durable_task_id,
+                material,
+            )
+            .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+        if let Some(existing) = self
+            .intents
+            .iter()
+            .find(|record| record.action_intent_id == action.action_intent_id())
+        {
+            if existing.fused.is_some() != fused.is_some() {
+                return Err(KernelAgentAuthorityErrorV2::StateConflict);
+            }
+            return Ok(ProposeToolCallResponseV2::new(
+                existing.intent,
+                intent_current_state(existing, &self.execution_tickets)?,
+            ));
+        }
+        let intent = mint_handle(ActionIntentHandleV2::from_authority_entropy)?;
+        let pending = mint_handle(PendingToolCallHandleV2::from_authority_entropy)?;
+        let intent_commitment = intent.authority_commitment(&self.handle_key);
+        let pending_commitment = pending.authority_commitment(&self.handle_key);
+        if self.intents.iter().any(|record| {
+            record.intent_commitment == intent_commitment
+                || record.pending_commitment == pending_commitment
+        }) {
+            return Err(KernelAgentAuthorityErrorV2::Unavailable);
+        }
+        self.intents
+            .try_reserve(1)
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        self.intents.push(IntentRecordV2 {
+            fused,
+            intent,
+            pending,
+            intent_commitment,
+            pending_commitment,
+            action_intent_id: action.action_intent_id(),
+            run: step.run,
+            durable_run_id: step.durable_run_id,
+            durable_task_id: step.durable_task_id,
+            principal: step.principal,
+            role: step.role,
+            descriptor_digest: step.descriptor_digest,
+            plan_revision_digest: step.plan_revision_digest,
+            internal_step_id: step.internal_step_id,
+            policy_binding,
+            semantic_binding,
+            task_match,
+            control_selections,
+            business_request,
+            dispatch_plaintext,
+            display_plaintext,
+            provenance_parents,
+            policy_allowed_effects,
+            arguments: step.arguments.clone(),
+            state: IntentRecordStateV2::Proposed,
+            decision_trace: None,
+            ticket_commitment: None,
+            approval_commitment: None,
+            approval_settlement: None,
+            task_action_approval: None,
+        });
+        Ok(ProposeToolCallResponseV2::new(
+            intent,
+            ActionIntentCurrentStateV2::Proposed { pending },
+        ))
+    }
+
+    /// One G4 implementation for legacy proposals and private local compilation.
+    /// This prepares material only: it creates no durable intent or permission.
+    fn prepare_tool_intent_material(
+        &self,
+        step: &PlanStepRecordV2,
+        values: &KernelValueOwnerV2,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        now: UnixMillisV2,
+    ) -> Result<PreparedToolIntentV2, KernelAgentAuthorityErrorV2> {
         let policy = self
             .policy
             .as_ref()
@@ -3649,6 +4026,7 @@ impl KernelAgentAuthorityV2 {
         .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
         let relations = VerifiedResolvedRelationSetV2::from_task_match(slot_count, &task_match)
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        let recipe_slots = slots.clone();
         let slots = slots
             .into_iter()
             .map(|s| s.with_task_relation(&relations))
@@ -3718,58 +4096,9 @@ impl KernelAgentAuthorityV2 {
         .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
         let policy_binding = material.binding().clone();
         let semantic_binding = protocol_semantic_binding(&policy_binding)?;
-        let action = self
-            .policy
-            .as_mut()
-            .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?
-            .durable
-            .create_or_replay_verified_intent(
-                request_id,
-                authenticated_canonical_request,
-                self.config.installation_id,
-                active_state_manifest_digest,
-                step.durable_run_id,
-                step.durable_task_id,
-                material,
-            )
-            .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
-        if let Some(existing) = self
-            .intents
-            .iter()
-            .find(|record| record.action_intent_id == action.action_intent_id())
-        {
-            return Ok(ProposeToolCallResponseV2::new(
-                existing.intent,
-                intent_current_state(existing, &self.execution_tickets)?,
-            ));
-        }
-        let intent = mint_handle(ActionIntentHandleV2::from_authority_entropy)?;
-        let pending = mint_handle(PendingToolCallHandleV2::from_authority_entropy)?;
-        let intent_commitment = intent.authority_commitment(&self.handle_key);
-        let pending_commitment = pending.authority_commitment(&self.handle_key);
-        if self.intents.iter().any(|record| {
-            record.intent_commitment == intent_commitment
-                || record.pending_commitment == pending_commitment
-        }) {
-            return Err(KernelAgentAuthorityErrorV2::Unavailable);
-        }
-        self.intents
-            .try_reserve(1)
-            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
-        self.intents.push(IntentRecordV2 {
-            intent,
-            pending,
-            intent_commitment,
-            pending_commitment,
-            action_intent_id: action.action_intent_id(),
-            run: step.run,
-            durable_run_id: step.durable_run_id,
-            durable_task_id: step.durable_task_id,
-            principal: step.principal,
-            role: step.role,
-            descriptor_digest: step.descriptor_digest,
-            plan_revision_digest: step.plan_revision_digest,
-            internal_step_id: step.internal_step_id,
+        Ok(PreparedToolIntentV2 {
+            material,
+            recipe_slots,
             policy_binding,
             semantic_binding,
             task_match,
@@ -3779,18 +4108,7 @@ impl KernelAgentAuthorityV2 {
             display_plaintext,
             provenance_parents,
             policy_allowed_effects,
-            arguments: step.arguments.clone(),
-            state: IntentRecordStateV2::Proposed,
-            decision_trace: None,
-            ticket_commitment: None,
-            approval_commitment: None,
-            approval_settlement: None,
-            task_action_approval: None,
-        });
-        Ok(ProposeToolCallResponseV2::new(
-            intent,
-            ActionIntentCurrentStateV2::Proposed { pending },
-        ))
+        })
     }
 
     fn recheck_intent_task(
@@ -3799,6 +4117,7 @@ impl KernelAgentAuthorityV2 {
         manifest: Digest32V2,
         generation: u64,
         now: UnixMillisV2,
+        access: IntentAccessV2,
     ) -> Result<(), KernelAgentAuthorityErrorV2> {
         if intent
             .task_match
@@ -3820,9 +4139,48 @@ impl KernelAgentAuthorityV2 {
                     )
             })
             .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
-        if self.require_session_task_authorization(session, now)?
-            != intent.task_match.authorization().digest()
-        {
+        let root = match access {
+            IntentAccessV2::LegacyAgent => {
+                if intent.fused.is_some() {
+                    return Err(KernelAgentAuthorityErrorV2::StateConflict);
+                }
+                self.require_session_task_authorization(session, now)?
+            }
+            IntentAccessV2::PrivateFused => {
+                let binding = intent
+                    .fused
+                    .as_ref()
+                    .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
+                let owner = &self
+                    .policy
+                    .as_ref()
+                    .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?
+                    .durable;
+                let active = owner
+                    .active_fused_plan_v04(intent.durable_task_id, now)
+                    .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+                if now.get() >= binding.expires_at.get()
+                    || active.revision() != binding.reference.plan_revision
+                    || active.next_operation() != Some(binding.reference.operation)
+                    || !active.recipe_approved(
+                        binding.reference.operation,
+                        &binding.recipe,
+                        generation,
+                        now,
+                    )
+                    || !owner
+                        .fused_inputs_pinned_v04(intent.durable_task_id)
+                        .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?
+                {
+                    return Err(KernelAgentAuthorityErrorV2::StateConflict);
+                }
+                owner
+                    .recover_fused_inputs_v04(intent.durable_task_id, generation, now)
+                    .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+                self.require_current_session_task_authorization(session, now)?
+            }
+        };
+        if root != intent.task_match.authorization().digest() {
             return Err(KernelAgentAuthorityErrorV2::StateConflict);
         }
         let state = self
@@ -3857,6 +4215,33 @@ impl KernelAgentAuthorityV2 {
         now: UnixMillisV2,
     ) -> Result<EvaluateToolCallResponseV2, KernelAgentAuthorityErrorV2> {
         self.verify_agent_caller(caller_identity)?;
+        self.evaluate_tool_call_inner(
+            request,
+            values,
+            active_state_manifest_digest,
+            deployment_generation,
+            now,
+            IntentAccessV2::LegacyAgent,
+            None,
+        )
+    }
+
+    // Keep caller route and held-policy rules explicit at the shared gate.
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_tool_call_inner(
+        &mut self,
+        request: EvaluateToolCallRequestV2,
+        values: &KernelValueOwnerV2,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        now: UnixMillisV2,
+        access: IntentAccessV2,
+        leased_rules: Option<&savana_policy_core::v2::DeclassificationRuleSetV2>,
+    ) -> Result<EvaluateToolCallResponseV2, KernelAgentAuthorityErrorV2> {
+        self.ensure_durable_available()?;
+        if (access == IntentAccessV2::PrivateFused) != leased_rules.is_some() {
+            return Err(KernelAgentAuthorityErrorV2::StateConflict);
+        }
         let pending_commitment = request.pending().authority_commitment(&self.handle_key);
         let index = self
             .intents
@@ -3868,6 +4253,7 @@ impl KernelAgentAuthorityV2 {
             active_state_manifest_digest,
             deployment_generation,
             now,
+            access,
         )?;
         match self.intents[index].state {
             IntentRecordStateV2::Denied => {
@@ -3889,6 +4275,9 @@ impl KernelAgentAuthorityV2 {
                     .iter()
                     .find(|record| record.commitment == approval_commitment)
                     .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
+                if now.get() >= approval.expires_at.get() {
+                    return Err(KernelAgentAuthorityErrorV2::Expired);
+                }
                 return Ok(EvaluateToolCallResponseV2::NeedsApproval {
                     approval: approval.approval,
                     envelope: approval.envelope.clone(),
@@ -4083,7 +4472,10 @@ impl KernelAgentAuthorityV2 {
                 if self.tool_approvals.len() >= self.maximum_records {
                     return Err(KernelAgentAuthorityErrorV2::LimitExceeded);
                 }
-                let expires_at = checked_deadline(now, TOOL_APPROVAL_TTL_MS)?;
+                let deadline = checked_deadline(now, TOOL_APPROVAL_TTL_MS)?;
+                let expires_at = intent.fused.as_ref().map_or(deadline, |binding| {
+                    UnixMillisV2::new(deadline.get().min(binding.expires_at.get()))
+                });
                 let envelope_nonce = Nonce32V2::new(random_bytes()?);
                 let challenge = Nonce32V2::new(random_bytes()?);
                 let binding = ApprovalBindingV2::ToolExecution {
@@ -4108,15 +4500,23 @@ impl KernelAgentAuthorityV2 {
                 )
                 .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
                 let display_parents = intent.provenance_parents.iter().collect::<Vec<_>>();
-                let declassification_rules = policy
-                    .declassification_rules
-                    .snapshot()
-                    .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+                // The private caller already holds the publication read lock;
+                // do not reacquire it (a queued writer could deadlock a nested read).
+                let snapshot;
+                let declassification_rules = if let Some(rules) = leased_rules {
+                    rules
+                } else {
+                    snapshot = policy
+                        .declassification_rules
+                        .snapshot()
+                        .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+                    &snapshot
+                };
                 let display_declassification = ProvenanceRecordV2::declassify(
                     &display_value,
                     display_context,
                     DeclassificationTransitionV2::BuildApprovalDisplay,
-                    &declassification_rules,
+                    declassification_rules,
                     ClosedDeclassificationPurposeV2::ApprovalDisplay.purpose_digest(),
                     intent.policy_binding.token_set_digest(),
                     None,
@@ -4127,10 +4527,20 @@ impl KernelAgentAuthorityV2 {
                 .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
                 if display_declassification.judge_handoff(
                     DeclassificationTransitionV2::BuildApprovalDisplay,
-                    &declassification_rules,
+                    declassification_rules,
                 ) != HandoffJudgmentV2::Admits
                 {
                     return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+                }
+                let approvald_identity = policy.approval.approvald_identity;
+                if let Some(recovered) = self.rebind_fused_approval_v04(
+                    index,
+                    active_state_manifest_digest,
+                    deployment_generation,
+                    now,
+                    trace,
+                )? {
+                    return Ok(recovered);
                 }
                 let unsigned = UnsignedApprovalEnvelopeV2::new(
                     self.config.installation_id,
@@ -4145,7 +4555,7 @@ impl KernelAgentAuthorityV2 {
                     approval_display_digest_v2(display_text.as_bytes()),
                     display_text.clone(),
                     Some(display_declassification.provenance_digest()),
-                    policy.approval.approvald_identity,
+                    approvald_identity,
                     now,
                     expires_at,
                 )
@@ -4204,6 +4614,13 @@ impl KernelAgentAuthorityV2 {
                 self.tool_approvals
                     .try_reserve(1)
                     .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+                if intent.fused.is_some() {
+                    self.retain_fused_approval_v04(
+                        intent.action_intent_id,
+                        envelope.clone(),
+                        display_authentication.clone(),
+                    )?;
+                }
                 self.tool_approvals.push(ToolApprovalRecordV2 {
                     approval,
                     commitment,
@@ -4241,6 +4658,24 @@ impl KernelAgentAuthorityV2 {
     ) -> Result<savana_kernel_protocol::v2::AuthorizeToolCallResponseV2, KernelAgentAuthorityErrorV2>
     {
         self.verify_agent_caller(caller_identity)?;
+        self.authorize_tool_call_inner(
+            request,
+            active_state_manifest_digest,
+            deployment_generation,
+            now,
+            IntentAccessV2::LegacyAgent,
+        )
+    }
+
+    fn authorize_tool_call_inner(
+        &mut self,
+        request: &savana_kernel_protocol::v2::AuthorizeToolCallRequestV2,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        now: UnixMillisV2,
+        access: IntentAccessV2,
+    ) -> Result<AuthorizeToolCallResponseV2, KernelAgentAuthorityErrorV2> {
+        self.ensure_durable_available()?;
         let pending_commitment = request.pending().authority_commitment(&self.handle_key);
         let approval_commitment = request.approval().authority_commitment(&self.handle_key);
         let intent_index = self
@@ -4253,6 +4688,7 @@ impl KernelAgentAuthorityV2 {
             active_state_manifest_digest,
             deployment_generation,
             now,
+            access,
         )?;
         let approval_index = self
             .tool_approvals
@@ -4310,6 +4746,7 @@ impl KernelAgentAuthorityV2 {
             )
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
         if verified.decision() != ApprovalDecisionV2::Approve {
+            self.retain_fused_settlement_v04(intent_index, request.receipt())?;
             self.tool_approvals[approval_index].consumed = true;
             self.intents[intent_index].state = IntentRecordStateV2::Denied;
             return Err(KernelAgentAuthorityErrorV2::StateConflict);
@@ -4358,6 +4795,7 @@ impl KernelAgentAuthorityV2 {
         self.execution_tickets
             .try_reserve(1)
             .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        self.retain_fused_settlement_v04(intent_index, request.receipt())?;
         self.execution_tickets.push(ExecutionTicketRecordV2 {
             ticket,
             commitment,
@@ -4384,17 +4822,68 @@ impl KernelAgentAuthorityV2 {
         now: UnixMillisV2,
     ) -> Result<savana_kernel_protocol::v2::DispatchExecutionResponseV2, KernelAgentAuthorityErrorV2>
     {
+        self.verify_agent_caller(caller_identity)?;
+        self.dispatch_execution_inner(
+            request_id,
+            request,
+            active_state_manifest_digest,
+            deployment_generation,
+            effect_fence_epoch,
+            now,
+            IntentAccessV2::LegacyAgent,
+            None,
+        )
+    }
+
+    // Private dispatch holds the publication lease through G7 and transport;
+    // use its borrowed rules rather than recursively acquiring the same lock.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_execution_inner(
+        &mut self,
+        request_id: savana_kernel_protocol::v2::RequestIdV2,
+        request: savana_kernel_protocol::v2::DispatchExecutionRequestV2,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        effect_fence_epoch: u64,
+        now: UnixMillisV2,
+        access: IntentAccessV2,
+        leased_rules: Option<(&savana_policy_core::v2::DeclassificationRuleSetV2, u64)>,
+    ) -> Result<DispatchExecutionResponseV2, KernelAgentAuthorityErrorV2> {
+        self.ensure_durable_available()?;
+        if (access == IntentAccessV2::PrivateFused) != leased_rules.is_some() {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
         #[cfg(test)]
         {
             self.execution_declassification_gate_test_observation = None;
         }
-        self.verify_agent_caller(caller_identity)?;
         let ticket_commitment = request.ticket().authority_commitment(&self.handle_key);
+        // Route isolation precedes *all* cache lookups. An opaque private ticket
+        // remains private even after an execution has already been dispatched.
+        let ticket = self
+            .execution_tickets
+            .iter()
+            .find(|record| record.commitment == ticket_commitment)
+            .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        let intent = self
+            .intents
+            .iter()
+            .find(|record| record.action_intent_id == ticket.action_intent_id)
+            .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        if intent.fused.is_some() != (access == IntentAccessV2::PrivateFused) {
+            return Err(KernelAgentAuthorityErrorV2::InvalidReference);
+        }
         if let Some(existing) = self
             .executions
             .iter()
-            .find(|record| record.ticket_commitment == ticket_commitment)
+            .find(|record| record.ticket_commitment == Some(ticket_commitment))
         {
+            self.check_execution_context(
+                existing,
+                active_state_manifest_digest,
+                deployment_generation,
+                effect_fence_epoch,
+            )?;
             return Ok(DispatchExecutionResponseV2::new(
                 existing.execution,
                 accepted_state(existing.status),
@@ -4425,6 +4914,7 @@ impl KernelAgentAuthorityV2 {
             active_state_manifest_digest,
             deployment_generation,
             now,
+            access,
         )?;
         if intent.state != IntentRecordStateV2::Authorized
             || intent.ticket_commitment != Some(ticket_commitment)
@@ -4436,6 +4926,33 @@ impl KernelAgentAuthorityV2 {
         {
             return Err(KernelAgentAuthorityErrorV2::StateConflict);
         }
+        let result_scope = if intent.fused.is_some() {
+            let session = self
+                .sessions
+                .iter()
+                .find(|s| s.run == intent.run)
+                .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+            Some(
+                savana_policy_core::v2::FusedResultScopeV04::from_authenticated_session(
+                    session.principal,
+                    session.producer_identity,
+                    UnixMillisV2::new(
+                        session.expires_at.get().min(
+                            intent
+                                .task_match
+                                .authorization()
+                                .material()
+                                .expires_at()
+                                .get(),
+                        ),
+                    ),
+                    session.policy_allowed_effects,
+                )
+                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?,
+            )
+        } else {
+            None
+        };
         let policy = self
             .policy
             .as_mut()
@@ -4466,7 +4983,20 @@ impl KernelAgentAuthorityV2 {
         {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
-        let expires_at = checked_deadline(now, 30_000)?;
+        let mut expires_at = checked_deadline(now, 30_000)?;
+        if let Some(binding) = &intent.fused {
+            let (_, lease_expiry) =
+                leased_rules.ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
+            expires_at = UnixMillisV2::new(
+                expires_at
+                    .get()
+                    .min(binding.expires_at.get())
+                    .min(lease_expiry),
+            );
+            if now.get() >= expires_at.get() {
+                return Err(KernelAgentAuthorityErrorV2::Expired);
+            }
+        }
         let quota_subject =
             DispatchQuotaSubjectV2::tool_attempt(intent.policy_binding.attempt_kind());
         let quota = VerifiedQuotaLimitV2::from_verified_policy(
@@ -4511,10 +5041,16 @@ impl KernelAgentAuthorityV2 {
         let execution_transition = DeclassificationTransitionV2::BuildExecutionEnvelope {
             executor_identity_digest: Digest32V2::new(*g7.executor_identity.as_bytes()),
         };
-        let declassification_rules = policy
-            .declassification_rules
-            .snapshot()
-            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        let snapshot;
+        let declassification_rules = if let Some((rules, _)) = leased_rules {
+            rules
+        } else {
+            snapshot = policy
+                .declassification_rules
+                .snapshot()
+                .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+            &snapshot
+        };
         #[cfg(test)]
         let mut execution_declassification_gate_test_observation = None;
         let execution_gate_result = gate_execution_before_durable_prepare(
@@ -4524,7 +5060,7 @@ impl KernelAgentAuthorityV2 {
                     &execution_value,
                     execution_context,
                     execution_transition,
-                    &declassification_rules,
+                    declassification_rules,
                     ClosedDeclassificationPurposeV2::ExecutionHandoff.purpose_digest(),
                     intent.policy_binding.token_set_digest(),
                     None,
@@ -4540,7 +5076,7 @@ impl KernelAgentAuthorityV2 {
                 }
                 let declassification = declassification_result
                     .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
-                if declassification.judge_handoff(execution_transition, &declassification_rules)
+                if declassification.judge_handoff(execution_transition, declassification_rules)
                     != HandoffJudgmentV2::Admits
                 {
                     #[cfg(test)]
@@ -4601,6 +5137,40 @@ impl KernelAgentAuthorityV2 {
                     intent.task_match.clone(),
                     endorsements,
                 );
+                let task = if let Some(binding) = &intent.fused {
+                    task.with_fused_recipe(binding.recipe.clone())
+                        .with_fused_result_scope(
+                            result_scope
+                                .clone()
+                                .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?,
+                        )
+                } else {
+                    task
+                };
+                // Resolve the selector locally from signed activation and exact
+                // frozen G4 material; never trust an Agent/model operation ID.
+                // This does not open the fused-session legacy entry guards.
+                let task = policy
+                    .durable
+                    .bind_fused_dispatch_v04(
+                        intent.action_intent_id,
+                        task,
+                        deployment_generation,
+                        now,
+                    )
+                    .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+                let task = policy
+                    .durable
+                    .bind_managed_dispatch_input_v04(
+                        intent.action_intent_id,
+                        task,
+                        &intent.dispatch_plaintext,
+                        self.managed_resource_issuer
+                            .as_ref()
+                            .map(|issuer| issuer.signer()),
+                        now,
+                    )
+                    .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
                 policy
                     .durable
                     .prepare_task_bound_tool_dispatch(
@@ -4622,6 +5192,38 @@ impl KernelAgentAuthorityV2 {
                 execution_declassification_gate_test_observation;
         }
         let (prepared, execution_declassification) = execution_gate_result?;
+        #[cfg(test)]
+        if self.fused_recovery_fault == Some(fused_actions::FusedRecoveryFaultV04::G7Prepared) {
+            self.fused_recovery_fault = None;
+            return Err(KernelAgentAuthorityErrorV2::Unavailable);
+        }
+        let fused_recovery = if intent.fused.is_some() {
+            Some(
+                policy
+                    .durable
+                    .recover_fused_executions_v04(intent.durable_task_id)
+                    .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?
+                    .into_iter()
+                    .find(|r| {
+                        r.core().execution_nonce() == prepared.preparation().execution_nonce()
+                    })
+                    .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?,
+            )
+        } else {
+            None
+        };
+        // Managed inputs are not generic attachments: the signed source policy
+        // must permit the exact fixed projection, and bytes must match the
+        // original G7 snapshot AND already G3-gated presealed commitment.
+        policy
+            .durable
+            .check_managed_execution_handoff_v04(
+                &prepared,
+                &intent.dispatch_plaintext,
+                execution_declassification.provenance_digest(),
+                now,
+            )
+            .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
         let protocol_core = protocol_dispatch_core(&prepared)?;
         if protocol_core
             .semantic_digest()
@@ -4658,8 +5260,12 @@ impl KernelAgentAuthorityV2 {
         self.executions.push(ExecutionRecordV2 {
             execution,
             commitment,
-            ticket_commitment,
+            ticket_commitment: Some(ticket_commitment),
+            fused_recovery,
             action_intent_id: intent.action_intent_id,
+            active_state_manifest_digest,
+            deployment_generation,
+            effect_fence_epoch,
             execution_nonce: prepared.preparation().execution_nonce(),
             dispatch_core_digest: prepared.preparation().dispatch_core_digest(),
             dispatch_subject_digest: prepared.preparation().dispatch_subject_digest(),
@@ -4691,6 +5297,47 @@ impl KernelAgentAuthorityV2 {
         now: UnixMillisV2,
     ) -> Result<GetExecutionStatusResponseV2, KernelAgentAuthorityErrorV2> {
         self.verify_agent_caller(caller_identity)?;
+        self.execution_status_inner(
+            request_id,
+            request,
+            vault,
+            active_state_manifest_digest,
+            deployment_generation,
+            effect_fence_epoch,
+            now,
+            IntentAccessV2::LegacyAgent,
+        )
+    }
+
+    fn check_execution_context(
+        &self,
+        record: &ExecutionRecordV2,
+        manifest: Digest32V2,
+        generation: u64,
+        fence: u64,
+    ) -> Result<(), KernelAgentAuthorityErrorV2> {
+        if record.active_state_manifest_digest != manifest
+            || record.deployment_generation != generation
+            || record.effect_fence_epoch != fence
+        {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execution_status_inner(
+        &mut self,
+        request_id: savana_kernel_protocol::v2::RequestIdV2,
+        request: GetExecutionStatusRequestV2,
+        vault: &mut dyn KernelIngressCommitSinkV2,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        effect_fence_epoch: u64,
+        now: UnixMillisV2,
+        access: IntentAccessV2,
+    ) -> Result<GetExecutionStatusResponseV2, KernelAgentAuthorityErrorV2> {
+        self.ensure_durable_available()?;
         let index = match request.target() {
             ExecutionStatusTargetV2::Intent(intent) => {
                 let commitment = intent.authority_commitment(&self.handle_key);
@@ -4708,7 +5355,7 @@ impl KernelAgentAuthorityV2 {
                 let commitment = ticket.authority_commitment(&self.handle_key);
                 self.executions
                     .iter()
-                    .position(|record| record.ticket_commitment == commitment)
+                    .position(|record| record.ticket_commitment == Some(commitment))
             }
             ExecutionStatusTargetV2::Execution(execution) => {
                 let commitment = execution.authority_commitment(&self.handle_key);
@@ -4718,13 +5365,53 @@ impl KernelAgentAuthorityV2 {
             }
         }
         .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        if self.executions[index].fused_recovery.is_some()
+            != (access == IntentAccessV2::PrivateFused)
+        {
+            return Err(KernelAgentAuthorityErrorV2::InvalidReference);
+        }
+        self.check_execution_context(
+            &self.executions[index],
+            active_state_manifest_digest,
+            deployment_generation,
+            effect_fence_epoch,
+        )?;
+        if let Some(recovered) = self.executions[index].fused_recovery.as_ref().filter(|_| {
+            !matches!(
+                self.executions[index].status,
+                PublicExecutionStatusV2::Succeeded { .. }
+            )
+        }) {
+            if let Some(commit) = recovered.result_commit() {
+                let scope = recovered.scope();
+                let document = vault
+                    .recover_tool_result(
+                        recovered.core().durable_task_id(),
+                        recovered.core().durable_run_id(),
+                        scope.principal(),
+                        commit,
+                        scope.expires_at(),
+                        now,
+                    )
+                    .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+                let status = PublicExecutionStatusV2::Succeeded {
+                    completion: PublicDispatchCompletionV2::ToolExecution { document },
+                };
+                self.executions[index].status = status;
+                return Ok(GetExecutionStatusResponseV2::new(status));
+            }
+        }
+        // Historical receipts settle the original reservation, including after
+        // plan replacement, expiry or revocation. Do not recheck the next action
+        // or refresh the original match against today's pre-state here.
         if matches!(
             self.executions[index].status,
             PublicExecutionStatusV2::Succeeded { .. }
                 | PublicExecutionStatusV2::EffectSucceededOutputQuarantined { .. }
                 | PublicExecutionStatusV2::FailedNoEffect { .. }
-                | PublicExecutionStatusV2::Indeterminate
-        ) {
+        ) || (access == IntentAccessV2::LegacyAgent
+            && self.executions[index].status == PublicExecutionStatusV2::Indeterminate)
+        {
             return Ok(GetExecutionStatusResponseV2::new(
                 self.executions[index].status,
             ));
@@ -4750,6 +5437,44 @@ impl KernelAgentAuthorityV2 {
                     .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?,
             )
             .map_err(map_executor_client_error)?;
+        // An authenticated transport may still return the wrong job's receipt.
+        // Bind every status witness to the exact query before mutating any job
+        // or fetching a completion. A signature alone is not this association.
+        let status_receipt = match response.status() {
+            ExecutorStatusV2::EffectStarted {
+                effect_started_receipt,
+                effect_started_receipt_digest,
+            }
+            | ExecutorStatusV2::CompletionAvailable {
+                effect_started_receipt,
+                effect_started_receipt_digest,
+                ..
+            } => Some((effect_started_receipt, *effect_started_receipt_digest)),
+            ExecutorStatusV2::Indeterminate {
+                effect_started_receipt: Some(receipt),
+                effect_started_receipt_digest: Some(digest),
+            } => Some((receipt, *digest)),
+            _ => None,
+        };
+        if let Some((receipt, digest)) = status_receipt {
+            let unsigned = receipt.unsigned();
+            if unsigned.execution_nonce() != nonce
+                || unsigned.dispatch_core_digest() != core
+                || unsigned.dispatch_subject_digest() != subject
+                || unsigned.installation_id() != self.config.installation_id
+                || unsigned.active_state_manifest_digest() != active_state_manifest_digest
+                || unsigned.deployment_generation() != deployment_generation
+                || unsigned.effect_fence_epoch() != effect_fence_epoch
+                || unsigned.started_at().get() > now.get()
+                || receipt.digest() != digest
+            {
+                return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+            }
+            let (key_id, public_key) = self.executor_receipt_identity()?;
+            receipt
+                .verify(key_id, public_key)
+                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        }
         let status = match response.status() {
             ExecutorStatusV2::EffectStarted {
                 effect_started_receipt,
@@ -4805,6 +5530,27 @@ impl KernelAgentAuthorityV2 {
                 PublicExecutionStatusV2::FailedNoEffect {
                     class: PublicFailureClassV2::Connector,
                 }
+            }
+            ExecutorStatusV2::Indeterminate {
+                effect_started_receipt,
+                ..
+            } if access == IntentAccessV2::PrivateFused => {
+                // A query's uncertain status is not a signed terminal outcome.
+                // Keep the existing G7 reservation (or verified effect-start)
+                // durable, so a later exact success can still settle it. Never
+                // use V2's irreversible terminal-Indeterminate transition here.
+                if let Some(receipt) = effect_started_receipt {
+                    let (key_id, public_key) = self.executor_receipt_identity()?;
+                    self.policy
+                        .as_mut()
+                        .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?
+                        .durable
+                        .reconcile_typed_effect_started_tool_dispatch(
+                            receipt, key_id, public_key, now,
+                        )
+                        .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+                }
+                PublicExecutionStatusV2::Indeterminate
             }
             ExecutorStatusV2::Indeterminate { .. } => {
                 let evidence = domain_digest(
@@ -4880,6 +5626,18 @@ impl KernelAgentAuthorityV2 {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
         let (receipt_key_id, receipt_public_key) = self.executor_receipt_identity()?;
+        let started = response.effect_started_receipt().unsigned();
+        if started.execution_nonce() != nonce
+            || started.dispatch_core_digest() != core
+            || started.dispatch_subject_digest() != subject
+            || started.active_state_manifest_digest() != active_state_manifest_digest
+            || started.deployment_generation() != deployment_generation
+            || started.effect_fence_epoch() != effect_fence_epoch
+            || response.effect_started_receipt().digest()
+                != response.effect_started_receipt_digest()
+        {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
         response
             .effect_started_receipt()
             .verify(receipt_key_id, receipt_public_key)
@@ -4914,50 +5672,84 @@ impl KernelAgentAuthorityV2 {
                 })
             }
         };
-        let intent = self
-            .intents
-            .iter()
-            .find(|intent| intent.action_intent_id == action_intent_id)
-            .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
-        let session = self
-            .sessions
-            .iter()
-            .find(|session| session.run == intent.run)
-            .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
-        if session.active_state_manifest_digest != active_state_manifest_digest
-            || deployment_generation == 0
-            || effect_fence_epoch == 0
-        {
-            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
-        }
+        let (
+            task,
+            run,
+            principal,
+            producer,
+            expires_at,
+            effects,
+            action_intent_record_digest,
+            descriptor,
+        ) = if let Some(recovered) = &self.executions[index].fused_recovery {
+            // Use the original G7 scope, never a newly logged-in session or
+            // fresh handle as the authority/provenance of yesterday's result.
+            let scope = recovered.scope();
+            (
+                recovered.core().durable_task_id(),
+                recovered.core().durable_run_id(),
+                scope.principal(),
+                scope.producer(),
+                scope.expires_at(),
+                scope.effects(),
+                recovered.result_binding(),
+                recovered.descriptor(),
+            )
+        } else {
+            let intent = self
+                .intents
+                .iter()
+                .find(|i| i.action_intent_id == action_intent_id)
+                .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
+            let session = self
+                .sessions
+                .iter()
+                .find(|s| s.run == intent.run)
+                .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
+            if session.active_state_manifest_digest != active_state_manifest_digest
+                || deployment_generation == 0
+                || effect_fence_epoch == 0
+            {
+                return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+            }
+            (
+                session.durable_task_id,
+                session.durable_run_id,
+                session.principal,
+                session.producer_identity,
+                session.expires_at,
+                session.policy_allowed_effects,
+                domain_digest(
+                    b"SAVANA_ACTION_INTENT_RESULT_BINDING_V2\0",
+                    &[
+                        action_intent_id.as_bytes(),
+                        intent.intent_commitment.as_bytes(),
+                    ],
+                ),
+                intent.descriptor_digest,
+            )
+        };
         let value = KernelValueV2::bytes(result.clone())
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
         let provenance_context =
             savana_policy_core::v2::ProvenanceContextV2::from_authenticated_runtime(
-                session.producer_identity,
-                session.durable_run_id,
+                producer,
+                run,
                 active_state_manifest_digest,
                 // Stable across a retry after a vault commit response loss.
                 response.effect_started_receipt().unsigned().started_at(),
-                session.expires_at,
+                expires_at,
             )
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
-        let action_intent_record_digest = domain_digest(
-            b"SAVANA_ACTION_INTENT_RESULT_BINDING_V2\0",
-            &[
-                action_intent_id.as_bytes(),
-                intent.intent_commitment.as_bytes(),
-            ],
-        );
         let provenance = ProvenanceRecordV2::from_verified_executor_tool_result(
             &value,
             provenance_context,
             action_intent_id,
             domain_digest(b"SAVANA_EXECUTION_NONCE_DIGEST_V2\0", &[nonce.as_bytes()]),
             action_intent_record_digest,
-            intent.descriptor_digest,
+            descriptor,
             response.effect_started_receipt_digest(),
-            session.policy_allowed_effects,
+            effects,
         )
         .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
         let commit_digest = domain_digest(
@@ -4973,22 +5765,82 @@ impl KernelAgentAuthorityV2 {
         );
         let document = vault
             .commit_tool_result(
-                session.durable_task_id,
-                session.durable_run_id,
-                session.principal,
-                provenance,
+                task,
+                run,
+                principal,
+                provenance.clone(),
                 commit_digest,
                 result,
-                session.expires_at,
+                expires_at,
                 now,
             )
             .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+        #[cfg(test)]
+        if self.fused_recovery_fault == Some(fused_actions::FusedRecoveryFaultV04::VaultCommitted) {
+            self.fused_recovery_fault = None;
+            return Err(KernelAgentAuthorityErrorV2::Unavailable);
+        }
         self.policy
             .as_mut()
             .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?
             .durable
             .reconcile_task_outcome(task_outcome)
             .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+        #[cfg(test)]
+        if self.fused_recovery_fault == Some(fused_actions::FusedRecoveryFaultV04::OutcomeCommitted)
+        {
+            self.fused_recovery_fault = None;
+            return Err(KernelAgentAuthorityErrorV2::Unavailable);
+        }
+        if self.executions[index].fused_recovery.is_some() {
+            let durable = &mut self
+                .policy
+                .as_mut()
+                .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?
+                .durable;
+            if durable
+                .fused_execution_needs_result_v04(task, nonce)
+                .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?
+            {
+                durable
+                    .record_fused_result_value_v04(
+                        task,
+                        nonce,
+                        commit_digest,
+                        savana_policy_core::v2::FusedOwnedResultV04::from_verified_result(
+                            &value,
+                            &provenance,
+                        )
+                        .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?,
+                    )
+                    .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+            } else {
+                durable
+                    .record_fused_result_commit_v04(task, nonce, commit_digest)
+                    .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+            }
+            // Publish the new durable reference to the existing private handle
+            // before any later fault/cleanup. A surviving handle must never try
+            // to refetch bytes that the recovery driver has already cleaned.
+            self.executions[index].fused_recovery = Some(
+                self.policy
+                    .as_ref()
+                    .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?
+                    .durable
+                    .recover_all_scoped_fused_executions_v04()
+                    .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?
+                    .into_iter()
+                    .find(|r| r.core().execution_nonce() == nonce)
+                    .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?,
+            );
+        }
+        #[cfg(test)]
+        if self.fused_recovery_fault
+            == Some(fused_actions::FusedRecoveryFaultV04::ResultCheckpointed)
+        {
+            self.fused_recovery_fault = None;
+            return Err(KernelAgentAuthorityErrorV2::Unavailable);
+        }
         // Both result bytes and the verified terminal outcome are durable now.
         // Retain the local observation before the cleanup acknowledgement: a
         // lost acknowledgement cannot turn this success back into pending or
@@ -5169,6 +6021,54 @@ impl KernelAgentAuthorityV2 {
             deployment_generation,
             now,
         )?;
+        let run = session.run;
+        self.finish_prepare_release(
+            run,
+            Some(request.document()),
+            request.executor(),
+            None,
+            proposal,
+            provenance_parents,
+            policy_allowed_effects,
+            release_payload_digest,
+            evidence_digest,
+            token_set_digest,
+            vault,
+            active_state_manifest_digest,
+            deployment_generation,
+            now,
+        )
+    }
+
+    /// Both entry paths must establish their own source authority first. Only
+    /// the exact G3 display, vault binding and G6 ceremony construction is shared.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_prepare_release(
+        &mut self,
+        run: savana_kernel_protocol::v2::RunHandleV2,
+        document: Option<MaskedDocumentHandleV2>,
+        executor: ExecutorIdentityV2,
+        private_candidate: Option<Digest32V2>,
+        proposal: FinalReleaseBusinessProposalV2,
+        provenance_parents: Vec<ProvenanceRecordV2>,
+        policy_allowed_effects: EffectSetV2,
+        release_payload_digest: Digest32V2,
+        evidence_digest: Digest32V2,
+        token_set_digest: Digest32V2,
+        vault: &mut dyn KernelIngressCommitSinkV2,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        now: UnixMillisV2,
+    ) -> Result<PrepareReleaseResponseV2, KernelAgentAuthorityErrorV2> {
+        let session = self
+            .sessions
+            .iter()
+            .find(|s| s.run == run)
+            .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        let policy = self
+            .policy
+            .as_ref()
+            .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?;
         let destination_digest = proposal.task_match.content().action().destination_digest();
         let display_projection_digest = proposal.display_projection_digest;
         let state = policy
@@ -5230,17 +6130,41 @@ impl KernelAgentAuthorityV2 {
             destination_digest,
             display_projection_digest,
             display_digest,
-            Digest32V2::new(*request.executor().as_bytes()),
+            Digest32V2::new(*executor.as_bytes()),
             release_quota_subject_digest,
         )
         .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
-        let vault_pending = vault
-            .prepare_release(request.document(), session.durable_run_id, material, now)
-            .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+        let vault_pending = if let Some(digest) = private_candidate {
+            if document.is_some() {
+                return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+            }
+            let c = policy
+                .durable
+                .fused_final_result_candidate_v04(session.durable_task_id, now)
+                .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+            if c.digest() != digest {
+                return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+            }
+            vault.prepare_fused_result_release(&c, session.principal, material, now)
+        } else {
+            vault.prepare_release(
+                document.ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?,
+                session.durable_run_id,
+                material,
+                now,
+            )
+        }
+        .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
         let binding = vault_pending.binding();
         let binding_digest = vault_pending.binding_digest();
         let candidate_expiry = checked_deadline(now, TOOL_APPROVAL_TTL_MS)?;
-        let expires_at = UnixMillisV2::new(candidate_expiry.get().min(session.expires_at.get()));
+        let expires_at = UnixMillisV2::new(
+            candidate_expiry
+                .get()
+                .min(session.expires_at.get())
+                .min(first_parent.expires_at().get())
+                .min(state.authorization().material().expires_at().get()),
+        );
         let challenge = Nonce32V2::new(random_bytes()?);
         let unsigned = UnsignedApprovalEnvelopeV2::new(
             self.config.installation_id,
@@ -5304,11 +6228,13 @@ impl KernelAgentAuthorityV2 {
         let pending_commitment = pending.authority_commitment(&self.handle_key);
         let approval_commitment = approval.authority_commitment(&self.handle_key);
         self.pending_releases.push(PendingReleaseRecordV2 {
+            private_candidate,
+            display_authentication: display_authentication.clone(),
             pending,
             pending_commitment,
             approval,
             approval_commitment,
-            document: request.document(),
+            document,
             run: session.run,
             durable_run_id: session.durable_run_id,
             durable_task_id: session.durable_task_id,
@@ -5331,11 +6257,17 @@ impl KernelAgentAuthorityV2 {
             settlement: None,
             ticket_commitment: None,
         });
+        let index = self.pending_releases.len() - 1;
+        if let Err(error) = self.bind_fused_release_archive_v04(index, now) {
+            self.pending_releases.pop();
+            return Err(error);
+        }
+        let p = &self.pending_releases[index];
         Ok(PrepareReleaseResponseV2::new(
-            pending,
-            approval,
-            envelope,
-            display_authentication,
+            p.pending,
+            p.approval,
+            p.envelope.clone(),
+            p.display_authentication.clone(),
         ))
     }
 
@@ -5351,6 +6283,27 @@ impl KernelAgentAuthorityV2 {
     ) -> Result<savana_kernel_protocol::v2::AuthorizeReleaseResponseV2, KernelAgentAuthorityErrorV2>
     {
         self.verify_agent_caller(caller_identity)?;
+        self.authorize_release_for(
+            request,
+            vault,
+            false,
+            active_state_manifest_digest,
+            deployment_generation,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn authorize_release_for(
+        &mut self,
+        request: &savana_kernel_protocol::v2::AuthorizeReleaseRequestV2,
+        vault: &mut dyn KernelIngressCommitSinkV2,
+        private: bool,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        now: UnixMillisV2,
+    ) -> Result<savana_kernel_protocol::v2::AuthorizeReleaseResponseV2, KernelAgentAuthorityErrorV2>
+    {
         let pending_commitment = request.pending().authority_commitment(&self.handle_key);
         let approval_commitment = request.approval().authority_commitment(&self.handle_key);
         let index = self
@@ -5361,6 +6314,9 @@ impl KernelAgentAuthorityV2 {
                     && record.approval_commitment == approval_commitment
             })
             .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        if self.pending_releases[index].private_candidate.is_some() != private {
+            return Err(KernelAgentAuthorityErrorV2::InvalidReference);
+        }
         self.recheck_release_task(
             &self.pending_releases[index],
             active_state_manifest_digest,
@@ -5368,6 +6324,9 @@ impl KernelAgentAuthorityV2 {
             now,
         )?;
         if self.pending_releases[index].consumed {
+            if private {
+                self.retain_fused_release_settlement_v04(index, request.settlement())?;
+            }
             if let Some(ticket_commitment) = self.pending_releases[index].ticket_commitment {
                 let ticket = self
                     .release_tickets
@@ -5406,6 +6365,7 @@ impl KernelAgentAuthorityV2 {
             )
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
         if verified.decision() != ApprovalDecisionV2::Approve {
+            self.retain_fused_release_settlement_v04(index, request.settlement())?;
             self.pending_releases[index].consumed = true;
             return Err(KernelAgentAuthorityErrorV2::StateConflict);
         }
@@ -5433,6 +6393,8 @@ impl KernelAgentAuthorityV2 {
         {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
+        self.retain_fused_release_settlement_v04(index, request.settlement())?;
+        let record = &self.pending_releases[index];
         let vault_approval =
             savana_vault::VerifiedFinalReleaseApprovalV2::from_verified_protocol_settlement(
                 verified,
@@ -5495,8 +6457,11 @@ impl KernelAgentAuthorityV2 {
             .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
         if record.active_state_manifest_digest != manifest
             || session.active_state_manifest_digest != manifest
-            || self.require_session_task_authorization(session, now)?
-                != record.task_match.authorization().digest()
+            || (if record.private_candidate.is_some() {
+                self.require_current_session_task_authorization(session, now)?
+            } else {
+                self.require_session_task_authorization(session, now)?
+            }) != record.task_match.authorization().digest()
         {
             return Err(KernelAgentAuthorityErrorV2::StateConflict);
         }
@@ -5504,6 +6469,17 @@ impl KernelAgentAuthorityV2 {
             .policy
             .as_ref()
             .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?;
+        if let Some(expected) = record.private_candidate {
+            let candidate = policy
+                .durable
+                .fused_final_result_candidate_v04(record.durable_task_id, now)
+                .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+            if candidate.digest() != expected
+                || candidate.core().durable_run_id() != record.durable_run_id
+            {
+                return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+            }
+        }
         let state = policy
             .durable
             .task_authorization_state(record.durable_task_id)
@@ -5555,7 +6531,45 @@ impl KernelAgentAuthorityV2 {
     ) -> Result<savana_kernel_protocol::v2::DispatchReleaseResponseV2, KernelAgentAuthorityErrorV2>
     {
         self.verify_agent_caller(caller_identity)?;
+        self.dispatch_release_for(
+            request_id,
+            request,
+            vault,
+            false,
+            active_state_manifest_digest,
+            deployment_generation,
+            effect_fence_epoch,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_release_for(
+        &mut self,
+        request_id: savana_kernel_protocol::v2::RequestIdV2,
+        request: savana_kernel_protocol::v2::DispatchReleaseRequestV2,
+        vault: &mut dyn KernelIngressCommitSinkV2,
+        private: bool,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        effect_fence_epoch: u64,
+        now: UnixMillisV2,
+    ) -> Result<savana_kernel_protocol::v2::DispatchReleaseResponseV2, KernelAgentAuthorityErrorV2>
+    {
         let ticket_commitment = request.ticket().authority_commitment(&self.handle_key);
+        let owner = self
+            .release_tickets
+            .iter()
+            .find(|r| r.commitment == ticket_commitment)
+            .and_then(|t| {
+                self.pending_releases
+                    .iter()
+                    .find(|p| p.pending_commitment == t.pending_commitment)
+            })
+            .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        if owner.private_candidate.is_some() != private {
+            return Err(KernelAgentAuthorityErrorV2::InvalidReference);
+        }
         if let Some(existing) = self
             .releases
             .iter()
@@ -5605,9 +6619,29 @@ impl KernelAgentAuthorityV2 {
         {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
-        let plaintext = vault
-            .read_release_payload(pending.document, pending.durable_run_id, now)
-            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        let plaintext = if let Some(expected) = pending.private_candidate {
+            let candidate = self
+                .policy
+                .as_ref()
+                .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?
+                .durable
+                .fused_final_result_candidate_v04(pending.durable_task_id, now)
+                .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+            if candidate.digest() != expected {
+                return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+            }
+            zeroize::Zeroizing::new(candidate.private_payload().to_vec())
+        } else {
+            vault
+                .read_release_payload(
+                    pending
+                        .document
+                        .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?,
+                    pending.durable_run_id,
+                    now,
+                )
+                .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?
+        };
         if domain_digest(
             b"SAVANA_FINAL_RELEASE_PAYLOAD_V2\0",
             &[plaintext.as_slice()],
@@ -5615,11 +6649,19 @@ impl KernelAgentAuthorityV2 {
         {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
-        let delivery = savana_kernel_protocol::v2::decode_final_release_delivery_v2(
-            &pending.business_request.canonical_json(),
-        )
+        let same_payload = if private {
+            savana_kernel_protocol::v2::decode_final_result_release_delivery_v04(
+                &pending.business_request.canonical_json(),
+            )
+            .map(|d| d.payload() == plaintext.as_slice())
+        } else {
+            savana_kernel_protocol::v2::decode_final_release_delivery_v2(
+                &pending.business_request.canonical_json(),
+            )
+            .map(|d| d.payload() == plaintext.as_slice())
+        }
         .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
-        if delivery.payload() != plaintext.as_slice()
+        if !same_payload
             || pending.task_match.content().action().destination_digest()
                 != binding.destination_digest()
             || pending.task_match.content().provenance_digest() != binding.evidence_digest()
@@ -5718,7 +6760,21 @@ impl KernelAgentAuthorityV2 {
                     g7.executor_identity,
                     g7.executor_key_id,
                     &g7.connector_registry,
-                    checked_deadline(now, 30_000)?,
+                    UnixMillisV2::new(
+                        checked_deadline(now, 30_000)?
+                            .get()
+                            .min(pending.expires_at.get())
+                            .min(first_parent.expires_at().get())
+                            .min(
+                                pending
+                                    .task_action_approval
+                                    .as_ref()
+                                    .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?
+                                    .material()
+                                    .expires_at()
+                                    .get(),
+                            ),
+                    ),
                 )
                 .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
                 let resolved_ticket = savana_policy_core::v2::ResolvedFinalReleaseTicketV2::
@@ -5755,10 +6811,14 @@ impl KernelAgentAuthorityV2 {
                     },
                 )
                 .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
-                let task = savana_policy_core::v2::TaskDispatchAuthorizationV2::new(
+                let mut task = savana_policy_core::v2::TaskDispatchAuthorizationV2::new(
                     pending.task_match.clone(),
                     endorsements,
                 );
+                if let Some(candidate) = pending.private_candidate {
+                    task =
+                        task.with_fused_final_result(candidate, pending.business_request.clone());
+                }
                 policy
                     .durable
                     .prepare_task_bound_final_release_dispatch(
@@ -5787,6 +6847,8 @@ impl KernelAgentAuthorityV2 {
         let vault_prepared = vault
             .mark_release_dispatch_prepared(authorized, vault_commit, now)
             .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+        let private_archive = pending.private_candidate;
+        let pending_commitment = pending.pending_commitment;
         let (hpke_enc, hpke_ciphertext) = seal_execution_payload(
             &dispatch_plaintext,
             g7.executor_seal_public_key,
@@ -5815,7 +6877,7 @@ impl KernelAgentAuthorityV2 {
             release: release_handle,
             commitment,
             ticket_commitment,
-            pending_commitment: pending.pending_commitment,
+            pending_commitment,
             prepared: vault_prepared,
             execution_nonce: prepared.preparation().execution_nonce(),
             dispatch_core_digest: prepared.preparation().dispatch_core_digest(),
@@ -5823,6 +6885,14 @@ impl KernelAgentAuthorityV2 {
             status: PublicExecutionStatusV2::Dispatching,
             completion: None,
         });
+        if let Some(candidate) = private_archive {
+            self.retain_fused_release_dispatch_v04(candidate, protocol_core)?;
+        }
+        let g7 = self
+            .policy
+            .as_ref()
+            .and_then(|p| p.g7.as_ref())
+            .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?;
         let response = g7
             .executor
             .dispatch(request_id, deadline, DispatchRequestV2::new(envelope))
@@ -5845,6 +6915,17 @@ impl KernelAgentAuthorityV2 {
         now: UnixMillisV2,
     ) -> Result<GetReleaseStatusResponseV2, KernelAgentAuthorityErrorV2> {
         self.verify_agent_caller(caller_identity)?;
+        self.release_status_for(request_id, request, vault, false, now)
+    }
+
+    fn release_status_for(
+        &mut self,
+        request_id: savana_kernel_protocol::v2::RequestIdV2,
+        request: GetReleaseStatusRequestV2,
+        vault: &mut dyn KernelIngressCommitSinkV2,
+        private: bool,
+        now: UnixMillisV2,
+    ) -> Result<GetReleaseStatusResponseV2, KernelAgentAuthorityErrorV2> {
         let index = match request.target() {
             ReleaseStatusTargetV2::Pending(pending) => {
                 let commitment = pending.authority_commitment(&self.handle_key);
@@ -5866,6 +6947,14 @@ impl KernelAgentAuthorityV2 {
             }
         }
         .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        let pending = self
+            .pending_releases
+            .iter()
+            .find(|p| p.pending_commitment == self.releases[index].pending_commitment)
+            .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        if pending.private_candidate.is_some() != private {
+            return Err(KernelAgentAuthorityErrorV2::InvalidReference);
+        }
         if matches!(
             self.releases[index].status,
             PublicExecutionStatusV2::Succeeded { .. }
@@ -6006,6 +7095,7 @@ impl KernelAgentAuthorityV2 {
             .find(|pending| pending.pending_commitment == record.pending_commitment)
             .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
         let binding = pending.vault_pending.binding();
+        let private_candidate = pending.private_candidate;
         let (final_release_receipt_digest, release_audit_digest) = match response.payload() {
             savana_kernel_protocol::v2::ExecutorCompletionPayloadV2::FinalReleaseReceipt {
                 receipt,
@@ -6091,6 +7181,16 @@ impl KernelAgentAuthorityV2 {
         };
         self.releases[index].completion = Some(completion);
         self.releases[index].status = committed_status;
+        if let Some(candidate) = private_candidate {
+            let r = self
+                .fused_release_recovery
+                .iter_mut()
+                .find(|r| r.candidate == candidate)
+                .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
+            r.completion = Some(completion);
+            r.commit = Some(kernel_commit_digest);
+            self.persist_fused_release_archive_v04()?;
+        }
         self.policy
             .as_ref()
             .and_then(|policy| policy.g7.as_ref())
@@ -6156,6 +7256,7 @@ impl KernelAgentAuthorityV2 {
             .iter()
             .position(|task| task.durable_task_id == unsigned.durable_task_id())
             .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
+        self.require_public_task_v04(self.tasks[task_index].durable_task_id)?;
         if &self.tasks[task_index].correlation != request.correlation()
             || !matches!(
                 self.tasks[task_index].status,
@@ -7528,6 +8629,15 @@ pub(crate) fn protocol_dispatch_core(
     {
         return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
     }
+    protocol_historical_dispatch_core(core)
+}
+
+fn protocol_historical_dispatch_core(
+    core: &savana_policy_core::v2::DispatchCoreV2,
+) -> Result<ProtocolDispatchCoreV2, KernelAgentAuthorityErrorV2> {
+    let task_binding = core
+        .task_binding()
+        .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
     let subject = match core.subject() {
         savana_policy_core::v2::DispatchSubjectV2::ToolExecution {
             action_intent_id,
@@ -7925,6 +9035,8 @@ fn decode_prepared_claim_material(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    include!("v04_fused_host_tests.rs");
+    include!("v04_fused_compiler_tests.rs");
     use std::cell::Cell;
     use std::fs;
     use std::os::unix::fs::PermissionsExt as _;
@@ -8290,7 +9402,7 @@ pub(crate) mod tests {
             .authority
             .mark_ingress_committed(task, principal, source, changed)
             .is_err());
-        for schema in [2, 3] {
+        for schema in [2, 3, 4] {
             let encoded = f.authority.encode_recovery_snapshot_schema(schema).unwrap();
             let mut restored = planner_authority_fixture().authority;
             restored
@@ -8299,7 +9411,7 @@ pub(crate) mod tests {
             assert_eq!(restored.tasks[0].task_authorization_digest, None);
             assert_eq!(
                 restored.tasks[0].source_input_digest,
-                if schema == 3 { Some(source) } else { None }
+                if schema >= 3 { Some(source) } else { None }
             );
             assert_eq!(restored.tasks[0].status, PublicTaskStatusV2::Processing);
             assert_eq!(
@@ -8485,7 +9597,7 @@ pub(crate) mod tests {
             Digest32V2::new([0x89; 32]),
             ServiceIdentityV2::new([0x8a; 32]),
             caller_identity,
-            ServiceIdentityV2::new([0x8b; 32]),
+            ServiceIdentityV2::new([0x9d; 32]),
             BootIdV2::new([0x8c; 32]),
             BootIdV2::new([0x8d; 32]),
             BootIdV2::new([0x8e; 32]),
@@ -8686,6 +9798,65 @@ pub(crate) mod tests {
             .commit(ticket, valid_planner_plan_for_task_gate(nonce, slot))
             .is_err());
         assert!(!f.authority.planner_tickets[0].consumed);
+    }
+
+    #[test]
+    fn fused_enrollment_blocks_legacy_planner_and_previously_prepared_ticket() {
+        use ed25519_dalek::Signer;
+        use savana_policy_core::v2::{FusedPlanningProfileV04, VerifiedFusedPlanningProfileV04};
+        let mut f = planner_authority_fixture();
+        let limits = PlannerLimitsV2::new(2, 1, 2, 4096).unwrap();
+        let (ticket, nonce, slot) = f.prepare(limits);
+        let task = f.authority.sessions[0].durable_task_id;
+        let durable = &mut f.authority.policy.as_mut().unwrap().durable;
+        let parent = durable.task_authorization_state(task).unwrap();
+        let m = parent.authorization().material();
+        let p: FusedPlanningProfileV04 = serde_json::from_value(serde_json::json!({
+            "schema":1,"installation":m.installation_digest().as_bytes(),"task":task.as_bytes(),
+            "not_before":m.not_before().get(),"expires_at":m.expires_at().get(),
+            "policy":{"schema":1,"root":parent.authorization().digest().as_bytes(),"observer_scope":vec![1u8;32],
+                "operations":[{"id":1,"tool_class":31,"action_template":21,"bindings":[],"after":[]}],
+                "templates":[{"id":1,"order":[1]}],"max_replacements":0,
+                "rounds":[{"id":1,"opens_at":200,"advice_cut":200,"closes_at":500,
+                    "advisor":null,"planner":vec![2u8;32],"model_profile":1,"mode":"registered_template_v04",
+                    "public_view":[],"template_ids":[1],"question_codes":[],"max_deliveries":1}]}
+        })).unwrap();
+        let key = SigningKey::from_bytes(&[0x21; 32]);
+        let proof = VerifiedFusedPlanningProfileV04::verify(
+            &serde_json::to_vec(&p).unwrap(),
+            &key.sign(&p.signing_digest().unwrap()).to_bytes(),
+            &key.verifying_key(),
+            parent.authorization(),
+            UnixMillisV2::new(200),
+        )
+        .unwrap();
+        durable
+            .install_fused_planning_v04(proof, UnixMillisV2::new(200))
+            .unwrap();
+        assert!(f
+            .commit(ticket, valid_planner_plan_for_task_gate(nonce, slot))
+            .is_err());
+        assert!(!f.authority.planner_tickets[0].consumed);
+        let request = PreparePlannerCallRequestV2::new(
+            f.run,
+            PlannerRouteIdV2::new(7),
+            StaticTemplateIdV2::new(11),
+            PlannerIntentKindV2::SendMessage,
+            PlannerPurposeV2::PlannerCall,
+            limits,
+            vec![f.prompt],
+        )
+        .unwrap();
+        assert!(f
+            .authority
+            .prepare_planner_call(
+                &request,
+                &f.values,
+                f.caller_identity,
+                UnixMillisV2::new(201)
+            )
+            .is_err());
+        assert_eq!(f.authority.planner_tickets.len(), 1);
     }
 
     fn valid_planner_plan_for_task_gate(nonce: Nonce32V2, slot: PlannerSlotRefV2) -> PlannerPlanV2 {
@@ -9754,6 +10925,116 @@ pub(crate) mod tests {
         )
     }
 
+    #[test]
+    fn managed_admin_real_owner_is_disabled_until_trusted_then_deduplicates() {
+        use crate::v04_managed_admin::{AdminSubmissionV04, AdminTrustV04};
+        use crate::v2_core_services::CoreKernelRuntimeServicesV2;
+        use crate::v2_kernel_owner::KernelRuntimeOwnerV2;
+        use savana_policy_core::v2::{
+            ManagedAdminCommandV04, ManagedAdminOperationV04 as Op, ManagedAdminResultV04,
+            ManagedSourcePolicyV04,
+        };
+        use std::time::{Duration, Instant};
+        let mut f = planner_authority_fixture();
+        let key = SigningKey::from_bytes(&[92; 32]);
+        let public = key.verifying_key().to_bytes();
+        let now = crate::v04_managed_admin::now().unwrap().get();
+        let policy = ManagedSourcePolicyV04 {
+            schema: 1,
+            installation: [0x89; 32],
+            source: [71; 32],
+            namespace: [72; 32],
+            target: [73; 32],
+            resource_issuer: SigningKey::from_bytes(&[93; 32]).verifying_key().to_bytes(),
+            not_before: now - 1,
+            expires_at: now + 60_000,
+            max_objects: 8,
+            max_object_bytes: 1024,
+            max_mutations: 32,
+            execution_projection: None,
+        };
+        let mut command = ManagedAdminCommandV04 {
+            schema: 1,
+            installation: [0x89; 32],
+            store: [0x9b; 32],
+            request: [74; 32],
+            not_before: now - 1,
+            expires_at: now + 60_000,
+            operation: Op::RegisterSource {
+                signature: key
+                    .sign(&policy.signing_digest().unwrap())
+                    .to_bytes()
+                    .to_vec(),
+                policy,
+            },
+        };
+        assert!(f
+            .authority
+            .apply_managed_admin(AdminSubmissionV04::for_test(&command, &key), &mut f.values)
+            .is_err());
+        let trust = || {
+            AdminTrustV04::from_deployment(
+                Some((derive_ed25519_key_id_v2(public), public)),
+                Digest32V2::new([0x89; 32]),
+                Digest32V2::new([0x9b; 32]),
+                &[],
+            )
+            .unwrap()
+            .unwrap()
+        };
+        f.authority.install_managed_admin(trust()).unwrap();
+        assert!(f.authority.install_managed_admin(trust()).is_err());
+        let mut services = CoreKernelRuntimeServicesV2::new(8, 4096, 8, 64).unwrap();
+        services.install_agent_security(f.authority).unwrap();
+        let owner = KernelRuntimeOwnerV2::spawn(4, services).unwrap();
+        let submit = |command: &ManagedAdminCommandV04, key: &SigningKey| {
+            owner.submit_managed_admin(
+                AdminSubmissionV04::for_test(command, key),
+                Instant::now() + Duration::from_secs(5),
+            )
+        };
+        assert!(submit(&command, &SigningKey::from_bytes(&[94; 32])).is_err());
+        assert!(matches!(
+            submit(&command, &key).unwrap().result(),
+            ManagedAdminResultV04::SourceRegistered { .. }
+        ));
+        command.request = [75; 32];
+        command.operation = Op::CreateResource {
+            source: [71; 32],
+            namespace: [72; 32],
+            label: "private".into(),
+            content: b"private bytes".to_vec(),
+        };
+        // An expired queue deadline cannot write; it also must not poison admission.
+        assert!(owner
+            .submit_managed_admin(
+                AdminSubmissionV04::for_test(&command, &key),
+                Instant::now() - Duration::from_millis(1)
+            )
+            .is_err());
+        let receipt = submit(&command, &key).unwrap();
+        assert_eq!(receipt, submit(&command, &key).unwrap());
+        let resource = match receipt.result() {
+            ManagedAdminResultV04::ResourceCreated { resource } => *resource,
+            _ => panic!("wrong private receipt"),
+        };
+        command.request = [76; 32];
+        command.operation = Op::UpdateResource {
+            resource,
+            expected_revision: 1,
+            value: None,
+        };
+        assert!(matches!(
+            submit(&command, &key).unwrap().result(),
+            ManagedAdminResultV04::ResourceUpdated { revision: 2, .. }
+        ));
+        assert!(submit(&command, &SigningKey::from_bytes(&[94; 32])).is_err());
+        command.request = [77; 32]; // new stale revision fails, exact retry succeeds
+        assert!(submit(&command, &key).is_err());
+        command.request = [76; 32];
+        assert!(submit(&command, &key).is_ok());
+    }
+
     fn planner_policy_runtime(
         directory: &std::path::Path,
         include_approval_display: bool,
@@ -9987,6 +11268,19 @@ pub(crate) mod tests {
         execution_reader: Option<Digest32V2>,
         final_release_reader: Option<Digest32V2>,
     ) -> crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2 {
+        planner_declassification_rules_with_model(
+            include_approval_display,
+            execution_reader,
+            final_release_reader,
+            None,
+        )
+    }
+    fn planner_declassification_rules_with_model(
+        include_approval_display: bool,
+        execution_reader: Option<Digest32V2>,
+        final_release_reader: Option<Digest32V2>,
+        fused_reader: Option<Digest32V2>,
+    ) -> crate::v2_declassification_policy::ActiveDeclassificationRuleSetV2 {
         let installer = SigningKey::from_bytes(&[0x9e; 32]);
         let authority = SigningKey::from_bytes(&[0x9f; 32]);
         let family = Digest32V2::new([0xa0; 32]);
@@ -10065,6 +11359,21 @@ pub(crate) mod tests {
                 .unwrap(),
             );
         }
+        if let Some(reader) = fused_reader {
+            rules.push(
+                DeclassificationRuleV2::new_for_test(
+                    6,
+                    ClosedDeclassificationPurposeV2::FusedModelCall,
+                    declassification_implementation_digest_v2(6).unwrap(),
+                    LeakGateDutyV2::BlocklistAndNoResidualPii,
+                    Some(vec![reader]),
+                    None,
+                    1,
+                    10_000,
+                )
+                .unwrap(),
+            );
+        }
         let rules = DeclassificationRuleSetV2::new_signed_for_test(
             family, 1, None, rules, 1, 10_000, &roots, &authority, 1, 100,
         )
@@ -10081,6 +11390,12 @@ pub(crate) mod tests {
     }
 
     fn planner_active_tools_with_release(include_release: bool) -> ActiveToolRegistryV2 {
+        planner_active_tools_with_release_mode(include_release, false)
+    }
+    fn planner_active_tools_with_release_mode(
+        include_release: bool,
+        result: bool,
+    ) -> ActiveToolRegistryV2 {
         let registry_version = VersionV2::new(1, 0, 0);
         let publisher_key = SigningKey::from_bytes(&[0xa1; 32]);
         let publisher_key_id = Ed25519KeyIdV2::new([0xa2; 32]);
@@ -10126,7 +11441,11 @@ pub(crate) mod tests {
                 &publisher,
                 &publisher_key,
                 publisher_key_id,
-                "release.allowed",
+                if result {
+                    "result-release.allowed"
+                } else {
+                    "release.allowed"
+                },
                 ActionTemplateIdV2::new(23),
                 ToolClassIdV2::new(34),
             ));
@@ -10201,7 +11520,10 @@ pub(crate) mod tests {
             Digest32V2::new([0xa5; 32]),
             Digest32V2::new([0xa6; 32]),
             vec![RoleIdV2::new(1)],
-            if provider_tool_id == "release.allowed" {
+            if matches!(
+                provider_tool_id,
+                "release.allowed" | "result-release.allowed"
+            ) {
                 EffectSetV2::FINAL_RELEASE
             } else {
                 EffectSetV2::SEND
@@ -10235,19 +11557,28 @@ pub(crate) mod tests {
         )
         .unwrap();
         let unsigned = unsigned
-            .with_business_profile(if provider_tool_id == "release.allowed" {
-                savana_kernel_protocol::v2::final_release_business_profile_v2(
-                    savana_kernel_protocol::v2::business_target_identity_v2(
-                        "https://provider.example/savana/final-release",
-                        Digest32V2::new([0x28; 32]),
+            .with_business_profile(
+                if matches!(
+                    provider_tool_id,
+                    "release.allowed" | "result-release.allowed"
+                ) {
+                    (if provider_tool_id == "result-release.allowed" {
+                        savana_kernel_protocol::v2::final_result_release_business_profile_v04
+                    } else {
+                        savana_kernel_protocol::v2::final_release_business_profile_v2
+                    })(
+                        savana_kernel_protocol::v2::business_target_identity_v2(
+                            "https://provider.example/savana/final-release",
+                            Digest32V2::new([0x28; 32]),
+                        )
+                        .unwrap(),
+                        Digest32V2::new([0x29; 32]),
                     )
-                    .unwrap(),
-                    Digest32V2::new([0x29; 32]),
-                )
-                .unwrap()
-            } else {
-                task_business_profile(provider_tool_id)
-            })
+                    .unwrap()
+                } else {
+                    task_business_profile(provider_tool_id)
+                },
+            )
             .unwrap();
         let descriptor_digest = descriptor_digest_v2(&unsigned).unwrap();
         let mut signature_input = b"SAVANA_TOOL_DESCRIPTOR_SIGNATURE_V2\0".to_vec();
@@ -11507,8 +12838,36 @@ pub(crate) mod tests {
         destination: &str,
         dependent: bool,
     ) -> (PlannerAuthorityFixtureV2, ProposeToolCallRequestV2) {
+        business_proposal_fixture_with_chain(resource, destination, dependent, false)
+    }
+
+    fn business_proposal_fixture_with_chain(
+        resource: &str,
+        destination: &str,
+        dependent: bool,
+        three_steps: bool,
+    ) -> (PlannerAuthorityFixtureV2, ProposeToolCallRequestV2) {
+        business_proposal_fixture_with_result_release(
+            resource,
+            destination,
+            dependent,
+            three_steps,
+            false,
+        )
+    }
+    fn business_proposal_fixture_with_result_release(
+        resource: &str,
+        destination: &str,
+        dependent: bool,
+        three_steps: bool,
+        release: bool,
+    ) -> (PlannerAuthorityFixtureV2, ProposeToolCallRequestV2) {
         use savana_kernel_protocol::v2::{BusinessControlsV2, BusinessValueV2};
         let mut f = planner_authority_fixture_with_task(true, false);
+        if release {
+            f.authority.policy.as_mut().unwrap().active_tools =
+                planner_active_tools_with_release_mode(true, true);
+        }
         let s = &f.authority.sessions[0];
         let active = f
             .authority
@@ -11524,7 +12883,12 @@ pub(crate) mod tests {
             .unsigned()
             .require_business_profile()
             .unwrap();
-        let alternatives: Vec<_> = [("A", "Alice"), ("B", "Bob")]
+        let destinations = if three_steps {
+            vec![("A", "Alice"), ("B", "Bob"), ("C", "Carol")]
+        } else {
+            vec![("A", "Alice"), ("B", "Bob")]
+        };
+        let alternatives: Vec<_> = destinations
             .iter()
             .map(|(file, to)| {
                 savana_kernel_protocol::v2::TaskAuthorizationDraftAlternativeV2::new(
@@ -11549,6 +12913,91 @@ pub(crate) mod tests {
                 s.active_state_manifest_digest,
                 b"send the reports",
             );
+        let mut clauses = if dependent {
+            alternatives
+                .into_iter()
+                .enumerate()
+                .map(|(index, alternative)| {
+                    savana_kernel_protocol::v2::TaskAuthorizationDraftClauseV2::new(
+                        index as u64 + 1,
+                        vec![alternative],
+                        1,
+                        1,
+                        1,
+                        if index > 0 {
+                            vec![index as u64]
+                        } else {
+                            vec![]
+                        },
+                        false,
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![
+                savana_kernel_protocol::v2::TaskAuthorizationDraftClauseV2::new(
+                    1,
+                    alternatives,
+                    1,
+                    2,
+                    2,
+                    vec![],
+                    false,
+                )
+                .unwrap(),
+            ]
+        };
+        if release {
+            use savana_kernel_protocol::v2::*;
+            let r = f
+                .authority
+                .policy
+                .as_ref()
+                .unwrap()
+                .active_tools
+                .resolve_class(ToolClassIdV2::new(34), s.role, UnixMillisV2::new(100))
+                .unwrap()
+                .descriptor();
+            let resource =
+                fused_final_result_resource_v04(s.durable_task_id, 2, descriptor).unwrap();
+            let controls = BusinessControlsV2::from_fields(
+                r.unsigned().business_profile().unwrap(),
+                vec![
+                    (
+                        "resource".into(),
+                        BusinessValueV2::Text(format!(
+                            "result:{}",
+                            resource
+                                .as_bytes()
+                                .iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<String>()
+                        )),
+                    ),
+                    (
+                        "destination".into(),
+                        BusinessValueV2::Text(format!("application-turn:{}", "04".repeat(32))),
+                    ),
+                ],
+            )
+            .unwrap();
+            clauses.push(
+                TaskAuthorizationDraftClauseV2::new(
+                    3,
+                    vec![
+                        TaskAuthorizationDraftAlternativeV2::new(r.descriptor_digest(), controls)
+                            .unwrap(),
+                    ],
+                    1,
+                    1,
+                    1,
+                    vec![1, 2],
+                    false,
+                )
+                .unwrap(),
+            );
+        }
         let draft = savana_kernel_protocol::v2::TaskAuthorizationDraftV2::new(
             Digest32V2::new([0x38; 32]),
             s.principal,
@@ -11560,37 +13009,7 @@ pub(crate) mod tests {
             UnixMillisV2::new(1),
             UnixMillisV2::new(10000),
             source,
-            if dependent {
-                alternatives
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, alternative)| {
-                        savana_kernel_protocol::v2::TaskAuthorizationDraftClauseV2::new(
-                            index as u64 + 1,
-                            vec![alternative],
-                            1,
-                            1,
-                            1,
-                            if index == 1 { vec![1] } else { vec![] },
-                            false,
-                        )
-                        .unwrap()
-                    })
-                    .collect()
-            } else {
-                vec![
-                    savana_kernel_protocol::v2::TaskAuthorizationDraftClauseV2::new(
-                        1,
-                        alternatives,
-                        1,
-                        2,
-                        2,
-                        vec![],
-                        false,
-                    )
-                    .unwrap(),
-                ]
-            },
+            clauses,
         )
         .unwrap();
         let key = SigningKey::from_bytes(&[0x39; 32]);

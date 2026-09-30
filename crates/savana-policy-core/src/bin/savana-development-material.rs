@@ -648,6 +648,16 @@ mod macos {
         write_json(&root.join("config/ingressd-bootstrap-v2.json"), &ingress)?;
 
         let mut approval = read_json(&root.join("config/approvald-bootstrap-v2.json"))?;
+        set_hex(
+            &mut approval,
+            &["kernel_authority_envelope_key_id"],
+            patch.kernel_authority.key_id,
+        )?;
+        set_hex(
+            &mut approval,
+            &["kernel_authority_envelope_public_key"],
+            patch.kernel_authority.public_key,
+        )?;
         set_value(
             &mut approval,
             &["signed_manifest_path"],

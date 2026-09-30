@@ -11,6 +11,28 @@ use sha2::{Digest as _, Sha256};
 
 pub const MAX_TASK_EXECUTION_PAYLOAD_BYTES_V2: usize = 96 * 1024;
 
+/// Exact plaintext plus the independently checked G3 node. This commitment is
+/// shared by kernel and executor; computing it alone does not authorize egress.
+pub fn presealed_tool_payload_digest_v2(bytes: &[u8], provenance: Digest32V2) -> Digest32V2 {
+    presealed_payload_digest(b"SAVANA_PRESEALED_EXECUTOR_PAYLOAD_V2\0", bytes, provenance)
+}
+pub fn presealed_release_payload_digest_v2(bytes: &[u8], provenance: Digest32V2) -> Digest32V2 {
+    presealed_payload_digest(
+        b"SAVANA_PRESEALED_FINAL_RELEASE_PAYLOAD_V2\0",
+        bytes,
+        provenance,
+    )
+}
+fn presealed_payload_digest(domain: &[u8], bytes: &[u8], provenance: Digest32V2) -> Digest32V2 {
+    let mut hash = Sha256::new();
+    hash.update(domain);
+    hash.update((bytes.len() as u64).to_be_bytes());
+    hash.update(bytes);
+    hash.update(32u64.to_be_bytes());
+    hash.update(provenance.as_bytes());
+    Digest32V2::new(hash.finalize().into())
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct TaskExecutionPayloadV2 {
     content: ActionContentV2,
@@ -72,20 +94,34 @@ impl TaskExecutionPayloadV2 {
                 if self.content.action().effect() != super::TaskEffectV2::FinalRelease
                     || self.content.action().destination_digest() != binding.destination_digest()
                     || self.content.provenance_digest() != binding.evidence_digest()
-                    || *profile
-                        != super::final_release_business_profile_v2(
-                            profile.target_identity(),
-                            profile.credential_identity(),
-                        )?
                 {
                     return Err(BusinessCodecErrorV2::Binding);
                 }
-                let delivery =
-                    super::decode_final_release_delivery_v2(&self.request.canonical_json())?;
+                let payload = if *profile
+                    == super::final_release_business_profile_v2(
+                        profile.target_identity(),
+                        profile.credential_identity(),
+                    )? {
+                    super::decode_final_release_delivery_v2(&self.request.canonical_json())?
+                        .payload()
+                        .to_vec()
+                } else if *profile
+                    == super::final_result_release_business_profile_v04(
+                        profile.target_identity(),
+                        profile.credential_identity(),
+                    )?
+                {
+                    super::decode_final_result_release_delivery_v04(&self.request.canonical_json())?
+                        .payload()
+                        .to_vec()
+                } else {
+                    return Err(BusinessCodecErrorV2::Binding);
+                };
+                let payload = zeroize::Zeroizing::new(payload);
                 let mut digest = Sha256::new();
                 digest.update(b"SAVANA_FINAL_RELEASE_PAYLOAD_V2\0");
-                digest.update((delivery.payload().len() as u64).to_be_bytes());
-                digest.update(delivery.payload());
+                digest.update((payload.len() as u64).to_be_bytes());
+                digest.update(&*payload);
                 if Digest32V2::new(digest.finalize().into()) != binding.release_payload_digest() {
                     return Err(BusinessCodecErrorV2::Binding);
                 }
@@ -171,4 +207,39 @@ pub fn business_target_identity_v2(
     hash.update(32u64.to_be_bytes());
     hash.update(tls_pin.as_bytes());
     Ok(Digest32V2::new(hash.finalize().into()))
+}
+
+#[cfg(test)]
+mod preseal_tests {
+    use super::*;
+
+    #[test]
+    fn presealed_commitments_preserve_v2_wire_golden_and_separate_domains() {
+        let node = Digest32V2::new([0x71; 32]);
+        let tool = presealed_tool_payload_digest_v2(b"exact plaintext", node);
+        let release = presealed_release_payload_digest_v2(b"exact plaintext", node);
+        let hex = |d: Digest32V2| {
+            d.as_bytes()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        };
+        assert_eq!(
+            hex(tool),
+            "96040396b9929db73190121c0018f093e223b0924e97a022f02dc8a1e65b1bfe"
+        );
+        assert_eq!(
+            hex(release),
+            "fbaeee3c7419ce4d12be43f1d7b936d66c4eba327206b3601f8b91c7a41e56d8"
+        );
+        assert_ne!(tool, release);
+        assert_ne!(
+            tool,
+            presealed_tool_payload_digest_v2(b"other plaintext", node)
+        );
+        assert_ne!(
+            tool,
+            presealed_tool_payload_digest_v2(b"exact plaintext", Digest32V2::new([0x72; 32]))
+        );
+    }
 }

@@ -71,8 +71,6 @@ mod implementation {
     const MANIFEST_ROOT_PATH_V2: &str = "/etc/savana/trust/deployment-manifest-root-v2.json";
     #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
     const MANIFEST_ROOT_PATH_V2: &str = "/Library/Application Support/Savana/Development/config/trust/deployment-manifest-root-v2.json";
-    #[cfg(target_os = "linux")]
-    const CREDENTIAL_DIRECTORY_V2: &str = "/run/credentials/savana-approvald.service";
     #[cfg(target_os = "macos")]
     const CREDENTIAL_DIRECTORY_V2: &str =
         "/Library/Application Support/Savana/Development/credentials/approvald";
@@ -82,6 +80,10 @@ mod implementation {
     const STATE_ENCRYPTION_CREDENTIAL_V2: &str = "approval-state-encryption-v2.key";
     const ANCHOR_AUTHENTICATION_CREDENTIAL_V2: &str = "approval-anchor-authentication-v2.key";
     const AGENT_FD_NAME_V2: &str = "savana-agent-approval";
+    #[cfg(target_os = "linux")]
+    const KERNEL_FD_NAME_V04: &str = "savana-kernel-approval";
+    #[cfg(target_os = "linux")]
+    const KERNEL_SOCKET_PATH_V04: &str = "/run/savana/approvald/kerneld/approvald.sock";
     const INGRESS_FD_NAME_V2: &str = "savana-ingress-approval";
     const ADMIN_FD_NAME_V2: &str = "savana-admin-approval";
     const HTTP_FD_NAME_V2: &str = "savana-approval-http";
@@ -124,6 +126,10 @@ mod implementation {
         rollback_anchor_path: PathBuf,
         store_id: String,
         kernel_envelope_public_key_path: PathBuf,
+        // Pinned by the signed deployment's measured bootstrap configuration.
+        // UI/approval authority is distinct from the executor-envelope key.
+        kernel_authority_envelope_key_id: String,
+        kernel_authority_envelope_public_key: String,
         kernel_correlation_public_key_path: PathBuf,
         kernel_correlation_key_id: String,
         settlement_key_id: String,
@@ -132,6 +138,8 @@ mod implementation {
         agent_client_public_key_path: PathBuf,
         agent_client_key_id: String,
         agent_listener_gid: u32,
+        #[serde(default)]
+        kernel_approval: Option<KernelApprovalDtoV04>,
         ingress_client_public_key_path: PathBuf,
         ingress_client_key_id: String,
         ingress_listener_gid: u32,
@@ -152,10 +160,48 @@ mod implementation {
 
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
+    struct KernelApprovalDtoV04 {
+        client_public_key_path: PathBuf,
+        client_key_id: String,
+        listener_gid: u32,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct EnrollmentProfileDtoV2 {
         profile: u32,
+        #[serde(default)]
+        assurance: EnrollmentAssuranceDtoV04,
         code_lifetime_ms: u64,
         ceremony_lifetime_ms: u64,
+    }
+
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "snake_case")]
+    enum EnrollmentAssuranceDtoV04 {
+        #[default]
+        AttestedHardware,
+        UserVerifiedPasskey,
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn passkey_enrollment_profile_is_explicit_and_unknown_settings_fail_closed() {
+        let base = serde_json::json!({"profile": 1, "code_lifetime_ms": 1000, "ceremony_lifetime_ms": 1000});
+        let old: EnrollmentProfileDtoV2 = serde_json::from_value(base.clone()).unwrap();
+        assert!(matches!(
+            old.assurance,
+            EnrollmentAssuranceDtoV04::AttestedHardware
+        ));
+        let mut selected = base;
+        selected["assurance"] = serde_json::json!("user_verified_passkey");
+        let passkey: EnrollmentProfileDtoV2 = serde_json::from_value(selected.clone()).unwrap();
+        assert!(matches!(
+            passkey.assurance,
+            EnrollmentAssuranceDtoV04::UserVerifiedPasskey
+        ));
+        selected["assurance"] = serde_json::json!("allow_any");
+        assert!(serde_json::from_value::<EnrollmentProfileDtoV2>(selected).is_err());
     }
 
     #[derive(Deserialize)]
@@ -252,11 +298,15 @@ mod implementation {
         )
         .map_err(|_| ApprovaldDaemonErrorV2::DeploymentUnavailable)?;
         development_stage("self-pinned");
-        let (agent_listener, ingress_listener, admin_listener, http_listener) =
+        let (agent_listener, ingress_listener, admin_listener, http_listener, kernel_listener) =
             take_verified_listeners(
                 &startup,
                 bootstrap.agent_listener_gid,
                 bootstrap.ingress_listener_gid,
+                bootstrap
+                    .kernel_approval
+                    .as_ref()
+                    .map(|config| config.listener_gid),
             )?;
         development_stage("listeners-verified");
         let approvald_boot_id = BootIdV2::new(read_credential_32(APPROVALD_BOOT_CREDENTIAL_V2)?);
@@ -289,6 +339,15 @@ mod implementation {
         if derive_ed25519_key_id_v2(kernel_correlation_public_key) != kernel_correlation_key_id {
             return Err(ApprovaldDaemonErrorV2::DeploymentUnavailable);
         }
+        let authority_public_key = parse_hex_32(&bootstrap.kernel_authority_envelope_public_key)?;
+        let authority_key_id =
+            Ed25519KeyIdV2::new(parse_hex_32(&bootstrap.kernel_authority_envelope_key_id)?);
+        validate_authority_envelope_key(
+            authority_public_key,
+            authority_key_id,
+            kernel_envelope_public_key,
+            kernel_correlation_public_key,
+        )?;
         development_stage("kernel-keys-verified");
         let approvald_identity = startup
             .service_identity(ClosedServiceIdV2::Approvald)
@@ -300,8 +359,8 @@ mod implementation {
             approvald_boot_id,
             bootstrap.settlement_key_epoch,
             approvald_identity,
-            startup.kernel_envelope_signing_key_id(),
-            kernel_envelope_public_key,
+            authority_key_id,
+            authority_public_key,
             kernel_correlation_key_id,
             kernel_correlation_public_key,
             settlement_key_id,
@@ -310,6 +369,14 @@ mod implementation {
         )
         .map_err(|_| ApprovaldDaemonErrorV2::DeploymentUnavailable)?;
         load_enrollment_profiles(&mut deployment, &bootstrap.enrollment_profiles)?;
+        if bootstrap.attestation_roots.is_empty()
+            && bootstrap
+                .enrollment_profiles
+                .iter()
+                .any(|p| matches!(p.assurance, EnrollmentAssuranceDtoV04::AttestedHardware))
+        {
+            return Err(ApprovaldDaemonErrorV2::DeploymentUnavailable);
+        }
         load_hardware_credentials(&mut deployment, &bootstrap.hardware_credentials)?;
         let attestation_roots = load_attestation_roots(&bootstrap.attestation_roots)?;
         development_stage("protocol-deployment-verified");
@@ -403,6 +470,52 @@ mod implementation {
             )
             .map_err(|_| ApprovaldDaemonErrorV2::DeploymentUnavailable)?,
         );
+        let kernel_endpoint = match (&bootstrap.kernel_approval, kernel_listener) {
+            (Some(config), Some(listener)) if cfg!(target_os = "linux") => {
+                let public = read_public_key(&config.client_public_key_path)?;
+                let key_id = Ed25519KeyIdV2::new(parse_hex_32(&config.client_key_id)?);
+                let kernel_lock = startup
+                    .service_lock(ClosedServiceIdV2::Kerneld)
+                    .ok_or(ApprovaldDaemonErrorV2::DeploymentUnavailable)?;
+                validate_kernel_approval_key_v04(
+                    public,
+                    key_id,
+                    config.listener_gid,
+                    kernel_lock.gid,
+                    &[
+                        agent_client_public_key,
+                        ingress_client_public_key,
+                        admin_client_public_key,
+                        server_key.verifying_key().to_bytes(),
+                        kernel_envelope_public_key,
+                        authority_public_key,
+                        kernel_correlation_public_key,
+                        SigningKey::from_bytes(&settlement_seed)
+                            .verifying_key()
+                            .to_bytes(),
+                    ],
+                )?;
+                let edge = startup
+                    .approval_service_handshake_edge(
+                        EndpointRoleV2::KernelApproval,
+                        key_id,
+                        server_key_id,
+                        approvald_boot_id,
+                    )
+                    .map_err(|_| ApprovaldDaemonErrorV2::DeploymentUnavailable)?;
+                let server = ApprovalSuiteOneServerV2::new(
+                    edge,
+                    public,
+                    server_key.clone(),
+                    65_536,
+                    Arc::clone(&authority),
+                )
+                .map_err(|_| ApprovaldDaemonErrorV2::DeploymentUnavailable)?;
+                Some((listener, Arc::new(server), peer_policy(kernel_lock)))
+            }
+            (None, None) => None,
+            _ => return Err(ApprovaldDaemonErrorV2::DeploymentUnavailable),
+        };
         let admin_server = Arc::new(
             ApprovalSuiteOneServerV2::new(
                 admin_edge,
@@ -454,6 +567,7 @@ mod implementation {
             agent_peer,
             ingress_peer,
             admin_peer,
+            kernel_endpoint,
         )
     }
 
@@ -570,8 +684,18 @@ mod implementation {
         agent_peer: PeerPolicyV2,
         ingress_peer: PeerPolicyV2,
         admin_peer: PeerPolicyV2,
+        kernel_endpoint: Option<(UnixListener, Arc<ApprovalSuiteOneServerV2>, PeerPolicyV2)>,
     ) -> Result<(), ApprovaldDaemonErrorV2> {
-        let (failures, terminated) = mpsc::sync_channel(4);
+        let (failures, terminated) = mpsc::sync_channel(5);
+        if let Some((listener, server, peer)) = kernel_endpoint {
+            let kernel_failures = failures.clone();
+            std::thread::Builder::new()
+                .name("savana-kernel-approval-listener-v04".to_owned())
+                .spawn(move || {
+                    let _ = kernel_failures.send(serve_uds(listener, server, peer));
+                })
+                .map_err(|_| ApprovaldDaemonErrorV2::EndpointUnavailable)?;
+        }
         let agent_failures = failures.clone();
         std::thread::Builder::new()
             .name("savana-agent-approval-listener-v2".to_owned())
@@ -791,8 +915,16 @@ mod implementation {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn serve_http_stream(
+        stream: TcpStream,
+        authority: Arc<ApprovalUiAuthorityV2>,
+    ) -> Result<(), ApprovaldDaemonErrorV2> {
+        serve_http_stream_with_clock(stream, authority, current_unix_millis)
+    }
+
+    fn serve_http_stream_with_clock(
         mut stream: TcpStream,
         authority: Arc<ApprovalUiAuthorityV2>,
+        clock: impl FnOnce() -> Result<UnixMillisV2, ApprovaldDaemonErrorV2>,
     ) -> Result<(), ApprovaldDaemonErrorV2> {
         stream
             .set_read_timeout(Some(CONNECTION_DEADLINE_V2))
@@ -806,11 +938,82 @@ mod implementation {
             Err(FixedHttpErrorV2::UnauthorizedOrigin) => return Ok(()),
             Err(_) => return write_http(&mut stream, 400, "text/plain; charset=utf-8", b""),
         };
-        let now = current_unix_millis()?;
+        let now = clock()?;
         let deadline = Instant::now()
             .checked_add(CONNECTION_DEADLINE_V2)
             .ok_or(ApprovaldDaemonErrorV2::EndpointUnavailable)?;
         match request.route() {
+            FixedHttpRouteV2::PrivateSessionAcceptV04 => {
+                let entropy = decode_form_transfer(request.body())?;
+                let _transfer = savana_kernel_protocol::v2::PrivateSessionTransferV04::from_authority_entropy(entropy)
+                    .ok_or(ApprovaldDaemonErrorV2::EndpointUnavailable)?;
+                // Only an ingress-origin POST can carry the handoff; never a URL.
+                let encoded = URL_SAFE_NO_PAD.encode(entropy);
+                let body = format!(r#"<!doctype html><html><head><meta charset="utf-8"><title>Savana private session</title><script src="/v2/savana-ui.js" defer></script></head><body><main data-private-session="true" data-private-transfer="{encoded}"><h1>Private Savana session</h1><p>This login does not approve tool execution.</p><input id="savana-private-transfer" type="password" autocomplete="off" maxlength="43"><button id="savana-private-connect" type="button">Authenticate with passkey or security key</button><p id="savana-status" role="status"></p><div id="savana-private-actions"></div></main></body></html>"#);
+                write_http(&mut stream, 200, "text/html; charset=utf-8", body.as_bytes())
+            }
+            FixedHttpRouteV2::PrivateSessionLandingV04 => write_http(
+                &mut stream, 200, "text/html; charset=utf-8",
+                br#"<!doctype html><html><head><meta charset="utf-8"><title>Savana private session</title><script src="/v2/savana-ui.js" defer></script></head><body><main data-private-session="true"><h1>Private Savana session</h1><p>This login does not approve tool execution.</p><label for="savana-private-transfer">Task session handoff</label><input id="savana-private-transfer" type="password" autocomplete="off" maxlength="43"><button id="savana-private-connect" type="button">Authenticate with passkey or security key</button><p id="savana-status" role="status"></p><div id="savana-private-actions"></div></main></body></html>"#,
+            ),
+            FixedHttpRouteV2::PrivateSessionPollV04 => {
+                let result = savana_kernel_protocol::v2::decode_private_session_browser_v04(request.body()).ok()
+                    .and_then(|browser| authority.private_session_handoff_v04(browser, now, deadline).ok())
+                    .and_then(|t| savana_kernel_protocol::v2::encode_private_session_handoff_v04(t).ok());
+                match result {
+                    Some(body) => write_http(&mut stream, 200, "application/cbor", &body),
+                    None => write_http(&mut stream, 400, "text/plain; charset=utf-8", b"Private session unavailable."),
+                }
+            }
+            FixedHttpRouteV2::PrivateSessionPublicationV04 => {
+                let result = savana_kernel_protocol::v2::decode_private_session_browser_v04(request.body()).ok()
+                    .and_then(|browser| authority.private_session_publication_v04(browser, now, deadline).ok())
+                    .and_then(|p| savana_kernel_protocol::v2::encode_private_publication_status_v04(p).ok());
+                match result {
+                    Some(body) => write_http(&mut stream, 200, "application/cbor", &body),
+                    None => write_http(&mut stream, 400, "text/plain; charset=utf-8", b"Private session unavailable."),
+                }
+            }
+            FixedHttpRouteV2::PrivateSessionBeginV04 => {
+                let result = savana_kernel_protocol::v2::decode_private_session_begin_v04(request.body()).ok()
+                    .and_then(|transfer| authority.begin_private_session_v04(transfer, now, deadline).ok())
+                    .and_then(|options| savana_kernel_protocol::v2::encode_private_session_options_v04(&options).ok());
+                match result {
+                    Some(body) => write_http(&mut stream, 200, "application/cbor", &body),
+                    None => write_http(&mut stream, 400, "text/plain; charset=utf-8", b"Private session unavailable."),
+                }
+            }
+            FixedHttpRouteV2::PrivateSessionFinishV04 => {
+                let result = savana_kernel_protocol::v2::decode_private_session_finish_v04(request.body()).ok()
+                    .and_then(|(transfer, assertion)| authority.finish_private_session_v04(
+                        transfer, assertion, Digest32V2::new(sha2::Sha256::digest(request.body()).into()), now, deadline,
+                    ).ok())
+                    .and_then(|browser| savana_kernel_protocol::v2::encode_private_session_browser_v04(browser).ok());
+                match result {
+                    Some(body) => write_http(&mut stream, 200, "application/cbor", &body),
+                    None => write_http(&mut stream, 400, "text/plain; charset=utf-8", b"Private session unavailable."),
+                }
+            }
+            FixedHttpRouteV2::PrivateApprovalLandingV04 => write_http(
+                &mut stream, 200, "text/html; charset=utf-8",
+                &savana_kernel_protocol::v2::render_private_approval_landing_v04(),
+            ),
+            FixedHttpRouteV2::PrivateApprovalAcceptV04 => {
+                let accepted = decode_form_transfer(request.body())
+                    .ok()
+                    .and_then(savana_kernel_protocol::v2::ApprovalDisplayAuthenticationTransferCapabilityV2::from_authority_entropy)
+                    .and_then(|transfer| authority.accept_kernel_approval_display_transfer_v04(transfer, now, deadline).ok());
+                match accepted {
+                    Some(accepted) => {
+                        let body = render_authentication_shell(accepted)?;
+                        write_http(&mut stream, 200, "text/html; charset=utf-8", &body)
+                    }
+                    // No expired/unknown/wrong-role oracle, no reflected token,
+                    // no redirect into the public Agent or Ingress bootstrap.
+                    None => write_http(&mut stream, 400, "text/plain; charset=utf-8",
+                        b"Private handoff unavailable. Return to your trusted Savana session."),
+                }
+            }
             FixedHttpRouteV2::BrowserScript => write_http(
                 &mut stream,
                 200,
@@ -904,7 +1107,7 @@ mod implementation {
                 &mut stream,
                 200,
                 "text/html; charset=utf-8",
-                b"<!doctype html><html><head><meta charset=\"utf-8\"><title>Savana enrollment</title></head><body><main data-enrollment=\"true\"><h1>Enroll hardware security key</h1><label for=\"savana-enrollment-handle\">Enrollment handle</label><input id=\"savana-enrollment-handle\" autocomplete=\"off\"><label for=\"savana-enrollment-code\">One-time code</label><input id=\"savana-enrollment-code\" type=\"password\" autocomplete=\"one-time-code\"><button id=\"savana-enrollment-start\" type=\"button\">Enroll security key</button><p id=\"savana-status\">Enrollment values stay in this page only.</p></main><script src=\"/v2/savana-ui.js\" defer></script></body></html>",
+                b"<!doctype html><html><head><meta charset=\"utf-8\"><title>Savana enrollment</title></head><body><main data-enrollment=\"true\"><h1>Register authentication credential</h1><label for=\"savana-enrollment-handle\">Enrollment handle</label><input id=\"savana-enrollment-handle\" autocomplete=\"off\"><label for=\"savana-enrollment-code\">One-time code</label><input id=\"savana-enrollment-code\" type=\"password\" autocomplete=\"one-time-code\"><button id=\"savana-enrollment-start\" type=\"button\">Register credential</button><p id=\"savana-status\">Enrollment values stay in this page only.</p></main><script src=\"/v2/savana-ui.js\" defer></script></body></html>",
             ),
             FixedHttpRouteV2::ApprovalEnrollmentBegin => {
                 let decoded = decode_begin_enrollment_browser_request_v2(request.body())
@@ -953,7 +1156,7 @@ mod implementation {
         };
         let capability = URL_SAFE_NO_PAD.encode(encoded);
         Ok(format!(
-            "<!doctype html><html><head><meta charset=\"utf-8\"><title>Savana authentication</title></head><body><main data-purpose=\"{purpose}\" data-pre-authentication=\"{capability}\"><h1>Hardware authentication required</h1><button id=\"savana-authenticate\" type=\"button\">Use security key</button><p id=\"savana-status\">The opaque capability is held only in this page.</p></main><script src=\"/v2/savana-ui.js\" defer></script></body></html>"
+            "<!doctype html><html><head><meta charset=\"utf-8\"><title>Savana authentication</title></head><body><main data-purpose=\"{purpose}\" data-pre-authentication=\"{capability}\"><h1>User verification required</h1><button id=\"savana-authenticate\" type=\"button\">Use passkey or security key</button><p id=\"savana-status\">The opaque capability is held only in this page.</p></main><script src=\"/v2/savana-ui.js\" defer></script></body></html>"
         )
         .into_bytes())
     }
@@ -974,15 +1177,28 @@ mod implementation {
         startup: &VerifiedDaemonStartupV2,
         agent_listener_gid: u32,
         ingress_listener_gid: u32,
-    ) -> Result<(UnixListener, UnixListener, UnixListener, TcpListener), ApprovaldDaemonErrorV2>
-    {
-        let inherited = savana_platform_identity::take_systemd_listeners_v2(&[
+        kernel_listener_gid: Option<u32>,
+    ) -> Result<
+        (
+            UnixListener,
+            UnixListener,
+            UnixListener,
+            TcpListener,
+            Option<UnixListener>,
+        ),
+        ApprovaldDaemonErrorV2,
+    > {
+        let mut expected_names = vec![
             AGENT_FD_NAME_V2,
             INGRESS_FD_NAME_V2,
             ADMIN_FD_NAME_V2,
             HTTP_FD_NAME_V2,
-        ])
-        .map_err(|_| ApprovaldDaemonErrorV2::EndpointUnavailable)?;
+        ];
+        if kernel_listener_gid.is_some() {
+            expected_names.push(KERNEL_FD_NAME_V04);
+        }
+        let inherited = savana_platform_identity::take_systemd_listeners_v2(&expected_names)
+            .map_err(|_| ApprovaldDaemonErrorV2::EndpointUnavailable)?;
         let mut inherited = inherited.into_iter();
         let (agent_name, agent_listener) = inherited
             .next()
@@ -1000,6 +1216,37 @@ mod implementation {
             .next()
             .ok_or(ApprovaldDaemonErrorV2::EndpointUnavailable)?
             .into_tcp_listener();
+        let kernel_listener = if let Some(gid) = kernel_listener_gid {
+            let (name, listener) = inherited
+                .next()
+                .ok_or(ApprovaldDaemonErrorV2::EndpointUnavailable)?
+                .into_unix_listener();
+            let approval = startup
+                .service_lock(ClosedServiceIdV2::Approvald)
+                .ok_or(ApprovaldDaemonErrorV2::DeploymentUnavailable)?;
+            let kernel = startup
+                .service_lock(ClosedServiceIdV2::Kerneld)
+                .ok_or(ApprovaldDaemonErrorV2::DeploymentUnavailable)?;
+            if name != KERNEL_FD_NAME_V04 || gid != kernel.gid {
+                return Err(ApprovaldDaemonErrorV2::EndpointUnavailable);
+            }
+            verify_role_unix_listener(
+                &listener,
+                Path::new(KERNEL_SOCKET_PATH_V04),
+                approval.uid,
+                gid,
+            )?;
+            verify_kernel_role_directory_v04(
+                Path::new(KERNEL_SOCKET_PATH_V04)
+                    .parent()
+                    .ok_or(ApprovaldDaemonErrorV2::EndpointUnavailable)?,
+                approval.uid,
+                gid,
+            )?;
+            Some(listener)
+        } else {
+            None
+        };
         if inherited.next().is_some()
             || agent_name != AGENT_FD_NAME_V2
             || ingress_name != INGRESS_FD_NAME_V2
@@ -1038,6 +1285,7 @@ mod implementation {
             ingress_listener,
             admin_listener,
             http_listener,
+            kernel_listener,
         ))
     }
 
@@ -1046,8 +1294,20 @@ mod implementation {
         startup: &VerifiedDaemonStartupV2,
         agent_listener_gid: u32,
         ingress_listener_gid: u32,
-    ) -> Result<(UnixListener, UnixListener, UnixListener, TcpListener), ApprovaldDaemonErrorV2>
-    {
+        kernel_listener_gid: Option<u32>,
+    ) -> Result<
+        (
+            UnixListener,
+            UnixListener,
+            UnixListener,
+            TcpListener,
+            Option<UnixListener>,
+        ),
+        ApprovaldDaemonErrorV2,
+    > {
+        if kernel_listener_gid.is_some() {
+            return Err(ApprovaldDaemonErrorV2::DeploymentUnavailable);
+        }
         let inherited = savana_platform_identity::take_launchd_unix_listeners_v2(&[
             AGENT_FD_NAME_V2,
             INGRESS_FD_NAME_V2,
@@ -1111,6 +1371,7 @@ mod implementation {
             ingress_listener,
             admin_listener,
             http_listener,
+            None,
         ))
     }
 
@@ -1254,10 +1515,14 @@ mod implementation {
         }
         for profile in profiles {
             deployment
-                .load_verified_enrollment_profile(
+                .load_verified_enrollment_profile_with_assurance(
                     EnrollmentProfileIdV2::new(profile.profile),
                     profile.code_lifetime_ms,
                     profile.ceremony_lifetime_ms,
+                    match profile.assurance {
+                        EnrollmentAssuranceDtoV04::AttestedHardware => savana_kernel_protocol::v2::AuthenticationAssuranceV04::AttestedHardware,
+                        EnrollmentAssuranceDtoV04::UserVerifiedPasskey => savana_kernel_protocol::v2::AuthenticationAssuranceV04::UserVerifiedPasskey,
+                    },
                 )
                 .map_err(|_| ApprovaldDaemonErrorV2::DeploymentUnavailable)?;
         }
@@ -1267,7 +1532,7 @@ mod implementation {
     fn load_attestation_roots(
         roots: &[AttestationRootDtoV2],
     ) -> Result<Vec<HardwareAttestationRootV2>, ApprovaldDaemonErrorV2> {
-        if roots.is_empty() || roots.len() > 256 {
+        if roots.len() > 256 {
             return Err(ApprovaldDaemonErrorV2::DeploymentUnavailable);
         }
         let mut loaded = Vec::new();
@@ -1294,6 +1559,158 @@ mod implementation {
         Ok(loaded)
     }
 
+    #[cfg(any(target_os = "linux", test))]
+    fn verify_kernel_role_directory_v04(
+        path: &Path,
+        uid: u32,
+        gid: u32,
+    ) -> Result<(), ApprovaldDaemonErrorV2> {
+        let metadata =
+            fs::symlink_metadata(path).map_err(|_| ApprovaldDaemonErrorV2::EndpointUnavailable)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || metadata.uid() != uid
+            || metadata.gid() != gid
+            || metadata.mode() & 0o7777 != 0o710
+        {
+            return Err(ApprovaldDaemonErrorV2::EndpointUnavailable);
+        }
+        Ok(())
+    }
+
+    fn validate_kernel_approval_key_v04(
+        public: [u8; 32],
+        key_id: Ed25519KeyIdV2,
+        listener_gid: u32,
+        kernel_gid: u32,
+        distinct: &[[u8; 32]],
+    ) -> Result<(), ApprovaldDaemonErrorV2> {
+        if public == [0; 32]
+            || listener_gid == 0
+            || listener_gid != kernel_gid
+            || derive_ed25519_key_id_v2(public) != key_id
+            || distinct.contains(&public)
+        {
+            return Err(ApprovaldDaemonErrorV2::DeploymentUnavailable);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod kernel_approval_startup_tests {
+        use super::*;
+        include!("private_http_tests.rs");
+        #[test]
+        fn private_role_directory_rejects_wrong_owner_mode_and_symlink() {
+            use std::os::unix::fs::{symlink, PermissionsExt};
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("kerneld");
+            fs::create_dir(&dir).unwrap();
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o710)).unwrap();
+            let metadata = fs::symlink_metadata(&dir).unwrap();
+            let (uid, gid) = (metadata.uid(), metadata.gid());
+            verify_kernel_role_directory_v04(&dir, uid, gid).unwrap();
+            assert!(verify_kernel_role_directory_v04(&dir, uid.wrapping_add(1), gid).is_err());
+            assert!(verify_kernel_role_directory_v04(&dir, uid, gid.wrapping_add(1)).is_err());
+            let link = root.path().join("alias");
+            symlink(&dir, &link).unwrap();
+            assert!(verify_kernel_role_directory_v04(&link, uid, gid).is_err());
+            for mode in [0o700, 0o711, 0o770, 0o777] {
+                fs::set_permissions(&dir, fs::Permissions::from_mode(mode)).unwrap();
+                assert!(verify_kernel_role_directory_v04(&dir, uid, gid).is_err());
+            }
+        }
+        #[test]
+        fn dedicated_key_and_kernel_group_are_required() {
+            let public = SigningKey::from_bytes(&[0x91; 32])
+                .verifying_key()
+                .to_bytes();
+            let id = derive_ed25519_key_id_v2(public);
+            assert!(validate_kernel_approval_key_v04(public, id, 901, 901, &[]).is_ok());
+            for (configured, expected) in [(0, 0), (901, 902), (901, 0)] {
+                assert!(
+                    validate_kernel_approval_key_v04(public, id, configured, expected, &[])
+                        .is_err()
+                );
+            }
+            assert!(validate_kernel_approval_key_v04(public, id, 901, 901, &[public]).is_err());
+            assert!(validate_kernel_approval_key_v04(
+                public,
+                Ed25519KeyIdV2::new([0x92; 32]),
+                901,
+                901,
+                &[]
+            )
+            .is_err());
+        }
+        #[test]
+        fn kernel_listener_configuration_is_closed() {
+            let json = br#"{"client_public_key_path":"/etc/savana/keys/kernel-approval-v04.pub","client_key_id":"id","listener_gid":901}"#;
+            assert!(serde_json::from_slice::<KernelApprovalDtoV04>(json).is_ok());
+            for field in [
+                "socket_path",
+                "expected_uid",
+                "executable_digest",
+                "skip_signature",
+            ] {
+                let mut value: serde_json::Value = serde_json::from_slice(json).unwrap();
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(field.into(), true.into());
+                assert!(serde_json::from_value::<KernelApprovalDtoV04>(value).is_err());
+            }
+        }
+    }
+
+    fn validate_authority_envelope_key(
+        public: [u8; 32],
+        key_id: Ed25519KeyIdV2,
+        execution_public: [u8; 32],
+        correlation_public: [u8; 32],
+    ) -> Result<(), ApprovaldDaemonErrorV2> {
+        if public == [0; 32]
+            || public == execution_public
+            || public == correlation_public
+            || derive_ed25519_key_id_v2(public) != key_id
+        {
+            return Err(ApprovaldDaemonErrorV2::DeploymentUnavailable);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod authority_envelope_tests {
+        use super::*;
+
+        #[test]
+        fn authority_pin_must_match_and_remain_role_separated() {
+            let public = SigningKey::from_bytes(&[41; 32]).verifying_key().to_bytes();
+            let execution = SigningKey::from_bytes(&[42; 32]).verifying_key().to_bytes();
+            let correlation = SigningKey::from_bytes(&[43; 32]).verifying_key().to_bytes();
+            let id = derive_ed25519_key_id_v2(public);
+            assert!(validate_authority_envelope_key(public, id, execution, correlation).is_ok());
+            for (key, key_id, exec, corr) in [
+                (
+                    public,
+                    derive_ed25519_key_id_v2(execution),
+                    execution,
+                    correlation,
+                ),
+                (public, id, public, correlation),
+                (public, id, execution, public),
+                (
+                    [0; 32],
+                    derive_ed25519_key_id_v2([0; 32]),
+                    execution,
+                    correlation,
+                ),
+            ] {
+                assert!(validate_authority_envelope_key(key, key_id, exec, corr).is_err());
+            }
+        }
+    }
+
     fn read_public_key(path: &Path) -> Result<[u8; 32], ApprovaldDaemonErrorV2> {
         let bytes = read_verified_regular_file_v2(path, 64, Some((0, 0, 0o444)))
             .map_err(|_| ApprovaldDaemonErrorV2::DeploymentUnavailable)?;
@@ -1303,6 +1720,21 @@ mod implementation {
             .map_err(|_| ApprovaldDaemonErrorV2::DeploymentUnavailable)
     }
 
+    #[cfg(target_os = "linux")]
+    fn read_credential_32(name: &str) -> Result<[u8; 32], ApprovaldDaemonErrorV2> {
+        let bytes = savana_platform_identity::read_linux_service_credential_v2(
+            savana_platform_identity::LinuxCredentialServiceV2::Approval,
+            name,
+            32,
+        )
+        .map_err(|_| ApprovaldDaemonErrorV2::DeploymentUnavailable)?;
+        bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| ApprovaldDaemonErrorV2::DeploymentUnavailable)
+    }
+
+    #[cfg(target_os = "macos")]
     fn read_credential_32(name: &str) -> Result<[u8; 32], ApprovaldDaemonErrorV2> {
         let path = Path::new(CREDENTIAL_DIRECTORY_V2).join(name);
         #[cfg(target_os = "linux")]

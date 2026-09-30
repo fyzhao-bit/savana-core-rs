@@ -407,6 +407,7 @@ pub enum EndpointRoleV2 {
     AgentApproval,
     IngressApproval,
     ApprovalAdmin,
+    KernelApproval,
 }
 
 impl EndpointRoleV2 {
@@ -419,6 +420,7 @@ impl EndpointRoleV2 {
             Self::AgentApproval => 5,
             Self::IngressApproval => 6,
             Self::ApprovalAdmin => 7,
+            Self::KernelApproval => 8,
         }
     }
 }
@@ -451,6 +453,7 @@ impl<'bytes> minicbor::Decode<'bytes, V2DecodeContext> for EndpointRoleV2 {
             5 => Ok(Self::AgentApproval),
             6 => Ok(Self::IngressApproval),
             7 => Ok(Self::ApprovalAdmin),
+            8 => Ok(Self::KernelApproval),
             _ => Err(malformed(position)),
         }
     }

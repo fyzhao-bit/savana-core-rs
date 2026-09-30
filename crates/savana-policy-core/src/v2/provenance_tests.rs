@@ -33,6 +33,93 @@ fn bytes_value_digest(byte: u8) -> Digest32V2 {
     Digest32V2::new(hasher.finalize().into())
 }
 
+#[test]
+fn result_utf8_derivation_preserves_untrusted_private_lineage_and_exact_bytes() {
+    let raw = KernelValueV2::bytes("private-é\u{301}".as_bytes().to_vec()).unwrap();
+    let parent = ProvenanceRecordV2::tool_result(
+        &raw,
+        context(1, 2),
+        ActionIntentIdV2::new([59; 32]),
+        digest(60),
+        digest(61),
+        digest(62),
+        digest(63),
+        EffectSetV2::READ,
+    )
+    .unwrap();
+    let op = DeriveOperationV2::decode_utf8();
+    assert_eq!(minicbor::to_vec(&op).unwrap(), vec![0x81, 7]);
+    let roundtrip: DeriveOperationV2 = minicbor::decode(&[0x81, 7]).unwrap();
+    assert_eq!(roundtrip, op);
+    let (text, derived) =
+        ProvenanceRecordV2::derived(context(1, 2), op, &[(&raw, &parent)], EffectSetV2::ALL)
+            .unwrap();
+    assert_eq!(text.as_text(), Some("private-é\u{301}"));
+    assert_eq!(derived.label(), parent.label());
+    assert_eq!(derived.root_evidence(), parent.root_evidence());
+    assert_eq!(derived.label().integrity(), IntegrityV2::ExternalUntrusted);
+    assert_eq!(
+        derived.label().confidentiality(),
+        ConfidentialityV2::VaultBound
+    );
+    assert_eq!(derived.label().readers(), ReaderSetV2::KERNEL);
+    assert_eq!(derived.value_digest(), value_digest_v2(&text).unwrap());
+    assert_ne!(derived.provenance_digest(), parent.provenance_digest());
+    let encoded = crate::v2::encode_provenance_record_v2(&derived).unwrap();
+    assert_eq!(
+        crate::v2::decode_provenance_record_v2(&encoded).unwrap(),
+        derived
+    );
+}
+
+#[test]
+fn result_utf8_derivation_rejects_bad_encoding_types_and_arity() {
+    for raw in [
+        KernelValueV2::bytes(vec![0xff]).unwrap(),
+        KernelValueV2::text("not bytes").unwrap(),
+    ] {
+        let p = ProvenanceRecordV2::tool_result(
+            &raw,
+            context(1, 2),
+            ActionIntentIdV2::new([59; 32]),
+            digest(60),
+            digest(61),
+            digest(62),
+            digest(63),
+            EffectSetV2::READ,
+        )
+        .unwrap();
+        assert!(ProvenanceRecordV2::derived(
+            context(1, 2),
+            DeriveOperationV2::decode_utf8(),
+            &[(&raw, &p)],
+            EffectSetV2::READ
+        )
+        .is_err());
+    }
+    let raw = KernelValueV2::bytes(b"ok".to_vec()).unwrap();
+    let p = ProvenanceRecordV2::tool_result(
+        &raw,
+        context(1, 2),
+        ActionIntentIdV2::new([59; 32]),
+        digest(60),
+        digest(61),
+        digest(62),
+        digest(63),
+        EffectSetV2::READ,
+    )
+    .unwrap();
+    for parents in [vec![], vec![(&raw, &p), (&raw, &p)]] {
+        assert!(ProvenanceRecordV2::derived(
+            context(1, 2),
+            DeriveOperationV2::decode_utf8(),
+            &parents,
+            EffectSetV2::READ
+        )
+        .is_err());
+    }
+}
+
 fn context(run: u8, manifest: u8) -> ProvenanceContextV2 {
     ProvenanceContextV2::from_authenticated_runtime(
         ProducerIdentityV2::new([0x91; 32]),
@@ -110,6 +197,59 @@ fn declassification_parent(value: &KernelValueV2) -> ProvenanceRecordV2 {
         EffectSetV2::READ.union(EffectSetV2::SEND),
     )
     .unwrap()
+}
+
+#[test]
+fn fused_model_handoff_requires_new_rule_exact_recipient_and_no_residual_pii() {
+    let purpose = ClosedDeclassificationPurposeV2::FusedModelCall;
+    let reader = digest(0xc1);
+    let transition = DeclassificationTransitionV2::BuildFusedModelEnvelope {
+        model_identity_digest: reader,
+    };
+    let set = declassification_set(
+        6,
+        purpose,
+        declassification_implementation_digest_v2(6).unwrap(),
+        Some(vec![reader]),
+        (30, 70),
+    );
+    let safe = KernelValueV2::text("registered abstract workflow").unwrap();
+    let parent = declassification_parent(&safe);
+    let make = |value: &KernelValueV2, transition, rules: &DeclassificationRuleSetV2| {
+        ProvenanceRecordV2::declassify(
+            value,
+            context(1, 2),
+            transition,
+            rules,
+            purpose.purpose_digest(),
+            digest(0xc2),
+            None,
+            &[&parent],
+            EffectSetV2::ALL,
+            50,
+        )
+    };
+    let proof = make(&safe, transition, &set).unwrap();
+    assert_eq!(proof.label().readers(), ReaderSetV2::EXTERNAL_PLANNER);
+    assert_eq!(
+        proof.judge_handoff(transition, &set),
+        HandoffJudgmentV2::Admits
+    );
+    let wrong = DeclassificationTransitionV2::BuildFusedModelEnvelope {
+        model_identity_digest: digest(0xc3),
+    };
+    assert!(make(&safe, wrong, &set).is_err());
+    assert_eq!(proof.judge_handoff(wrong, &set), HandoffJudgmentV2::Refuses);
+    let legacy = declassification_set(
+        2,
+        ClosedDeclassificationPurposeV2::PlannerCall,
+        declassification_implementation_digest_v2(2).unwrap(),
+        None,
+        (30, 70),
+    );
+    assert!(make(&safe, transition, &legacy).is_err());
+    let pii = KernelValueV2::text("customer@example.com").unwrap();
+    assert!(make(&pii, transition, &set).is_err());
 }
 
 fn final_release_set(reader: Digest32V2, max_age_ms: u64) -> DeclassificationRuleSetV2 {

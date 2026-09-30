@@ -22,6 +22,26 @@ fn context() -> TaskAuthorizationContextV2 {
 }
 
 #[test]
+fn private_context_binding_contains_only_verified_operator_metadata() {
+    let context = context();
+    let before = encode_task_authorization_context_v2(&context).unwrap();
+    let binding: serde_json::Value =
+        serde_json::from_str(&context.private_binding_json().unwrap()).unwrap();
+    assert_eq!(binding, serde_json::json!({
+        "schema": 1, "task": "02".repeat(32), "installation": "03".repeat(32),
+        "manifest": "04".repeat(32), "generation": 7, "source": "05".repeat(32),
+        "not_before": 100, "expires_at": 500
+    }));
+    assert_eq!(before, encode_task_authorization_context_v2(&context).unwrap());
+    assert_eq!(context.final_result_resource(1, d(7)).unwrap(),
+        fused_final_result_resource_v04(context.task(), 1, d(7)).unwrap());
+    assert_ne!(context.final_result_resource(1, d(7)).unwrap(),
+        context.final_result_resource(2, d(7)).unwrap());
+    assert!(context.final_result_resource(0, d(7)).is_err());
+    assert!(context.final_result_resource(1, d(8)).is_err());
+}
+
+#[test]
 fn task_context_is_bounded_data_and_preserves_kernel_identity_when_building_draft() {
     let context = context();
     let encoded = encode_task_authorization_context_v2(&context).unwrap();

@@ -191,6 +191,34 @@ impl TaskAuthorizationContextV2 {
         }).collect();
         serde_json::to_string(&tools).map_err(|_| malformed())
     }
+    /// Private operator metadata for binding planning to the actual admitted
+    /// task. Not a grant, signed profile, input value or model-visible view.
+    pub fn private_binding_json(&self) -> Result<String, ProtocolError> {
+        serde_json::to_string(&serde_json::json!({
+            "schema": 1,
+            "task": hex(self.task.as_bytes()),
+            "installation": hex(self.installation.as_bytes()),
+            "manifest": hex(self.manifest.as_bytes()),
+            "generation": self.generation,
+            "source": hex(self.source.as_bytes()),
+            "not_before": self.not_before.get(),
+            "expires_at": self.expires_at.get(),
+        })).map_err(|_| malformed())
+    }
+    /// Pure selector construction for an owner draft, not an output or grant.
+    /// Resolve only a descriptor in this authenticated context. This prevents
+    /// applications from duplicating the kernel's stable resource hash codec.
+    pub fn final_result_resource(
+        &self,
+        operation: u16,
+        descriptor: Digest32V2,
+    ) -> Result<Digest32V2, ProtocolError> {
+        if !self.tools().iter().any(|t| t.descriptor_digest() == descriptor) {
+            return Err(malformed());
+        }
+        super::super::fused_final_result_resource_v04(self.task, operation, descriptor)
+            .map_err(|_| malformed())
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         principal: PrincipalIdV2,

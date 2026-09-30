@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::net::TcpListener;
-use std::os::fd::{FromRawFd as _, OwnedFd};
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 
@@ -120,10 +120,10 @@ pub fn take_systemd_unix_listeners_v2(
 }
 
 pub struct PinnedLinuxPeerMeasurementV2 {
-    measurement: NativePeerMeasurementV2,
-    _pidfd: rustix::fd::OwnedFd,
-    _proc_dir: rustix::fd::OwnedFd,
-    _executable: File,
+    pub(crate) measurement: NativePeerMeasurementV2,
+    pub(crate) _pidfd: rustix::fd::OwnedFd,
+    pub(crate) _proc_dir: Option<rustix::fd::OwnedFd>,
+    pub(crate) _executable: File,
 }
 
 impl PinnedLinuxPeerMeasurementV2 {
@@ -141,7 +141,46 @@ pub fn measure_linux_peer_v2(
     if pid_u32 == 0 {
         return Err(NativeIdentityErrorV2::InvalidMeasurement);
     }
-    measure_linux_process_v2(pid_u32, credentials.uid(), credentials.gid())
+    let pidfd = socket_peer_pidfd(stream)?;
+    if credentials.uid() != nix::unistd::geteuid().as_raw() && !nix::unistd::geteuid().is_root() {
+        return crate::linux_broker::measure_through_broker(stream, credentials, pidfd);
+    }
+    measure_linux_process_pinned(pid_u32, credentials.uid(), credentials.gid(), pidfd)
+}
+
+/// Get the socket's actual peer process, not a new process that recycled its PID.
+/// SO_PEERPIDFD requires Linux 6.5+ (or a backport); absence fails closed.
+pub(crate) fn socket_peer_pidfd(stream: &UnixStream) -> Result<OwnedFd, NativeIdentityErrorV2> {
+    let mut raw = -1_i32;
+    let mut length = std::mem::size_of::<i32>() as nix::libc::socklen_t;
+    // SAFETY: the live socket is borrowed; `raw` and `length` are initialized
+    // writable stack objects of the exact ABI types and sizes. A successful
+    // SO_PEERPIDFD installs a fresh FD owned by this call, not a borrowed FD.
+    #[allow(unsafe_code)]
+    let result = unsafe {
+        nix::libc::getsockopt(
+            stream.as_raw_fd(),
+            nix::libc::SOL_SOCKET,
+            nix::libc::SO_PEERPIDFD,
+            (&mut raw as *mut i32).cast(),
+            &mut length,
+        )
+    };
+    if result != 0 || raw < 0 {
+        return Err(NativeIdentityErrorV2::CodeIdentityUnavailable);
+    }
+    // SAFETY: the successful kernel call just transferred unique ownership.
+    #[allow(unsafe_code)]
+    let descriptor = unsafe { OwnedFd::from_raw_fd(raw) };
+    if length as usize != std::mem::size_of::<i32>()
+        || fcntl(raw, FcntlArg::F_GETFD).map_err(|_| NativeIdentityErrorV2::Io)?
+            & FdFlag::FD_CLOEXEC.bits()
+            == 0
+    {
+        return Err(NativeIdentityErrorV2::InvalidMeasurement);
+    }
+    require_live(&descriptor)?;
+    Ok(descriptor)
 }
 
 pub fn measure_current_linux_process_v2(
@@ -191,6 +230,15 @@ fn measure_linux_process_v2(
     let raw_pid = i32::try_from(pid_u32).map_err(|_| NativeIdentityErrorV2::InvalidMeasurement)?;
     let pid = Pid::from_raw(raw_pid).ok_or(NativeIdentityErrorV2::InvalidMeasurement)?;
     let pidfd = pidfd_open(pid, PidfdFlags::empty()).map_err(|_| NativeIdentityErrorV2::Io)?;
+    measure_linux_process_pinned(pid_u32, uid, gid, pidfd)
+}
+
+pub(crate) fn measure_linux_process_pinned(
+    pid_u32: u32,
+    uid: u32,
+    gid: u32,
+    pidfd: OwnedFd,
+) -> Result<PinnedLinuxPeerMeasurementV2, NativeIdentityErrorV2> {
     require_live(&pidfd)?;
 
     let proc_path = format!("/proc/{pid_u32}");
@@ -237,21 +285,7 @@ fn measure_linux_process_v2(
     ) {
         return Err(NativeIdentityErrorV2::InvalidMeasurement);
     }
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = executable
-            .read(&mut buffer)
-            .map_err(|_| NativeIdentityErrorV2::Io)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    executable
-        .seek(SeekFrom::Start(0))
-        .map_err(|_| NativeIdentityErrorV2::Io)?;
-    let executable_measurement: [u8; 32] = hasher.finalize().into();
+    let executable_measurement = hash_executable(&mut executable)?;
 
     require_live(&pidfd)?;
     let measurement = NativePeerMeasurementV2::linux(
@@ -264,9 +298,45 @@ fn measure_linux_process_v2(
     Ok(PinnedLinuxPeerMeasurementV2 {
         measurement,
         _pidfd: pidfd,
-        _proc_dir: proc_dir,
+        _proc_dir: Some(proc_dir),
         _executable: executable,
     })
+}
+
+pub(crate) fn hash_executable(executable: &mut File) -> Result<[u8; 32], NativeIdentityErrorV2> {
+    let size = executable
+        .metadata()
+        .map_err(|_| NativeIdentityErrorV2::Io)?
+        .len();
+    if size == 0 || size > 256 * 1024 * 1024 {
+        return Err(NativeIdentityErrorV2::InvalidMeasurement);
+    }
+    executable
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| NativeIdentityErrorV2::Io)?;
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = executable
+            .read(&mut buffer)
+            .map_err(|_| NativeIdentityErrorV2::Io)?;
+        if read == 0 {
+            break;
+        }
+        total += read as u64;
+        if total > size {
+            return Err(NativeIdentityErrorV2::InvalidMeasurement);
+        }
+        hasher.update(&buffer[..read]);
+    }
+    executable
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| NativeIdentityErrorV2::Io)?;
+    if total != size {
+        return Err(NativeIdentityErrorV2::InvalidMeasurement);
+    }
+    Ok(hasher.finalize().into())
 }
 
 fn is_trusted_executable_identity_v2(
@@ -288,7 +358,7 @@ fn is_trusted_executable_identity_v2(
         && mode & 0o111 != 0
 }
 
-fn require_live(pidfd: &rustix::fd::OwnedFd) -> Result<(), NativeIdentityErrorV2> {
+pub(crate) fn require_live(pidfd: &rustix::fd::OwnedFd) -> Result<(), NativeIdentityErrorV2> {
     let mut descriptors = [PollFd::new(pidfd, PollFlags::IN)];
     let zero = Timespec {
         tv_sec: 0,

@@ -34,7 +34,13 @@ required-features = ["macos-development-authority"]
 name = "savana-systemd-agentd-network-policy-v2"
 path = "src/bin/savana-systemd-agentd-network-policy-v2.rs"
 
+[[bin]]
+name = "savana-linux-integration-manifest"
+path = "src/bin/savana-linux-integration-manifest.rs"
+required-features = ["filesystem-integration-authority"]
+
 [dependencies]
+savana-continuation-core = { path = "../savana-continuation-core" }
 savana-kernel-protocol = { path = "../savana-kernel-protocol" }
 savana-platform-identity = { path = "../savana-platform-identity" }
 thiserror.workspace = true
@@ -55,6 +61,7 @@ serde_json.workspace = true
 x25519-dalek.workspace = true
 
 [dev-dependencies]
+p256.workspace = true
 savana-policy-core-test-support = { package = "savana-policy-core", path = ".", features = ["test-support"] }
 tempfile = "=3.23.0"
 # Linear RE2-style engine, used ONLY by the leak-gate differential to show that

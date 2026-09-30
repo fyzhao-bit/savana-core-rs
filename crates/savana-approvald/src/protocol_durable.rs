@@ -186,6 +186,17 @@ impl DurableProtocolApprovalServiceV2 {
         })
     }
 
+    pub fn register_enrolled_passkey(
+        &mut self,
+        enrollment: EnrollmentHandleV2,
+        credential_digest: Digest32V2,
+        verified: crate::VerifiedPasskeyRegistrationV04,
+    ) -> Result<CredentialPublicStateV2, ApprovalErrorV2> {
+        self.mutate(|service| {
+            service.register_enrolled_passkey(enrollment, credential_digest, verified)
+        })
+    }
+
     pub fn revoke_credential(
         &mut self,
         credential_digest: Digest32V2,
@@ -261,6 +272,17 @@ impl DurableProtocolApprovalServiceV2 {
         now: UnixMillisV2,
     ) -> Result<ProtocolSignedUiAuthenticationSettlementV2, ApprovalErrorV2> {
         self.mutate(|service| service.settle_ui_authentication(envelope_digest, assertion, now))
+    }
+
+    pub fn private_session_authentication_v04(
+        &self,
+        digest: Digest32V2,
+        now: UnixMillisV2,
+    ) -> Result<Option<ProtocolSignedUiAuthenticationSettlementV2>, ApprovalErrorV2> {
+        if self.poisoned {
+            return Err(ApprovalErrorV2::CommitUncertain);
+        }
+        self.service.private_session_authentication_v04(digest, now)
     }
 
     pub fn ui_authentication_challenge(

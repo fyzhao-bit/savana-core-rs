@@ -92,6 +92,12 @@ pub(crate) enum KernelScalarRefV2<'value> {
 }
 
 impl KernelValueV2 {
+    pub(crate) fn as_bytes_value(&self) -> Option<&[u8]> {
+        match &self.0 {
+            KernelValueKindV2::Bytes(v) => Some(v),
+            _ => None,
+        }
+    }
     pub const fn null() -> Self {
         Self(KernelValueKindV2::Null)
     }

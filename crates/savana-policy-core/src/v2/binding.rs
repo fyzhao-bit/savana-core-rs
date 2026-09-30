@@ -304,6 +304,32 @@ impl VerifiedInternalSlotMaterialV2 {
         let digest = domain_hash(b"SAVANA_INTERNAL_SLOT_V2\0", &canonical);
         Ok(InternalSlotDigestV2::new(*digest.as_bytes()))
     }
+
+    /// Verify a recipe's neutral slot witness against the *exact* G4 argument.
+    /// Only the task relation may be added. Ontology relations, wrong ordinals,
+    /// substituted ownership/value/provenance and already-bound slots fail.
+    pub(crate) fn check_fused_recipe_witness(
+        &self,
+        ordinal: usize,
+        argument: &super::StableActionArgumentBindingV2,
+        relations: &VerifiedResolvedRelationSetV2,
+    ) -> Result<(), G4Error> {
+        if usize::from(self.slot_ordinal) != ordinal
+            || !self.permitted_relations.is_empty()
+            || self.relation_semantics_digest != relation_semantics_digest_v2(&[])?
+            || self.value_internal_id != argument.value_internal_id()
+            || self.value_digest != argument.value_digest()
+            || self.provenance_digest != argument.provenance_digest()
+            || self
+                .clone()
+                .with_task_relation(relations)?
+                .internal_slot_digest()?
+                != argument.internal_slot_digest()
+        {
+            return Err(G4Error::InvalidInternalSlotBinding);
+        }
+        Ok(())
+    }
 }
 
 impl<C> minicbor::Encode<C> for VerifiedInternalSlotMaterialV2 {

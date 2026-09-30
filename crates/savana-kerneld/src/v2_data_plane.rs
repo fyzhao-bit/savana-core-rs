@@ -264,6 +264,26 @@ impl KernelIngressCommitSinkV2 for ProductionKernelDataPlaneV2 {
             .map_err(map_vault_error)
     }
 
+    fn prepare_fused_result_release(
+        &mut self,
+        candidate: &savana_policy_core::v2::FusedFinalResultCandidateV04,
+        principal: PrincipalIdV2,
+        material: savana_vault::VaultReleaseMaterialV2,
+        now: UnixMillisV2,
+    ) -> Result<savana_vault::PendingVaultReleaseV2, StableCode> {
+        self.vault
+            .prepare_committed_tool_result_release(
+                candidate.task(),
+                candidate.core().durable_run_id(),
+                principal,
+                candidate.result_commit(),
+                candidate.provenance().expires_at(),
+                material,
+                now,
+            )
+            .map_err(map_vault_error)
+    }
+
     fn mark_release_dispatch_prepared(
         &mut self,
         authorized: savana_vault::AuthorizedVaultReleaseV2,
@@ -328,6 +348,47 @@ impl KernelIngressCommitSinkV2 for ProductionKernelDataPlaneV2 {
     ) -> Result<(), StableCode> {
         self.vault
             .mark_indeterminate(prepared, now)
+            .map_err(map_vault_error)
+    }
+
+    fn commit_recovered_release(
+        &mut self,
+        release: savana_kernel_protocol::v2::DurableReleaseIdV2,
+        nonce: savana_kernel_protocol::v2::Nonce32V2,
+        core: Digest32V2,
+        subject: Digest32V2,
+        receipt: Digest32V2,
+        audit: Digest32V2,
+        now: UnixMillisV2,
+    ) -> Result<(), StableCode> {
+        self.vault
+            .commit_known_release_by_identity(release, nonce, core, subject, receipt, audit, now)
+            .map_err(map_vault_error)
+    }
+
+    fn recover_tool_result(
+        &mut self,
+        task: DurableTaskIdV2,
+        run: DurableRunIdV2,
+        principal: PrincipalIdV2,
+        commit: Digest32V2,
+        expires_at: UnixMillisV2,
+        now: UnixMillisV2,
+    ) -> Result<MaskedDocumentHandleV2, StableCode> {
+        let live = self
+            .vault
+            .recover_committed_tool_result(task, run, principal, commit, expires_at, now)
+            .map_err(map_vault_error)?;
+        let context = savana_vault::VaultAccessContextV2::from_authenticated_agent(
+            self.agentd_boot_id,
+            self.agentd_identity,
+            self.agentd_peer_identity_digest,
+            run,
+            expires_at,
+        )
+        .map_err(map_vault_error)?;
+        self.vault
+            .issue_masked_document(&live, context, now)
             .map_err(map_vault_error)
     }
 

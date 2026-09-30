@@ -16,14 +16,32 @@ use zeroize::Zeroizing;
 /// counted effect; this is deliberately not described as a byte-metered profile.
 pub const MAX_FINAL_RELEASE_BUSINESS_PAYLOAD_BYTES_V2: usize = 32 * 1024;
 const OPERATION: &str = "/savana/final-release";
+const RESULT_OPERATION: &str = "/savana/final-result-release";
 
 pub fn final_release_business_profile_v2(
     target: Digest32V2,
     credential: Digest32V2,
 ) -> Result<BusinessProfileV2, BusinessCodecErrorV2> {
+    release_profile(OPERATION, target, credential)
+}
+
+/// Separate codec and resource namespace: original-input permission never
+/// authorizes releasing a tool result. Neither codec constitutes a grant.
+pub fn final_result_release_business_profile_v04(
+    target: Digest32V2,
+    credential: Digest32V2,
+) -> Result<BusinessProfileV2, BusinessCodecErrorV2> {
+    release_profile(RESULT_OPERATION, target, credential)
+}
+
+fn release_profile(
+    operation: &str,
+    target: Digest32V2,
+    credential: Digest32V2,
+) -> Result<BusinessProfileV2, BusinessCodecErrorV2> {
     BusinessProfileV2::new(
         ActionCodecProfileV2::FixedJsonPostV1,
-        OPERATION,
+        operation,
         target,
         credential,
         TaskEffectV2::FinalRelease,
@@ -44,6 +62,64 @@ pub fn final_release_business_profile_v2(
                 BusinessFieldRoleV2::Resource,
                 BusinessFieldTypeV2::Text,
             )?,
+        ],
+    )
+}
+
+/// Stable, pre-execution resource identity. No output bytes, root hash or
+/// profile hash appear here, so the administrator can sign this before a run.
+/// The kernel separately binds the exact completed result in the approval.
+pub fn fused_final_result_resource_v04(
+    task: super::DurableTaskIdV2,
+    operation: u16,
+    descriptor: Digest32V2,
+) -> Result<Digest32V2, BusinessCodecErrorV2> {
+    use sha2::{Digest as _, Sha256};
+    if task.as_bytes() == &[0; 32] || operation == 0 || descriptor.as_bytes() == &[0; 32] {
+        return Err(BusinessCodecErrorV2::Binding);
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"SAVANA_FUSED_FINAL_RESULT_RESOURCE_V04\0");
+    hash.update(task.as_bytes());
+    hash.update(operation.to_be_bytes());
+    hash.update(descriptor.as_bytes());
+    Ok(Digest32V2::new(hash.finalize().into()))
+}
+
+pub fn final_result_release_business_request_v04(
+    profile: &BusinessProfileV2,
+    request_id: &str,
+    resource: Digest32V2,
+    turn: Digest32V2,
+    payload: &[u8],
+) -> Result<BusinessRequestV2, BusinessCodecErrorV2> {
+    if profile
+        != &final_result_release_business_profile_v04(
+            profile.target_identity(),
+            profile.credential_identity(),
+        )?
+    {
+        return Err(BusinessCodecErrorV2::Unsupported);
+    }
+    if payload.len() > MAX_FINAL_RELEASE_BUSINESS_PAYLOAD_BYTES_V2 {
+        return Err(BusinessCodecErrorV2::Limit);
+    }
+    BusinessRequestV2::from_fields(
+        profile,
+        request_id,
+        vec![
+            (
+                "destination".into(),
+                BusinessValueV2::Text(named_digest("application-turn:", turn)?),
+            ),
+            (
+                "payload".into(),
+                BusinessValueV2::Text(URL_SAFE_NO_PAD.encode(payload)),
+            ),
+            (
+                "resource".into(),
+                BusinessValueV2::Text(named_digest("result:", resource)?),
+            ),
         ],
     )
 }
@@ -117,17 +193,48 @@ impl FinalReleaseDeliveryV2 {
 pub fn decode_final_release_delivery_v2(
     bytes: &[u8],
 ) -> Result<FinalReleaseDeliveryV2, BusinessCodecErrorV2> {
+    decode_release(bytes, OPERATION, "input:")
+}
+
+/// Distinct result type prevents treating a result resource as an input digest.
+pub struct FinalResultReleaseDeliveryV04(FinalReleaseDeliveryV2);
+impl FinalResultReleaseDeliveryV04 {
+    pub fn request_id(&self) -> &str {
+        self.0.request_id()
+    }
+    pub fn resource(&self) -> Digest32V2 {
+        self.0.source_input_digest
+    }
+    pub fn turn_binding(&self) -> Digest32V2 {
+        self.0.turn_binding()
+    }
+    pub fn payload(&self) -> &[u8] {
+        self.0.payload()
+    }
+}
+
+pub fn decode_final_result_release_delivery_v04(
+    bytes: &[u8],
+) -> Result<FinalResultReleaseDeliveryV04, BusinessCodecErrorV2> {
+    decode_release(bytes, RESULT_OPERATION, "result:").map(FinalResultReleaseDeliveryV04)
+}
+
+fn decode_release(
+    bytes: &[u8],
+    operation: &str,
+    resource_prefix: &str,
+) -> Result<FinalReleaseDeliveryV2, BusinessCodecErrorV2> {
     let root = parse(bytes)?;
     let envelope = exact(&root, &["request_id", "method", "path", "body"])?;
     let request_id = envelope["request_id"].text()?;
     if !identifier(request_id, 128)
         || envelope["method"].text()? != "POST"
-        || envelope["path"].text()? != OPERATION
+        || envelope["path"].text()? != operation
     {
         return Err(BusinessCodecErrorV2::Malformed);
     }
     let body = exact(&envelope["body"], &["destination", "payload", "resource"])?;
-    let source_input_digest = parse_named_digest(body["resource"].text()?, "input:")?;
+    let source_input_digest = parse_named_digest(body["resource"].text()?, resource_prefix)?;
     let turn_binding = parse_named_digest(body["destination"].text()?, "application-turn:")?;
     let encoded = body["payload"].text()?;
     if encoded.len() > MAX_FINAL_RELEASE_BUSINESS_PAYLOAD_BYTES_V2.div_ceil(3) * 4 {

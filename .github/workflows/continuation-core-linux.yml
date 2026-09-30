@@ -1,0 +1,123 @@
+name: continuation-core-linux
+on: [push, pull_request]
+jobs:
+  tpm-signature-interoperability:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.82.0
+      - run: cargo fetch --locked
+      - run: docker build -t savana-tpm-test:ci tools/tpm-test-image
+      - name: Offline unprivileged swtpm interoperability (not hardware acceptance)
+        run: |
+          mkdir -p "$RUNNER_TEMP/savana-tpm-build"
+          docker run --rm --user "$(id -u):$(id -g)" --network none \
+            --cap-drop ALL --security-opt no-new-privileges --read-only \
+            --tmpfs /tmp --tmpfs "/cargo:uid=$(id -u),gid=$(id -g),mode=0700" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/tools/tpm_emulator_acceptance.py,target=/run/savana-tpm-emulator-test-only,readonly" \
+            --mount "type=bind,source=$HOME/.cargo/registry,target=/cargo/registry,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/savana-tpm-build,target=/build" \
+            -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/build -e CARGO_BUILD_JOBS=2 \
+            -e RUSTUP_TOOLCHAIN=1.82.0-x86_64-unknown-linux-gnu \
+            -w /workspace savana-tpm-test:ci python3 tools/tpm_emulator_acceptance.py
+      - name: Root-owned journal and staging contracts in fresh disposable tmpfs (not systemd acceptance)
+        run: |
+          docker run --rm --user 0:0 --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp --tmpfs /var/lib/savana:mode=0700 --tmpfs /var/lib/savana-deploy:mode=0700 \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/tools/deployment_disk_acceptance.py,target=/run/savana-deployment-disk-test-only,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/savana-tpm-build,target=/build,readonly" \
+            -e PYTHONDONTWRITEBYTECODE=1 -w /workspace \
+            savana-tpm-test:ci python3 tools/deployment_disk_acceptance.py
+  identity-broker-processes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # Build and run in the same userspace; host-built Ubuntu binaries may
+      # depend on a newer glibc than the disposable Debian test container.
+      - name: Build isolated identity fixtures
+        run: |
+          mkdir -p "$RUNNER_TEMP/savana-identity-build"
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges \
+            --read-only --tmpfs /tmp --tmpfs /cargo \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/savana-identity-build,target=/build" \
+            -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/build -e CARGO_BUILD_JOBS=2 \
+            -e RUSTUP_TOOLCHAIN=1.82.0-x86_64-unknown-linux-gnu \
+            -w /workspace rust:1.82-bookworm \
+            cargo build -p savana-platform-identity --bin savana-linux-identity-broker \
+              --example linux_peer_probe --locked
+      - name: Verify real cross-UID allow and deny paths
+        run: |
+          docker run --rm --network none --read-only \
+            --cap-drop ALL --cap-add SYS_PTRACE --cap-add SETUID --cap-add SETGID \
+            --cap-add CHOWN --cap-add FSETID --cap-add KILL --cap-add SETPCAP \
+            --security-opt no-new-privileges \
+            --tmpfs /tmp --tmpfs /run:mode=0755 --tmpfs /etc/savana:mode=0755 \
+            --tmpfs /usr/libexec/savana:exec,mode=0755 \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/tools/linux_identity_broker_acceptance.py,target=/run/savana-broker-test-only,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/savana-identity-build,target=/build,readonly" \
+            -w /workspace rust:1.82-bookworm \
+            python3 tools/linux_identity_broker_acceptance.py --disposable-container
+      # The harness reduces the broker to SYS_PTRACE only before exec. These
+      # extra capabilities belong to the disposable fixture orchestrator, not
+      # ordinary services. This job is not native systemd/hardware acceptance.
+  finite-core:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.82.0
+        with: { components: clippy, rustfmt }
+      - run: cargo fmt -p savana-continuation-core -- --check
+      - run: cargo clippy -p savana-continuation-core --all-targets --locked -- -D warnings
+      - run: cargo test -p savana-continuation-core --all-targets --locked
+      - run: cargo test -p savana-continuation-core --doc --locked
+      - run: cargo build -p savana-continuation-core --release --locked
+      - run: cargo test -p savana-policy-core --lib continuation --locked
+      - run: cargo test -p savana-policy-core --lib fused_ --locked
+      - run: cargo test -p savana-policy-core --lib deployment_staging_v3 --locked
+      - run: cargo test -p savana-policy-core --test v2_security_state_manifest --locked
+      - run: cargo test -p savana-platform-identity --lib staging_ --locked
+      - run: cargo run -p savana-continuation-core --example fused_planning --locked
+      - run: cargo check -p savana-kerneld --locked
+      # Execute the native wrapper: library-only checks missed startup failures.
+      - run: cargo test -p savana-platform-identity --features test-support --locked
+      - run: cargo test -p savana-approvald --locked
+      - run: cargo test -p savana-kernel-protocol --lib private_approval_http --locked
+      - run: python3 -m unittest discover -s tools -p test_aws_v04_preflight.py -v
+      - run: cargo build -p savana-platform-identity --bin savana-tpm-enroll --locked
+      - run: cargo build -p savana-private-workflow --example benchmark_driver --locked
+      - name: Python oracles and real Rust component loops (not product acceptance)
+        run: PYTHONPATH=experiments SAVANA_COMPONENT_DRIVER=target/debug/examples/benchmark_driver python3 -m unittest discover -s experiments/tests -v
+      - run: PYTHONPATH=experiments python3 -m savana_bench regressions
+      - run: cargo test -p savana-kerneld --lib kernel_approval --locked
+      - run: cargo test -p savana-kerneld --lib --features test-support fused_approval_delivery --locked
+      # The complete socket/startup suite needs a non-root runner with a second
+      # supplementary group (the GitHub-hosted Ubuntu runner has one). Do not
+      # bypass identity checks or run this suite as root to make it pass.
+      - run: cargo test -p savana-kerneld --lib --features test-support --locked
+      - run: cargo test -p savana-kerneld --test deployment_units --locked
+      - run: cargo test -p savana-kerneld --lib managed_issuer --locked
+      - run: cargo test -p savana-kerneld --lib managed_admin --locked
+      - run: cargo test -p savana-kerneld --lib fused_enrollment --locked
+      - run: cargo test -p savana-kerneld --lib fused_host --locked
+      - run: cargo test -p savana-kerneld --lib fused_policy_lease --locked
+      - run: cargo test -p savana-policy-core --lib managed_admin --locked
+      - run: cargo test -p savana-client --lib managed_admin --locked
+      - run: cargo check -p savana-core-py --locked
+      - run: tools/check-frozen-v2-core.sh
+      # Native service/sandbox/anchor acceptance belongs to deployment tests;
+      # compiling this finite library does not establish those properties.

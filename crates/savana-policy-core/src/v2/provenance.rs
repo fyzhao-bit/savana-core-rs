@@ -54,6 +54,8 @@ pub struct DeriveOperationV2(DeriveOperationKindV2);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum DeriveOperationKindV2 {
+    OwnerInputTextV04([u8; 16]),
+    DecodeUtf8,
     ConcatenateText,
     NormalizeNfc,
     SelectObjectField(ArgumentNameV2),
@@ -63,6 +65,13 @@ enum DeriveOperationKindV2 {
 }
 
 impl DeriveOperationV2 {
+    /// Host-private deterministic selection from already owned ingress text.
+    pub const fn owner_input_text_v04(slot: [u8;16]) -> Self {
+        Self(DeriveOperationKindV2::OwnerInputTextV04(slot))
+    }
+    pub const fn decode_utf8() -> Self {
+        Self(DeriveOperationKindV2::DecodeUtf8)
+    }
     pub const fn concatenate_text() -> Self {
         Self(DeriveOperationKindV2::ConcatenateText)
     }
@@ -97,6 +106,8 @@ impl DeriveOperationV2 {
 
     pub const fn tag(&self) -> u16 {
         match &self.0 {
+            DeriveOperationKindV2::OwnerInputTextV04(_) => 8,
+            DeriveOperationKindV2::DecodeUtf8 => 7,
             DeriveOperationKindV2::ConcatenateText => 1,
             DeriveOperationKindV2::NormalizeNfc => 2,
             DeriveOperationKindV2::SelectObjectField(_) => 3,
@@ -111,6 +122,19 @@ impl DeriveOperationV2 {
         parents: &[(&KernelValueV2, &ProvenanceRecordV2)],
     ) -> Result<KernelValueV2, G3Error> {
         match &self.0 {
+            DeriveOperationKindV2::OwnerInputTextV04(slot) => {
+                let [(value, _)] = parents else { return Err(G3Error::DeriveArityMismatch); };
+                super::fused_input_document::FusedInputDocumentV04::select(
+                    value.as_text().ok_or(G3Error::DeriveTypeMismatch)?, *slot)
+            }
+            DeriveOperationKindV2::DecodeUtf8 => {
+                let [(value, _)] = parents else {
+                    return Err(G3Error::DeriveArityMismatch);
+                };
+                let bytes = value.as_bytes_value().ok_or(G3Error::DeriveTypeMismatch)?;
+                let text = std::str::from_utf8(bytes).map_err(|_| G3Error::DeriveTypeMismatch)?;
+                KernelValueV2::text(text)
+            }
             DeriveOperationKindV2::ConcatenateText => {
                 require_nonempty(parents)?;
                 let total_length = parents.iter().try_fold(0_usize, |length, (value, _)| {
@@ -194,6 +218,12 @@ impl<C> minicbor::Encode<C> for DeriveOperationV2 {
         context: &mut C,
     ) -> Result<(), minicbor::encode::Error<W::Error>> {
         match &self.0 {
+            DeriveOperationKindV2::OwnerInputTextV04(slot) => {
+                encoder.array(2)?.u16(8)?.bytes(slot)?;
+            }
+            DeriveOperationKindV2::DecodeUtf8 => {
+                encoder.array(1)?.u16(7)?;
+            }
             DeriveOperationKindV2::ConcatenateText => {
                 encoder.array(1)?.u16(1)?;
             }
@@ -233,6 +263,9 @@ impl<'bytes, C> minicbor::Decode<'bytes, C> for DeriveOperationV2 {
         })?;
         let tag = decoder.u16()?;
         match (length, tag) {
+            (2, 8) => Ok(Self::owner_input_text_v04(decoder.bytes()?.try_into()
+                .map_err(|_| minicbor::decode::Error::message("invalid owner input slot"))?)),
+            (1, 7) => Ok(Self::decode_utf8()),
             (1, 1) => Ok(Self::concatenate_text()),
             (1, 2) => Ok(Self::normalize_nfc()),
             (2, 3) => Ok(Self::select_object_field(minicbor::Decode::decode(
@@ -264,6 +297,11 @@ impl<'bytes, C> minicbor::Decode<'bytes, C> for DeriveOperationV2 {
 pub enum DeclassificationTransitionV2 {
     MaskTokenizeAndLeakCheck,
     BuildPlannerEnvelope,
+    /// Fused advisor/planner publication to one specifically admitted model.
+    /// Legacy planner rules cannot authorize this transition.
+    BuildFusedModelEnvelope {
+        model_identity_digest: Digest32V2,
+    },
     BuildApprovalDisplay,
     /// Hands the value to ONE exact executor, named by its identity digest.
     ///
@@ -300,6 +338,7 @@ impl DeclassificationTransitionV2 {
             Self::BuildApprovalDisplay => 3,
             Self::BuildExecutionEnvelope { .. } => 4,
             Self::BuildFinalRelease { .. } => 5,
+            Self::BuildFusedModelEnvelope { .. } => 6,
         }
     }
 
@@ -317,9 +356,9 @@ impl DeclassificationTransitionV2 {
     /// recipient is entitled to, under any transition.
     const fn leak_gate_duty(self) -> LeakGateDutyV2 {
         match self {
-            Self::MaskTokenizeAndLeakCheck | Self::BuildPlannerEnvelope => {
-                LeakGateDutyV2::BlocklistAndNoResidualPii
-            }
+            Self::MaskTokenizeAndLeakCheck
+            | Self::BuildPlannerEnvelope
+            | Self::BuildFusedModelEnvelope { .. } => LeakGateDutyV2::BlocklistAndNoResidualPii,
             Self::BuildApprovalDisplay
             | Self::BuildExecutionEnvelope { .. }
             | Self::BuildFinalRelease { .. } => LeakGateDutyV2::BlocklistOnly,
@@ -329,7 +368,7 @@ impl DeclassificationTransitionV2 {
     const fn target(self) -> (ConfidentialityV2, ReaderSetV2) {
         match self {
             Self::MaskTokenizeAndLeakCheck => (ConfidentialityV2::AgentMasked, ReaderSetV2::AGENT),
-            Self::BuildPlannerEnvelope => (
+            Self::BuildPlannerEnvelope | Self::BuildFusedModelEnvelope { .. } => (
                 ConfidentialityV2::PlannerAbstract,
                 ReaderSetV2::EXTERNAL_PLANNER,
             ),
@@ -358,6 +397,9 @@ impl DeclassificationTransitionV2 {
             }
             | Self::BuildFinalRelease {
                 sink_identity_digest: identity,
+            }
+            | Self::BuildFusedModelEnvelope {
+                model_identity_digest: identity,
             } => Some(identity),
             Self::MaskTokenizeAndLeakCheck
             | Self::BuildPlannerEnvelope
@@ -576,6 +618,15 @@ pub struct ProvenanceContextV2 {
 }
 
 impl ProvenanceContextV2 {
+    pub(super) fn restrict_expiry(self, expires_at: UnixMillisV2) -> Result<Self, G3Error> {
+        Self::from_authenticated_runtime(
+            self.producer_identity,
+            self.run_internal_id,
+            self.active_state_manifest_digest,
+            self.created_at,
+            UnixMillisV2::new(self.expires_at.get().min(expires_at.get())),
+        )
+    }
     pub fn from_authenticated_runtime(
         producer_identity: ProducerIdentityV2,
         run_internal_id: DurableRunIdV2,

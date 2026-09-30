@@ -32,6 +32,12 @@ use savana_kernel_protocol::v2::{
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
+#[cfg(test)]
+#[path = "ui_approval_delivery_tests.rs"]
+pub(crate) mod approval_delivery_tests;
+#[path = "private_session_ui_v04.rs"]
+mod private_session;
+
 use crate::{
     verify_enrollment_attestation_v2, ConsumedEnrollmentCodeV2, HardwareAttestationRootV2,
     ProtocolApprovalStateOwnerErrorV2, ProtocolApprovalStateOwnerV2,
@@ -133,6 +139,10 @@ struct ApprovalRecordV2 {
     handle: ApprovalRecordHandleV2,
     envelope_digest: Digest32V2,
     display_transfer: ApprovalDisplayAuthenticationTransferCapabilityV2,
+    private_scope: Option<(
+        savana_kernel_protocol::v2::DurableTaskIdV2,
+        savana_kernel_protocol::v2::PrincipalIdV2,
+    )>,
 }
 
 #[derive(Debug)]
@@ -148,6 +158,7 @@ struct EnrollmentCeremonyRecordV2 {
 }
 
 pub struct ApprovalUiAuthorityV2 {
+    private_sessions: Mutex<Vec<private_session::PrivateSessionRecordV04>>,
     state: ProtocolApprovalStateOwnerV2,
     records: Mutex<Vec<UiRecordV2>>,
     approvals: Mutex<Vec<ApprovalRecordV2>>,
@@ -173,12 +184,12 @@ impl ApprovalUiAuthorityV2 {
     ) -> Result<Self, ApprovalUiAuthorityErrorV2> {
         if maximum_records == 0
             || maximum_records > MAX_UI_RECORDS_V2
-            || attestation_roots.is_empty()
             || attestation_roots.len() > 256
         {
             return Err(ApprovalUiAuthorityErrorV2::Unavailable);
         }
         Ok(Self {
+            private_sessions: Mutex::new(Vec::new()),
             state,
             records: Mutex::new(Vec::new()),
             approvals: Mutex::new(Vec::new()),
@@ -297,28 +308,48 @@ impl ApprovalUiAuthorityV2 {
         if now.get() >= record.grant.ceremony_expires_at().get() {
             return Err(ApprovalUiAuthorityErrorV2::AlreadyConsumed);
         }
-        let verified = verify_enrollment_attestation_v2(
-            &credential_id,
-            &client_data_json,
-            &attestation_object,
-            record.challenge,
-            &self.attestation_roots,
-            now,
-        )
-        .map_err(|_| ApprovalUiAuthorityErrorV2::InvalidReference)?;
         let credential_digest = webauthn_credential_digest_v2(&credential_id)
             .ok_or(ApprovalUiAuthorityErrorV2::InvalidReference)?;
-        let state = self
-            .state
-            .register_enrolled_hardware_credential(
-                record.grant.handle(),
-                credential_digest,
-                verified.aaguid,
-                verified.p256_sec1_public_key,
-                verified.signature_counter,
-                deadline,
-            )
-            .map_err(map_owner)?;
+        let state = match record.grant.assurance() {
+            savana_kernel_protocol::v2::AuthenticationAssuranceV04::AttestedHardware => {
+                let verified = verify_enrollment_attestation_v2(
+                    &credential_id,
+                    &client_data_json,
+                    &attestation_object,
+                    record.challenge,
+                    &self.attestation_roots,
+                    now,
+                )
+                .map_err(|_| ApprovalUiAuthorityErrorV2::InvalidReference)?;
+                self.state
+                    .register_enrolled_hardware_credential(
+                        record.grant.handle(),
+                        credential_digest,
+                        verified.aaguid,
+                        verified.p256_sec1_public_key,
+                        verified.signature_counter,
+                        deadline,
+                    )
+                    .map_err(map_owner)?
+            }
+            savana_kernel_protocol::v2::AuthenticationAssuranceV04::UserVerifiedPasskey => {
+                let verified = crate::verify_passkey_registration_v04(
+                    &credential_id,
+                    &client_data_json,
+                    &attestation_object,
+                    record.challenge,
+                )
+                .map_err(|_| ApprovalUiAuthorityErrorV2::InvalidReference)?;
+                self.state
+                    .register_enrolled_passkey(
+                        record.grant.handle(),
+                        credential_digest,
+                        verified,
+                        deadline,
+                    )
+                    .map_err(map_owner)?
+            }
+        };
         let response = FinishEnrollmentBrowserResponseV2::new(credential_digest, state)
             .map_err(|_| ApprovalUiAuthorityErrorV2::Unavailable)?;
         record.response = Some(response);
@@ -332,9 +363,21 @@ impl ApprovalUiAuthorityV2 {
         now: UnixMillisV2,
         deadline: Instant,
     ) -> Result<RegisteredUiAuthenticationV2, ApprovalUiAuthorityErrorV2> {
+        // Display authentication is registered only with its exact approval
+        // pair, never as a standalone Agent/Ingress content-authentication flow.
+        // This structural filter grants nothing; the owner verifies signatures.
+        let material = envelope
+            .unverified_material()
+            .map_err(|_| ApprovalUiAuthorityErrorV2::InvalidReference)?;
         if !matches!(
-            role,
-            EndpointRoleV2::AgentApproval | EndpointRoleV2::IngressApproval
+            (role, material.purpose()),
+            (
+                EndpointRoleV2::AgentApproval,
+                UiAuthenticationPurposeV2::AgentContent
+            ) | (
+                EndpointRoleV2::IngressApproval,
+                UiAuthenticationPurposeV2::IngressInput
+            )
         ) {
             return Err(ApprovalUiAuthorityErrorV2::InvalidReference);
         }
@@ -366,6 +409,16 @@ impl ApprovalUiAuthorityV2 {
             .iter()
             .find(|candidate| candidate.envelope_digest == envelope_digest)
         {
+            if existing.role != role {
+                return Err(ApprovalUiAuthorityErrorV2::InvalidReference);
+            }
+            let registered_digest = self
+                .state
+                .register_ui_authentication_envelope(envelope, now, deadline)
+                .map_err(map_owner)?;
+            if registered_digest != envelope_digest {
+                return Err(ApprovalUiAuthorityErrorV2::Unavailable);
+            }
             return registered(existing);
         }
         if records.len() >= self.maximum_records {
@@ -431,7 +484,9 @@ impl ApprovalUiAuthorityV2 {
     ) -> Result<RegisteredApprovalV2, ApprovalUiAuthorityErrorV2> {
         if !matches!(
             role,
-            EndpointRoleV2::AgentApproval | EndpointRoleV2::IngressApproval
+            EndpointRoleV2::AgentApproval
+                | EndpointRoleV2::IngressApproval
+                | EndpointRoleV2::KernelApproval
         ) {
             return Err(ApprovalUiAuthorityErrorV2::InvalidReference);
         }
@@ -448,6 +503,15 @@ impl ApprovalUiAuthorityV2 {
         {
             if existing.role != role {
                 return Err(ApprovalUiAuthorityErrorV2::InvalidReference);
+            }
+            // A digest/cache hit is not signature, pairing, freshness or durable
+            // owner-health evidence. Validate the exact pair on every retry.
+            let (registered, _, _) = self
+                .state
+                .register_approval_pair(role, envelope, display_authentication, now, deadline)
+                .map_err(map_owner)?;
+            if registered != envelope_digest {
+                return Err(ApprovalUiAuthorityErrorV2::Unavailable);
             }
             return registered_approval(existing);
         }
@@ -472,6 +536,17 @@ impl ApprovalUiAuthorityV2 {
             .ok_or(ApprovalUiAuthorityErrorV2::Unavailable)?;
         let ui_record_handle = ApprovalUiRecordHandleV2::from_authority_entropy(draw_nonzero()?)
             .ok_or(ApprovalUiAuthorityErrorV2::Unavailable)?;
+        let private_scope = if role == EndpointRoleV2::KernelApproval {
+            let u = envelope
+                .unverified_material()
+                .map_err(|_| ApprovalUiAuthorityErrorV2::InvalidReference)?;
+            let binding = u
+                .task_action_binding()
+                .ok_or(ApprovalUiAuthorityErrorV2::InvalidReference)?;
+            Some((binding.task(), u.expected_principal()))
+        } else {
+            None
+        };
         let (registered_digest, display_envelope_digest, purpose) = self
             .state
             .register_approval_pair(role, envelope, display_authentication, now, deadline)
@@ -492,18 +567,20 @@ impl ApprovalUiAuthorityV2 {
                         .ok_or(ApprovalUiAuthorityErrorV2::Unavailable)?,
                 )
             }
-            (EndpointRoleV2::AgentApproval, ApprovalPurposeV2::ToolExecution) => {
-                ApprovalRecordHandleV2::Tool(
-                    ToolApprovalRecordHandleV2::from_authority_entropy(handle_entropy)
-                        .ok_or(ApprovalUiAuthorityErrorV2::Unavailable)?,
-                )
-            }
-            (EndpointRoleV2::AgentApproval, ApprovalPurposeV2::FinalRelease) => {
-                ApprovalRecordHandleV2::Release(
-                    ReleaseApprovalRecordHandleV2::from_authority_entropy(handle_entropy)
-                        .ok_or(ApprovalUiAuthorityErrorV2::Unavailable)?,
-                )
-            }
+            (
+                EndpointRoleV2::AgentApproval | EndpointRoleV2::KernelApproval,
+                ApprovalPurposeV2::ToolExecution,
+            ) => ApprovalRecordHandleV2::Tool(
+                ToolApprovalRecordHandleV2::from_authority_entropy(handle_entropy)
+                    .ok_or(ApprovalUiAuthorityErrorV2::Unavailable)?,
+            ),
+            (
+                EndpointRoleV2::AgentApproval | EndpointRoleV2::KernelApproval,
+                ApprovalPurposeV2::FinalRelease,
+            ) => ApprovalRecordHandleV2::Release(
+                ReleaseApprovalRecordHandleV2::from_authority_entropy(handle_entropy)
+                    .ok_or(ApprovalUiAuthorityErrorV2::Unavailable)?,
+            ),
             (EndpointRoleV2::AgentApproval, ApprovalPurposeV2::ConnectorRegistration) => {
                 ApprovalRecordHandleV2::Connector(
                     ConnectorApprovalRecordHandleV2::from_authority_entropy(handle_entropy)
@@ -517,6 +594,7 @@ impl ApprovalUiAuthorityV2 {
             handle,
             envelope_digest,
             display_transfer,
+            private_scope,
         });
         records.push(UiRecordV2 {
             role,
@@ -543,6 +621,34 @@ impl ApprovalUiAuthorityV2 {
             approvals
                 .last()
                 .ok_or(ApprovalUiAuthorityErrorV2::Unavailable)?,
+        )
+    }
+
+    pub fn get_kernel_approval_settlement(
+        &self,
+        approval: ToolApprovalRecordHandleV2,
+        now: UnixMillisV2,
+        deadline: Instant,
+    ) -> Result<ApprovalSettlementViewV2, ApprovalUiAuthorityErrorV2> {
+        self.get_approval_settlement(
+            ApprovalRecordHandleV2::Tool(approval),
+            EndpointRoleV2::KernelApproval,
+            now,
+            deadline,
+        )
+    }
+
+    pub fn get_kernel_release_approval_settlement(
+        &self,
+        approval: ReleaseApprovalRecordHandleV2,
+        now: UnixMillisV2,
+        deadline: Instant,
+    ) -> Result<ApprovalSettlementViewV2, ApprovalUiAuthorityErrorV2> {
+        self.get_approval_settlement(
+            ApprovalRecordHandleV2::Release(approval),
+            EndpointRoleV2::KernelApproval,
+            now,
+            deadline,
         )
     }
 
@@ -682,6 +788,26 @@ impl ApprovalUiAuthorityV2 {
         &self,
         transfer: ApprovalDisplayAuthenticationTransferCapabilityV2,
     ) -> Result<AcceptedUiAuthenticationV2, ApprovalUiAuthorityErrorV2> {
+        self.accept_display_transfer(transfer, false, None)
+    }
+
+    /// A private handoff is not authentication. It only permits the subsequent
+    /// hardware ceremony for the exact paired envelope; no details are returned.
+    pub fn accept_kernel_approval_display_transfer_v04(
+        &self,
+        transfer: ApprovalDisplayAuthenticationTransferCapabilityV2,
+        now: UnixMillisV2,
+        deadline: Instant,
+    ) -> Result<AcceptedUiAuthenticationV2, ApprovalUiAuthorityErrorV2> {
+        self.accept_display_transfer(transfer, true, Some((now, deadline)))
+    }
+
+    fn accept_display_transfer(
+        &self,
+        transfer: ApprovalDisplayAuthenticationTransferCapabilityV2,
+        kernel_only: bool,
+        live: Option<(UnixMillisV2, Instant)>,
+    ) -> Result<AcceptedUiAuthenticationV2, ApprovalUiAuthorityErrorV2> {
         let mut records = self
             .records
             .lock()
@@ -695,6 +821,35 @@ impl ApprovalUiAuthorityV2 {
                 )
             })
             .ok_or(ApprovalUiAuthorityErrorV2::InvalidReference)?;
+        // The legacy public bootstrap must never consume a KernelApproval
+        // transfer, even if an untrusted caller somehow obtains the bytes.
+        let allowed = if kernel_only {
+            record.role == EndpointRoleV2::KernelApproval
+        } else {
+            matches!(
+                record.role,
+                EndpointRoleV2::AgentApproval | EndpointRoleV2::IngressApproval
+            )
+        };
+        if !allowed {
+            return Err(ApprovalUiAuthorityErrorV2::InvalidReference);
+        }
+        if let Some((now, deadline)) = live {
+            let challenge = self
+                .state
+                .ui_authentication_challenge(record.envelope_digest, now, deadline)
+                .map_err(map_owner)?;
+            validate_challenge_role(record.role, challenge)?;
+            self.state
+                .approval_challenge(
+                    record
+                        .approval_envelope_digest
+                        .ok_or(ApprovalUiAuthorityErrorV2::InvalidReference)?,
+                    now,
+                    deadline,
+                )
+                .map_err(map_owner)?;
+        }
         let pre_authentication = match record.pre_authentication {
             Some(PreAuthenticationV2::ApprovalDisplay(value)) => value,
             Some(_) => return Err(ApprovalUiAuthorityErrorV2::InvalidReference),
@@ -1090,6 +1245,9 @@ fn validate_challenge_role(
         ) | (
             EndpointRoleV2::AgentApproval,
             UiAuthenticationPurposeV2::ApprovalDisplay
+        ) | (
+            EndpointRoleV2::KernelApproval,
+            UiAuthenticationPurposeV2::ApprovalDisplay
         )
     );
     if valid {
@@ -1240,6 +1398,19 @@ fn enrollment_creation_options_json(
     }
     let challenge = URL_SAFE_NO_PAD.encode(challenge.as_bytes());
     let principal = URL_SAFE_NO_PAD.encode(grant.principal().as_bytes());
+    if grant.assurance()
+        == savana_kernel_protocol::v2::AuthenticationAssuranceV04::UserVerifiedPasskey
+    {
+        return serde_json::to_vec(&serde_json::json!({
+            "challenge": challenge,
+            "rp": {"id": "localhost", "name": "Savana"},
+            "user": {"id": principal, "name": "Savana principal", "displayName": "Savana passkey principal"},
+            "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+            "timeout": timeout, "attestation": "none",
+            "authenticatorSelection": {"residentKey": "required", "requireResidentKey": true, "userVerification": "required"},
+            "excludeCredentials": []
+        })).map_err(|_| ApprovalUiAuthorityErrorV2::Unavailable);
+    }
     let json = format!(
         "{{\"challenge\":\"{challenge}\",\"rp\":{{\"id\":\"localhost\",\"name\":\"Savana\"}},\"user\":{{\"id\":\"{principal}\",\"name\":\"Savana principal\",\"displayName\":\"Savana security principal\"}},\"pubKeyCredParams\":[{{\"type\":\"public-key\",\"alg\":-7}}],\"timeout\":{timeout},\"attestation\":\"direct\",\"authenticatorSelection\":{{\"authenticatorAttachment\":\"cross-platform\",\"residentKey\":\"discouraged\",\"requireResidentKey\":false,\"userVerification\":\"required\"}},\"excludeCredentials\":[]}}"
     )

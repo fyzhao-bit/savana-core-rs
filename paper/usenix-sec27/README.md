@@ -1,13 +1,18 @@
-# Savana: Binding Agent Actions to Authorized Task Traces
+# Savana: Binding Private Agent Continuations to Task Authority
 
-Implementation-grounded working draft, revised 2026-09-05 against code snapshot
-**73e0684** on codex/intent-bound-execution. This replaces the older
+Implementation-grounded working draft, revised 2026-09-05 against production
+baseline **73e0684**, with the additive prototype in this working tree, on
+codex/intent-bound-execution. This replaces the older
 information-flow-only paper skeleton. The user's original LaTeX attachment is
 preserved unchanged; revisions live here.
 
-The subsequent research increment adds an independent S1–S7 prefix specification,
-finite model checking and a manual Rust-boundary map. It leaves the production
-kernel unchanged.
+The first research increment adds an independent S1–S7 prefix specification,
+finite model checking and a manual Rust-boundary map. The subsequent originality
+increment adds the runnable `savana-private-workflow` Rust prototype: fixed
+authenticated rules over newly discovered objects, durable one-use opportunities
+and controlled-disclosure planner feedback. Both leave the frozen production
+kernel unchanged. The new prototype is **not** a production RPC/approval/dispatch
+integration; its interfaces and assumptions are explicitly separate.
 
 This is **not a submission-ready paper** and does not assert a reviewer score.
 The implementation increment and engineering checks are complete within the
@@ -16,6 +21,16 @@ experiments remain unrun. The PDF is a readable working draft, not a certified
 USENIX-formatted submission.
 
 ## What changed
+
+- New evidence-grounded continuation section: scoped authenticated facts,
+  runtime object instantiation, immutable tuple binding and fixed request schema.
+- Three planner commands with opaque handles, cached bounded views and uniform
+  refusal; explicit count/progress/status leakage and paired-world target.
+- 26 prototype tests, including a 48-configuration paired-world matrix and real
+  encrypted-file recovery tests; a two-round offline executable example.
+- The old S1–S7 graphs are **not** claimed to verify the new continuation state
+  machine. Offline callbacks and deterministic controllers are not LLM utility
+  or production-provider measurements.
 
 - Separately authenticated task authority precedes planning; action approval
   cannot enlarge it.
@@ -51,6 +66,9 @@ USENIX-formatted submission.
 | [Rust correspondence](../../docs/research/task-trace-rust-map.md) | Owner/commit boundaries; explicit remaining refinement obligations. |
 | [Finite checker](../../verification/task_trace/README.md) | Reproducible graph exploration, mutations and source-hashed evidence. |
 | [Research-increment verification](../../docs/verification/task-trace-model.md) | This increment's checks and updated PDF verification. |
+| [Private continuation crate](../../crates/savana-private-workflow/README.md) | Runnable Rust prototype, planner/host APIs and explicit production-integration boundary. |
+| [Continuation specification](../../docs/research/private-continuations.md) | Fixed rules, dynamic evidence, safety obligations and permitted leakage. |
+| [Continuation verification](../../docs/verification/private-continuations.md) | Exact new checks, corrections, exclusions and latest PDF. |
 
 The paper reports engineering evidence, including nine native tool cases, seven
 native release cases and 1,440 bounded accounting traces. Those are not attack

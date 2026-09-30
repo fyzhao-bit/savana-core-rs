@@ -1,6 +1,21 @@
 name: ci
 on: [push, pull_request]
 jobs:
+  private-continuations:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.82.0
+        with: { components: clippy, rustfmt }
+      - run: cargo fmt -p savana-private-workflow -- --check
+      - run: cargo clippy -p savana-private-workflow --all-targets --no-deps --locked -- -D warnings
+      - run: cargo test -p savana-private-workflow --all-targets --locked
+      - run: |
+          private_fixture_dir=$(mktemp -d)
+          cargo run -p savana-private-workflow --example invoice_loop --locked -- "$private_fixture_dir"
   task-trace-model:
     runs-on: ubuntu-latest
     steps:

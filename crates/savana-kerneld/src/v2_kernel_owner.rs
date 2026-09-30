@@ -67,6 +67,7 @@ pub(crate) enum KernelRuntimeHandlerV2 {
     RevokeTaskAuthorization,
     RecoverTaskAuthorization,
     GetTaskAuthorizationContext,
+    OpenPrivateSessionV04,
 }
 
 impl KernelRuntimeHandlerV2 {
@@ -121,7 +122,8 @@ impl KernelRuntimeHandlerV2 {
             | Self::CommitTaskAuthorizationApproval
             | Self::RevokeTaskAuthorization
             | Self::RecoverTaskAuthorization
-            | Self::GetTaskAuthorizationContext => EndpointRoleV2::IngressKernel,
+            | Self::GetTaskAuthorizationContext
+            | Self::OpenPrivateSessionV04 => EndpointRoleV2::IngressKernel,
         }
     }
 
@@ -172,12 +174,13 @@ impl KernelRuntimeHandlerV2 {
             Self::RevokeTaskAuthorization => 54,
             Self::RecoverTaskAuthorization => 55,
             Self::GetTaskAuthorizationContext => 56,
+            Self::OpenPrivateSessionV04 => 57,
         }
     }
 }
 
 #[cfg(test)]
-pub(crate) const ALL_KERNEL_RUNTIME_HANDLERS_V2: [KernelRuntimeHandlerV2; 50] = [
+pub(crate) const ALL_KERNEL_RUNTIME_HANDLERS_V2: [KernelRuntimeHandlerV2; 51] = [
     KernelRuntimeHandlerV2::AgentHealth,
     KernelRuntimeHandlerV2::ClaimAgentSession,
     KernelRuntimeHandlerV2::PrepareFollowupIngress,
@@ -228,6 +231,7 @@ pub(crate) const ALL_KERNEL_RUNTIME_HANDLERS_V2: [KernelRuntimeHandlerV2; 50] = 
     KernelRuntimeHandlerV2::RevokeTaskAuthorization,
     KernelRuntimeHandlerV2::RecoverTaskAuthorization,
     KernelRuntimeHandlerV2::GetTaskAuthorizationContext,
+    KernelRuntimeHandlerV2::OpenPrivateSessionV04,
 ];
 
 pub(crate) fn handler_for_operation_v2(
@@ -333,6 +337,9 @@ pub(crate) fn handler_for_operation_v2(
             }
             KernelIngressOperationV2::GetTaskAuthorizationContext(_) => {
                 KernelRuntimeHandlerV2::GetTaskAuthorizationContext
+            }
+            KernelIngressOperationV2::OpenPrivateSessionV04(_) => {
+                KernelRuntimeHandlerV2::OpenPrivateSessionV04
             }
         }),
         KernelServiceOperationV2::Connector(operation) => Ok(match operation {
@@ -457,6 +464,16 @@ impl KernelRuntimeRequestContextV2 {
 }
 
 pub(crate) trait KernelRuntimeServicesV2: Send + 'static {
+    fn tick_fused_planning(&mut self) -> Result<(), StableCode> {
+        Ok(())
+    }
+    fn managed_admin(
+        &mut self,
+        _submission: crate::v04_managed_admin::AdminSubmissionV04,
+    ) -> Result<savana_policy_core::v2::ManagedAdminReceiptV04, StableCode> {
+        Err(StableCode::PolicyDenied)
+    }
+
     fn execute(
         &mut self,
         request: KernelRuntimeRequestV2,
@@ -473,10 +490,18 @@ pub(crate) enum KernelRuntimeOwnerErrorV2 {
 }
 
 pub(crate) struct KernelRuntimeOwnerV2 {
-    owner: StateOwnerV2<
-        KernelRuntimeRequestV2,
-        Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2>,
-    >,
+    owner: StateOwnerV2<OwnerCommandV04, OwnerResponseV04>,
+}
+
+enum OwnerCommandV04 {
+    FusedClockTick,
+    Service(Box<KernelRuntimeRequestV2>),
+    Admin(crate::v04_managed_admin::AdminSubmissionV04),
+}
+enum OwnerResponseV04 {
+    FusedClockTick(Result<(), StableCode>),
+    Service(Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2>),
+    Admin(Result<savana_policy_core::v2::ManagedAdminReceiptV04, StableCode>),
 }
 
 impl std::fmt::Debug for KernelRuntimeOwnerV2 {
@@ -493,8 +518,24 @@ impl KernelRuntimeOwnerV2 {
         let owner = StateOwnerV2::spawn_transactional(
             "savana-kerneld-runtime-v2",
             capacity,
-            move |request: KernelRuntimeRequestV2, commit| {
-                Ok(match request.validate() {
+            move |command: OwnerCommandV04, commit| {
+                let request = match command {
+                    OwnerCommandV04::FusedClockTick => {
+                        commit.claim()?;
+                        return Ok(OwnerResponseV04::FusedClockTick(
+                            services.tick_fused_planning(),
+                        ));
+                    }
+                    OwnerCommandV04::Service(request) => *request,
+                    OwnerCommandV04::Admin(submission) => {
+                        // One serialized state owner for both execution and admin.
+                        // Cancelled queued requests cannot mutate. After claiming,
+                        // a timeout is uncertain and retries use the durable ID.
+                        commit.claim()?;
+                        return Ok(OwnerResponseV04::Admin(services.managed_admin(submission)));
+                    }
+                };
+                Ok(OwnerResponseV04::Service(match request.validate() {
                     Ok(()) => {
                         let commit = request.prepares_finalize_before_commit().then_some(commit);
                         services.execute(request, commit)
@@ -503,11 +544,42 @@ impl KernelRuntimeOwnerV2 {
                         let (_, builder) = request.into_parts();
                         builder.prepare(Err(error))
                     }
-                })
+                }))
             },
         )
         .map_err(map_owner_error)?;
         Ok(Self { owner })
+    }
+
+    pub(crate) fn submit_managed_admin(
+        &self,
+        submission: crate::v04_managed_admin::AdminSubmissionV04,
+        deadline: Instant,
+    ) -> Result<savana_policy_core::v2::ManagedAdminReceiptV04, KernelRuntimeOwnerErrorV2> {
+        match self
+            .owner
+            .request(OwnerCommandV04::Admin(submission), deadline)
+            .map_err(map_owner_error)?
+        {
+            OwnerResponseV04::Admin(result) => result.map_err(KernelRuntimeOwnerErrorV2::Operation),
+            _ => Err(KernelRuntimeOwnerErrorV2::Unavailable),
+        }
+    }
+
+    pub(crate) fn tick_fused_planning(
+        &self,
+        deadline: Instant,
+    ) -> Result<(), KernelRuntimeOwnerErrorV2> {
+        match self
+            .owner
+            .request(OwnerCommandV04::FusedClockTick, deadline)
+            .map_err(map_owner_error)?
+        {
+            OwnerResponseV04::FusedClockTick(result) => {
+                result.map_err(KernelRuntimeOwnerErrorV2::Operation)
+            }
+            _ => Err(KernelRuntimeOwnerErrorV2::Unavailable),
+        }
     }
 
     #[cfg(test)]
@@ -620,9 +692,10 @@ impl KernelRuntimeOwnerV2 {
                 StableCode::IdentityPeerRejected,
             ));
         }
-        self.owner
+        let response = self
+            .owner
             .request(
-                KernelRuntimeRequestV2 {
+                OwnerCommandV04::Service(Box::new(KernelRuntimeRequestV2 {
                     context: KernelRuntimeRequestContextV2 {
                         peer,
                         lease,
@@ -633,18 +706,21 @@ impl KernelRuntimeOwnerV2 {
                         operation,
                     },
                     response_builder,
-                },
+                })),
                 deadline,
             )
-            .map_err(map_owner_error)?
-            .map_err(|error| match error {
-                KernelRuntimeResponsePreparationErrorV2::DeadlineExceeded => {
-                    KernelRuntimeOwnerErrorV2::DeadlineExceeded
-                }
-                KernelRuntimeResponsePreparationErrorV2::Unavailable => {
-                    KernelRuntimeOwnerErrorV2::Unavailable
-                }
-            })
+            .map_err(map_owner_error)?;
+        let OwnerResponseV04::Service(response) = response else {
+            return Err(KernelRuntimeOwnerErrorV2::Unavailable);
+        };
+        response.map_err(|error| match error {
+            KernelRuntimeResponsePreparationErrorV2::DeadlineExceeded => {
+                KernelRuntimeOwnerErrorV2::DeadlineExceeded
+            }
+            KernelRuntimeResponsePreparationErrorV2::Unavailable => {
+                KernelRuntimeOwnerErrorV2::Unavailable
+            }
+        })
     }
 
     #[cfg(test)]
@@ -688,13 +764,51 @@ mod tests {
     use super::{handler_for_operation_v2, ALL_KERNEL_RUNTIME_HANDLERS_V2};
 
     #[test]
-    fn exhaustive_handler_table_covers_all_50_kerneld_operations_once() {
-        assert_eq!(ALL_KERNEL_RUNTIME_HANDLERS_V2.len(), 50);
+    fn fused_clock_uses_same_owner_and_expired_ticks_cannot_mutate() {
+        use super::{
+            KernelRuntimeOwnerV2, KernelRuntimeRequestV2, KernelRuntimeResponsePreparationErrorV2,
+            KernelRuntimeServicesV2, PreparedKernelServiceResponseV2, StateOwnerCommitV2,
+        };
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        use std::time::{Duration, Instant};
+        struct Services(Arc<AtomicUsize>);
+        impl KernelRuntimeServicesV2 for Services {
+            fn tick_fused_planning(&mut self) -> Result<(), StableCode> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn execute(
+                &mut self,
+                _: KernelRuntimeRequestV2,
+                _: Option<StateOwnerCommitV2>,
+            ) -> Result<PreparedKernelServiceResponseV2, KernelRuntimeResponsePreparationErrorV2>
+            {
+                Err(KernelRuntimeResponsePreparationErrorV2::Unavailable)
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let owner = KernelRuntimeOwnerV2::spawn(2, Services(calls.clone())).unwrap();
+        assert!(owner
+            .tick_fused_planning(Instant::now() - Duration::from_millis(1))
+            .is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        owner
+            .tick_fused_planning(Instant::now() + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn exhaustive_handler_table_covers_all_51_kerneld_operations_once() {
+        assert_eq!(ALL_KERNEL_RUNTIME_HANDLERS_V2.len(), 51);
         let actual = ALL_KERNEL_RUNTIME_HANDLERS_V2
             .into_iter()
             .map(|handler| (role_tag(handler.role()), handler.tag()))
             .collect::<BTreeSet<_>>();
-        assert_eq!(actual.len(), 50);
+        assert_eq!(actual.len(), 51);
 
         let expected = kernel_agent_operation_tags_v2()
             .iter()

@@ -19,11 +19,12 @@ const FROZEN_CORE_MEMBERS: [&str; 11] = [
     "savana-vault",
 ];
 
-const ALLOWED_WORKSPACE_MEMBERS: [&str; 15] = [
+const ALLOWED_WORKSPACE_MEMBERS: [&str; 17] = [
     "libsavana-ner",
     "savana-agentd",
     "savana-approvald",
     "savana-client",
+    "savana-continuation-core",
     "savana-core-py",
     "savana-execd",
     "savana-ingressd",
@@ -34,6 +35,7 @@ const ALLOWED_WORKSPACE_MEMBERS: [&str; 15] = [
     "savana-openclaw-release",
     "savana-platform-identity",
     "savana-policy-core",
+    "savana-private-workflow",
     "savana-vault",
 ];
 
@@ -115,6 +117,7 @@ fn workspace_boundary_rejects_duplicate_package_names() {
         "savana-client",
         "savana-client",
         "libsavana-ner",
+        "savana-continuation-core",
         "savana-core-py",
         "savana-execd",
         "savana-ingressd",
@@ -125,6 +128,7 @@ fn workspace_boundary_rejects_duplicate_package_names() {
         "savana-openclaw-release",
         "savana-platform-identity",
         "savana-policy-core",
+        "savana-private-workflow",
         "savana-vault",
     ];
     assert_exact_workspace_members(members);

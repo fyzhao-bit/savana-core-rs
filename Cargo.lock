@@ -1041,6 +1041,7 @@ dependencies = [
  "rustix",
  "rustls",
  "savana-approvald",
+ "savana-continuation-core",
  "savana-kernel-protocol",
  "savana-platform-identity",
  "savana-policy-core",
@@ -1087,6 +1088,7 @@ dependencies = [
  "base64",
  "getrandom 0.2.17",
  "minicbor",
+ "nix",
  "rustix",
  "savana-kernel-protocol",
  "savana-policy-core",
@@ -1099,6 +1101,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "savana-continuation-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "savana-core-py"
 version = "0.1.0"
 dependencies = [
@@ -1106,6 +1118,7 @@ dependencies = [
  "libsavana-ner",
  "minicbor",
  "pyo3",
+ "pyo3-build-config",
  "savana-client",
  "savana-kernel-protocol",
  "savana-openclaw-release",
@@ -1216,6 +1229,7 @@ dependencies = [
  "rustix",
  "savana-agentd",
  "savana-approvald",
+ "savana-continuation-core",
  "savana-execd",
  "savana-ingressd",
  "savana-input-runtime",
@@ -1264,13 +1278,16 @@ name = "savana-platform-identity"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "getrandom 0.2.17",
  "nix",
+ "p256",
  "rustix",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]
@@ -1283,8 +1300,10 @@ dependencies = [
  "hmac",
  "minicbor",
  "nix",
+ "p256",
  "regex",
  "rustix",
+ "savana-continuation-core",
  "savana-kernel-protocol",
  "savana-leak-gate",
  "savana-platform-identity",
@@ -1297,6 +1316,24 @@ dependencies = [
  "unicode-normalization",
  "url",
  "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "savana-private-workflow"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "ed25519-dalek",
+ "getrandom 0.2.17",
+ "hmac",
+ "nix",
+ "savana-kernel-protocol",
+ "savana-policy-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
  "zeroize",
 ]
 

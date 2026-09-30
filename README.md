@@ -2,6 +2,185 @@
 
 [简体中文](README.zh-CN.md)
 
+## Current source snapshot — 2026-09-29
+
+This branch includes the Linux/v0.4 kernel work, Python SDK, deployment tooling,
+and the [finite AgentDojo experiment runner](experiments/AGENTDOJO-PROTECTED-RUNNER.zh-CN.md).
+The new [software-identity experiment mode](experiments/SOFTWARE-IDENTITY-BENCHMARK.zh-CN.md)
+uses an explicitly armed test identity and bounded preconsent, not real human or
+hardware authentication. Production defaults remain interactive. This mode has
+not been deployed or produced a protected benchmark score. Raw experiment
+artifacts and operational logs remain local under ignored `experiments/results/`;
+historical reports may reference those non-published files.
+
+Pre-push checks: 71 focused Python tests and macOS workspace `cargo check`
+passed. The frozen-core integrity check still reports **17 source/hash
+mismatches**; the freeze was not regenerated merely to make that check pass.
+This is a development checkpoint, not a validated release. See the
+[checkpoint record](docs/verification/source-checkpoint-20260929.md).
+
+The dated records below describe separate implementation stages, not a claim
+that the complete product or native hardware acceptance is finished.
+
+## v0.4 implementation records (Linux target)
+
+An independent [user-verified passkey profile](docs/verification/passkey-assurance-v04.md)
+is deployment-selected alongside the unchanged attested-hardware profile. It supports
+synced/zero-counter credentials, signs the actual assurance, and durably consumes
+one-use challenges. Login still does not approve actions. It makes no hardware
+non-copyability claim. Python APIs are unchanged; real enrollment and AWS native
+product acceptance are not complete.
+
+An additive TPM P-256/ECDSA-SHA256 deployment signature suite is implemented with
+strict V3 envelopes, pinned TPM object checks and a fixed Linux device adapter.
+V2 Ed25519 remains unchanged. Signed first-install enrollment, TPM-enforced PCR
+signing, an isolated authority and whole-head NV recovery now connect to the Linux
+Vault/Agent/G4/Connector runtime anchors. Software-TPM interoperability passed.
+An [offline enrollment authoring tool](docs/verification/tpm-enrollment-authoring-v3.md)
+now prepares/finalizes/verifies public material without private keys or activation.
+[Python-driven Rust component experiments](experiments/COMPONENT-LOOP.zh-CN.md)
+exercise actual synthetic requests and support local-model stdio, not full product evaluation.
+[Fresh TPM preparation and signed activation](docs/verification/tpm-first-install-v3.md)
+now have a closed native adapter and software-TPM tests; occupied slots and consumed
+state cannot be reset. Legacy deployment migration, renewal and native hardware
+acceptance remain incomplete; no installation was changed. See the
+[current TPM authority boundary](docs/verification/tpm-authority-v3.md).
+An independent [V3 deployment record journal](docs/verification/deployment-records-v3.md)
+now anchors complete signed records and checks verification/commit evidence.
+It also archives immutable history, verifies ledger transitions and binds both
+evidence consumers to the actual ledger chain. This is not completion of the
+deployment driver or permission to bypass the still-closed installer/bootstrap gate.
+Linux [native staging preparation](docs/verification/linux-staging-v3.md) now checks
+actual files, all six typed plans and external transaction bindings to V3 history.
+It also binds all 35 payloads to the signed release manifest and rejects conflicts
+with all 29 version/key-epoch high-water domains; retained manifests are reverified
+for expiry and normal updates cannot replace the bootstrap TCB.
+Its read-only result cannot install artifacts, start services or unfence effects.
+
+The private action compiler now prepares only the durable next operation, so an
+exhausted completed clause cannot block a separately authorized successor. Six
+synthetic integration cases cover dependent two-step execution, volatile execution
+handle loss, reversed dependencies, revocation, and exact second-step approval
+before owner-clock resumption. These exercise real G4–G7, authenticated local IPC,
+execd journaling and vault checkpoints, but use fixture sessions/keys/provider.
+The first private consumer login and task-scoped approval-browser handoff are now
+wired through authenticated Ingress, dedicated WebAuthn receipts, the kernel owner
+clock and the KernelApproval edge. Legacy Agent login/status/claim paths reject
+enrolled private tasks. See [private sessions and limits](docs/verification/private-session-v04.md).
+Result-dependent registered loops now pass verified private responses into the
+next step's payload, with encrypted recovery, exact per-step approval and no
+quota reset. Two/three-step integration tests inspect actual provider requests.
+See [result-loop scope and checks](docs/verification/result-dependent-loop-v04.md).
+Owner-only Python `poll_publication` / `wait_publication` now observe a native
+committed publication receipt. The experiment completion adapter matches actual
+receiver bytes and records audit metadata; approval alone is not completion.
+See [interfaces and flow](docs/verification/private-publication-sdk-v04.md).
+This is not an official protected AgentDojo score or a production receiver.
+Native installation/startup, private login recovery, exclusive publication/reconnect
+and general dynamic planning remain incomplete; full-product experiments stay blocked.
+
+The in-progress v0.4 path adds a bounded finite continuation checker, encrypted
+stable-consumption/pin/freeze state, atomic G7 resource accounting, and a first
+Rust-managed private object source. Renames/content edits preserve object IDs;
+deletion retains tombstones and spent budget. Original managed input bytes are
+now pinned atomically with G7 and survive edit/delete/replay. The five private
+source-management methods plus the execution-snapshot read are documented in
+[managed resources](docs/verification/managed-resources-v04.md) and
+[execution snapshots](docs/verification/execution-input-snapshots-v04.md).
+They are not new Agent, MCP or public HTTP endpoints. A separate Linux operator
+SDK can submit signed administrative commands; it does not expose raw owner methods.
+An opt-in signed UTF-8 projection now has an exact-byte pre-seal guard in the
+kernel tool-dispatch path, retaining the existing G3/HPKE/execd checks. This is
+not automatic task enrollment. Already-enrolled requests now bind source facts
+inside the kernel using an optional purpose-separated Linux issuer; no model
+supplies trusted facts. See [handoff](docs/verification/managed-handoff-v04.md) and
+[admission/configuration limits](docs/verification/managed-admission-v04.md).
+A signed private administration backend now supports resource import/edit and
+atomic task enrollment with durable retry receipts. An opt-in Linux root-only
+socket and Rust/Python `managed_admin.submit_signed` operator wrappers now route
+to that same owner. No private admin key is held by the Agent or daemon. Signing
+workflow, consumer approval UI and native deployment acceptance remain pending:
+[administration boundary](docs/verification/managed-admin-v04.md).
+
+The fused V2/v0.4 staging backend now includes closed review/advice/envelope
+protocols, a durable once-only outbox, registered-plan compilation and V2 lowering.
+Exact signed operation commitments now bind the active continuation to the real
+G7 transaction, with retained old execution IDs under restricted replacement.
+A private model-exchange helper charges attempts durably and enforces a new
+exact-recipient G3 rule over frozen views. Its cloud transport is disabled.
+Signed delivery windows now bound retries; the durable cursor skips missed slots
+after recovery. The daemon timer now enters the same state owner and holds a
+current-deployment policy lease through model exchange. It recovers a saved but
+unactivated candidate without retransmission. Production model adapters remain
+disabled. See [host integration](docs/verification/fused-host-v04.md).
+A host-private dispatch binder now selects the next active operation for an
+already frozen, exactly approved action, with original replay identity retained.
+It is called by the daemon dispatch path and rechecked by G7; it is not the
+missing candidate-to-action compiler or a new Agent/Python endpoint.
+A private draft compiler now resolves activated operations to real local G4
+material using the same checks as the existing proposer. It mints no handles or
+execution grants by itself. Its private G4/G5/G6 caller is described below;
+no consumer workflow entry is open yet. Real task-relation/display
+commitments can change on recompile, so automatic approval reuse remains blocked;
+see the replacement limitation in the host integration record.
+A separate exact-draft recipe witness now checks reconstruction of every exact G4
+slot before producing a stable recipe commitment. Real reordering preserves it,
+while source/ownership changes do not. It neither transfers an exact approval nor
+enables execution. Separately signed recipe allowlists can now be admitted through
+the private admin transaction and restored with exact retry receipts (schema 14).
+The compiler checks this approval against current recipes/generation/expiry.
+The durable G7 owner now also checks the live exact-draft witness, active operation,
+root and generation, and caps execution lifetime at recipe-approval expiry. Its
+atomic schema-15 receipt preserves the original execution and accounting on replay;
+current G5/G6, dependencies and quotas remain mandatory. Local owned inputs can now
+be immutably pinned in the encrypted owner (schema 16), then restored with new
+process handles but the original value identity/provenance. The compiler and G7
+reject substitution; expiry and revocation still apply. These are private host
+helpers, not consumer intake/session recovery. A private orchestrator now selects
+the next unreserved operation, restores only pinned inputs, and creates a durable
+G4 intent using the shared proposer implementation. It runs shared G5 and exact G6
+envelope/receipt verification under a current policy lease; old Agent entries reject
+these internal handles, including cached execution/status lookups. Private G7/execd
+sending and result reconciliation now use the same sealed-envelope, signed-receipt
+and vault paths. Lost responses retain the original query identity; transient
+Unknown keeps its reservation and allows a later exact success, without resend.
+Schema 17 now stores original result scope with G7 and checkpoints the vault result
+before executor cleanup. Private query/result handles can be restored without the
+old session, intent or ticket; stable identities, provenance and expiry are retained.
+The production owner timer now discovers these historical executions, reconciles
+one at a time, and retries exact cleanup acknowledgements without new dispatch or
+plaintext refetch after checkpoint. Recovery, planning and new-action turns now
+rotate. New actions require a live authorized session, active plan, pinned inputs
+and exact signed recipe; they rerun G4/G5/G6/G7. Denial or required user approval
+pauses the action; a recipe never substitutes for G6. Each task waits for prior
+result checkpoint/no-effect settlement before advancing. Job-local faults retain
+reservations, while poisoned storage fails closed. Private pending approval
+envelopes and verified settlements now survive encrypted, rollback-anchored
+agent-owner recovery. Rebinding requires the same current G4/root/plan and reruns
+G5/display disclosure/G6; it never renews challenges or expiry, restores login,
+or dispatches by itself. Consumer intake, authenticated session recovery and
+trusted approval delivery/UI remain pending.
+The approval receiver now persists the exact delivery role/display pairing and
+revalidates cached retries; restart or re-registration cannot swap the display
+challenge or reset a decision. A distinct `KernelApproval` role now supports
+encrypted private registration/query and G6 receipt processing in the owner
+driver; it never impersonates Agent/Ingress. Native Linux bootstrap now installs
+the client when both signed bootstraps and the dedicated credential/socket are
+provisioned. Approvald checks the Kernel-only listener and measured peer; opt-in
+systemd units and role-directory provisioning are included. Trusted consumer
+browser routing is **not yet wired**. No installed service has been changed;
+without provisioning the client stays disabled. See the
+[Linux approval deployment contract](docs/verification/kernel-approval-linux-v04.md).
+Legacy chat/session planning and final release still fail closed for enrolled
+tasks: consumer intake/approval/publisher/UI wiring is not complete, so do not enable this
+on live tasks. See [fusion boundaries](docs/verification/fused-planning-v04.md)
+and [execution/egress integration](docs/verification/fused-execution-and-egress-v04.md).
+
+This is **not yet the complete v0.4 product**: general compiler/residual replacement,
+exclusive publication, concrete provider effects, SDK/UI and native Linux
+hardware/sandbox acceptance remain pending. Cloud/DeepSeek integrations stay
+disabled placeholders. [Implementation plan and evidence](docs/research/v04-product-implementation.md).
+
 Savana's Rust security-kernel workspace. Production crates forbid unsafe Rust
 except for the narrowly audited native boundary in
 `savana-platform-identity`: systemd descriptor ownership transfer and the
@@ -37,6 +216,13 @@ SDK adds `savana-client` and `savana-core-py` as workspace members so Rust and
 Python bindings are checked together; they are not added to the frozen
 production deployment core. The legacy `libsavana-ner` crate is also a
 workspace member for the Python wheel and remains off the V2 security path.
+
+An additional **experimental research** member, [`savana-private-workflow`](crates/savana-private-workflow/README.md),
+implements evidence-grounded dynamic order discovery and controlled-disclosure
+planner continuations. Its three model commands are `Observe`, `Discover` and
+`RequestInvoice`. It is not a new production RPC, SDK endpoint or executor grant;
+the current deployment and G1–G7 path are unchanged. See its README for the
+offline fixture, trust assumptions and required production integration.
 
 Protocol `1.0` is retained only as frozen compatibility and regression
 evidence under debug `test-support`. Its test-only daemon accepts exactly one

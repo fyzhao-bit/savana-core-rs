@@ -98,8 +98,6 @@ mod implementation {
     #[cfg(target_os = "macos")]
     const APPROVAL_SERVER_PUBLIC_KEY_PATH_V2: &str =
         "/Library/Application Support/Savana/Development/config/agentd/keys/approvald-agent-v2.pub";
-    #[cfg(target_os = "linux")]
-    const CREDENTIAL_DIRECTORY_V2: &str = "/run/credentials/savana-agentd.service";
     #[cfg(target_os = "macos")]
     const CREDENTIAL_DIRECTORY_V2: &str =
         "/Library/Application Support/Savana/Development/credentials/agentd";
@@ -1164,7 +1162,13 @@ mod implementation {
                 return;
             };
             let _pinned = job.measurement;
-            let _ = serve_control_stream(job.stream, Arc::clone(&dispatcher), job.verified_peer);
+            let _ = serve_control_stream(
+                job.stream,
+                Arc::clone(&dispatcher),
+                job.verified_peer,
+                #[cfg(target_os = "linux")]
+                _pinned.measurement(),
+            );
         }
     }
 
@@ -1173,6 +1177,7 @@ mod implementation {
         mut stream: UnixStream,
         dispatcher: Arc<AgentControlDispatcherV2>,
         peer: VerifiedAgentControlPeerV2,
+        #[cfg(target_os = "linux")] initial_measurement: &NativePeerMeasurementV2,
     ) -> Result<(), AgentdDaemonErrorV2> {
         let deadline = Instant::now()
             .checked_add(CONNECTION_DEADLINE_V2)
@@ -1181,6 +1186,32 @@ mod implementation {
             .set_read_timeout(Some(CONNECTION_DEADLINE_V2))
             .and_then(|()| stream.set_write_timeout(Some(CONNECTION_DEADLINE_V2)))
             .map_err(|_| AgentdDaemonErrorV2::EndpointUnavailable)?;
+        // Authenticate the actual acceptor, not systemd's inherited listener.
+        // This worker is reached only after the initial caller was measured.
+        #[cfg(target_os = "linux")]
+        let _reverse_pin;
+        #[cfg(target_os = "linux")]
+        let request = {
+            let mut prefix = [0; 4];
+            stream
+                .read_exact(&mut prefix)
+                .map_err(|_| AgentdDaemonErrorV2::EndpointUnavailable)?;
+            if prefix == savana_platform_identity::OWNER_CONTROL_REVERSE_MAGIC_V2 {
+                let (reverse, pinned) = savana_platform_identity::connect_owner_control_reverse_v2(
+                    &mut stream,
+                    initial_measurement,
+                    deadline,
+                )
+                .map_err(|_| AgentdDaemonErrorV2::EndpointUnavailable)?;
+                stream = reverse;
+                _reverse_pin = Some(pinned);
+                read_frame(&mut stream)?
+            } else {
+                _reverse_pin = None;
+                read_frame_with_length(&mut stream, prefix)?
+            }
+        };
+        #[cfg(target_os = "macos")]
         let request = read_frame(&mut stream)?;
         let response = dispatcher
             .dispatch_canonical(&request, peer, current_unix_millis()?, deadline)
@@ -1194,6 +1225,14 @@ mod implementation {
         stream
             .read_exact(&mut length)
             .map_err(|_| AgentdDaemonErrorV2::EndpointUnavailable)?;
+        read_frame_with_length(stream, length)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn read_frame_with_length(
+        stream: &mut UnixStream,
+        length: [u8; 4],
+    ) -> Result<Vec<u8>, AgentdDaemonErrorV2> {
         let length = u32::from_be_bytes(length) as usize;
         if length == 0 || length > MAX_CONTROL_FRAME_BYTES_V2 {
             return Err(AgentdDaemonErrorV2::EndpointUnavailable);
@@ -1468,6 +1507,18 @@ mod implementation {
         File::open(path).map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)
     }
 
+    #[cfg(target_os = "linux")]
+    fn read_credential_32(name: &str) -> Result<[u8; 32], AgentdDaemonErrorV2> {
+        let bytes = savana_platform_identity::read_linux_service_credential_v2(
+            savana_platform_identity::LinuxCredentialServiceV2::Agent,
+            name,
+            32,
+        )
+        .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
+        bytes.as_slice().try_into().map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)
+    }
+
+    #[cfg(target_os = "macos")]
     fn read_credential_32(name: &str) -> Result<[u8; 32], AgentdDaemonErrorV2> {
         if name.is_empty() || name.contains('/') {
             return Err(AgentdDaemonErrorV2::DeploymentUnavailable);
@@ -1497,6 +1548,18 @@ mod implementation {
             .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)
     }
 
+    #[cfg(target_os = "linux")]
+    fn read_credential_blob(name: &str, maximum_bytes: usize) -> Result<Vec<u8>, AgentdDaemonErrorV2> {
+        savana_platform_identity::read_linux_service_credential_v2(
+            savana_platform_identity::LinuxCredentialServiceV2::Agent,
+            name,
+            maximum_bytes,
+        )
+        .map(|bytes| bytes.to_vec())
+        .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)
+    }
+
+    #[cfg(target_os = "macos")]
     fn read_credential_blob(
         name: &str,
         maximum_bytes: usize,

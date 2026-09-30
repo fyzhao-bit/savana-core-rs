@@ -1228,7 +1228,11 @@ mod tests {
         let (mut new_client, new_server) = UnixStream::pair().unwrap();
         sender.try_send(new_server).unwrap();
         new_client.write_all(&1_025_u32.to_be_bytes()).unwrap();
-        new_client.shutdown(NetworkShutdown::Write).unwrap();
+        // The worker can reject the oversized length and close its socket before
+        // this half-close runs. That is the expected refusal, not a test failure.
+        if let Err(error) = new_client.shutdown(NetworkShutdown::Write) {
+            assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
+        }
         let new_outcome = outcome_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(new_outcome.worker, old_outcome.worker);
         assert_eq!(

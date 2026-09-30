@@ -46,10 +46,13 @@ pub use ui_authority::{
     ApprovalUiAuthorityV2,
 };
 pub use webauthn_attestation::{
-    verify_enrollment_attestation_v2, HardwareAttestationRootV2, VerifiedEnrollmentAttestationV2,
+    verify_enrollment_attestation_v2, verify_passkey_registration_v04, HardwareAttestationRootV2,
+    VerifiedEnrollmentAttestationV2, VerifiedPasskeyRegistrationV04,
 };
 
 const RP_ID: &[u8] = b"localhost";
+#[cfg(test)]
+mod passkey_tests_v04;
 const APPROVAL_ORIGIN: &str = "http://localhost:8766";
 const CLIENT_DATA_TYPE: &str = "webauthn.get";
 const MAX_CLIENT_DATA_BYTES: usize = 8 * 1024;
@@ -644,6 +647,8 @@ impl ConsumedApprovalSettlementV2 {
 
 #[derive(Debug, Clone)]
 pub struct ActiveHardwareCredentialV2 {
+    assurance: savana_kernel_protocol::v2::AuthenticationAssuranceV04,
+    backup_eligible: bool,
     credential_digest: Digest32V2,
     principal: PrincipalIdV2,
     aaguid: [u8; 16],
@@ -675,6 +680,34 @@ impl ActiveHardwareCredentialV2 {
             p256_sec1_public_key,
             signature_counter,
             revoked: false,
+            assurance: savana_kernel_protocol::v2::AuthenticationAssuranceV04::AttestedHardware,
+            backup_eligible: false,
+        })
+    }
+
+    pub(crate) fn from_verified_passkey(
+        credential_digest: Digest32V2,
+        principal: PrincipalIdV2,
+        aaguid: [u8; 16],
+        p256_sec1_public_key: [u8; 65],
+        signature_counter: u32,
+        backup_eligible: bool,
+    ) -> Result<Self, ApprovalErrorV2> {
+        if is_zero(credential_digest.as_bytes())
+            || is_zero(principal.as_bytes())
+            || VerifyingKey::from_sec1_bytes(&p256_sec1_public_key).is_err()
+        {
+            return Err(ApprovalErrorV2::InvalidCredential);
+        }
+        Ok(Self {
+            credential_digest,
+            principal,
+            aaguid,
+            p256_sec1_public_key,
+            signature_counter,
+            revoked: false,
+            backup_eligible,
+            assurance: savana_kernel_protocol::v2::AuthenticationAssuranceV04::UserVerifiedPasskey,
         })
     }
 
@@ -767,6 +800,9 @@ impl WebAuthnAssertionV2 {
 
 #[derive(Debug, Clone, Copy)]
 pub struct VerifiedApprovalDecisionV2 {
+    assurance: savana_kernel_protocol::v2::AuthenticationAssuranceV04,
+    backup_eligible: bool,
+    backup_state: bool,
     purpose: ApprovalPurposeV2,
     envelope_digest: Digest32V2,
     authenticated_principal: PrincipalIdV2,
@@ -912,6 +948,9 @@ pub fn verify_approval_decision_assertion(
         now,
     )?;
     Ok(VerifiedApprovalDecisionV2 {
+        assurance: verified.assurance,
+        backup_eligible: verified.backup_eligible,
+        backup_state: verified.backup_state,
         purpose: challenge.purpose,
         envelope_digest: challenge.envelope_digest,
         authenticated_principal: verified.authenticated_principal,
@@ -924,6 +963,9 @@ pub fn verify_approval_decision_assertion(
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct VerifiedWebAuthnAssertionV2 {
+    pub(crate) assurance: savana_kernel_protocol::v2::AuthenticationAssuranceV04,
+    pub(crate) backup_eligible: bool,
+    pub(crate) backup_state: bool,
     pub(crate) authenticated_principal: PrincipalIdV2,
     pub(crate) credential_digest: Digest32V2,
     pub(crate) authentication_context_digest: Digest32V2,
@@ -972,7 +1014,8 @@ fn verify_webauthn_assertion(
     if now.get() < issued_at.get() || now.get() >= expires_at.get() {
         return Err(ApprovalErrorV2::InvalidChallenge);
     }
-    if assertion.credential_digest != credential.credential_digest
+    if credential.revoked
+        || assertion.credential_digest != credential.credential_digest
         || assertion.user_handle != credential.principal
         || expected_principal != credential.principal
     {
@@ -997,10 +1040,11 @@ fn verify_webauthn_assertion(
         return Err(ApprovalErrorV2::InvalidAuthenticatorData);
     }
     let flags = assertion.authenticator_data[32];
-    if flags & FLAG_USER_PRESENT == 0
-        || flags & FLAG_USER_VERIFIED == 0
-        || flags & FLAG_BACKUP_ELIGIBLE != 0
-        || flags & FLAG_BACKUP_STATE != 0
+    let backup_eligible = flags & FLAG_BACKUP_ELIGIBLE != 0;
+    let backup_state = flags & FLAG_BACKUP_STATE != 0;
+    if flags & !(FLAG_USER_PRESENT | FLAG_USER_VERIFIED | FLAG_BACKUP_ELIGIBLE | FLAG_BACKUP_STATE)
+        != 0
+        || backup_eligible != credential.backup_eligible
     {
         return Err(ApprovalErrorV2::InvalidAuthenticatorData);
     }
@@ -1009,7 +1053,19 @@ fn verify_webauthn_assertion(
             .try_into()
             .map_err(|_| ApprovalErrorV2::InvalidAuthenticatorData)?,
     );
-    if next_counter == 0 || next_counter <= credential.signature_counter {
+    if !credential.assurance.accepts_evidence(
+        flags & FLAG_USER_PRESENT != 0,
+        flags & FLAG_USER_VERIFIED != 0,
+        backup_eligible,
+        backup_state,
+        next_counter,
+    ) {
+        return Err(ApprovalErrorV2::InvalidAuthenticatorData);
+    }
+    if credential.assurance
+        == savana_kernel_protocol::v2::AuthenticationAssuranceV04::AttestedHardware
+        && (next_counter == 0 || next_counter <= credential.signature_counter)
+    {
         return Err(ApprovalErrorV2::CounterReplay);
     }
 
@@ -1022,7 +1078,10 @@ fn verify_webauthn_assertion(
     signed_bytes.extend_from_slice(&client_hash);
     let signature = Signature::from_der(&assertion.der_signature)
         .map_err(|_| ApprovalErrorV2::InvalidSignature)?;
-    if signature.normalize_s().is_some() {
+    if credential.assurance
+        == savana_kernel_protocol::v2::AuthenticationAssuranceV04::AttestedHardware
+        && signature.normalize_s().is_some()
+    {
         return Err(ApprovalErrorV2::InvalidSignature);
     }
     let verifying_key = VerifyingKey::from_sec1_bytes(&credential.p256_sec1_public_key)
@@ -1041,6 +1100,9 @@ fn verify_webauthn_assertion(
         next_counter,
     );
     Ok(VerifiedWebAuthnAssertionV2 {
+        assurance: credential.assurance,
+        backup_eligible,
+        backup_state,
         authenticated_principal: credential.principal,
         credential_digest: credential.credential_digest,
         authentication_context_digest,
@@ -1060,6 +1122,11 @@ fn webauthn_context_digest(
 ) -> Digest32V2 {
     let mut hasher = Sha256::new();
     hasher.update(context_domain);
+    if credential.assurance
+        == savana_kernel_protocol::v2::AuthenticationAssuranceV04::UserVerifiedPasskey
+    {
+        hasher.update(b"SAVANA_USER_VERIFIED_PASSKEY_V04\0");
+    }
     hasher.update(purpose_tag.to_be_bytes());
     hasher.update(1_u16.to_be_bytes());
     hasher.update(1_u16.to_be_bytes());
@@ -1350,6 +1417,9 @@ fn decode_settlement_payload(
         expires_at,
     };
     let verified = VerifiedApprovalDecisionV2 {
+        assurance: savana_kernel_protocol::v2::AuthenticationAssuranceV04::AttestedHardware,
+        backup_eligible,
+        backup_state,
         purpose,
         envelope_digest,
         authenticated_principal,

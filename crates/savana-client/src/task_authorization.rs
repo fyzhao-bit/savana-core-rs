@@ -12,7 +12,7 @@ use crate::{
 
 #[derive(Clone)]
 pub struct TaskAuthorizationDraft {
-    material: TaskAuthorizationDraftV2,
+    pub(crate) material: TaskAuthorizationDraftV2,
     canonical: Vec<u8>,
 }
 impl TaskAuthorizationDraft {
@@ -39,8 +39,8 @@ impl std::fmt::Debug for TaskAuthorizationDraft {
 /// An observation of a kernel receipt, never a portable grant or execution ticket.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct TaskAuthorizationReceipt {
-    request: [u8; 32],
-    authorization: [u8; 32],
+    pub(crate) request: [u8; 32],
+    pub(crate) authorization: [u8; 32],
 }
 impl TaskAuthorizationReceipt {
     pub fn request_digest(&self) -> &[u8; 32] {
@@ -293,7 +293,7 @@ impl Session {
     }
 }
 
-fn issuance_request_digest(d: &TaskAuthorizationDraftV2, nonce: Nonce32V2) -> Digest32V2 {
+pub(crate) fn issuance_request_digest(d: &TaskAuthorizationDraftV2, nonce: Nonce32V2) -> Digest32V2 {
     let mut h = Sha256::new();
     h.update(b"SAVANA_TASK_ISSUANCE_REQUEST_V2_SCHEMA1\0");
     for b in [

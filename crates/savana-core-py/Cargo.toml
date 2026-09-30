@@ -24,3 +24,6 @@ zeroize.workspace = true
 # compatible with 3.13+, and (crucially) needs no per-interpreter match, so the
 # manylinux container build doesn't have to locate a specific `python3`.
 pyo3 = { version = "0.22", features = ["extension-module", "abi3-py312"] }
+
+[build-dependencies]
+pyo3-build-config = "=0.22.6"

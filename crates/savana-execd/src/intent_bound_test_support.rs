@@ -78,11 +78,14 @@ pub fn deployment_connector_named(
         .unwrap()
         .array(tools.len() as u64)
         .unwrap();
+    let effects = tools
+        .iter()
+        .fold(0u16, |bits, tool| bits | tool.effects().bits());
     for tool in tools {
         e.writer_mut()
             .extend_from_slice(&minicbor::to_vec(tool).unwrap());
     }
-    e.u16(savana_policy_core::v2::EffectSetV2::SEND.bits())
+    e.u16(effects)
         .unwrap()
         .u16(savana_policy_core::v2::ConnectorStructuralRoleV2::Sink.tag())
         .unwrap()
@@ -105,9 +108,13 @@ impl Observations {
         self.0.lock().unwrap().clone()
     }
 }
+/// Debug-only provider seam, invoked ONLY after worker/effect-permit validation.
+/// Carries the actual MCP request, not an approval boolean or authority keys.
+pub type ProviderExchange = Arc<dyn Fn(&[u8], u32, Instant) -> Result<Vec<u8>, ()> + Send + Sync>;
 struct Provider {
     observed: Observations,
     reply: ProviderReply,
+    exchange: Option<ProviderExchange>,
 }
 impl ProviderTransportV2 for Provider {
     fn business_credential_identity(&self) -> Result<Digest32V2, Error> {
@@ -142,7 +149,7 @@ impl ProviderTransportV2 for Provider {
         &mut self,
         request: &VerifiedProviderRequestV2,
         permit: &EffectPermitV2,
-        _maximum: u32,
+        maximum: u32,
         deadline: Instant,
     ) -> Result<Vec<u8>, Error> {
         if !request.matches_permit(permit) || Instant::now() >= deadline {
@@ -164,6 +171,14 @@ impl ProviderTransportV2 for Provider {
             .as_str()
             .ok_or(Error::ProtocolViolation)?;
         self.observed.0.lock().unwrap().push(bytes.to_vec());
+        if let Some(exchange) = &self.exchange {
+            let result =
+                exchange(inner, maximum, deadline).map_err(|_| Error::ProviderAttemptFailed)?;
+            if result.len() > maximum as usize || Instant::now() >= deadline {
+                return Err(Error::ProviderAttemptFailed);
+            }
+            return Ok(result);
+        }
         let status = match self.reply {
             ProviderReply::Success => "succeeded",
             ProviderReply::Failure => "failed",
@@ -278,6 +293,31 @@ pub fn service_with_connectors(
     reply: ProviderReply,
     connectors: Vec<ConnectorDescriptorV2>,
 ) -> (ReopenableExecutor, Observations) {
+    service_with_provider(
+        root,
+        installation,
+        manifest,
+        generation,
+        fence,
+        substitute_request,
+        reply,
+        connectors,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn service_with_provider(
+    root: &Path,
+    installation: Digest32V2,
+    manifest: Digest32V2,
+    generation: u64,
+    fence: u64,
+    substitute_request: bool,
+    reply: ProviderReply,
+    connectors: Vec<ConnectorDescriptorV2>,
+    exchange: Option<ProviderExchange>,
+) -> (ReopenableExecutor, Observations) {
     let root = root.to_path_buf();
     let anchor = Anchor::default();
     let registry_anchor = RegistryAnchor(Arc::new(Mutex::new(
@@ -298,6 +338,7 @@ pub fn service_with_connectors(
             registry_anchor.clone(),
             observed.clone(),
             connectors.clone(),
+            exchange.clone(),
         )
     };
     let service = rebuild();
@@ -323,6 +364,7 @@ fn build(
     registry_anchor: RegistryAnchor,
     observed: Observations,
     connectors: Vec<ConnectorDescriptorV2>,
+    exchange: Option<ProviderExchange>,
 ) -> ExecdProtocolServiceV2 {
     let kernel = SigningKey::from_bytes(&[0xc0; 32]);
     let receipt = SigningKey::from_bytes(&[0xbd; 32]);
@@ -479,6 +521,7 @@ fn build(
         Box::new(Provider {
             observed: observed.clone(),
             reply,
+            exchange,
         }),
     );
     ExecdProtocolServiceV2::new_with_connector_registry(

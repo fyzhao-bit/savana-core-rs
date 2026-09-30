@@ -21,6 +21,10 @@ mod planner_catalog;
 mod planner_client;
 pub mod planner_privacy;
 mod private_model_transport;
+#[cfg(unix)]
+mod fused_model_transport;
+#[cfg(unix)]
+pub use fused_model_transport::{fused_model_recipient_v04, UnixMtlsFusedModelTransportV04};
 mod state_owner;
 
 use std::collections::HashSet;

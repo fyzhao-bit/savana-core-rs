@@ -300,6 +300,23 @@ impl ActiveDeclassificationRuleSetV2 {
         initial: DeclassificationRuleSetV2,
         trust_roots: Arc<OperationalTrustRootSetV2>,
     ) -> Result<Self, DeploymentControlErrorV2> {
+        Self::new_for_binding(
+            initial,
+            trust_roots,
+            Digest32V2::new([0x71; 32]),
+            Digest32V2::new([0x72; 32]),
+            1,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_binding(
+        initial: DeclassificationRuleSetV2,
+        trust_roots: Arc<OperationalTrustRootSetV2>,
+        installation_id: Digest32V2,
+        manifest: Digest32V2,
+        generation: u64,
+    ) -> Result<Self, DeploymentControlErrorV2> {
         if initial.trust_root_set_digest() != trust_roots.signed_digest()
             || initial.product_family_digest() != trust_roots.product_family_digest()
         {
@@ -307,10 +324,9 @@ impl ActiveDeclassificationRuleSetV2 {
         }
         Ok(Self {
             active: Arc::new(RwLock::new(Some(Arc::new(ActiveV2DeploymentBundle {
-                installation_id: Digest32V2::new([0x71; 32]),
+                installation_id,
                 generation: Arc::new(V2ActiveGenerationSnapshot::for_dispatch_test(
-                    Digest32V2::new([0x72; 32]),
-                    1,
+                    manifest, generation,
                 )),
                 declassification_rules: Some(Arc::new(initial)),
                 trust_roots: Some(trust_roots),
@@ -331,6 +347,91 @@ impl ActiveDeclassificationRuleSetV2 {
             .ok_or(DeploymentControlErrorV2::InvalidDeclassificationRuleSet)
     }
 
+    /// A snapshot Arc alone is not a current-policy lease. Hold the publication
+    /// read lock throughout the bounded private handoff, so a successor cannot
+    /// become current between validation and send. The callback must not call
+    /// back into deployment publication (lock ordering: owner -> policy).
+    /// Used by the private fused scheduler; no Agent holds this lease.
+    pub(crate) fn with_current_fused_policy<T>(
+        &self,
+        installation: Digest32V2,
+        manifest: Digest32V2,
+        generation: u64,
+        now_unix_ms: u64,
+        handoff: impl FnOnce(&DeclassificationRuleSetV2, u64) -> T,
+    ) -> Result<T, DeploymentControlErrorV2> {
+        self.with_current_fused_policy_inner(
+            installation,
+            manifest,
+            generation,
+            None,
+            now_unix_ms,
+            handoff,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_current_fused_dispatch_policy<T>(
+        &self,
+        installation: Digest32V2,
+        manifest: Digest32V2,
+        generation: u64,
+        fence: u64,
+        now_unix_ms: u64,
+        handoff: impl FnOnce(&DeclassificationRuleSetV2, u64) -> T,
+    ) -> Result<T, DeploymentControlErrorV2> {
+        self.with_current_fused_policy_inner(
+            installation,
+            manifest,
+            generation,
+            Some(fence),
+            now_unix_ms,
+            handoff,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_current_fused_policy_inner<T>(
+        &self,
+        installation: Digest32V2,
+        manifest: Digest32V2,
+        generation: u64,
+        fence: Option<u64>,
+        now_unix_ms: u64,
+        handoff: impl FnOnce(&DeclassificationRuleSetV2, u64) -> T,
+    ) -> Result<T, DeploymentControlErrorV2> {
+        let invalid = DeploymentControlErrorV2::InvalidDeclassificationRuleSet;
+        let guard = self.active.read().map_err(|_| invalid)?;
+        let active = guard.as_ref().ok_or(invalid)?;
+        if active.installation_id != installation
+            || active.generation.active_state_manifest_digest() != manifest
+            || active.generation.deployment_generation() != generation
+            || fence.is_some_and(|fence| active.generation.effect_fence_epoch() != fence)
+        {
+            return Err(invalid);
+        }
+        let rules = active.declassification_rules.as_deref().ok_or(invalid)?;
+        let roots = active.trust_roots.as_deref().ok_or(invalid)?;
+        // Revalidate the actual authority at handoff time, not at startup time.
+        DeclassificationRuleSetV2::from_canonical_bytes(
+            rules.canonical_bytes(),
+            roots,
+            now_unix_ms,
+        )?;
+        // Conservatively stop at the earliest member expiry. This may reject
+        // an otherwise usable signer, but never outlives the signing authority.
+        let expires = roots.members().iter().fold(
+            rules.not_after_unix_ms().min(roots.not_after_unix_ms()),
+            |expiry, member| expiry.min(member.not_after_unix_ms()),
+        );
+        if now_unix_ms >= expires {
+            return Err(invalid);
+        }
+        let result = handoff(rules, expires);
+        drop(guard);
+        Ok(result)
+    }
+
     pub(crate) fn generation_snapshot(
         &self,
     ) -> Result<Arc<V2ActiveGenerationSnapshot>, DeploymentControlErrorV2> {
@@ -343,6 +444,35 @@ impl ActiveDeclassificationRuleSetV2 {
                     .map(|active| Arc::clone(&active.generation))
                     .ok_or(DeploymentControlErrorV2::InvalidDeclassificationRuleSet)
             })
+    }
+
+    /// Historical query/cleanup uses the current deployment edge, not a renewed
+    /// declassification lease. Hold publication stable for this bounded handoff.
+    pub(crate) fn with_recovery_generation<R>(
+        &self,
+        handoff: impl FnOnce(&V2ActiveGenerationSnapshot) -> R,
+    ) -> Result<R, DeploymentControlErrorV2> {
+        let guard = self
+            .active
+            .read()
+            .map_err(|_| DeploymentControlErrorV2::InvalidDeclassificationRuleSet)?;
+        let active = guard
+            .as_ref()
+            .ok_or(DeploymentControlErrorV2::InvalidDeclassificationRuleSet)?;
+        Ok(handoff(&active.generation))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_recovery_fence_for_test(&self, fence: u64) {
+        let mut guard = self.active.write().unwrap();
+        let old = guard.as_ref().unwrap();
+        *guard = Some(Arc::new(ActiveV2DeploymentBundle {
+            installation_id: old.installation_id,
+            generation: Arc::new(old.generation.with_fence_for_test(fence)),
+            declassification_rules: old.declassification_rules.clone(),
+            trust_roots: old.trust_roots.clone(),
+            live_endpoints: old.live_endpoints.clone(),
+        }));
     }
 
     pub(crate) fn endpoint_snapshot(
@@ -454,5 +584,128 @@ impl ActiveDeclassificationRuleSetV2 {
             live_endpoints: None,
         }));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod fused_policy_lease_tests {
+    use super::*;
+    use savana_policy_core::v2::{
+        declassification_implementation_digest_v2, ClosedDeclassificationPurposeV2,
+        DeclassificationRuleV2, LeakGateDutyV2, OperationalTrustRootPurposeV2,
+        OperationalTrustRootSetItemV2,
+    };
+    fn d(n: u8) -> Digest32V2 {
+        Digest32V2::new([n; 32])
+    }
+    fn active() -> ActiveDeclassificationRuleSetV2 {
+        let installer = SigningKey::from_bytes(&[0xa1; 32]);
+        let authority = SigningKey::from_bytes(&[0xa2; 32]);
+        let roots = OperationalTrustRootSetV2::new_declassification_signed_for_test(
+            d(1),
+            1,
+            None,
+            vec![OperationalTrustRootSetItemV2::new(
+                OperationalTrustRootPurposeV2::DeclassificationAuthority,
+                authority.verifying_key().to_bytes(),
+                1,
+                1,
+                800,
+            )
+            .unwrap()],
+            1,
+            900,
+            &installer,
+            1,
+        )
+        .unwrap();
+        let rule = DeclassificationRuleV2::new_for_test(
+            6,
+            ClosedDeclassificationPurposeV2::FusedModelCall,
+            declassification_implementation_digest_v2(6).unwrap(),
+            LeakGateDutyV2::BlocklistAndNoResidualPii,
+            Some(vec![d(20)]),
+            None,
+            1,
+            1000,
+        )
+        .unwrap();
+        let rules = DeclassificationRuleSetV2::new_signed_for_test(
+            d(1),
+            1,
+            None,
+            vec![rule],
+            1,
+            1000,
+            &roots,
+            &authority,
+            1,
+            10,
+        )
+        .unwrap();
+        ActiveDeclassificationRuleSetV2::new(rules, Arc::new(roots)).unwrap()
+    }
+    #[test]
+    fn fused_policy_lease_rejects_stale_generation_and_expired_signer() {
+        let active = active();
+        for (install, manifest, generation, now) in [
+            (0, 0x72, 1, 10),
+            (0x71, 0, 1, 10),
+            (0x71, 0x72, 2, 10),
+            (0x71, 0x72, 1, 0),
+            (0x71, 0x72, 1, 800),
+            (0x71, 0x72, 1, 901),
+        ] {
+            assert!(active
+                .with_current_fused_policy(d(install), d(manifest), generation, now, |_, _| panic!(
+                    "stale policy must not invoke handoff"
+                ))
+                .is_err());
+        }
+        active
+            .with_current_fused_policy(d(0x71), d(0x72), 1, 799, |rules, expiry| {
+                assert_eq!(expiry, 800);
+                assert!(rules
+                    .authorizing_rule(
+                        6,
+                        ClosedDeclassificationPurposeV2::FusedModelCall.purpose_digest()
+                    )
+                    .is_some());
+            })
+            .unwrap();
+    }
+    #[test]
+    fn fused_policy_lease_holds_publication_lock_until_handoff_returns() {
+        let active = active();
+        let old = active.snapshot().unwrap();
+        active
+            .with_current_fused_policy(d(0x71), d(0x72), 1, 10, |_, _| {
+                let other = active.clone();
+                std::thread::spawn(move || {
+                    assert!(matches!(
+                        other.active.try_write(),
+                        Err(std::sync::TryLockError::WouldBlock)
+                    ));
+                })
+                .join()
+                .unwrap();
+            })
+            .unwrap();
+        *active.active.try_write().unwrap() = None;
+        // An old Arc still exists, but it cannot authorize a fresh current call.
+        assert_eq!(old.not_after_unix_ms(), 1000);
+        assert!(active
+            .with_current_fused_policy(d(0x71), d(0x72), 1, 11, |_, _| ())
+            .is_err());
+    }
+    #[test]
+    fn fused_policy_lease_panicking_handoff_releases_publication_lock() {
+        let active = active();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = active
+                .with_current_fused_policy(d(0x71), d(0x72), 1, 10, |_, _| panic!("adapter panic"));
+        }));
+        assert!(result.is_err());
+        assert!(active.active.try_write().is_ok());
     }
 }

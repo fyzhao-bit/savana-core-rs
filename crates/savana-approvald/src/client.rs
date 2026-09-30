@@ -32,6 +32,10 @@ use sha2::{Digest as _, Sha256};
 use x25519_dalek::StaticSecret;
 
 const AGENT_APPROVAL_SOCKET_PATH_V2: &str = "/run/savana/approvald/agentd/approvald.sock";
+#[cfg(test)]
+#[path = "kernel_delivery_transport_tests.rs"]
+mod kernel_delivery_transport_tests;
+const KERNEL_APPROVAL_SOCKET_PATH_V2: &str = "/run/savana/approvald/kerneld/approvald.sock";
 const INGRESS_APPROVAL_SOCKET_PATH_V2: &str = "/run/savana/approvald/ingressd/approvald.sock";
 const ADMIN_APPROVAL_SOCKET_PATH_V2: &str = "/run/savana/approvald/admin/approvald.sock";
 const HANDSHAKE_MAGIC_V2: &[u8; 8] = b"SAVANA2\0";
@@ -72,6 +76,11 @@ impl core::fmt::Debug for ApprovalSuiteOneClientV2 {
 }
 
 impl ApprovalSuiteOneClientV2 {
+    /// Public deployment metadata only; private transport keys remain internal.
+    pub fn deployment_edge(&self) -> KernelServiceHandshakeEdgeV2 {
+        self.edge
+    }
+
     pub fn from_verified_deployment(
         edge: KernelServiceHandshakeEdgeV2,
         client_boot_id: BootIdV2,
@@ -80,6 +89,7 @@ impl ApprovalSuiteOneClientV2 {
         server_public_key: [u8; 32],
     ) -> Result<Self, ApprovalSuiteOneClientErrorV2> {
         let socket_path = match edge.role() {
+            EndpointRoleV2::KernelApproval => KERNEL_APPROVAL_SOCKET_PATH_V2,
             EndpointRoleV2::AgentApproval => AGENT_APPROVAL_SOCKET_PATH_V2,
             EndpointRoleV2::IngressApproval => INGRESS_APPROVAL_SOCKET_PATH_V2,
             EndpointRoleV2::ApprovalAdmin => ADMIN_APPROVAL_SOCKET_PATH_V2,
@@ -125,6 +135,7 @@ impl ApprovalSuiteOneClientV2 {
         deadline: UnixMillisV2,
     ) -> Result<ApprovalHealthResponseV2, ApprovalSuiteOneClientErrorV2> {
         let operation = match self.edge.role() {
+            EndpointRoleV2::KernelApproval => ApprovalServiceOperationV2::KernelHealth,
             EndpointRoleV2::AgentApproval => ApprovalServiceOperationV2::AgentHealth,
             EndpointRoleV2::IngressApproval => ApprovalServiceOperationV2::IngressHealth,
             EndpointRoleV2::ApprovalAdmin => ApprovalServiceOperationV2::AdminHealth,
@@ -154,6 +165,114 @@ impl ApprovalSuiteOneClientV2 {
             .map_err(|_| ApprovalSuiteOneClientErrorV2::Unavailable)
     }
 
+    pub fn attach_private_approval_v04(
+        &self,
+        session: savana_kernel_protocol::v2::ApprovalUiRecordHandleV2,
+        approval: savana_kernel_protocol::v2::ToolApprovalRecordHandleV2,
+        root: Digest32V2,
+        deadline: UnixMillisV2,
+    ) -> Result<(), ApprovalSuiteOneClientErrorV2> {
+        if self.edge.role() != EndpointRoleV2::KernelApproval {
+            return Err(ApprovalSuiteOneClientErrorV2::Unavailable);
+        }
+        let body = self.exchange(
+            ApprovalServiceOperationV2::AttachPrivateApprovalV04 {
+                session,
+                approval,
+                root,
+            },
+            deadline,
+        )?;
+        if body != [0x80] {
+            return Err(ApprovalSuiteOneClientErrorV2::Unavailable);
+        }
+        Ok(())
+    }
+
+    pub fn attach_private_release_approval_v04(
+        &self,
+        session: savana_kernel_protocol::v2::ApprovalUiRecordHandleV2,
+        approval: savana_kernel_protocol::v2::ReleaseApprovalRecordHandleV2,
+        root: Digest32V2,
+        deadline: UnixMillisV2,
+    ) -> Result<(), ApprovalSuiteOneClientErrorV2> {
+        if self.edge.role() != EndpointRoleV2::KernelApproval {
+            return Err(ApprovalSuiteOneClientErrorV2::Unavailable);
+        }
+        let body = self.exchange(
+            ApprovalServiceOperationV2::AttachPrivateReleaseApprovalV04 {
+                session,
+                approval,
+                root,
+            },
+            deadline,
+        )?;
+        if body != [0x80] {
+            return Err(ApprovalSuiteOneClientErrorV2::Unavailable);
+        }
+        Ok(())
+    }
+
+    pub fn attach_private_publication_v04(
+        &self,
+        session: savana_kernel_protocol::v2::ApprovalUiRecordHandleV2,
+        publication: savana_kernel_protocol::v2::PrivatePublicationV04,
+        deadline: UnixMillisV2,
+    ) -> Result<(), ApprovalSuiteOneClientErrorV2> {
+        if self.edge.role() != EndpointRoleV2::KernelApproval {
+            return Err(ApprovalSuiteOneClientErrorV2::Unavailable);
+        }
+        let body = self.exchange(
+            ApprovalServiceOperationV2::AttachPrivatePublicationV04 {
+                session,
+                publication,
+            },
+            deadline,
+        )?;
+        if body != [0x80] {
+            return Err(ApprovalSuiteOneClientErrorV2::Unavailable);
+        }
+        Ok(())
+    }
+
+    pub fn register_private_session_v04(
+        &self,
+        envelope: SignedUiAuthenticationEnvelopeV2,
+        deadline: UnixMillisV2,
+    ) -> Result<
+        savana_kernel_protocol::v2::RegisteredPrivateSessionV04,
+        ApprovalSuiteOneClientErrorV2,
+    > {
+        if self.edge.role() != EndpointRoleV2::KernelApproval {
+            return Err(ApprovalSuiteOneClientErrorV2::Unavailable);
+        }
+        let body = self.exchange(
+            ApprovalServiceOperationV2::RegisterPrivateSessionV04 { envelope },
+            deadline,
+        )?;
+        savana_kernel_protocol::v2::decode_registered_private_session_v04(&body)
+            .map_err(|_| ApprovalSuiteOneClientErrorV2::Unavailable)
+    }
+
+    pub fn private_session_authentication_v04(
+        &self,
+        record: savana_kernel_protocol::v2::ApprovalUiRecordHandleV2,
+        deadline: UnixMillisV2,
+    ) -> Result<
+        Option<savana_kernel_protocol::v2::SignedUiAuthenticationSettlementV2>,
+        ApprovalSuiteOneClientErrorV2,
+    > {
+        if self.edge.role() != EndpointRoleV2::KernelApproval {
+            return Err(ApprovalSuiteOneClientErrorV2::Unavailable);
+        }
+        let body = self.exchange(
+            ApprovalServiceOperationV2::GetPrivateSessionAuthenticationV04 { record },
+            deadline,
+        )?;
+        savana_kernel_protocol::v2::decode_private_session_authentication_v04(&body)
+            .map_err(|_| ApprovalSuiteOneClientErrorV2::Unavailable)
+    }
+
     pub fn register_approval(
         &self,
         envelope: SignedApprovalEnvelopeV2,
@@ -161,6 +280,10 @@ impl ApprovalSuiteOneClientV2 {
         deadline: UnixMillisV2,
     ) -> Result<RegisteredApprovalV2, ApprovalSuiteOneClientErrorV2> {
         let operation = match self.edge.role() {
+            EndpointRoleV2::KernelApproval => ApprovalServiceOperationV2::RegisterKernelApproval {
+                envelope,
+                display_authentication,
+            },
             EndpointRoleV2::AgentApproval => ApprovalServiceOperationV2::RegisterAgentApproval {
                 envelope,
                 display_authentication,
@@ -175,6 +298,38 @@ impl ApprovalSuiteOneClientV2 {
         };
         let body = self.exchange(operation, deadline)?;
         decode_registered_approval_v2(&body, self.edge.role())
+            .map_err(|_| ApprovalSuiteOneClientErrorV2::Unavailable)
+    }
+
+    pub fn get_kernel_approval_settlement(
+        &self,
+        approval: savana_kernel_protocol::v2::ToolApprovalRecordHandleV2,
+        deadline: UnixMillisV2,
+    ) -> Result<ApprovalSettlementViewV2, ApprovalSuiteOneClientErrorV2> {
+        if self.edge.role() != EndpointRoleV2::KernelApproval {
+            return Err(ApprovalSuiteOneClientErrorV2::Unavailable);
+        }
+        let body = self.exchange(
+            ApprovalServiceOperationV2::GetKernelApprovalSettlement { approval },
+            deadline,
+        )?;
+        decode_approval_settlement_view_v2(&body)
+            .map_err(|_| ApprovalSuiteOneClientErrorV2::Unavailable)
+    }
+
+    pub fn get_kernel_release_approval_settlement(
+        &self,
+        approval: savana_kernel_protocol::v2::ReleaseApprovalRecordHandleV2,
+        deadline: UnixMillisV2,
+    ) -> Result<ApprovalSettlementViewV2, ApprovalSuiteOneClientErrorV2> {
+        if self.edge.role() != EndpointRoleV2::KernelApproval {
+            return Err(ApprovalSuiteOneClientErrorV2::Unavailable);
+        }
+        let body = self.exchange(
+            ApprovalServiceOperationV2::GetKernelReleaseApprovalSettlement { approval },
+            deadline,
+        )?;
+        decode_approval_settlement_view_v2(&body)
             .map_err(|_| ApprovalSuiteOneClientErrorV2::Unavailable)
     }
 

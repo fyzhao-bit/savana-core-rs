@@ -66,6 +66,11 @@ the SDK does not create them.
 
 ## Public Python surface
 
+The separate owner-only v0.4 namespace also provides `poll_publication` and
+`wait_publication` with a native committed `PublicationReceipt`. These do not
+change the V2 Agent inventory below and do not expose raw private results.
+See [v0.4 publication interfaces and experiment boundary](verification/private-publication-sdk-v04.md).
+
 The intent-bound branch product surface has twenty-one public types:
 
 | Category | Public types |

@@ -1,4 +1,6 @@
 mod application;
+mod authentication_assurance;
+pub use authentication_assurance::AuthenticationAssuranceV04;
 mod approval_service;
 mod bindings;
 mod browser;
@@ -19,14 +21,21 @@ pub use business_request::{
     MAX_BUSINESS_PROFILE_BYTES_V2,
 };
 pub use final_release_business::{
-    decode_final_release_delivery_v2, final_release_business_profile_v2,
-    final_release_business_request_v2, FinalReleaseDeliveryV2,
+    decode_final_release_delivery_v2, decode_final_result_release_delivery_v04,
+    final_release_business_profile_v2, final_release_business_request_v2,
+    final_result_release_business_profile_v04, final_result_release_business_request_v04,
+    fused_final_result_resource_v04, FinalReleaseDeliveryV2, FinalResultReleaseDeliveryV04,
     MAX_FINAL_RELEASE_BUSINESS_PAYLOAD_BYTES_V2,
 };
 mod cbor;
 mod effect_gate_projection;
 mod handles;
 pub use handles::TaskAuthorizationApprovalRecordHandleV2;
+pub use handles::{PrivateSessionBrowserCapabilityV04, PrivateSessionTransferV04};
+mod private_session_v04;
+pub use private_session_v04::*;
+mod private_publication_v04;
+pub use private_publication_v04::*;
 mod http;
 mod jarvis;
 mod kernel_agent;
@@ -74,7 +83,8 @@ pub use task_action_approval::{
 pub use task_completion::{task_completion_evidence_digest_v2, TaskCompletionEvidenceV2};
 pub use task_execution_payload::{
     business_target_identity_v2, decode_task_execution_payload_v2,
-    encode_task_execution_payload_v2, TaskExecutionPayloadV2, MAX_TASK_EXECUTION_PAYLOAD_BYTES_V2,
+    encode_task_execution_payload_v2, presealed_release_payload_digest_v2,
+    presealed_tool_payload_digest_v2, TaskExecutionPayloadV2, MAX_TASK_EXECUTION_PAYLOAD_BYTES_V2,
 };
 #[cfg(test)]
 mod task_action_approval_tests;
@@ -232,8 +242,9 @@ pub use http::{
     read_fixed_http_request_v2, render_agent_ui_authentication_form_v2, render_agent_workspace_v2,
     render_approval_display_authentication_form_v2, render_ingress_bootstrap_form_v2,
     render_ingress_ui_authentication_form_v2, render_ingress_workspace_v2,
-    write_fixed_http_response_v2, ContinueJarvisBootstrapRequestV2, FixedHttpErrorV2,
-    FixedHttpRequestV2, FixedHttpRouteV2, FixedHttpServiceV2, MAX_HTTP_BODY_BYTES_V2,
+    render_private_approval_landing_v04, write_fixed_http_response_v2,
+    ContinueJarvisBootstrapRequestV2, FixedHttpErrorV2, FixedHttpRequestV2, FixedHttpRouteV2,
+    FixedHttpServiceV2, MAX_HTTP_BODY_BYTES_V2,
 };
 pub use jarvis::{
     AgentControlHealthResponseV2, AgentControlOperationV2, BootstrapKindV2, CancelTaskRequestV2,
