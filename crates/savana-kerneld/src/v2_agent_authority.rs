@@ -816,6 +816,9 @@ struct IntentRecordV2 {
     provenance_parents: Vec<ProvenanceRecordV2>,
     policy_allowed_effects: EffectSetV2,
     arguments: Vec<PlanArgumentRecordV2>,
+    /// The step's owner-signed result-derived rules; the display must be
+    /// re-rendered under them to re-verify the stored approval text.
+    derived_controls: Vec<(String, savana_kernel_protocol::v2::ResultDerivedControlV2)>,
     state: IntentRecordStateV2,
     decision_trace: Option<Digest32V2>,
     ticket_commitment: Option<Digest32V2>,
@@ -3918,6 +3921,7 @@ impl KernelAgentAuthorityV2 {
             provenance_parents,
             policy_allowed_effects,
             arguments: step.arguments.clone(),
+            derived_controls: step.derived_controls.clone(),
             state: IntentRecordStateV2::Proposed,
             decision_trace: None,
             ticket_commitment: None,
@@ -4112,12 +4116,12 @@ impl KernelAgentAuthorityV2 {
         if stored.provenance_set_digest() != task_match.content().provenance_digest() {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
-        let dispatch_plaintext = task_execution_plaintext(&task_match, &business_request)?;
+        let dispatch_plaintext = task_execution_plaintext(&task_match, &business_request, &derived)?;
         let destination = KernelValueV2::bytes(business_request.canonical_json())
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
         // The G4 display commitment includes the complete content, before any
         // action approval or final authorization digest is constructed.
-        let display_text = task_bound_display(&task_match, &business_request, &state)?;
+        let display_text = task_bound_display(&task_match, &business_request, &state, &derived)?;
         let display_plaintext = display_text.as_bytes().to_vec();
         let display = KernelValueV2::text(display_text.as_str())
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
@@ -4441,7 +4445,11 @@ impl KernelAgentAuthorityV2 {
             )
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
         if projected != intent.business_request
-            || task_execution_plaintext(&intent.task_match, &projected)?
+            || task_execution_plaintext(
+                &intent.task_match,
+                &projected,
+                &intent.derived_controls.iter().cloned().collect(),
+            )?
                 != intent.dispatch_plaintext
             || stored.provenance_set_digest() != intent.task_match.content().provenance_digest()
         {
@@ -4451,7 +4459,9 @@ impl KernelAgentAuthorityV2 {
             .durable
             .task_authorization_state(intent.durable_task_id)
             .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
-        if task_bound_display(&intent.task_match, &projected, &state)?.as_bytes()
+        let derived: std::collections::BTreeMap<_, _> =
+            intent.derived_controls.iter().cloned().collect();
+        if task_bound_display(&intent.task_match, &projected, &state, &derived)?.as_bytes()
             != intent.display_plaintext
         {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
@@ -5017,11 +5027,17 @@ impl KernelAgentAuthorityV2 {
         }
         if active.descriptor().unsigned().business_profile()
             != Some(intent.business_request.profile())
-            || task_execution_plaintext(&intent.task_match, &intent.business_request)?
-                != intent.dispatch_plaintext
+            || task_execution_plaintext(
+                &intent.task_match,
+                &intent.business_request,
+                &intent.derived_controls.iter().cloned().collect(),
+            )? != intent.dispatch_plaintext
             || intent
                 .business_request
-                .action_alternative(intent.descriptor_digest)
+                .action_alternative_with_derived(
+                    intent.descriptor_digest,
+                    &intent.derived_controls.iter().cloned().collect(),
+                )
                 .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?
                 != *intent.task_match.content().action()
             || intent.business_request.payload_digest()
@@ -6122,8 +6138,13 @@ impl KernelAgentAuthorityV2 {
             .durable
             .task_authorization_state(session.durable_task_id)
             .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
-        let display_text =
-            task_bound_display(&proposal.task_match, &proposal.business_request, &state)?;
+        // Final release has no result-derived controls.
+        let display_text = task_bound_display(
+            &proposal.task_match,
+            &proposal.business_request,
+            &state,
+            &std::collections::BTreeMap::new(),
+        )?;
         let display_digest = approval_display_digest_v2(display_text.as_bytes());
         let display_value = KernelValueV2::text(display_text.as_str())
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
@@ -6715,8 +6736,12 @@ impl KernelAgentAuthorityV2 {
         {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
-        let dispatch_plaintext =
-            task_execution_plaintext(&pending.task_match, &pending.business_request)?;
+        // Final release has no result-derived controls.
+        let dispatch_plaintext = task_execution_plaintext(
+            &pending.task_match,
+            &pending.business_request,
+            &std::collections::BTreeMap::new(),
+        )?;
         let policy = self
             .policy
             .as_mut()
@@ -8525,10 +8550,14 @@ fn match_business_proposal(
 fn task_execution_plaintext(
     matched: &savana_policy_core::v2::VerifiedTaskMatchV2,
     request: &savana_kernel_protocol::v2::BusinessRequestV2,
+    derived: &std::collections::BTreeMap<String, savana_kernel_protocol::v2::ResultDerivedControlV2>,
 ) -> Result<Vec<u8>, KernelAgentAuthorityErrorV2> {
-    let payload = savana_kernel_protocol::v2::TaskExecutionPayloadV2::new(
+    // The step's signed derived rules travel with the sealed payload so every
+    // verifier rebuilds the exact alternative G4 matched.
+    let payload = savana_kernel_protocol::v2::TaskExecutionPayloadV2::new_with_derived(
         matched.content().clone(),
         request.clone(),
+        derived.clone(),
     )
     .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
     savana_kernel_protocol::v2::encode_task_execution_payload_v2(&payload)
@@ -8539,6 +8568,7 @@ fn task_bound_display(
     matched: &savana_policy_core::v2::VerifiedTaskMatchV2,
     request: &savana_kernel_protocol::v2::BusinessRequestV2,
     state: &savana_policy_core::v2::TaskAuthorizationStateV2,
+    derived: &std::collections::BTreeMap<String, savana_kernel_protocol::v2::ResultDerivedControlV2>,
 ) -> Result<BoundedApprovalDisplayTextV2, KernelAgentAuthorityErrorV2> {
     if state.revoked()
         || state.authorization().digest() != matched.authorization().digest()
@@ -8554,6 +8584,7 @@ fn task_bound_display(
         matched.content(),
         matched.authorization().material(),
         request,
+        derived,
         attempts,
         magnitude,
     )

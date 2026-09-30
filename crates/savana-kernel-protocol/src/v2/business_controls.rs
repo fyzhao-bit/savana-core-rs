@@ -413,6 +413,54 @@ pub fn decode_business_controls_v2(
     Ok(result)
 }
 
+/// Canonical bytes of one step's result-derived rule set, in field-name order.
+/// Carried with a sealed task execution payload so every verifier can rebuild
+/// the owner-signed alternative the kernel matched at G4.
+pub fn encode_result_derived_controls_v2(
+    derived: &BTreeMap<String, ResultDerivedControlV2>,
+) -> Result<Vec<u8>, BusinessCodecErrorV2> {
+    if derived.len() > 32 {
+        return Err(BusinessCodecErrorV2::Limit);
+    }
+    let mut e = minicbor::Encoder::new(Vec::new());
+    e.array(derived.len() as u64).map_err(malformed)?;
+    for (name, rule) in derived {
+        e.array(2).and_then(|e| e.str(name)).map_err(malformed)?;
+        rule.put(&mut e)?;
+    }
+    Ok(e.into_writer())
+}
+
+/// Strict inverse of [`encode_result_derived_controls_v2`]: bounded, names
+/// strictly ascending, every rule re-validated, no trailing bytes.
+pub fn decode_result_derived_controls_v2(
+    bytes: &[u8],
+) -> Result<BTreeMap<String, ResultDerivedControlV2>, BusinessCodecErrorV2> {
+    let mut d = minicbor::Decoder::new(bytes);
+    let count = d.array().map_err(malformed)?.ok_or(BusinessCodecErrorV2::Malformed)?;
+    if count > 32 {
+        return Err(BusinessCodecErrorV2::Limit);
+    }
+    let mut out = BTreeMap::new();
+    let mut last: Option<String> = None;
+    for _ in 0..count {
+        if d.array().map_err(malformed)? != Some(2) {
+            return Err(BusinessCodecErrorV2::Malformed);
+        }
+        let name = d.str().map_err(malformed)?.to_owned();
+        if name.is_empty() || name.len() > 64 || last.as_ref().is_some_and(|l| *l >= name) {
+            return Err(BusinessCodecErrorV2::Malformed);
+        }
+        let rule = decode_result_derived_control(&mut d)?;
+        last = Some(name.clone());
+        out.insert(name, rule);
+    }
+    if d.position() != bytes.len() {
+        return Err(BusinessCodecErrorV2::Malformed);
+    }
+    Ok(out)
+}
+
 fn decode_result_derived_control(
     d: &mut minicbor::Decoder<'_>,
 ) -> Result<ResultDerivedControlV2, BusinessCodecErrorV2> {

@@ -103,7 +103,7 @@ fn action_review_is_exact_readable_bounded_and_not_model_prose() {
             1,
         )
         .unwrap();
-        render_task_action_display_v2(&content, &root, request, used, charged)
+        render_task_action_display_v2(&content, &root, request, &std::collections::BTreeMap::new(), used, charged)
     };
     let source = String::from_utf8(input(2))
         .unwrap()
@@ -1014,4 +1014,109 @@ fn a_request_matches_the_owner_signed_derived_alternative_iff_the_rule_matches()
         request.action_alternative_with_derived(d(90), &other).unwrap(),
         root_alt
     );
+}
+
+#[test]
+fn action_review_of_a_result_derived_field_renders_under_the_signed_rule() {
+    // The owner signed: resource `file` = the value the kernel extracts from
+    // clause 1's verified result at this path. G4 matched the action under that
+    // rule, so the review must rebuild the alternative with it; the plain
+    // (literal-domain) alternative differs and must not be accepted.
+    let p = profile(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        BusinessMagnitudeV2::FixedCount(1),
+    );
+    let rule = ResultDerivedControlV2::new(
+        1,
+        vec!["result".into(), "content".into(), "0".into(), "text".into(), "$json".into(), "0".into(), "id_".into()],
+        BusinessFieldTypeV2::Text,
+        64,
+    )
+    .unwrap();
+    let derived: std::collections::BTreeMap<String, ResultDerivedControlV2> =
+        [("file".to_string(), rule)].into_iter().collect();
+    let source = br#"{"jsonrpc":"2.0","id":"request-1","method":"tools/call","params":{"name":"mail.send","arguments":{"body":"hello","file":"3","subject":"report","to":"Alice"}}}"#;
+    let request = BusinessRequestV2::parse(&p, "request-1", source).unwrap();
+    let action = request.action_alternative_with_derived(d(21), &derived).unwrap();
+    assert_ne!(action, request.action_alternative(d(21)).unwrap());
+    let root = TaskAuthorizationV2::new(
+        d(20), PrincipalIdV2::new([30; 32]), DurableTaskIdV2::new([31; 32]), 1, d(32), d(33),
+        UnixMillisV2::new(1), UnixMillisV2::new(1000), TaskEvidenceKindV2::AuthenticatedStructuredInput,
+        d(34), d(35),
+        vec![
+            TaskAuthorizationClauseV2::new(1, vec![request.action_alternative(d(40)).unwrap()], 1, 1, 1, vec![], false)
+                .unwrap(),
+            TaskAuthorizationClauseV2::new(2, vec![action.clone()], 1, 1, 1, vec![1], false).unwrap(),
+        ],
+    )
+    .unwrap();
+    let content = ActionContentV2::new(
+        d(20), 1, 2, 0, action, request.magnitude(), request.payload_digest(),
+        d(22), d(23), d(24), d(25), 1,
+    )
+    .unwrap();
+    let display = render_task_action_display_v2(&content, &root, &request, &derived, 0, 0).unwrap();
+    let decoded: serde_json::Value = serde_json::from_str(display.as_str()).unwrap();
+    assert_eq!(decoded["rendering_schema"], 2);
+    assert_eq!(decoded["resource"], "3");
+    assert_eq!(decoded["derived_fields"]["file"]["source_clause"], 1);
+    assert_eq!(decoded["derived_fields"]["file"]["path"][4], "$json");
+    // Without the rule the matched action cannot be re-derived: refused.
+    assert!(render_task_action_display_v2(
+        &content, &root, &request, &std::collections::BTreeMap::new(), 0, 0
+    )
+    .is_err());
+}
+
+#[test]
+fn task_execution_payload_carries_the_signed_derived_rules() {
+    let p = profile(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        BusinessMagnitudeV2::FixedCount(1),
+    );
+    let rule = ResultDerivedControlV2::new(1, vec!["id_".into()], BusinessFieldTypeV2::Text, 64).unwrap();
+    let derived: std::collections::BTreeMap<String, ResultDerivedControlV2> =
+        [("file".to_string(), rule)].into_iter().collect();
+    let source = br#"{"jsonrpc":"2.0","id":"request-1","method":"tools/call","params":{"name":"mail.send","arguments":{"body":"hello","file":"3","subject":"report","to":"Alice"}}}"#;
+    let request = BusinessRequestV2::parse(&p, "request-1", source).unwrap();
+    let content_for = |action| {
+        ActionContentV2::new(
+            d(20), 1, 2, 0, action, request.magnitude(), request.payload_digest(),
+            d(22), d(23), d(24), d(25), 1,
+        )
+        .unwrap()
+    };
+    let derived_content = content_for(request.action_alternative_with_derived(d(21), &derived).unwrap());
+    // Without the rules the matched derived action cannot be re-verified.
+    assert!(TaskExecutionPayloadV2::new(derived_content.clone(), request.clone()).is_err());
+    let payload =
+        TaskExecutionPayloadV2::new_with_derived(derived_content, request.clone(), derived.clone()).unwrap();
+    let bytes = encode_task_execution_payload_v2(&payload).unwrap();
+    assert_eq!(&bytes[..2], &[0x86, 0x02]); // array(6), version 2
+    let decoded = decode_task_execution_payload_v2(&bytes).unwrap();
+    assert_eq!(decoded.derived(), &derived);
+    assert_eq!(decoded, payload);
+    // An exact-only payload keeps the version 1 encoding and carries no rules.
+    let exact = TaskExecutionPayloadV2::new(content_for(request.action_alternative(d(21)).unwrap()), request.clone()).unwrap();
+    let exact_bytes = encode_task_execution_payload_v2(&exact).unwrap();
+    assert_eq!(&exact_bytes[..2], &[0x85, 0x01]);
+    assert!(decode_task_execution_payload_v2(&exact_bytes).unwrap().derived().is_empty());
+    // Rules cannot be stripped (v2 relabeled as v1) or swapped for other rules.
+    let mut relabeled = bytes.clone();
+    relabeled[0] = 0x85;
+    relabeled[1] = 0x01;
+    assert!(decode_task_execution_payload_v2(&relabeled).is_err());
+    let other = ResultDerivedControlV2::new(1, vec!["other".into()], BusinessFieldTypeV2::Text, 64).unwrap();
+    let swapped: std::collections::BTreeMap<String, ResultDerivedControlV2> =
+        [("file".to_string(), other)].into_iter().collect();
+    assert!(TaskExecutionPayloadV2::new_with_derived(
+        decoded.content().clone(),
+        request,
+        swapped
+    )
+    .is_err());
+    // Canonical rule-set codec round-trips and refuses an empty v2 rule set.
+    let rules = encode_result_derived_controls_v2(&derived).unwrap();
+    assert_eq!(decode_result_derived_controls_v2(&rules).unwrap(), derived);
+    assert!(decode_result_derived_controls_v2(&[0x80, 0x00]).is_err());
 }

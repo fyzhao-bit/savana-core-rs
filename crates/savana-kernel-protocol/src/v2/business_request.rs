@@ -29,7 +29,8 @@ use std::collections::BTreeMap;
 #[path = "business_controls.rs"]
 mod controls;
 pub use controls::{
-    decode_business_controls_v2, encode_business_controls_v2, BusinessControlsV2,
+    decode_business_controls_v2, decode_result_derived_controls_v2, encode_business_controls_v2,
+    encode_result_derived_controls_v2, BusinessControlsV2,
     ResultDerivedControlV2,
 };
 

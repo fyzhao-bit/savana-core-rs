@@ -21,10 +21,16 @@ fn hex(bytes: &[u8]) -> String {
 /// Includes all exact request fields, never a model-authored summary or truncated
 /// payload. Counts are projection material; only the durable owner authenticates
 /// them and performs the later atomic reservation.
+///
+/// `derived` is the owner-signed result-derived rule set of the step (empty for
+/// an exact-only action). G4 matched the action under those rules, so the
+/// alternative is rebuilt with them; the owner is shown each derived field's
+/// signed source next to the concrete value the kernel extracted.
 pub fn render_task_action_display_v2(
     content: &ActionContentV2,
     authorization: &TaskAuthorizationV2,
     request: &BusinessRequestV2,
+    derived: &std::collections::BTreeMap<String, ResultDerivedControlV2>,
     attempts_used: u64,
     magnitude_charged: u64,
 ) -> Result<BoundedApprovalDisplayTextV2, ProtocolError> {
@@ -44,7 +50,7 @@ pub fn render_task_action_display_v2(
             .get(content.alternative_index() as usize)
             != Some(content.action())
         || request
-            .action_alternative(content.action().tool_descriptor_digest())
+            .action_alternative_with_derived(content.action().tool_descriptor_digest(), derived)
             .map_err(|_| invalid())?
             != *content.action()
         || request.payload_digest() != content.payload_digest()
@@ -58,8 +64,8 @@ pub fn render_task_action_display_v2(
     let p = request.profile();
     let exact: serde_json::Value =
         serde_json::from_slice(&request.canonical_json()).map_err(ProtocolError::malformed)?;
-    let rendering = serde_json::json!({
-        "rendering_schema":1,
+    let mut rendering = serde_json::json!({
+        "rendering_schema":if derived.is_empty() {1} else {2},
         "approval_kind":"One action; does not amend task authorization",
         "authorization_id":hex(authorization.authorization_id().as_bytes()), "authorization_revision":authorization.revision(),
         "task":hex(authorization.task().as_bytes()), "principal":hex(authorization.principal().as_bytes()),
@@ -85,6 +91,24 @@ pub fn render_task_action_display_v2(
         "plan_revision_digest":hex(content.plan_revision_digest().as_bytes()),
         "exact_business_request":exact,
     });
+    if !derived.is_empty() {
+        // The concrete extracted value is in exact_business_request; this shows
+        // where the owner's signed root says it must come from.
+        let fields: serde_json::Map<String, serde_json::Value> = derived
+            .iter()
+            .map(|(name, r)| {
+                (
+                    name.clone(),
+                    serde_json::json!({
+                        "source_clause": r.source_clause(), "path": r.path(),
+                        "type": format!("{:?}", r.kind()), "max_bytes": r.max_bytes(),
+                        "meaning": "Extracted by the kernel from the verified result of source_clause at this JSON path; not chosen by the planner",
+                    }),
+                )
+            })
+            .collect();
+        rendering["derived_fields"] = serde_json::Value::Object(fields);
+    }
     let json = serde_json::to_string(&rendering).map_err(ProtocolError::malformed)?;
     let mut visible = String::new();
     for c in json.chars() {

@@ -3,10 +3,12 @@
 //! Control data is never taken from the untrusted codec worker.
 use super::{
     action_content_digest_v2, decode_action_content_v2, decode_business_profile_v2,
-    encode_action_content_v2, encode_business_profile_v2, ActionContentV2, BusinessCodecErrorV2,
-    BusinessRequestV2, Digest32V2, DispatchCoreV2, DispatchSubjectV2, MAX_BUSINESS_JSON_BYTES_V2,
-    MAX_BUSINESS_PROFILE_BYTES_V2,
+    decode_result_derived_controls_v2, encode_action_content_v2, encode_business_profile_v2,
+    encode_result_derived_controls_v2, ActionContentV2, BusinessCodecErrorV2, BusinessRequestV2,
+    Digest32V2, DispatchCoreV2, DispatchSubjectV2, ResultDerivedControlV2,
+    MAX_BUSINESS_JSON_BYTES_V2, MAX_BUSINESS_PROFILE_BYTES_V2,
 };
+use std::collections::BTreeMap;
 use sha2::{Digest as _, Sha256};
 
 pub const MAX_TASK_EXECUTION_PAYLOAD_BYTES_V2: usize = 96 * 1024;
@@ -37,6 +39,10 @@ fn presealed_payload_digest(domain: &[u8], bytes: &[u8], provenance: Digest32V2)
 pub struct TaskExecutionPayloadV2 {
     content: ActionContentV2,
     request: BusinessRequestV2,
+    /// The step's owner-signed result-derived rules (empty for an exact-only
+    /// action). The matched action commits to them, so the request can only be
+    /// re-verified against the action under the same rules.
+    derived: BTreeMap<String, ResultDerivedControlV2>,
 }
 
 impl std::fmt::Debug for TaskExecutionPayloadV2 {
@@ -51,14 +57,30 @@ impl TaskExecutionPayloadV2 {
         content: ActionContentV2,
         request: BusinessRequestV2,
     ) -> Result<Self, BusinessCodecErrorV2> {
-        if request.action_alternative(content.action().tool_descriptor_digest())?
+        Self::new_with_derived(content, request, BTreeMap::new())
+    }
+
+    pub fn new_with_derived(
+        content: ActionContentV2,
+        request: BusinessRequestV2,
+        derived: BTreeMap<String, ResultDerivedControlV2>,
+    ) -> Result<Self, BusinessCodecErrorV2> {
+        if request.action_alternative_with_derived(content.action().tool_descriptor_digest(), &derived)?
             != *content.action()
             || request.magnitude() != content.magnitude()
             || request.payload_digest() != content.payload_digest()
         {
             return Err(BusinessCodecErrorV2::Binding);
         }
-        Ok(Self { content, request })
+        Ok(Self {
+            content,
+            request,
+            derived,
+        })
+    }
+
+    pub fn derived(&self) -> &BTreeMap<String, ResultDerivedControlV2> {
+        &self.derived
     }
 
     pub fn request(&self) -> &BusinessRequestV2 {
@@ -138,14 +160,24 @@ pub fn encode_task_execution_payload_v2(
         encode_action_content_v2(&value.content).map_err(|_| BusinessCodecErrorV2::Malformed)?;
     let profile = encode_business_profile_v2(value.request.profile())?;
     let request = value.request.canonical_json();
+    // Version 1 (exact-only) is byte-identical to before; version 2 appends the
+    // step's non-empty derived rule set.
+    let derived = if value.derived.is_empty() {
+        None
+    } else {
+        Some(encode_result_derived_controls_v2(&value.derived)?)
+    };
     let mut e = minicbor::Encoder::new(Vec::new());
-    e.array(5)
-        .and_then(|e| e.u16(1))
+    e.array(if derived.is_some() { 6 } else { 5 })
+        .and_then(|e| e.u16(if derived.is_some() { 2 } else { 1 }))
         .and_then(|e| e.bytes(&content))
         .and_then(|e| e.bytes(&profile))
         .and_then(|e| e.str(value.request.request_id()))
         .and_then(|e| e.bytes(&request))
         .map_err(|_| BusinessCodecErrorV2::Malformed)?;
+    if let Some(derived) = derived {
+        e.bytes(&derived).map_err(|_| BusinessCodecErrorV2::Malformed)?;
+    }
     let bytes = e.into_writer();
     if bytes.len() > MAX_TASK_EXECUTION_PAYLOAD_BYTES_V2 {
         return Err(BusinessCodecErrorV2::Limit);
@@ -161,9 +193,11 @@ pub fn decode_task_execution_payload_v2(
         return Err(BusinessCodecErrorV2::Limit);
     }
     let mut d = minicbor::Decoder::new(bytes);
-    if d.array().map_err(malformed)? != Some(5) || d.u16().map_err(malformed)? != 1 {
-        return Err(BusinessCodecErrorV2::Malformed);
-    }
+    let with_derived = match (d.array().map_err(malformed)?, d.u16().map_err(malformed)?) {
+        (Some(5), 1) => false,
+        (Some(6), 2) => true,
+        _ => return Err(BusinessCodecErrorV2::Malformed),
+    };
     let content = decode_action_content_v2(d.bytes().map_err(malformed)?)
         .map_err(|_| BusinessCodecErrorV2::Malformed)?;
     let profile_bytes = d.bytes().map_err(malformed)?;
@@ -180,7 +214,17 @@ pub fn decode_task_execution_payload_v2(
         return Err(BusinessCodecErrorV2::Limit);
     }
     let request = BusinessRequestV2::parse(&profile, id, json)?;
-    let value = TaskExecutionPayloadV2::new(content, request)?;
+    let derived = if with_derived {
+        let rules = decode_result_derived_controls_v2(d.bytes().map_err(malformed)?)?;
+        // An empty rule set must use the exact-only version 1 encoding.
+        if rules.is_empty() {
+            return Err(BusinessCodecErrorV2::Malformed);
+        }
+        rules
+    } else {
+        BTreeMap::new()
+    };
+    let value = TaskExecutionPayloadV2::new_with_derived(content, request, derived)?;
     if d.position() != bytes.len() || encode_task_execution_payload_v2(&value)? != bytes {
         return Err(BusinessCodecErrorV2::Malformed);
     }
