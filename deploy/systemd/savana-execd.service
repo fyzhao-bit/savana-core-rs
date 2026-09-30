@@ -44,6 +44,9 @@ RemoveIPC=yes
 KeyringMode=private
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+# The connector worker sandbox installs Landlock and seccomp before exec;
+# without @sandbox those calls fail with EPERM and no tool can be dispatched.
+SystemCallFilter=@sandbox
 SystemCallFilter=~@clock @debug @module @mount @obsolete @privileged @raw-io @reboot @swap
 SystemCallErrorNumber=EPERM
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
