@@ -1398,3 +1398,135 @@ fn a_declassification_with_a_null_binding_is_refused() {
     )
     .is_ok());
 }
+
+fn tool_result_bytes(json: &[u8]) -> (KernelValueV2, ProvenanceRecordV2) {
+    let raw = KernelValueV2::bytes(json.to_vec()).unwrap();
+    let provenance = ProvenanceRecordV2::tool_result(
+        &raw,
+        context(1, 2),
+        ActionIntentIdV2::new([59; 32]),
+        digest(60),
+        digest(61),
+        digest(62),
+        digest(63),
+        EffectSetV2::READ,
+    )
+    .unwrap();
+    (raw, provenance)
+}
+
+fn path(segments: &[&str]) -> Vec<String> {
+    segments.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn result_json_path_extracts_scalars_and_keeps_untrusted_provenance() {
+    let json = br#"{"result":{"event":{"participants":["a@x.com","b@y.com"],"count":2,"public":true}}}"#;
+    let (raw, parent) = tool_result_bytes(json);
+    // A text scalar reached through objects and an array index.
+    let op = DeriveOperationV2::select_result_json_path_v04(
+        path(&["result", "event", "participants", "0"]),
+        256,
+    )
+    .unwrap();
+    // Encoded shape: [tag 9, [segments...], max_bytes]; decode is byte-stable.
+    let encoded = minicbor::to_vec(&op).unwrap();
+    assert_eq!(encoded[0], 0x83);
+    assert_eq!(encoded[1], 9);
+    assert_eq!(minicbor::decode::<DeriveOperationV2>(&encoded).unwrap(), op);
+    let (value, derived) =
+        ProvenanceRecordV2::derived(context(1, 2), op, &[(&raw, &parent)], EffectSetV2::READ)
+            .unwrap();
+    assert_eq!(value.as_text(), Some("a@x.com"));
+    // Projection is not endorsement: the value stays exactly as untrusted as the result.
+    assert_eq!(derived.label().integrity(), IntegrityV2::ExternalUntrusted);
+    assert_eq!(derived.label().confidentiality(), ConfidentialityV2::VaultBound);
+    assert_eq!(derived.label().readers(), ReaderSetV2::KERNEL);
+    assert_eq!(derived.value_digest(), value_digest_v2(&value).unwrap());
+
+    let integer = DeriveOperationV2::select_result_json_path_v04(
+        path(&["result", "event", "count"]),
+        16,
+    )
+    .unwrap();
+    let (count, _) =
+        ProvenanceRecordV2::derived(context(1, 2), integer, &[(&raw, &parent)], EffectSetV2::READ)
+            .unwrap();
+    assert!(matches!(count.scalar_ref(), Some(crate::v2::value::KernelScalarRefV2::I64(2))));
+
+    let boolean = DeriveOperationV2::select_result_json_path_v04(
+        path(&["result", "event", "public"]),
+        16,
+    )
+    .unwrap();
+    let (flag, _) =
+        ProvenanceRecordV2::derived(context(1, 2), boolean, &[(&raw, &parent)], EffectSetV2::READ)
+            .unwrap();
+    assert!(matches!(flag.scalar_ref(), Some(crate::v2::value::KernelScalarRefV2::Bool(true))));
+}
+
+#[test]
+fn result_json_path_fails_closed_on_non_scalar_missing_and_oversize() {
+    let json = br#"{"a":{"b":"value"},"list":[1,2],"n":123,"big":18446744073709551615,"f":1.5}"#;
+    let (raw, parent) = tool_result_bytes(json);
+    let cases = [
+        (path(&["a"]), 256u16),            // object node, not scalar
+        (path(&["list"]), 256),            // array node, not scalar
+        (path(&["a", "missing"]), 256),    // absent path
+        (path(&["a", "b"]), 3),            // "value" exceeds max_bytes
+        (path(&["big"]), 32),              // > i64::MAX
+        (path(&["f"]), 32),                // float rejected
+    ];
+    for (p, max) in cases {
+        let op = DeriveOperationV2::select_result_json_path_v04(p.clone(), max).unwrap();
+        assert!(
+            ProvenanceRecordV2::derived(context(1, 2), op, &[(&raw, &parent)], EffectSetV2::READ)
+                .is_err(),
+            "expected failure for {p:?} max {max}"
+        );
+    }
+    // Wrong parent kind (text, not bytes) and wrong arity both fail.
+    let text = KernelValueV2::text("not bytes").unwrap();
+    let op = DeriveOperationV2::select_result_json_path_v04(path(&["n"]), 32).unwrap();
+    assert!(
+        ProvenanceRecordV2::derived(context(1, 2), op, &[(&text, &parent)], EffectSetV2::READ)
+            .is_err()
+    );
+    let op = DeriveOperationV2::select_result_json_path_v04(path(&["n"]), 32).unwrap();
+    assert!(
+        ProvenanceRecordV2::derived(context(1, 2), op, &[], EffectSetV2::READ).is_err()
+    );
+}
+
+#[test]
+fn result_json_path_construction_and_decode_bounds() {
+    // Empty path selects the whole document (must still be a scalar there).
+    assert!(DeriveOperationV2::select_result_json_path_v04(vec![], 8).is_ok());
+    // Zero max_bytes, an over-long segment, and too many segments are rejected.
+    assert!(DeriveOperationV2::select_result_json_path_v04(path(&["x"]), 0).is_err());
+    assert!(DeriveOperationV2::select_result_json_path_v04(vec!["x".repeat(129)], 8).is_err());
+    let too_deep: Vec<String> = (0..17).map(|i| i.to_string()).collect();
+    assert!(DeriveOperationV2::select_result_json_path_v04(too_deep, 8).is_err());
+    // A decoder must reject an out-of-grammar segment even if the array length is fine.
+    let mut bad = minicbor::Encoder::new(Vec::new());
+    bad.array(3).unwrap().u16(9).unwrap().array(1).unwrap().str(&"x".repeat(200)).unwrap();
+    bad.u16(8).unwrap();
+    assert!(minicbor::decode::<DeriveOperationV2>(&bad.into_writer()).is_err());
+}
+
+#[test]
+fn result_json_path_extractor_rejects_duplicate_keys() {
+    use savana_continuation_core::planning_observation::{select_scalar, ScalarSelectionV04};
+    assert_eq!(
+        select_scalar(br#"{"k":"v"}"#, &path(&["k"]), 8).unwrap(),
+        ScalarSelectionV04::Text("v".to_string())
+    );
+    // A duplicate key means the two parsers could disagree on which value wins.
+    assert!(select_scalar(br#"{"k":"a","k":"b"}"#, &path(&["k"]), 8).is_err());
+    // Array indices must be canonical decimal.
+    assert_eq!(
+        select_scalar(br#"[10,20,30]"#, &path(&["2"]), 8).unwrap(),
+        ScalarSelectionV04::Unsigned(30)
+    );
+    assert!(select_scalar(br#"[10,20]"#, &path(&["00"]), 8).is_err());
+}

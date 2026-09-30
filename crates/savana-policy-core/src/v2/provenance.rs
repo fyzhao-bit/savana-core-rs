@@ -62,6 +62,23 @@ enum DeriveOperationKindV2 {
     AssembleList,
     AssembleObject(Vec<ArgumentNameV2>),
     PolicyConstant(PolicyConstantIdV2),
+    /// Kernel-internal strict scalar projection from a prior operation's
+    /// verified result bytes, for an owner-signed result-derived control. The
+    /// path grammar matches signed observations; the node must be a single
+    /// scalar. Not reachable from the agent wire (no `map_operation` entry).
+    SelectResultJsonPathV04 { path: Vec<String>, max_bytes: u16 },
+}
+
+const MAX_RESULT_PATH_SEGMENTS_V04: usize = 16;
+const MAX_RESULT_PATH_SEGMENT_BYTES_V04: usize = 128;
+
+fn valid_result_path(path: &[String]) -> bool {
+    path.len() <= MAX_RESULT_PATH_SEGMENTS_V04
+        && path.iter().all(|segment| {
+            !segment.is_empty()
+                && segment.len() <= MAX_RESULT_PATH_SEGMENT_BYTES_V04
+                && !segment.chars().any(char::is_control)
+        })
 }
 
 impl DeriveOperationV2 {
@@ -104,6 +121,16 @@ impl DeriveOperationV2 {
         Self(DeriveOperationKindV2::PolicyConstant(constant_id))
     }
 
+    pub fn select_result_json_path_v04(path: Vec<String>, max_bytes: u16) -> Result<Self, G3Error> {
+        if !valid_result_path(&path) || max_bytes == 0 {
+            return Err(G3Error::DeriveTypeMismatch);
+        }
+        Ok(Self(DeriveOperationKindV2::SelectResultJsonPathV04 {
+            path,
+            max_bytes,
+        }))
+    }
+
     pub const fn tag(&self) -> u16 {
         match &self.0 {
             DeriveOperationKindV2::OwnerInputTextV04(_) => 8,
@@ -114,6 +141,7 @@ impl DeriveOperationV2 {
             DeriveOperationKindV2::AssembleList => 4,
             DeriveOperationKindV2::AssembleObject(_) => 5,
             DeriveOperationKindV2::PolicyConstant(_) => 6,
+            DeriveOperationKindV2::SelectResultJsonPathV04 { .. } => 9,
         }
     }
 
@@ -207,6 +235,22 @@ impl DeriveOperationV2 {
                 }
                 value.try_clone_internal()
             }
+            DeriveOperationKindV2::SelectResultJsonPathV04 { path, max_bytes } => {
+                use savana_continuation_core::planning_observation::{select_scalar, ScalarSelectionV04};
+                let [(value, _)] = parents else {
+                    return Err(G3Error::DeriveArityMismatch);
+                };
+                let bytes = value.as_bytes_value().ok_or(G3Error::DeriveTypeMismatch)?;
+                match select_scalar(bytes, path, *max_bytes)
+                    .map_err(|_| G3Error::DeriveFieldMissing)?
+                {
+                    ScalarSelectionV04::Text(text) => KernelValueV2::text(text),
+                    ScalarSelectionV04::Boolean(flag) => Ok(KernelValueV2::boolean(flag)),
+                    ScalarSelectionV04::Unsigned(number) => i64::try_from(number)
+                        .map(KernelValueV2::integer)
+                        .map_err(|_| G3Error::DeriveTypeMismatch),
+                }
+            }
         }
     }
 }
@@ -246,6 +290,13 @@ impl<C> minicbor::Encode<C> for DeriveOperationV2 {
             DeriveOperationKindV2::PolicyConstant(constant_id) => {
                 encoder.array(2)?.u16(6)?;
                 constant_id.encode(encoder, context)?;
+            }
+            DeriveOperationKindV2::SelectResultJsonPathV04 { path, max_bytes } => {
+                encoder.array(3)?.u16(9)?.array(path.len() as u64)?;
+                for segment in path {
+                    encoder.str(segment)?;
+                }
+                encoder.u16(*max_bytes)?;
             }
         }
         Ok(())
@@ -288,6 +339,27 @@ impl<'bytes, C> minicbor::Decode<'bytes, C> for DeriveOperationV2 {
             (2, 6) => Ok(Self::policy_constant(minicbor::Decode::decode(
                 decoder, context,
             )?)),
+            (3, 9) => {
+                let count = decode_bounded_array(decoder, MAX_RESULT_PATH_SEGMENTS_V04, position)?;
+                let mut path = Vec::new();
+                path.try_reserve_exact(count).map_err(|_| {
+                    minicbor::decode::Error::message("derive path allocation failed").at(position)
+                })?;
+                for _ in 0..count {
+                    let segment = decoder.str()?;
+                    if segment.is_empty() || segment.len() > MAX_RESULT_PATH_SEGMENT_BYTES_V04 {
+                        return Err(
+                            minicbor::decode::Error::message("invalid result path segment")
+                                .at(position),
+                        );
+                    }
+                    path.push(segment.to_owned());
+                }
+                let max_bytes = decoder.u16()?;
+                Self::select_result_json_path_v04(path, max_bytes).map_err(|_| {
+                    minicbor::decode::Error::message("invalid result path derive").at(position)
+                })
+            }
             _ => Err(minicbor::decode::Error::message("unknown derive operation").at(position)),
         }
     }

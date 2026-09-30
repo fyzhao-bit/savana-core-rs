@@ -97,6 +97,65 @@ impl<'de> Deserialize<'de> for UniqueJson {
     }
 }
 
+/// One scalar the kernel extracts from a verified result for a signed control.
+/// Never a list, object, null or float: a result-derived control value must be
+/// a single Text / non-negative integer / boolean, or extraction fails closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScalarSelectionV04 {
+    Text(String),
+    Unsigned(u64),
+    Boolean(bool),
+}
+
+fn walk<'value>(value: &'value Value, path: &[String]) -> Option<&'value Value> {
+    let mut current = value;
+    for key in path {
+        current = match current {
+            Value::Object(map) => map.get(key)?,
+            Value::Array(items) => key
+                .parse::<usize>()
+                .ok()
+                .filter(|index| index.to_string() == *key)
+                .and_then(|index| items.get(index))?,
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+/// Strict scalar projection for a signed result-derived control. Same bounded,
+/// duplicate-key-rejecting parser and path grammar as observations; the node at
+/// `path` must exist and be a single scalar. `max_bytes` bounds a text result's
+/// UTF-8 length. This is projection, never endorsement: the caller keeps the
+/// value's untrusted provenance.
+pub fn select_scalar(bytes: &[u8], path: &[String], max_bytes: u16) -> Result<ScalarSelectionV04, Error> {
+    if bytes.len() > 16 * 1024
+        || path.len() > 16
+        || path
+            .iter()
+            .any(|s| s.is_empty() || s.len() > 128 || s.chars().any(char::is_control))
+    {
+        return Err(Error::Invalid);
+    }
+    let value = serde_json::from_slice::<UniqueJson>(bytes)
+        .map_err(|_| Error::Invalid)?
+        .0;
+    match walk(&value, path).ok_or(Error::Binding)? {
+        Value::String(text) => {
+            if text.len() > usize::from(max_bytes) {
+                return Err(Error::Limit);
+            }
+            Ok(ScalarSelectionV04::Text(text.clone()))
+        }
+        Value::Bool(flag) => Ok(ScalarSelectionV04::Boolean(*flag)),
+        Value::Number(number) => number
+            .as_u64()
+            .map(ScalarSelectionV04::Unsigned)
+            .ok_or(Error::Invalid),
+        Value::Null | Value::Array(_) | Value::Object(_) => Err(Error::Invalid),
+    }
+}
+
 pub(crate) fn render(
     context: &[u8],
     specs: &[ResultObservation],
@@ -128,19 +187,7 @@ pub(crate) fn render(
             let value = serde_json::from_slice::<UniqueJson>(bytes)
                 .map_err(|_| Error::Invalid)?
                 .0;
-            let mut current = Some(&value);
-            for key in &spec.path {
-                current = current.and_then(|v| match v {
-                    Value::Object(map) => map.get(key),
-                    Value::Array(items) => key
-                        .parse::<usize>()
-                        .ok()
-                        .filter(|i| i.to_string() == *key)
-                        .and_then(|i| items.get(i)),
-                    _ => None,
-                });
-            }
-            current.cloned()
+            walk(&value, &spec.path).cloned()
         } else {
             None
         };
