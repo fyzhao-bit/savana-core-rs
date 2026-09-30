@@ -752,10 +752,13 @@ mod native {
             keys.vault_encryption_key,
             vault_namespace,
             Box::new(vault_anchor),
+            // Every vault context is issued and checked by the data plane for
+            // the authenticated agentd kernel client. The vault must bind the
+            // same boot identity, or committed input can never mint a document.
             savana_vault::VaultServiceV2::from_verified_deployment(
                 startup.installation_id(),
                 startup.active_state_manifest_digest(),
-                boot_id,
+                runtime_material.agentd_boot_id,
                 128,
             )
             .map_err(|_| StableCode::KernelUnavailable)?,
