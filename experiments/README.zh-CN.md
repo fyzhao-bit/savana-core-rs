@@ -1,9 +1,10 @@
 # Savana 实验：组件、官方任务基线与产品评测分开报告
 
 2026-09-30：软件身份模式首次在真实签名部署上运行（一次性特权容器，B/file-backed，
-非 AWS、非 TPM）。修复了启动器读取 systemd 凭证的问题和 vault boot 绑定缺陷；
-流程已经能走到 operator 执行准备阶段，但被泄露闸门误拦融合模型信封里的毫秒时间戳，
-模型调用仍为 0，**没有防护成绩**。详见[本地容器实验记录](../docs/verification/local-container-experiment-20260930.md)。
+非 AWS、非 TPM）。修复了四个阻断问题：systemd 凭证读取、vault boot 绑定、泄露闸门
+误拦模型信封、规划回复格式。第一次完成真实 DeepSeek 规划（提议已被内核接受）。
+但生产入口只把脱敏视图作为会话初始值，融合执行准备读不到原始 owner 文档，
+流程停在执行准备阶段，**没有防护成绩**。详见[本地容器实验记录](../docs/verification/local-container-experiment-20260930.md)。
 
 2026-09-29 源码归档：新增[隔离软件身份与有限预授权](SOFTWARE-IDENTITY-BENCHMARK.zh-CN.md)，
 默认交互认证不变；新模式尚未部署、没有新防护成绩。原始运行产物、响应与日志
