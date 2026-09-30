@@ -21,7 +21,7 @@ from savana_bench.agentdojo_calendar import calendar_provider
 from savana_bench.agentdojo_provider import canonical
 from savana_bench.private_episode import PrivateOutcome
 from savana_bench.protected_agentdojo import (CASES, ResearchAudit, official_case, preflight,
-    run, score_outcome, load_config, safe_error_code)
+    run, score_outcome, load_config, safe_error_code, safe_worker_error)
 from savana_bench.protected_endpoint import EpisodeEndpoint, admit_owner_episode
 from savana_bench.protected_transport import (ProviderServer, read_frame, server_context,
     certificate_spki_pin, _head, _blob, _hash)
@@ -65,6 +65,23 @@ class DiagnosticTests(unittest.TestCase):
             def code(self):
                 raise ValueError('private property failure')
         self.assertIsNone(safe_error_code(UnreadableCode()))
+
+    def test_only_closed_model_worker_errors_are_recorded(self):
+        import re
+        import ssl
+        source=(ROOT/'crates/savana-core-py/python/savana/fused_worker.py').read_text()
+        from savana_bench.protected_agentdojo import WORKER_ERROR_CODES
+        raised=set(re.findall(r"raise (?:ValueError|TimeoutError|EOFError)\('([a-z_]+)'\)",source))
+        self.assertLessEqual(WORKER_ERROR_CODES,raised)
+        self.assertEqual(safe_worker_error(ValueError('view_values')),dict(error_type='ValueError',error_code='view_values'))
+        self.assertEqual(safe_worker_error(TimeoutError('view_expired'))['error_code'],'view_expired')
+        for error in (ValueError('private text'),ValueError('view_values','extra'),RuntimeError(b'view_values')):
+            self.assertIsNone(safe_worker_error(error)['error_code'])
+        tls=ssl.SSLError(1,'[SSL: CERTIFICATE_VERIFY_FAILED] private detail')
+        tls.reason='CERTIFICATE_VERIFY_FAILED'
+        self.assertEqual(safe_worker_error(tls),dict(error_type='SSLError',error_code='CERTIFICATE_VERIFY_FAILED'))
+        tls.reason='private detail'
+        self.assertIsNone(safe_worker_error(tls)['error_code'])
 
 
 class FrameTests(unittest.TestCase):

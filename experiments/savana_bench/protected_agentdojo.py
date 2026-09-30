@@ -46,6 +46,26 @@ def safe_error_code(error):
     return code if type(code) is str and code in allowed else None
 
 
+WORKER_ERROR_CODES = frozenset((
+    'advice_fields','advice_values','cbor_shape','cbor_size','cbor_size_or_canonical','choice_fields',
+    'choice_kind','client_binding','client_pin','duplicate_field','duplicate_header','empty_cbor',
+    'header_bound','nonfinite','order','proposal_shape','proposal_size','request_headers','request_path',
+    'request_size','request_truncated','template','view_expired','view_list','view_shape','view_size',
+    'view_values','worker_deadline'))
+
+
+def safe_worker_error(error):
+    """Closed model-worker diagnostics: static worker codes or OpenSSL reasons only."""
+    import ssl
+    if isinstance(error, ssl.SSLError):
+        reason = getattr(error, 'reason', None)
+        ok = type(reason) is str and 0 < len(reason) <= 64 and reason.replace('_', '').isalnum() and reason.isupper()
+        return dict(error_type='SSLError', error_code=reason if ok else None)
+    args = getattr(error, 'args', ())
+    code = args[0] if len(args) == 1 and type(args[0]) is str and args[0] in WORKER_ERROR_CODES else None
+    return dict(error_type=type(error).__name__, error_code=code)
+
+
 class ResearchAudit:
     """Private synthetic benchmark evidence. Exclusive, fsynced hash chain.
 
@@ -285,8 +305,8 @@ class ModelWorker:
             try:
                 self.worker.serve_connection(raw, context=self.context,
                     client_certificate_sha256=self.pin, propose=self._propose)
-            except Exception:
-                self.audit.emit("model_transport_unknown")
+            except Exception as error:
+                self.audit.emit("model_transport_unknown", **safe_worker_error(error))
 
     def start(self):
         self.thread.start()
