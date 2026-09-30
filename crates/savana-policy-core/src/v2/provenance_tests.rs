@@ -1544,3 +1544,48 @@ fn result_json_path_extractor_rejects_duplicate_keys() {
     );
     assert!(select_scalar(br#"[10,20]"#, &path(&["00"]), 8).is_err());
 }
+
+#[test]
+fn result_json_path_decodes_a_nested_tool_output_string_with_json_step() {
+    use savana_continuation_core::planning_observation::{
+        select_scalar, ScalarSelectionV04, DECODE_JSON_TEXT_SEGMENT,
+    };
+    assert_eq!(DECODE_JSON_TEXT_SEGMENT, "$json");
+    // The recorded result is the whole MCP response; the tool's own output is
+    // canonical JSON text inside result.content[0].text.
+    let inner = r#"[{"filename":"team-building-activities.docx","id_":"3"}]"#;
+    let response = serde_json::json!({
+        "id": "r", "jsonrpc": "2.0",
+        "result": {"content": [{"text": inner, "type": "text"}], "isError": false,
+                   "structuredContent": {"savana_status": "succeeded"}}
+    })
+    .to_string();
+    let id_path = path(&["result", "content", "0", "text", "$json", "0", "id_"]);
+    assert_eq!(
+        select_scalar(response.as_bytes(), &id_path, 16).unwrap(),
+        ScalarSelectionV04::Text("3".to_string())
+    );
+    // Without the step the path stops at the string and cannot reach the field.
+    let plain = path(&["result", "content", "0", "text", "0", "id_"]);
+    assert!(select_scalar(response.as_bytes(), &plain, 16).is_err());
+    // On an object, `$json` is an ordinary key: it never shadows a real key.
+    assert_eq!(
+        select_scalar(br#"{"$json":"k"}"#, &path(&["$json"]), 8).unwrap(),
+        ScalarSelectionV04::Text("k".to_string())
+    );
+    // Only a string decodes; a number or an array cannot.
+    assert!(select_scalar(br#"{"n":5}"#, &path(&["n", "$json"]), 8).is_err());
+    assert!(select_scalar(br#"[[1]]"#, &path(&["0", "$json"]), 8).is_err());
+    // The nested text is parsed just as strictly: duplicate keys, non-JSON text,
+    // and a non-scalar target are refused; the byte bound still applies.
+    let dup = serde_json::json!({"t": r#"{"a":"x","a":"y"}"#}).to_string();
+    assert!(select_scalar(dup.as_bytes(), &path(&["t", "$json", "a"]), 8).is_err());
+    let prose = serde_json::json!({"t": "not json"}).to_string();
+    assert!(select_scalar(prose.as_bytes(), &path(&["t", "$json"]), 8).is_err());
+    assert!(select_scalar(response.as_bytes(), &path(&["result", "content", "0", "text", "$json", "0"]), 64).is_err());
+    let long = path(&["result", "content", "0", "text", "$json", "0", "filename"]);
+    assert!(matches!(
+        select_scalar(response.as_bytes(), &long, 4),
+        Err(_)
+    ));
+}

@@ -107,9 +107,24 @@ pub enum ScalarSelectionV04 {
     Boolean(bool),
 }
 
-fn walk<'value>(value: &'value Value, path: &[String]) -> Option<&'value Value> {
+/// Reserved path step: decode the current node, which must be a JSON *string*,
+/// as a nested strict JSON document and continue the path inside it. A tool's
+/// output reaches the kernel as canonical JSON text inside the MCP response
+/// (`result.content[0].text`), so this is how a signed path names a field of
+/// the tool output itself. A string has no keys or indices, so this step can
+/// never shadow an object key (on an object `$json` is an ordinary key) or an
+/// array index. The nested text uses the same duplicate-key-rejecting parser.
+pub const DECODE_JSON_TEXT_SEGMENT: &str = "$json";
+
+fn walk(value: &Value, path: &[String]) -> Option<Value> {
     let mut current = value;
-    for key in path {
+    for (index, key) in path.iter().enumerate() {
+        if key == DECODE_JSON_TEXT_SEGMENT {
+            if let Value::String(text) = current {
+                let nested = serde_json::from_str::<UniqueJson>(text).ok()?.0;
+                return walk(&nested, &path[index + 1..]);
+            }
+        }
         current = match current {
             Value::Object(map) => map.get(key)?,
             Value::Array(items) => key
@@ -120,7 +135,7 @@ fn walk<'value>(value: &'value Value, path: &[String]) -> Option<&'value Value> 
             _ => return None,
         };
     }
-    Some(current)
+    Some(current.clone())
 }
 
 /// Strict scalar projection for a signed result-derived control. Same bounded,
@@ -145,9 +160,9 @@ pub fn select_scalar(bytes: &[u8], path: &[String], max_bytes: u16) -> Result<Sc
             if text.len() > usize::from(max_bytes) {
                 return Err(Error::Limit);
             }
-            Ok(ScalarSelectionV04::Text(text.clone()))
+            Ok(ScalarSelectionV04::Text(text))
         }
-        Value::Bool(flag) => Ok(ScalarSelectionV04::Boolean(*flag)),
+        Value::Bool(flag) => Ok(ScalarSelectionV04::Boolean(flag)),
         Value::Number(number) => number
             .as_u64()
             .map(ScalarSelectionV04::Unsigned)
@@ -187,7 +202,7 @@ pub(crate) fn render(
             let value = serde_json::from_slice::<UniqueJson>(bytes)
                 .map_err(|_| Error::Invalid)?
                 .0;
-            walk(&value, &spec.path).cloned()
+            walk(&value, &spec.path)
         } else {
             None
         };
