@@ -29,6 +29,7 @@ const MAX_CONNECTOR_HOST_BYTES_V2: usize = 253;
 const MAX_CONNECTOR_URL_BYTES_V2: usize = 4_096;
 const CONNECTOR_DEPLOYMENT_ID_DOMAIN_V2: &[u8] = b"savana.connector.deployment.v2\0";
 const CONNECTOR_USER_ID_DOMAIN_V2: &[u8] = b"savana.connector.user.v2\0";
+const CONNECTOR_DEPLOYMENT_GENESIS_DOMAIN_V2: &[u8] = b"savana.connector.deployment-genesis.v2\0";
 const CONNECTOR_DELTA_PAYLOAD_DOMAIN_V2: &[u8] = b"savana.connector-registry.delta.v2.payload\0";
 const CONNECTOR_DELTA_SIGNED_DOMAIN_V2: &[u8] = b"savana.connector-registry.delta.v2.signed\0";
 const CONNECTOR_DELTA_SIGNATURE_DOMAIN_V2: &[u8] =
@@ -291,6 +292,107 @@ impl ConnectorDescriptorV2 {
     /// decision and callers must not treat this projection parser as approval.
     pub fn from_canonical_bytes_for_local_projection(bytes: &[u8]) -> Result<Self, G4Error> {
         Self::from_canonical_bytes_intrinsic(bytes)
+    }
+
+    /// Identity a deployment-shipped connector derives from its name and
+    /// transport. Its tool descriptors name this identity as their provider.
+    pub fn deployment_shipped_id(
+        display_name: &BoundedConnectorNameV2,
+        transport: &ConnectorTransportV2,
+    ) -> Result<Digest32V2, G4Error> {
+        connector_id_v2(ConnectorTierV2::DeploymentShipped, display_name, transport)
+    }
+
+    /// Deployment authoring only. Startup never trusts this value directly; it
+    /// re-parses the canonical bytes carried by the measured configuration.
+    pub fn new_deployment_shipped(
+        display_name: BoundedConnectorNameV2,
+        transport: ConnectorTransportV2,
+        tool_descriptors: Vec<UnsignedToolDescriptorV2>,
+        requested_effects: EffectSetV2,
+        structural_role: ConnectorStructuralRoleV2,
+        descriptor_version: u64,
+    ) -> Result<Self, G4Error> {
+        let connector_id = Self::deployment_shipped_id(&display_name, &transport)?;
+        let value = Self::from_decoded(
+            connector_id,
+            display_name,
+            ConnectorTierV2::DeploymentShipped,
+            transport,
+            tool_descriptors,
+            requested_effects,
+            structural_role,
+            descriptor_version,
+        )?;
+        if value
+            .tool_descriptors
+            .iter()
+            .any(|tool| tool.provider_identity_digest() != connector_id)
+        {
+            return Err(G4Error::InvalidDescriptor);
+        }
+        Ok(value)
+    }
+
+    /// Genesis head binding one exact, connector-id-ordered deployment set.
+    /// Registry synchronization compares heads only, so an unbound genesis
+    /// would let kerneld and execd start from different connector sets.
+    pub fn deployment_genesis_digest(connectors: &[Self]) -> Result<Digest32V2, G4Error> {
+        if connectors.is_empty()
+            || connectors
+                .iter()
+                .any(|connector| connector.tier != ConnectorTierV2::DeploymentShipped)
+            || connectors
+                .windows(2)
+                .any(|pair| pair[0].connector_id.as_bytes() >= pair[1].connector_id.as_bytes())
+        {
+            return Err(G4Error::InvalidDescriptor);
+        }
+        let mut encoder = minicbor::Encoder::new(Vec::new());
+        encoder
+            .array(connectors.len() as u64)
+            .map_err(|_| G4Error::NonCanonicalDescriptor)?;
+        for connector in connectors {
+            encoder
+                .bytes(&connector.canonical_bytes)
+                .map_err(|_| G4Error::NonCanonicalDescriptor)?;
+        }
+        Ok(domain_hash(
+            CONNECTOR_DEPLOYMENT_GENESIS_DOMAIN_V2,
+            &encoder.into_writer(),
+        ))
+    }
+
+    /// Parses the deployment-shipped set carried by a measured daemon
+    /// configuration. An empty set keeps the legacy opaque genesis digest; a
+    /// non-empty set must be exactly the set that genesis digest commits to,
+    /// and every tool must name its own connector as provider.
+    pub fn verified_deployment_set(
+        genesis_digest: Digest32V2,
+        encoded: &[Vec<u8>],
+        user_host_allowlist: &[BoundedConnectorHostV2],
+    ) -> Result<Vec<Self>, G4Error> {
+        let mut connectors = Vec::new();
+        connectors
+            .try_reserve_exact(encoded.len())
+            .map_err(|_| G4Error::AllocationFailure)?;
+        for bytes in encoded {
+            let connector = Self::from_canonical_bytes(bytes, user_host_allowlist)?;
+            if connector.tier != ConnectorTierV2::DeploymentShipped
+                || connector
+                    .tool_descriptors
+                    .iter()
+                    .any(|tool| tool.provider_identity_digest() != connector.connector_id)
+            {
+                return Err(G4Error::InvalidDescriptor);
+            }
+            connectors.push(connector);
+        }
+        if !connectors.is_empty() && Self::deployment_genesis_digest(&connectors)? != genesis_digest
+        {
+            return Err(G4Error::InvalidDescriptor);
+        }
+        Ok(connectors)
     }
 
     fn from_canonical_bytes_intrinsic(bytes: &[u8]) -> Result<Self, G4Error> {
@@ -1662,6 +1764,102 @@ mod tests {
                 .apply_canonical_delta(remove.finalize(signature).unwrap().canonical_bytes())
                 .unwrap();
             assert!(state.resolve_task_tool_connector(digest).is_err());
+        }
+    }
+
+    #[test]
+    fn deployment_set_is_bound_to_genesis_and_resolves_its_own_task_tools() {
+        use savana_kernel_protocol::v2::{
+            business_target_identity_v2, ActionCodecProfileV2, BusinessFieldRoleV2,
+            BusinessFieldTypeV2, BusinessFieldV2, BusinessMagnitudeV2, BusinessProfileV2,
+            TaskEffectV2,
+        };
+        let build = |label: &str, seed: u8, provider: Option<Digest32V2>| {
+            let name = BoundedConnectorNameV2::new(label).unwrap();
+            let url = BoundedConnectorUrlV2::new(format!("https://{label}.example/mcp")).unwrap();
+            let transport = ConnectorTransportV2::https(url.clone(), test_digest(seed)).unwrap();
+            let id = ConnectorDescriptorV2::deployment_shipped_id(&name, &transport).unwrap();
+            let profile = BusinessProfileV2::new(
+                ActionCodecProfileV2::McpToolsCallJsonV1,
+                &format!("tool-{}", seed + 1),
+                business_target_identity_v2(url.as_str(), test_digest(seed)).unwrap(),
+                test_digest(seed + 2),
+                TaskEffectV2::Read,
+                BusinessMagnitudeV2::FixedCount(1),
+                [
+                    ("body", BusinessFieldRoleV2::Payload),
+                    ("file", BusinessFieldRoleV2::Resource),
+                    ("to", BusinessFieldRoleV2::Destination),
+                ]
+                .into_iter()
+                .map(|(field, role)| {
+                    BusinessFieldV2::new(field, role, BusinessFieldTypeV2::Text).unwrap()
+                })
+                .collect(),
+            )
+            .unwrap();
+            let tool = test_tool_for_provider(seed + 1, provider.unwrap_or(id))
+                .with_business_profile(profile)
+                .unwrap();
+            ConnectorDescriptorV2::new_deployment_shipped(
+                name,
+                transport,
+                vec![tool],
+                EffectSetV2::READ,
+                ConnectorStructuralRoleV2::Sink,
+                1,
+            )
+        };
+        assert!(build("foreign", 0x61, Some(test_digest(0x62))).is_err());
+        let mut set = vec![
+            build("calendar", 0x41, None).unwrap(),
+            build("release", 0x51, None).unwrap(),
+        ];
+        set.sort_by_key(|connector| *connector.connector_id().as_bytes());
+        let genesis = ConnectorDescriptorV2::deployment_genesis_digest(&set).unwrap();
+        let encoded: Vec<Vec<u8>> = set
+            .iter()
+            .map(|connector| connector.canonical_bytes().to_vec())
+            .collect();
+        let loaded =
+            ConnectorDescriptorV2::verified_deployment_set(genesis, &encoded, &[]).unwrap();
+        assert_eq!(loaded, set);
+        // Only the exact committed set loads; the legacy opaque digest stays
+        // valid for an empty set alone.
+        let reversed: Vec<_> = encoded.iter().rev().cloned().collect();
+        for (digest, bytes) in [
+            (test_digest(0xe2), encoded.as_slice()),
+            (genesis, reversed.as_slice()),
+            (genesis, &encoded[..1]),
+        ] {
+            assert!(ConnectorDescriptorV2::verified_deployment_set(digest, bytes, &[]).is_err());
+        }
+        assert!(
+            ConnectorDescriptorV2::verified_deployment_set(test_digest(0xe2), &[], &[])
+                .unwrap()
+                .is_empty()
+        );
+        let user = inactive_descriptor("user-tier", 0x21)
+            .canonical_bytes()
+            .to_vec();
+        assert!(ConnectorDescriptorV2::verified_deployment_set(
+            genesis,
+            &[user],
+            &[BoundedConnectorHostV2::new("outside-33.example").unwrap()],
+        )
+        .is_err());
+        let state =
+            ConnectorRegistryStateV2::from_verified_genesis(genesis, [0; 32], vec![], loaded)
+                .unwrap();
+        for connector in &set {
+            let digest = descriptor_digest_v2(&connector.tool_descriptors()[0]).unwrap();
+            assert_eq!(
+                state
+                    .resolve_task_tool_connector(digest)
+                    .unwrap()
+                    .connector_id(),
+                connector.connector_id()
+            );
         }
     }
 

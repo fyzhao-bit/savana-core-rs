@@ -39,7 +39,7 @@ mod implementation {
     };
     use savana_policy_core::v2::{
         listener_identity_digest_v2, BoundedConnectorHostV2, BoundedConnectorUrlV2,
-        ClosedServiceEdgeIdV2, ClosedServiceIdV2, DurableStateNamespaceV2,
+        ClosedServiceEdgeIdV2, ClosedServiceIdV2, ConnectorDescriptorV2, DurableStateNamespaceV2,
         FilesystemServiceObservationConfigV2, G4Error, RollbackProtectedStateAnchorV2,
         RollbackProtectedStateHeadV2, VerifiedDaemonStartupV2,
     };
@@ -147,6 +147,10 @@ mod implementation {
         provider: ProviderDtoV2,
         #[serde(default)]
         final_release_provider: Option<ProviderDtoV2>,
+        /// Canonical deployment-shipped connectors (lowercase hex), bound to
+        /// the connector genesis digest exactly as kerneld verifies them.
+        #[serde(default)]
+        deployment_shipped_connectors: Vec<String>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -365,6 +369,29 @@ mod implementation {
                 Ok(canonical)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        if loaded.bootstrap.deployment_shipped_connectors.len() > 64 {
+            return Err(ExecdDaemonErrorV2::DeploymentUnavailable);
+        }
+        let shipped = loaded
+            .bootstrap
+            .deployment_shipped_connectors
+            .iter()
+            .map(|value| {
+                if !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    return Err(ExecdDaemonErrorV2::DeploymentUnavailable);
+                }
+                decode_hex_bounded(value, 65_536)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let shipped = ConnectorDescriptorV2::verified_deployment_set(
+            connector_genesis,
+            &shipped,
+            &connector_hosts,
+        )
+        .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
         let connector_trust = ExecdConnectorRegistryTrustV2::from_authenticated_deployment(
             loaded.startup.installation_id(),
             loaded.startup.active_state_manifest_digest(),
@@ -373,7 +400,7 @@ mod implementation {
             connector_authority_key_id,
             connector_authority_public_key,
             connector_hosts,
-            vec![],
+            shipped,
         )
         .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
         let connector_store_id = Digest32V2::new(decode_hex_32(
@@ -1591,6 +1618,7 @@ mod implementation {
                     credential_handle_identity_digest: "34".repeat(32),
                 },
                 final_release_provider: None,
+                deployment_shipped_connectors: Vec::new(),
             };
             assert!(verify_runtime_paths(&bootstrap).is_ok());
             bootstrap.journal_path = "/var/lib/savana/execd/renamed.cbor".into();

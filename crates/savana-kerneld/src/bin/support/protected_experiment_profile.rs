@@ -4,6 +4,8 @@ use super::*;
 use savana_kernel_protocol::v2::{business_target_identity_v2,
     final_result_release_business_profile_v04, ActionCodecProfileV2, BusinessFieldRoleV2 as R,
     BusinessFieldTypeV2 as T, BusinessFieldV2, BusinessMagnitudeV2, BusinessProfileV2, TaskEffectV2};
+use savana_policy_core::v2::{BoundedConnectorNameV2, BoundedConnectorUrlV2, ConnectorDescriptorV2,
+    ConnectorStructuralRoleV2, ConnectorTransportV2};
 
 fn parse_digest(v: &Value, key: &str) -> Result<[u8;32], String> {
     let s=v[key].as_str().ok_or("missing digest")?;
@@ -31,6 +33,20 @@ fn replace(root:&Path,name:&str,bytes:&[u8])->Result<(),String> {
 }
 fn replace_json(root:&Path,name:&str,v:&Value)->Result<(),String> {
     replace(root,name,&serde_json::to_vec(v).map_err(|_|"JSON encoding")?)
+}
+fn hex_bytes(bytes:&[u8])->String {
+    bytes.iter().map(|b|format!("{b:02x}")).collect()
+}
+/// One deployment-shipped connector per native provider transport. Its id,
+/// not the business target, is each tool descriptor's provider identity.
+fn shipped_connector(transport:&Value,name:&str)
+    ->Result<(BoundedConnectorNameV2,ConnectorTransportV2,Digest32V2),String> {
+    let url=transport["canonical_url"].as_str().ok_or("provider URL missing")?;
+    let name=BoundedConnectorNameV2::new(name).map_err(|_|"connector name")?;
+    let transport=ConnectorTransportV2::https(BoundedConnectorUrlV2::new(url).map_err(|_|"connector URL")?,
+        Digest32V2::new(parse_digest(transport,"server_spki_sha256")?)).map_err(|_|"connector transport")?;
+    let id=ConnectorDescriptorV2::deployment_shipped_id(&name,&transport).map_err(|_|"connector id")?;
+    Ok((name,transport,id))
 }
 fn projection(domain:&[u8],id:u32)->Digest32V2 {
     let mut h=Sha256::new();h.update(domain);h.update(4u64.to_be_bytes());h.update(id.to_be_bytes());
@@ -63,7 +79,7 @@ pub(super) fn materialize(stage:&Path)->Result<(),String> {
         return Err("opt-in experimental stage required".into());
     }
     let mut kernel=read(stage,"etc/savana/kerneld-bootstrap-v2.json")?;
-    let exec=read(stage,"etc/savana/execd-bootstrap-v2.json")?;
+    let mut exec=read(stage,"etc/savana/execd-bootstrap-v2.json")?;
     let mut agent=read(stage,"etc/savana/agentd-bootstrap-v2.json")?;
     let mut manifest=read(stage,"etc/savana/integration-manifest-input.json")?;
     let mut endpoints=read(stage,"etc/savana/experiment-endpoints-v04.json")?;
@@ -75,6 +91,9 @@ pub(super) fn materialize(stage:&Path)->Result<(),String> {
     let executor=parse_digest(&kernel["policy_runtime"],"executor_identity")?;
     let mut paths=Vec::new();let mut activations=Vec::new();let mut constraints=Vec::new();
     let mut descriptors=serde_json::Map::new();let mut catalog=Vec::new();
+    let calendar=shipped_connector(&exec["provider"],"dojo-calendar")?;
+    let release_connector=shipped_connector(&exec["final_release_provider"],"savana-final-release")?;
+    let (mut calendar_tools,mut release_tools)=(Vec::new(),Vec::new());
     for (index,name,parameters,release) in [
         (0,"dojo.calendar.search",vec!["date","query"],false),
         (1,"dojo.calendar.day",vec!["day"],false),
@@ -94,7 +113,8 @@ pub(super) fn materialize(stage:&Path)->Result<(),String> {
                     .map_err(|_|"business fields")?).map_err(|_|"business profile")?
         };
         let contract=ExecutorIdempotencyContractV2::ConnectorNonIdempotentSingleAttempt;
-        let d=UnsignedToolDescriptorV2::from_verified_manifest(2,VersionV2::new(2,0,0),target,
+        let provider=if release {release_connector.2} else {calendar.2};
+        let d=UnsignedToolDescriptorV2::from_verified_manifest(2,VersionV2::new(2,0,0),provider,
             IdentifierV2::new(name).map_err(|_|"tool name")?,ActionTemplateIdV2::new(102+index),ToolClassIdV2::new(202+index),
             profile.digest(),Digest32V2::new(Sha256::digest(if release {b"SAVANA_FIXED_POST_CORRELATED_STATUS_V1\0".as_slice()}
                 else {b"SAVANA_MCP_JSON_RESULT_V1\0".as_slice()}).into()),vec![RoleIdV2::new(1)],
@@ -106,6 +126,7 @@ pub(super) fn materialize(stage:&Path)->Result<(),String> {
             UnixMillisV2::new(ACTIVE_NOT_BEFORE),UnixMillisV2::new(ACTIVE_EXPIRES_AT))
             .and_then(|d|d.with_business_profile(profile)).map_err(|_|"descriptor")?;
         let digest=descriptor_digest_v2(&d).map_err(|_|"descriptor digest")?;
+        if release {release_tools.push(d.clone())} else {calendar_tools.push(d.clone())}
         let leaf=format!("protected-tool-{index}-v04.cbor");
         write_new(&stage.join("etc/savana/policy").join(&leaf),&sign_descriptor(&d,&registry)?,0o444)?;
         paths.push(format!("/etc/savana/policy/{leaf}"));
@@ -121,6 +142,29 @@ pub(super) fn materialize(stage:&Path)->Result<(),String> {
         endpoints[if release {"release_provider"}else{"provider"}]["url"]=json!(url);
     }
     activations.sort_by_key(|v|v["descriptor_digest"].as_str().unwrap().to_owned());
+    // G7 routes an authorized task tool only through a registered connector.
+    // Ship both in the measured daemon configs, bound to the genesis head.
+    let mut connectors=[(calendar,calendar_tools,EffectSetV2::READ),
+        (release_connector,release_tools,EffectSetV2::FINAL_RELEASE)].into_iter()
+        .map(|((name,transport,_),tools,effects)|ConnectorDescriptorV2::new_deployment_shipped(
+            name,transport,tools,effects,ConnectorStructuralRoleV2::Sink,1).map_err(|_|"shipped connector".to_owned()))
+        .collect::<Result<Vec<_>,String>>()?;
+    connectors.sort_by_key(|c|*c.connector_id().as_bytes());
+    let genesis=hex(*ConnectorDescriptorV2::deployment_genesis_digest(&connectors)
+        .map_err(|_|"connector genesis")?.as_bytes());
+    let shipped:Vec<String>=connectors.iter().map(|c|hex_bytes(c.canonical_bytes())).collect();
+    let previous=kernel["policy_runtime"]["connector_registry_genesis_digest"].clone();
+    if !previous.is_string() || [&kernel["policy_runtime"]["executor_connector_registry_digest"],
+        &exec["connector_set_digest"],&exec["connector_registry_genesis_digest"]].iter().any(|v|**v!=previous)
+        || exec.get("deployment_shipped_connectors").is_some()
+        || kernel["policy_runtime"].get("deployment_shipped_connectors").is_some() {
+        return Err("unexpected connector genesis".into());
+    }
+    for (object,keys) in [(&mut kernel["policy_runtime"],["executor_connector_registry_digest","connector_registry_genesis_digest"]),
+        (&mut exec,["connector_set_digest","connector_registry_genesis_digest"])] {
+        for key in keys {object[key]=json!(genesis);}
+        object["deployment_shipped_connectors"]=json!(shipped);
+    }
     constraints.sort_by_key(|v|v["descriptor_digest"].as_str().unwrap().to_owned());
     let policy=&mut kernel["policy_runtime"];
     policy["registry_publisher_key_id"]=json!(hex(*derive_ed25519_key_id_v2(registry.verifying_key().to_bytes()).as_bytes()));
@@ -153,6 +197,7 @@ pub(super) fn materialize(stage:&Path)->Result<(),String> {
     replace(stage,"etc/savana/trust/declassification-trust-root-set-v2.cbor",roots.canonical_bytes())?;
     replace(stage,"etc/savana/policy/declassification-rule-set-v2.cbor",rules.canonical_bytes())?;
     replace_json(stage,"etc/savana/kerneld-bootstrap-v2.json",&kernel)?;
+    replace_json(stage,"etc/savana/execd-bootstrap-v2.json",&exec)?;
     replace_json(stage,"etc/savana/agentd-bootstrap-v2.json",&agent)?;
     replace_json(stage,"etc/savana/integration-manifest-input.json",&manifest)?;
     replace_json(stage,"etc/savana/experiment-endpoints-v04.json",&endpoints)?;
@@ -161,6 +206,7 @@ pub(super) fn materialize(stage:&Path)->Result<(),String> {
         "installation":manifest["installation_id"],"disposition":"require_approval",
         "scope":"finite_calendar_subset","task_grants_installed":false});
     write_json(&stage.join("etc/savana/experiment-provisioning-v04.json"),&binding)?;
-    write_json(&stage.join("protected-experiment-profile.json"),&json!({"schema":1,"tools":3,"g3_rules":6,"installed":false}))?;
+    write_json(&stage.join("protected-experiment-profile.json"),&json!({"schema":1,"tools":3,"g3_rules":6,
+        "deployment_shipped_connectors":connectors.len(),"installed":false}))?;
     Ok(())
 }

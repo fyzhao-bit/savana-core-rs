@@ -83,11 +83,12 @@ mod native {
     use savana_kernel_protocol::StableCode;
     use savana_policy_core::v2::{
         activate_internal_validator_registry, ActiveToolRegistryV2, BoundedConnectorHostV2,
-        ConnectorRegistryStateV2, ContextFieldV2, DurableConnectorRegistryStoreV2,
-        DurableG4StateV2, DurableStateNamespaceV2, FilesystemServiceObservationConfigV2,
-        InstallerOrMdmVerifierV2, InternalValidatorBuildV2, InternalValidatorDeclarationV2,
-        InternalValidatorImplementationKindV2, OntologyExprV2, OntologyOperandV2, OntologyScalarV2,
-        OperationalTrustRootSetV2, SharedVerifiedConnectorRegistryV2, SignedToolDescriptorV2,
+        ConnectorDescriptorV2, ConnectorRegistryStateV2, ContextFieldV2,
+        DurableConnectorRegistryStoreV2, DurableG4StateV2, DurableStateNamespaceV2,
+        FilesystemServiceObservationConfigV2, InstallerOrMdmVerifierV2, InternalValidatorBuildV2,
+        InternalValidatorDeclarationV2, InternalValidatorImplementationKindV2, OntologyExprV2,
+        OntologyOperandV2, OntologyScalarV2, OperationalTrustRootSetV2,
+        SharedVerifiedConnectorRegistryV2, SignedToolDescriptorV2,
         VerifiedInternalValidatorRegistryV2, VerifiedManifestToolConstraintSetV2,
         VerifiedManifestToolConstraintV2, VerifiedPolicyDispositionV2,
         VerifiedPolicyToolActivationV2, VerifiedPolicyToolSetV2, VerifiedRegistryPublisherV2,
@@ -330,6 +331,11 @@ mod native {
         user_tier_host_allowlist: Vec<String>,
         executor_receipt_key_id: String,
         executor_receipt_public_key: String,
+        /// Canonical deployment-shipped connector descriptors (lowercase hex),
+        /// authenticated by this measured configuration and bound to the
+        /// connector genesis digest. Absent means the empty legacy set.
+        #[serde(default)]
+        deployment_shipped_connectors: Vec<String>,
     }
 
     #[derive(Deserialize)]
@@ -492,6 +498,7 @@ mod native {
         user_tier_host_allowlist: Vec<BoundedConnectorHostV2>,
         executor_receipt_key_id: Ed25519KeyIdV2,
         executor_receipt_public_key: [u8; 32],
+        deployment_shipped_connectors: Vec<ConnectorDescriptorV2>,
     }
 
     struct ProductionV2SuccessorPublisher {
@@ -885,7 +892,7 @@ mod native {
             runtime_material.policy.connector_registry_genesis_digest,
             runtime_material.policy.connector_authority_public_key,
             runtime_material.policy.user_tier_host_allowlist,
-            vec![],
+            runtime_material.policy.deployment_shipped_connectors,
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
         let connector_store_id = connector_store_id_v2(
@@ -3423,6 +3430,12 @@ mod native {
         {
             return Err(StableCode::KernelUnavailable);
         }
+        let deployment_shipped_connectors = load_deployment_shipped_connectors(
+            &policy.deployment_shipped_connectors,
+            connector_registry_genesis_digest,
+            &user_tier_host_allowlist,
+            &active_tools,
+        )?;
         Ok(LoadedPolicyRuntimeV2 {
             active_tools,
             validators,
@@ -3443,7 +3456,63 @@ mod native {
             user_tier_host_allowlist,
             executor_receipt_key_id,
             executor_receipt_public_key,
+            deployment_shipped_connectors,
         })
+    }
+
+    /// Every shipped connector tool must be an active signed descriptor: the
+    /// connector set can route an authorized tool, never introduce one.
+    fn load_deployment_shipped_connectors(
+        encoded: &[String],
+        genesis_digest: Digest32V2,
+        user_tier_host_allowlist: &[BoundedConnectorHostV2],
+        active_tools: &ActiveToolRegistryV2,
+    ) -> Result<Vec<ConnectorDescriptorV2>, StableCode> {
+        const MAX_CONNECTORS: usize = 64;
+        const MAX_CONNECTOR_BYTES: usize = 65_536;
+        if encoded.len() > MAX_CONNECTORS {
+            return Err(StableCode::KernelUnavailable);
+        }
+        let bytes = encoded
+            .iter()
+            .map(|value| {
+                if value.is_empty()
+                    || value.len() % 2 != 0
+                    || value.len() / 2 > MAX_CONNECTOR_BYTES
+                    || !value
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                {
+                    return Err(StableCode::KernelUnavailable);
+                }
+                (0..value.len())
+                    .step_by(2)
+                    .map(|offset| {
+                        u8::from_str_radix(&value[offset..offset + 2], 16)
+                            .map_err(|_| StableCode::KernelUnavailable)
+                    })
+                    .collect::<Result<Vec<u8>, StableCode>>()
+            })
+            .collect::<Result<Vec<_>, StableCode>>()?;
+        let connectors = ConnectorDescriptorV2::verified_deployment_set(
+            genesis_digest,
+            &bytes,
+            user_tier_host_allowlist,
+        )
+        .map_err(|_| StableCode::KernelUnavailable)?;
+        for tool in connectors
+            .iter()
+            .flat_map(ConnectorDescriptorV2::tool_descriptors)
+        {
+            if !active_tools
+                .records()
+                .iter()
+                .any(|record| record.descriptor().unsigned() == tool)
+            {
+                return Err(StableCode::KernelUnavailable);
+            }
+        }
+        Ok(connectors)
     }
 
     fn load_validator_declarations(
