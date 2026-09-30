@@ -204,6 +204,21 @@ payload cannot satisfy the signed edge. Sequenced smallest-first:
   (`send_email`, `create_calendar_event`). New field/value type, list control
   digest, MCP list encode/decode, list rendering; scalar digests stay
   byte-identical.
+- **W4-gen — model-generated payload. DONE (harness + local fresh-host runs; see
+  `experiments/GENERATE-OFFICIAL-20260930.zh-CN.md`).** No new kernel authority:
+  the quarantined model is one more reviewed tool, `dojo.model.generate`
+  (effect Send, IntentFlowConfinement; fields body=payload, instruction,
+  model=resource, to=destination). The official `user_task_29` runs as a
+  4-clause chain search -> generate -> append -> release: the generator's
+  payload is clause 1's WHOLE result (an existing whole-result edge), its
+  instruction is the owner's own text, and its one-line output reaches
+  `append.content` only via the owner-signed edge (clause 2,
+  `result/content/0/text/$json/text`, Text, 512); `file_id` stays clause 1's
+  signed `id_` edge. Known gap: a payload is not a root control, so the
+  generator's input source is enforced by the owner's approval (the finite
+  consent compares it byte-for-byte with clause 1's result), not by the
+  kernel; binding payload sources into the root would change the signed
+  alternative encoding and is not done.
 - **W4 — computed origin** (`start_time + duration -> end_time` first).
 - **W5 — expand runner to the ~50 derived-write tasks; fresh-host run
   (honest / poisoned / official injection); same-condition CaMeL comparison.**
