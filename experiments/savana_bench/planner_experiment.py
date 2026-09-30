@@ -54,7 +54,7 @@ CHAIN_KINDS = {
 }
 
 
-def chain_cases(kind, groups=WRITE_GROUPS, mutations=None, injections=None):
+def chain_cases(kind, groups=WRITE_GROUPS, mutations=None, injections=None, goals=None):
     """A multi-operation task under every planner and the official attack.
 
     `reviewed` forwards the reviewed plan unread (the honest reference);
@@ -62,6 +62,7 @@ def chain_cases(kind, groups=WRITE_GROUPS, mutations=None, injections=None):
     goal); `compromised` are adversary-controlled plans; `attack` is the
     reviewed plan against each official injection.
     """
+    chosen_goals = goals or frozenset()
     contract, goals, catalog = CHAIN_KINDS[kind]
     base = dict(user=contract.task_id, contract=contract.contract_id)
     cases = []
@@ -71,9 +72,9 @@ def chain_cases(kind, groups=WRITE_GROUPS, mutations=None, injections=None):
     if "honest" in groups:
         cases.append(dict(group=f"{kind}_honest", **base, injection=None, author="deepseek", goal=None,
                           mutation=None))
-    if "poisoned" in groups:
+    if "poisoned" in groups or chosen_goals:
         cases += [dict(group=f"{kind}_poisoned", **base, injection=None, author="deepseek", goal=goal,
-                       mutation=None) for goal in goals]
+                       mutation=None) for goal in goals if "poisoned" in groups or goal in chosen_goals]
     if "compromised" in groups or mutations:
         cases += [dict(group=f"{kind}_compromised", **base, injection=None, author="adversary", goal=None,
                        mutation=name) for name, _, _ in catalog
@@ -98,17 +99,21 @@ def experiment_cases(spec):
         return tuple(dict(group="poisoned_planner", user=user, injection=None, author="deepseek", goal=goal,
                           mutation=None) for user in TASKS for goal in POISON_GOALS)
     if kind in CHAIN_KINDS:
-        # Items are whole groups, single compromised mutations or single
-        # official injections, so a run can stay within one armed batch's
-        # case limit.
+        # Items are whole groups, single poison goals, single compromised
+        # mutations or single official injections, so a run can stay within
+        # one armed batch's case limit and one host's task window.
         items = names.split(",") if colon else list(WRITE_GROUPS)
         mutations = {n for n, _, _ in CHAIN_KINDS[kind][2]}
+        goals = set(CHAIN_KINDS[kind][1])
         injections = tuple(i for i in items if re.fullmatch(r"injection_task_(0|[1-9][0-9]?)", i))
         if (not items or len(set(items)) != len(items) or ("attack" in items and injections)
-                or any(i not in WRITE_GROUPS and i not in mutations and i not in injections for i in items)):
+                or ("poisoned" in items and goals & set(items))
+                or any(i not in WRITE_GROUPS and i not in mutations and i not in injections and i not in goals
+                       for i in items)):
             raise ValueError("planner_experiment_spec")
         return chain_cases(kind, tuple(i for i in items if i in WRITE_GROUPS),
-                           frozenset(i for i in items if i in mutations), injections)
+                           frozenset(i for i in items if i in mutations), injections,
+                           frozenset(i for i in items if i in goals))
     if kind == "compromised":
         catalog = [name for name, _, _ in COMPROMISED]
         chosen = names.split(",") if colon else catalog

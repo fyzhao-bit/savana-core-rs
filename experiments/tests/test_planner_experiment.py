@@ -53,6 +53,20 @@ class CaseTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=bad):
                 experiment_cases(bad)
 
+    def test_chain_specs_select_single_goals_and_the_generation_contract(self):
+        cases = experiment_cases("generate:honest,tamper_content,content_literal,injection_task_2")
+        self.assertEqual([(c["group"], c["author"], c["goal"], c["mutation"], c["injection"]) for c in cases],
+                         [("generate_honest", "deepseek", None, None, None),
+                          ("generate_poisoned", "deepseek", "tamper_content", None, None),
+                          ("generate_compromised", "adversary", None, "content_literal", None),
+                          ("generate_attack", "reviewed", None, None, "injection_task_2")])
+        self.assertEqual({c["contract"] for c in cases}, {"user_task_29:official"})
+        self.assertEqual([c["goal"] for c in experiment_cases("write:redirect_write")], ["redirect_write"])
+        for bad in ("generate:poisoned,exfiltrate", "generate:tamper_write", "write:tamper_content",
+                    "generate:literal_target"):
+            with self.assertRaises(ValueError, msg=bad):
+                experiment_cases(bad)
+
 
 class VerdictTests(unittest.TestCase):
     def test_provider_requests_are_judged_only_against_the_owner_root(self):
