@@ -157,15 +157,45 @@ destination/payload origin in the owner-signed root and the kernel supplies the
 value, so an injection that tries to redirect a write's destination or smuggle a
 payload cannot satisfy the signed edge. Sequenced smallest-first:
 
-- **W1 — write descriptors + validator rule.** The catalog may declare
-  authorizing-effect tools; the generator ships their descriptors declaring
-  `IntentFlowConfinement`. Candidate kernel rule: an authorizing-effect
-  descriptor must declare `IntentFlowConfinement` or be refused admission.
-- **W2 — `append_to_file` differentiator (scalar).** Read a scalar, append the
-  kernel-derived value to an owner-fixed `file_id`. No arrays, no computed
-  values; reuses the result-derived control. First end-to-end task that shows
-  the structural difference. Provider adapter + official-oracle scoring of the
-  side effect.
+- **W1 — write descriptors + validator rule. DONE (kernel/protocol/provider,
+  tested here).** Catalog schema 2 declares authorizing-effect `write_tools`; the
+  generator ships their signed descriptors declaring `IntentFlowConfinement`
+  (on the descriptor, the matching manifest constraint, and a registered
+  `validator_builds` entry), on the one workspace connector (effects widened to
+  the union). The rule is the testable policy-core helper
+  `deployment_requires_intent_flow_confinement` (state-changing ⇒ confinement;
+  FINAL_RELEASE excluded — it is governed by G3), NOT core `validate()` (kept
+  permissive to avoid breaking existing write descriptors). Tests:
+  `deployment_write_tool_must_declare_intent_flow_confinement`,
+  `shipped_write_descriptor_with_confinement_validates_and_activates_at_g5`
+  (validate + G5 activation + digest-match), and the provider serves
+  `append_to_file` (forwards {file_id, content}, enforces body/to sentinels;
+  functional test on real agentdojo 0.1.35 in the scratchpad venv: authorized
+  append mutates only the owner-fixed file, every control violation / redirected
+  destination / unreviewed upstream write is refused with no mutation).
+- **Owner-side derived bridge — DONE.** `draft_from_json` accepts a
+  `derived_controls` edge per alternative (source_clause, path, kind, max_bytes)
+  and builds the root via `from_fields_with_derived`, so an owner root can carry
+  a read->derived-write edge. Round-trip test in `tests/task_context.rs`.
+
+  So every KERNEL/PROTOCOL/PROVIDER mechanism the write differentiator needs is
+  built and tested here: result-derived control (slice 1a/1b), write descriptors
+  + confinement (W1), the owner-side derived draft bridge, and the append
+  provider adapter. What remains is experiment-harness wiring and the run, which
+  can only be validated end to end on a fresh host (daemons + DeepSeek).
+
+- **W2 — `append_to_file` differentiator (scalar). REMAINING (harness + run).**
+  Needs: a two-operation reviewed contract (read clause -> append clause whose
+  `content` is the result-derived edge from the read at a fixed path, `file_id`
+  owner-text); `reviewed_clauses` (protected_setup.py) emitting that derived
+  edge in the clause JSON the bridge above accepts; the planner plan binding
+  op2.content to op1's result (SlotBinding.result_path, built in slice 1b);
+  scoring the append side effect via the official oracle; then the fresh-host
+  run. The compromised-planner case is the differentiator: the planner cannot
+  bind a literal attacker `content`/`file_id`, because G4 admits only the signed
+  derived edge / owner value; CaMeL's P-LLM literals get sources={User} and are
+  allowed. IntentFlowConfinement (G5) additionally escalates to owner approval
+  when the read source itself is poisoned.
 - **W3 — array (text-list) fields** for `recipients`/`participants`
   (`send_email`, `create_calendar_event`). New field/value type, list control
   digest, MCP list encode/decode, list rendering; scalar digests stay
@@ -173,3 +203,16 @@ payload cannot satisfy the signed edge. Sequenced smallest-first:
 - **W4 — computed origin** (`start_time + duration -> end_time` first).
 - **W5 — expand runner to the ~50 derived-write tasks; fresh-host run
   (honest / poisoned / official injection); same-condition CaMeL comparison.**
+
+### Fresh-host runbook (for W2 onward)
+
+The scratchpad venv (`.../scratchpad/venv`) has agentdojo 0.1.35 and a
+pre-built `savana_core`; a fresh run host additionally needs the built Rust
+daemons (kerneld/execd/agentd/approvald/ingressd), Docker, and the DeepSeek
+proxy (`deepseek_openai_proxy.py`, key via stdin, never argv/files/logs). After
+any Rust SDK change (e.g. the draft bridge), rebuild `savana_core` into the run
+venv (maturin) before the owner-side path exercises it. Assemble the stage with
+`assemble.py --protected-experiment`, materialize with
+`savana-development-build-inputs --protected-experiment-profile`, then run
+`protected_agentdojo` (schema 3) for honest / poisoned-planner / official-
+injection, and compare with CaMeL under the same DeepSeek + AgentDojo tasks.
