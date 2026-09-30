@@ -279,8 +279,8 @@ def assemble(templates: Path, binaries: Path, repo: Path, out: Path, ids: dict, 
         # committed artifact (pinned by an experiments test to the authoring
         # catalog_json), copied verbatim; it grants nothing and names no target.
         catalog = (Path(__file__).resolve().with_name("read-tool-catalog-v04.json")).read_bytes()
-        if json.loads(catalog).get("schema") != 1:
-            raise ValueError("unrecognized read-tool catalog schema")
+        if json.loads(catalog).get("schema") != 2:
+            raise ValueError("unrecognized tool catalog schema")
         put("etc/savana/read-tool-catalog-v04.json", catalog)
 
     observations = []

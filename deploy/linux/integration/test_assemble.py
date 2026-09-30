@@ -303,7 +303,7 @@ def test_protected_transport_pins_match_and_operator_key_is_separate(inputs):
     # The reviewed read-tool catalog is copied verbatim for the profile generator.
     staged_catalog = (out / "etc/savana/read-tool-catalog-v04.json").read_bytes()
     assert staged_catalog == Path(__file__).with_name("read-tool-catalog-v04.json").read_bytes()
-    assert json.loads(staged_catalog)["schema"] == 1
+    assert json.loads(staged_catalog)["schema"] == 2
     pins = []
     for role, block in [("provider", "provider"), ("release_provider", "final_release_provider"),
                         ("model_worker", None)]:

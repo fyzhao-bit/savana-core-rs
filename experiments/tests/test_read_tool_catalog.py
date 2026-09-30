@@ -10,7 +10,8 @@ import unittest
 from pathlib import Path
 
 from savana_bench.agentdojo_provider import canonical
-from savana_bench.agentdojo_tasks import TOOL_CATALOG, _TASKS, catalog_json, upstream_for
+from savana_bench.agentdojo_tasks import (
+    TOOL_CATALOG, WRITE_CATALOG, WRITE_VALIDATORS, _TASKS, catalog_json, upstream_for)
 
 # The artifact assemble.py copies verbatim into etc/savana/read-tool-catalog-v04.json.
 COMMITTED = (Path(__file__).resolve().parents[2]
@@ -25,23 +26,46 @@ class ReadToolCatalogTests(unittest.TestCase):
 
     def test_catalog_json_structure_is_closed(self):
         doc = catalog_json()
-        self.assertEqual(doc["schema"], 1)
+        self.assertEqual(doc["schema"], 2)
         self.assertEqual([t["operation"] for t in doc["read_tools"]],
                          [name for name, _, _ in TOOL_CATALOG])
         for tool in doc["read_tools"]:
             self.assertEqual(set(tool), {"operation", "effect", "fixed_magnitude", "fields"})
             self.assertEqual(tool["effect"], "read")
             self.assertEqual(tool["fixed_magnitude"], 1)
-            names = [f["name"] for f in tool["fields"]]
-            self.assertEqual(names, sorted(names))
+            self._check_fields(tool["fields"])
             roles = {f["name"]: f["role"] for f in tool["fields"]}
-            self.assertEqual(roles["body"], "payload")
             self.assertEqual(roles["calendar"], "resource")
-            self.assertEqual(roles["to"], "destination")
-            for field in tool["fields"]:
-                self.assertEqual(set(field), {"name", "role", "type"})
-                self.assertEqual(field["type"], "text")
-                self.assertIn(field["role"], {"payload", "resource", "destination", "parameter"})
+
+    def test_write_tools_declare_roles_and_the_confinement_validator(self):
+        doc = catalog_json()
+        self.assertEqual([t["operation"] for t in doc["write_tools"]],
+                         [name for name, _, _, _ in WRITE_CATALOG])
+        for tool in doc["write_tools"]:
+            self.assertEqual(set(tool),
+                             {"operation", "effect", "fixed_magnitude", "validators", "fields"})
+            # A write tool is authorizing (never "read") and must require the
+            # intent-flow-confinement validator so an untrusted-derived argument
+            # escalates to owner approval at G5.
+            self.assertNotEqual(tool["effect"], "read")
+            self.assertEqual(tool["validators"], list(WRITE_VALIDATORS))
+            self.assertIn("intent_flow_confinement", tool["validators"])
+            self._check_fields(tool["fields"])
+            # Exactly one of each structural role (business-profile invariant).
+            roles = [f["role"] for f in tool["fields"]]
+            for required in ("payload", "resource", "destination"):
+                self.assertEqual(roles.count(required), 1, (tool["operation"], required))
+
+    def _check_fields(self, fields):
+        names = [f["name"] for f in fields]
+        self.assertEqual(names, sorted(names))
+        roles = {f["name"]: f["role"] for f in fields}
+        self.assertEqual(roles["body"], "payload")
+        self.assertEqual(roles["to"], "destination")
+        for field in fields:
+            self.assertEqual(set(field), {"name", "role", "type"})
+            self.assertEqual(field["type"], "text")
+            self.assertIn(field["role"], {"payload", "resource", "destination", "parameter"})
 
     def test_every_contract_argument_set_matches_its_tool_catalog_params(self):
         params = {name: set(p) for name, _, p in TOOL_CATALOG}

@@ -3,9 +3,10 @@
 use super::*;
 use savana_kernel_protocol::v2::{business_target_identity_v2,
     final_result_release_business_profile_v04, final_result_release_business_request_v04, ActionCodecProfileV2, BusinessFieldRoleV2 as R,
-    BusinessFieldTypeV2 as T, BusinessFieldV2, BusinessMagnitudeV2, BusinessProfileV2, TaskEffectV2};
-use savana_policy_core::v2::{BoundedConnectorNameV2, BoundedConnectorUrlV2, ConnectorDescriptorV2,
-    ConnectorStructuralRoleV2, ConnectorTransportV2};
+    BusinessFieldTypeV2 as T, BusinessFieldV2, BusinessMagnitudeV2, BusinessProfileV2, ImplementationIdV2, TaskEffectV2};
+use savana_policy_core::v2::{deployment_requires_intent_flow_confinement, BoundedConnectorNameV2,
+    BoundedConnectorUrlV2, ConnectorDescriptorV2, ConnectorStructuralRoleV2, ConnectorTransportV2,
+    InternalValidatorDeclarationV2};
 
 fn parse_digest(v: &Value, key: &str) -> Result<[u8;32], String> {
     let s=v[key].as_str().ok_or("missing digest")?;
@@ -44,28 +45,89 @@ fn field_role(s:&str)->Result<R,String> {
 fn field_type(s:&str)->Result<T,String> {
     match s {"text"=>Ok(T::Text),_=>Err("field type".into())}
 }
-/// Parse the reviewed read-tool catalog the staging step copied in. Only its
-/// operation names and business field roles/types are read; it authorizes no
-/// target, credential or value and never re-signs a manifest.
-fn read_tool_catalog(stage:&Path)->Result<Vec<(String,Vec<(String,R,T)>)>,String> {
+/// The intent-flow-confinement validator's fixed build identity (id 6, v1.0.0).
+/// A declaration and its registry build must carry the same non-zero digest;
+/// this is a manifest identity, not a hash of validator code.
+const CONFINEMENT_IMPLEMENTATION_ID:u32=6;
+fn confinement_build_digest()->Digest32V2 {
+    Digest32V2::new(domain_digest(b"SAVANA_PROTECTED_VALIDATOR_BUILD_V04\0",
+        &[CONFINEMENT_IMPLEMENTATION_ID as u8]))
+}
+fn confinement_declaration()->InternalValidatorDeclarationV2 {
+    InternalValidatorDeclarationV2::new(ImplementationIdV2::new(CONFINEMENT_IMPLEMENTATION_ID),
+        VersionV2::new(1,0,0),confinement_build_digest())
+}
+/// Map a reviewed catalog effect string to the closed protocol effect/effect
+/// set and attempt kind. Reads are steerable; every authorizing effect is a
+/// tool write.
+fn tool_effect(effect:&str)->Result<(TaskEffectV2,EffectSetV2,AttemptKindV2),String> {
+    Ok(match effect {
+        "read"=>(TaskEffectV2::Read,EffectSetV2::READ,AttemptKindV2::ToolRead),
+        "create"=>(TaskEffectV2::Create,EffectSetV2::CREATE,AttemptKindV2::ToolWrite),
+        "update"=>(TaskEffectV2::Update,EffectSetV2::UPDATE,AttemptKindV2::ToolWrite),
+        "delete"=>(TaskEffectV2::Delete,EffectSetV2::DELETE,AttemptKindV2::ToolWrite),
+        "send"=>(TaskEffectV2::Send,EffectSetV2::SEND,AttemptKindV2::ToolWrite),
+        "execute"=>(TaskEffectV2::Execute,EffectSetV2::EXECUTE,AttemptKindV2::ToolWrite),
+        _=>return Err("catalog effect".into()),
+    })
+}
+/// One reviewed workspace tool the deployment ships: its operation, business
+/// fields, effect, and required internal validators.
+struct CatalogToolV04 {
+    operation: String,
+    fields: Vec<(String,R,T)>,
+    effect: TaskEffectV2,
+    effect_set: EffectSetV2,
+    attempt: AttemptKindV2,
+    validators: Vec<InternalValidatorDeclarationV2>,
+}
+fn parse_catalog_fields(tool:&Value)->Result<Vec<(String,R,T)>,String> {
+    let raw=tool["fields"].as_array().ok_or("catalog fields")?;
+    let mut fields=Vec::new();
+    for field in raw {
+        fields.push((field["name"].as_str().ok_or("field name")?.to_owned(),
+            field_role(field["role"].as_str().ok_or("field role")?)?,
+            field_type(field["type"].as_str().ok_or("field type")?)?));
+    }
+    Ok(fields)
+}
+/// Parse the reviewed tool catalog the staging step copied in. Only operation
+/// names, business field roles/types, effects and required validators are read;
+/// it authorizes no target, credential or value and never re-signs a manifest.
+/// Every authorizing (write) tool must declare intent-flow-confinement.
+fn tool_catalog(stage:&Path)->Result<Vec<CatalogToolV04>,String> {
     let doc=read(stage,"etc/savana/read-tool-catalog-v04.json")?;
-    if doc["schema"]!=json!(1) {return Err("read catalog schema".into());}
-    let tools=doc["read_tools"].as_array().ok_or("read catalog tools")?;
-    if tools.is_empty() || tools.len()>64 {return Err("read catalog size".into());}
+    if doc["schema"]!=json!(2) {return Err("tool catalog schema".into());}
+    let reads=doc["read_tools"].as_array().ok_or("catalog read tools")?;
+    let writes=doc["write_tools"].as_array().ok_or("catalog write tools")?;
+    if reads.is_empty() || reads.len()+writes.len()>64 {return Err("catalog size".into());}
     let mut out=Vec::new();
-    for tool in tools {
+    for tool in reads {
         if tool["effect"]!=json!("read") || tool["fixed_magnitude"]!=json!(1) {
-            return Err("read catalog operation".into());
+            return Err("catalog read operation".into());
         }
-        let name=tool["operation"].as_str().ok_or("read catalog operation name")?;
-        let raw=tool["fields"].as_array().ok_or("read catalog fields")?;
-        let mut fields=Vec::new();
-        for field in raw {
-            fields.push((field["name"].as_str().ok_or("field name")?.to_owned(),
-                field_role(field["role"].as_str().ok_or("field role")?)?,
-                field_type(field["type"].as_str().ok_or("field type")?)?));
+        let (effect,effect_set,attempt)=tool_effect("read")?;
+        out.push(CatalogToolV04{
+            operation:tool["operation"].as_str().ok_or("catalog operation name")?.to_owned(),
+            fields:parse_catalog_fields(tool)?,effect,effect_set,attempt,validators:Vec::new()});
+    }
+    for tool in writes {
+        if tool["fixed_magnitude"]!=json!(1) {return Err("catalog write magnitude".into());}
+        let (effect,effect_set,attempt)=tool_effect(tool["effect"].as_str().ok_or("catalog write effect")?)?;
+        // A write tool declares exactly the intent-flow-confinement validator.
+        let names=tool["validators"].as_array().ok_or("catalog validators")?;
+        if names.iter().map(|v|v.as_str()).collect::<Option<Vec<_>>>()
+            !=Some(vec!["intent_flow_confinement"]) {
+            return Err("catalog write validators".into());
         }
-        out.push((name.to_owned(),fields));
+        let validators=vec![confinement_declaration()];
+        // The deployment rule: a state-changing tool must bind confinement.
+        if !deployment_requires_intent_flow_confinement(effect_set,&validators) {
+            return Err("authorizing tool without confinement".into());
+        }
+        out.push(CatalogToolV04{
+            operation:tool["operation"].as_str().ok_or("catalog operation name")?.to_owned(),
+            fields:parse_catalog_fields(tool)?,effect,effect_set,attempt,validators});
     }
     Ok(out)
 }
@@ -128,16 +190,26 @@ pub(super) fn materialize(stage:&Path)->Result<(),String> {
     let workspace=shipped_connector(&exec["provider"],"dojo-workspace")?;
     let release_connector=shipped_connector(&exec["final_release_provider"],"savana-final-release")?;
     let (mut workspace_tools,mut release_tools)=(Vec::new(),Vec::new());
-    // Ordered registry: each reviewed read tool from the catalog, then the one
-    // fixed final-result-release tool. Indices drive the tool class/template and
-    // the signed descriptor leaf, so this order is the deployment's tool order.
-    let read_tools=read_tool_catalog(stage)?;
-    let tool_count=read_tools.len()+1;
-    let mut specs:Vec<(String,Vec<(String,R,T)>,bool)>=read_tools.into_iter()
-        .map(|(name,fields)|(name,fields,false)).collect();
-    specs.push(("savana.final_result_release".to_owned(),Vec::new(),true));
-    for (index,(name,fields,release)) in specs.into_iter().enumerate() {
+    // Ordered registry: each reviewed catalog tool (reads then writes), then the
+    // one fixed final-result-release tool. Indices drive the tool class/template
+    // and the signed descriptor leaf, so this order is the deployment tool order.
+    let catalog_tools=tool_catalog(stage)?;
+    let tool_count=catalog_tools.len()+1;
+    // The workspace connector carries every read AND write tool on one native
+    // provider endpoint; its effect set is the union it must authorize.
+    let mut workspace_effects=EffectSetV2::EMPTY;
+    let mut needs_confinement_build=false;
+    enum Spec { Tool(CatalogToolV04), Release }
+    let mut specs:Vec<Spec>=catalog_tools.into_iter().map(Spec::Tool).collect();
+    specs.push(Spec::Release);
+    for (index,spec) in specs.into_iter().enumerate() {
         let ordinal=u32::try_from(index).map_err(|_|"tool index")?;
+        let release=matches!(spec,Spec::Release);
+        let (operation,fields,effect,effect_set,attempt,validators)=match spec {
+            Spec::Tool(t)=>(t.operation,t.fields,t.effect,t.effect_set,t.attempt,t.validators),
+            Spec::Release=>("savana.final_result_release".to_owned(),Vec::new(),
+                TaskEffectV2::FinalRelease,EffectSetV2::FINAL_RELEASE,AttemptKindV2::ToolWrite,Vec::new()),
+        };
         let transport=&exec[if release {"final_release_provider"} else {"provider"}];
         let url=transport["canonical_url"].as_str().ok_or("provider URL missing")?;
         let target=business_target_identity_v2(url,Digest32V2::new(parse_digest(transport,"server_spki_sha256")?))
@@ -146,44 +218,49 @@ pub(super) fn materialize(stage:&Path)->Result<(),String> {
         let profile=if release { final_result_release_business_profile_v04(target,credential).map_err(|_|"release profile")? }
         else {
             let mut fields=fields;fields.sort_by(|a,b|a.0.cmp(&b.0));
-            BusinessProfileV2::new(ActionCodecProfileV2::McpToolsCallJsonV1,name.as_str(),target,credential,
-                TaskEffectV2::Read,BusinessMagnitudeV2::FixedCount(1),
+            BusinessProfileV2::new(ActionCodecProfileV2::McpToolsCallJsonV1,operation.as_str(),target,credential,
+                effect,BusinessMagnitudeV2::FixedCount(1),
                 fields.into_iter().map(|(n,r,t)|BusinessFieldV2::new(n.as_str(),r,t)).collect::<Result<Vec<_>,_>>()
                     .map_err(|_|"business fields")?).map_err(|_|"business profile")?
         };
         let contract=ExecutorIdempotencyContractV2::ConnectorNonIdempotentSingleAttempt;
         let provider=if release {release_connector.2} else {workspace.2};
         let d=UnsignedToolDescriptorV2::from_verified_manifest(2,VersionV2::new(2,0,0),provider,
-            IdentifierV2::new(name.as_str()).map_err(|_|"tool name")?,ActionTemplateIdV2::new(102+ordinal),ToolClassIdV2::new(202+ordinal),
+            IdentifierV2::new(operation.as_str()).map_err(|_|"tool name")?,ActionTemplateIdV2::new(102+ordinal),ToolClassIdV2::new(202+ordinal),
             profile.digest(),Digest32V2::new(Sha256::digest(if release {b"SAVANA_FIXED_POST_CORRELATED_STATUS_V1\0".as_slice()}
                 else {b"SAVANA_MCP_JSON_RESULT_V1\0".as_slice()}).into()),vec![RoleIdV2::new(1)],
-            if release {EffectSetV2::FINAL_RELEASE} else {EffectSetV2::READ},
-            if release {AttemptKindV2::ToolWrite} else {AttemptKindV2::ToolRead},
-            BoundedConnectorRetryPolicyV2::new(contract,1,0).map_err(|_|"retry policy")?,vec![],ExecutorIdentityV2::new(executor),
+            effect_set,attempt,
+            BoundedConnectorRetryPolicyV2::new(contract,1,0).map_err(|_|"retry policy")?,validators.clone(),ExecutorIdentityV2::new(executor),
             ProjectionIdV2::new(1),projection(b"SAVANA_KERNEL_DESTINATION_PROJECTION_V2\0",1),
             DisplayProjectionIdV2::new(1),projection(b"SAVANA_KERNEL_DISPLAY_PROJECTION_V2\0",1),contract,
             UnixMillisV2::new(ACTIVE_NOT_BEFORE),UnixMillisV2::new(ACTIVE_EXPIRES_AT))
             .and_then(|d|d.with_business_profile(profile)).map_err(|_|"descriptor")?;
         let digest=descriptor_digest_v2(&d).map_err(|_|"descriptor digest")?;
-        if release {release_tools.push(d.clone())} else {workspace_tools.push(d.clone())}
+        if release {release_tools.push(d.clone())} else {workspace_tools.push(d.clone());workspace_effects=workspace_effects.union(effect_set);}
+        if !validators.is_empty() {needs_confinement_build=true;}
+        // Manifest constraint validators must equal the descriptor's exactly;
+        // the only validator a reviewed write tool carries is confinement.
+        let constraint_validators:Vec<Value>=validators.iter().map(|_|json!({
+            "implementation_id":CONFINEMENT_IMPLEMENTATION_ID,"semantic_version":[1,0,0],
+            "build_manifest_digest":hex(*confinement_build_digest().as_bytes())})).collect();
         let leaf=format!("protected-tool-{index}-v04.cbor");
         write_new(&stage.join("etc/savana/policy").join(&leaf),&sign_descriptor(&d,&registry)?,0o444)?;
         paths.push(format!("/etc/savana/policy/{leaf}"));
         activations.push(json!({"descriptor_digest":hex(*digest.as_bytes()),"registry_ordinal":index,
             "policy_activation_digest":hex(domain_digest(b"SAVANA_PROTECTED_ACTIVATION_V04\0",digest.as_bytes()))}));
-        constraints.push(json!({"descriptor_digest":hex(*digest.as_bytes()),"maximum_attempts":1,"maximum_elapsed_ns":0,"internal_validators":[]}));
-        descriptors.insert(name.clone(),json!(hex(*digest.as_bytes())));
+        constraints.push(json!({"descriptor_digest":hex(*digest.as_bytes()),"maximum_attempts":1,"maximum_elapsed_ns":0,"internal_validators":constraint_validators}));
+        descriptors.insert(operation.clone(),json!(hex(*digest.as_bytes())));
         catalog.push(json!({"tool_class":202+ordinal,"action_template":102+ordinal,
             "structural_role":savana_policy_core::v2::ConnectorStructuralRoleV2::Sink.tag(),
-            "effects":if release {EffectSetV2::FINAL_RELEASE.bits()}else{EffectSetV2::READ.bits()},
-            "semantic_name":name,"semantic_description":"Reviewed finite experiment operation"}));
+            "effects":effect_set.bits(),
+            "semantic_name":operation,"semantic_description":"Reviewed finite experiment operation"}));
         // Use the exact native transport URL, not a similar-looking guessed path.
         endpoints[if release {"release_provider"}else{"provider"}]["url"]=json!(url);
     }
     activations.sort_by_key(|v|v["descriptor_digest"].as_str().unwrap().to_owned());
     // G7 routes an authorized task tool only through a registered connector.
     // Ship both in the measured daemon configs, bound to the genesis head.
-    let mut connectors=[(workspace,workspace_tools,EffectSetV2::READ),
+    let mut connectors=[(workspace,workspace_tools,workspace_effects),
         (release_connector,release_tools,EffectSetV2::FINAL_RELEASE)].into_iter()
         .map(|((name,transport,_),tools,effects)|ConnectorDescriptorV2::new_deployment_shipped(
             name,transport,tools,effects,ConnectorStructuralRoleV2::Sink,1).map_err(|_|"shipped connector".to_owned()))
@@ -209,6 +286,17 @@ pub(super) fn materialize(stage:&Path)->Result<(),String> {
     policy["registry_publisher_key_id"]=json!(hex(*derive_ed25519_key_id_v2(registry.verifying_key().to_bytes()).as_bytes()));
     policy["registry_publisher_public_key"]=json!(hex(registry.verifying_key().to_bytes()));
     policy["signed_tool_descriptor_paths"]=json!(paths);policy["policy_activations"]=json!(activations);policy["manifest_constraints"]=json!(constraints);
+    // Register the intent-flow-confinement validator build so every write tool's
+    // declaration activates at G5. The template ships no builds; adding a write
+    // tool is the only reason this deployment needs one.
+    if needs_confinement_build {
+        if policy["validator_builds"].as_array().map(|b|!b.is_empty()).unwrap_or(true) {
+            return Err("unexpected validator builds".into());
+        }
+        policy["validator_builds"]=json!([{"kind":CONFINEMENT_IMPLEMENTATION_ID,
+            "implementation_id":CONFINEMENT_IMPLEMENTATION_ID,"semantic_version":[1,0,0],
+            "build_manifest_digest":hex(*confinement_build_digest().as_bytes())}]);
+    }
     agent["planner_shipped_catalog"]=json!(catalog);
     let input_key=signing_key(&mut issued)?;
     let input_id=derive_ed25519_key_id_v2(input_key.verifying_key().to_bytes());

@@ -122,24 +122,47 @@ TOOL_CATALOG = (
 )
 READ_TASK_IDS = tuple(t.task_id for t in _TASKS)
 
+# Deployment-shipped WRITE tools. Each maps a reviewed dojo operation to one
+# official AgentDojo authorizing function, the authorizing effect, and its
+# business fields with EXPLICIT roles (a write tool's resource/destination carry
+# real owner values, unlike a read tool's fixed calendar/to sentinels). Every
+# write tool MUST carry the intent_flow_confinement validator, so a call binding
+# an untrusted-derived argument escalates to owner approval at G5 instead of
+# executing silently. Scalar only for now (no arrays, no computed values).
+WRITE_VALIDATORS = ("intent_flow_confinement",)
+WRITE_CATALOG = (
+    # append_to_file(file_id, content): file_id is the owner-fixed resource;
+    # content is a (result-derived) parameter; body/to are synthetic
+    # payload/destination sentinels a business profile always needs.
+    ("dojo.file.append", "append_to_file", "update",
+     (("body", "payload"), ("content", "parameter"),
+      ("file_id", "resource"), ("to", "destination"))),
+)
+
 
 def upstream_for(tool):
-    for name, upstream, _ in TOOL_CATALOG:
+    for name, upstream, *_ in (*TOOL_CATALOG, *WRITE_CATALOG):
         if name == tool:
             return upstream
     raise ValueError("unreviewed_tool")
 
 
 def catalog_json():
-    """Reviewed read-tool catalog for the deployment generator: each tool with
-    its business fields (synthetic body/calendar/to plus text parameters)."""
+    """Reviewed tool catalog for the deployment generator: read tools (synthetic
+    body/calendar/to plus text parameters) and authorizing write tools (explicit
+    roles plus their required validators)."""
     roles = {"body": "payload", "calendar": "resource", "to": "destination"}
-    tools = []
+    read_tools = []
     for name, _, params in TOOL_CATALOG:
         fields = [{"name": f, "role": roles.get(f, "parameter"), "type": "text"}
                   for f in sorted(("body", "calendar", "to", *params))]
-        tools.append({"operation": name, "effect": "read", "fixed_magnitude": 1, "fields": fields})
-    return {"schema": 1, "read_tools": tools}
+        read_tools.append({"operation": name, "effect": "read", "fixed_magnitude": 1, "fields": fields})
+    write_tools = []
+    for name, _, effect, spec in WRITE_CATALOG:
+        fields = [{"name": n, "role": r, "type": "text"} for n, r in sorted(spec)]
+        write_tools.append({"operation": name, "effect": effect, "fixed_magnitude": 1,
+                            "validators": list(WRITE_VALIDATORS), "fields": fields})
+    return {"schema": 2, "read_tools": read_tools, "write_tools": write_tools}
 
 
 def reviewed_task(task_id, clean_prompt):
