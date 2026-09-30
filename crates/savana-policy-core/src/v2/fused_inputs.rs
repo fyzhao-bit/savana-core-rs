@@ -416,3 +416,111 @@ impl RecoveredFusedInputV04 {
         &self.provenance
     }
 }
+
+#[cfg(test)]
+mod result_edge_tests {
+    use super::*;
+    use crate::v2::intent::StableActionArgumentBindingV2;
+    use crate::v2::{encode_provenance_record_v2, EffectSetV2, ProvenanceContextV2, ProvenanceRecordV2};
+    use crate::v2::ArgumentNameV2;
+    use savana_kernel_protocol::v2::{
+        Digest32V2, DurableRunIdV2, InternalSlotDigestV2, ProducerIdentityV2, UnixMillisV2,
+    };
+
+    // A structured tool result, wrapped as an Input the kernel would recover.
+    fn result_input(json: &[u8]) -> Input {
+        let value = KernelValueV2::bytes(json.to_vec()).unwrap();
+        let context = ProvenanceContextV2::from_authenticated_runtime(
+            ProducerIdentityV2::new([90; 32]),
+            DurableRunIdV2::new([44; 32]),
+            Digest32V2::new([3; 32]),
+            UnixMillisV2::new(10),
+            UnixMillisV2::new(1000),
+        )
+        .unwrap();
+        let provenance = ProvenanceRecordV2::gated_ingress(
+            &value,
+            context,
+            Digest32V2::new([41; 32]),
+            Digest32V2::new([42; 32]),
+            Digest32V2::new([43; 32]),
+            EffectSetV2::READ,
+        )
+        .unwrap();
+        Input {
+            slot: [1; 16],
+            identity: [9; 32],
+            value: minicbor::to_vec(&value).unwrap(),
+            provenance: encode_provenance_record_v2(&provenance).unwrap(),
+        }
+    }
+
+    fn path(segments: &[&str]) -> Vec<String> {
+        segments.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn matching_argument(
+        input: &Input,
+        slot: [u8; 16],
+        extract: Option<(&[String], u16)>,
+    ) -> StableActionArgumentBindingV2 {
+        let (_, provenance) = input.result_value(extract).unwrap();
+        StableActionArgumentBindingV2::new_for_test(
+            ArgumentNameV2::new("to").unwrap(),
+            InternalSlotDigestV2::new([6; 32]),
+            input.result_identity(slot),
+            provenance.value_digest(),
+            provenance.provenance_digest(),
+        )
+    }
+
+    #[test]
+    fn a_path_edge_extracts_the_scalar_and_g7_accepts_only_that_extraction() {
+        // Step 1's structured result: the participants of a found event.
+        let json = br#"{"events":[{"participants":["a@x.com","b@y.com"],"count":2}]}"#;
+        let input = result_input(json);
+        let slot = [5; 16];
+        let to_path = path(&["events", "0", "participants", "0"]);
+        let extract = Some((&to_path[..], 256u16));
+
+        // The kernel extracts exactly the scalar at the signed path.
+        let (value, _) = input.result_value(extract).unwrap();
+        assert_eq!(value.as_text(), Some("a@x.com"));
+
+        // A whole-result edge (payload) produces a DIFFERENT value and provenance,
+        // so a path edge and a payload edge never alias.
+        let (_, path_prov) = input.result_value(extract).unwrap();
+        let (whole, whole_prov) = input.result_value(None).unwrap();
+        assert!(whole.as_text().unwrap().contains("participants"));
+        assert_ne!(path_prov.provenance_digest(), whole_prov.provenance_digest());
+
+        // G7 accepts an argument built from the kernel's own extraction.
+        let ok = matching_argument(&input, slot, extract);
+        assert!(input.check_result_argument(slot, &ok, extract).is_ok());
+
+        // G7 rejects that same argument checked under a DIFFERENT path: the
+        // recomputed provenance differs, so a planner that changes the edge
+        // after the fact cannot pass.
+        let other = path(&["events", "0", "count"]);
+        assert!(input
+            .check_result_argument(slot, &ok, Some((&other[..], 256)))
+            .is_err());
+        // And rejects it under the whole-result edge.
+        assert!(input.check_result_argument(slot, &ok, None).is_err());
+    }
+
+    #[test]
+    fn a_path_edge_fails_closed_on_nonscalar_or_oversize() {
+        let json = br#"{"events":[{"participants":["a@x.com"],"count":2}]}"#;
+        let input = result_input(json);
+        // The participants array is not a scalar.
+        let array = path(&["events", "0", "participants"]);
+        assert!(input.result_value(Some((&array[..], 256))).is_err());
+        // The scalar exceeds the signed byte bound.
+        let addr = path(&["events", "0", "participants", "0"]);
+        assert!(input.result_value(Some((&addr[..], 3))).is_err());
+        // A missing path fails.
+        let missing = path(&["events", "1", "participants", "0"]);
+        assert!(input.result_value(Some((&missing[..], 256))).is_err());
+    }
+}
