@@ -11,6 +11,7 @@ fn install_inputs(s: &mut DurableG4StateV2) {
         result_of: None,
         result_path: None,
         result_max_bytes: None,
+        result_source_clause: None,
         argument: "body".into(),
         slot: [1; 16],
     }];

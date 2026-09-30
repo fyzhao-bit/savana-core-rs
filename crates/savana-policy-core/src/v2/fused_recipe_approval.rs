@@ -219,6 +219,7 @@ mod tests {
                 result_of: Some(1),
                 result_path: None,
                 result_max_bytes: None,
+                result_source_clause: None,
             }],
         };
         let mut a = approval();
