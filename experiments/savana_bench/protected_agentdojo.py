@@ -154,12 +154,14 @@ def load_config(path):
         if set(config)!=fields|{'provisioning','operator_socket'}: raise ValueError('closed_deployment_config_required')
         from .protected_operator import SOCKET
         d=config['provisioning']
+        from .agentdojo_tasks import TOOL_CATALOG
+        expected_descriptors={op for op,_,_ in TOOL_CATALOG}|{'savana.final_result_release'}
         if (config['operator_socket']!=SOCKET or type(d) is not dict
             or set(d)!={'schema','descriptors','planner','destination_digest','application_turn','store',
                         'installation','disposition','scope','task_grants_installed'}
             or d['schema']!=1 or d['disposition']!='require_approval'
-            or d['scope']!='finite_calendar_subset' or d['task_grants_installed'] is not False
-            or set(d['descriptors'])!={'dojo.calendar.search','dojo.calendar.day','savana.final_result_release'}):
+            or d['scope']!='finite_workspace_read_subset' or d['task_grants_installed'] is not False
+            or set(d['descriptors'])!=expected_descriptors):
             raise ValueError('closed_provisioning_profile')
         for value in (*d['descriptors'].values(),*(d[k] for k in ('planner','destination_digest','application_turn',
                                                                     'store','installation'))):

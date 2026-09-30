@@ -37,6 +37,38 @@ fn replace_json(root:&Path,name:&str,v:&Value)->Result<(),String> {
 fn hex_bytes(bytes:&[u8])->String {
     bytes.iter().map(|b|format!("{b:02x}")).collect()
 }
+fn field_role(s:&str)->Result<R,String> {
+    match s {"payload"=>Ok(R::Payload),"resource"=>Ok(R::Resource),
+        "destination"=>Ok(R::Destination),"parameter"=>Ok(R::Parameter),_=>Err("field role".into())}
+}
+fn field_type(s:&str)->Result<T,String> {
+    match s {"text"=>Ok(T::Text),_=>Err("field type".into())}
+}
+/// Parse the reviewed read-tool catalog the staging step copied in. Only its
+/// operation names and business field roles/types are read; it authorizes no
+/// target, credential or value and never re-signs a manifest.
+fn read_tool_catalog(stage:&Path)->Result<Vec<(String,Vec<(String,R,T)>)>,String> {
+    let doc=read(stage,"etc/savana/read-tool-catalog-v04.json")?;
+    if doc["schema"]!=json!(1) {return Err("read catalog schema".into());}
+    let tools=doc["read_tools"].as_array().ok_or("read catalog tools")?;
+    if tools.is_empty() || tools.len()>64 {return Err("read catalog size".into());}
+    let mut out=Vec::new();
+    for tool in tools {
+        if tool["effect"]!=json!("read") || tool["fixed_magnitude"]!=json!(1) {
+            return Err("read catalog operation".into());
+        }
+        let name=tool["operation"].as_str().ok_or("read catalog operation name")?;
+        let raw=tool["fields"].as_array().ok_or("read catalog fields")?;
+        let mut fields=Vec::new();
+        for field in raw {
+            fields.push((field["name"].as_str().ok_or("field name")?.to_owned(),
+                field_role(field["role"].as_str().ok_or("field role")?)?,
+                field_type(field["type"].as_str().ok_or("field type")?)?));
+        }
+        out.push((name.to_owned(),fields));
+    }
+    Ok(out)
+}
 /// One deployment-shipped connector per native provider transport. Its id,
 /// not the business target, is each tool descriptor's provider identity.
 fn shipped_connector(transport:&Value,name:&str)
@@ -91,13 +123,21 @@ pub(super) fn materialize(stage:&Path)->Result<(),String> {
     let executor=parse_digest(&kernel["policy_runtime"],"executor_identity")?;
     let mut paths=Vec::new();let mut activations=Vec::new();let mut constraints=Vec::new();
     let mut descriptors=serde_json::Map::new();let mut catalog=Vec::new();
-    let calendar=shipped_connector(&exec["provider"],"dojo-calendar")?;
+    // One shipped connector carries every reviewed read tool (the single native
+    // workspace provider endpoint); a separate connector carries final release.
+    let workspace=shipped_connector(&exec["provider"],"dojo-workspace")?;
     let release_connector=shipped_connector(&exec["final_release_provider"],"savana-final-release")?;
-    let (mut calendar_tools,mut release_tools)=(Vec::new(),Vec::new());
-    for (index,name,parameters,release) in [
-        (0,"dojo.calendar.search",vec!["date","query"],false),
-        (1,"dojo.calendar.day",vec!["day"],false),
-        (2,"savana.final_result_release",vec![],true)] {
+    let (mut workspace_tools,mut release_tools)=(Vec::new(),Vec::new());
+    // Ordered registry: each reviewed read tool from the catalog, then the one
+    // fixed final-result-release tool. Indices drive the tool class/template and
+    // the signed descriptor leaf, so this order is the deployment's tool order.
+    let read_tools=read_tool_catalog(stage)?;
+    let tool_count=read_tools.len()+1;
+    let mut specs:Vec<(String,Vec<(String,R,T)>,bool)>=read_tools.into_iter()
+        .map(|(name,fields)|(name,fields,false)).collect();
+    specs.push(("savana.final_result_release".to_owned(),Vec::new(),true));
+    for (index,(name,fields,release)) in specs.into_iter().enumerate() {
+        let ordinal=u32::try_from(index).map_err(|_|"tool index")?;
         let transport=&exec[if release {"final_release_provider"} else {"provider"}];
         let url=transport["canonical_url"].as_str().ok_or("provider URL missing")?;
         let target=business_target_identity_v2(url,Digest32V2::new(parse_digest(transport,"server_spki_sha256")?))
@@ -105,17 +145,16 @@ pub(super) fn materialize(stage:&Path)->Result<(),String> {
         let credential=Digest32V2::new(parse_digest(transport,"credential_handle_identity_digest")?);
         let profile=if release { final_result_release_business_profile_v04(target,credential).map_err(|_|"release profile")? }
         else {
-            let mut fields=vec![("body",R::Payload),("calendar",R::Resource),("to",R::Destination)];
-            fields.extend(parameters.iter().map(|p|(*p,R::Parameter)));fields.sort_by_key(|f|f.0);
-            BusinessProfileV2::new(ActionCodecProfileV2::McpToolsCallJsonV1,name,target,credential,
+            let mut fields=fields;fields.sort_by(|a,b|a.0.cmp(&b.0));
+            BusinessProfileV2::new(ActionCodecProfileV2::McpToolsCallJsonV1,name.as_str(),target,credential,
                 TaskEffectV2::Read,BusinessMagnitudeV2::FixedCount(1),
-                fields.into_iter().map(|(n,r)|BusinessFieldV2::new(n,r,T::Text)).collect::<Result<Vec<_>,_>>()
+                fields.into_iter().map(|(n,r,t)|BusinessFieldV2::new(n.as_str(),r,t)).collect::<Result<Vec<_>,_>>()
                     .map_err(|_|"business fields")?).map_err(|_|"business profile")?
         };
         let contract=ExecutorIdempotencyContractV2::ConnectorNonIdempotentSingleAttempt;
-        let provider=if release {release_connector.2} else {calendar.2};
+        let provider=if release {release_connector.2} else {workspace.2};
         let d=UnsignedToolDescriptorV2::from_verified_manifest(2,VersionV2::new(2,0,0),provider,
-            IdentifierV2::new(name).map_err(|_|"tool name")?,ActionTemplateIdV2::new(102+index),ToolClassIdV2::new(202+index),
+            IdentifierV2::new(name.as_str()).map_err(|_|"tool name")?,ActionTemplateIdV2::new(102+ordinal),ToolClassIdV2::new(202+ordinal),
             profile.digest(),Digest32V2::new(Sha256::digest(if release {b"SAVANA_FIXED_POST_CORRELATED_STATUS_V1\0".as_slice()}
                 else {b"SAVANA_MCP_JSON_RESULT_V1\0".as_slice()}).into()),vec![RoleIdV2::new(1)],
             if release {EffectSetV2::FINAL_RELEASE} else {EffectSetV2::READ},
@@ -126,15 +165,15 @@ pub(super) fn materialize(stage:&Path)->Result<(),String> {
             UnixMillisV2::new(ACTIVE_NOT_BEFORE),UnixMillisV2::new(ACTIVE_EXPIRES_AT))
             .and_then(|d|d.with_business_profile(profile)).map_err(|_|"descriptor")?;
         let digest=descriptor_digest_v2(&d).map_err(|_|"descriptor digest")?;
-        if release {release_tools.push(d.clone())} else {calendar_tools.push(d.clone())}
+        if release {release_tools.push(d.clone())} else {workspace_tools.push(d.clone())}
         let leaf=format!("protected-tool-{index}-v04.cbor");
         write_new(&stage.join("etc/savana/policy").join(&leaf),&sign_descriptor(&d,&registry)?,0o444)?;
         paths.push(format!("/etc/savana/policy/{leaf}"));
         activations.push(json!({"descriptor_digest":hex(*digest.as_bytes()),"registry_ordinal":index,
             "policy_activation_digest":hex(domain_digest(b"SAVANA_PROTECTED_ACTIVATION_V04\0",digest.as_bytes()))}));
         constraints.push(json!({"descriptor_digest":hex(*digest.as_bytes()),"maximum_attempts":1,"maximum_elapsed_ns":0,"internal_validators":[]}));
-        descriptors.insert(name.into(),json!(hex(*digest.as_bytes())));
-        catalog.push(json!({"tool_class":202+index,"action_template":102+index,
+        descriptors.insert(name.clone(),json!(hex(*digest.as_bytes())));
+        catalog.push(json!({"tool_class":202+ordinal,"action_template":102+ordinal,
             "structural_role":savana_policy_core::v2::ConnectorStructuralRoleV2::Sink.tag(),
             "effects":if release {EffectSetV2::FINAL_RELEASE.bits()}else{EffectSetV2::READ.bits()},
             "semantic_name":name,"semantic_description":"Reviewed finite experiment operation"}));
@@ -144,7 +183,7 @@ pub(super) fn materialize(stage:&Path)->Result<(),String> {
     activations.sort_by_key(|v|v["descriptor_digest"].as_str().unwrap().to_owned());
     // G7 routes an authorized task tool only through a registered connector.
     // Ship both in the measured daemon configs, bound to the genesis head.
-    let mut connectors=[(calendar,calendar_tools,EffectSetV2::READ),
+    let mut connectors=[(workspace,workspace_tools,EffectSetV2::READ),
         (release_connector,release_tools,EffectSetV2::FINAL_RELEASE)].into_iter()
         .map(|((name,transport,_),tools,effects)|ConnectorDescriptorV2::new_deployment_shipped(
             name,transport,tools,effects,ConnectorStructuralRoleV2::Sink,1).map_err(|_|"shipped connector".to_owned()))
@@ -216,9 +255,9 @@ pub(super) fn materialize(stage:&Path)->Result<(),String> {
         "destination_digest":hex(destination),"application_turn":hex(*turn.as_bytes()),
         "store":kernel["g4_store_id"],
         "installation":manifest["installation_id"],"disposition":"require_approval",
-        "scope":"finite_calendar_subset","task_grants_installed":false});
+        "scope":"finite_workspace_read_subset","task_grants_installed":false});
     write_json(&stage.join("etc/savana/experiment-provisioning-v04.json"),&binding)?;
-    write_json(&stage.join("protected-experiment-profile.json"),&json!({"schema":1,"tools":3,"g3_rules":6,
+    write_json(&stage.join("protected-experiment-profile.json"),&json!({"schema":1,"tools":tool_count,"g3_rules":6,
         "deployment_shipped_connectors":connectors.len(),"installed":false}))?;
     Ok(())
 }

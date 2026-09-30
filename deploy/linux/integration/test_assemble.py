@@ -300,6 +300,10 @@ def test_protected_transport_pins_match_and_operator_key_is_separate(inputs):
     endpoints = json.loads((out / "etc/savana/experiment-endpoints-v04.json").read_bytes())
     assert endpoints["schema"] == 2
     assert endpoints["entries"] == []  # no invented tasks, roots or enrollment
+    # The reviewed read-tool catalog is copied verbatim for the profile generator.
+    staged_catalog = (out / "etc/savana/read-tool-catalog-v04.json").read_bytes()
+    assert staged_catalog == Path(__file__).with_name("read-tool-catalog-v04.json").read_bytes()
+    assert json.loads(staged_catalog)["schema"] == 1
     pins = []
     for role, block in [("provider", "provider"), ("release_provider", "final_release_provider"),
                         ("model_worker", None)]:
@@ -345,6 +349,7 @@ def test_default_profile_does_not_enable_experimental_trust(stage):
     assert "fused_model_workers" not in config(stage, "kerneld")
     assert not (stage / "private/experiment").exists()
     assert not (stage / "etc/savana/experiment-endpoints-v04.json").exists()
+    assert not (stage / "etc/savana/read-tool-catalog-v04.json").exists()
 
 
 def test_experiment_units_keep_private_operator_and_kernel_credentials_out(inputs):

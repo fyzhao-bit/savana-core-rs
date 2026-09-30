@@ -275,6 +275,13 @@ def assemble(templates: Path, binaries: Path, repo: Path, out: Path, ids: dict, 
         # This is deliberately NOT a runnable episode configuration: authentic
         # task/run/root/plan bindings must be obtained after real owner admission.
         obj("etc/savana/experiment-endpoints-v04.json", experiment)
+        # Reviewed read-tool catalog for the protected-profile generator. A fixed
+        # committed artifact (pinned by an experiments test to the authoring
+        # catalog_json), copied verbatim; it grants nothing and names no target.
+        catalog = (Path(__file__).resolve().with_name("read-tool-catalog-v04.json")).read_bytes()
+        if json.loads(catalog).get("schema") != 1:
+            raise ValueError("unrecognized read-tool catalog schema")
+        put("etc/savana/read-tool-catalog-v04.json", catalog)
 
     observations = []
     for index, service in enumerate(SERVICES):

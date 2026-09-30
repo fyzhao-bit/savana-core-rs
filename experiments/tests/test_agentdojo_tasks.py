@@ -130,7 +130,9 @@ class TaskAdapterTests(unittest.TestCase):
                 self.assertNotEqual(text, clean_text)
                 self.assertEqual(canonical(env.model_dump(mode="json")), before)
                 self.assertEqual(canonical(prepare_draft(c, **settings())), draft)
-                self.assertEqual(set(provider.runtime.functions), {"dojo.calendar.search", "dojo.calendar.day"})
+                from savana_bench.agentdojo_tasks import TOOL_CATALOG
+                self.assertEqual(set(provider.runtime.functions),
+                                 {op for op, _, _ in TOOL_CATALOG})
 
     def test_control_payload_write_tool_and_extra_argument_have_no_effect(self):
         c = self.contract()

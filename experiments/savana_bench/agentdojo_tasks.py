@@ -118,7 +118,7 @@ TOOL_CATALOG = (
     ("dojo.email.unread", "get_unread_emails", ()),
     ("dojo.file.list", "list_files", ()),
     ("dojo.file.search_name", "search_files_by_filename", ("filename",)),
-    ("dojo.file.search", "search_files", ()),
+    ("dojo.file.search", "search_files", ("query",)),
 )
 READ_TASK_IDS = tuple(t.task_id for t in _TASKS)
 
