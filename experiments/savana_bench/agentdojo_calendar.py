@@ -8,14 +8,15 @@ not exposed. Input text, including hostile text, is never parsed as a tool call.
 Every synthetic control field (body/calendar/to) is fixed to its sentinel and
 never forwarded; the remaining fields are the official function's own arguments,
 which the kernel has already authorized (G4 structure, G5 confinement) before a
-request reaches here. The served operations are exactly TOOL_CATALOG (reads) and
-WRITE_CATALOG (writes), so the provider stays in lockstep with the signed
+request reaches here. The served operations are exactly TOOL_CATALOG (reads),
+WRITE_CATALOG (writes) and, when a generator is supplied, MODEL_CATALOG (the
+quarantined generator), so the provider stays in lockstep with the signed
 descriptors the deployment generator ships.
 """
 import importlib.metadata
 
 from .agentdojo_provider import AgentDojoProvider
-from .agentdojo_tasks import PACKAGE_VERSION, TOOL_CATALOG, WRITE_CATALOG
+from .agentdojo_tasks import GENERATOR_MODEL, MODEL_CATALOG, PACKAGE_VERSION, TOOL_CATALOG, WRITE_CATALOG
 
 # Synthetic business controls, always fixed and never forwarded to an official
 # function. A field named here must equal its sentinel; any other field is a
@@ -67,9 +68,35 @@ def _wrapper_source(pyname, upstream, field_names):
     return "\n".join(lines)
 
 
-def calendar_provider(environment, max_calls=1):
+def _generator_tool(generator):
+    """The reviewed `dojo.model.generate` adapter: the payload is the earlier
+    result the kernel passed (data), the instruction is the owner's text, and
+    the model/destination controls are fixed. Returns {"text": one line}."""
+    (operation, _upstream, _effect, fields), = MODEL_CATALOG
+    if sorted(n for n, _ in fields) != ["body", "instruction", "model", "to"]:
+        raise ValueError("unreviewed_generator_fields")
+
+    def generate(body: str, instruction: str, model: str, to: str):
+        """Quarantined generation over an untrusted source; no tools, no actions.
+
+        :param body: The earlier verified result, passed by the kernel as data.
+        :param instruction: The owner's own instruction text.
+        :param model: Fixed generator model control.
+        :param to: Fixed private result destination control.
+        """
+        if model != GENERATOR_MODEL or to != SENTINELS["to"] or not body or not instruction:
+            raise ValueError("generator_control_mismatch")
+        return {"text": generator(instruction=instruction, source=body)}
+
+    generate.__name__ = operation
+    return generate
+
+
+def calendar_provider(environment, max_calls=1, generator=None):
     """One call per reviewed operation: a read-only contract gets exactly one,
-    a read -> write contract exactly two. Never more than the plan can use."""
+    a read -> write contract exactly two, read -> generate -> write three.
+    Never more than the plan can use. Without a `generator` the model tool is
+    not served at all (a call to it fails before any effect)."""
     from agentdojo.default_suites.v1.tools.calendar_client import (
         get_day_calendar_events, search_calendar_events,
     )
@@ -97,6 +124,8 @@ def calendar_provider(environment, max_calls=1):
         if upstream not in seen:
             seen.add(upstream)
             needed.append(make_function(upstream_impls[upstream]))
+    if generator is not None and not callable(generator):
+        raise ValueError("generator_not_callable")
     # The official tool schema is resolved before any episode request. Returning
     # an upstream exception is indeterminate, not proof of no effect or safety.
     original = FunctionsRuntime(needed)
@@ -109,5 +138,7 @@ def calendar_provider(environment, max_calls=1):
         adapter = namespace.pop(pyname)
         adapter.__name__ = operation
         functions.append(make_function(adapter))
+    if generator is not None:
+        functions.append(make_function(_generator_tool(generator)))
     runtime = FunctionsRuntime(functions)
     return AgentDojoProvider(runtime, environment, max_calls=max_calls)

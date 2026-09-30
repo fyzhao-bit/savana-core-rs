@@ -52,7 +52,14 @@ class FiniteConsent:
         # Read-only contracts keep their original policy label and behavior.
         self.policy='finite_calendar_preconsent_v1' if len(self.steps)==1 else 'finite_write_preconsent_v1'
         self.stage='ingress';self.task=self.binding=self.clauses=self.authorization=None
-        self.profiles=None;self.failed=False
+        self.profiles=None;self.failed=False;self.results=None
+
+    def bind_results(self, results):
+        """The owner's view of the results this episode already returned, used
+        only to check that a whole-result payload is exactly that result."""
+        if self.results is not None or not callable(results):
+            raise ValueError('consent_results_binding')
+        self.results=results
 
     def bind_root(self, context, clauses, authorization):
         if self.failed or self.stage!='task_authorization' or self.binding is not None:
@@ -186,6 +193,14 @@ class FiniteConsent:
                 or not _edges_match(d.get('derived_fields'),step)):
                 raise ValueError('consent_action_arguments')
             arguments=dict(r['params']['arguments'])
+            if step.payload_from:
+                # A payload fed from an earlier result is not a root control:
+                # approve it only if it is byte-for-byte that result's text.
+                payload=_roles(step)[0]
+                prior=self.results() if self.results is not None else []
+                if (len(prior)<step.payload_from
+                    or arguments.pop(payload,None)!=prior[step.payload_from-1].decode('utf-8')):
+                    raise ValueError('consent_payload_source')
             # A derived field is approved as the SOURCE the owner signed (the
             # kernel-extracted value at that path), never as a planner literal;
             # it must still be a well-formed bounded text value.

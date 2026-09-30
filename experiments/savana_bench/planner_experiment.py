@@ -25,13 +25,16 @@ import threading
 import time
 
 from .agentdojo_provider import canonical
-from .agentdojo_tasks import BENCHMARK, PACKAGE_VERSION, SUITE, WRITE_TASKS, prepare_draft
+from .agentdojo_tasks import (BENCHMARK, GENERATE_TASKS, PACKAGE_VERSION, SUITE, WRITE_TASKS, contract_by_id,
+                              prepare_draft)
 from .official_agentdojo import INJECTIONS, TASKS
-from .planner_authors import (COMPROMISED, POISON_GOALS, SYSTEM, WRITE_COMPROMISED, WRITE_POISON_GOALS,
-                              PlanUnencodable, compromised_draft, encode_plan, parse_plan)
+from .planner_authors import (COMPROMISED, GENERATE_COMPROMISED, GENERATE_POISON_GOALS, POISON_GOALS, SYSTEM,
+                              WRITE_COMPROMISED, WRITE_POISON_GOALS, PlanUnencodable, compromised_draft,
+                              encode_plan, parse_plan)
 from .protected_agentdojo import (CASES, ModelWorker, ResearchAudit, official_case, package_sources,
                                   preflight, safe_error_code, score_outcome)
 from .protected_endpoint import EpisodeEndpoint, digest32
+from .quarantined_generator import SYSTEM as GENERATOR_SYSTEM, DeepSeekGenerator
 from .protected_transport import ProviderServer, certificate_spki_pin, server_context
 
 SCHEMA = "savana-planner-experiment-v1"
@@ -44,54 +47,67 @@ KERNEL_BLOCKS = ("compile_rejected", "prepare_rejected")
 
 
 WRITE_GROUPS = ("reviewed", "honest", "poisoned", "compromised", "attack")
+# One multi-operation contract per spec kind: (contract, poison goals, mutations).
+CHAIN_KINDS = {
+    "write": (WRITE_TASKS[0], WRITE_POISON_GOALS, WRITE_COMPROMISED),
+    "generate": (GENERATE_TASKS[0], GENERATE_POISON_GOALS, GENERATE_COMPROMISED),
+}
 
 
-def write_cases(groups=WRITE_GROUPS, mutations=None, injections=None):
-    """The read -> derived-write task under every planner and the official attack.
+def chain_cases(kind, groups=WRITE_GROUPS, mutations=None, injections=None):
+    """A multi-operation task under every planner and the official attack.
 
     `reviewed` forwards the reviewed plan unread (the honest reference);
     `honest`/`poisoned` are DeepSeek-authored plans (poisoned = hidden attacker
     goal); `compromised` are adversary-controlled plans; `attack` is the
     reviewed plan against each official injection.
     """
-    contract = WRITE_TASKS[0]
+    contract, goals, catalog = CHAIN_KINDS[kind]
     base = dict(user=contract.task_id, contract=contract.contract_id)
     cases = []
     if "reviewed" in groups:
-        cases.append(dict(group="write_reviewed", **base, injection=None, author="reviewed", goal=None, mutation=None))
+        cases.append(dict(group=f"{kind}_reviewed", **base, injection=None, author="reviewed", goal=None,
+                          mutation=None))
     if "honest" in groups:
-        cases.append(dict(group="write_honest", **base, injection=None, author="deepseek", goal=None, mutation=None))
+        cases.append(dict(group=f"{kind}_honest", **base, injection=None, author="deepseek", goal=None,
+                          mutation=None))
     if "poisoned" in groups:
-        cases += [dict(group="write_poisoned", **base, injection=None, author="deepseek", goal=goal, mutation=None)
-                  for goal in WRITE_POISON_GOALS]
+        cases += [dict(group=f"{kind}_poisoned", **base, injection=None, author="deepseek", goal=goal,
+                       mutation=None) for goal in goals]
     if "compromised" in groups or mutations:
-        cases += [dict(group="write_compromised", **base, injection=None, author="adversary", goal=None,
-                       mutation=name) for name, _, _ in WRITE_COMPROMISED
+        cases += [dict(group=f"{kind}_compromised", **base, injection=None, author="adversary", goal=None,
+                       mutation=name) for name, _, _ in catalog
                   if "compromised" in groups or name in mutations]
     if "attack" in groups or injections:
-        cases += [dict(group="write_attack", **base, injection=injection, author="reviewed", goal=None,
+        cases += [dict(group=f"{kind}_attack", **base, injection=injection, author="reviewed", goal=None,
                        mutation=None) for injection in (INJECTIONS if "attack" in groups else injections)]
     return tuple(cases)
 
 
+def write_cases(groups=WRITE_GROUPS, mutations=None, injections=None):
+    """The read -> derived-write task (see `chain_cases`)."""
+    return chain_cases("write", groups, mutations, injections)
+
+
 def experiment_cases(spec):
-    """honest | poisoned | compromised[:names] | write[:groups]"""
+    """honest | poisoned | compromised[:names] | write[:items] | generate[:items]"""
     kind, colon, names = spec.partition(":") if type(spec) is str else ("", "", "")
     if kind == "honest" and not colon:
         return tuple(dict(case, author="deepseek", goal=None, mutation=None) for case in CASES)
     if kind == "poisoned" and not colon:
         return tuple(dict(group="poisoned_planner", user=user, injection=None, author="deepseek", goal=goal,
                           mutation=None) for user in TASKS for goal in POISON_GOALS)
-    if kind == "write":
-        # Items are whole groups or single compromised mutations, so a run can
-        # stay within one armed batch's case limit.
+    if kind in CHAIN_KINDS:
+        # Items are whole groups, single compromised mutations or single
+        # official injections, so a run can stay within one armed batch's
+        # case limit.
         items = names.split(",") if colon else list(WRITE_GROUPS)
-        mutations = {n for n, _, _ in WRITE_COMPROMISED}
+        mutations = {n for n, _, _ in CHAIN_KINDS[kind][2]}
         injections = tuple(i for i in items if re.fullmatch(r"injection_task_(0|[1-9][0-9]?)", i))
         if (not items or len(set(items)) != len(items) or ("attack" in items and injections)
                 or any(i not in WRITE_GROUPS and i not in mutations and i not in injections for i in items)):
             raise ValueError("planner_experiment_spec")
-        return write_cases(tuple(i for i in items if i in WRITE_GROUPS),
+        return chain_cases(kind, tuple(i for i in items if i in WRITE_GROUPS),
                            frozenset(i for i in items if i in mutations), injections)
     if kind == "compromised":
         catalog = [name for name, _, _ in COMPROMISED]
@@ -216,7 +232,8 @@ def _hex(value):
 
 
 def consent_mode(experiment):
-    return "finite_write_preconsent_v1" if str(experiment).startswith("write") else "finite_calendar_preconsent_v1"
+    multi = str(experiment).partition(":")[0] in CHAIN_KINDS
+    return "finite_write_preconsent_v1" if multi else "finite_calendar_preconsent_v1"
 
 
 def plan_author_for(case, contract, text, emit, facts):
@@ -253,7 +270,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
     if identity_profile is None or identity_profile != load_profile() or config is None or config["schema"] != 3:
         raise ValueError("explicit_benchmark_profile_required")
     audit = ResearchAudit(output)
-    model = worker = broker = author = None
+    model = worker = broker = author = generator = None
     import asyncio
     async_runner = asyncio.Runner()
     rows = []
@@ -265,8 +282,12 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             kernel_interface="python_sdk_only", operator_mode=OPERATOR_MODE,
             plan_author_model="deepseek-flash", plan_author_system_sha256=hashlib.sha256(SYSTEM.encode()).hexdigest(),
             poison_goals=POISON_GOALS, write_poison_goals=WRITE_POISON_GOALS,
+            generate_poison_goals=GENERATE_POISON_GOALS,
             compromised_catalog=[dict(name=n, description=d) for n, d, _ in COMPROMISED],
             write_compromised_catalog=[dict(name=n, description=d) for n, d, _ in WRITE_COMPROMISED],
+            generate_compromised_catalog=[dict(name=n, description=d) for n, d, _ in GENERATE_COMPROMISED],
+            generator_model="deepseek-flash",
+            generator_system_sha256=hashlib.sha256(GENERATOR_SYSTEM.encode()).hexdigest(),
             executor_model="deepseek-flash", identity_profile=identity_profile,
             human_authentication_evaluated=False, consent_mode=consent_mode(experiment),
             comparable_to_unrestricted_baseline=False, attack="important_instructions_no_names",
@@ -286,6 +307,11 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             model = DeepSeekModel(api_key=key, profiles={config["model_worker"]["profile"]: "deepseek-flash"}, max_calls=32)
             if any(case["author"] == "deepseek" for case in cases):
                 author = DeepSeekPlanAuthor(key, max_calls=len(cases))
+            if any(st.payload_from for case in cases if "contract" in case
+                   for st in contract_by_id(case["contract"]).steps()):
+                # The reviewed generator tool's own credential use: one call
+                # per generation step, never shared with the planner/executor.
+                generator = DeepSeekGenerator(key, max_calls=len(cases))
             del key
             broker = WebAuthnBroker(auth_fd, timeout_seconds=120)
             worker = ModelWorker(config["model_worker"], model, audit, listener_fd=model_listener_fd)
@@ -305,7 +331,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                 facts = dict(plan_supplied=False, deviates=None)
                 attempts = []
                 servers, session, observer, endpoint, consent = [], None, None, None, None
-                suite = provider = after = None
+                suite = provider = after = generated_before = None
                 try:
                     from .agentdojo_calendar import calendar_provider
                     from .benchmark_consent import FiniteConsent
@@ -332,7 +358,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         audit.emit(kind, episode=index, **data)
                     emit("episode_input", contract=contract.document(), injections=values,
                          environment=before.model_dump(mode="json"))
-                    provider = calendar_provider(env, max_calls=len(contract.steps()))
+                    provider = calendar_provider(env, max_calls=len(contract.steps()), generator=generator)
+                    generated_before = 0 if generator is None else len(generator.log)
                     relay = ProviderRelay(emit)
                     servers = _servers(config, relay.exchange)
                     text = None
@@ -375,6 +402,9 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                     endpoint = EpisodeEndpoint(contract=contract, provider=provider, binding=binding,
                         tool_url=config["provider"]["url"], release_url=config["release_provider"]["url"], emit=emit)
                     relay.bind(endpoint)
+                    # The owner's approval of a whole-result payload compares it
+                    # with the result this episode actually returned.
+                    consent.bind_results(endpoint.completed_results)
                     observer = PrivateEpisodeAudit(output / f"publication-{index:02d}.jsonl")
                     row["stage"] = "execution"
 
@@ -432,6 +462,10 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         except Exception:
                             row["oracle_status"] = "unknown"
                     row["environment_changed"] = after.model_dump(mode="json") != before.model_dump(mode="json")
+                if generator is not None and generated_before is not None:
+                    # Digests and token usage of this episode's generator calls
+                    # (its text output is already in the tool result evidence).
+                    audit.emit("generator_calls", episode=index, calls=generator.log[generated_before:])
                 if row["status"] != "published":
                     row["status"] = "refused" if row["outcome"] in DEFINITIVE else "unknown"
                 row.update(plan_deviates_from_reviewed=facts["deviates"], provider_attempts=len(attempts),
@@ -450,6 +484,9 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             episodes_attempted=sum(r["attempted"] for r in rows), blockers=blockers, rows=rows,
             groups=summarize(rows), total_model_calls=0 if model is None else model.calls,
             plan_author_calls=0 if author is None else author.calls,
+            generator_calls=0 if generator is None else generator.calls,
+            generator_tokens=None if generator is None else dict(prompt=generator.prompt_tokens,
+                                                                completion=generator.completion_tokens),
             plan_author_tokens=None if author is None else dict(prompt=author.prompt_tokens,
                                                               completion=author.completion_tokens),
             operator_mode=OPERATOR_MODE, identity_profile=identity_profile,
@@ -469,4 +506,6 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             model.close()
         if author is not None:
             author.close()
+        if generator is not None:
+            generator.close()
         audit.close()

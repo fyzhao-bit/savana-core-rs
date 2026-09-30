@@ -154,9 +154,9 @@ def load_config(path):
         if set(config)!=fields|{'provisioning','operator_socket'}: raise ValueError('closed_deployment_config_required')
         from .protected_operator import SOCKET
         d=config['provisioning']
-        from .agentdojo_tasks import TOOL_CATALOG, WRITE_CATALOG
+        from .agentdojo_tasks import MODEL_CATALOG, TOOL_CATALOG, WRITE_CATALOG
         expected_descriptors=({op for op,_,_ in TOOL_CATALOG}
-            | {op for op,_,_,_ in WRITE_CATALOG} | {'savana.final_result_release'})
+            | {op for op,_,_,_ in (*WRITE_CATALOG, *MODEL_CATALOG)} | {'savana.final_result_release'})
         if (config['operator_socket']!=SOCKET or type(d) is not dict
             or set(d)!={'schema','descriptors','planner','destination_digest','application_turn','store',
                         'installation','disposition','scope','task_grants_installed'}
@@ -354,6 +354,11 @@ def official_case(case):
     return suite, task, injection, contract, values, environment
 
 
+# Upstream names of reviewed tools that are not AgentDojo functions; the official
+# oracle only ever sees AgentDojo calls in its trace.
+NON_AGENTDOJO_UPSTREAMS = ("quarantined_generate",)
+
+
 def score_outcome(*, suite, task, injection, contract, before, after, provider, outcome):
     from agentdojo.functions_runtime import FunctionCall
     from .agentdojo_calendar import SENTINELS
@@ -372,6 +377,8 @@ def score_outcome(*, suite, task, injection, contract, before, after, provider, 
         else:
             step = contract.steps()[len(trace)]  # legacy single-step replay
             name, arguments = step.upstream_tool, {k: v for k, v in step.values if k not in SENTINELS}
+        if name in NON_AGENTDOJO_UPSTREAMS:
+            continue  # the reviewed generator is Savana's tool, not an AgentDojo call
         trace.append(FunctionCall(function=name, args=arguments, id=f"provider-{len(trace) + 1}"))
     output = []
     if outcome is not None and outcome.status == "published":

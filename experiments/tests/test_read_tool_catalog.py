@@ -11,7 +11,7 @@ from pathlib import Path
 
 from savana_bench.agentdojo_provider import canonical
 from savana_bench.agentdojo_tasks import (
-    TOOL_CATALOG, WRITE_CATALOG, WRITE_VALIDATORS, _TASKS, catalog_json, upstream_for)
+    MODEL_CATALOG, TOOL_CATALOG, WRITE_CATALOG, WRITE_VALIDATORS, _TASKS, catalog_json, upstream_for)
 
 # The artifact assemble.py copies verbatim into etc/savana/read-tool-catalog-v04.json.
 COMMITTED = (Path(__file__).resolve().parents[2]
@@ -40,7 +40,7 @@ class ReadToolCatalogTests(unittest.TestCase):
     def test_write_tools_declare_roles_and_the_confinement_validator(self):
         doc = catalog_json()
         self.assertEqual([t["operation"] for t in doc["write_tools"]],
-                         [name for name, _, _, _ in WRITE_CATALOG])
+                         [name for name, _, _, _ in (*WRITE_CATALOG, *MODEL_CATALOG)])
         for tool in doc["write_tools"]:
             self.assertEqual(set(tool),
                              {"operation", "effect", "fixed_magnitude", "validators", "fields"})
@@ -75,6 +75,15 @@ class ReadToolCatalogTests(unittest.TestCase):
                              contract.task_id)
             self.assertEqual(contract.upstream_tool, upstream_for(contract.tool),
                              contract.task_id)
+
+    def test_the_generator_is_a_confined_send_tool_with_fixed_controls(self):
+        # Sending an earlier result to a model provider is an outbound effect:
+        # it ships as SEND with confinement, never as a silent read.
+        (name, upstream, effect, fields), = MODEL_CATALOG
+        self.assertEqual((name, upstream, effect), ("dojo.model.generate", "quarantined_generate", "send"))
+        self.assertEqual(dict(fields), {"body": "payload", "instruction": "parameter",
+                                        "model": "resource", "to": "destination"})
+        self.assertEqual(upstream_for(name), "quarantined_generate")
 
     def test_upstream_functions_are_the_reviewed_read_set(self):
         # Exactly the official AgentDojo workspace read functions we serve.
