@@ -520,6 +520,117 @@ fn active_registry_is_the_exact_policy_registry_intersection() {
         .is_none());
 }
 
+#[test]
+fn shipped_write_descriptor_with_confinement_validates_and_activates_at_g5() {
+    use crate::v2::{
+        activate_internal_validator_registry, deployment_requires_intent_flow_confinement,
+        AttemptKindV2, BoundedConnectorRetryPolicyV2, EffectSetV2,
+        ExecutorIdempotencyContractV2, InternalValidatorBuildV2,
+        InternalValidatorImplementationKindV2,
+    };
+    use savana_kernel_protocol::v2::{
+        ActionCodecProfileV2, ActionTemplateIdV2, BusinessFieldRoleV2, BusinessFieldTypeV2,
+        BusinessFieldV2, BusinessMagnitudeV2, BusinessProfileV2, DisplayProjectionIdV2,
+        ExecutorIdentityV2, ToolClassIdV2, TaskEffectV2,
+    };
+
+    // Exactly the append_to_file business profile the deployment generator
+    // builds: file_id the owner-fixed resource, content the (result-derived)
+    // parameter, body/to synthetic payload/destination sentinels; effect Update.
+    let field = |name, role| BusinessFieldV2::new(name, role, BusinessFieldTypeV2::Text).unwrap();
+    let profile = BusinessProfileV2::new(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        "dojo.file.append",
+        Digest32V2::new([30; 32]),
+        Digest32V2::new([31; 32]),
+        TaskEffectV2::Update,
+        BusinessMagnitudeV2::FixedCount(1),
+        vec![
+            field("body", BusinessFieldRoleV2::Payload),
+            field("content", BusinessFieldRoleV2::Parameter),
+            field("file_id", BusinessFieldRoleV2::Resource),
+            field("to", BusinessFieldRoleV2::Destination),
+        ],
+    )
+    .unwrap();
+
+    let kind = InternalValidatorImplementationKindV2::IntentFlowConfinement;
+    let build_digest = Digest32V2::new([6; 32]);
+    let confinement =
+        InternalValidatorDeclarationV2::new(kind.implementation_id(), VersionV2::new(1, 0, 0), build_digest);
+    let build = |validators: Vec<InternalValidatorDeclarationV2>| {
+        UnsignedToolDescriptorV2::from_verified_manifest(
+            2,
+            VersionV2::new(2, 0, 0),
+            Digest32V2::new([12; 32]),
+            IdentifierV2::new("dojo.file.append").unwrap(),
+            ActionTemplateIdV2::new(102),
+            ToolClassIdV2::new(202),
+            profile.digest(),
+            Digest32V2::new([13; 32]),
+            vec![RoleIdV2::new(1)],
+            EffectSetV2::UPDATE,
+            AttemptKindV2::ToolWrite,
+            BoundedConnectorRetryPolicyV2::new(
+                ExecutorIdempotencyContractV2::ConnectorNonIdempotentSingleAttempt,
+                1,
+                0,
+            )
+            .unwrap(),
+            validators,
+            ExecutorIdentityV2::new([14; 32]),
+            ProjectionIdV2::new(1),
+            Digest32V2::new([15; 32]),
+            DisplayProjectionIdV2::new(1),
+            Digest32V2::new([16; 32]),
+            ExecutorIdempotencyContractV2::ConnectorNonIdempotentSingleAttempt,
+            UnixMillisV2::new(1),
+            UnixMillisV2::new(u64::MAX),
+        )
+        .and_then(|descriptor| descriptor.with_business_profile(profile.clone()))
+    };
+
+    // Core validate() stays permissive: an UPDATE descriptor is well-formed even
+    // without the validator, so existing write descriptors keep working. It is
+    // the deployment rule, not validate(), that requires confinement.
+    let bare = build(vec![]).unwrap();
+    assert!(!deployment_requires_intent_flow_confinement(
+        EffectSetV2::UPDATE,
+        bare.internal_validators()
+    ));
+
+    // The generator ships it WITH confinement; validate() also accepts that.
+    let write = build(vec![confinement]).unwrap();
+    assert!(deployment_requires_intent_flow_confinement(
+        EffectSetV2::UPDATE,
+        write.internal_validators()
+    ));
+
+    // The validator build registers, and the descriptor's declaration activates
+    // against it at G5. Identity (id, version, build digest) must match exactly.
+    let registry = activate_internal_validator_registry(vec![InternalValidatorBuildV2::new(
+        kind,
+        kind.implementation_id(),
+        VersionV2::new(1, 0, 0),
+        build_digest,
+    )])
+    .unwrap();
+    registry.activate_exact(write.internal_validators()).unwrap();
+
+    // A build with a different digest cannot activate the same declaration:
+    // the constraint and the registry build must carry the generator's digest.
+    let mismatched = activate_internal_validator_registry(vec![InternalValidatorBuildV2::new(
+        kind,
+        kind.implementation_id(),
+        VersionV2::new(1, 0, 0),
+        Digest32V2::new([9; 32]),
+    )])
+    .unwrap();
+    assert!(mismatched
+        .activate_exact(write.internal_validators())
+        .is_err());
+}
+
 fn validator(id: u32) -> InternalValidatorDeclarationV2 {
     InternalValidatorDeclarationV2::new(
         ImplementationIdV2::new(id),
