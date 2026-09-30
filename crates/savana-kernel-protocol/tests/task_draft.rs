@@ -551,10 +551,10 @@ fn splice(bytes: &[u8], old: &[u8], new: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn result_derived_controls_are_not_admitted_into_a_root_draft_yet() {
-    // The owner approval text and G4 do not handle result-derived edges yet,
-    // so no draft may carry one: otherwise an owner could sign an edge the
-    // approval display never showed.
+fn a_result_derived_edge_is_admitted_and_shown_to_the_owner() {
+    // A derived control is admitted into a root draft; the approval text shows
+    // the owner the EDGE (which clause's result, which path), not a value it
+    // cannot see, and marks the rendering schema as derived (2).
     let exact = controls("A", "Alice", BusinessMagnitudeV2::CountField);
     let mut rules = std::collections::BTreeMap::new();
     rules.insert(
@@ -579,23 +579,55 @@ fn result_derived_controls_are_not_admitted_into_a_root_draft_yet() {
         rules,
     )
     .unwrap();
-    assert!(TaskAuthorizationDraftAlternativeV2::new(d(3), edge.clone()).is_err());
-
-    // The wire path is closed too: splice the edge into a valid draft.
-    let bytes = encode_task_authorization_draft_v2(&draft(vec![clause(1, vec![])], 1).unwrap())
+    let edge_alt = TaskAuthorizationDraftAlternativeV2::new(d(3), edge.clone()).unwrap();
+    // Clause 1 is the prior read; clause 2 sends using its result.
+    let read = TaskAuthorizationDraftClauseV2::new(
+        1,
+        vec![TaskAuthorizationDraftAlternativeV2::new(
+            d(3),
+            controls("A", "Alice", BusinessMagnitudeV2::CountField),
+        )
+        .unwrap()],
+        1,
+        1,
+        1,
+        vec![],
+        false,
+    )
+    .unwrap();
+    let send = TaskAuthorizationDraftClauseV2::new(2, vec![edge_alt], 1, 1, 1, vec![1], false).unwrap();
+    let draft = TaskAuthorizationDraftV2::new(
+        d(4),
+        PrincipalIdV2::new([5; 32]),
+        DurableTaskIdV2::new([6; 32]),
+        1,
+        d(7),
+        d(8),
+        9,
+        UnixMillisV2::new(10),
+        UnixMillisV2::new(100),
+        d(9),
+        vec![read, send],
+    )
+    .unwrap();
+    // Round-trips on the wire (discriminant 2 controls carried through).
+    let bytes = encode_task_authorization_draft_v2(&draft).unwrap();
+    assert_eq!(decode_task_authorization_draft_v2(&bytes).unwrap(), draft);
+    // The owner sees the derived edge and the derived rendering schema.
+    let text = draft.render_approval_text().unwrap();
+    let projection: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+    assert_eq!(projection["rendering_schema"], 2);
+    let derived = &projection["clauses"][1]["alternatives"][0]["derived_fields"]["to"];
+    assert_eq!(derived["source_clause"], 1);
+    assert_eq!(derived["path"][0], "participants");
+    assert_eq!(derived["path"][1], "0");
+    assert_eq!(derived["type"], "Text");
+    // The signed root's alternative carries the derived (rule) digest.
+    let signed = draft
+        .to_unsigned_authorization(TaskEvidenceKindV2::ApprovedDraft, d(12))
         .unwrap();
-    let exact_wire = cbor_bytes(&encode_business_controls_v2(&exact).unwrap());
-    let spliced = splice(
-        &bytes,
-        &exact_wire,
-        &cbor_bytes(&encode_business_controls_v2(&edge).unwrap()),
+    assert_eq!(
+        signed.clauses()[1].alternatives()[0],
+        edge.action_alternative(d(3)).unwrap()
     );
-    assert!(decode_task_authorization_draft_v2(&spliced).is_err());
-    // Control: the same splice with other exact controls decodes, so the
-    // refusal above comes from the derived edge, not from the splice.
-    let other = cbor_bytes(
-        &encode_business_controls_v2(&controls("A", "Carol", BusinessMagnitudeV2::CountField))
-            .unwrap(),
-    );
-    assert!(decode_task_authorization_draft_v2(&splice(&bytes, &exact_wire, &other)).is_ok());
 }

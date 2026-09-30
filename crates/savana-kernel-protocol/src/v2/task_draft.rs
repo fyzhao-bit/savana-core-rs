@@ -22,13 +22,10 @@ impl TaskAuthorizationDraftAlternativeV2 {
         controls: BusinessControlsV2,
     ) -> Result<Self, ProtocolError> {
         nonzero(descriptor_digest.as_bytes())?;
-        // Result-derived controls are not admitted into any root yet: the owner
-        // approval text, G4 matching and kernel readers of installed drafts do
-        // not handle them, so an owner could otherwise sign an edge the display
-        // never showed. Admission opens together with that wiring.
-        if !controls.derived().is_empty() {
-            return Err(malformed());
-        }
+        // Result-derived controls are now admitted: render_approval_text shows
+        // each edge (source clause + path) to the owner, G4 matches under the
+        // signed rule, and the only kernel reader of installed-draft controls is
+        // the final-release path, whose profile never carries a derived field.
         Ok(Self {
             descriptor_digest,
             controls,
@@ -258,6 +255,13 @@ impl TaskAuthorizationDraftV2 {
     /// text that cannot satisfy the approval channel's NFC rule is refused.
     pub fn render_approval_text(&self) -> Result<BoundedApprovalDisplayTextV2, ProtocolError> {
         let mut clauses = Vec::new();
+        // Present only when some alternative signs a result-derived edge, so an
+        // exact-only root renders byte-identically to before.
+        let any_derived = self
+            .clauses
+            .0
+            .iter()
+            .any(|c| c.alternatives.0.iter().any(|a| !a.controls.derived().is_empty()));
         for clause in &self.clauses.0 {
             let mut alternatives = Vec::new();
             for (index, alt) in clause.alternatives.0.iter().enumerate() {
@@ -277,17 +281,41 @@ impl TaskAuthorizationDraftV2 {
                     }
                 };
                 let roles: serde_json::Map<String, serde_json::Value> = p.fields().iter().map(|f| (f.name().into(), serde_json::json!({"role":format!("{:?}",f.role()), "type":format!("{:?}",f.kind())}))).collect();
-                alternatives.push(serde_json::json!({
+                let mut alternative = serde_json::json!({
                     "alternative_index":index, "descriptor_digest":hex(alt.descriptor_digest.as_bytes()),
                     "profile_digest":hex(p.digest().as_bytes()), "codec":format!("{:?}",p.codec()), "operation":p.operation(),
                     "target_identity":hex(p.target_identity().as_bytes()), "credential_identity":hex(p.credential_identity().as_bytes()),
                     "effect":format!("{:?}",p.effect()), "fields":fields, "field_mapping":roles, "magnitude_rule":rule,
-                }));
+                });
+                // A result-derived field carries no value here: show the owner
+                // the edge (which clause's result, which path) so they approve
+                // the source of the value, not a value they cannot see.
+                if !alt.controls.derived().is_empty() {
+                    let derived: serde_json::Map<String, serde_json::Value> = alt
+                        .controls
+                        .derived()
+                        .iter()
+                        .map(|(name, r)| {
+                            (
+                                name.clone(),
+                                serde_json::json!({
+                                    "source_clause": r.source_clause(),
+                                    "path": r.path(),
+                                    "type": format!("{:?}", r.kind()),
+                                    "max_bytes": r.max_bytes(),
+                                    "meaning": "The value the kernel extracts from the verified result of source_clause at this JSON path",
+                                }),
+                            )
+                        })
+                        .collect();
+                    alternative["derived_fields"] = serde_json::Value::Object(derived);
+                }
+                alternatives.push(alternative);
             }
             clauses.push(serde_json::json!({"clause_id":clause.clause_id, "alternatives":alternatives, "maximum_single_magnitude":clause.maximum_single_magnitude, "total_magnitude_budget":clause.total_magnitude_budget, "maximum_attempts":clause.maximum_attempts, "predecessor_clause_ids":clause.predecessor_clause_ids.0, "retry_after_proven_no_effect":clause.retry_after_proven_no_effect}));
         }
         let projection = serde_json::json!({
-            "rendering_schema":1, "operation":if self.revision == 1 {"Create task authorization"} else {"Replace task authorization; retain prior consumption"},
+            "rendering_schema":if any_derived {2} else {1}, "operation":if self.revision == 1 {"Create task authorization"} else {"Replace task authorization; retain prior consumption"},
             "authorization_id":hex(self.authorization_id.as_bytes()), "revision":self.revision, "expected_previous_revision":self.revision-1,
             "principal":hex(self.principal.as_bytes()), "task":hex(self.task.as_bytes()), "installation_digest":hex(self.installation_digest.as_bytes()),
             "manifest_digest":hex(self.manifest_digest.as_bytes()), "deployment_generation":self.deployment_generation,
