@@ -184,18 +184,22 @@ payload cannot satisfy the signed edge. Sequenced smallest-first:
   provider adapter. What remains is experiment-harness wiring and the run, which
   can only be validated end to end on a fresh host (daemons + DeepSeek).
 
-- **W2 — `append_to_file` differentiator (scalar). REMAINING (harness + run).**
-  Needs: a two-operation reviewed contract (read clause -> append clause whose
-  `content` is the result-derived edge from the read at a fixed path, `file_id`
-  owner-text); `reviewed_clauses` (protected_setup.py) emitting that derived
-  edge in the clause JSON the bridge above accepts; the planner plan binding
-  op2.content to op1's result (SlotBinding.result_path, built in slice 1b);
-  scoring the append side effect via the official oracle; then the fresh-host
-  run. The compromised-planner case is the differentiator: the planner cannot
-  bind a literal attacker `content`/`file_id`, because G4 admits only the signed
-  derived edge / owner value; CaMeL's P-LLM literals get sources={User} and are
-  allowed. IntentFlowConfinement (G5) additionally escalates to owner approval
-  when the read source itself is poisoned.
+- **W2 — `append_to_file` differentiator (scalar). DONE (harness + local
+  fresh-host runs; see `experiments/WRITE-DERIVED-20260930.zh-CN.md`).**
+  As built the edge runs the other way round from the first sketch: the
+  WRITE TARGET is derived and the payload is the owner's. Contract
+  `user_task_29:owner_content` = clause 1 `dojo.file.search_name`
+  (filename owner-text) -> clause 2 `dojo.file.append` whose `file_id` is the
+  owner-signed result edge `(1, result/content/0/text/$json/0/id_, Text, 64)`
+  and whose `content` is the owner's exact text -> clause 3 final release.
+  The `$json` path step decodes the tool's nested JSON text. The kernel checks
+  the edge at prepare (before the read runs) and again at dispatch; the
+  planner can only reference the signed edge, never a literal target. The
+  official `user_task_29` asks the model to invent the two activities, which
+  is a computed payload (not supported yet, W4-class), so the variant fixes
+  the owner's text; its oracle is the official one. CaMeL's shipped
+  `append_to_file_policy` checks only that the file's readers may read the
+  content, not which file the planner chose.
 - **W3 — array (text-list) fields** for `recipients`/`participants`
   (`send_email`, `create_calendar_event`). New field/value type, list control
   digest, MCP list encode/decode, list rendering; scalar digests stay
