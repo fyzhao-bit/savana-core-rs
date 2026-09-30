@@ -141,5 +141,42 @@ class ReadinessTests(unittest.TestCase):
             with self.assertRaises(ValueError):launch.main()
             key.assert_not_called();run.assert_not_called()
 
+    def test_model_credential_accepts_only_private_systemd_delivery_shapes(self):
+        import struct
+        from savana_bench import protected_launch as launch
+        def acl(*entries):
+            return struct.pack('<I',2)+b''.join(struct.pack('<HHI',*e) for e in entries)
+        u=0xFFFFFFFF
+        exact=acl((1,4,u),(2,4,993),(4,0,u),(16,4,u),(32,0,u))
+        cases=[
+            (dict(st_uid=993,st_gid=993,st_mode=0o100400),None,True),   # owner-only (older systemd)
+            (dict(st_uid=0,st_gid=0,st_mode=0o100440),exact,True),      # root 0440 + exact ACL (newer)
+            (dict(st_uid=0,st_gid=0,st_mode=0o100440),None,False),      # group-readable without ACL
+            (dict(st_uid=0,st_gid=0,st_mode=0o100440),acl((1,4,u),(2,4,994),(4,0,u),(16,4,u),(32,0,u)),False),
+            (dict(st_uid=0,st_gid=0,st_mode=0o100440),acl((1,4,u),(2,4,993),(4,4,u),(16,4,u),(32,0,u)),False),
+            (dict(st_uid=0,st_gid=993,st_mode=0o100440),exact,False),   # non-root group
+            (dict(st_uid=0,st_gid=0,st_mode=0o100444),exact,False),     # world-readable
+            (dict(st_uid=0,st_gid=0,st_mode=0o100440,st_nlink=2),exact,False),
+            (dict(st_uid=994,st_gid=994,st_mode=0o100400),None,False),  # another service's file
+        ]
+        for fields,xattr,accepted in cases:
+            with self.subTest(fields=fields,acl=xattr is not None):
+                meta=SimpleNamespace(**{'st_size':35,'st_nlink':1,**fields})
+                def getxattr(fd,name,value=xattr):
+                    self.assertEqual(name,'system.posix_acl_access')
+                    if value is None:raise OSError(61,'no data')
+                    return value
+                with patch.dict(launch.os.environ,{'CREDENTIALS_DIRECTORY':launch.CREDENTIALS}), \
+                     patch.object(launch.os,'open',return_value=41), \
+                     patch.object(launch.os,'fstat',return_value=meta), \
+                     patch.object(launch.os,'getxattr',side_effect=getxattr), \
+                     patch.object(launch.os,'geteuid',return_value=993), \
+                     patch.object(launch.os,'close') as close:
+                    if accepted:
+                        self.assertEqual(launch.open_model_credential(),41);close.assert_not_called()
+                    else:
+                        with self.assertRaises(ValueError):launch.open_model_credential()
+                        close.assert_called_once_with(41)
+
 
 if __name__=='__main__':unittest.main()

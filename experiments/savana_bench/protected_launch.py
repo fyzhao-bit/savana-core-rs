@@ -84,14 +84,32 @@ def open_auth_broker():
         raise
 
 
+def _credential_acl_grants_only(fd, uid):
+    """Exact systemd >=254 delivery, matching the native Linux credential check:
+    owner r, this UID r, no group/other access. Any other ACL is rejected."""
+    try:
+        raw = os.getxattr(fd, 'system.posix_acl_access')
+    except OSError:
+        return False
+    undefined = 0xFFFFFFFF
+    expected = struct.pack('<I', 2) + b''.join(struct.pack('<HHI', *entry) for entry in (
+        (0x01, 4, undefined), (0x02, 4, uid), (0x04, 0, undefined), (0x10, 4, undefined), (0x20, 0, undefined)))
+    return raw == expected
+
+
 def open_model_credential():
     if os.environ.get('CREDENTIALS_DIRECTORY') != CREDENTIALS:
         raise ValueError('systemd_credentials_required')
     fd = os.open(CREDENTIALS+'/deepseek-api-key', os.O_RDONLY | os.O_NOFOLLOW)
     try:
         meta = os.fstat(fd)
-        if (not stat.S_ISREG(meta.st_mode) or meta.st_uid not in (0, os.geteuid())
-                or meta.st_mode & 0o077 or not 1 <= meta.st_size <= 256):
+        # Older systemd delivers an owner-only file; newer systemd delivers
+        # root:root 0440 plus an ACL naming only this service UID.
+        owner_only = meta.st_uid in (0, os.geteuid()) and not meta.st_mode & 0o077
+        exact_acl = (meta.st_uid == 0 and meta.st_gid == 0 and meta.st_nlink == 1
+            and stat.S_IMODE(meta.st_mode) == 0o440 and _credential_acl_grants_only(fd, os.geteuid()))
+        if (not stat.S_ISREG(meta.st_mode) or not (owner_only or exact_acl)
+                or not 1 <= meta.st_size <= 256):
             raise ValueError('private_model_credential_required')
         return fd
     except BaseException:
