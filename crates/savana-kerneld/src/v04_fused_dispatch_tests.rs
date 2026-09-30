@@ -1904,6 +1904,9 @@ fn assert_fused_final_release(
         .durable
         .task_authorization_state(task)
         .unwrap();
+    // Owner-visible publication scope: the private session and approvald bind
+    // the task authorization root, not the per-dispatch authorization digest.
+    assert_eq!(publication.root(), state.authorization().digest());
     assert_eq!(state.clause_consumption(1), Some((1, 1)));
     assert_eq!(state.clause_consumption(2), Some((1, 1)));
     assert_eq!(state.clause_consumption(3), Some((1, 1)));

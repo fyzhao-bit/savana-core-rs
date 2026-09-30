@@ -46,13 +46,26 @@ impl KernelAgentAuthorityV2 {
         let ProtocolDispatchSubjectV2::FinalRelease { binding, .. } = core.subject() else {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         };
+        core.task_binding()
+            .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
+        // The publication root is the owner's task authorization root, the same
+        // digest the private session and its approvald record are bound to. The
+        // dispatch binding's authorization digest is per-dispatch (transition,
+        // endorsements, policy) and never equals that root.
+        let root = self
+            .policy
+            .as_ref()
+            .ok_or(KernelAgentAuthorityErrorV2::Unavailable)?
+            .durable
+            .task_authorization_state(task)
+            .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?
+            .authorization()
+            .digest();
         Ok(Some(
             savana_kernel_protocol::v2::PrivatePublicationV04::new(
                 task,
                 core.durable_run_id(),
-                core.task_binding()
-                    .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?
-                    .authorization_digest(),
+                root,
                 self.config.kerneld_server_boot_id,
                 release,
                 binding.release_payload_digest(),
