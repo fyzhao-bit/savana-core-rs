@@ -263,6 +263,25 @@ mod tests {
                 approval: ToolApprovalRecordHandleV2::from_authority_entropy([3; 32]).unwrap(),
                 root: Digest32V2::new([4; 32]),
             },
+            // Without a response contract approvald applied the attachment but
+            // could not answer, so kerneld saw every delivery as unavailable.
+            ApprovalServiceOperationV2::AttachPrivatePublicationV04 {
+                session: record,
+                publication: super::super::PrivatePublicationV04::new(
+                    super::super::DurableTaskIdV2::new([8; 32]),
+                    super::super::DurableRunIdV2::new([9; 32]),
+                    Digest32V2::new([10; 32]),
+                    super::super::BootIdV2::new([11; 32]),
+                    super::super::DurableReleaseIdV2::new([12; 32]),
+                    Digest32V2::new([13; 32]),
+                    Digest32V2::new([14; 32]),
+                    Digest32V2::new([15; 32]),
+                    Digest32V2::new([16; 32]),
+                    Digest32V2::new([17; 32]),
+                    Digest32V2::new([18; 32]),
+                )
+                .unwrap(),
+            },
         ] {
             let tag = operation.tag();
             let request = ApprovalServiceRequestV2::new(

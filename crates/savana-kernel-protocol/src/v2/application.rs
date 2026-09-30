@@ -585,7 +585,7 @@ const fn error_set_for(role: EndpointRoleV2, tag: u16) -> Option<ErrorSetV2> {
         (EndpointRoleV2::AgentKernel, 20 | 28 | 33 | 39 | 40 | 43 | 70..=72)
         | (EndpointRoleV2::IngressKernel, 43 | 46 | 47) => Some(ErrorSetV2::Approval),
         (EndpointRoleV2::AgentApproval, 20 | 22..=24)
-        | (EndpointRoleV2::KernelApproval, 20 | 22 | 24 | 25)
+        | (EndpointRoleV2::KernelApproval, 20 | 22 | 24 | 25 | 27)
         | (EndpointRoleV2::IngressApproval, 20 | 22..=23) => Some(ErrorSetV2::Approval),
         (
             EndpointRoleV2::AgentApproval
