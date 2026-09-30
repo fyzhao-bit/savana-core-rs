@@ -766,6 +766,10 @@ struct PlanStepRecordV2 {
     task_authorization_digest: Digest32V2,
     proposer_parent: Digest32V2,
     arguments: Vec<PlanArgumentRecordV2>,
+    /// Owner-signed result-derived controls for this step, by field name. Empty
+    /// for the agent path and for steps with no result edge into a control
+    /// field; G4 uses them to build the match alternative under the derived rule.
+    derived_controls: Vec<(String, savana_kernel_protocol::v2::ResultDerivedControlV2)>,
 }
 
 struct PreparedToolIntentV2 {
@@ -3730,6 +3734,7 @@ impl KernelAgentAuthorityV2 {
                         task_authorization_digest: record.task_authorization_digest,
                         proposer_parent,
                         arguments,
+                        derived_controls: vec![],
                     });
                 }
                 self.plan_steps
@@ -4049,12 +4054,15 @@ impl KernelAgentAuthorityV2 {
             .durable
             .task_authorization_state(step.durable_task_id)
             .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
+        let derived: std::collections::BTreeMap<_, _> =
+            step.derived_controls.iter().cloned().collect();
         let task_match = match_business_proposal(
             &state,
             &business_request,
             step.descriptor_digest,
             step.plan_revision_digest,
             stored.provenance_set_digest(),
+            &derived,
             deployment_generation,
             now,
         )?;
@@ -8422,6 +8430,8 @@ fn project_final_release_business(
             alternative.descriptor_digest(),
             committed_plan.plan_revision_digest,
             provenance,
+            // Final release has no result-derived controls; every field is exact.
+            &std::collections::BTreeMap::new(),
             generation,
             now,
         )?;
@@ -8447,6 +8457,7 @@ fn match_business_proposal(
     descriptor: Digest32V2,
     plan_revision: PlanRevisionDigestV2,
     provenance: Digest32V2,
+    derived: &std::collections::BTreeMap<String, savana_kernel_protocol::v2::ResultDerivedControlV2>,
     generation: u64,
     now: UnixMillisV2,
 ) -> Result<savana_policy_core::v2::VerifiedTaskMatchV2, KernelAgentAuthorityErrorV2> {
@@ -8454,8 +8465,10 @@ fn match_business_proposal(
         return Err(KernelAgentAuthorityErrorV2::StateConflict);
     }
     let authorization = state.authorization();
+    // Result-derived fields match the owner-signed rule, not this request's
+    // concrete extracted value; every other field matches its exact value.
     let action = request
-        .action_alternative(descriptor)
+        .action_alternative_with_derived(descriptor, derived)
         .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
     let mut choices = authorization
         .material()
@@ -12277,6 +12290,7 @@ pub(crate) mod tests {
             task_authorization_digest: root_digest,
             proposer_parent: Digest32V2::new([0x44; 32]),
             arguments: vec![],
+            derived_controls: vec![],
         };
         let request = PrepareReleaseRequestV2::new(
             s.initial_document,

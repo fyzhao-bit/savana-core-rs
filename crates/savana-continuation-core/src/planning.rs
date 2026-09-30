@@ -44,6 +44,12 @@ pub struct SlotBinding {
     pub result_path: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_max_bytes: Option<u16>,
+    /// The owner clause whose verified result this edge extracts from. The root
+    /// compiler sets it from the source operation's clause, so a planner cannot
+    /// choose it; G4 rebuilds the owner-signed rule from it and fails on a
+    /// mismatch. Present exactly when `result_path` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_source_clause: Option<u64>,
 }
 
 /// Private compiler input. Never serialize this registry to a model implicitly.
@@ -144,6 +150,7 @@ impl Policy {
                         // edge, with a well-formed path and a non-zero bound: a
                         // whole-result (payload) edge carries neither.
                         || (b.result_path.is_some() != b.result_max_bytes.is_some())
+                        || (b.result_path.is_some() != b.result_source_clause.is_some())
                         || (b.result_path.is_some() && b.result_of.is_none())
                         || b.result_max_bytes == Some(0)
                         || b.result_path.as_ref().is_some_and(|path| {

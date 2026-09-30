@@ -498,6 +498,36 @@ impl KernelAgentAuthorityV2 {
                     })
                 })
                 .collect::<Result<Vec<_>, KernelAgentAuthorityErrorV2>>()?;
+            // Owner-signed result-derived controls for this step: for each
+            // binding that extracts a scalar from a prior result, rebuild the
+            // rule the owner signed (source clause and path/bound from the
+            // compiler-set binding, kind from the signed descriptor). G4 matches
+            // the request alternative under these, so a mismatch fails there.
+            let business = descriptor
+                .descriptor()
+                .unsigned()
+                .require_business_profile()
+                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+            let mut derived_controls = Vec::new();
+            for b in &operation.bindings {
+                if let (Some(source_clause), Some(path), Some(max_bytes)) =
+                    (b.result_source_clause, b.result_path.as_ref(), b.result_max_bytes)
+                {
+                    let field = business
+                        .fields()
+                        .iter()
+                        .find(|f| f.name() == b.argument)
+                        .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
+                    let rule = savana_kernel_protocol::v2::ResultDerivedControlV2::new(
+                        source_clause,
+                        path.clone(),
+                        field.kind(),
+                        max_bytes,
+                    )
+                    .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+                    derived_controls.push((b.argument.clone(), rule));
+                }
+            }
             // Logical operation identity is independent of its new ordinal or
             // plan version. Actual parameters remain bound in G4 and the profile.
             let identity = domain_digest(
@@ -519,6 +549,7 @@ impl KernelAgentAuthorityV2 {
                 task_authorization_digest: root,
                 proposer_parent: provenance.provenance_digest(),
                 arguments,
+                derived_controls,
             };
             let prepared =
                 self.prepare_tool_intent_material(&step, values, manifest, generation, now)?;

@@ -157,6 +157,9 @@ pub fn compile_fused_task_v04(
     {
         return Err(G4Error::StateConflict);
     }
+    // Source operation id -> its owner clause, so a result edge's source clause
+    // is set by the compiler (never the planner) for G4 to rebuild the rule.
+    let op_clause: BTreeMap<u16, u64> = draft.operations.iter().map(|o| (o.id, o.clause)).collect();
     let mut clause_ids = BTreeMap::new();
     for op in &draft.operations {
         if clause_ids.insert(op.clause, op.id).is_some() {
@@ -307,7 +310,20 @@ pub fn compile_fused_task_v04(
                 .map_err(|_| G4Error::StateConflict)?,
             action_template: u16::try_from(unsigned.action_template().get())
                 .map_err(|_| G4Error::StateConflict)?,
-            bindings: op.bindings.clone(),
+            bindings: {
+                let mut bindings = op.bindings.clone();
+                for binding in &mut bindings {
+                    // A path edge's source clause is authoritative from the
+                    // compiler; a whole-result (payload) edge carries none.
+                    binding.result_source_clause = match (binding.result_of, binding.result_path.is_some()) {
+                        (Some(source), true) => {
+                            Some(*op_clause.get(&source).ok_or(G4Error::StateConflict)?)
+                        }
+                        _ => None,
+                    };
+                }
+                bindings
+            },
             after: after.into_iter().collect(),
         });
     }

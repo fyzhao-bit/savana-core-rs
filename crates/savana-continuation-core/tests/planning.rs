@@ -179,6 +179,7 @@ fn policy() -> Policy {
                 result_of: None,
                 result_path: None,
                 result_max_bytes: None,
+                result_source_clause: None,
                 argument: "input".into(),
                 slot: [id as u8; 16],
             }],
@@ -239,6 +240,7 @@ fn result_edges_require_schema_two_declared_predecessors_and_wellformed_paths() 
     derived.operations[1].bindings[0].argument = "to".into();
     derived.operations[1].bindings[0].result_path = Some(vec!["participants".into(), "0".into()]);
     derived.operations[1].bindings[0].result_max_bytes = Some(256);
+    derived.operations[1].bindings[0].result_source_clause = Some(1);
     derived.validate().unwrap();
 
     for case in 0..9 {

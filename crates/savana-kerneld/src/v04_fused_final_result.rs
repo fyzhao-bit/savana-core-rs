@@ -125,6 +125,8 @@ impl KernelAgentAuthorityV2 {
             descriptor_digest,
             PlanRevisionDigestV2::new(*candidate.profile().as_bytes()),
             evidence_digest,
+            // Final result release has no result-derived controls.
+            &std::collections::BTreeMap::new(),
             generation,
             now,
         )?;
