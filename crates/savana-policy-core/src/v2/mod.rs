@@ -369,11 +369,12 @@ pub use savana_platform_identity::{
 pub use store_compatibility::{RecoveryValidationResultV2, StoreCompatibilityAttestationV2};
 pub use transition_audit::TransitionAuditV2;
 pub use validator::{
-    G5DecisionBranchV2, G5DecisionIndexV2, G5DecisionResolutionKindV2, G5DecisionResolutionV2,
-    G5Error, G5PolicyDispositionV2, InternalValidatorImplementationKindV2, PublicDecisionTraceV2,
-    ValidatorBuildManifestIdentityV2, VerifiedG5EvaluationInputV2,
-    VerifiedInternalValidatorImplementationV2, VerifiedInternalValidatorRegistryV2,
-    VerifiedInternalValidatorSetV2,
+    deployment_requires_intent_flow_confinement, G5DecisionBranchV2, G5DecisionIndexV2,
+    G5DecisionResolutionKindV2, G5DecisionResolutionV2, G5Error, G5PolicyDispositionV2,
+    InternalValidatorImplementationKindV2, PublicDecisionTraceV2, ValidatorBuildManifestIdentityV2,
+    VerifiedG5EvaluationInputV2, VerifiedInternalValidatorImplementationV2,
+    VerifiedInternalValidatorRegistryV2, VerifiedInternalValidatorSetV2, EFFECT_AUTHORIZING_V2,
+    EFFECT_STATE_CHANGING_V2,
 };
 pub use value::{value_digest_v2, ArgumentNameV2, FieldNameV2, IdentifierV2, KernelValueV2};
 pub use verification_evidence::{ClosedVerificationDigestFieldV2, VerificationEvidenceV2};

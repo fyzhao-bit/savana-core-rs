@@ -101,6 +101,40 @@ pub const EFFECT_AUTHORIZING_V2: EffectSetV2 = EffectSetV2::CREATE
     .union(EffectSetV2::EXECUTE)
     .union(EffectSetV2::FINAL_RELEASE);
 
+/// Authorizing effects that change state outside the kernel. This is
+/// [`EFFECT_AUTHORIZING_V2`] without `FINAL_RELEASE`: releasing a result is
+/// governed by the G3 declassification path, not by a per-descriptor validator,
+/// and the deployment's single final-release tool deliberately ships no
+/// validator. A CREATE/UPDATE/DELETE/SEND/EXECUTE tool has no such separate
+/// control, so a deployment that ships one must bind `IntentFlowConfinement`.
+pub const EFFECT_STATE_CHANGING_V2: EffectSetV2 = EffectSetV2::CREATE
+    .union(EffectSetV2::UPDATE)
+    .union(EffectSetV2::DELETE)
+    .union(EffectSetV2::SEND)
+    .union(EffectSetV2::EXECUTE);
+
+/// Deployment admission rule: a descriptor that carries a state-changing effect
+/// must declare the `IntentFlowConfinement` validator, so that a call binding an
+/// `ExternalUntrusted` argument (planner output, or a value the kernel lifted
+/// out of a tool result) escalates to owner approval at G5 instead of executing
+/// silently. Returns `true` when the descriptor is allowed to ship. Reads and
+/// the final-release tool need no validator and always pass. This is not the
+/// core [`crate::v2::UnsignedToolDescriptorV2`] shape check (which stays
+/// permissive so existing write descriptors keep their own validators); it is a
+/// stricter rule a deployment generator applies to every write tool it ships.
+pub fn deployment_requires_intent_flow_confinement(
+    effects: EffectSetV2,
+    validators: &[InternalValidatorDeclarationV2],
+) -> bool {
+    if effects.intersection(EFFECT_STATE_CHANGING_V2) == EffectSetV2::EMPTY {
+        return true;
+    }
+    let required = InternalValidatorImplementationKindV2::IntentFlowConfinement.implementation_id();
+    validators
+        .iter()
+        .any(|declaration| declaration.implementation_id() == required)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ValidatorBuildManifestIdentityV2 {
     implementation_id: ImplementationIdV2,

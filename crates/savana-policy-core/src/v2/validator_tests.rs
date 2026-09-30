@@ -386,6 +386,69 @@ fn effect_authorizing_set_covers_every_effect_except_read() {
 }
 
 #[test]
+fn deployment_write_tool_must_declare_intent_flow_confinement() {
+    use crate::v2::validator::{
+        deployment_requires_intent_flow_confinement, EFFECT_STATE_CHANGING_V2,
+    };
+    use crate::v2::EffectSetV2;
+
+    let confinement = InternalValidatorDeclarationV2::new(
+        InternalValidatorImplementationKindV2::IntentFlowConfinement.implementation_id(),
+        VersionV2::new(1, 0, 0),
+        Digest32V2::new([7; 32]),
+    );
+    let other = InternalValidatorDeclarationV2::new(
+        InternalValidatorImplementationKindV2::ProjectionBindingIntegrity.implementation_id(),
+        VersionV2::new(1, 0, 0),
+        Digest32V2::new([9; 32]),
+    );
+
+    // The state-changing set is the authorizing set without final release.
+    assert!(!EFFECT_STATE_CHANGING_V2.contains(EffectSetV2::FINAL_RELEASE));
+    assert!(!EFFECT_STATE_CHANGING_V2.contains(EffectSetV2::READ));
+
+    // Reads and the final-release tool ship with no validator.
+    assert!(deployment_requires_intent_flow_confinement(
+        EffectSetV2::READ,
+        &[]
+    ));
+    assert!(deployment_requires_intent_flow_confinement(
+        EffectSetV2::FINAL_RELEASE,
+        &[]
+    ));
+
+    // Every state-changing effect needs the confinement validator; a different
+    // validator (or none) is refused, the confinement one (even alongside
+    // another) is accepted.
+    for effect in [
+        EffectSetV2::CREATE,
+        EffectSetV2::UPDATE,
+        EffectSetV2::DELETE,
+        EffectSetV2::SEND,
+        EffectSetV2::EXECUTE,
+    ] {
+        assert!(!deployment_requires_intent_flow_confinement(effect, &[]));
+        assert!(!deployment_requires_intent_flow_confinement(
+            effect,
+            std::slice::from_ref(&other)
+        ));
+        assert!(deployment_requires_intent_flow_confinement(
+            effect,
+            std::slice::from_ref(&confinement)
+        ));
+        assert!(deployment_requires_intent_flow_confinement(
+            effect,
+            &[other, confinement]
+        ));
+        // A write that also reads still needs it.
+        assert!(!deployment_requires_intent_flow_confinement(
+            effect.union(EffectSetV2::READ),
+            &[]
+        ));
+    }
+}
+
+#[test]
 fn intent_flow_confinement_has_its_own_closed_implementation_id() {
     // The kind must be distinct from the five pre-existing validators and must
     // keep implementation id 6; `savana-kerneld`'s startup decoder maps that
