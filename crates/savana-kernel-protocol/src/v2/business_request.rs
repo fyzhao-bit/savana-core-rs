@@ -434,13 +434,26 @@ impl BusinessRequestV2 {
         &self,
         descriptor_digest: Digest32V2,
     ) -> Result<ActionAlternativeV2, BusinessCodecErrorV2> {
+        self.action_alternative_with_derived(descriptor_digest, &BTreeMap::new())
+    }
+    /// Build the alternative treating `derived` fields as owner-signed result
+    /// edges: their digests commit to the RULE (under the derived domain), not
+    /// this request's concrete value, so the alternative equals the owner-signed
+    /// derived alternative iff the rule matches. The concrete value's integrity
+    /// is checked separately (G7 check_result_argument); here it is ignored for
+    /// the derived fields. `derived` must name only fields this profile controls.
+    pub fn action_alternative_with_derived(
+        &self,
+        descriptor_digest: Digest32V2,
+        derived: &BTreeMap<String, ResultDerivedControlV2>,
+    ) -> Result<ActionAlternativeV2, BusinessCodecErrorV2> {
         ActionAlternativeV2::new(
             descriptor_digest,
             self.profile.codec,
             self.profile.effect,
-            self.resource_digest(),
-            self.destination_digest(),
-            self.parameters_digest(),
+            controls::resource_digest(&self.profile, &self.fields, derived),
+            controls::destination_digest(&self.profile, &self.fields, derived),
+            controls::parameters_digest(&self.profile, &self.fields, derived),
             self.unit(),
         )
         .map_err(malformed)

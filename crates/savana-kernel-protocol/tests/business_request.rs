@@ -945,3 +945,73 @@ fn derived_controls_validate_coverage_disjointness_and_kind() {
     assert!(ResultDerivedControlV2::new(1, vec!["".into()], BusinessFieldTypeV2::Text, 8).is_err());
     assert!(ResultDerivedControlV2::new(1, vec!["x".into()], BusinessFieldTypeV2::Text, 0).is_err());
 }
+
+#[test]
+fn a_request_matches_the_owner_signed_derived_alternative_iff_the_rule_matches() {
+    // This is the property G4 relies on: the kernel materializes a concrete
+    // value into the derived field, then builds the request alternative with the
+    // SAME rule the owner signed. It must equal the signed derived alternative,
+    // regardless of the concrete value, and differ if the rule differs.
+    let p = profile(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        BusinessMagnitudeV2::CountField,
+    );
+    let rule = ResultDerivedControlV2::new(
+        1,
+        vec!["participants".into(), "0".into()],
+        BusinessFieldTypeV2::Text,
+        256,
+    )
+    .unwrap();
+    let mut signed = std::collections::BTreeMap::new();
+    signed.insert("to".to_string(), rule.clone());
+    let root_alt = BusinessControlsV2::from_fields_with_derived(
+        &p,
+        vec![
+            ("file".into(), BusinessValueV2::Text("A".into())),
+            ("subject".into(), BusinessValueV2::Text("report".into())),
+        ],
+        signed.clone(),
+    )
+    .unwrap()
+    .action_alternative(d(90))
+    .unwrap();
+
+    // The kernel's request carries whatever scalar it extracted into "to".
+    for extracted in ["a@x.com", "attacker@evil.com", "anything"] {
+        let request = BusinessRequestV2::parse(
+            &p,
+            "request-1",
+            format!(
+                r#"{{"jsonrpc":"2.0","id":"request-1","method":"tools/call","params":{{"name":"mail.send","arguments":{{"body":"hi","file":"A","quantity":1,"subject":"report","to":{extracted:?}}}}}}}"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        // With the signed rule: equal (the concrete "to" value is ignored).
+        assert_eq!(
+            request.action_alternative_with_derived(d(90), &signed).unwrap(),
+            root_alt
+        );
+        // Without the rule (treating "to" as a literal): never equal.
+        assert_ne!(request.action_alternative(d(90)).unwrap(), root_alt);
+    }
+    // A different rule (other path) produces a different alternative: a planner
+    // that changes the edge cannot match the owner-signed one.
+    let mut other = std::collections::BTreeMap::new();
+    other.insert(
+        "to".to_string(),
+        ResultDerivedControlV2::new(1, vec!["organizer".into()], BusinessFieldTypeV2::Text, 256)
+            .unwrap(),
+    );
+    let request = BusinessRequestV2::parse(
+        &p,
+        "request-1",
+        br#"{"jsonrpc":"2.0","id":"request-1","method":"tools/call","params":{"name":"mail.send","arguments":{"body":"hi","file":"A","quantity":1,"subject":"report","to":"a@x.com"}}}"#,
+    )
+    .unwrap();
+    assert_ne!(
+        request.action_alternative_with_derived(d(90), &other).unwrap(),
+        root_alt
+    );
+}
