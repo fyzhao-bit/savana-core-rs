@@ -20,7 +20,8 @@ worker=importlib.util.module_from_spec(spec);sys.modules[spec.name]=worker;spec.
 
 
 def view(**changes):
-    value=dict(schema=1,job=[1]*16,role='planner',model_profile=1,deadline=int(time.time()*1000)+10000,
+    deadline=changes.pop('deadline',int(time.time()*1000)+10000)
+    value=dict(schema=1,job=[1]*16,role='planner',model_profile=1,deadline=list(deadline.to_bytes(8,'big')),
                mode='registered_template_v04',public_view=list(b'public synthetic task'),template_ids=[1,2],
                question_codes=[],suggested_templates=[],suggested_questions=[])
     value.update(changes);return worker._json(value)
@@ -96,6 +97,14 @@ class WorkerTests(unittest.TestCase):
                          {'choice':{'kind':'execute','command':'send_email'}},
                          {'choice':{'kind':'registered_template','template':1},'job':[9]*16}):
             with self.assertRaises(ValueError):job.encode_proposal(proposed)
+
+    def test_deadline_is_fixed_width_bytes_not_a_decimal_digit_run(self):
+        job=worker.ModelJob.decode(view(deadline=1790733952898))
+        self.assertEqual(job.deadline_ms,1790733952898)
+        self.assertIn(b'"deadline":[0,0,1,',job.raw)
+        for deadline in (1790733952898,[0]*8,[1]*7,[256]+[0]*7,[True]+[0]*7):
+            with self.assertRaises(ValueError):worker.ModelJob.decode(view(deadline=0) .replace(
+                b'"deadline":[0,0,0,0,0,0,0,0]',b'"deadline":'+worker._json(deadline)))
 
     def test_binding_changes_with_each_view_and_no_authority_is_created(self):
         a=worker.ModelJob.decode(view(deadline=10000));b=worker.ModelJob.decode(view(deadline=10001))

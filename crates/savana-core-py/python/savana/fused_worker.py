@@ -87,6 +87,7 @@ class ModelJob:
     raw: bytes
     view: dict
     commitment: bytes
+    deadline_ms: int
 
     @classmethod
     def decode(cls, raw):
@@ -97,7 +98,7 @@ class ModelJob:
                 or not _integers(v['job'],255,size=16) or not any(v['job'])
                 or v['role'] not in ('advisor','planner')
                 or type(v['model_profile']) is not int or not 1<=v['model_profile']<=65535
-                or type(v['deadline']) is not int or not 0<v['deadline']<2**64
+                or not _integers(v['deadline'],255,size=8) or not any(v['deadline'])
                 or v['mode'] not in ('registered_template_v04','structural_order_v04')
                 or not _integers(v['public_view'],255) or len(v['public_view'])>4096):
             raise ValueError('view_values')
@@ -106,7 +107,8 @@ class ModelJob:
             if not _integers(v[name],65535) or len(v[name])>64: raise ValueError('view_list')
         domain=b'SAVANA_FUSED_MODEL_VIEW_V04\0'
         digest=hashlib.sha256(len(domain).to_bytes(8,'big')+domain+len(raw).to_bytes(8,'big')+raw).digest()
-        return cls(raw,v,digest)
+        # Unix ms as 8 big-endian bytes: a decimal would trip the G3 PII gate.
+        return cls(raw,v,digest,int.from_bytes(bytes(v['deadline']),'big'))
 
     def encode_proposal(self, proposed):
         # This is syntax/binding only, never an authorization decision. Rust
@@ -212,8 +214,8 @@ def serve_connection(raw_socket, *, context, client_certificate_sha256, propose,
         size=int(fields['content-length'])
         if not 0<size<=MAX_VIEW+3:raise ValueError('request_size')
         job=ModelJob.decode(decode_cbor_bytes(read(size),MAX_VIEW))
-        if job.view['deadline']<=int(time.time()*1000):raise TimeoutError('view_expired')
-        end=min(end,clock()+(job.view['deadline']/1000-time.time()))
+        if job.deadline_ms<=int(time.time()*1000):raise TimeoutError('view_expired')
+        end=min(end,clock()+(job.deadline_ms/1000-time.time()))
         remaining()
         response=job.encode_proposal(propose(job,end))
         remaining()

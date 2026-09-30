@@ -384,3 +384,41 @@ fn fused_exchange_uncertain_reservation_or_revocation_prevents_any_send() {
         assert!(worker.requests.is_empty());
     }
 }
+
+#[test]
+fn fused_model_view_with_real_epoch_deadline_passes_the_residual_pii_gate() {
+    // Production views carry a current Unix-ms deadline. As a JSON decimal it
+    // matched the card/phone PII patterns, so G3 withheld every view.
+    let gate = |wire: &[u8]| {
+        crate::v2::leak_gate::enforce_for_declassification(
+            &KernelValueV2::bytes(wire.to_vec()).unwrap(),
+            LeakGateDutyV2::BlocklistAndNoResidualPii,
+        )
+    };
+    assert!(matches!(
+        gate(br#"{"deadline":1790733952898}"#),
+        Err(G3Error::LeakGateResidualPii)
+    ));
+    let view = ModelView {
+        schema: 1,
+        job: [7; 16],
+        role: Role::Planner,
+        model_profile: 1,
+        deadline: 1_790_733_952_898,
+        mode: Mode::RegisteredTemplateV04,
+        public_view: b"Who else is invited at the networking event?".to_vec(),
+        template_ids: vec![1, 2],
+        question_codes: vec![],
+        suggested_templates: vec![1],
+        suggested_questions: vec![],
+    };
+    let wire = view.canonical_bytes().unwrap();
+    assert!(gate(&wire).is_ok());
+    let longest_digit_run = wire
+        .split(|byte| !byte.is_ascii_digit())
+        .map(<[u8]>::len)
+        .max()
+        .unwrap();
+    assert!(longest_digit_run < 8);
+    assert_eq!(serde_json::from_slice::<ModelView>(&wire).unwrap(), view);
+}

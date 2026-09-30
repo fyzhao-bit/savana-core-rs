@@ -229,6 +229,8 @@ pub struct ModelView {
     pub job: [u8; 16],
     pub role: Role,
     pub model_profile: u16,
+    /// Unix milliseconds, sent as 8 big-endian bytes (see `wire_deadline`).
+    #[serde(with = "wire_deadline")]
     pub deadline: u64,
     pub mode: Mode,
     pub public_view: Vec<u8>,
@@ -270,6 +272,21 @@ pub struct PlanProposal {
     pub job: [u8; 16],
     pub view: Digest,
     pub choice: PlanChoice,
+}
+
+/// The G3 leak gate scans the released JSON wire. A 13-digit Unix-ms decimal
+/// matches its card/phone PII patterns, so a decimal deadline would withhold
+/// every view. Fixed-width bytes carry the same value without digit runs.
+mod wire_deadline {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+        value.to_be_bytes().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+        <[u8; 8]>::deserialize(deserializer).map(u64::from_be_bytes)
+    }
 }
 
 fn wire<T: Serialize>(value: &T) -> Result<Vec<u8>, Error> {
