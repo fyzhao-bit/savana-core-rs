@@ -74,6 +74,7 @@ class OperatorTests(unittest.TestCase):
 
     def test_compile_rejects_model_selected_plan(self):
         contract=_TASKS[0];d=dict(installation=(b'i'*32).hex(),store=(b's'*32).hex(),planner=(b'p'*32).hex(),
+            application_turn=(b'u'*32).hex(),
             descriptors={contract.tool:(b't'*32).hex(),'savana.final_result_release':(b'r'*32).hex()})
         now=time.time_ns()//1000000
         draft=prepare_draft(contract,task=b'a'*32,root=b'b'*32,observer=b'o'*32,tool_descriptor=b't'*32,
@@ -86,10 +87,11 @@ class OperatorTests(unittest.TestCase):
             op=FiniteOperator(d,Ed25519PrivateKey.generate(),tmp)
             with patch.object(op,'_submit',return_value=dict(kind='planning_enrolled',task=list(b'a'*32),profile=list(b'f'*32))) as submit:
                 self.assertEqual(op.compile(request)['profile'],(b'f'*32).hex())
-                for mutation in ('public_view','tool','slot'):
+                for mutation in ('public_view','tool','slot','turn'):
                     changed=copy.deepcopy(request);plan=changed['command']['operation']['draft']
                     if mutation=='public_view':plan['rounds'][0]['public_view']=[42]
                     elif mutation=='tool':plan['operations'][0]['tool']='send_email'
+                    elif mutation=='turn':plan['final_release']['turn']=list(b'v'*32)
                     else:plan['operations'][0]['bindings'][0]['slot']=[0]*16
                     with self.assertRaises(ValueError):op.compile(changed)
                 self.assertEqual(submit.call_count,1)

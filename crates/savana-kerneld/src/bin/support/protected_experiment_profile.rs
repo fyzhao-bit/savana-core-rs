@@ -2,7 +2,7 @@
 //! endpoint and never re-sign an installed manifest or task root.
 use super::*;
 use savana_kernel_protocol::v2::{business_target_identity_v2,
-    final_result_release_business_profile_v04, ActionCodecProfileV2, BusinessFieldRoleV2 as R,
+    final_result_release_business_profile_v04, final_result_release_business_request_v04, ActionCodecProfileV2, BusinessFieldRoleV2 as R,
     BusinessFieldTypeV2 as T, BusinessFieldV2, BusinessMagnitudeV2, BusinessProfileV2, TaskEffectV2};
 use savana_policy_core::v2::{BoundedConnectorNameV2, BoundedConnectorUrlV2, ConnectorDescriptorV2,
     ConnectorStructuralRoleV2, ConnectorTransportV2};
@@ -183,7 +183,18 @@ pub(super) fn materialize(stage:&Path)->Result<(),String> {
         authority.verifying_key().to_bytes(),1,ACTIVE_NOT_BEFORE,ACTIVE_EXPIRES_AT).map_err(|_|"G3 member")?;
     let roots=OperationalTrustRootSetV2::new_declassification_signed_for_test(family,1,None,vec![member],
         ACTIVE_NOT_BEFORE,ACTIVE_EXPIRES_AT,&installer,1).map_err(|_|"G3 roots")?;
-    let destination=final_release_destination_digest(executor);
+    // The kernel's FinalRelease sink is the task-bound business destination:
+    // the release gateway target plus "application-turn:<turn>". Pin one turn
+    // (this deployment's single result receiver) and derive its sink with the
+    // kernel's own request codec, so the signed G3 reader is that sink exactly.
+    let turn=Digest32V2::new(random_unique(&mut issued)?);
+    let release=&exec["final_release_provider"];
+    let release_profile=final_result_release_business_profile_v04(
+        business_target_identity_v2(release["canonical_url"].as_str().ok_or("release URL missing")?,
+            Digest32V2::new(parse_digest(release,"server_spki_sha256")?)).map_err(|_|"release target")?,
+        Digest32V2::new(parse_digest(release,"credential_handle_identity_digest")?)).map_err(|_|"release profile")?;
+    let destination=*final_result_release_business_request_v04(&release_profile,"destination-reader",
+        Digest32V2::new([1;32]),turn,b"reader").map_err(|_|"release destination")?.destination_digest().as_bytes();
     let mut rules=development_declassification_rules(Digest32V2::new(executor),Digest32V2::new(destination))?;
     rules.push(DeclassificationRuleV2::new_for_test(6,ClosedDeclassificationPurposeV2::FusedModelCall,
         declassification_implementation_digest_v2(6).ok_or("G3 transition")?,LeakGateDutyV2::BlocklistOnly,
@@ -202,7 +213,8 @@ pub(super) fn materialize(stage:&Path)->Result<(),String> {
     replace_json(stage,"etc/savana/integration-manifest-input.json",&manifest)?;
     replace_json(stage,"etc/savana/experiment-endpoints-v04.json",&endpoints)?;
     let binding=json!({"schema":1,"descriptors":descriptors,"planner":hex(recipient),
-        "destination_digest":hex(destination),"store":kernel["g4_store_id"],
+        "destination_digest":hex(destination),"application_turn":hex(*turn.as_bytes()),
+        "store":kernel["g4_store_id"],
         "installation":manifest["installation_id"],"disposition":"require_approval",
         "scope":"finite_calendar_subset","task_grants_installed":false});
     write_json(&stage.join("etc/savana/experiment-provisioning-v04.json"),&binding)?;

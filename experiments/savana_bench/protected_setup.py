@@ -134,7 +134,10 @@ async def provision_owner_episode(*, contract, deployment, broker, operator, mod
             await ingress.commit_text(owner_document(contract),approval)
             progress('owner_root_authorization_and_plan')
             request=await authorize_and_prepare(ingress=ingress,contract=contract,
-                authorization_id=os.urandom(32),application_turn=os.urandom(32),observer=os.urandom(32),
+                # The deployment's one result receiver: its G3 FinalRelease
+                # reader is signed for exactly this turn's destination.
+                authorization_id=os.urandom(32),application_turn=digest32(deployment['application_turn']),
+                observer=os.urandom(32),
                 tool_descriptor=digest32(deployment['descriptors'][contract.tool]),
                 release_descriptor=digest32(deployment['descriptors']['savana.final_result_release']),
                 planner=digest32(deployment['planner']),model_profile=model_profile,

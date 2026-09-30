@@ -146,6 +146,7 @@ class FiniteOperator:
         if set(op)!={'kind','task','draft'} or op['kind']!='compile_planning': raise ValueError('compile_only')
         draft=op['draft']
         task=bytes(op['task']);root=bytes(draft['root']);turn=bytes(draft['final_release']['turn'])
+        if turn!=digest32(d['application_turn']): raise ValueError('application_turn_mismatch')
         if len(task)!=32 or not any(task) or type(command['not_before']) is not int or type(command['expires_at']) is not int:
             raise ValueError('task_binding')
         directory=self.directory/task.hex()

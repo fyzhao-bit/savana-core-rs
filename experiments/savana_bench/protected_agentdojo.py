@@ -155,13 +155,14 @@ def load_config(path):
         from .protected_operator import SOCKET
         d=config['provisioning']
         if (config['operator_socket']!=SOCKET or type(d) is not dict
-            or set(d)!={'schema','descriptors','planner','destination_digest','store','installation',
-                        'disposition','scope','task_grants_installed'}
+            or set(d)!={'schema','descriptors','planner','destination_digest','application_turn','store',
+                        'installation','disposition','scope','task_grants_installed'}
             or d['schema']!=1 or d['disposition']!='require_approval'
             or d['scope']!='finite_calendar_subset' or d['task_grants_installed'] is not False
             or set(d['descriptors'])!={'dojo.calendar.search','dojo.calendar.day','savana.final_result_release'}):
             raise ValueError('closed_provisioning_profile')
-        for value in (*d['descriptors'].values(),*(d[k] for k in ('planner','destination_digest','store','installation'))):
+        for value in (*d['descriptors'].values(),*(d[k] for k in ('planner','destination_digest','application_turn',
+                                                                    'store','installation'))):
             digest32(value)
     elif (set(config)!=fields|{'entries'} or type(config['entries']) is not list
             or len(config['entries'])!=len(CASES)):
