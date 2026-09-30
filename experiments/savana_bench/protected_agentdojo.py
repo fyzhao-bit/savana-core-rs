@@ -154,8 +154,9 @@ def load_config(path):
         if set(config)!=fields|{'provisioning','operator_socket'}: raise ValueError('closed_deployment_config_required')
         from .protected_operator import SOCKET
         d=config['provisioning']
-        from .agentdojo_tasks import TOOL_CATALOG
-        expected_descriptors={op for op,_,_ in TOOL_CATALOG}|{'savana.final_result_release'}
+        from .agentdojo_tasks import TOOL_CATALOG, WRITE_CATALOG
+        expected_descriptors=({op for op,_,_ in TOOL_CATALOG}
+            | {op for op,_,_,_ in WRITE_CATALOG} | {'savana.final_result_release'})
         if (config['operator_socket']!=SOCKET or type(d) is not dict
             or set(d)!={'schema','descriptors','planner','destination_digest','application_turn','store',
                         'installation','disposition','scope','task_grants_installed'}

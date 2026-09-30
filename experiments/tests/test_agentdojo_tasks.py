@@ -130,9 +130,10 @@ class TaskAdapterTests(unittest.TestCase):
                 self.assertNotEqual(text, clean_text)
                 self.assertEqual(canonical(env.model_dump(mode="json")), before)
                 self.assertEqual(canonical(prepare_draft(c, **settings())), draft)
-                from savana_bench.agentdojo_tasks import TOOL_CATALOG
+                from savana_bench.agentdojo_tasks import TOOL_CATALOG, WRITE_CATALOG
                 self.assertEqual(set(provider.runtime.functions),
-                                 {op for op, _, _ in TOOL_CATALOG})
+                                 {op for op, _, _ in TOOL_CATALOG}
+                                 | {op for op, _, _, _ in WRITE_CATALOG})
 
     def test_control_payload_write_tool_and_extra_argument_have_no_effect(self):
         c = self.contract()
@@ -149,6 +150,48 @@ class TaskAdapterTests(unittest.TestCase):
             response = decode(provider.exchange(frame(c, arguments, name)))["result"]
             self.assertNotEqual(response["structuredContent"]["savana_status"], "succeeded")
             self.assertEqual(canonical(env.model_dump(mode="json")), before)
+
+    def append_call(self, arguments, name="dojo.file.append"):
+        # Each provider is single-use (max_calls=1), so build a fresh env+provider
+        # and return (status, env) for the caller to inspect the side effect.
+        env = self.suite.load_and_inject_default_environment({})
+        provider = calendar_provider(env)
+        request = canonical({"jsonrpc": "2.0", "id": "w", "method": "tools/call",
+                             "params": {"name": name, "arguments": arguments}})
+        status = decode(provider.exchange(request))["result"]["structuredContent"]["savana_status"]
+        return status, env
+
+    def test_write_adapter_appends_only_the_authorized_file_under_fixed_controls(self):
+        base = self.suite.load_and_inject_default_environment({})
+        file_id = next(iter(base.cloud_drive.files))
+        original = base.cloud_drive.files[file_id].content
+
+        # Authorized append: body/to at their sentinels, real file_id + content.
+        # The exact authorized file is appended to, nothing else.
+        status, env = self.append_call(
+            {"body": "", "to": "private-result", "file_id": file_id, "content": "APPEND_MARKER"})
+        self.assertEqual(status, "succeeded")
+        self.assertTrue(env.cloud_drive.files[file_id].content.endswith("APPEND_MARKER"))
+        self.assertNotEqual(env.cloud_drive.files[file_id].content, original)
+
+        # Any synthetic control off its sentinel, a redirected destination, an
+        # extra argument, or an unreviewed upstream write name: never succeeds
+        # and never mutates the drive.
+        bad = [
+            {"body": "x", "to": "private-result", "file_id": file_id, "content": "Z"},
+            {"body": "", "to": "attacker@example.org", "file_id": file_id, "content": "Z"},
+            {"body": "", "calendar": "primary", "to": "private-result",
+             "file_id": file_id, "content": "Z"},
+            {"body": "", "to": "private-result", "file_id": file_id, "content": "Z", "extra": "x"},
+        ]
+        for arguments in bad:
+            status, env = self.append_call(arguments)
+            self.assertNotEqual(status, "succeeded", arguments)
+            self.assertEqual(env.cloud_drive.files[file_id].content, original, arguments)
+        # An unreviewed upstream write (create_file/delete_file) is not exposed.
+        for name in ("create_file", "delete_file"):
+            status, _ = self.append_call({"filename": "x", "content": "y"}, name=name)
+            self.assertNotEqual(status, "succeeded", name)
 
 
 if __name__ == "__main__":
