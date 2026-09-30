@@ -300,7 +300,11 @@ pub(super) fn materialize(stage:&Path)->Result<(),String> {
     agent["planner_shipped_catalog"]=json!(catalog);
     let input_key=signing_key(&mut issued)?;
     let input_id=derive_ed25519_key_id_v2(input_key.verifying_key().to_bytes());
-    let assets=signed_input_assets_for_profile(&input_key,input_id,true)?;
+    // Every shipped tool's action template, in registry order (102.. and the
+    // final release last): the planner envelope may name exactly these.
+    let templates:Vec<u32>=(0..tool_count).map(|i|u32::try_from(i).map(|i|102+i).map_err(|_|"template".to_owned()))
+        .collect::<Result<_,_>>()?;
+    let assets=signed_input_assets_for_profile(&input_key,input_id,Some(&templates))?;
     kernel["input_runtime_publisher_key_id"]=json!(hex(*input_id.as_bytes()));
     kernel["input_runtime_publisher_public_key"]=json!(hex(input_key.verifying_key().to_bytes()));
     replace(stage,"etc/savana/input-runtime-assets-v2.cbor",&assets)?;

@@ -701,12 +701,19 @@ fn signed_input_assets(
     signing_key: &SigningKey,
     signing_key_id: Ed25519KeyIdV2,
 ) -> Result<Vec<u8>, String> {
-    signed_input_assets_for_profile(signing_key, signing_key_id, false)
+    signed_input_assets_for_profile(signing_key, signing_key_id, None)
 }
 
+/// `protected` carries the protected experiment's complete ordered action
+/// templates (every shipped tool, including final release). The planner
+/// envelope may only name these, so it must list exactly what the deployment
+/// generator registered, never a fixed subset.
 fn signed_input_assets_for_profile(
-    signing_key: &SigningKey, signing_key_id: Ed25519KeyIdV2, protected: bool,
+    signing_key: &SigningKey, signing_key_id: Ed25519KeyIdV2, protected: Option<&[u32]>,
 ) -> Result<Vec<u8>, String> {
+    if protected.is_some_and(|t| t.is_empty() || t[0] != ACTION_TEMPLATE || t.windows(2).any(|w| w[0] >= w[1])) {
+        return Err("protected action templates".into());
+    }
     let mut payload = minicbor::Encoder::new(Vec::new());
     payload
         .array(7)
@@ -731,13 +738,15 @@ fn signed_input_assets_for_profile(
         .and_then(|encoder| encoder.array(1))
         .and_then(|encoder| encoder.array(6))
         .and_then(|encoder| encoder.u32(1))
-        .and_then(|encoder| encoder.str(if protected { "\"inputs\":" } else { "summarize" }))
+        .and_then(|encoder| encoder.str(if protected.is_some() { "\"inputs\":" } else { "summarize" }))
         .and_then(|encoder| encoder.u16(3))
         .and_then(|encoder| encoder.u32(1))
-        .and_then(|encoder| encoder.array(if protected {3} else {1}))
+        .and_then(|encoder| encoder.array(protected.map_or(1, |t| t.len() as u64)))
         .and_then(|encoder| encoder.u32(ACTION_TEMPLATE))
         .map_err(|_| "input runtime asset encoding failed".to_owned())?;
-    if protected { payload.u32(103).and_then(|e| e.u32(104)).map_err(|_| "template encoding")?; }
+    for template in protected.map_or(&[][..], |t| &t[1..]) {
+        payload.u32(*template).map_err(|_| "template encoding")?;
+    }
     payload.null().map_err(|_| "asset encoding")?;
     let payload = payload.into_writer();
     let digest = domain_digest(INPUT_ASSET_DIGEST_DOMAIN, &payload);
