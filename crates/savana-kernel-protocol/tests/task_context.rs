@@ -162,6 +162,67 @@ fn task_context_is_bounded_data_and_preserves_kernel_identity_when_building_draf
 }
 
 #[test]
+fn draft_from_json_admits_a_result_derived_edge() {
+    // The owner-side SDK can express a result-derived control (the kernel fills
+    // it from a prior clause's verified result) alongside exact controls, and it
+    // round-trips to the same draft as building it natively.
+    let context = context();
+    let tool = &context.tools()[0];
+    let derived: std::collections::BTreeMap<String, ResultDerivedControlV2> = [(
+        "destination".to_string(),
+        ResultDerivedControlV2::new(1, vec!["recipient".to_string()], BusinessFieldTypeV2::Text, 64)
+            .unwrap(),
+    )]
+    .into_iter()
+    .collect();
+    let controls = BusinessControlsV2::from_fields_with_derived(
+        tool.profile(),
+        vec![(
+            "resource".into(),
+            BusinessValueV2::Text(format!("input:{}", "05".repeat(32))),
+        )],
+        derived,
+    )
+    .unwrap();
+    let clause = TaskAuthorizationDraftClauseV2::new(
+        1,
+        vec![TaskAuthorizationDraftAlternativeV2::new(tool.descriptor_digest(), controls).unwrap()],
+        1,
+        1,
+        1,
+        vec![],
+        false,
+    )
+    .unwrap();
+    let expected = context.draft(d(6), vec![clause]).unwrap();
+
+    let json = serde_json::json!([{
+        "clause_id": 1,
+        "alternatives": [{
+            "descriptor_digest": "07".repeat(32),
+            "controls": [["resource", format!("input:{}", "05".repeat(32))]],
+            "derived_controls": [["destination", {
+                "source_clause": 1, "path": ["recipient"], "kind": 1, "max_bytes": 64
+            }]]
+        }],
+        "maximum_single_magnitude": 1, "total_magnitude_budget": 1, "maximum_attempts": 1,
+        "predecessor_clause_ids": [], "retry_after_proven_no_effect": false
+    }])
+    .to_string();
+    assert_eq!(context.draft_from_json(d(6), json.as_bytes()).unwrap(), expected);
+
+    // A derived edge that overlaps an exact control (both name the same field),
+    // an unknown field type, or a zero source clause is refused.
+    for bad in [
+        json.replace("[\"resource\"", "[\"destination\""),
+        json.replace("\"kind\":1", "\"kind\":9"),
+        json.replace("\"source_clause\":1", "\"source_clause\":0"),
+    ] {
+        assert!(context.draft_from_json(d(6), bad.as_bytes()).is_err());
+    }
+}
+
+#[test]
 fn context_ingress_wire_has_no_caller_supplied_identity_or_profile() {
     let auth = IngressUiAuthorizationHandleV2::from_authority_entropy([1; 32]).unwrap();
     for session in [

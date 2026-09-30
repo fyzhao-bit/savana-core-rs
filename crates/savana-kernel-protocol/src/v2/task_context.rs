@@ -114,6 +114,18 @@ impl TaskAuthorizationContextV2 {
         struct Alternative {
             descriptor_digest: String,
             controls: Vec<(String, Value)>,
+            // A result-derived edge per field the kernel fills from a prior
+            // clause's verified result (owner-signed origin, never a literal).
+            #[serde(default)]
+            derived_controls: Vec<(String, DerivedControl)>,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct DerivedControl {
+            source_clause: u64,
+            path: Vec<String>,
+            kind: u8,
+            max_bytes: u16,
         }
         #[derive(serde::Deserialize)]
         #[serde(untagged)]
@@ -162,9 +174,32 @@ impl TaskAuthorizationContextV2 {
                                 )
                             })
                             .collect();
-                        let controls =
-                            super::super::BusinessControlsV2::from_fields(tool.profile(), fields)
+                        let derived = a
+                            .derived_controls
+                            .into_iter()
+                            .map(|(name, rule)| {
+                                let kind = match rule.kind {
+                                    1 => super::super::BusinessFieldTypeV2::Text,
+                                    2 => super::super::BusinessFieldTypeV2::Unsigned,
+                                    3 => super::super::BusinessFieldTypeV2::Boolean,
+                                    _ => return Err(malformed()),
+                                };
+                                let control = super::super::ResultDerivedControlV2::new(
+                                    rule.source_clause,
+                                    rule.path,
+                                    kind,
+                                    rule.max_bytes,
+                                )
                                 .map_err(|_| malformed())?;
+                                Ok((name, control))
+                            })
+                            .collect::<Result<std::collections::BTreeMap<_, _>, ProtocolError>>()?;
+                        let controls = super::super::BusinessControlsV2::from_fields_with_derived(
+                            tool.profile(),
+                            fields,
+                            derived,
+                        )
+                        .map_err(|_| malformed())?;
                         TaskAuthorizationDraftAlternativeV2::new(tool.descriptor_digest(), controls)
                     })
                     .collect::<Result<_, ProtocolError>>()?;
