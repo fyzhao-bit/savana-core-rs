@@ -528,3 +528,74 @@ fn task_draft_aggregate_limits_refuse_instead_of_truncating() {
         .collect();
     assert!(draft(clauses, 1).is_err());
 }
+
+fn cbor_bytes(content: &[u8]) -> Vec<u8> {
+    let mut out = match content.len() {
+        n if n < 24 => vec![0x40 | n as u8],
+        n if n < 256 => vec![0x58, n as u8],
+        n => vec![0x59, (n >> 8) as u8, n as u8],
+    };
+    out.extend_from_slice(content);
+    out
+}
+
+fn splice(bytes: &[u8], old: &[u8], new: &[u8]) -> Vec<u8> {
+    let at = bytes
+        .windows(old.len())
+        .position(|w| w == old)
+        .expect("controls embedded in draft");
+    let mut out = bytes[..at].to_vec();
+    out.extend_from_slice(new);
+    out.extend_from_slice(&bytes[at + old.len()..]);
+    out
+}
+
+#[test]
+fn result_derived_controls_are_not_admitted_into_a_root_draft_yet() {
+    // The owner approval text and G4 do not handle result-derived edges yet,
+    // so no draft may carry one: otherwise an owner could sign an edge the
+    // approval display never showed.
+    let exact = controls("A", "Alice", BusinessMagnitudeV2::CountField);
+    let mut rules = std::collections::BTreeMap::new();
+    rules.insert(
+        "to".to_string(),
+        ResultDerivedControlV2::new(
+            1,
+            vec!["participants".into(), "0".into()],
+            BusinessFieldTypeV2::Text,
+            256,
+        )
+        .unwrap(),
+    );
+    let edge = BusinessControlsV2::from_fields_with_derived(
+        exact.profile(),
+        vec![
+            ("file".into(), BusinessValueV2::Text("A".into())),
+            (
+                "subject".into(),
+                BusinessValueV2::Text("A \"report\" <script>".into()),
+            ),
+        ],
+        rules,
+    )
+    .unwrap();
+    assert!(TaskAuthorizationDraftAlternativeV2::new(d(3), edge.clone()).is_err());
+
+    // The wire path is closed too: splice the edge into a valid draft.
+    let bytes = encode_task_authorization_draft_v2(&draft(vec![clause(1, vec![])], 1).unwrap())
+        .unwrap();
+    let exact_wire = cbor_bytes(&encode_business_controls_v2(&exact).unwrap());
+    let spliced = splice(
+        &bytes,
+        &exact_wire,
+        &cbor_bytes(&encode_business_controls_v2(&edge).unwrap()),
+    );
+    assert!(decode_task_authorization_draft_v2(&spliced).is_err());
+    // Control: the same splice with other exact controls decodes, so the
+    // refusal above comes from the derived edge, not from the splice.
+    let other = cbor_bytes(
+        &encode_business_controls_v2(&controls("A", "Carol", BusinessMagnitudeV2::CountField))
+            .unwrap(),
+    );
+    assert!(decode_task_authorization_draft_v2(&splice(&bytes, &exact_wire, &other)).is_ok());
+}

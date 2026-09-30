@@ -22,6 +22,13 @@ impl TaskAuthorizationDraftAlternativeV2 {
         controls: BusinessControlsV2,
     ) -> Result<Self, ProtocolError> {
         nonzero(descriptor_digest.as_bytes())?;
+        // Result-derived controls are not admitted into any root yet: the owner
+        // approval text, G4 matching and kernel readers of installed drafts do
+        // not handle them, so an owner could otherwise sign an edge the display
+        // never showed. Admission opens together with that wiring.
+        if !controls.derived().is_empty() {
+            return Err(malformed());
+        }
         Ok(Self {
             descriptor_digest,
             controls,

@@ -1443,6 +1443,20 @@ fn result_json_path_extracts_scalars_and_keeps_untrusted_provenance() {
     assert_eq!(derived.label().confidentiality(), ConfidentialityV2::VaultBound);
     assert_eq!(derived.label().readers(), ReaderSetV2::KERNEL);
     assert_eq!(derived.value_digest(), value_digest_v2(&value).unwrap());
+    // Even offered every effect, an extracted value keeps only READ: it can be
+    // read, never authorize a write (UNTRUSTED_EFFECT_CEILING_V2).
+    let (_, widened) = ProvenanceRecordV2::derived(
+        context(1, 2),
+        DeriveOperationV2::select_result_json_path_v04(
+            path(&["result", "event", "participants", "0"]),
+            256,
+        )
+        .unwrap(),
+        &[(&raw, &parent)],
+        EffectSetV2::ALL,
+    )
+    .unwrap();
+    assert_eq!(widened.label().effects(), EffectSetV2::READ);
 
     let integer = DeriveOperationV2::select_result_json_path_v04(
         path(&["result", "event", "count"]),

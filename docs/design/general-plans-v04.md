@@ -79,6 +79,34 @@ Kernel checklist (from the two provenance surveys, file:line to touch):
 - [ ] rendering for approval + action display (`task_draft.rs`, `task_action_display.rs`).
 - [ ] Python SDK draft conversion (`task_context.rs`, `client.rs`) + owner side.
 
+### Defense layering for a derived value (existing kernel mechanisms)
+
+A result-derived value is extracted by the kernel and keeps `ExternalUntrusted`
+integrity, so `UNTRUSTED_EFFECT_CEILING_V2` (`labels.rs:281-300`) caps it at
+READ. Therefore:
+
+- **G4** checks structure only: the operation's edge must equal the owner-signed
+  edge (source clause, path, kind, bound).
+- **G5** checks the value's integrity: `IntentFlowConfinement`
+  (`validator.rs:94, 411`) escalates any authorizing-effect call
+  (CREATE/UPDATE/DELETE/SEND/EXECUTE/FINAL_RELEASE) that carries an untrusted
+  argument to owner approval. This is what stops a poisoned source (e.g. an
+  attacker added to the source event's participants): the write cannot run
+  without the owner seeing the actual value. `LabelEffectConfinement` denies
+  outright and cannot be approved, so write tools that take derived values
+  declare `IntentFlowConfinement`, not `LabelEffectConfinement`.
+- **G6** shows the owner the exact request with the concrete derived value.
+
+Caveat: validators are per-descriptor and not mandatory today
+(`descriptor.rs:272-300`); the protected experiment declares none because it only
+ships read tools. Adding write tools must declare `IntentFlowConfinement`
+(candidate kernel rule: refuse authorizing-effect descriptors without it).
+
+Admission gate: until G4, the approval text and kernel readers of installed
+drafts handle derived edges, `TaskAuthorizationDraftAlternativeV2::new` refuses
+any control with a derived field, so no root can carry an edge the owner's
+approval display would not show.
+
 ## Design: owner-text constant origin
 
 When the planner drafts the root, the kernel must confirm each literal control
