@@ -152,6 +152,44 @@ is also what CaMeL's shipped policies do for untrusted recipients); derived
 content parameters escalate under intent-flow confinement and are approved only
 when they equal the owner-signed edge's kernel-extracted value.
 
+## Design: typed lists and computed origins (G4)
+
+**Text lists.** A business field may have type `TextList` (code 4), allowed for
+a Destination (several recipients are one destination) or a Parameter. Items
+are bounded (at most 32, each a trimmed control text) and an empty list means
+exactly "no one" (an event without participants), never a default. A
+destination list commits to its canonical JSON array under its own digest
+domain (`..._LIST_V2_SCHEMA1`), so no list can collide with a single text. A
+literal list reaches the kernel as typed items in the schema-2 owner document
+(`{"slot", "text": "", "items": [...]}`); `check_owner_text_origin` holds every
+item to the owner-text rule by itself (an item is never split again), and the
+selected value is a kernel list, which G4 types against the field (a list never
+fills a text field, nor a text a list). A derived list is one owner-signed edge
+of kind 4: the kernel selects a JSON array of strings at the signed path, within
+the signed total byte bound (`DeriveOperationV2` tag 10, `list = true`).
+
+**Computed origins.** A derived text edge may carry one owner-signed
+computation `[op, amount]` (`add_minutes` on `YYYY-MM-DD HH:MM`, `add_days` on
+`YYYY-MM-DD[ HH:MM]`, `add_cents` on a non-negative decimal with at most two
+fraction digits), bounded per operation (a year of minutes, ten years of days,
+ten million units). The rule is the fifth element of the signed control; a plain
+rule keeps its exact bytes, so every earlier root still verifies. The kernel
+computes from the verified result value (tag 10, `compute`), fails closed on
+any operand not exactly in the operation's form, and folds the operation into
+the value's provenance, so G7 accepts only an argument the kernel itself
+computed with the signed amount. Root and action displays show the computation.
+
+**Owner review (fixed rules).** The planner writes `"add_minutes"`,
+`"add_days"` or `"add_amount"` on a `from` origin; the size must be stated in
+the request (durations in minutes or days, every plain number as money), the
+sign is the planner's. The owner also restates an end it states as a duration
+from its own start ("12:00 for one hour" -> `... 13:00`). cc/bcc are recipients
+too: never derived. A context that names the extraction's own source is dropped
+(the source is already the payload).
+
+**Not covered:** keyed selection (choose the list element whose field equals an
+owner value), conditionals and loops; those still fail honestly.
+
 ## Comparison with CaMeL
 
 Standard, same-conditions comparison only: both use DeepSeek, same AgentDojo
@@ -167,7 +205,7 @@ interpreter with per-suite static policies). No bespoke attacks on CaMeL.
    extraction, G7, G4 matching, rendering, admission; 10 commits, unit + one
    integration test.
 2. owner-text constant origin + planner drafts the root.
-3. computed origin (time+duration first).
+3. computed origin (time+duration first). **DONE (G4)** with typed text lists.
 4. general AgentDojo connector adapter (workspace writes) + scoring via the
    official oracle.
 5. run honest / poisoned / official-injection; compare with CaMeL+DeepSeek.

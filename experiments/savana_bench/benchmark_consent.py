@@ -10,7 +10,7 @@ import hashlib
 import re
 import time
 
-from .agentdojo_tasks import EFFECT_NAMES, all_contracts, catalog_tool
+from .agentdojo_tasks import EFFECT_NAMES, LIST, all_contracts, catalog_tool, signed_edge
 from .benchmark_identity import strict_json
 
 
@@ -22,15 +22,20 @@ def _roles(step):
 
 def _signed_edges(step):
     """The clause-draft form of a step's owner-signed derived edges."""
-    return sorted([field, dict(source_clause=source, path=list(path), kind=1, max_bytes=bound)]
-                  for field, source, path, bound in step.derived)
+    return sorted([edge[0], signed_edge(edge)] for edge in step.derived)
 
 
 def _displayed_edges(step):
     """What the native displays must show for those edges (the meaning text
     is the kernel's fixed explanation and is not part of the check)."""
-    return {field: dict(source_clause=source, path=list(path), type="Text", max_bytes=bound)
-            for field, source, path, bound in step.derived}
+    shown = {}
+    for field, source, path, bound, form in step.edges():
+        edge = dict(source_clause=source, path=list(path), type="TextList" if form == LIST else "Text",
+                    max_bytes=bound, compute=None)
+        if form not in (None, LIST):
+            edge["compute"] = dict(op=form[0], amount=form[1])
+        shown[field] = edge
+    return shown
 
 
 def _edges_match(shown, step):
@@ -38,8 +43,21 @@ def _edges_match(shown, step):
         return shown is None
     if type(shown) is not dict or set(shown) != {f for f, *_ in step.derived}:
         return False
-    return all(type(v) is dict and {k: v.get(k) for k in ("source_clause", "path", "type", "max_bytes")}
-               == _displayed_edges(step)[f] for f, v in shown.items())
+    keys = ("source_clause", "path", "type", "max_bytes", "compute")
+    return all(type(v) is dict and set(v) <= {*keys, "meaning"}
+               and {k: v.get(k) for k in keys} == _displayed_edges(step)[f] for f, v in shown.items())
+
+
+def _derived_value_ok(value, bound, form):
+    """A kernel-derived value's shape: a bounded trimmed text, or for a list
+    edge a bounded list of such texts (an empty list is "no one")."""
+    def text(v, limit):
+        return (type(v) is str and v and v.strip() == v and len(v.encode()) <= limit
+                and not any(ord(ch) < 32 for ch in v))
+    if form == LIST:
+        return (type(value) is list and len(value) <= 32 and all(text(v, bound) for v in value)
+                and sum(len(v.encode()) for v in value) <= bound)
+    return text(value, bound)
 
 
 class FiniteConsent:
@@ -88,7 +106,7 @@ class FiniteConsent:
             if len(a['controls'])!=len(controls): raise ValueError('consent_duplicate_control')
             if step is not None:
                 payload=_roles(step)[0]
-                if (controls!={k:v for k,v in step.values if k!=payload}
+                if (controls!={k:v for k,v in step.value_map().items() if k!=payload}
                     or profiles[a['descriptor_digest']]['operation']!=step.tool
                     or (step.derived and a['derived_controls']!=_signed_edges(step))):
                     raise ValueError('consent_fixed_tool')
@@ -204,10 +222,8 @@ class FiniteConsent:
             # A derived field is approved as the SOURCE the owner signed (the
             # kernel-extracted value at that path), never as a planner literal;
             # it must still be a well-formed bounded text value.
-            for field,_,_,bound in step.derived:
-                value=arguments.pop(field,None)
-                if (type(value) is not str or not value or value.strip()!=value
-                    or len(value.encode())>bound or any(ord(ch)<32 for ch in value)):
+            for field,_,_,bound,form in step.edges():
+                if not _derived_value_ok(arguments.pop(field,None),bound,form):
                     raise ValueError('consent_derived_value')
             if (arguments!=step.value_map()
                 or d['resource']!=r['params']['arguments'][resource]

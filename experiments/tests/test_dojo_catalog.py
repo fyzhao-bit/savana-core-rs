@@ -9,9 +9,9 @@ from savana_bench.dojo_catalog import (CATALOG, KINDS, OMIT, SENTINELS, SUITE_TO
 
 ORIGINAL = ("dojo.calendar.search", "dojo.calendar.day", "dojo.email.search", "dojo.email.unread",
             "dojo.file.list", "dojo.file.search_name", "dojo.file.search", "dojo.file.append")
-SAMPLE = {"text": "x", "opt_text": "", "null_text": "", "list": "a; b", "opt_list": "", "number": "12.5",
+SAMPLE = {"text": "x", "opt_text": "", "null_text": "", "list": ["a", "b"], "opt_list": [], "number": "12.5",
           "opt_number": "", "integer": "3", "opt_integer": "", "boolean": "false",
-          "opt_boolean": "", "permission": "r", "attachments": ""}
+          "opt_boolean": "", "permission": "r", "attachments": []}
 
 
 def call(name, arguments, request_id):
@@ -92,18 +92,20 @@ class CatalogShapeTests(unittest.TestCase):
 
 class DecodingTests(unittest.TestCase):
     def test_rules_are_exact_and_refuse_anything_else(self):
-        self.assertEqual(decode_argument("list", "a@x.com; b@y.com"), ["a@x.com", "b@y.com"])
-        self.assertIs(decode_argument("opt_list", ""), OMIT)
+        self.assertEqual(decode_argument("list", ["a@x.com", "b@y.com"]), ["a@x.com", "b@y.com"])
+        self.assertIs(decode_argument("opt_list", []), OMIT)
         self.assertEqual(decode_argument("number", "100"), 100.0)
         self.assertEqual(decode_argument("number", "0.5"), 0.5)
         self.assertEqual(decode_argument("integer", "7"), 7)
         self.assertIs(decode_argument("boolean", "true"), True)
-        self.assertEqual(decode_argument("attachments", "13; 2"),
+        self.assertEqual(decode_argument("attachments", ["13", "2"]),
                          [{"type": "file", "file_id": "13"}, {"type": "file", "file_id": "2"}])
         self.assertEqual(decode_argument("text", ""), "")
         self.assertIsNone(decode_argument("null_text", ""))
         self.assertEqual(decode_argument("null_text", "2024-05-01 10:00"), "2024-05-01 10:00")
-        for kind, text in (("list", ""), ("list", "a;b; "), ("list", "a; ; b"), ("number", "1e3"),
+        # A list kind takes typed items only: never one joined text.
+        for kind, text in (("list", []), ("list", "a; b"), ("list", ["a", ""]), ("list", [" a"]),
+                           ("list", ["a", 1]), ("opt_list", ""), ("text", ["a"]), ("number", "1e3"),
                            ("number", "-5"), ("number", "01"), ("number", "nan"), ("integer", "1.0"),
                            ("integer", "+1"), ("boolean", "True"), ("boolean", ""), ("permission", "w"),
                            ("text", None)):
@@ -148,13 +150,13 @@ class ProviderTests(unittest.TestCase):
 
     def test_workspace_email_list_and_travel_list_reads(self):
         env, provider = self.provider("workspace")
-        status, _ = self.result(provider, "dojo.email.send", "e1", recipients="a@x.com; b@y.com",
-                                subject="hi", text="hello", attachments="")
+        status, _ = self.result(provider, "dojo.email.send", "e1", recipients=["a@x.com", "b@y.com"],
+                                subject="hi", text="hello", attachments=[])
         self.assertEqual(status, "succeeded")
         self.assertEqual(env.inbox.sent[-1].recipients, ["a@x.com", "b@y.com"])
         env, provider = self.provider("travel")
         status, content = self.result(provider, "dojo.travel.hotel_prices", "t1",
-                                      hotel_names="Le Marais Boutique; Good Night")
+                                      hotel_names=["Le Marais Boutique", "Good Night"])
         self.assertEqual(status, "succeeded")
         self.assertIn("Le Marais Boutique", content[0]["text"])
 

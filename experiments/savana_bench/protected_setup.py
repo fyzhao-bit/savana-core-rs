@@ -10,8 +10,8 @@ import json
 import time
 
 from .agentdojo_provider import canonical
-from .agentdojo_tasks import (EFFECT_CODES, ROLE_CODES, all_contracts, catalog_tool,
-    owner_document, prepare_draft)
+from .agentdojo_tasks import (EFFECT_CODES, ROLE_CODES, TYPE_CODES, all_contracts, catalog_tool,
+    owner_document, prepare_draft, signed_edge)
 from .protected_endpoint import digest32
 
 
@@ -81,8 +81,7 @@ def reviewed_clauses(contract, context, *, tool_descriptor, release_descriptor,
         alternative = dict(descriptor_digest=descriptor.hex(),
             controls=sorted([name, value] for name, value in controls.items()))
         if derived:
-            alternative["derived_controls"] = sorted([field, dict(source_clause=source,
-                path=list(path), kind=1, max_bytes=bound)] for field, source, path, bound in derived)
+            alternative["derived_controls"] = sorted([edge[0], signed_edge(edge)] for edge in derived)
         return dict(clause_id=number, alternatives=[alternative],
             maximum_single_magnitude=1, total_magnitude_budget=1, maximum_attempts=1,
             predecessor_clause_ids=after, retry_after_proven_no_effect=False)
@@ -90,12 +89,12 @@ def reviewed_clauses(contract, context, *, tool_descriptor, release_descriptor,
     for number, (step, descriptor) in enumerate(zip(steps, descriptors), 1):
         tool, reviewed = registered(descriptor), catalog_tool(step.tool)
         payload = [f["name"] for f in reviewed["fields"] if f["role"] == "payload"]
-        expected = sorted((f["name"], ROLE_CODES[f["role"]], 1) for f in reviewed["fields"]
+        expected = sorted((f["name"], ROLE_CODES[f["role"]], TYPE_CODES[f["type"]]) for f in reviewed["fields"]
                           if f["role"] != "payload")
         if (tool["name"] != step.tool or tool["operation"] != step.tool
                 or tool["effect"] != EFFECT_CODES[reviewed["effect"]] or fields(tool) != expected):
             raise ValueError("reviewed_descriptor_profile_mismatch")
-        controls = {k: v for k, v in step.values if k not in payload}
+        controls = {k: v for k, v in step.value_map().items() if k not in payload}
         clauses.append(clause(number, descriptor, controls, list(range(1, number)), step.derived))
     resource = _bytes32(context.final_result_resource(len(steps), descriptors[-1]))
     clauses.append(clause(len(steps) + 1, release_descriptor, dict(resource="result:"+resource.hex(),

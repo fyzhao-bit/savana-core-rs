@@ -72,7 +72,10 @@ class ReadToolCatalogTests(unittest.TestCase):
             self.assertEqual(roles["to"], "destination")
         for field in fields:
             self.assertEqual(set(field), {"name", "role", "type"})
-            self.assertEqual(field["type"], "text")
+            # A text list only where the reviewed kind is a list.
+            self.assertIn(field["type"], {"text", "text_list"})
+            if field["type"] == "text_list":
+                self.assertIn(field["role"], {"destination", "parameter"})
             self.assertIn(field["role"], {"payload", "resource", "destination", "parameter"})
 
     def test_every_contract_argument_set_matches_its_tool_catalog_params(self):

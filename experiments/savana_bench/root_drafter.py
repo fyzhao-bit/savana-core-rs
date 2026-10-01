@@ -35,8 +35,15 @@ An origin is one of:
                      anything not literally in the request is refused. Exception: a date or
                      time the request states may be written as YYYY-MM-DD or YYYY-MM-DD HH:MM
                      (24-hour; year 2024 if the request gives none).
-  {{"from": k}}      the value extraction step k produced.
-  {{"from": k, "path": ["key", 0, ...]}}  a single value at that JSON path in tool step k's result.
+  {{"from": k}}      the value extraction step k produced (for a list field: its items).
+  {{"from": k, "path": ["key", 0, ...]}}  a single value at that JSON path in tool step k's result
+                     (for a list field: a JSON array of strings at that path).
+  Either "from" origin may add ONE computation on its text: "add_minutes": n (a "YYYY-MM-DD HH:MM"
+  time), "add_days": n (a "YYYY-MM-DD" date, a time after it is kept) or "add_amount": x (a decimal
+  amount of money). n or x may be negative; its size must be stated in the request (e.g. "1 hour"
+  is 60 minutes, "a week" is 7 days, "by 100" is 100).
+A field whose format is list, opt_list or attachments takes a list: a literal is
+  {{"text": ["item", ...]}} (or the items joined with "{LIST_SEPARATOR}"), each item copied exactly.
 Rules:
 - Steps are numbered from 1; an origin or source may only name an EARLIER step.
 - A whole tool result is never a field value. To use data from a result in a field (a list of
@@ -47,8 +54,9 @@ Rules:
 - A field with role "destination" (who or where something is sent) must be a literal from the request.
 - The instruction of an extraction step must be copied from the request (the whole request is fine).
 - Values the request does not state (ids, names, amounts found in data, relative dates such
-  as "tomorrow", an end time computed from a duration) must come from an extraction step or a
-  JSON path, never be typed by you. An extraction needs some earlier result as its source.
+  as "tomorrow") must come from an extraction step or a JSON path, never be typed by you. An
+  extraction needs some earlier result as its source. An end time the request gives as a duration
+  from a start it states may be written as a literal; from a start found in data, use a computation.
 - An extraction whose value a later field uses must name that field as its target
   ("<operation>.<field>"); target "{ANSWER}" is only for the final answer and cannot feed a field.
 - The result of the LAST step is what the user receives. If the user asked a question, end with an

@@ -1,8 +1,8 @@
 """Reviewed adapters for every AgentDojo v1.2.2 tool in all four suites.
 
 Each entry maps one reviewed `dojo.*` operation to one official AgentDojo
-function. The kernel sees only business fields of type text with an explicit
-role; a business profile carries exactly one resource, one destination and one
+function. The kernel sees business fields of type text or text list with an
+explicit role; a business profile carries exactly one resource, one destination and one
 payload field, so a tool without a natural one gets a fixed synthetic field
 (`body` = "", `calendar` = "primary", `to` = "private-result") that must equal
 its sentinel and is never forwarded. Every other field decodes, by a fixed
@@ -11,17 +11,19 @@ reviewed rule, into exactly one official argument:
     text        the text itself
     opt_text    "" -> argument omitted (the official default, e.g. None)
     null_text   "" -> None passed explicitly (a required, nullable argument)
-    list        "a; b"  -> ["a", "b"]  (non-empty items, "; " separated)
-    opt_list    "" -> omitted, else as list
+    list        a text list ["a", "b"] -> ["a", "b"] (non-empty trimmed items)
+    opt_list    [] -> omitted, else as list
     number      decimal digits -> float      opt_number: "" -> omitted
     integer     digits -> int                opt_integer: "" -> omitted
     boolean     "true" / "false"             opt_boolean: "" -> omitted
     permission  "r" / "rw"
-    attachments "" -> omitted, else "; "-separated file ids -> file attachments
+    attachments [] -> omitted, else file ids -> file attachments
 
-The decoding is deterministic and total, so the kernel-pinned text fixes the
-official argument exactly. Lists are an interim text encoding: the kernel signs
-the whole list text, not each element (typed list fields are W3).
+The decoding is deterministic and total, so the kernel-pinned value fixes the
+official argument exactly. The three list kinds are typed text-list business
+fields: the kernel signs, checks and shows each item (an owner literal item by
+item against the request; a derived list as one bounded edge), never one
+joined text.
 
 Free-text content of a write (an email body, a message, a file's content) is a
 PARAMETER, like `append_to_file.content`: it can then be an owner value or an
@@ -37,6 +39,7 @@ import re
 SENTINELS = {"body": "", "calendar": "primary", "to": "private-result"}
 READ_SYNTHETIC = (("body", "payload"), ("calendar", "resource"), ("to", "destination"))
 LIST_SEPARATOR = "; "
+LIST_KINDS = frozenset({"list", "opt_list", "attachments"})
 SUITES = ("workspace", "banking", "slack", "travel")
 # The official AgentDojo v1.2.2 functions of each suite (pinned against the
 # installed package by a test). A deployment serves exactly one suite, so the
@@ -228,21 +231,24 @@ def entry(operation):
 def decode_argument(kind, text):
     """The official argument for one kernel-pinned text, or OMIT. Total and
     deterministic: any text it does not accept is refused, never guessed."""
-    if type(text) is not str or kind not in KINDS:
+    if kind not in KINDS or (type(text) is not list if kind in LIST_KINDS else type(text) is not str):
         raise ValueError("adapter_argument")
+    if kind in LIST_KINDS:
+        if any(type(item) is not str or not item or item != item.strip() for item in text):
+            raise ValueError("adapter_list")
+        if not text:
+            if KINDS[kind]:
+                return OMIT
+            raise ValueError("adapter_list")
+        if kind == "attachments":
+            return [{"type": "file", "file_id": item} for item in text]
+        return list(text)
     if text == "" and KINDS[kind]:
         return OMIT
     if kind == "null_text":
         return text or None
     if kind in ("text", "opt_text"):
         return text
-    if kind in ("list", "opt_list", "attachments"):
-        items = text.split(LIST_SEPARATOR)
-        if any(not item or item != item.strip() for item in items):
-            raise ValueError("adapter_list")
-        if kind == "attachments":
-            return [{"type": "file", "file_id": item} for item in items]
-        return items
     if kind in ("number", "opt_number"):
         if not _NUMBER.match(text):
             raise ValueError("adapter_number")
@@ -302,15 +308,16 @@ def suite_operations(suite_tools):
 
 def catalog_document(suite, extra_write_tools=()):
     """Schema-2 catalog of one suite for the deployment generator: every field
-    is text with an explicit role; authorizing tools carry intent-flow
-    confinement. Catalog order is kept, so the original workspace tools lead."""
+    is text (a list kind: text list) with an explicit role; authorizing tools
+    carry intent-flow confinement. Catalog order is kept, so the original
+    workspace tools lead."""
     served = set(suite_operations(SUITE_TOOLS[suite]))
     reads, writes = [], []
     for tool in CATALOG:
         if tool["operation"] not in served:
             continue
-        fields = sorted(({"name": n, "role": r, "type": "text"} for n, r, _u, _k in tool["fields"]),
-                        key=lambda f: f["name"])
+        fields = sorted(({"name": n, "role": r, "type": "text_list" if k in LIST_KINDS else "text"}
+                         for n, r, _u, k in tool["fields"]), key=lambda f: f["name"])
         item = {"operation": tool["operation"], "effect": tool["effect"], "fixed_magnitude": 1,
                 "fields": fields}
         if tool["effect"] == "read":

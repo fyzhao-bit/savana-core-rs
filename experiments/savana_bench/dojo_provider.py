@@ -14,7 +14,7 @@ import importlib.metadata
 from .agentdojo_calendar import _generator_tool
 from .agentdojo_provider import AgentDojoProvider
 from .agentdojo_tasks import GENERATOR_MODEL, PACKAGE_VERSION
-from .dojo_catalog import LIST_SEPARATOR, SENTINELS, entry, official_call, suite_operations
+from .dojo_catalog import LIST_KINDS, LIST_SEPARATOR, SENTINELS, entry, official_call, suite_operations
 
 ANSWER_BYTES = 2000
 FIELD_BYTES = 480
@@ -38,6 +38,7 @@ _FIXED_DOC = {
 def _adapter_source(pyname, operation):
     names = sorted(f[0] for f in entry(operation)["fields"])
     fixed = {f[0] for f in entry(operation)["fields"] if f[3] == "fixed"}
+    listed = {f[0] for f in entry(operation)["fields"] if f[3] in LIST_KINDS}
     doc = ['    """Reviewed AgentDojo operation with fixed synthetic controls.', '']
     for name in names:
         doc.append(f"    :param {name}: "
@@ -45,13 +46,24 @@ def _adapter_source(pyname, operation):
     doc.append('    """')
     arguments = "{" + ", ".join(f"{n!r}: {n}" for n in names) + "}"
     return "\n".join([
-        f"def {pyname}({', '.join(f'{n}: str' for n in names)}):", *doc,
+        f"def {pyname}({', '.join(f'{n}: list[str]' if n in listed else f'{n}: str' for n in names)}):", *doc,
         f"    upstream, official = official_call({operation!r}, {arguments})",
         "    result, error = original.run_function(environment, upstream, official, raise_on_error=False)",
         "    if error is not None:",
         "        raise RuntimeError('upstream_failure')",
         "    return result",
     ])
+
+
+def target_kind(target):
+    """The reviewed kind of a field label ("answer" for the final answer)."""
+    if target == "answer":
+        return "answer"
+    operation, _, name = target.rpartition(".")
+    spec = next((f for f in entry(operation)["fields"] if f[0] == name and f[3] != "fixed"), None)
+    if spec is None:
+        raise ValueError("extract_target")
+    return spec[3]
 
 
 def target_description(target, functions):
@@ -89,8 +101,14 @@ def _extract_tool(generator, functions):
         if model != GENERATOR_MODEL or to != SENTINELS["to"] or not body or not instruction:
             raise ValueError("generator_control_mismatch")
         description, max_bytes = target_description(target, functions)
-        return {"text": generator(instruction=instruction, source=body, target=description, max_bytes=max_bytes,
-                                  context=context)}
+        line = generator(instruction=instruction, source=body, target=description, max_bytes=max_bytes,
+                         context=context)
+        if target_kind(target) not in LIST_KINDS:
+            return {"text": line}
+        # A list target: the same line, and its items split by the reviewed
+        # separator (a fixed rule; the items are as untrusted as the line).
+        items = [item.strip() for item in line.split(LIST_SEPARATOR.strip())]
+        return {"text": line, "items": [item for item in items if item]}
 
     extract.__name__ = "dojo.model.extract"
     return extract

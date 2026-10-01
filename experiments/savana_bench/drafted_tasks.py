@@ -6,9 +6,12 @@ The planner sees only the owner's request and the reviewed catalog, never a
 tool result (as CaMeL's P-LLM). It returns a small program: an ordered list of
 reviewed operations, each field given one origin:
 
-    {"text": "..."}              an owner-text literal
+    {"text": "..."}              an owner-text literal (a list: items joined by "; ")
     {"from": k}                  the text the quarantined extractor produced at step k
     {"from": k, "path": [...]}   a scalar at a JSON path of step k's tool result
+    ... "add_minutes"/"add_days"/"add_amount": n
+                                 that text computed by the kernel (a time, date or
+                                 amount plus n), n stated by the owner's request
 
 and extraction steps `{"tool": "dojo.model.extract", "source": k, "args":
 {"instruction": {"text": ...}, "target": {"text": "<operation>.<field>" | "answer"}}}`
@@ -17,8 +20,11 @@ named target. The last step's result is released to the owner.
 
 Owner review (this module, before anything is signed) refuses a program unless:
 every tool is reviewed and served by this suite; every edge points at an earlier
-step; no destination is derived from a result (the conservative owner policy: an
-injection can change what a write says, never whom it reaches); the program has
+step; no destination (nor a cc/bcc recipient) is derived from a result (the
+conservative owner policy: an injection can change what a write says, never
+whom it reaches); a text-list field takes typed items (each literal item owner
+text; a derived list one bounded edge); a computation's amount is one the
+request states (a duration in minutes or days, an amount of money); the program has
 at most MAX_STEPS operations; and every literal is owner text (each "; "-separated
 item a substring of the request, NFC with whitespace folded) or a value the owner
 declares itself: its own dates and times restated as YYYY-MM-DD[ HH:MM], a
@@ -30,15 +36,17 @@ constants fails before any operation runs) and every signed edge at prepare and
 dispatch.
 """
 from dataclasses import dataclass
+import decimal
 import hashlib
 import json
 import re
 import unicodedata
 
 from .agentdojo_provider import canonical
-from .agentdojo_tasks import (BENCHMARK, CALENDAR_YEAR, GENERATED_MAX_BYTES, GENERATED_TEXT, GENERATOR_MODEL,
-                              PACKAGE_VERSION, Step, catalog_tool, upstream_for)
-from .dojo_catalog import LIST_SEPARATOR, SENTINELS, entry, suite_operations
+from .agentdojo_tasks import (BENCHMARK, CALENDAR_YEAR, GENERATED_ITEMS, GENERATED_MAX_BYTES, GENERATED_TEXT,
+                              GENERATOR_MODEL, LIST, PACKAGE_VERSION, Step, catalog_tool, edge_document,
+                              upstream_for)
+from .dojo_catalog import LIST_KINDS, LIST_SEPARATOR, SENTINELS, entry, suite_operations
 
 EXTRACT_TOOL = "dojo.model.extract"
 ANSWER = "answer"
@@ -53,8 +61,13 @@ MAX_DECLARED = 32
 # has no effect, and its result reaches a write only through a signed edge. A
 # URL is excluded: fetching an address is itself an outbound channel.
 OWNER_ONLY_READ_FIELDS = frozenset({("dojo.web.get", "url")})
+# Recipients beyond a write's one destination field: never derived either.
+OWNER_ONLY_WRITE_FIELDS = frozenset({("dojo.email.send", "cc"), ("dojo.email.send", "bcc")})
+# A computation's amount, as the planner writes it -> (kernel op, unit scale).
+COMPUTE_KEYS = {"add_minutes": "add_minutes", "add_days": "add_days", "add_amount": "add_cents"}
 STEP_NOTES = frozenset({"description", "instruction", "comment", "note"})
 MAX_PATH = 8
+MAX_LIST_ITEMS = 32
 
 
 def review_policy():
@@ -64,7 +77,10 @@ def review_policy():
             "destinations": "owner_text_only", "edges": "earlier_steps_only", "extract_tool": EXTRACT_TOOL,
             "extract_targets_sha256": hashlib.sha256(canonical(list(extract_targets()))).hexdigest(),
             "edge_max_bytes": MAX_EDGE_BYTES, "context_max_bytes": MAX_CONTEXT_BYTES,
-            "restated": "owner dates/times (CALENDAR_YEAR default), booleans, permissions, read terms except URLs",
+            "restated": "owner dates/times (CALENDAR_YEAR default) and end times from stated durations, "
+                        "booleans, permissions, read terms except URLs",
+            "list_fields": "typed items; each literal item owner text", "computations": sorted(COMPUTE_KEYS),
+            "compute_amounts": "magnitude stated in the request",
             "calendar_year": CALENDAR_YEAR, "max_declared": MAX_DECLARED,
             "extract_instruction": "the whole request"}
 
@@ -80,6 +96,12 @@ def nfc(text):
 def folded(text):
     """NFC with every whitespace run (line breaks included) as one space."""
     return " ".join(nfc(text).split())
+
+
+def owner_item(item, prompt):
+    """One list item: a non-empty substring of the request as a whole (the
+    kernel's per-item rule; an item is never split again)."""
+    return type(item) is str and bool(folded(item)) and folded(item) in folded(prompt)
 
 
 def owner_text(text, prompt):
@@ -131,7 +153,52 @@ def owner_normalized(prompt):
                 continue
             hour = hour % 12 + (12 if half.lower().startswith("p") else 0)
         times.add(f"{hour:02d}:{int(minute or 0):02d}")
-    return frozenset(dates | {f"{d} {t}" for d in dates for t in times})
+    stamps = {f"{d} {t}" for d in dates for t in times}
+    # An end the owner states as a duration from its own start ("a 1-hour
+    # event at 10:00") is restated as that end, by the same fixed rule.
+    from .agentdojo_tasks import apply_compute
+    ends = set()
+    for stamp in stamps:
+        for minutes in owner_amounts(prompt)["add_minutes"]:
+            try:
+                ends.add(apply_compute(("add_minutes", minutes), stamp))
+            except ValueError:
+                pass
+    return frozenset(dates | stamps | ends)
+
+
+_NUMBER_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+                 "eight": 8, "nine": 9, "ten": 10, "twelve": 12, "fifteen": 15, "twenty": 20, "thirty": 30,
+                 "forty-five": 45, "half an": 0.5, "half a": 0.5}
+_COUNT = r"(?P<count>[0-9]+(?:\.[0-9]+)?|" + "|".join(sorted(map(re.escape, _NUMBER_WORDS), key=len, reverse=True)) + r")"
+_DURATION = re.compile(r"\b" + _COUNT + r"[\s-]*(?P<unit>hours?|hrs?|minutes?|mins?|days?|weeks?)\b", re.I)
+_MONEY = re.compile(r"(?<![0-9.])(?P<amount>[0-9]{1,9}(?:\.[0-9]{1,2})?)(?![0-9])")
+
+
+def owner_amounts(prompt):
+    """The computation amounts the owner's request states, by a fixed rule:
+    durations as minutes (hours, minutes) and days (days, weeks), and every
+    plain number as an amount of money in hundredths. Signs are not restated:
+    a computation may add or subtract a stated magnitude."""
+    text = nfc(prompt)
+    minutes, days = set(), set()
+    for m in _DURATION.finditer(text):
+        count = m.group("count").lower()
+        count = _NUMBER_WORDS[count] if count in _NUMBER_WORDS else float(count)
+        unit = m.group("unit").lower()
+        if unit.startswith(("hour", "hr")):
+            value = count * 60
+            minutes.add(value)
+        elif unit.startswith("min"):
+            minutes.add(count)
+        elif unit.startswith("day"):
+            days.add(count)
+        else:
+            days.add(count * 7)
+    cents = {round(float(m.group("amount")) * 100) for m in _MONEY.finditer(text)}
+    def whole(values):
+        return {int(v) for v in values if float(v).is_integer() and v > 0}
+    return {"add_minutes": whole(minutes), "add_days": whole(days), "add_cents": {c for c in cents if c > 0}}
 
 
 def extract_targets():
@@ -178,10 +245,9 @@ class DraftedContract:
                 "package": PACKAGE_VERSION, "task": self.task_id, "prompt": self.prompt,
                 "origin": "owner_text", "program": self.program,
                 "steps": [{"tool": st.tool, "upstream_tool": st.upstream_tool,
-                           "effect": catalog_tool(st.tool)["effect"], "values": dict(st.values),
+                           "effect": catalog_tool(st.tool)["effect"], "values": st.value_map(),
                            "payload_from": st.payload_from,
-                           "derived": [{"field": f, "source_operation": src, "path": list(path),
-                                        "max_bytes": bound} for f, src, path, bound in st.derived]}
+                           "derived": [edge_document(e) for e in st.derived]}
                           for st in self.chain],
                 "maximum_attempts": 1, "final_output": "last_step_result"}
 
@@ -202,12 +268,14 @@ def _origin(value):
         return ("text", "true" if value else "false")
     if type(value) is int:
         return ("text", str(value))
-    if type(value) is not dict or not value or set(value) - {"text", "from", "path"}:
+    if type(value) is list:
+        return ("items", value)
+    if type(value) is not dict or not value or set(value) - {"text", "from", "path", *COMPUTE_KEYS}:
         _refuse("field_origin")
     if "text" in value:
-        if set(value) != {"text"} or type(value["text"]) is not str:
+        if set(value) != {"text"} or type(value["text"]) not in (str, list):
             _refuse("field_origin")
-        return ("text", value["text"])
+        return ("items", value["text"]) if type(value["text"]) is list else ("text", value["text"])
     source = value.get("from")
     if type(source) is not int or isinstance(source, bool):
         _refuse("edge_source")
@@ -215,7 +283,20 @@ def _origin(value):
     if path is not None and (type(path) is not list or not 1 <= len(path) <= MAX_PATH
                              or any(type(p) not in (str, int) or isinstance(p, bool) for p in path)):
         _refuse("edge_path")
-    return ("from", source, None if path is None else tuple(str(p) for p in path))
+    keys = [k for k in COMPUTE_KEYS if k in value]
+    compute = None
+    if len(keys) > 1:
+        _refuse("edge_compute")
+    if keys:
+        amount = value[keys[0]]
+        if type(amount) not in (int, float) or isinstance(amount, bool):
+            _refuse("edge_compute")
+        # An amount of money is written in units and signed in hundredths.
+        scaled = decimal.Decimal(str(amount)) * (100 if keys[0] == "add_amount" else 1)
+        if scaled != scaled.to_integral_value():
+            _refuse("edge_compute")
+        compute = (COMPUTE_KEYS[keys[0]], int(scaled))
+    return ("from", source, None if path is None else tuple(str(p) for p in path), compute)
 
 
 def review_program(*, suite, suite_tools, task_id, prompt, program):
@@ -262,11 +343,17 @@ def review_program(*, suite, suite_tools, task_id, prompt, program):
             values = {"instruction": folded(prompt), "target": target[1], "model": GENERATOR_MODEL,
                       "to": SENTINELS["to"]}
             payload_from = source
-            if "context" in args:
+            context = _origin(args["context"]) if "context" in args else None
+            if context is not None and context[0] == "from" and context[1] == source and context[2] is None:
+                # The source's result is already the payload: the same result
+                # again as context adds nothing (and a large result would
+                # exceed the context bound), so it is dropped.
+                context = None
+            if context is not None:
                 # Context is only ever an earlier extraction's value, so one
                 # answer can combine several results; never a literal.
-                context = _origin(args["context"])
-                if context[0] != "from" or context[2] is not None or not 1 <= context[1] < number:
+                if (context[0] != "from" or context[2] is not None or context[3] is not None
+                        or not 1 <= context[1] < number):
                     _refuse("extract_context")
                 if kinds[context[1] - 1] == "extract":
                     if chain[context[1] - 1].value_map()["target"] == ANSWER:
@@ -285,41 +372,64 @@ def review_program(*, suite, suite_tools, task_id, prompt, program):
             open_fields = {n for n, (_r, k) in fields.items() if k != "fixed"}
             if set(args) - open_fields:
                 _refuse("unknown_field")
+            def owned(literal):
+                """An owner literal (or one list item) as the owner accepts it."""
+                if owner_text(literal, prompt):
+                    return True
+                if (literal in restatable
+                        or (kind in ("boolean", "opt_boolean") and literal in ("true", "false"))
+                        or (kind == "permission" and literal in ("r", "rw"))
+                        or (reading and (tool, name) not in OWNER_ONLY_READ_FIELDS
+                            and 0 < len(literal.encode()) <= 128 and literal == literal.strip()
+                            and not any(ord(ch) < 32 for ch in literal))):
+                    # Restated by the owner (its own dates/times, a yes/no, a
+                    # permission) or a read term the owner accepts from the
+                    # planner; declared to the kernel as constants.
+                    restated.add(literal)
+                    return True
+                return False
+
             for name, (role, kind) in sorted(fields.items()):
                 if kind == "fixed":
                     values[name] = SENTINELS[name]
                     continue
+                listed = kind in LIST_KINDS
                 if name not in args:
                     if not kind.startswith("opt_") and kind not in ("attachments", "null_text"):
                         _refuse("missing_field")
-                    values[name] = ""
+                    values[name] = () if listed else ""
                     continue
                 origin = _origin(args[name])
-                if origin[0] == "text":
-                    literal = origin[1]
-                    if owner_text(literal, prompt):
-                        pass
-                    elif (literal in restatable
-                          or (kind in ("boolean", "opt_boolean") and literal in ("true", "false"))
-                          or (kind == "permission" and literal in ("r", "rw"))
-                          or (reading and (tool, name) not in OWNER_ONLY_READ_FIELDS
-                              and 0 < len(literal.encode()) <= 128 and literal == literal.strip()
-                              and not any(ord(ch) < 32 for ch in literal))):
-                        # Restated by the owner (its own dates/times, a yes/no,
-                        # a permission) or a read term the owner accepts from
-                        # the planner; declared to the kernel as constants.
-                        restated.add(literal)
-                    else:
+                if origin[0] in ("text", "items"):
+                    if not listed:
+                        if origin[0] == "items":
+                            _refuse("field_origin")
+                        if not owned(origin[1]):
+                            _refuse("literal_not_owner_text")
+                        values[name] = origin[1]
+                        continue
+                    # A list literal: typed items, each held to the owner rule
+                    # by itself (the kernel checks every item the same way).
+                    items = (origin[1] if origin[0] == "items" else
+                             [] if origin[1] == "" else origin[1].split(LIST_SEPARATOR))
+                    if (len(items) > MAX_LIST_ITEMS or any(type(i) is not str or not i or i != i.strip()
+                                                           for i in items)):
+                        _refuse("literal_list")
+                    if not all(owner_item(i, prompt) or (owned(i) and LIST_SEPARATOR not in i) for i in items):
                         _refuse("literal_not_owner_text")
-                    values[name] = literal
+                    values[name] = tuple(items)
                     continue
-                if role == "destination" or (tool, name) in OWNER_ONLY_READ_FIELDS:
+                if role == "destination" or (tool, name) in OWNER_ONLY_READ_FIELDS | OWNER_ONLY_WRITE_FIELDS:
                     # Whom a write reaches, or which address a fetch contacts,
                     # is never chosen by data an injection could control.
                     _refuse("derived_destination")
-                _kind, source, path = origin
+                _kind, source, path, compute = origin
                 if not 1 <= source < number:
                     _refuse("edge_source")
+                if compute is not None:
+                    # Only one text is computed, by an amount the request states.
+                    if listed or abs(compute[1]) not in owner_amounts(prompt)[compute[0]]:
+                        _refuse("compute_amount")
                 if kinds[source - 1] == "extract":
                     if path is not None:
                         _refuse("edge_path")
@@ -327,12 +437,13 @@ def review_program(*, suite, suite_tools, task_id, prompt, program):
                         # The final answer is unbounded prose; a value a later
                         # field uses comes from an extraction for that field.
                         _refuse("answer_used_as_value")
-                    full = GENERATED_TEXT
+                    full = GENERATED_ITEMS if listed else GENERATED_TEXT
                 else:
                     if path is None:
                         _refuse("edge_path")
                     full = RESULT_PREFIX + path
-                derived.append((name, source, full, MAX_EDGE_BYTES))
+                form = LIST if listed else compute
+                derived.append((name, source, full, MAX_EDGE_BYTES) + (() if form is None else (form,)))
         kinds.append("extract" if tool == EXTRACT_TOOL else catalog_tool(tool)["effect"])
         chain.append(Step(tool, upstream_for(tool), tuple(sorted(values.items())), tuple(derived), payload_from))
     contract = DraftedContract(suite, task_id, prompt, tuple(chain), canonical(program).decode("utf-8"),

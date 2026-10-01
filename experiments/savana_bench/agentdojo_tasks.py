@@ -34,15 +34,118 @@ class Step:
     kernel passes as this operation's payload (0 = the payload is an owner
     value). A payload is not a root control: its source is fixed by this
     reviewed contract and checked again when the owner approves the action.
+
+    A derived edge may carry a fifth element, its form: LIST (the node is an
+    array of texts, for a text-list field) or (op, amount) (one text the kernel
+    computes with an owner-signed operation, `COMPUTE_OPS`). A list field's
+    owner value is a tuple of texts.
     """
     tool: str
     upstream_tool: str
-    values: tuple[tuple[str, str], ...]
-    derived: tuple[tuple[str, int, tuple[str, ...], int], ...] = ()
+    values: tuple[tuple[str, object], ...]
+    derived: tuple[tuple, ...] = ()
     payload_from: int = 0
 
     def value_map(self):
-        return dict(self.values)
+        return {k: list(v) if type(v) is tuple else v for k, v in self.values}
+
+    def edges(self):
+        """Every derived edge as (field, source, path, bound, form)."""
+        return tuple(edge_parts(e) for e in self.derived)
+
+
+LIST = "list"
+# Owner-signed computations on one extracted text, mirrored exactly from the
+# kernel (savana-continuation-core planning_observation::ResultComputeV04).
+COMPUTE_OPS = {"add_minutes": (1, 527_040), "add_days": (2, 3_660), "add_cents": (3, 1_000_000_000)}
+MAX_LIST_ITEMS = 32
+
+
+def edge_parts(edge):
+    field, source, path, bound, *rest = edge
+    form = rest[0] if rest else None
+    if not (form is None or form == LIST or (type(form) is tuple and len(form) == 2 and form[0] in COMPUTE_OPS
+                                             and type(form[1]) is int
+                                             and abs(form[1]) <= COMPUTE_OPS[form[0]][1])) or len(rest) > 1:
+        raise ValueError("edge_form")
+    return field, source, tuple(path), bound, form
+
+
+def edge_document(edge):
+    """An edge as contract evidence; a plain edge keeps its historical shape."""
+    field, source, path, bound, form = edge_parts(edge)
+    doc = {"field": field, "source_operation": source, "path": list(path), "max_bytes": bound}
+    if form == LIST:
+        doc["list"] = True
+    elif form is not None:
+        doc["compute"] = {"op": form[0], "amount": form[1]}
+    return doc
+
+
+def _days(y, m, d):
+    import datetime
+    if not 1000 <= y <= 9999:
+        raise ValueError("compute_operand")
+    return (datetime.date(y, m, d) - datetime.date(1970, 1, 1)).days
+
+
+def _date(days):
+    import datetime
+    value = datetime.date(1970, 1, 1) + datetime.timedelta(days=days)
+    if not 1000 <= value.year <= 9999:
+        raise ValueError("compute_range")
+    return value.isoformat()
+
+
+def _fixed_digits(text, width):
+    if len(text) != width or not text.isascii() or not text.isdigit():
+        raise ValueError("compute_operand")
+    return int(text)
+
+
+def _parse_date(text):
+    parts = text.split("-")
+    if len(parts) != 3:
+        raise ValueError("compute_operand")
+    return _days(_fixed_digits(parts[0], 4), _fixed_digits(parts[1], 2), _fixed_digits(parts[2], 2))
+
+
+def _parse_time(text):
+    parts = text.split(":")
+    if len(parts) != 2:
+        raise ValueError("compute_operand")
+    hour, minute = _fixed_digits(parts[0], 2), _fixed_digits(parts[1], 2)
+    if hour > 23 or minute > 59:
+        raise ValueError("compute_operand")
+    return hour * 60 + minute
+
+
+def apply_compute(form, text):
+    """The kernel's computation on one extracted text, or ValueError."""
+    op, amount = form
+    if op not in COMPUTE_OPS or type(amount) is not int or abs(amount) > COMPUTE_OPS[op][1] or type(text) is not str:
+        raise ValueError("compute_form")
+    if op == "add_minutes":
+        date, sep, time = text.partition(" ")
+        if not sep:
+            raise ValueError("compute_operand")
+        total = _parse_date(date) * 1440 + _parse_time(time) + amount
+        day, minute = divmod(total, 1440)
+        return f"{_date(day)} {minute // 60:02d}:{minute % 60:02d}"
+    if op == "add_days":
+        date, sep, time = text.partition(" ")
+        if sep:
+            _parse_time(time)
+        return _date(_parse_date(date) + amount) + (f" {time}" if sep else "")
+    whole, dot, fraction = text.partition(".")
+    if (not whole or len(whole) > 12 or not whole.isascii() or not whole.isdigit()
+            or (len(whole) > 1 and whole.startswith("0")) or (dot and not 1 <= len(fraction) <= 2)
+            or (dot and not (fraction.isascii() and fraction.isdigit()))):
+        raise ValueError("compute_operand")
+    cents = int(whole) * 100 + (int(fraction.ljust(2, "0")) if dot else 0) + amount
+    if cents < 0:
+        raise ValueError("compute_range")
+    return f"{cents // 100}.{cents % 100:02d}"
 
 
 @dataclass(frozen=True)
@@ -228,6 +331,18 @@ EFFECT_CODES = {"read": 1, "create": 2, "update": 3, "delete": 4, "send": 5, "ex
 EFFECT_NAMES = {"read": "Read", "create": "Create", "update": "Update", "delete": "Delete",
                 "send": "Send", "execute": "Execute"}
 ROLE_CODES = {"resource": 1, "destination": 2, "magnitude": 3, "payload": 4, "parameter": 5}
+TYPE_CODES = {"text": 1, "text_list": 4}
+TYPE_NAMES = {"text": "Text", "text_list": "TextList"}
+
+
+def signed_edge(edge):
+    """One derived edge in the clause-draft form the owner signs."""
+    _field, source, path, bound, form = edge_parts(edge)
+    rule = dict(source_clause=source, path=list(path), kind=TYPE_CODES["text_list" if form == LIST else "text"],
+                max_bytes=bound)
+    if form not in (None, LIST):
+        rule["compute"] = dict(op=form[0], amount=form[1])
+    return rule
 
 
 def catalog_tool(tool):
@@ -241,7 +356,7 @@ def catalog_tool(tool):
     raise ValueError("unreviewed_tool")
 
 
-def select_result_path(response_bytes, path):
+def select_result_path(response_bytes, path, *, node_only=False):
     """Python mirror of the kernel's strict result-path projection, used only by
     the researcher endpoint to CHECK the value the kernel derived. `$json` on a
     string decodes nested JSON text; on an object it is an ordinary key."""
@@ -262,9 +377,36 @@ def select_result_path(response_bytes, path):
             node = node[int(key)]
         else:
             raise ValueError("path_miss")
+    if node_only:
+        return node
     if not isinstance(node, (str, bool, int)) or isinstance(node, float):
         raise ValueError("non_scalar")
     return node
+
+
+def select_result_list(response_bytes, path, max_bytes):
+    """Mirror of the kernel's text-list projection: an array of at most
+    MAX_LIST_ITEMS strings whose total UTF-8 length is within `max_bytes`."""
+    node = select_result_path(response_bytes, path, node_only=True)
+    if (type(node) is not list or len(node) > MAX_LIST_ITEMS or any(type(i) is not str for i in node)
+            or sum(len(i.encode()) for i in node) > max_bytes):
+        raise ValueError("non_list")
+    return node
+
+
+def edge_value(prior_results, edge):
+    """The value the kernel derives for one edge from the actual earlier
+    result bytes, or ValueError (the kernel refuses the step)."""
+    _field, source, path, bound, form = edge_parts(edge)
+    raw = prior_results[source - 1]
+    if form == LIST:
+        return select_result_list(raw, path, bound)
+    value = select_result_path(raw, path)
+    if form is not None:
+        value = apply_compute(form, value) if type(value) is str else None
+    if type(value) is not str or len(value.encode()) > bound:
+        raise ValueError("derived_value_out_of_bounds")
+    return value
 
 
 @dataclass(frozen=True)
@@ -305,9 +447,8 @@ class WriteTaskContract:
                 "task": self.task_id, "variant": self.variant, "prompt": self.prompt,
                 "content_origin": "owner_supplied",
                 "steps": [{"tool": st.tool, "upstream_tool": st.upstream_tool,
-                           "effect": catalog_tool(st.tool)["effect"], "values": dict(st.values),
-                           "derived": [{"field": f, "source_operation": src, "path": list(path),
-                                        "max_bytes": bound} for f, src, path, bound in st.derived]}
+                           "effect": catalog_tool(st.tool)["effect"], "values": st.value_map(),
+                           "derived": [edge_document(e) for e in st.derived]}
                           for st in self.steps()],
                 "maximum_attempts": 1, "final_output": "write_tool_result_not_model_answer"}
 
@@ -358,10 +499,9 @@ class ChainTaskContract:
                 "task": self.task_id, "variant": self.variant, "prompt": self.prompt,
                 "content_origin": "quarantined_generator",
                 "steps": [{"tool": st.tool, "upstream_tool": st.upstream_tool,
-                           "effect": catalog_tool(st.tool)["effect"], "values": dict(st.values),
+                           "effect": catalog_tool(st.tool)["effect"], "values": st.value_map(),
                            "payload_from": st.payload_from,
-                           "derived": [{"field": f, "source_operation": src, "path": list(path),
-                                        "max_bytes": bound} for f, src, path, bound in st.derived]}
+                           "derived": [edge_document(e) for e in st.derived]}
                           for st in self.chain],
                 "maximum_attempts": 1, "final_output": "write_tool_result_not_model_answer"}
 
@@ -371,6 +511,8 @@ class ChainTaskContract:
 
 # The generator's one line of output (its result is the JSON object {"text": ...}).
 GENERATED_TEXT = ("result", "content", "0", "text", "$json", "text")
+# For a text-list target the extractor's result also carries its items.
+GENERATED_ITEMS = ("result", "content", "0", "text", "$json", "items")
 GENERATED_MAX_BYTES = 512
 
 
@@ -436,11 +578,8 @@ def expected_step_call(contract, number, prior_results):
         # The kernel decodes the whole earlier result as the payload text.
         payload = next(f["name"] for f in catalog_tool(step.tool)["fields"] if f["role"] == "payload")
         arguments[payload] = prior_results[step.payload_from - 1].decode("utf-8")
-    for field, source, path, bound in step.derived:
-        value = select_result_path(prior_results[source - 1], path)
-        if type(value) is not str or len(value.encode()) > bound:
-            raise ValueError("derived_value_out_of_bounds")
-        arguments[field] = value
+    for edge in step.derived:
+        arguments[edge[0]] = edge_value(prior_results, edge)
     return {"name": step.tool, "arguments": arguments}
 
 
@@ -484,7 +623,10 @@ def owner_inputs(contract):
             key = name if number == 1 else f"{number}:{name}"
             row = dict(argument=name, slot=list(hashlib.sha256(
                 b"SAVANA_DOJO_INPUT_SLOT_V2\0" + bytes.fromhex(contract.digest()) + key.encode()).digest()[:16]),
-                text=value)
+                text="" if type(value) is tuple else value)
+            if type(value) is tuple:
+                # A text-list field's owner value: typed items, never one text.
+                row["items"] = list(value)
             if len(steps) > 1:
                 row["operation"] = number
             rows.append(row)
@@ -492,7 +634,8 @@ def owner_inputs(contract):
 
 
 def owner_document(contract):
-    inputs = sorted([dict(slot=i["slot"], text=i["text"]) for i in owner_inputs(contract)], key=lambda i:i["slot"])
+    inputs = sorted([dict(slot=i["slot"], text=i["text"], **({"items": i["items"]} if "items" in i else {}))
+                     for i in owner_inputs(contract)], key=lambda i: i["slot"])
     if getattr(contract, "variant", None) == "drafted":
         # Schema 2: the kernel requires every input to be empty, an owner-text
         # constant of this prompt, or one of these owner-declared constants.
@@ -532,17 +675,23 @@ def prepare_draft(contract, *, task, root, observer, tool_descriptor,
         or any(type(v) is not int or not 1 <= v < 2**64
                for v in (not_before, expires_at, *clauses, release_clause))
         or not not_before < expires_at or expires_at - not_before < 2
-        or release_clause in clauses or release_descriptor in descriptors
-        or len(set(map(bytes, tools))) != len(tools)):
+        or release_clause in clauses or release_descriptor in descriptors):
+        # One tool may serve several operations (two reads, two extractions):
+        # each runs under its own clause, so its action is still distinct.
         raise ValueError("invalid_task_draft_binding")
     inputs = owner_inputs(contract)
     operations = []
     for number, (step, descriptor, clause) in enumerate(zip(steps, tools, clauses), 1):
         mine = [v for v in inputs if v.get("operation", 1) == number]
         bindings = [{"argument": v["argument"], "slot": v["slot"]} for v in mine]
-        for field, source, path, bound in step.derived:
-            bindings.append({"argument": field, "slot": result_slot(contract, number, field),
-                             "result_of": source, "result_path": list(path), "result_max_bytes": bound})
+        for field, source, path, bound, form in step.edges():
+            binding = {"argument": field, "slot": result_slot(contract, number, field),
+                       "result_of": source, "result_path": list(path), "result_max_bytes": bound}
+            if form == LIST:
+                binding["result_list"] = True
+            elif form is not None:
+                binding["result_compute"] = {"op": form[0], "amount": form[1]}
+            bindings.append(binding)
         if step.payload_from:
             # A whole-result edge: no path, no bound; the kernel fills the payload.
             payload = next(f["name"] for f in catalog_tool(step.tool)["fields"] if f["role"] == "payload")
