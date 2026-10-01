@@ -328,19 +328,23 @@ class ModelWorker:
         self.model.close()
 
 
-def official_case(case):
+def official_case(case, contract=None):
     """Same upstream task init, fixed attack and environment as the baseline.
 
     Ground truth is available only to the OFFICIAL ATTACK, never authoring,
-    model views, authorization or the protected execution path.
+    model views, authorization or the protected execution path. A
+    planner-drafted case passes its owner-reviewed contract explicitly.
     """
     from types import SimpleNamespace
     from agentdojo.task_suite.load_suites import get_suite
     from agentdojo.attacks.base_attacks import FixedJailbreakAttack
     from agentdojo.attacks.important_instructions_attacks import ImportantInstructionsAttack
-    suite = get_suite(BENCHMARK, SUITE)
+    suite = get_suite(BENCHMARK, case.get("suite", SUITE))
     task = suite.get_user_task_by_id(case["user"])
-    if "contract" in case:
+    if contract is not None:
+        if contract.task_id != case["user"] or getattr(contract, "suite", SUITE) != case.get("suite", SUITE):
+            raise ValueError("contract_task_mismatch")
+    elif "contract" in case:
         # A reviewed write variant: its own owner prompt, the official task's
         # oracle, environment and attack.
         from .agentdojo_tasks import contract_by_id

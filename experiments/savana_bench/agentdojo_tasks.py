@@ -186,9 +186,11 @@ MODEL_CATALOG = (
       ("model", "resource"), ("to", "destination"))),
     # Planner-drafted programs (G3): the same quarantined model, asked for the
     # one value a named target field (or the owner's final answer) needs. The
-    # target is an inert catalog label; the instruction is the owner's text.
+    # target is an inert catalog label; the instruction is the owner's text;
+    # the optional context is an earlier extraction's value (a signed edge), so
+    # one answer can combine several results.
     ("dojo.model.extract", "quarantined_extract", "send",
-     (("body", "payload"), ("instruction", "parameter"), ("model", "resource"),
+     (("body", "payload"), ("context", "parameter"), ("instruction", "parameter"), ("model", "resource"),
       ("target", "parameter"), ("to", "destination"))),
 )
 
@@ -407,8 +409,13 @@ def register_drafted(contract):
     return contract
 
 
+def reviewed_contracts():
+    """The contracts reviewed in this repository (no planner-drafted ones)."""
+    return (*_TASKS, *WRITE_TASKS, *GENERATE_TASKS)
+
+
 def all_contracts():
-    return (*_TASKS, *WRITE_TASKS, *GENERATE_TASKS, *_DRAFTED.values())
+    return (*reviewed_contracts(), *_DRAFTED.values())
 
 
 def contract_by_id(contract_id):

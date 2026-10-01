@@ -95,7 +95,7 @@ class ReadToolCatalogTests(unittest.TestCase):
         # The extractor for planner-drafted programs: same model, one more
         # inert label naming the value it must produce.
         self.assertEqual((xname, xupstream, xeffect), ("dojo.model.extract", "quarantined_extract", "send"))
-        self.assertEqual(dict(xfields), dict(fields, target="parameter"))
+        self.assertEqual(dict(xfields), dict(fields, target="parameter", context="parameter"))
 
     def test_upstream_functions_are_the_reviewed_read_set(self):
         # Exactly the official AgentDojo workspace read functions we serve.

@@ -130,6 +130,18 @@ contain cannot become a control even if the owner's (automated) review accepts
 it. Schema-1 documents (the reviewed contracts, whose dates are owner-normalized,
 e.g. `May 26th` -> `2024-05-26`) are unchanged.
 
+Owner-declared values beyond the deployment's synthetic controls, all fixed
+rules of the owner's review (`drafted_tasks.review_program`): its own dates and
+times restated as `YYYY-MM-DD[ HH:MM]` (year 2024 when the request states none,
+the same policy the reviewed contracts use); booleans and sharing permissions;
+and search terms or counts for READ tools other than a URL (a read has no
+effect and reaches a write only through a signed edge; fetching a URL is itself
+an outbound channel). The extractor's instruction is always the owner's whole
+request (whitespace folded), so a planner cannot steer the quarantined model.
+An extraction's optional `context` is another earlier step's value (an
+extraction, or a tool result's text up to 8 KB), which lets one answer combine
+two results.
+
 Not covered yet, and therefore failing honestly in planner-drafted runs: values
 that need a computed origin (a date the prompt states without its year, time +
 duration, arithmetic), keyed selection from a list, and anything the owner's

@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
 import socket
 import stat
 import struct
@@ -156,7 +157,11 @@ class FiniteOperator:
             or mode not in MODES):
             raise ValueError('closed_compile_request')
         contract=next((c for c in all_contracts() if c.contract_id==request['contract']),None)
-        if contract is None: raise ValueError('unreviewed_contract')
+        # Forwarding signs an untrusted plan unread, so the contract is only a
+        # label there; a planner-drafted one exists only on the owner side.
+        drafted=(mode=='forward_untrusted_plan' and type(request['contract']) is str
+                 and re.fullmatch(r'user_task_[0-9]{1,3}:drafted:[0-9a-f]{16}',request['contract']))
+        if contract is None and not drafted: raise ValueError('unreviewed_contract')
         command=request['command']
         if set(command)!={'schema','installation','store','request','not_before','expires_at','operation'}:
             raise ValueError('closed_command')
@@ -208,7 +213,8 @@ class FiniteOperator:
         prior=json.loads(private_read(directory/'compile.receipt.json'))['result']
         original=json.loads(private_read(directory/'request.json'))
         forwarded=original.get('mode','reviewed')=='forward_untrusted_plan'
-        operations=len(next(c for c in all_contracts() if c.contract_id==original['contract']).steps())
+        operations=None if forwarded else len(
+            next(c for c in all_contracts() if c.contract_id==original['contract']).steps())
         approval=prepared['approval']
         if (prepared['kind']!='planning_execution_prepared' or prepared['task']!=list(task)
             or approval['task']!=list(task) or approval['root']!=root or approval['profile']!=prior['profile']

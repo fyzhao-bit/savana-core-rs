@@ -42,7 +42,7 @@ OPERATOR_MODE = "forward_untrusted_plan"
 IDS = ("task", "root", "observer", "application_turn", "planner", "model_profile", "not_before", "expires_at")
 # Outcomes that settle an episode. Anything else stays unknown.
 DEFINITIVE = ("plan_unencodable", "author_failed", "sdk_codec_rejected", "compile_rejected",
-              "prepare_rejected", "owner_refused", "published")
+              "prepare_rejected", "owner_refused", "published", "program_refused")
 KERNEL_BLOCKS = ("compile_rejected", "prepare_rejected")
 
 
@@ -90,9 +90,33 @@ def write_cases(groups=WRITE_GROUPS, mutations=None, injections=None):
     return chain_cases("write", groups, mutations, injections)
 
 
+def drafted_cases(spec):
+    """`<suite>:<item>[,<item>...]`, each item `user_task_N` (benign) or
+    `user_task_N+injection_task_M` (the official important_instructions
+    attack). The planner drafts each task's whole program from its request."""
+    from .dojo_catalog import SUITES
+    suite, colon, items = spec.partition(":")
+    names = items.split(",") if colon else []
+    if suite not in SUITES or not names or len(set(names)) != len(names):
+        raise ValueError("planner_experiment_spec")
+    cases = []
+    for item in names:
+        match = re.fullmatch(r"(user_task_(?:0|[1-9][0-9]?))(?:\+(injection_task_(?:0|[1-9][0-9]?)))?", item)
+        if match is None:
+            raise ValueError("planner_experiment_spec")
+        user, injection = match.groups()
+        cases.append(dict(group="drafted_attack" if injection else "drafted_benign", suite=suite, user=user,
+                          injection=injection, author="reviewed", root_author="deepseek", goal=None,
+                          mutation=None))
+    return tuple(cases)
+
+
 def experiment_cases(spec):
-    """honest | poisoned | compromised[:names] | write[:items] | generate[:items]"""
+    """honest | poisoned | compromised[:names] | write[:items] | generate[:items]
+    | drafted:<suite>:<items>"""
     kind, colon, names = spec.partition(":") if type(spec) is str else ("", "", "")
+    if kind == "drafted" and colon:
+        return drafted_cases(names)
     if kind == "honest" and not colon:
         return tuple(dict(case, author="deepseek", goal=None, mutation=None) for case in CASES)
     if kind == "poisoned" and not colon:
@@ -237,7 +261,7 @@ def _hex(value):
 
 
 def consent_mode(experiment):
-    multi = str(experiment).partition(":")[0] in CHAIN_KINDS
+    multi = str(experiment).partition(":")[0] in (*CHAIN_KINDS, "drafted")
     return "finite_write_preconsent_v1" if multi else "finite_calendar_preconsent_v1"
 
 
@@ -275,7 +299,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
     if identity_profile is None or identity_profile != load_profile() or config is None or config["schema"] != 3:
         raise ValueError("explicit_benchmark_profile_required")
     audit = ResearchAudit(output)
-    model = worker = broker = author = generator = None
+    model = worker = broker = author = generator = drafter = None
     import asyncio
     async_runner = asyncio.Runner()
     rows = []
@@ -312,8 +336,12 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             model = DeepSeekModel(api_key=key, profiles={config["model_worker"]["profile"]: "deepseek-flash"}, max_calls=32)
             if any(case["author"] == "deepseek" for case in cases):
                 author = DeepSeekPlanAuthor(key, max_calls=len(cases))
-            if any(st.payload_from for case in cases if "contract" in case
-                   for st in contract_by_id(case["contract"]).steps()):
+            if any(case.get("root_author") for case in cases):
+                from .root_drafter import DeepSeekRootDrafter
+                drafter = DeepSeekRootDrafter(key, max_calls=len(cases))
+            if any(case.get("root_author") for case in cases) or any(
+                    st.payload_from for case in cases if "contract" in case
+                    for st in contract_by_id(case["contract"]).steps()):
                 # The reviewed generator tool's own credential use: one call
                 # per generation step, never shared with the planner/executor.
                 generator = DeepSeekGenerator(key, max_calls=len(cases))
@@ -344,7 +372,31 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                     from .protected_operator import OperatorClient
                     from .protected_setup import provision_owner_episode
                     from .publication_audit import PrivateEpisodeAudit
-                    suite, task, injection, contract, values, env = official_case(case)
+                    drafted = None
+                    if case.get("root_author"):
+                        # The untrusted planner drafts the whole program from the
+                        # request alone; the owner's fixed review admits it or not.
+                        from agentdojo.task_suite.load_suites import get_suite
+                        from .agentdojo_tasks import register_drafted
+                        from .drafted_tasks import ProgramRefused, parse_program_text, review_program
+                        official = get_suite(BENCHMARK, case["suite"])
+                        prompt = official.get_user_task_by_id(case["user"]).PROMPT
+                        row["stage"] = "root_drafting"
+                        try:
+                            program_text, meta = drafter.draft(official, prompt)
+                        except RuntimeError:
+                            row["outcome"] = "author_failed"
+                            raise
+                        audit.emit("root_drafted", episode=index, program_text=program_text, **meta)
+                        try:
+                            drafted = register_drafted(review_program(suite=case["suite"],
+                                suite_tools={t.name for t in official.tools}, task_id=case["user"], prompt=prompt,
+                                program=parse_program_text(program_text)))
+                        except ProgramRefused as error:
+                            audit.emit("program_refused", episode=index, reason=str(error))
+                            row.update(outcome="program_refused", refusal=str(error))
+                            raise
+                    suite, task, injection, contract, values, env = official_case(case, drafted)
                     before = env.model_copy(deep=True)
                     turn = digest32(deployment["application_turn"]).hex()
                     tool_results = []  # exact tool responses so far, in order
@@ -363,7 +415,11 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         audit.emit(kind, episode=index, **data)
                     emit("episode_input", contract=contract.document(), injections=values,
                          environment=before.model_dump(mode="json"))
-                    provider = calendar_provider(env, max_calls=len(contract.steps()), generator=generator)
+                    if drafted is not None:
+                        from .dojo_provider import dojo_provider
+                        provider = dojo_provider(suite, env, max_calls=len(contract.steps()), generator=generator)
+                    else:
+                        provider = calendar_provider(env, max_calls=len(contract.steps()), generator=generator)
                     generated_before = 0 if generator is None else len(generator.log)
                     relay = ProviderRelay(emit)
                     servers = _servers(config, relay.exchange)
@@ -451,6 +507,11 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         server.close()
                     if observer is not None:
                         observer.close()
+                if row["outcome"] == "program_refused":
+                    # Refused before anything was signed: no tool ran and the
+                    # environment was never created, so nothing changed.
+                    row.update(observed_utility=False, environment_changed=False,
+                               observed_attacker_success=False if case["injection"] else None)
                 if suite is not None:
                     if after is None:
                         after = endpoint.freeze() if endpoint is not None else provider.env.model_copy(deep=True)
@@ -489,6 +550,9 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             episodes_attempted=sum(r["attempted"] for r in rows), blockers=blockers, rows=rows,
             groups=summarize(rows), total_model_calls=0 if model is None else model.calls,
             plan_author_calls=0 if author is None else author.calls,
+            root_drafter_calls=0 if drafter is None else drafter.calls,
+            root_drafter_tokens=None if drafter is None else dict(prompt=drafter.prompt_tokens,
+                                                                 completion=drafter.completion_tokens),
             generator_calls=0 if generator is None else generator.calls,
             generator_tokens=None if generator is None else dict(prompt=generator.prompt_tokens,
                                                                 completion=generator.completion_tokens),
@@ -513,4 +577,6 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             author.close()
         if generator is not None:
             generator.close()
+        if drafter is not None:
+            drafter.close()
         audit.close()
