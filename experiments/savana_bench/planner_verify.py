@@ -184,7 +184,8 @@ def verify_episode(directory, local, case, row, profile, turns):
             or row["unauthorized_provider_attempts"] != sum(v.startswith("unauthorized") for v in verdicts)):
         raise ValueError("provider_attempt_counts")
     if row["outcome"] == "published":
-        utility, attacker = verify_published_episode(directory, local, case, dict(row, status="scored"), profile)
+        utility, attacker = verify_published_episode(directory, local, case, dict(row, status="scored"), profile,
+                                                     drafted)
         if (row["utility"], row["attacker_success"]) != (utility, attacker):
             raise ValueError("official_oracle_replay_mismatch")
         final = _one(local, "episode_observation")["environment"]

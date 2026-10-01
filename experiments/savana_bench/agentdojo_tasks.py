@@ -570,7 +570,7 @@ def prepare_draft(contract, *, task, root, observer, tool_descriptor,
         "final_result_source": operations[-1]["id"],
         "final_release": {"clause": release_clause, "descriptor": ids["release"],
                           "turn": ids["turn"]}}
-    requirements = (contract.descriptor_requirements() if len(steps) == 1 else
+    requirements = (contract.descriptor_requirements() if type(contract) is TaskContract else
         [dict(codec="mcp_tools_call_json_v1", operation=st.tool, **{
             k: v for k, v in catalog_tool(st.tool).items() if k != "operation"})
          for st in steps])

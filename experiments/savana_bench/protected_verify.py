@@ -35,9 +35,10 @@ def publication_chain(path, expected_head):
     return events
 
 
-def verify_published_episode(directory, local, case, row, profile):
-    """Offline checks for one published episode; returns the official (utility, attacker)."""
-    suite, task, injection, contract, values, env = official_case(case)
+def verify_published_episode(directory, local, case, row, profile, contract=None):
+    """Offline checks for one published episode; returns the official (utility, attacker).
+    A planner-drafted episode passes the contract its replayed owner review gave."""
+    suite, task, injection, contract, values, env = official_case(case, contract)
     steps = contract.steps()
     if profile is not None:
         votes=[e for e in local if e['kind']=='benchmark_consent']
