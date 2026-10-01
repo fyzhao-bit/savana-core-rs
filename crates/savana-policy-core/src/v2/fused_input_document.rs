@@ -14,7 +14,7 @@ use zeroize::Zeroize;
 pub const OWNER_TEXT_ORIGIN_V04: &str = "owner_text";
 /// Items of one input are joined by this separator (a list encoded as text).
 const OWNER_TEXT_ITEM_SEPARATOR: &str = "; ";
-const MAX_OWNER_CONSTANTS: usize = 16;
+const MAX_OWNER_CONSTANTS: usize = 32;
 const MAX_OWNER_CONSTANT_BYTES: usize = 128;
 
 #[derive(Serialize, Deserialize)]
@@ -68,7 +68,8 @@ impl FusedInputDocumentV04 {
     }
     /// A schema-2 document's inputs are all owner text: each is empty, one of
     /// the owner's declared constants, or a text whose every "; "-separated
-    /// item is a non-empty NFC substring of the owner's request. A literal the
+    /// item is a non-empty substring of the owner's request, both compared NFC
+    /// normalized with whitespace runs folded to one space. A literal the
     /// request does not contain (an address an injected or compromised planner
     /// proposed) fails here, before any operation runs. Schema 1 documents
     /// carry owner-normalized values and are not subject to this rule.
@@ -77,13 +78,14 @@ impl FusedInputDocumentV04 {
             return Ok(());
         }
         let constants = self.constants.as_deref().ok_or(G3Error::DeriveTypeMismatch)?;
-        let request: String = self.prompt.nfc().collect();
+        let request = folded_owner_text(&self.prompt);
         for input in &self.inputs {
             if input.text.is_empty() || constants.iter().any(|c| *c == input.text) {
                 continue;
             }
             if !input.text.split(OWNER_TEXT_ITEM_SEPARATOR).all(|item| {
-                !item.is_empty() && request.contains(item.nfc().collect::<String>().as_str())
+                let item = folded_owner_text(item);
+                !item.is_empty() && request.contains(item.as_str())
             }) {
                 return Err(G3Error::DeriveTypeMismatch);
             }
@@ -96,6 +98,12 @@ impl FusedInputDocumentV04 {
             .ok_or(G3Error::DeriveFieldMissing)?;
         KernelValueV2::text(input.text.clone())
     }
+}
+
+/// NFC with every whitespace run (line breaks included) folded to one space.
+fn folded_owner_text(text: &str) -> String {
+    let normalized: String = text.nfc().collect();
+    normalized.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
@@ -138,6 +146,12 @@ mod tests {
                 &owner_text_document(&["Q3 plan", refused], &["primary", "private-result"]).to_string()).unwrap();
             assert!(document.check_owner_text_origin().is_err(), "{refused}");
         }
+        // Line breaks and repeated spaces in the request do not matter.
+        let multiline = serde_json::json!({"schema":2,"prompt":"Book the hotel.\nThen  email  me.",
+            "origin":"owner_text","constants":[],
+            "inputs":[{"slot":vec![1;16],"text":"Book the hotel. Then email me."},
+                      {"slot":vec![2;16],"text":"email me"}]});
+        FusedInputDocumentV04::parse(&multiline.to_string()).unwrap().check_owner_text_origin().unwrap();
         // A schema-1 document keeps owner-normalized values (e.g. dates).
         let legacy = serde_json::json!({"schema":1,"prompt":"May 26th","inputs":[{"slot":vec![1;16],"text":"2024-05-26"}]});
         FusedInputDocumentV04::parse(&legacy.to_string()).unwrap().check_owner_text_origin().unwrap();
@@ -154,7 +168,7 @@ mod tests {
                              ("constants", serde_json::json!([""])),
                              ("constants", serde_json::json!(["a\nb"])),
                              ("constants", serde_json::json!(vec!["x".repeat(129)])),
-                             ("constants", serde_json::json!((0..17).map(|i| format!("c{i:02}")).collect::<Vec<_>>()))] {
+                             ("constants", serde_json::json!((0..33).map(|i| format!("c{i:02}")).collect::<Vec<_>>()))] {
             let mut changed = good.clone();
             changed[key] = value;
             cases.push(changed);
