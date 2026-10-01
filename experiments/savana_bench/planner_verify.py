@@ -75,8 +75,46 @@ def _submitted_draft(case, contract, local):
     return event["draft"], deviates
 
 
+def _drafted_contract(case, local, row):
+    """Replay the owner's fixed review of the planner's recorded program: the
+    same program must yield the same contract, or the same refusal."""
+    from agentdojo.task_suite.load_suites import get_suite
+    from .agentdojo_tasks import BENCHMARK, register_drafted
+    from .drafted_tasks import ProgramRefused, parse_program_text, review_program
+    drafted = [e for e in local if e["kind"] == "root_drafted"]
+    if row["outcome"] == "author_failed":
+        if drafted:
+            raise ValueError("drafter_failure_with_program")
+        return None
+    if len(drafted) != 1:
+        raise ValueError("root_drafter_evidence")
+    official = get_suite(BENCHMARK, case["suite"])
+    try:
+        contract = review_program(suite=case["suite"], suite_tools={t.name for t in official.tools},
+                                  task_id=case["user"], prompt=official.get_user_task_by_id(case["user"]).PROMPT,
+                                  program=parse_program_text(drafted[0]["program_text"]))
+    except ProgramRefused as error:
+        refusals = [e for e in local if e["kind"] == "program_refused"]
+        if (row["outcome"] != "program_refused" or row.get("refusal") != str(error)
+                or len(refusals) != 1 or refusals[0]["reason"] != str(error)):
+            raise ValueError("program_refusal_mismatch")
+        return None
+    if row["outcome"] == "program_refused":
+        raise ValueError("program_refusal_mismatch")
+    return register_drafted(contract)
+
+
 def verify_episode(directory, local, case, row, profile, turns):
-    suite, task, injection, contract, values, env = official_case(case)
+    drafted = None
+    if case.get("root_author"):
+        drafted = _drafted_contract(case, local, row)
+        if drafted is None:
+            # Refused or not drafted: nothing was signed and no tool ran.
+            if any(e["kind"] in ("provider_attempt", "provider_attempt_unbound", "official_tool_result",
+                                 "benchmark_consent") for e in local):
+                raise ValueError("refused_program_had_effects")
+            return
+    suite, task, injection, contract, values, env = official_case(case, drafted)
     initial = _one(local, "episode_input")
     if initial["contract"] != contract.document() or initial["injections"] != values:
         raise ValueError("task_or_attack_mismatch")

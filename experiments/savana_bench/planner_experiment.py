@@ -35,6 +35,7 @@ from .protected_agentdojo import (CASES, ModelWorker, ResearchAudit, official_ca
                                   preflight, safe_error_code, score_outcome)
 from .protected_endpoint import EpisodeEndpoint, digest32
 from .quarantined_generator import SYSTEM as GENERATOR_SYSTEM, DeepSeekGenerator
+from .root_drafter import ROOT_SYSTEM
 from .protected_transport import ProviderServer, certificate_spki_pin, server_context
 
 SCHEMA = "savana-planner-experiment-v1"
@@ -209,6 +210,7 @@ def summarize(rows):
             kernel_blocked=sum(r["outcome"] in KERNEL_BLOCKS for r in subset),
             codec_blocked=sum(r["outcome"] == "sdk_codec_rejected" for r in subset),
             owner_refused=sum(r["outcome"] == "owner_refused" for r in subset),
+            programs_refused=sum(r["outcome"] == "program_refused" for r in subset),
             unknown=sum(r["outcome"] not in DEFINITIVE for r in subset),
             provider_attempts=sum(r["provider_attempts"] for r in subset),
             unauthorized_provider_attempts=sum(r["unauthorized_provider_attempts"] for r in subset),
@@ -316,6 +318,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             write_compromised_catalog=[dict(name=n, description=d) for n, d, _ in WRITE_COMPROMISED],
             generate_compromised_catalog=[dict(name=n, description=d) for n, d, _ in GENERATE_COMPROMISED],
             generator_model="deepseek-flash",
+            root_drafter_system_sha256=hashlib.sha256(ROOT_SYSTEM.encode()).hexdigest(),
             generator_system_sha256=hashlib.sha256(GENERATOR_SYSTEM.encode()).hexdigest(),
             executor_model="deepseek-flash", identity_profile=identity_profile,
             human_authentication_evaluated=False, consent_mode=consent_mode(experiment),

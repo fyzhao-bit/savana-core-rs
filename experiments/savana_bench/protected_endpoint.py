@@ -84,10 +84,18 @@ class EpisodeEndpoint:
                 raise ValueError("official_tool_outcome_unknown")
             self._results.append(response)
             # Exactly what the official function received: the fixed synthetic
-            # controls are checked and dropped by the provider adapter.
+            # controls are checked and dropped by the provider adapter, and every
+            # other field decoded by its reviewed rule (the reviewed generator
+            # tools are Savana's own, recorded as sent).
             from .agentdojo_calendar import SENTINELS
+            from .dojo_catalog import CATALOG, official_call
+            arguments = request["params"]["arguments"]
+            if any(t["operation"] == step.tool for t in CATALOG):
+                _, official = official_call(step.tool, arguments)
+            else:
+                official = {k: v for k, v in arguments.items() if k not in SENTINELS}
             self.emit("official_tool_result", operation=number + 1, tool=step.upstream_tool,
-                arguments={k: v for k, v in request["params"]["arguments"].items() if k not in SENTINELS},
+                arguments=official,
                 response=result,
                 environment=self.provider.env.model_dump(mode="json"))
             return response
