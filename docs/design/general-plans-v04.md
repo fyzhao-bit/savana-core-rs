@@ -190,6 +190,28 @@ too: never derived. A context that names the extraction's own source is dropped
 **Not covered:** keyed selection (choose the list element whose field equals an
 owner value), conditionals and loops; those still fail honestly.
 
+**Found on fresh hosts (G5/G6 smoke runs), fixed:**
+- *Empty optional values.* The pinned G5 binaries refused an empty parameter
+  (an extraction without context, an omitted optional field) when the root
+  was drafted: 13 of 97 tasks failed setup. G4 admits an empty parameter.
+- *A request naming an email address.* The kernel never releases a model view
+  with residual PII (`fused_model_exchange`, `BlocklistAndNoResidualPii`), so
+  the one-template planning round of such a task never ran and preparation
+  failed. That is the intended privacy rule; a drafted program is already
+  fixed by the owner's review, so its round now uses the empty view the kernel
+  admits, and the address never reaches that model.
+- *Two identical extractions.* Two clauses with the same signed alternative
+  are ambiguous, and G4 refuses to pick a budget bucket for the agent. Each
+  extraction now carries its payload's step as an owner-declared control.
+- *Large results.* The leak gate's blocklist search keeps the rewritten `\b`
+  on fancy-regex's backtracking VM, whose 1,000,000-step budget is per search;
+  any text past about 15 KB exhausted it and failed closed by length alone (a
+  27 KB file listing could not be shown for approval). The gate now collapses
+  whitespace runs and searches 4 KB windows cut at non-word characters with at
+  least 256 bytes of overlap: same answers on the reference corpus and fuzz
+  vectors, every hit still found, a window that exhausts the budget still
+  blocks.
+
 ## Comparison with CaMeL
 
 Standard, same-conditions comparison only: both use DeepSeek, same AgentDojo

@@ -56,6 +56,8 @@ RESULT_PREFIX = ("result", "content", "0", "text", "$json")
 RESULT_TEXT = ("result", "content", "0", "text")
 MAX_EDGE_BYTES = 512
 MAX_CONTEXT_BYTES = 8192
+# The extractor's final answer is bounded by its provider at 2000 bytes.
+MAX_ANSWER_BYTES = 2048
 MAX_DECLARED = 32
 # Read parameters the planner may choose itself (a search term, a count): a read
 # has no effect, and its result reaches a write only through a signed edge. A
@@ -356,9 +358,12 @@ def review_program(*, suite, suite_tools, task_id, prompt, program):
                         or not 1 <= context[1] < number):
                     _refuse("extract_context")
                 if kinds[context[1] - 1] == "extract":
-                    if chain[context[1] - 1].value_map()["target"] == ANSWER:
-                        _refuse("answer_used_as_value")
-                    derived.append(("context", context[1], GENERATED_TEXT, MAX_EDGE_BYTES))
+                    # An earlier answer is only ever more context for a later
+                    # extraction (data for the model, never a control), so a
+                    # request with several parts can be answered in full.
+                    answer = chain[context[1] - 1].value_map()["target"] == ANSWER
+                    derived.append(("context", context[1], GENERATED_TEXT,
+                                    MAX_ANSWER_BYTES if answer else MAX_EDGE_BYTES))
                 else:
                     # A second tool result, whole, as bounded text.
                     derived.append(("context", context[1], RESULT_TEXT, MAX_CONTEXT_BYTES))

@@ -60,7 +60,8 @@ Rules:
 - An extraction whose value a later field uses must name that field as its target
   ("<operation>.<field>"); target "{ANSWER}" is only for the final answer and cannot feed a field.
 - The result of the LAST step is what the user receives. If the user asked a question, end with an
-  extraction step whose target is "{ANSWER}".
+  extraction step whose target is "{ANSWER}". If the request has several parts, give each later
+  "{ANSWER}" extraction the previous "{ANSWER}" extraction as context, so the last one answers all parts.
 Output the JSON object only."""
 
 

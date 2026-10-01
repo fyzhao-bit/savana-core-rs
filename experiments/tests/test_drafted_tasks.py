@@ -104,6 +104,11 @@ class ReviewTests(unittest.TestCase):
         refused({"steps": [steps[0], dict(steps[1], source=2)]}, "extract_shape")
         refused({"steps": [steps[0], dict(steps[1], args=dict(steps[1]["args"], target=text("answer"))),
                            steps[2]]}, "answer_used_as_value")
+        # An earlier answer may be the context of a later one (several parts).
+        two = review("slack", "user_task_3", {"steps": [
+            steps[0], dict(steps[1], args={"target": text("answer")}), steps[0],
+            dict(steps[1], source=3, args={"target": text("answer"), "context": {"from": 2}})]})
+        self.assertEqual(two.steps()[3].derived, (("context", 2, GENERATED_TEXT, 2048),))
         refused({"steps": [dict(steps[2], args={"channel": text("general"), "text": {"from": 1}})]}, "edge_source")
         refused({"steps": [{"tool": "dojo.bank.send_money", "args": {}}]}, "unserved_tool")
         # A fetched URL is an outbound address: never derived from data.
