@@ -319,7 +319,7 @@ impl ExecdQueryV2 {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DispatchEnvelopePayloadV2 {
     installation_id: Digest32V2,
     active_state_manifest_digest: Digest32V2,
@@ -3473,6 +3473,159 @@ mod tests {
         assert!(!persisted
             .windows(nonce.as_bytes().len())
             .any(|window| window == nonce.as_bytes()));
+    }
+
+    #[test]
+    fn durable_commit_reverifies_only_the_entry_it_changed_whatever_the_history() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.path().join("execd-journal-v2.cbor");
+        let anchor = TestAnchor::default();
+        let namespace = DurableExecdNamespaceV2::from_verified_installation(
+            Digest32V2::new([0x11; 32]),
+            Digest32V2::new([0x8b; 32]),
+        )
+        .unwrap();
+        let (values, kernel_key, _, deployment) = fixture();
+        let mut durable = DurableExecdServiceV2::open(
+            &path,
+            [0x8c; 32],
+            namespace,
+            Box::new(anchor.clone()),
+            deployment,
+        )
+        .unwrap();
+        let verifications = crate::durable::full_entry_validations_for_test;
+        let mut per_commit = Vec::new();
+        for index in 0..12_u8 {
+            let nonce = Nonce32V2::new([0xa0 + index; 32]);
+            let envelope = signed_envelope(
+                values,
+                &kernel_key,
+                nonce,
+                DispatchEnvelopeKindV2::ToolExecution,
+                0xc0 + index,
+            );
+            let start = verifications();
+            durable
+                .accept_signed_dispatch(&envelope, UnixMillisV2::new(200))
+                .unwrap();
+            per_commit.push(verifications() - start);
+            let start = verifications();
+            let predecessor = durable
+                .prepare_provider_attempt(
+                    nonce,
+                    Digest32V2::new([0x8d; 32]),
+                    UnixMillisV2::new(210),
+                )
+                .unwrap();
+            per_commit.push(verifications() - start);
+            let start = verifications();
+            durable
+                .record_effect_started(predecessor, UnixMillisV2::new(211))
+                .unwrap();
+            per_commit.push(verifications() - start);
+            // An exact replay changes nothing and commits nothing.
+            let start = verifications();
+            durable
+                .accept_signed_dispatch(&envelope, UnixMillisV2::new(212))
+                .unwrap();
+            assert_eq!(verifications() - start, 0);
+        }
+        // The first commit and the thirty-sixth each verify one entry.
+        assert_eq!(per_commit, vec![1; 36]);
+        drop(durable);
+        // Loading from disk still verifies every entry.
+        let (_, _, _, deployment) = fixture();
+        let start = verifications();
+        let reopened =
+            DurableExecdServiceV2::open(&path, [0x8c; 32], namespace, Box::new(anchor), deployment)
+                .unwrap();
+        assert_eq!(verifications() - start, 12);
+        assert_eq!(
+            reopened.query(Nonce32V2::new([0xab; 32])).unwrap().state(),
+            ExecdJournalStateV2::EffectStarted
+        );
+    }
+
+    #[test]
+    fn change_validation_reverifies_every_entry_that_is_not_the_verified_one() {
+        let (values, kernel_key, _, deployment) = fixture();
+        let mut service = ExecdServiceV2::new(deployment);
+        for index in 0..2_u8 {
+            let nonce = Nonce32V2::new([0xd0 + index; 32]);
+            let envelope = signed_envelope(
+                values,
+                &kernel_key,
+                nonce,
+                DispatchEnvelopeKindV2::ToolExecution,
+                0xd4 + index,
+            );
+            service
+                .accept_signed_dispatch(&envelope, UnixMillisV2::new(200))
+                .unwrap();
+            let predecessor = service
+                .prepare_provider_attempt(
+                    nonce,
+                    Digest32V2::new([0xd8; 32]),
+                    UnixMillisV2::new(210),
+                )
+                .unwrap();
+            service
+                .record_effect_started(predecessor, UnixMillisV2::new(211))
+                .unwrap();
+        }
+        let verified = service;
+        let verifications = crate::durable::full_entry_validations_for_test;
+        let start = verifications();
+        crate::durable::validate_service_change(&verified, &verified.clone()).unwrap();
+        assert_eq!(verifications() - start, 0);
+
+        // A validly signed receipt moved onto another dispatch is re-verified
+        // and rejected, though its envelope digest is unchanged.
+        let mut moved_receipt = verified.clone();
+        moved_receipt.entries[0].effect_started_receipt =
+            moved_receipt.entries[1].effect_started_receipt.clone();
+        assert_eq!(
+            crate::durable::validate_service_change(&verified, &moved_receipt).unwrap_err(),
+            ExecdErrorV2::InvalidReceipt
+        );
+        let mut moved_envelope = verified.clone();
+        moved_envelope.entries[0].canonical_envelope =
+            moved_envelope.entries[1].canonical_envelope.clone();
+        assert_eq!(
+            crate::durable::validate_service_change(&verified, &moved_envelope).unwrap_err(),
+            ExecdErrorV2::DurableState
+        );
+        let mut rebound = verified.clone();
+        let duplicate = rebound.entries[0].clone();
+        rebound.entries.push(duplicate);
+        assert_eq!(
+            crate::durable::validate_service_change(&verified, &rebound).unwrap_err(),
+            ExecdErrorV2::NonceRebinding
+        );
+        // A different deployment verifies everything again: receipts signed
+        // under the previous receipt key no longer verify.
+        let other_receipt_key = SigningKey::from_bytes(&[0x33; 32]);
+        let mut rotated = verified.clone();
+        rotated.deployment = VerifiedExecdDeploymentV2::from_verified_manifest(
+            values.installation,
+            values.manifest,
+            7,
+            9,
+            values.executor_identity,
+            values.kernel_key_id,
+            kernel_key.verifying_key().to_bytes(),
+            savana_kernel_protocol::v2::derive_ed25519_key_id_v2(
+                other_receipt_key.verifying_key().to_bytes(),
+            ),
+            other_receipt_key.to_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::durable::validate_service_change(&verified, &rotated).unwrap_err(),
+            ExecdErrorV2::InvalidReceipt
+        );
     }
 
     #[test]
