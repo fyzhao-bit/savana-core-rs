@@ -61,7 +61,9 @@ def reviewed_clauses(contract, context, *, tool_descriptor, release_descriptor,
     descriptors = tuple(step_descriptors) if step_descriptors is not None else (tool_descriptor,)
     for value in (*descriptors, release_descriptor, application_turn):
         _bytes32(value)
-    if len(descriptors) != len(steps) or release_descriptor in descriptors or len(set(descriptors)) != len(descriptors):
+    # A tool may serve several operations (e.g. two extractions); the final
+    # release always has its own descriptor.
+    if len(descriptors) != len(steps) or release_descriptor in descriptors:
         raise ValueError("separate_release_descriptor_required")
     tools = json.loads(context.tools_json())
     def registered(digest):

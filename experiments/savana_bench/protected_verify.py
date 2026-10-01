@@ -64,11 +64,15 @@ def verify_published_episode(directory, local, case, row, profile, contract=None
     # fields recomputed here from the earlier logged results at the signed path.
     from .agentdojo_calendar import SENTINELS
     from .agentdojo_tasks import expected_step_call
+    from .dojo_catalog import CATALOG, official_call
     prior = []
     for number, event in enumerate(tools):
         expected = expected_step_call(contract, number, prior)
-        if (event["tool"] != steps[number].upstream_tool
-                or event["arguments"] != {k: v for k, v in expected["arguments"].items() if k not in SENTINELS}):
+        if any(t["operation"] == steps[number].tool for t in CATALOG):
+            _, official = official_call(steps[number].tool, expected["arguments"])
+        else:
+            official = {k: v for k, v in expected["arguments"].items() if k not in SENTINELS}
+        if event["tool"] != steps[number].upstream_tool or event["arguments"] != official:
             raise ValueError("official_function_trace_mismatch")
         prior.append(canonical(event["response"]))
     payload = base64.b64decode(final["output_base64"], validate=True)

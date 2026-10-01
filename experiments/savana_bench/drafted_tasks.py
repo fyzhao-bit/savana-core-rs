@@ -313,7 +313,9 @@ def review_program(*, suite, suite_tools, task_id, prompt, program):
                         _refuse("literal_not_owner_text")
                     values[name] = literal
                     continue
-                if role == "destination":
+                if role == "destination" or (tool, name) in OWNER_ONLY_READ_FIELDS:
+                    # Whom a write reaches, or which address a fetch contacts,
+                    # is never chosen by data an injection could control.
                     _refuse("derived_destination")
                 _kind, source, path = origin
                 if not 1 <= source < number:
