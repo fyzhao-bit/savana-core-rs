@@ -74,3 +74,21 @@ overflow-checks = true
 opt-level = 3
 debug-assertions = true
 overflow-checks = true
+
+# Linux integration hosts (deploy/linux/integration/build.py) run the daemons
+# with debug assertions and overflow checks. Every durable commit encrypts the
+# whole state snapshot and verifies signatures; at opt-level 0, AES-GCM over a
+# 660 KB kernel state takes about 130 ms and one ed25519 verification about
+# 8 ms, so each step slowed as a host's history grew. Optimize code generation
+# only; the debug trust mode is inherited from dev unchanged. Ordinary dev and
+# test builds are unaffected.
+[profile.integration]
+inherits = "dev"
+opt-level = 1
+debug-assertions = true
+overflow-checks = true
+
+[profile.integration.package.sha2]
+opt-level = 3
+debug-assertions = true
+overflow-checks = true

@@ -18,7 +18,8 @@ def test_clean_rebuilds_all_workspace_members_not_third_party_dependencies():
     with patch.object(build.subprocess, "check_output", return_value=json.dumps(metadata)), \
          patch.object(build.subprocess, "run") as run:
         build.clean_workspace(Path("/workspace"))
-    run.assert_called_once_with(["cargo", "clean", "--package", "savana-kernel-protocol",
+    run.assert_called_once_with(["cargo", "clean", "--profile", "integration",
+                                 "--package", "savana-kernel-protocol",
                                  "--package", "savana-kerneld"], cwd=Path("/workspace"), check=True)
 
 

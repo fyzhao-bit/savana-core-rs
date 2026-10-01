@@ -9,6 +9,10 @@ import shutil
 import subprocess
 import sys
 
+# Cargo profile for exported daemons: dev's debug assertions and overflow
+# checks, optimized code generation (see Cargo.toml).
+PROFILE = "integration"
+
 RUNTIME_BINARIES = {
     "savana-kerneld": ["savana-kerneld"],
     "savana-agentd": ["savana-agentd", "savana-ownerctl"],
@@ -34,7 +38,7 @@ def clean_workspace(repo):
     names = sorted(p["name"] for p in metadata["packages"] if p["id"] in members)
     if not names or len(names) != len(members):
         raise RuntimeError("incomplete workspace metadata")
-    command = ["cargo", "clean"]
+    command = ["cargo", "clean", "--profile", PROFILE]
     for name in names:
         command += ["--package", name]
     subprocess.run(command, cwd=repo, check=True)
@@ -61,7 +65,7 @@ def main():
         raise SystemExit("Linux and a new output directory required")
     repo = Path(__file__).resolve().parents[3]
     target = Path(os.environ.get("CARGO_TARGET_DIR", str(repo / "target"))).resolve()
-    base = ["cargo", "build", "--locked", "--jobs", "1"]
+    base = ["cargo", "build", "--locked", "--jobs", "1", "--profile", PROFILE]
     if args.offline:
         base.append("--offline")
     before = source_snapshot(repo)
@@ -70,7 +74,7 @@ def main():
     # separate runtime build. Never use --workspace --all-features here.
     subprocess.run(base + ["-p", "savana-kerneld", "--features", "macos-development-authority",
         "--bin", "savana-development-build-inputs"], cwd=repo, check=True)
-    generator = (target / "debug/savana-development-build-inputs").read_bytes()
+    generator = (target / PROFILE / "savana-development-build-inputs").read_bytes()
     for package, binaries in RUNTIME_BINARIES.items():
         command = base + ["-p", package, "--features", "savana-policy-core/filesystem-integration-authority"]
         if package != "savana-policy-core":
@@ -86,14 +90,15 @@ def main():
     generator_path.chmod(0o755)
     for binaries in RUNTIME_BINARIES.values():
         for binary in binaries:
-            shutil.copyfile(target / "debug" / binary, args.output / binary)
+            shutil.copyfile(target / PROFILE / binary, args.output / binary)
             (args.output / binary).chmod(0o755)
     # Strip only exported copies; keep Cargo's debug cache and debug_assertions.
     for path in args.output.iterdir():
         subprocess.run(["strip", "--strip-debug", str(path)], check=True)
     if before != source_snapshot(repo):
         raise SystemExit("source changed during build; exported binaries must not be deployed")
-    receipt = {"profile": "file-backed-integration", "workspace_cache_reused": False,
+    receipt = {"profile": "file-backed-integration", "cargo_profile": PROFILE,
+               "workspace_cache_reused": False,
                "sources": before, "binaries": {
                    p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(args.output.iterdir())}}
     args.output.with_suffix(".build.json").write_text(json.dumps(receipt, sort_keys=True, indent=2) + "\n")
