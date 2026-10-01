@@ -101,6 +101,11 @@ class ReviewTests(unittest.TestCase):
                            steps[2]]}, "answer_used_as_value")
         refused({"steps": [dict(steps[2], args={"channel": text("general"), "text": {"from": 1}})]}, "edge_source")
         refused({"steps": [{"tool": "dojo.bank.send_money", "args": {}}]}, "unserved_tool")
+        # A fetched URL is an outbound address: never derived from data.
+        refused({"steps": [{"tool": "dojo.slack.read_channel", "args": {"channel": text("general")}},
+                           {"tool": EXTRACT_TOOL, "source": 1, "args": {"target": text("dojo.web.get.url")}},
+                           {"tool": "dojo.web.get", "args": {"url": {"from": 2}}}]},
+                "derived_destination", "slack", "user_task_1")
         refused({"steps": [dict(steps[0], args={"url": text("www.informations.com"), "body": text("")})]},
                 "unknown_field")
         refused({"steps": [steps[0]] * (MAX_STEPS + 1)}, "program_length")
