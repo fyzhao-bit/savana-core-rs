@@ -46,7 +46,7 @@ from .agentdojo_provider import canonical
 from .agentdojo_tasks import (BENCHMARK, CALENDAR_YEAR, GENERATED_ITEMS, GENERATED_MAX_BYTES, GENERATED_TEXT,
                               GENERATOR_MODEL, LIST, PACKAGE_VERSION, Step, catalog_tool, edge_document,
                               upstream_for)
-from .dojo_catalog import LIST_KINDS, LIST_SEPARATOR, SENTINELS, entry, suite_operations
+from .dojo_catalog import LIST_KINDS, LIST_SEPARATOR, SENTINELS, decode_argument, entry, suite_operations
 
 EXTRACT_TOOL = "dojo.model.extract"
 ANSWER = "answer"
@@ -387,6 +387,15 @@ def review_program(*, suite, suite_tools, task_id, prompt, program):
             open_fields = {n for n, (_r, k) in fields.items() if k != "fixed"}
             if set(args) - open_fields:
                 _refuse("unknown_field")
+            def decodable(value):
+                """A literal the field's reviewed decode rule accepts; anything
+                else would only fail at the adapter, after earlier steps ran."""
+                try:
+                    decode_argument(kind, list(value) if type(value) is tuple else value)
+                    return True
+                except ValueError:
+                    return False
+
             def owned(literal):
                 """An owner literal (or one list item) as the owner accepts it."""
                 if owner_text(literal, prompt):
@@ -421,6 +430,8 @@ def review_program(*, suite, suite_tools, task_id, prompt, program):
                             _refuse("field_origin")
                         if not owned(origin[1]):
                             _refuse("literal_not_owner_text")
+                        if not decodable(origin[1]):
+                            _refuse("literal_kind")
                         values[name] = origin[1]
                         continue
                     # A list literal: typed items, each held to the owner rule
@@ -432,6 +443,8 @@ def review_program(*, suite, suite_tools, task_id, prompt, program):
                         _refuse("literal_list")
                     if not all(owner_item(i, prompt) or (owned(i) and LIST_SEPARATOR not in i) for i in items):
                         _refuse("literal_not_owner_text")
+                    if items and not decodable(tuple(items)):
+                        _refuse("literal_kind")
                     values[name] = tuple(items)
                     continue
                 if role == "destination" or (tool, name) in OWNER_ONLY_READ_FIELDS | OWNER_ONLY_WRITE_FIELDS:

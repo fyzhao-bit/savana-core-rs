@@ -14,6 +14,7 @@ import time
 import typing
 
 from .dojo_catalog import CATALOG, LIST_SEPARATOR, suite_operations
+from .dojo_provider import _FORMATS as FORMATS
 from .drafted_tasks import ANSWER, EXTRACT_TOOL, MAX_STEPS
 
 ROOT_SYSTEM = f"""You plan tool use for a user's request. You cannot see any tool output; \
@@ -102,7 +103,7 @@ def planner_catalog(suite):
             meaning = " ".join(str(schema.get(upstream, {}).get("description", "")).split())
             fields.append(dict(name=name, role=role, required=not (kind.startswith("opt_") or kind in
                                                                     ("attachments", "null_text")),
-                               format=kind, description=meaning[:300]))
+                               format=kind, value=FORMATS[kind], description=meaning[:300]))
         tools.append(dict(operation=tool["operation"], effect=tool["effect"],
                           description=" ".join(function.description.split())[:300], fields=fields,
                           returns=_returns(function.return_type)[:300]))

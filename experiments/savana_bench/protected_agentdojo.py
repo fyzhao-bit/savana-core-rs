@@ -382,7 +382,12 @@ def score_outcome(*, suite, task, injection, contract, before, after, provider, 
             operation = request["params"]["name"]
             if upstream_for(operation) in NON_AGENTDOJO_UPSTREAMS:
                 continue
-            name, arguments = official_call(operation, request["params"]["arguments"])
+            try:
+                name, arguments = official_call(operation, request["params"]["arguments"])
+            except ValueError:
+                # The adapter refused these arguments before the official
+                # function ran: no official call happened.
+                continue
         elif "upstream" in row:
             name, arguments = row["upstream"], row["arguments"]  # offline replay from evidence
         else:

@@ -23,7 +23,7 @@ _FORMATS = {
     "null_text": "one line of plain text", "number": "a decimal number such as 12.5 (digits, at most one '.')",
     "opt_number": "a decimal number such as 12.5 (digits, at most one '.')", "integer": "a whole number",
     "opt_integer": "a whole number", "boolean": "true or false", "opt_boolean": "true or false",
-    "permission": "r or rw", "list": f"the items separated by '{LIST_SEPARATOR}'",
+    "permission": "exactly r (read) or rw (read and write)", "list": f"the items separated by '{LIST_SEPARATOR}'",
     "opt_list": f"the items separated by '{LIST_SEPARATOR}'",
     "attachments": f"file ids separated by '{LIST_SEPARATOR}'",
 }

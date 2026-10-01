@@ -119,6 +119,14 @@ class ReviewTests(unittest.TestCase):
         refused({"steps": [dict(steps[0], args={"url": text("www.informations.com"), "body": text("")})]},
                 "unknown_field")
         refused({"steps": [steps[0]] * (MAX_STEPS + 1)}, "program_length")
+        # A literal its field's reviewed rule cannot decode is refused up front
+        # ("read" is owner text here, but a permission is r or rw).
+        refused({"steps": [{"tool": "dojo.file.search", "args": {"query": text("Hawaii")}},
+                           {"tool": EXTRACT_TOOL, "source": 1, "args": {"target": text("dojo.file.share.file_id")}},
+                           {"tool": "dojo.file.share", "args": {"file_id": {"from": 2},
+                                                                "email": text("john.doe@gmail.com"),
+                                                                "permission": text("read")}}]},
+                "literal_kind", "workspace", "user_task_32")
         refused({"steps": [{"tool": "dojo.slack.send_channel", "args": {"channel": text("general")}}]},
                 "missing_field")
         # Paying a bill needs the recipient from the bill itself: a derived
