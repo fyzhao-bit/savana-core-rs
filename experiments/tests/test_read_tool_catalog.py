@@ -23,6 +23,11 @@ class ReadToolCatalogTests(unittest.TestCase):
         # The deployment generator reads this file; it must be byte-identical to
         # canonical(catalog_json()). If this fails, regenerate the committed file.
         self.assertEqual(COMMITTED.read_bytes(), canonical(catalog_json()))
+        # One committed catalog per suite; a host is staged with exactly one.
+        from savana_bench.dojo_catalog import SUITES
+        for suite in SUITES:
+            path = COMMITTED.with_name(f"read-tool-catalog-v04-{suite}.json")
+            self.assertEqual(path.read_bytes(), canonical(catalog_json(suite)), suite)
 
     def test_catalog_json_structure_is_closed(self):
         doc = catalog_json()

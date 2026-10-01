@@ -4,7 +4,7 @@ import hashlib
 import unittest
 
 from savana_bench.agentdojo_provider import canonical, decode
-from savana_bench.dojo_catalog import (CATALOG, KINDS, OMIT, SENTINELS, SUITES, catalog_document,
+from savana_bench.dojo_catalog import (CATALOG, KINDS, OMIT, SENTINELS, SUITE_TOOLS, SUITES, catalog_document,
                                        decode_argument, entry, official_call, suite_operations)
 
 ORIGINAL = ("dojo.calendar.search", "dojo.calendar.day", "dojo.email.search", "dojo.email.unread",
@@ -32,6 +32,7 @@ class CatalogShapeTests(unittest.TestCase):
         covered = {t["upstream"] for t in CATALOG}
         for name in SUITES:
             tools = {t.name for t in get_suite("v1.2.2", name).tools}
+            self.assertEqual(tools, SUITE_TOOLS[name], name)
             self.assertEqual(tools - covered, set(), name)
             served = suite_operations(tools)
             self.assertEqual({entry(o)["upstream"] for o in served}, tools, name)
@@ -60,12 +61,23 @@ class CatalogShapeTests(unittest.TestCase):
     def test_original_workspace_entries_are_unchanged(self):
         from savana_bench.agentdojo_tasks import catalog_json
         old = catalog_json()
-        new = catalog_document()
+        new = catalog_document("workspace")
         by_name = {t["operation"]: t for t in (*new["read_tools"], *new["write_tools"])}
         for tool in (*old["read_tools"], *old["write_tools"]):
             if tool["operation"] in ORIGINAL:
                 self.assertEqual(by_name[tool["operation"]], tool)
         self.assertEqual([t["operation"] for t in new["read_tools"][:7]], list(ORIGINAL[:7]))
+
+    def test_each_suite_catalog_fits_one_task_context(self):
+        # The owner's task-authorization context lists at most 64 tools, so a
+        # deployment ships exactly one suite (plus the two model tools).
+        from savana_bench.agentdojo_tasks import catalog_json
+        for name in SUITES:
+            doc = catalog_json(name)
+            operations = [t["operation"] for t in (*doc["read_tools"], *doc["write_tools"])]
+            self.assertLessEqual(len(operations) + 1, 64, name)
+            self.assertEqual({entry(o)["upstream"] for o in operations if o.startswith("dojo.") and
+                              not o.startswith("dojo.model.")}, set(SUITE_TOOLS[name]), name)
 
     def test_every_adapter_decodes_to_valid_official_arguments(self):
         from agentdojo.task_suite.load_suites import get_suite

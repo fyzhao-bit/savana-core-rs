@@ -38,6 +38,36 @@ SENTINELS = {"body": "", "calendar": "primary", "to": "private-result"}
 READ_SYNTHETIC = (("body", "payload"), ("calendar", "resource"), ("to", "destination"))
 LIST_SEPARATOR = "; "
 SUITES = ("workspace", "banking", "slack", "travel")
+# The official AgentDojo v1.2.2 functions of each suite (pinned against the
+# installed package by a test). A deployment serves exactly one suite, so the
+# owner's task context never lists another suite's tools.
+SUITE_TOOLS = {
+    "workspace": frozenset((
+        "add_calendar_event_participants", "append_to_file", "cancel_calendar_event", "create_calendar_event",
+        "create_file", "delete_email", "delete_file", "get_current_day", "get_day_calendar_events",
+        "get_draft_emails", "get_file_by_id", "get_received_emails", "get_sent_emails", "get_unread_emails",
+        "list_files", "reschedule_calendar_event", "search_calendar_events", "search_contacts_by_email",
+        "search_contacts_by_name", "search_emails", "search_files", "search_files_by_filename", "send_email",
+        "share_file")),
+    "banking": frozenset((
+        "get_balance", "get_iban", "get_most_recent_transactions", "get_scheduled_transactions",
+        "get_user_info", "read_file", "schedule_transaction", "send_money", "update_password",
+        "update_scheduled_transaction", "update_user_info")),
+    "slack": frozenset((
+        "add_user_to_channel", "get_channels", "get_users_in_channel", "get_webpage", "invite_user_to_slack",
+        "post_webpage", "read_channel_messages", "read_inbox", "remove_user_from_slack",
+        "send_channel_message", "send_direct_message")),
+    "travel": frozenset((
+        "cancel_calendar_event", "check_restaurant_opening_hours", "create_calendar_event",
+        "get_all_car_rental_companies_in_city", "get_all_hotels_in_city", "get_all_restaurants_in_city",
+        "get_car_fuel_options", "get_car_price_per_day", "get_car_rental_address", "get_car_types_available",
+        "get_contact_information_for_restaurants", "get_cuisine_type_for_restaurants",
+        "get_day_calendar_events", "get_dietary_restrictions_for_all_restaurants", "get_flight_information",
+        "get_hotels_address", "get_hotels_prices", "get_price_for_restaurants",
+        "get_rating_reviews_for_car_rental", "get_rating_reviews_for_hotels",
+        "get_rating_reviews_for_restaurants", "get_restaurants_address", "get_user_information",
+        "reserve_car_rental", "reserve_hotel", "reserve_restaurant", "search_calendar_events", "send_email")),
+}
 
 # kind -> (official argument may be omitted when the text is empty)
 KINDS = {"text": False, "opt_text": True, "null_text": False, "list": False, "opt_list": True, "number": False,
@@ -270,11 +300,15 @@ def suite_operations(suite_tools):
     return tuple(t["operation"] for t in CATALOG if t["upstream"] in names)
 
 
-def catalog_document(extra_write_tools=()):
-    """Schema-2 catalog for the deployment generator: every field is text with
-    an explicit role; authorizing tools carry intent-flow confinement."""
+def catalog_document(suite, extra_write_tools=()):
+    """Schema-2 catalog of one suite for the deployment generator: every field
+    is text with an explicit role; authorizing tools carry intent-flow
+    confinement. Catalog order is kept, so the original workspace tools lead."""
+    served = set(suite_operations(SUITE_TOOLS[suite]))
     reads, writes = [], []
     for tool in CATALOG:
+        if tool["operation"] not in served:
+            continue
         fields = sorted(({"name": n, "role": r, "type": "text"} for n, r, _u, _k in tool["fields"]),
                         key=lambda f: f["name"])
         item = {"operation": tool["operation"], "effect": tool["effect"], "fixed_magnitude": 1,

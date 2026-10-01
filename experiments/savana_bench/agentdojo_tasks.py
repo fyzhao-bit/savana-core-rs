@@ -201,24 +201,24 @@ def upstream_for(tool):
     return entry(tool)["upstream"]
 
 
-def catalog_json():
-    """Reviewed tool catalog for the deployment generator: every AgentDojo tool
-    of the four suites (`dojo_catalog`, the original workspace tools first and
-    unchanged) plus the quarantined generator. Reads carry the synthetic
-    body/calendar/to controls; authorizing tools carry explicit roles and the
-    intent-flow-confinement validator."""
+def catalog_json(suite=SUITE):
+    """Reviewed tool catalog of one suite for the deployment generator: every
+    AgentDojo tool of that suite (`dojo_catalog`; for workspace the original
+    tools first and unchanged) plus the quarantined generator. Reads carry the
+    synthetic body/calendar/to controls; authorizing tools carry explicit roles
+    and the intent-flow-confinement validator."""
     from .dojo_catalog import catalog_document
     model_tools = []
     for name, _, effect, spec in MODEL_CATALOG:
         fields = [{"name": n, "role": r, "type": "text"} for n, r in sorted(spec)]
         model_tools.append({"operation": name, "effect": effect, "fixed_magnitude": 1,
                             "fields": fields, "validators": list(WRITE_VALIDATORS)})
-    return catalog_document(extra_write_tools=model_tools)
+    return catalog_document(suite, extra_write_tools=model_tools)
 
 
-def catalog_operations():
-    """Every operation the deployment ships a signed descriptor for."""
-    doc = catalog_json()
+def catalog_operations(suite=SUITE):
+    """Every operation a deployment of `suite` ships a signed descriptor for."""
+    doc = catalog_json(suite)
     return {t["operation"] for t in (*doc["read_tools"], *doc["write_tools"])}
 
 
@@ -230,10 +230,12 @@ ROLE_CODES = {"resource": 1, "destination": 2, "magnitude": 3, "payload": 4, "pa
 
 def catalog_tool(tool):
     """The reviewed catalog entry (operation, effect, fields) for one tool."""
-    doc = catalog_json()
-    for entry in (*doc["read_tools"], *doc["write_tools"]):
-        if entry["operation"] == tool:
-            return entry
+    from .dojo_catalog import SUITES
+    for suite in SUITES:
+        doc = catalog_json(suite)
+        for entry in (*doc["read_tools"], *doc["write_tools"]):
+            if entry["operation"] == tool:
+                return entry
     raise ValueError("unreviewed_tool")
 
 

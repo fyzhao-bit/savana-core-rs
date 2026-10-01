@@ -155,7 +155,11 @@ def load_config(path):
         from .protected_operator import SOCKET
         d=config['provisioning']
         from .agentdojo_tasks import catalog_operations
-        expected_descriptors=catalog_operations()|{'savana.final_result_release'}
+        from .dojo_catalog import SUITES
+        # A deployment ships exactly one suite's reviewed catalog.
+        shipped=set(d['descriptors']) if type(d) is dict and type(d.get('descriptors')) is dict else set()
+        expected_descriptors=next((catalog_operations(s)|{'savana.final_result_release'} for s in SUITES
+            if catalog_operations(s)|{'savana.final_result_release'}==shipped),None)
         if (config['operator_socket']!=SOCKET or type(d) is not dict
             or set(d)!={'schema','descriptors','planner','destination_digest','application_turn','store',
                         'installation','disposition','scope','task_grants_installed'}
