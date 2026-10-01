@@ -97,7 +97,15 @@ impl KernelAgentAuthorityV2 {
         };
         p.fused_release_last_task = Some(task);
         let result = if let Some(index) = historical {
-            self.reconcile_fused_release_v04(index, vault, now)
+            // Committed and acknowledged history only still owes the owner a
+            // notification; asking execd again would return the same status.
+            if self.fused_release_recovery[index].commit.is_some()
+                && self.fused_release_recovery[index].acknowledged
+            {
+                Ok(())
+            } else {
+                self.reconcile_fused_release_v04(index, vault, now)
+            }
         } else {
             self.advance_fused_release_v04(
                 run.unwrap(),
@@ -134,11 +142,29 @@ impl KernelAgentAuthorityV2 {
         Ok(())
     }
 
+    /// Whether an owner private session that could still receive this task's
+    /// publication notice exists (the same session `notify_fused_publication_v04`
+    /// would use: consumed, for this task, envelope not yet expired).
+    fn owner_can_receive_publication_v04(&self, task: DurableTaskIdV2, now: UnixMillisV2) -> bool {
+        self.private_session_authentications.iter().any(|s| {
+            s.consumed
+                && s.task == task
+                && s.envelope.unverified_material().is_ok_and(|e| {
+                    now.get() >= e.issued_at().get() && now.get() < e.expires_at().get()
+                })
+        })
+    }
+
     /// Candidates for the one-job-per-tick release rotation: this
     /// generation's unsettled history, then sessions whose final release is
     /// prepared. Settled history (committed, acknowledged and delivered to the
     /// owner) is not work: rotating it would delay every live release by one
     /// turn per finished task until none completes within its authorization.
+    /// Neither is committed and acknowledged history whose owner session can no
+    /// longer receive the notice (it expired with its task): it would otherwise
+    /// keep a turn forever, so every release on a long-running host waits one
+    /// more turn per finished task. A task with a committed release is never
+    /// prepared again either.
     pub(super) fn fused_release_jobs_v04(
         &self,
         manifest: Digest32V2,
@@ -153,6 +179,12 @@ impl KernelAgentAuthorityV2 {
             .filter(|(_, r)| !r.settled())
             .filter_map(|(i, r)| {
                 let core = r.dispatch?;
+                if r.commit.is_some()
+                    && r.acknowledged
+                    && !self.owner_can_receive_publication_v04(core.durable_task_id(), now)
+                {
+                    return None;
+                }
                 if core.active_state_manifest_digest() != manifest
                     || core.deployment_generation() != generation
                     || core.effect_fence_epoch() != fence
@@ -165,7 +197,7 @@ impl KernelAgentAuthorityV2 {
         for s in &self.sessions {
             if jobs.iter().any(|j| j.0 == *s.durable_task_id.as_bytes())
                 || self.fused_release_recovery.iter().any(|r| {
-                    r.settled()
+                    (r.settled() || r.commit.is_some())
                         && r.dispatch
                             .is_some_and(|c| c.durable_task_id() == s.durable_task_id)
                 })

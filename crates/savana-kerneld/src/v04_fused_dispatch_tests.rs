@@ -1868,23 +1868,70 @@ fn assert_fused_final_release(
             f.authority.fused_release_recovery[0].commit,
             Some(committed)
         );
-        // Committed and acknowledged history keeps its rotation turn until the
-        // owner has been notified; settled history then stops taking turns.
+        // Unacknowledged history is still work. Committed and acknowledged
+        // history keeps a rotation turn only while an owner session could still
+        // receive its notice; once none can (it expired with its task) it stops
+        // taking turns, so finished tasks never delay a live release.
         assert!(f.authority.fused_release_recovery[0].acknowledged);
         assert!(!f.authority.fused_release_recovery[0].settled());
         let task = *core.durable_task_id().as_bytes();
-        let jobs = |f: &PlannerAuthorityFixtureV2| {
+        let jobs = |f: &PlannerAuthorityFixtureV2, now: u64| {
             f.authority.fused_release_jobs_v04(
                 core.active_state_manifest_digest(),
                 core.deployment_generation(),
                 core.effect_fence_epoch(),
-                UnixMillisV2::new(at + 3),
+                UnixMillisV2::new(now),
             )
         };
-        assert_eq!(jobs(f), vec![(task, None, Some(0))]);
+        f.authority.fused_release_recovery[0].acknowledged = false;
+        assert_eq!(jobs(f, at + 3), vec![(task, None, Some(0))]);
+        f.authority.fused_release_recovery[0].acknowledged = true;
+        assert!(jobs(f, at + 3).is_empty());
+        let envelope = SignedUiAuthenticationEnvelopeV2::sign(
+            UnsignedUiAuthenticationEnvelopeV2::new(
+                f.authority.config.installation_id,
+                core.active_state_manifest_digest(),
+                core.deployment_generation(),
+                UiAuthenticationPurposeV2::PrivateSessionV04,
+                UiAuthenticationBindingV2::PrivateSessionV04 {
+                    durable_task_id: core.durable_task_id(),
+                    durable_run_id: DurableRunIdV2::new([0x5e; 32]),
+                    task_authorization_digest: Digest32V2::new([0x5f; 32]),
+                    kerneld_boot_id: f.authority.config.kerneld_server_boot_id,
+                },
+                Some(PrincipalIdV2::new([0x60; 32])),
+                FixedOriginV2::Approval8766,
+                FixedOriginV2::Approval8766,
+                Nonce32V2::new([0x61; 32]),
+                UnixMillisV2::new(at),
+                UnixMillisV2::new(at + 10),
+            )
+            .unwrap(),
+            &f.authority.config.envelope_signing_key,
+        )
+        .unwrap();
+        f.authority.private_session_authentications.push(
+            super::super::private_session::PrivateSessionAuthenticationV04 {
+                task: core.durable_task_id(),
+                root: Digest32V2::new([0x5f; 32]),
+                envelope,
+                registered: RegisteredPrivateSessionV04 {
+                    record: ApprovalUiRecordHandleV2::from_authority_entropy([0x62; 32]).unwrap(),
+                    transfer: PrivateSessionTransferV04::from_authority_entropy([0x63; 32])
+                        .unwrap(),
+                },
+                consumed: true,
+                next_poll: 0,
+            },
+        );
+        // A live owner session can still receive the notice: keep the turn.
+        assert_eq!(jobs(f, at + 3), vec![(task, None, Some(0))]);
+        // That session expired with its task: the history is no longer work.
+        assert!(jobs(f, at + 10).is_empty());
+        f.authority.private_session_authentications.clear();
         f.authority.fused_release_recovery[0].owner_notified = true;
         assert!(f.authority.fused_release_recovery[0].settled());
-        assert!(jobs(f).is_empty());
+        assert!(jobs(f, at + 3).is_empty());
     } else {
         let status = f
             .authority
