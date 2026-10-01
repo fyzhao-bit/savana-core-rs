@@ -76,7 +76,8 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(document["schema"], 2)
         self.assertEqual(document["origin"], "owner_text")
         self.assertEqual(set(document["constants"]), {"primary", "private-result", "deepseek-flash",
-                                                      "dojo.slack.send_channel.text"})
+                                                      "dojo.slack.send_channel.text", "1"})
+        self.assertEqual(extract.value_map()["source"], "1")
         # Every committed input is owner text or a declared constant.
         for row in owner_inputs(contract):
             self.assertTrue(owner_text(row["text"], contract.prompt) or row["text"] in document["constants"])
@@ -124,6 +125,14 @@ class ReviewTests(unittest.TestCase):
             {"tool": "dojo.bank.send_money", "args": {"recipient": {"from": 2}, "amount": {"from": 2},
                                                       "subject": {"from": 2}, "date": {"from": 2}}}]},
             "derived_destination", "banking", "user_task_0")
+
+    def test_two_extractions_are_never_the_same_alternative(self):
+        steps = SUMMARY_PROGRAM["steps"]
+        program = {"steps": [steps[0], dict(steps[1], args={"target": text("answer")}),
+                             steps[0], dict(steps[1], source=3, args={"target": text("answer")})]}
+        first, second = review("slack", "user_task_3", program).steps()[1::2]
+        self.assertNotEqual(first.values, second.values)
+        self.assertEqual((first.value_map()["source"], second.value_map()["source"]), ("1", "3"))
 
     def test_context_from_the_source_itself_is_dropped(self):
         steps = SUMMARY_PROGRAM["steps"]

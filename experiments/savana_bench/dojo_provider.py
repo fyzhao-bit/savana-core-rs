@@ -88,17 +88,19 @@ def _extract_tool(generator, functions):
     """The reviewed `dojo.model.extract` adapter: the payload is the earlier
     result the kernel passed (data), the instruction is the owner's text, the
     target an inert catalog label; model/destination controls are fixed."""
-    def extract(body: str, context: str, instruction: str, model: str, target: str, to: str):
+    def extract(body: str, context: str, instruction: str, model: str, source: str, target: str, to: str):
         """Quarantined extraction of one value from an untrusted source; no tools, no actions.
 
         :param body: The earlier verified result, passed by the kernel as data.
         :param context: An earlier extraction's value (a signed edge) or empty.
         :param instruction: The owner's own request text.
         :param model: Fixed generator model control.
+        :param source: The step whose result is the payload (an owner-signed number).
         :param target: The reviewed label of the value to produce.
         :param to: Fixed private result destination control.
         """
-        if model != GENERATOR_MODEL or to != SENTINELS["to"] or not body or not instruction:
+        if (model != GENERATOR_MODEL or to != SENTINELS["to"] or not body or not instruction
+                or not (source.isascii() and source.isdigit() and source[0] != "0")):
             raise ValueError("generator_control_mismatch")
         description, max_bytes = target_description(target, functions)
         line = generator(instruction=instruction, source=body, target=description, max_bytes=max_bytes,

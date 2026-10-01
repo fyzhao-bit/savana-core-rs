@@ -237,7 +237,7 @@ class DraftedContract:
         values = {SENTINELS["calendar"], SENTINELS["to"], *self.restated}
         for step in self.chain:
             if step.tool == EXTRACT_TOOL:
-                values |= {step.value_map()["model"], step.value_map()["target"]}
+                values |= {step.value_map()[k] for k in ("model", "target", "source")}
         return sorted(values)
 
     def document(self):
@@ -341,7 +341,7 @@ def review_program(*, suite, suite_tools, task_id, prompt, program):
             # The extractor's instruction is always the owner's whole request;
             # whatever the planner wrote there is not used.
             values = {"instruction": folded(prompt), "target": target[1], "model": GENERATOR_MODEL,
-                      "to": SENTINELS["to"]}
+                      "to": SENTINELS["to"], "source": str(source)}
             payload_from = source
             context = _origin(args["context"]) if "context" in args else None
             if context is not None and context[0] == "from" and context[1] == source and context[2] is None:
