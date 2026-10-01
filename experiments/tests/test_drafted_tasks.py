@@ -84,6 +84,9 @@ class ReviewTests(unittest.TestCase):
                           release_descriptor=b"f" * 32, **IDS)["planning_draft"]
         self.assertEqual([o["clause"] for o in d["operations"]], [1, 2, 3])
         self.assertEqual((d["final_result_source"], d["final_release"]["clause"]), (3, 4))
+        # The kernel's planning round sees nothing of the request: the program
+        # is fixed, and a request with an address could not be released anyway.
+        self.assertEqual([r["public_view"] for r in d["rounds"]], [[]])
 
     def test_refusals(self):
         def refused(program, reason, name="slack", task_id="user_task_3"):

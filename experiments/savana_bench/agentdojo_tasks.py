@@ -702,8 +702,12 @@ def prepare_draft(contract, *, task, root, observer, tool_descriptor,
             "tool": step.tool, "after": list(range(1, number)), "bindings": bindings})
     # These are complete disclosed bytes, not an instruction to release them.
     # Deployment admission must explicitly approve this view and its G3 reader.
-    # The kernel accepts only a view derived from the committed (NFC) request.
-    view = canonical({"request": unicodedata.normalize("NFC", contract.prompt), "permitted_template_ids": [1]})
+    # The kernel accepts only a view derived from the committed (NFC) request,
+    # and releases none with residual PII. A planner-drafted program is already
+    # fixed by the owner's review, so its one-template round needs no request:
+    # its view is empty (an address in the request never reaches that model).
+    view = b"" if getattr(contract, "variant", None) == "drafted" else canonical(
+        {"request": unicodedata.normalize("NFC", contract.prompt), "permitted_template_ids": [1]})
     draft = {"schema": 3, "root": ids["root"], "observer_scope": ids["observer"],
         "not_before": not_before, "expires_at": expires_at,
         "operations": operations,
