@@ -213,7 +213,112 @@ fn security_re() -> &'static Fancy {
 /// `_SECURITY_RE.search(s) is not None`. Fail CLOSED: any engine runtime error
 /// counts as a match (block), so the blocklist can only over-block, never miss.
 pub fn security_match(s: &str) -> bool {
+    let compact = collapse_whitespace(s);
+    let text: &str = &compact;
+    // The backtracking budget is per search, and the rewritten `\b` keeps the
+    // search on the backtracking VM, so a long benign text alone used to
+    // exhaust it and fail closed. Scan bounded windows instead; a window whose
+    // search still exhausts the budget fails closed exactly as before.
+    let mut start = 0;
+    loop {
+        let rest = &text[start..];
+        if rest.len() <= SCAN_WINDOW {
+            return window_match(rest);
+        }
+        let (Some(end), Some(next)) = (
+            separator_in(text, start + SCAN_WINDOW - SCAN_OVERLAP / 2, start + SCAN_WINDOW),
+            separator_in(text, start + SCAN_WINDOW - SCAN_OVERLAP, start + SCAN_WINDOW - SCAN_OVERLAP / 2),
+        ) else {
+            // Nothing to cut at: one search over the rest, bounded and failing
+            // closed as it always did.
+            return window_match(rest);
+        };
+        // Both edges of a window are non-word characters the window includes,
+        // so a `\b` inside it sees the same neighbours as in the whole text and
+        // no window can hit where the whole text does not; consecutive windows
+        // overlap by at least SCAN_OVERLAP / 2, more than any match and its
+        // context can span once whitespace runs are collapsed, so every hit of
+        // the whole text lies inside some window.
+        let end = end + text[end..].chars().next().map_or(0, char::len_utf8);
+        if window_match(&text[start..end]) {
+            return true;
+        }
+        start = next;
+    }
+}
+
+/// Bytes per blocklist search, and the minimum overlap between windows (twice
+/// the guaranteed one, which exceeds the longest possible match after
+/// whitespace runs are collapsed).
+const SCAN_WINDOW: usize = 4096;
+const SCAN_OVERLAP: usize = 512;
+
+fn window_match(s: &str) -> bool {
     security_re().is_match(s).unwrap_or(true)
+}
+
+fn is_py_space(c: char) -> bool {
+    WS_SET.contains(&u32::from(c))
+}
+
+fn is_py_word(c: char) -> bool {
+    let c = u32::from(c);
+    PY_WORD_RANGES
+        .binary_search_by(|&(lo, hi)| {
+            if hi < c {
+                std::cmp::Ordering::Less
+            } else if lo > c {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
+}
+
+/// Every maximal run of whitespace replaced by its first character. No
+/// blocklist pattern counts whitespace (each uses `\s+`, `\s*` or a single
+/// `.`), so this keeps every match and bounds every match's length; the one
+/// change is that a run whose first character is not `\n` may now satisfy a
+/// single `.`, which can only add a hit (over-block), never remove one.
+fn collapse_whitespace(s: &str) -> std::borrow::Cow<'_, str> {
+    let mut previous = false;
+    if !s.chars().any(|c| {
+        let space = is_py_space(c);
+        let run = space && previous;
+        previous = space;
+        run
+    }) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut previous = false;
+    for c in s.chars() {
+        let space = is_py_space(c);
+        if !(space && previous) {
+            out.push(c);
+        }
+        previous = space;
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// The byte index of the last non-word character in `text[from..to]`
+/// (clamped to char boundaries).
+fn separator_in(text: &str, from: usize, to: usize) -> Option<usize> {
+    let mut from = from.min(text.len());
+    while !text.is_char_boundary(from) {
+        from -= 1;
+    }
+    let mut to = to.min(text.len());
+    while !text.is_char_boundary(to) {
+        to -= 1;
+    }
+    text[from..to]
+        .char_indices()
+        .filter(|(_, c)| !is_py_word(*c))
+        .last()
+        .map(|(i, _)| from + i)
 }
 
 // ── redact_pii (slm_gate.py) — 17 sequential regex substitutions ──
