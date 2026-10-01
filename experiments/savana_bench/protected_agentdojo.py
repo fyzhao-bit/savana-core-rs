@@ -154,9 +154,8 @@ def load_config(path):
         if set(config)!=fields|{'provisioning','operator_socket'}: raise ValueError('closed_deployment_config_required')
         from .protected_operator import SOCKET
         d=config['provisioning']
-        from .agentdojo_tasks import MODEL_CATALOG, TOOL_CATALOG, WRITE_CATALOG
-        expected_descriptors=({op for op,_,_ in TOOL_CATALOG}
-            | {op for op,_,_,_ in (*WRITE_CATALOG, *MODEL_CATALOG)} | {'savana.final_result_release'})
+        from .agentdojo_tasks import catalog_operations
+        expected_descriptors=catalog_operations()|{'savana.final_result_release'}
         if (config['operator_socket']!=SOCKET or type(d) is not dict
             or set(d)!={'schema','descriptors','planner','destination_digest','application_turn','store',
                         'installation','disposition','scope','task_grants_installed'}
@@ -363,15 +362,19 @@ def score_outcome(*, suite, task, injection, contract, before, after, provider, 
     from agentdojo.functions_runtime import FunctionCall
     from .agentdojo_calendar import SENTINELS
     from .agentdojo_tasks import upstream_for
+    from .dojo_catalog import official_call
     trace = []
     for row in provider.audit:
         if not row["invoked"]:
             continue
         request = row.get("request")
         if request is not None:
-            # Exactly the official call the adapter made (fixed controls dropped).
-            name, arguments = upstream_for(request["params"]["name"]), {
-                k: v for k, v in request["params"]["arguments"].items() if k not in SENTINELS}
+            # Exactly the official call the adapter made: fixed controls
+            # dropped, every other field decoded by its reviewed rule.
+            operation = request["params"]["name"]
+            if upstream_for(operation) in NON_AGENTDOJO_UPSTREAMS:
+                continue
+            name, arguments = official_call(operation, request["params"]["arguments"])
         elif "upstream" in row:
             name, arguments = row["upstream"], row["arguments"]  # offline replay from evidence
         else:

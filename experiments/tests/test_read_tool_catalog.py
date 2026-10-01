@@ -27,7 +27,8 @@ class ReadToolCatalogTests(unittest.TestCase):
     def test_catalog_json_structure_is_closed(self):
         doc = catalog_json()
         self.assertEqual(doc["schema"], 2)
-        self.assertEqual([t["operation"] for t in doc["read_tools"]],
+        # The original workspace reads come first, in their original order.
+        self.assertEqual([t["operation"] for t in doc["read_tools"]][:len(TOOL_CATALOG)],
                          [name for name, _, _ in TOOL_CATALOG])
         for tool in doc["read_tools"]:
             self.assertEqual(set(tool), {"operation", "effect", "fixed_magnitude", "fields"})
@@ -39,8 +40,9 @@ class ReadToolCatalogTests(unittest.TestCase):
 
     def test_write_tools_declare_roles_and_the_confinement_validator(self):
         doc = catalog_json()
-        self.assertEqual([t["operation"] for t in doc["write_tools"]],
-                         [name for name, _, _, _ in (*WRITE_CATALOG, *MODEL_CATALOG)])
+        operations = [t["operation"] for t in doc["write_tools"]]
+        self.assertEqual(operations[:len(WRITE_CATALOG)], [name for name, _, _, _ in WRITE_CATALOG])
+        self.assertEqual(operations[-len(MODEL_CATALOG):], [name for name, _, _, _ in MODEL_CATALOG])
         for tool in doc["write_tools"]:
             self.assertEqual(set(tool),
                              {"operation", "effect", "fixed_magnitude", "validators", "fields"})
@@ -50,18 +52,19 @@ class ReadToolCatalogTests(unittest.TestCase):
             self.assertNotEqual(tool["effect"], "read")
             self.assertEqual(tool["validators"], list(WRITE_VALIDATORS))
             self.assertIn("intent_flow_confinement", tool["validators"])
-            self._check_fields(tool["fields"])
+            self._check_fields(tool["fields"], synthetic=False)
             # Exactly one of each structural role (business-profile invariant).
             roles = [f["role"] for f in tool["fields"]]
             for required in ("payload", "resource", "destination"):
                 self.assertEqual(roles.count(required), 1, (tool["operation"], required))
 
-    def _check_fields(self, fields):
+    def _check_fields(self, fields, synthetic=True):
         names = [f["name"] for f in fields]
         self.assertEqual(names, sorted(names))
         roles = {f["name"]: f["role"] for f in fields}
-        self.assertEqual(roles["body"], "payload")
-        self.assertEqual(roles["to"], "destination")
+        if synthetic:
+            self.assertEqual(roles["body"], "payload")
+            self.assertEqual(roles["to"], "destination")
         for field in fields:
             self.assertEqual(set(field), {"name", "role", "type"})
             self.assertEqual(field["type"], "text")

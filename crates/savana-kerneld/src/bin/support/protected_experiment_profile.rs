@@ -100,7 +100,7 @@ fn tool_catalog(stage:&Path)->Result<Vec<CatalogToolV04>,String> {
     if doc["schema"]!=json!(2) {return Err("tool catalog schema".into());}
     let reads=doc["read_tools"].as_array().ok_or("catalog read tools")?;
     let writes=doc["write_tools"].as_array().ok_or("catalog write tools")?;
-    if reads.is_empty() || reads.len()+writes.len()>64 {return Err("catalog size".into());}
+    if reads.is_empty() || reads.len()+writes.len()>128 {return Err("catalog size".into());}
     let mut out=Vec::new();
     for tool in reads {
         if tool["effect"]!=json!("read") || tool["fixed_magnitude"]!=json!(1) {

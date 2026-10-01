@@ -191,25 +191,29 @@ def upstream_for(tool):
     for name, upstream, *_ in (*TOOL_CATALOG, *WRITE_CATALOG, *MODEL_CATALOG):
         if name == tool:
             return upstream
-    raise ValueError("unreviewed_tool")
+    from .dojo_catalog import entry
+    return entry(tool)["upstream"]
 
 
 def catalog_json():
-    """Reviewed tool catalog for the deployment generator: read tools (synthetic
-    body/calendar/to plus text parameters) and authorizing write tools (explicit
-    roles plus their required validators)."""
-    roles = {"body": "payload", "calendar": "resource", "to": "destination"}
-    read_tools = []
-    for name, _, params in TOOL_CATALOG:
-        fields = [{"name": f, "role": roles.get(f, "parameter"), "type": "text"}
-                  for f in sorted(("body", "calendar", "to", *params))]
-        read_tools.append({"operation": name, "effect": "read", "fixed_magnitude": 1, "fields": fields})
-    write_tools = []
-    for name, _, effect, spec in (*WRITE_CATALOG, *MODEL_CATALOG):
+    """Reviewed tool catalog for the deployment generator: every AgentDojo tool
+    of the four suites (`dojo_catalog`, the original workspace tools first and
+    unchanged) plus the quarantined generator. Reads carry the synthetic
+    body/calendar/to controls; authorizing tools carry explicit roles and the
+    intent-flow-confinement validator."""
+    from .dojo_catalog import catalog_document
+    model_tools = []
+    for name, _, effect, spec in MODEL_CATALOG:
         fields = [{"name": n, "role": r, "type": "text"} for n, r in sorted(spec)]
-        write_tools.append({"operation": name, "effect": effect, "fixed_magnitude": 1,
-                            "validators": list(WRITE_VALIDATORS), "fields": fields})
-    return {"schema": 2, "read_tools": read_tools, "write_tools": write_tools}
+        model_tools.append({"operation": name, "effect": effect, "fixed_magnitude": 1,
+                            "fields": fields, "validators": list(WRITE_VALIDATORS)})
+    return catalog_document(extra_write_tools=model_tools)
+
+
+def catalog_operations():
+    """Every operation the deployment ships a signed descriptor for."""
+    doc = catalog_json()
+    return {t["operation"] for t in (*doc["read_tools"], *doc["write_tools"])}
 
 
 EFFECT_CODES = {"read": 1, "create": 2, "update": 3, "delete": 4, "send": 5, "execute": 6}
