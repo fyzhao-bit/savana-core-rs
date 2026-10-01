@@ -41,6 +41,10 @@ impl KernelAgentAuthorityV2 {
             let input = values.resolve_g4_value(run, owner, now).map_err(map_value_error)?;
             let document = FusedInputDocumentV04::from_owned_value(input.value())
                 .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+            // A planner-drafted task's owner declared every input owner text:
+            // hold that before any input is pinned or any operation runs.
+            document.check_owner_text_origin()
+                .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
             let expected = active.compiled().operations().iter().flat_map(|o| &o.bindings)
                 .filter(|b| b.result_of.is_none()).map(|b| b.slot)
                 .collect::<std::collections::BTreeSet<_>>();

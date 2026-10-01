@@ -1,6 +1,12 @@
 // Synthetic signer/owner fixture, not passkey or installed-system acceptance.
 fn owner_document_fixture(extra: bool, wrong_control: bool, untrusted: bool)
     -> PlannerAuthorityFixtureV2 {
+    owner_document_fixture_with(extra,wrong_control,untrusted,
+        |inputs| serde_json::json!({"schema":1,"prompt":"send the reports","inputs":inputs}))
+}
+
+fn owner_document_fixture_with(extra: bool, wrong_control: bool, untrusted: bool,
+    document: impl Fn(Vec<serde_json::Value>) -> serde_json::Value) -> PlannerAuthorityFixtureV2 {
     let (mut f, request) = business_proposal_fixture("A","Alice");
     install(&mut f,&request,1);
     choose(&mut f,1,1,true,202);
@@ -9,7 +15,7 @@ fn owner_document_fixture(extra: bool, wrong_control: bool, untrusted: bool)
         serde_json::json!({"slot":vec![2;16],"text":if wrong_control {"B"}else{"A"}}),
         serde_json::json!({"slot":vec![3;16],"text":"Alice"})];
     if extra { inputs.push(serde_json::json!({"slot":vec![4;16],"text":"extra"})); }
-    let value=KernelValueV2::text(serde_json::json!({"schema":1,"prompt":"send the reports","inputs":inputs}).to_string()).unwrap();
+    let value=KernelValueV2::text(document(inputs).to_string()).unwrap();
     let s=&f.authority.sessions[0];
     let context=ProvenanceContextV2::from_authenticated_runtime(s.producer_identity,s.durable_run_id,
         s.active_state_manifest_digest,UnixMillisV2::new(200),UnixMillisV2::new(1000)).unwrap();
@@ -154,5 +160,31 @@ fn claim_material_retains_only_a_matching_gated_owner_document_across_snapshots(
             &text("private planner prompt"),context(run),d(1),d(2),d(3),&[],EffectSetV2::SEND).unwrap()),
     ] {
         assert!(matches!(build(Some(owner)),Err(KernelAgentAuthorityErrorV2::BindingMismatch)));
+    }
+}
+
+#[test]
+fn planner_drafted_inputs_must_be_owner_text_before_anything_is_pinned() {
+    // Schema 2: the owner declared every input owner text. A literal the
+    // request does not contain fails before any input is pinned.
+    let drafted=|prompt:&'static str| move |inputs| serde_json::json!({"schema":2,"prompt":prompt,
+        "inputs":inputs,"origin":"owner_text","constants":["private-result"]});
+    let mut f=owner_document_fixture_with(false,false,false,drafted("send the private payload to A for Alice"));
+    let task=f.authority.sessions[0].durable_task_id;
+    let root=f.authority.sessions[0].task_authorization_digest.unwrap();
+    f.authority.prepare_owner_execution_review_v04(&review_proof(&f,78),*task.as_bytes(),*root.as_bytes(),
+        &mut f.values,UnixMillisV2::new(203)).unwrap();
+    assert!(f.authority.policy.as_ref().unwrap().durable.fused_inputs_pinned_v04(task).unwrap());
+
+    for prompt in ["send the private payload to A", "send the private payload to a for alice"] {
+        let mut f=owner_document_fixture_with(false,false,false,drafted(prompt));
+        let task=f.authority.sessions[0].durable_task_id;
+        let root=f.authority.sessions[0].task_authorization_digest.unwrap();
+        let before=disk(&f);
+        assert!(matches!(f.authority.prepare_owner_execution_review_v04(&review_proof(&f,79),*task.as_bytes(),
+            *root.as_bytes(),&mut f.values,UnixMillisV2::new(203)),Err(KernelAgentAuthorityErrorV2::BindingMismatch)),
+            "{prompt}");
+        assert_eq!(disk(&f),before);
+        assert!(!f.authority.policy.as_ref().unwrap().durable.fused_inputs_pinned_v04(task).unwrap());
     }
 }
