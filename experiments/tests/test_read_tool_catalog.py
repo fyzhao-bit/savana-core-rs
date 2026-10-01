@@ -82,11 +82,15 @@ class ReadToolCatalogTests(unittest.TestCase):
     def test_the_generator_is_a_confined_send_tool_with_fixed_controls(self):
         # Sending an earlier result to a model provider is an outbound effect:
         # it ships as SEND with confinement, never as a silent read.
-        (name, upstream, effect, fields), = MODEL_CATALOG
+        (name, upstream, effect, fields), (xname, xupstream, xeffect, xfields) = MODEL_CATALOG
         self.assertEqual((name, upstream, effect), ("dojo.model.generate", "quarantined_generate", "send"))
         self.assertEqual(dict(fields), {"body": "payload", "instruction": "parameter",
                                         "model": "resource", "to": "destination"})
         self.assertEqual(upstream_for(name), "quarantined_generate")
+        # The extractor for planner-drafted programs: same model, one more
+        # inert label naming the value it must produce.
+        self.assertEqual((xname, xupstream, xeffect), ("dojo.model.extract", "quarantined_extract", "send"))
+        self.assertEqual(dict(xfields), dict(fields, target="parameter"))
 
     def test_upstream_functions_are_the_reviewed_read_set(self):
         # Exactly the official AgentDojo workspace read functions we serve.

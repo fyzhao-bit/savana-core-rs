@@ -116,6 +116,30 @@ planner cannot smuggle an attacker's address into a root the owner then approves
 because that string is not in the owner's words. Enforced at compile, next to the
 existing owner-view check (`v04_fused_input_admission.rs`).
 
+**As built (G3).** The rule lives on the owner's consented input document, not
+on the root encoding: a schema-2 `FusedInputDocumentV04` carries
+`origin = "owner_text"` and a short list of owner-declared `constants` (the
+deployment's fixed synthetic controls: `""`, `primary`, `private-result`, the
+generator model). When the kernel first pins a schema-2 document's inputs
+(`prepare_owner_execution_review_v04`, before any operation runs), every input
+text must be empty, one of those constants, or an NFC substring of the
+document's prompt; otherwise preparation fails and nothing executes. The planner
+never writes the document — the owner side composes it from the official prompt
+and the planner's proposed literals — so a literal the owner's words do not
+contain cannot become a control even if the owner's (automated) review accepts
+it. Schema-1 documents (the reviewed contracts, whose dates are owner-normalized,
+e.g. `May 26th` -> `2024-05-26`) are unchanged.
+
+Not covered yet, and therefore failing honestly in planner-drafted runs: values
+that need a computed origin (a date the prompt states without its year, time +
+duration, arithmetic), keyed selection from a list, and anything the owner's
+words do not literally contain. In the automated benchmark the owner approves a
+planner-drafted root only if it passes the same rule, and denies any write whose
+destination is derived from an untrusted result (the conservative choice, which
+is also what CaMeL's shipped policies do for untrusted recipients); derived
+content parameters escalate under intent-flow confinement and are approved only
+when they equal the owner-signed edge's kernel-extracted value.
+
 ## Comparison with CaMeL
 
 Standard, same-conditions comparison only: both use DeepSeek, same AgentDojo

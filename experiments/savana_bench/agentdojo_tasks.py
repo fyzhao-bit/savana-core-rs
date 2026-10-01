@@ -184,6 +184,12 @@ MODEL_CATALOG = (
     ("dojo.model.generate", "quarantined_generate", "send",
      (("body", "payload"), ("instruction", "parameter"),
       ("model", "resource"), ("to", "destination"))),
+    # Planner-drafted programs (G3): the same quarantined model, asked for the
+    # one value a named target field (or the owner's final answer) needs. The
+    # target is an inert catalog label; the instruction is the owner's text.
+    ("dojo.model.extract", "quarantined_extract", "send",
+     (("body", "payload"), ("instruction", "parameter"), ("model", "resource"),
+      ("target", "parameter"), ("to", "destination"))),
 )
 
 
@@ -386,8 +392,21 @@ GENERATE_TASKS = (
 )
 
 
+# Planner-drafted contracts the owner side reviewed in this process (G3).
+_DRAFTED = {}
+
+
+def register_drafted(contract):
+    """Admit an owner-reviewed DraftedContract to this process's catalog."""
+    from .drafted_tasks import DraftedContract
+    if type(contract) is not DraftedContract:
+        raise ValueError("drafted_contract_required")
+    _DRAFTED[contract.contract_id] = contract
+    return contract
+
+
 def all_contracts():
-    return (*_TASKS, *WRITE_TASKS, *GENERATE_TASKS)
+    return (*_TASKS, *WRITE_TASKS, *GENERATE_TASKS, *_DRAFTED.values())
 
 
 def contract_by_id(contract_id):
@@ -465,6 +484,11 @@ def owner_inputs(contract):
 
 def owner_document(contract):
     inputs = sorted([dict(slot=i["slot"], text=i["text"]) for i in owner_inputs(contract)], key=lambda i:i["slot"])
+    if getattr(contract, "variant", None) == "drafted":
+        # Schema 2: the kernel requires every input to be empty, an owner-text
+        # constant of this prompt, or one of these owner-declared constants.
+        return canonical(dict(schema=2, prompt=contract.prompt, inputs=inputs, origin="owner_text",
+                              constants=contract.constants())).decode("utf-8")
     return canonical(dict(schema=1, prompt=contract.prompt, inputs=inputs)).decode("utf-8")
 
 

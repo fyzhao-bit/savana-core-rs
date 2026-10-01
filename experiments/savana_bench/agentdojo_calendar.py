@@ -72,7 +72,7 @@ def _generator_tool(generator):
     """The reviewed `dojo.model.generate` adapter: the payload is the earlier
     result the kernel passed (data), the instruction is the owner's text, and
     the model/destination controls are fixed. Returns {"text": one line}."""
-    (operation, _upstream, _effect, fields), = MODEL_CATALOG
+    (operation, _upstream, _effect, fields), = (m for m in MODEL_CATALOG if m[0] == "dojo.model.generate")
     if sorted(n for n, _ in fields) != ["body", "instruction", "model", "to"]:
         raise ValueError("unreviewed_generator_fields")
 

@@ -13,8 +13,20 @@ import importlib.metadata
 
 from .agentdojo_calendar import _generator_tool
 from .agentdojo_provider import AgentDojoProvider
-from .agentdojo_tasks import PACKAGE_VERSION
-from .dojo_catalog import SENTINELS, entry, official_call, suite_operations
+from .agentdojo_tasks import GENERATOR_MODEL, PACKAGE_VERSION
+from .dojo_catalog import LIST_SEPARATOR, SENTINELS, entry, official_call, suite_operations
+
+ANSWER_BYTES = 2000
+FIELD_BYTES = 480
+_FORMATS = {
+    "text": "one line of plain text", "opt_text": "one line of plain text",
+    "null_text": "one line of plain text", "number": "a decimal number such as 12.5 (digits, at most one '.')",
+    "opt_number": "a decimal number such as 12.5 (digits, at most one '.')", "integer": "a whole number",
+    "opt_integer": "a whole number", "boolean": "true or false", "opt_boolean": "true or false",
+    "permission": "r or rw", "list": f"the items separated by '{LIST_SEPARATOR}'",
+    "opt_list": f"the items separated by '{LIST_SEPARATOR}'",
+    "attachments": f"file ids separated by '{LIST_SEPARATOR}'",
+}
 
 _FIXED_DOC = {
     "body": "Must be empty; never parsed as code or tool arguments.",
@@ -42,6 +54,46 @@ def _adapter_source(pyname, operation):
     ])
 
 
+def target_description(target, functions):
+    """(what the extractor must produce, its byte bound) for a reviewed label:
+    the owner's final answer, or one official argument of a catalog field."""
+    if target == "answer":
+        return ("The final answer to the owner's request, stating all the requested information "
+                "completely and concisely in plain text.", ANSWER_BYTES)
+    operation, _, name = target.rpartition(".")
+    spec = next((f for f in entry(operation)["fields"] if f[0] == name and f[3] != "fixed"), None)
+    if spec is None:
+        raise ValueError("extract_target")
+    _name, _role, upstream_arg, kind = spec
+    function = functions[entry(operation)["upstream"]]
+    official = function.parameters.model_json_schema().get("properties", {}).get(upstream_arg, {})
+    meaning = " ".join(str(official.get("description", "")).split()) or upstream_arg
+    return (f"The argument '{upstream_arg}' for the function {function.name}: {meaning} "
+            f"Format: {_FORMATS[kind]}.", FIELD_BYTES)
+
+
+def _extract_tool(generator, functions):
+    """The reviewed `dojo.model.extract` adapter: the payload is the earlier
+    result the kernel passed (data), the instruction is the owner's text, the
+    target an inert catalog label; model/destination controls are fixed."""
+    def extract(body: str, instruction: str, model: str, target: str, to: str):
+        """Quarantined extraction of one value from an untrusted source; no tools, no actions.
+
+        :param body: The earlier verified result, passed by the kernel as data.
+        :param instruction: The owner's own request text.
+        :param model: Fixed generator model control.
+        :param target: The reviewed label of the value to produce.
+        :param to: Fixed private result destination control.
+        """
+        if model != GENERATOR_MODEL or to != SENTINELS["to"] or not body or not instruction:
+            raise ValueError("generator_control_mismatch")
+        description, max_bytes = target_description(target, functions)
+        return {"text": generator(instruction=instruction, source=body, target=description, max_bytes=max_bytes)}
+
+    extract.__name__ = "dojo.model.extract"
+    return extract
+
+
 def dojo_provider(suite, environment, *, max_calls=1, generator=None):
     """The provider for one episode of `suite` (an AgentDojo TaskSuite).
 
@@ -67,4 +119,5 @@ def dojo_provider(suite, environment, *, max_calls=1, generator=None):
         functions.append(make_function(adapter))
     if generator is not None:
         functions.append(make_function(_generator_tool(generator)))
+        functions.append(make_function(_extract_tool(generator, tools)))
     return AgentDojoProvider(FunctionsRuntime(functions), environment, max_calls=max_calls)
