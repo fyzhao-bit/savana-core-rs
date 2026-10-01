@@ -139,6 +139,25 @@ class ReviewTests(unittest.TestCase):
         self.assertNotEqual(first.values, second.values)
         self.assertEqual((first.value_map()["source"], second.value_map()["source"]), ("1", "3"))
 
+    def test_an_answer_may_combine_up_to_three_earlier_steps(self):
+        steps = SUMMARY_PROGRAM["steps"]
+        read = steps[0]
+        program = {"steps": [read, read, read, read,
+                             {"tool": EXTRACT_TOOL, "source": 4,
+                              "args": {"target": text("answer"), "context": [{"from": 1}, {"from": 2}, {"from": 3}]}}]}
+        answer = review("slack", "user_task_3", program).steps()[4]
+        self.assertEqual([d[:2] for d in answer.derived], [("context", 1), ("context2", 2), ("context3", 3)])
+        too_many = dict(program["steps"][4], args={"target": text("answer"),
+                                                    "context": [{"from": k} for k in (1, 2, 3, 4, 1)]})
+        with self.assertRaises(ProgramRefused):
+            review("slack", "user_task_3", {"steps": program["steps"][:4] + [too_many]})
+        repeated = dict(program["steps"][4], args={"target": text("answer"), "context": [{"from": 1}, {"from": 1}]})
+        with self.assertRaises(ProgramRefused):
+            review("slack", "user_task_3", {"steps": program["steps"][:4] + [repeated]})
+        # Unused context fields are empty owner values.
+        single = review("slack", "user_task_3", SUMMARY_PROGRAM).steps()[1].value_map()
+        self.assertEqual((single["context2"], single["context3"]), ("", ""))
+
     def test_context_from_the_source_itself_is_dropped(self):
         steps = SUMMARY_PROGRAM["steps"]
         same = {"steps": [steps[0], dict(steps[1], args=dict(steps[1]["args"], context={"from": 1})), steps[2]]}

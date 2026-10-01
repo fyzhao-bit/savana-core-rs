@@ -58,6 +58,8 @@ MAX_EDGE_BYTES = 512
 MAX_CONTEXT_BYTES = 8192
 # The extractor's final answer is bounded by its provider at 2000 bytes.
 MAX_ANSWER_BYTES = 2048
+CONTEXT_FIELDS = ("context", "context2", "context3")
+MAX_CONTEXTS = len(CONTEXT_FIELDS)
 MAX_DECLARED = 32
 # Read parameters the planner may choose itself (a search term, a count): a read
 # has no effect, and its result reaches a write only through a signed edge. A
@@ -345,30 +347,38 @@ def review_program(*, suite, suite_tools, task_id, prompt, program):
             values = {"instruction": folded(prompt), "target": target[1], "model": GENERATOR_MODEL,
                       "to": SENTINELS["to"], "source": str(source)}
             payload_from = source
-            context = _origin(args["context"]) if "context" in args else None
-            if context is not None and context[0] == "from" and context[1] == source and context[2] is None:
-                # The source's result is already the payload: the same result
-                # again as context adds nothing (and a large result would
-                # exceed the context bound), so it is dropped.
-                context = None
-            if context is not None:
-                # Context is only ever an earlier extraction's value, so one
-                # answer can combine several results; never a literal.
+            # Up to MAX_CONTEXTS other earlier steps as context, one signed edge
+            # each, so one answer can combine several results.
+            raw_contexts = args.get("context")
+            raw_contexts = ([] if raw_contexts is None else raw_contexts if type(raw_contexts) is list
+                            else [raw_contexts])
+            contexts = []
+            for raw_context in raw_contexts:
+                context = _origin(raw_context)
+                if context[0] == "from" and context[1] == source and context[2] is None:
+                    # The source's result is already the payload: the same
+                    # result again as context adds nothing, so it is dropped.
+                    continue
+                # Context is only ever an earlier step's value or result,
+                # never a literal.
                 if (context[0] != "from" or context[2] is not None or context[3] is not None
-                        or not 1 <= context[1] < number):
+                        or not 1 <= context[1] < number or context[1] in contexts):
                     _refuse("extract_context")
-                if kinds[context[1] - 1] == "extract":
+                contexts.append(context[1])
+            if len(contexts) > MAX_CONTEXTS:
+                _refuse("extract_context")
+            for field, earlier in zip(CONTEXT_FIELDS, contexts + [None] * MAX_CONTEXTS):
+                if earlier is None:
+                    values[field] = ""
+                elif kinds[earlier - 1] == "extract":
                     # An earlier answer is only ever more context for a later
                     # extraction (data for the model, never a control), so a
                     # request with several parts can be answered in full.
-                    answer = chain[context[1] - 1].value_map()["target"] == ANSWER
-                    derived.append(("context", context[1], GENERATED_TEXT,
-                                    MAX_ANSWER_BYTES if answer else MAX_EDGE_BYTES))
+                    answer = chain[earlier - 1].value_map()["target"] == ANSWER
+                    derived.append((field, earlier, GENERATED_TEXT, MAX_ANSWER_BYTES if answer else MAX_EDGE_BYTES))
                 else:
-                    # A second tool result, whole, as bounded text.
-                    derived.append(("context", context[1], RESULT_TEXT, MAX_CONTEXT_BYTES))
-            else:
-                values["context"] = ""
+                    # Another tool result, whole, as bounded text.
+                    derived.append((field, earlier, RESULT_TEXT, MAX_CONTEXT_BYTES))
         else:
             if "source" in raw:
                 _refuse("source_on_tool")

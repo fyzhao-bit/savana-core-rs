@@ -88,11 +88,14 @@ def _extract_tool(generator, functions):
     """The reviewed `dojo.model.extract` adapter: the payload is the earlier
     result the kernel passed (data), the instruction is the owner's text, the
     target an inert catalog label; model/destination controls are fixed."""
-    def extract(body: str, context: str, instruction: str, model: str, source: str, target: str, to: str):
+    def extract(body: str, context: str, context2: str, context3: str, instruction: str, model: str,
+                source: str, target: str, to: str):
         """Quarantined extraction of one value from an untrusted source; no tools, no actions.
 
         :param body: The earlier verified result, passed by the kernel as data.
-        :param context: An earlier extraction's value (a signed edge) or empty.
+        :param context: An earlier step's value or result (a signed edge) or empty.
+        :param context2: A second such context or empty.
+        :param context3: A third such context or empty.
         :param instruction: The owner's own request text.
         :param model: Fixed generator model control.
         :param source: The step whose result is the payload (an owner-signed number).
@@ -103,8 +106,9 @@ def _extract_tool(generator, functions):
                 or not (source.isascii() and source.isdigit() and source[0] != "0")):
             raise ValueError("generator_control_mismatch")
         description, max_bytes = target_description(target, functions)
+        contexts = [c for c in (context, context2, context3) if c]
         line = generator(instruction=instruction, source=body, target=description, max_bytes=max_bytes,
-                         context=context)
+                         context="\n\n".join(contexts))
         if target_kind(target) not in LIST_KINDS:
             return {"text": line}
         # A list target: the same line, and its items split by the reviewed

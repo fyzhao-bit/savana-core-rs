@@ -291,12 +291,13 @@ MODEL_CATALOG = (
     # one value a named target field (or the owner's final answer) needs. The
     # target is an inert catalog label; the instruction is the owner's text;
     # the optional context is an earlier extraction's value (a signed edge), so
-    # one answer can combine several results. `source` names the step whose
+    # one answer can combine several results (up to three contexts). `source` names the step whose
     # result is the payload, so two extractions are never the same signed
     # alternative (the kernel refuses an ambiguous match).
     ("dojo.model.extract", "quarantined_extract", "send",
-     (("body", "payload"), ("context", "parameter"), ("instruction", "parameter"), ("model", "resource"),
-      ("source", "parameter"), ("target", "parameter"), ("to", "destination"))),
+     (("body", "payload"), ("context", "parameter"), ("context2", "parameter"), ("context3", "parameter"),
+      ("instruction", "parameter"), ("model", "resource"), ("source", "parameter"), ("target", "parameter"),
+      ("to", "destination"))),
 )
 
 

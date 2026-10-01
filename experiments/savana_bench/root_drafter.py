@@ -24,11 +24,11 @@ A tool step: {{"tool": "<operation>", "args": {{"<field>": <origin>, ...}}}}
   Give every required field; omit an optional one to leave it unset.
 An extraction step: {{"tool": "{EXTRACT_TOOL}", "source": <earlier step number>,
   "args": {{"target": {{"text": "<operation>.<field>" or "{ANSWER}"}},
-           "context": {{"from": <another earlier step>}}  (optional)}}}}
+           "context": {{"from": <another earlier step>}} or a list of up to three  (optional)}}}}
   A quarantined model reads the user's request, that earlier step's whole result and the
-  context (another earlier step's result or extracted value, if given), and writes the one
-  value the target needs in that field's format (or, for "{ANSWER}", the final answer to the
-  user). To combine more than two results, chain extractions through context.
+  context (up to three other earlier steps' results or extracted values, if given), and writes
+  the one value the target needs in that field's format (or, for "{ANSWER}", the final answer to
+  the user). Give the final "{ANSWER}" extraction as context every earlier result it needs.
 An origin is one of:
   {{"text": "..."}}  a literal. It MUST be copied exactly from the user's request (several
                      items of a list are joined with "{LIST_SEPARATOR}", each copied exactly);
