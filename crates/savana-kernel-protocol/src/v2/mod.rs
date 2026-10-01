@@ -19,7 +19,8 @@ pub use business_request::{
     BusinessCodecErrorV2, BusinessControlsV2, BusinessFieldRoleV2,
     BusinessFieldTypeV2, BusinessFieldV2, BusinessMagnitudeV2, BusinessProfileV2,
     BusinessRequestV2, BusinessResponseDispositionV2, BusinessValueV2, ResultComputeOpV2,
-    ResultComputeV2, ResultDerivedControlV2, MAX_BUSINESS_JSON_BYTES_V2, MAX_TEXT_LIST_ITEMS_V2,
+    ResultComputeV2, ResultDerivedControlV2, MAX_BUSINESS_JSON_BYTES_V2, MAX_PARAMETER_TEXT_BYTES_V2,
+    MAX_TEXT_LIST_ITEMS_V2,
     MAX_BUSINESS_PROFILE_BYTES_V2,
 };
 pub use final_release_business::{

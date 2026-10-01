@@ -600,9 +600,17 @@ pub(super) fn identifier(s: &str, max: usize) -> bool {
 /// Bounds of a text-list control: at most this many items, each a control text.
 pub const MAX_TEXT_LIST_ITEMS_V2: usize = 32;
 
+/// At most this many bytes in one parameter text (a resource, destination
+/// or list item stays within 1 KB).
+pub const MAX_PARAMETER_TEXT_BYTES_V2: usize = 8 * 1024;
+
 pub(super) fn control_text(s: &str) -> bool {
+    s.len() <= 1024 && parameter_text(s)
+}
+
+pub(super) fn parameter_text(s: &str) -> bool {
     !s.is_empty()
-        && s.len() <= 1024
+        && s.len() <= MAX_PARAMETER_TEXT_BYTES_V2
         && s.trim() == s
         && !s.chars().any(|c| {
             matches!(c, '\u{0000}'..='\u{001f}' | '\u{007f}'..='\u{009f}' | '\u{2028}' | '\u{2029}')

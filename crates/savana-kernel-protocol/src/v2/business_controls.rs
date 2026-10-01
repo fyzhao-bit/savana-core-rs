@@ -275,11 +275,14 @@ pub(super) fn validate_field(
 ) -> Result<(), BusinessCodecErrorV2> {
     match (field.kind, value) {
         // An empty parameter is an argument left unset: it carries no data.
-        // A resource or destination text is never empty.
+        // A resource or destination text is never empty and at most 1 KB; a
+        // parameter (a subject, a message, an extraction's context) may carry
+        // up to MAX_PARAMETER_TEXT_BYTES_V2 under the same character rules.
         (BusinessFieldTypeV2::Text, Json::Text(s))
             if field.role == BusinessFieldRoleV2::Payload
                 || control_text(s)
-                || (field.role == BusinessFieldRoleV2::Parameter && s.is_empty()) =>
+                || (field.role == BusinessFieldRoleV2::Parameter
+                    && (s.is_empty() || parameter_text(s))) =>
         {
             Ok(())
         }

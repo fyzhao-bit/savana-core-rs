@@ -1239,3 +1239,23 @@ fn computed_rules_are_signed_bounded_and_plain_rules_keep_their_bytes() {
     unknown[at - 1] = 0x09;
     assert!(decode_result_derived_controls_v2(&unknown).is_err());
 }
+
+#[test]
+fn a_parameter_may_carry_more_text_than_a_resource_under_the_same_rules() {
+    let p = list_profile();
+    let request = |end: &str, file: &str| {
+        let args = serde_json::json!({"body": "hi", "cc": [], "end": end, "file": file, "to": ["a@x.com"]});
+        let call = serde_json::json!({"jsonrpc": "2.0", "id": "r1", "method": "tools/call",
+            "params": {"name": "mail.send", "arguments": args}});
+        BusinessRequestV2::parse(&p, "r1", call.to_string().as_bytes())
+    };
+    let long = "word ".repeat(400).trim_end().to_owned(); // about 2 KB
+    assert!(request(&long, "A").is_ok());
+    assert!(request("x".repeat(MAX_PARAMETER_TEXT_BYTES_V2).as_str(), "A").is_ok());
+    // A resource keeps its 1 KB bound; a parameter its own; neither takes a
+    // line break, padding or more than its bound.
+    assert!(request("short", &long).is_err());
+    assert!(request(&"x".repeat(MAX_PARAMETER_TEXT_BYTES_V2 + 1), "A").is_err());
+    assert!(request(&format!("{long}\nmore"), "A").is_err());
+    assert!(request(&format!(" {long}"), "A").is_err());
+}
