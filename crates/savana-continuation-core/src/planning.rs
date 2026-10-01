@@ -50,6 +50,14 @@ pub struct SlotBinding {
     /// mismatch. Present exactly when `result_path` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_source_clause: Option<u64>,
+    /// A path edge into a text-list field: the node at the path is an array of
+    /// strings (bounded in total by `result_max_bytes`), not a scalar.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub result_list: bool,
+    /// A computed control: the kernel applies this owner-signed computation to
+    /// the scalar it extracts at the path (e.g. a start time plus a duration).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_compute: Option<crate::planning_observation::ResultComputeV04>,
 }
 
 /// Private compiler input. Never serialize this registry to a model implicitly.
@@ -153,6 +161,11 @@ impl Policy {
                         || (b.result_path.is_some() != b.result_source_clause.is_some())
                         || (b.result_path.is_some() && b.result_of.is_none())
                         || b.result_max_bytes == Some(0)
+                        // List and computed edges are path edges; a list is
+                        // never computed, and an amount stays within bounds.
+                        || ((b.result_list || b.result_compute.is_some()) && b.result_path.is_none())
+                        || (b.result_list && b.result_compute.is_some())
+                        || b.result_compute.is_some_and(|c| !c.valid())
                         || b.result_path.as_ref().is_some_and(|path| {
                             path.len() > 16
                                 || path.iter().any(|s| {

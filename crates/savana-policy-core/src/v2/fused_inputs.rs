@@ -271,7 +271,7 @@ impl RecoveredFusedInputsV04 {
         &mut self,
         slot: [u8; 16],
         input: &Input,
-        extract: Option<(&[String], u16)>,
+        extract: Option<ResultExtractV04<'_>>,
         now: u64,
     ) -> Result<(), G4Error> {
         let (value, provenance) = input.result_value(extract)?;
@@ -301,6 +301,27 @@ impl RecoveredFusedInputsV04 {
     }
     pub fn inputs(&self) -> &[RecoveredFusedInputV04] {
         &self.inputs
+    }
+}
+
+/// The signed shape of a path edge: the JSON path and byte bound, and whether
+/// the value is a text list or one text with a signed computation applied.
+#[derive(Clone, Copy)]
+pub(super) struct ResultExtractV04<'a> {
+    pub path: &'a [String],
+    pub max_bytes: u16,
+    pub list: bool,
+    pub compute: Option<savana_continuation_core::planning_observation::ResultComputeV04>,
+}
+impl<'a> ResultExtractV04<'a> {
+    /// The binding's edge, or `None` for a whole-result payload edge.
+    pub(super) fn of(binding: &'a savana_continuation_core::planning::SlotBinding) -> Option<Self> {
+        Some(Self {
+            path: binding.result_path.as_deref()?,
+            max_bytes: binding.result_max_bytes?,
+            list: binding.result_list,
+            compute: binding.result_compute,
+        })
     }
 }
 
@@ -336,7 +357,7 @@ impl Input {
     /// `check_result_argument` must pass the SAME extract to agree on the digest.
     fn result_value(
         &self,
-        extract: Option<(&[String], u16)>,
+        extract: Option<ResultExtractV04<'_>>,
     ) -> Result<(KernelValueV2, ProvenanceRecordV2), G4Error> {
         let (raw, p) = self.decode()?;
         let context = super::ProvenanceContextV2::from_authenticated_runtime(
@@ -349,10 +370,17 @@ impl Input {
         .map_err(|_| G4Error::StateConflict)?;
         let operation = match extract {
             None => super::DeriveOperationV2::decode_utf8(),
-            Some((path, max_bytes)) => {
-                super::DeriveOperationV2::select_result_json_path_v04(path.to_vec(), max_bytes)
+            Some(e) if !e.list && e.compute.is_none() => {
+                super::DeriveOperationV2::select_result_json_path_v04(e.path.to_vec(), e.max_bytes)
                     .map_err(|_| G4Error::StateConflict)?
             }
+            Some(e) => super::DeriveOperationV2::select_result_json_edge_v04(
+                e.path.to_vec(),
+                e.max_bytes,
+                e.list,
+                e.compute,
+            )
+            .map_err(|_| G4Error::StateConflict)?,
         };
         ProvenanceRecordV2::derived(context, operation, &[(&raw, &p)], p.label().effects())
             .map_err(|_| G4Error::StateConflict)
@@ -370,7 +398,7 @@ impl Input {
         &self,
         slot: [u8; 16],
         argument: &super::StableActionArgumentBindingV2,
-        extract: Option<(&[String], u16)>,
+        extract: Option<ResultExtractV04<'_>>,
     ) -> Result<(), G4Error> {
         let (_, p) = self.result_value(extract)?;
         if argument.value_internal_id() != self.result_identity(slot)
@@ -459,10 +487,14 @@ mod result_edge_tests {
         segments.iter().map(|s| s.to_string()).collect()
     }
 
+    fn at(path: &[String], max_bytes: u16) -> Option<ResultExtractV04<'_>> {
+        Some(ResultExtractV04 { path, max_bytes, list: false, compute: None })
+    }
+
     fn matching_argument(
         input: &Input,
         slot: [u8; 16],
-        extract: Option<(&[String], u16)>,
+        extract: Option<ResultExtractV04<'_>>,
     ) -> StableActionArgumentBindingV2 {
         let (_, provenance) = input.result_value(extract).unwrap();
         StableActionArgumentBindingV2::new_for_test(
@@ -481,7 +513,7 @@ mod result_edge_tests {
         let input = result_input(json);
         let slot = [5; 16];
         let to_path = path(&["events", "0", "participants", "0"]);
-        let extract = Some((&to_path[..], 256u16));
+        let extract = at(&to_path, 256);
 
         // The kernel extracts exactly the scalar at the signed path.
         let (value, _) = input.result_value(extract).unwrap();
@@ -503,7 +535,7 @@ mod result_edge_tests {
         // after the fact cannot pass.
         let other = path(&["events", "0", "count"]);
         assert!(input
-            .check_result_argument(slot, &ok, Some((&other[..], 256)))
+            .check_result_argument(slot, &ok, at(&other, 256))
             .is_err());
         // And rejects it under the whole-result edge.
         assert!(input.check_result_argument(slot, &ok, None).is_err());
@@ -515,12 +547,88 @@ mod result_edge_tests {
         let input = result_input(json);
         // The participants array is not a scalar.
         let array = path(&["events", "0", "participants"]);
-        assert!(input.result_value(Some((&array[..], 256))).is_err());
+        assert!(input.result_value(at(&array, 256)).is_err());
         // The scalar exceeds the signed byte bound.
         let addr = path(&["events", "0", "participants", "0"]);
-        assert!(input.result_value(Some((&addr[..], 3))).is_err());
+        assert!(input.result_value(at(&addr, 3)).is_err());
         // A missing path fails.
         let missing = path(&["events", "1", "participants", "0"]);
-        assert!(input.result_value(Some((&missing[..], 256))).is_err());
+        assert!(input.result_value(at(&missing, 256)).is_err());
+    }
+
+    #[test]
+    fn list_and_computed_edges_are_typed_and_never_alias_plain_ones() {
+        use savana_continuation_core::planning_observation::{ComputeOpV04, ResultComputeV04};
+        let json = br#"{"events":[{"participants":["a@x.com","b@y.com"],"start":"2024-05-19 10:00","count":2}]}"#;
+        let input = result_input(json);
+        let slot = [5; 16];
+        let people = path(&["events", "0", "participants"]);
+        let list = Some(ResultExtractV04 { path: &people, max_bytes: 256, list: true, compute: None });
+        let (value, list_prov) = input.result_value(list).unwrap();
+        assert_eq!(value.text_list(), Some(vec!["a@x.com", "b@y.com"]));
+        // A list bound is on the total bytes; a scalar node is not a list.
+        assert!(input
+            .result_value(Some(ResultExtractV04 { path: &people, max_bytes: 10, list: true, compute: None }))
+            .is_err());
+        let one = path(&["events", "0", "participants", "0"]);
+        assert!(input
+            .result_value(Some(ResultExtractV04 { path: &one, max_bytes: 256, list: true, compute: None }))
+            .is_err());
+
+        let start = path(&["events", "0", "start"]);
+        let hour = ResultComputeV04 { op: ComputeOpV04::AddMinutes, amount: 90 };
+        let end = Some(ResultExtractV04 { path: &start, max_bytes: 64, list: false, compute: Some(hour) });
+        let (value, end_prov) = input.result_value(end).unwrap();
+        assert_eq!(value.as_text(), Some("2024-05-19 11:30"));
+        // The signed amount is part of the provenance: a different amount, the
+        // plain path, or the list edge never verifies the same argument.
+        let ok = matching_argument(&input, slot, end);
+        assert!(input.check_result_argument(slot, &ok, end).is_ok());
+        let longer = ResultComputeV04 { op: ComputeOpV04::AddMinutes, amount: 91 };
+        assert!(input
+            .check_result_argument(
+                slot,
+                &ok,
+                Some(ResultExtractV04 { path: &start, max_bytes: 64, list: false, compute: Some(longer) })
+            )
+            .is_err());
+        assert!(input.check_result_argument(slot, &ok, at(&start, 64)).is_err());
+        assert_ne!(list_prov.provenance_digest(), end_prov.provenance_digest());
+        // An operand not in the operation's exact form fails closed.
+        let count = path(&["events", "0", "count"]);
+        assert!(input
+            .result_value(Some(ResultExtractV04 { path: &count, max_bytes: 64, list: false, compute: Some(hour) }))
+            .is_err());
+        // List and computation together, or an out-of-range amount, are refused.
+        let huge = ResultComputeV04 { op: ComputeOpV04::AddDays, amount: 100_000 };
+        assert!(input
+            .result_value(Some(ResultExtractV04 { path: &start, max_bytes: 64, list: false, compute: Some(huge) }))
+            .is_err());
+        assert!(input
+            .result_value(Some(ResultExtractV04 { path: &start, max_bytes: 64, list: true, compute: Some(hour) }))
+            .is_err());
+    }
+
+    #[test]
+    fn edge_derive_operations_round_trip_and_plain_ones_keep_tag_nine() {
+        use savana_continuation_core::planning_observation::{ComputeOpV04, ResultComputeV04};
+        use crate::v2::DeriveOperationV2;
+        let p = path(&["a", "0"]);
+        let plain = DeriveOperationV2::select_result_json_path_v04(p.clone(), 64).unwrap();
+        assert_eq!(plain.tag(), 9);
+        let list = DeriveOperationV2::select_result_json_edge_v04(p.clone(), 64, true, None).unwrap();
+        let compute = DeriveOperationV2::select_result_json_edge_v04(
+            p.clone(),
+            64,
+            false,
+            Some(ResultComputeV04 { op: ComputeOpV04::AddCents, amount: -250 }),
+        )
+        .unwrap();
+        for op in [plain, list, compute] {
+            let bytes = minicbor::to_vec(&op).unwrap();
+            assert_eq!(minicbor::decode::<DeriveOperationV2>(&bytes).unwrap(), op);
+        }
+        // Neither list nor computation is the plain edge's job.
+        assert!(DeriveOperationV2::select_result_json_edge_v04(p, 64, false, None).is_err());
     }
 }

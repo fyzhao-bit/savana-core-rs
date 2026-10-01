@@ -393,8 +393,7 @@ pub fn check_result_operation_rule_v04(
     derived: &BTreeMap<String, savana_kernel_protocol::v2::ResultDerivedControlV2>,
     authorization: &savana_kernel_protocol::v2::TaskAuthorizationV2,
 ) -> Result<(), G4Error> {
-    use super::value::KernelScalarRefV2;
-    use savana_kernel_protocol::v2::{BusinessControlsV2, BusinessValueV2};
+    use savana_kernel_protocol::v2::BusinessControlsV2;
     let mut fields = Vec::new();
     for field in profile.fields() {
         if matches!(field.role(), BusinessFieldRoleV2::Payload | BusinessFieldRoleV2::Magnitude)
@@ -409,12 +408,7 @@ pub fn check_result_operation_rule_v04(
             .ok_or(G4Error::InvalidIntentBinding)?;
         fields.push((
             field.name().to_owned(),
-            match value.scalar_ref() {
-                Some(KernelScalarRefV2::Text(s)) => BusinessValueV2::Text(s.to_owned()),
-                Some(KernelScalarRefV2::I64(n)) if n >= 0 => BusinessValueV2::Unsigned(n as u64),
-                Some(KernelScalarRefV2::Bool(b)) => BusinessValueV2::Boolean(b),
-                _ => return Err(G4Error::InvalidIntentBinding),
-            },
+            value.business_value().ok_or(G4Error::InvalidIntentBinding)?,
         ));
     }
     let alternative = BusinessControlsV2::from_fields_with_derived(profile, fields, derived.clone())
@@ -449,13 +443,32 @@ pub fn fused_operation_derived_rules_v04(
                 .iter()
                 .find(|f| f.name() == b.argument)
                 .ok_or(G4Error::InvalidIntentBinding)?;
-            let rule = savana_kernel_protocol::v2::ResultDerivedControlV2::new(
+            // A list edge fills exactly a text-list field, and only a text
+            // field can be computed: the binding cannot reshape the field.
+            if b.result_list != (field.kind() == savana_kernel_protocol::v2::BusinessFieldTypeV2::TextList)
+                || (b.result_compute.is_some()
+                    && field.kind() != savana_kernel_protocol::v2::BusinessFieldTypeV2::Text)
+            {
+                return Err(G4Error::InvalidIntentBinding);
+            }
+            let mut rule = savana_kernel_protocol::v2::ResultDerivedControlV2::new(
                 source_clause,
                 path.clone(),
                 field.kind(),
                 max_bytes,
             )
             .map_err(|_| G4Error::InvalidIntentBinding)?;
+            if let Some(compute) = b.result_compute {
+                use savana_kernel_protocol::v2::{ResultComputeOpV2, ResultComputeV2};
+                let op = ResultComputeOpV2::from_code(compute.op.code())
+                    .ok_or(G4Error::InvalidIntentBinding)?;
+                rule = rule
+                    .with_compute(
+                        ResultComputeV2::new(op, compute.amount)
+                            .map_err(|_| G4Error::InvalidIntentBinding)?,
+                    )
+                    .map_err(|_| G4Error::InvalidIntentBinding)?;
+            }
             rules.push((b.argument.clone(), rule));
         }
     }

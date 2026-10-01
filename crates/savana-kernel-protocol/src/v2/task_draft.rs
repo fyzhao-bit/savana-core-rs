@@ -296,16 +296,19 @@ impl TaskAuthorizationDraftV2 {
                         .derived()
                         .iter()
                         .map(|(name, r)| {
-                            (
-                                name.clone(),
-                                serde_json::json!({
-                                    "source_clause": r.source_clause(),
-                                    "path": r.path(),
-                                    "type": format!("{:?}", r.kind()),
-                                    "max_bytes": r.max_bytes(),
-                                    "meaning": "The value the kernel extracts from the verified result of source_clause at this JSON path",
-                                }),
-                            )
+                            let mut edge = serde_json::json!({
+                                "source_clause": r.source_clause(),
+                                "path": r.path(),
+                                "type": format!("{:?}", r.kind()),
+                                "max_bytes": r.max_bytes(),
+                                "meaning": "The value the kernel extracts from the verified result of source_clause at this JSON path",
+                            });
+                            // A computed field also shows the owner-signed computation.
+                            if let Some(c) = r.compute() {
+                                edge["compute"] = serde_json::json!({"op": c.op().name(), "amount": c.amount()});
+                                edge["meaning"] = serde_json::json!("The value the kernel extracts from the verified result of source_clause at this JSON path, then computes with compute");
+                            }
+                            (name.clone(), edge)
                         })
                         .collect();
                     alternative["derived_fields"] = serde_json::Value::Object(derived);

@@ -126,6 +126,14 @@ impl TaskAuthorizationContextV2 {
             path: Vec<String>,
             kind: u8,
             max_bytes: u16,
+            #[serde(default)]
+            compute: Option<Compute>,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Compute {
+            op: String,
+            amount: i64,
         }
         #[derive(serde::Deserialize)]
         #[serde(untagged)]
@@ -133,6 +141,7 @@ impl TaskAuthorizationContextV2 {
             Text(String),
             Unsigned(u64),
             Boolean(bool),
+            List(Vec<String>),
         }
         if bytes.len() > 1024 * 1024 {
             return Err(malformed());
@@ -170,6 +179,9 @@ impl TaskAuthorizationContextV2 {
                                         Value::Boolean(b) => {
                                             super::super::BusinessValueV2::Boolean(b)
                                         }
+                                        Value::List(items) => {
+                                            super::super::BusinessValueV2::TextList(items)
+                                        }
                                     },
                                 )
                             })
@@ -182,15 +194,30 @@ impl TaskAuthorizationContextV2 {
                                     1 => super::super::BusinessFieldTypeV2::Text,
                                     2 => super::super::BusinessFieldTypeV2::Unsigned,
                                     3 => super::super::BusinessFieldTypeV2::Boolean,
+                                    4 => super::super::BusinessFieldTypeV2::TextList,
                                     _ => return Err(malformed()),
                                 };
-                                let control = super::super::ResultDerivedControlV2::new(
+                                let mut control = super::super::ResultDerivedControlV2::new(
                                     rule.source_clause,
                                     rule.path,
                                     kind,
                                     rule.max_bytes,
                                 )
                                 .map_err(|_| malformed())?;
+                                if let Some(compute) = rule.compute {
+                                    let op = match compute.op.as_str() {
+                                        "add_minutes" => super::super::ResultComputeOpV2::AddMinutes,
+                                        "add_days" => super::super::ResultComputeOpV2::AddDays,
+                                        "add_cents" => super::super::ResultComputeOpV2::AddCents,
+                                        _ => return Err(malformed()),
+                                    };
+                                    control = control
+                                        .with_compute(
+                                            super::super::ResultComputeV2::new(op, compute.amount)
+                                                .map_err(|_| malformed())?,
+                                        )
+                                        .map_err(|_| malformed())?;
+                                }
                                 Ok((name, control))
                             })
                             .collect::<Result<std::collections::BTreeMap<_, _>, ProtocolError>>()?;

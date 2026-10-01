@@ -74,7 +74,13 @@ pub fn render_task_action_display_v2(
         "descriptor_digest":hex(content.action().tool_descriptor_digest().as_bytes()),
         "profile_digest":hex(p.digest().as_bytes()), "target_identity":hex(p.target_identity().as_bytes()),
         "credential_identity":hex(p.credential_identity().as_bytes()),
-        "resource":request.resource(), "destination":request.destination(),
+        "resource":request.resource(),
+        // Several recipients are shown as the list they are.
+        "destination":if request.destination_is_list() {
+            serde_json::json!(request.destination_items())
+        } else {
+            serde_json::json!(request.destination())
+        },
         "magnitude":content.magnitude(), "unit":format!("{:?}",content.action().magnitude_unit()),
         "attempts_used":attempts_used, "attempts_after_prepare":next_attempt, "maximum_attempts":clause.maximum_attempts(),
         "magnitude_charged":magnitude_charged, "magnitude_after_prepare":next_magnitude,
@@ -97,14 +103,16 @@ pub fn render_task_action_display_v2(
         let fields: serde_json::Map<String, serde_json::Value> = derived
             .iter()
             .map(|(name, r)| {
-                (
-                    name.clone(),
-                    serde_json::json!({
-                        "source_clause": r.source_clause(), "path": r.path(),
-                        "type": format!("{:?}", r.kind()), "max_bytes": r.max_bytes(),
-                        "meaning": "Extracted by the kernel from the verified result of source_clause at this JSON path; not chosen by the planner",
-                    }),
-                )
+                let mut edge = serde_json::json!({
+                    "source_clause": r.source_clause(), "path": r.path(),
+                    "type": format!("{:?}", r.kind()), "max_bytes": r.max_bytes(),
+                    "meaning": "Extracted by the kernel from the verified result of source_clause at this JSON path; not chosen by the planner",
+                });
+                if let Some(c) = r.compute() {
+                    edge["compute"] = serde_json::json!({"op": c.op().name(), "amount": c.amount()});
+                    edge["meaning"] = serde_json::json!("Extracted by the kernel from the verified result of source_clause at this JSON path, then computed by the kernel with compute; not chosen by the planner");
+                }
+                (name.clone(), edge)
             })
             .collect();
         rendering["derived_fields"] = serde_json::Value::Object(fields);

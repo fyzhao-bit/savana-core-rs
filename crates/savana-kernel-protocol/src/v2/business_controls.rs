@@ -14,6 +14,63 @@ pub struct ResultDerivedControlV2 {
     path: Vec<String>,
     kind: BusinessFieldTypeV2,
     max_bytes: u16,
+    compute: Option<ResultComputeV2>,
+}
+
+/// A computation the owner signs into a derived control: the kernel applies
+/// it to the text it extracts at the signed path (a computed origin). The
+/// operand is never a planner or model literal.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ResultComputeOpV2 {
+    /// "YYYY-MM-DD HH:MM" plus `amount` minutes.
+    AddMinutes = 1,
+    /// "YYYY-MM-DD[ HH:MM]" plus `amount` days.
+    AddDays = 2,
+    /// A two-decimal amount plus `amount` hundredths, never negative.
+    AddCents = 3,
+}
+impl ResultComputeOpV2 {
+    pub const fn max_amount(self) -> i64 {
+        match self {
+            Self::AddMinutes => 527_040,
+            Self::AddDays => 3_660,
+            Self::AddCents => 1_000_000_000,
+        }
+    }
+    pub fn from_code(code: u16) -> Option<Self> {
+        match code {
+            1 => Some(Self::AddMinutes),
+            2 => Some(Self::AddDays),
+            3 => Some(Self::AddCents),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::AddMinutes => "add_minutes",
+            Self::AddDays => "add_days",
+            Self::AddCents => "add_cents",
+        }
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ResultComputeV2 {
+    op: ResultComputeOpV2,
+    amount: i64,
+}
+impl ResultComputeV2 {
+    pub fn new(op: ResultComputeOpV2, amount: i64) -> Result<Self, BusinessCodecErrorV2> {
+        if amount.unsigned_abs() > op.max_amount().unsigned_abs() {
+            return Err(BusinessCodecErrorV2::Limit);
+        }
+        Ok(Self { op, amount })
+    }
+    pub fn op(&self) -> ResultComputeOpV2 {
+        self.op
+    }
+    pub fn amount(&self) -> i64 {
+        self.amount
+    }
 }
 impl ResultDerivedControlV2 {
     pub fn new(
@@ -36,7 +93,20 @@ impl ResultDerivedControlV2 {
             path,
             kind,
             max_bytes,
+            compute: None,
         })
+    }
+    /// A computed control: the extracted text, transformed by `compute`. Only
+    /// a text field can be computed.
+    pub fn with_compute(mut self, compute: ResultComputeV2) -> Result<Self, BusinessCodecErrorV2> {
+        if self.kind != BusinessFieldTypeV2::Text {
+            return Err(BusinessCodecErrorV2::Malformed);
+        }
+        self.compute = Some(compute);
+        Ok(self)
+    }
+    pub fn compute(&self) -> Option<ResultComputeV2> {
+        self.compute
     }
     pub fn source_clause(&self) -> u64 {
         self.source_clause
@@ -54,7 +124,9 @@ impl ResultDerivedControlV2 {
         &self,
         e: &mut minicbor::Encoder<W>,
     ) -> Result<(), BusinessCodecErrorV2> {
-        e.array(4)
+        // A plain edge keeps its four-element encoding byte for byte; a
+        // computed edge appends [op, amount].
+        e.array(if self.compute.is_some() { 5 } else { 4 })
             .and_then(|e| e.u64(self.source_clause))
             .and_then(|e| e.array(self.path.len() as u64))
             .map_err(malformed)?;
@@ -64,6 +136,12 @@ impl ResultDerivedControlV2 {
         e.u16(self.kind as u16)
             .and_then(|e| e.u16(self.max_bytes))
             .map_err(malformed)?;
+        if let Some(compute) = self.compute {
+            e.array(2)
+                .and_then(|e| e.u16(compute.op as u16))
+                .and_then(|e| e.i64(compute.amount))
+                .map_err(malformed)?;
+        }
         Ok(())
     }
     /// Canonical rule bytes, folded into the field's control digest.
@@ -196,8 +274,22 @@ pub(super) fn validate_field(
     value: &Json,
 ) -> Result<(), BusinessCodecErrorV2> {
     match (field.kind, value) {
+        // An empty parameter is an argument left unset: it carries no data.
+        // A resource or destination text is never empty.
         (BusinessFieldTypeV2::Text, Json::Text(s))
-            if field.role == BusinessFieldRoleV2::Payload || control_text(s) =>
+            if field.role == BusinessFieldRoleV2::Payload
+                || control_text(s)
+                || (field.role == BusinessFieldRoleV2::Parameter && s.is_empty()) =>
+        {
+            Ok(())
+        }
+        // An empty list is exactly "no one" (an event without participants),
+        // never a default: it may be a destination too.
+        (BusinessFieldTypeV2::TextList, Json::Array(items))
+            if items.len() <= MAX_TEXT_LIST_ITEMS_V2
+                && items
+                    .iter()
+                    .all(|item| matches!(item, Json::Text(s) if control_text(s))) =>
         {
             Ok(())
         }
@@ -230,6 +322,20 @@ pub(super) fn field_map(
             }
             BusinessValueV2::Unsigned(n) => Json::Unsigned(n),
             BusinessValueV2::Boolean(b) => Json::Bool(b),
+            BusinessValueV2::TextList(items) => {
+                if items.len() > MAX_TEXT_LIST_ITEMS_V2 {
+                    return Err(BusinessCodecErrorV2::Limit);
+                }
+                for item in &items {
+                    size = size
+                        .checked_add(item.len())
+                        .ok_or(BusinessCodecErrorV2::Limit)?;
+                }
+                if size > MAX_BUSINESS_JSON_BYTES_V2 {
+                    return Err(BusinessCodecErrorV2::Limit);
+                }
+                Json::Array(items.into_iter().map(Json::Text).collect())
+            }
         };
         result.insert(name, value);
     }
@@ -270,14 +376,27 @@ fn text_role_digest(
         // A derived control commits to its rule under a distinct domain, so a
         // literal request (which carries no rule) can never collide with it.
         Some(rule) => hash(derived_domain, &[profile.target.as_bytes(), &rule.canonical()]),
-        None => hash(
-            exact_domain,
-            &[
-                profile.target.as_bytes(),
-                values[&field.name].text().expect("validated text").as_bytes(),
-            ],
-        ),
+        None => match &values[&field.name] {
+            // A destination list commits to its canonical JSON array under a
+            // list domain, so no list collides with a single text.
+            Json::Array(_) => hash(
+                &list_domain(exact_domain),
+                &[profile.target.as_bytes(), &values[&field.name].canonical()],
+            ),
+            value => hash(
+                exact_domain,
+                &[
+                    profile.target.as_bytes(),
+                    value.text().expect("validated text").as_bytes(),
+                ],
+            ),
+        },
     }
+}
+/// `SAVANA_BUSINESS_X_V2_SCHEMA1\0` -> `SAVANA_BUSINESS_X_LIST_V2_SCHEMA1\0`.
+fn list_domain(exact_domain: &[u8]) -> Vec<u8> {
+    let text = std::str::from_utf8(exact_domain).expect("ascii domain");
+    text.replacen("_V2_SCHEMA1", "_LIST_V2_SCHEMA1", 1).into_bytes()
 }
 pub(super) fn resource_digest(
     profile: &BusinessProfileV2,
@@ -464,7 +583,8 @@ pub fn decode_result_derived_controls_v2(
 fn decode_result_derived_control(
     d: &mut minicbor::Decoder<'_>,
 ) -> Result<ResultDerivedControlV2, BusinessCodecErrorV2> {
-    if d.array().map_err(malformed)? != Some(4) {
+    let length = d.array().map_err(malformed)?;
+    if length != Some(4) && length != Some(5) {
         return Err(BusinessCodecErrorV2::Malformed);
     }
     let source_clause = d.u64().map_err(malformed)?;
@@ -480,8 +600,18 @@ fn decode_result_derived_control(
         1 => BusinessFieldTypeV2::Text,
         2 => BusinessFieldTypeV2::Unsigned,
         3 => BusinessFieldTypeV2::Boolean,
+        4 => BusinessFieldTypeV2::TextList,
         _ => return Err(BusinessCodecErrorV2::Unsupported),
     };
     let max_bytes = d.u16().map_err(malformed)?;
-    ResultDerivedControlV2::new(source_clause, path, kind, max_bytes)
+    let rule = ResultDerivedControlV2::new(source_clause, path, kind, max_bytes)?;
+    if length == Some(4) {
+        return Ok(rule);
+    }
+    if d.array().map_err(malformed)? != Some(2) {
+        return Err(BusinessCodecErrorV2::Malformed);
+    }
+    let op = ResultComputeOpV2::from_code(d.u16().map_err(malformed)?)
+        .ok_or(BusinessCodecErrorV2::Unsupported)?;
+    rule.with_compute(ResultComputeV2::new(op, d.i64().map_err(malformed)?)?)
 }

@@ -715,11 +715,7 @@ impl FusedPlanningTableV04 {
                     .iter()
                     .find(|e| e.operation == source && e.result_commit.is_some())
                 {
-                    let extract = b
-                        .result_path
-                        .as_deref()
-                        .zip(b.result_max_bytes)
-                        .map(|(path, max)| (path, max));
+                    let extract = super::fused_inputs::ResultExtractV04::of(b);
                     recovered.add_result(
                         b.slot,
                         e.result_value.as_ref().ok_or(G4Error::StateConflict)?,
@@ -1290,7 +1286,7 @@ impl FusedPlanningTableV04 {
                     .iter()
                     .find(|a| a.argument_name().as_str() == b.argument)
                     .ok_or(G4Error::StateConflict)?;
-                let extract = b.result_path.as_deref().zip(b.result_max_bytes);
+                let extract = super::fused_inputs::ResultExtractV04::of(b);
                 e.result_value
                     .as_ref()
                     .ok_or(G4Error::StateConflict)?

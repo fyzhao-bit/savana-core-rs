@@ -171,6 +171,207 @@ pub fn select_scalar(bytes: &[u8], path: &[String], max_bytes: u16) -> Result<Sc
     }
 }
 
+/// Strict list projection for a signed text-list control: the node at `path`
+/// must be a JSON array of at most `MAX_TEXT_LIST_ITEMS_V04` strings whose
+/// total UTF-8 length is at most `max_bytes`. Anything else fails closed.
+pub fn select_text_list(bytes: &[u8], path: &[String], max_bytes: u16) -> Result<Vec<String>, Error> {
+    if bytes.len() > 16 * 1024
+        || path.len() > 16
+        || path
+            .iter()
+            .any(|s| s.is_empty() || s.len() > 128 || s.chars().any(char::is_control))
+    {
+        return Err(Error::Invalid);
+    }
+    let value = serde_json::from_slice::<UniqueJson>(bytes)
+        .map_err(|_| Error::Invalid)?
+        .0;
+    let Value::Array(items) = walk(&value, path).ok_or(Error::Binding)? else {
+        return Err(Error::Invalid);
+    };
+    if items.len() > MAX_TEXT_LIST_ITEMS_V04 {
+        return Err(Error::Limit);
+    }
+    let mut total = 0usize;
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Value::String(text) = item else {
+            return Err(Error::Invalid);
+        };
+        total = total.saturating_add(text.len());
+        if total > usize::from(max_bytes) {
+            return Err(Error::Limit);
+        }
+        out.push(text);
+    }
+    Ok(out)
+}
+
+/// At most this many items in a text-list control.
+pub const MAX_TEXT_LIST_ITEMS_V04: usize = 32;
+
+/// A deterministic computation the kernel applies to an extracted text value
+/// for an owner-signed computed control. The owner signs the operation and
+/// the amount; the operand is the verified result value at the signed path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputeOpV04 {
+    /// "YYYY-MM-DD HH:MM" plus `amount` minutes, same format.
+    AddMinutes,
+    /// "YYYY-MM-DD" (optionally followed by " HH:MM", kept) plus `amount` days.
+    AddDays,
+    /// A non-negative decimal with at most two fraction digits plus `amount`
+    /// hundredths, written with exactly two fraction digits; never negative.
+    AddCents,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResultComputeV04 {
+    pub op: ComputeOpV04,
+    pub amount: i64,
+}
+
+impl ComputeOpV04 {
+    pub const fn code(self) -> u16 {
+        match self {
+            Self::AddMinutes => 1,
+            Self::AddDays => 2,
+            Self::AddCents => 3,
+        }
+    }
+    pub const fn from_code(code: u16) -> Option<Self> {
+        match code {
+            1 => Some(Self::AddMinutes),
+            2 => Some(Self::AddDays),
+            3 => Some(Self::AddCents),
+            _ => None,
+        }
+    }
+    /// The bound on `amount` (a year of minutes, ten years of days, ten
+    /// million currency units in hundredths).
+    pub const fn max_amount(self) -> i64 {
+        match self {
+            Self::AddMinutes => 527_040,
+            Self::AddDays => 3_660,
+            Self::AddCents => 1_000_000_000,
+        }
+    }
+}
+
+impl ResultComputeV04 {
+    pub fn valid(&self) -> bool {
+        self.amount.unsigned_abs() <= self.op.max_amount().unsigned_abs()
+    }
+    /// The computed text, or `None` when the operand is not exactly the form
+    /// the operation reads (or the result leaves its range): fails closed.
+    pub fn apply(&self, input: &str) -> Option<String> {
+        if !self.valid() {
+            return None;
+        }
+        match self.op {
+            ComputeOpV04::AddMinutes => {
+                let (date, time) = input.split_once(' ')?;
+                let days = days_from_date(date)?;
+                let minute = minutes_from_time(time)?;
+                let total = (days * 1440 + minute).checked_add(self.amount)?;
+                let (day, minute) = (total.div_euclid(1440), total.rem_euclid(1440));
+                Some(format!("{} {:02}:{:02}", date_from_days(day)?, minute / 60, minute % 60))
+            }
+            ComputeOpV04::AddDays => {
+                let (date, time) = match input.split_once(' ') {
+                    Some((date, time)) => (date, Some(time)),
+                    None => (input, None),
+                };
+                let day = days_from_date(date)?.checked_add(self.amount)?;
+                let date = date_from_days(day)?;
+                match time {
+                    Some(time) => {
+                        minutes_from_time(time)?;
+                        Some(format!("{date} {time}"))
+                    }
+                    None => Some(date),
+                }
+            }
+            ComputeOpV04::AddCents => {
+                let cents = cents_from_decimal(input)?.checked_add(self.amount)?;
+                if cents < 0 {
+                    return None;
+                }
+                Some(format!("{}.{:02}", cents / 100, cents % 100))
+            }
+        }
+    }
+}
+
+fn digits(text: &str, width: usize) -> Option<i64> {
+    if text.len() != width || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
+/// Days since 1970-01-01 of a strict "YYYY-MM-DD" civil date (1000..=9999).
+fn days_from_date(text: &str) -> Option<i64> {
+    let mut parts = text.split('-');
+    let (y, m, d) = (digits(parts.next()?, 4)?, digits(parts.next()?, 2)?, digits(parts.next()?, 2)?);
+    if parts.next().is_some() || !(1000..=9999).contains(&y) || !(1..=12).contains(&m) {
+        return None;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if !(1..=month_days[(m - 1) as usize]).contains(&d) {
+        return None;
+    }
+    // Howard Hinnant's days_from_civil.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
+}
+
+fn date_from_days(days: i64) -> Option<String> {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (1000..=9999).contains(&y).then(|| format!("{y:04}-{m:02}-{d:02}"))
+}
+
+fn minutes_from_time(text: &str) -> Option<i64> {
+    let (h, m) = text.split_once(':')?;
+    let (h, m) = (digits(h, 2)?, digits(m, 2)?);
+    (h < 24 && m < 60).then_some(h * 60 + m)
+}
+
+fn cents_from_decimal(text: &str) -> Option<i64> {
+    let (whole, fraction) = match text.split_once('.') {
+        Some((whole, fraction)) => (whole, fraction),
+        None => (text, ""),
+    };
+    if whole.is_empty()
+        || whole.len() > 12
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || (whole.len() > 1 && whole.starts_with('0'))
+        || fraction.len() > 2
+        || (text.contains('.') && fraction.is_empty())
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let whole: i64 = whole.parse().ok()?;
+    let fraction: i64 = if fraction.is_empty() { 0 } else { format!("{fraction:0<2}").parse().ok()? };
+    whole.checked_mul(100)?.checked_add(fraction)
+}
+
 pub(crate) fn render(
     context: &[u8],
     specs: &[ResultObservation],

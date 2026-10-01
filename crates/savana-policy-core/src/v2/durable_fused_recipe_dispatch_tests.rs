@@ -27,6 +27,8 @@ fn setup_with_final_source(
                 result_path: None,
                 result_max_bytes: None,
                 result_source_clause: None,
+                result_list: false,
+                result_compute: None,
                 argument: "body".into(),
                 slot: [7; 16],
             }],

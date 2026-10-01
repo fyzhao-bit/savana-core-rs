@@ -31,7 +31,7 @@ mod controls;
 pub use controls::{
     decode_business_controls_v2, decode_result_derived_controls_v2, encode_business_controls_v2,
     encode_result_derived_controls_v2, BusinessControlsV2,
-    ResultDerivedControlV2,
+    ResultComputeOpV2, ResultComputeV2, ResultDerivedControlV2,
 };
 
 pub const MAX_BUSINESS_JSON_BYTES_V2: usize = 64 * 1024;
@@ -61,6 +61,9 @@ pub enum BusinessFieldTypeV2 {
     Text = 1,
     Unsigned = 2,
     Boolean = 3,
+    /// An ordered list of control texts (e.g. recipients), each item held to
+    /// the same rules as a text control; encoded as a JSON array of strings.
+    TextList = 4,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BusinessMagnitudeV2 {
@@ -74,6 +77,7 @@ pub enum BusinessValueV2 {
     Text(String),
     Unsigned(u64),
     Boolean(bool),
+    TextList(Vec<String>),
 }
 impl std::fmt::Debug for BusinessValueV2 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -81,6 +85,7 @@ impl std::fmt::Debug for BusinessValueV2 {
             Self::Text(_) => "BusinessValueV2::Text(..)",
             Self::Unsigned(_) => "BusinessValueV2::Unsigned(..)",
             Self::Boolean(_) => "BusinessValueV2::Boolean(..)",
+            Self::TextList(_) => "BusinessValueV2::TextList(..)",
         })
     }
 }
@@ -98,9 +103,14 @@ impl BusinessFieldV2 {
     ) -> Result<Self, BusinessCodecErrorV2> {
         if !identifier(name, 64)
             || match role {
-                BusinessFieldRoleV2::Resource
-                | BusinessFieldRoleV2::Destination
-                | BusinessFieldRoleV2::Payload => kind != BusinessFieldTypeV2::Text,
+                BusinessFieldRoleV2::Resource | BusinessFieldRoleV2::Payload => {
+                    kind != BusinessFieldTypeV2::Text
+                }
+                // Several recipients are one destination list.
+                BusinessFieldRoleV2::Destination => !matches!(
+                    kind,
+                    BusinessFieldTypeV2::Text | BusinessFieldTypeV2::TextList
+                ),
                 BusinessFieldRoleV2::Magnitude => kind != BusinessFieldTypeV2::Unsigned,
                 BusinessFieldRoleV2::Parameter => false,
             }
@@ -347,7 +357,8 @@ impl BusinessRequestV2 {
                         magnitude = *v;
                     }
                 }
-                (BusinessFieldTypeV2::Boolean, Json::Bool(_)) => (),
+                (BusinessFieldTypeV2::Boolean, Json::Bool(_))
+                | (BusinessFieldTypeV2::TextList, Json::Array(_)) => (),
                 _ => return Err(BusinessCodecErrorV2::Malformed),
             }
         }
@@ -399,8 +410,33 @@ impl BusinessRequestV2 {
     pub fn resource(&self) -> &str {
         self.text_role(BusinessFieldRoleV2::Resource)
     }
+    /// The destination of a profile whose destination is a single text (as
+    /// every final-release destination is). A destination list has no single
+    /// text: use `destination_items`.
     pub fn destination(&self) -> &str {
         self.text_role(BusinessFieldRoleV2::Destination)
+    }
+    /// Every destination item, in order: one for a text destination, each
+    /// recipient for a destination list.
+    pub fn destination_items(&self) -> Vec<&str> {
+        let field = self
+            .profile
+            .fields
+            .iter()
+            .find(|f| f.role == BusinessFieldRoleV2::Destination)
+            .expect("validated role");
+        match &self.fields[&field.name] {
+            Json::Text(s) => vec![s.as_str()],
+            Json::Array(items) => items.iter().filter_map(|i| i.text().ok()).collect(),
+            _ => Vec::new(),
+        }
+    }
+    /// True when the destination is a list of recipients.
+    pub fn destination_is_list(&self) -> bool {
+        self.profile
+            .fields
+            .iter()
+            .any(|f| f.role == BusinessFieldRoleV2::Destination && f.kind == BusinessFieldTypeV2::TextList)
     }
     pub fn payload(&self) -> &str {
         self.text_role(BusinessFieldRoleV2::Payload)
@@ -425,6 +461,13 @@ impl BusinessRequestV2 {
                     Json::Text(s) => BusinessValueV2::Text(s.clone()),
                     Json::Unsigned(n) => BusinessValueV2::Unsigned(*n),
                     Json::Bool(b) => BusinessValueV2::Boolean(*b),
+                    Json::Array(items) => BusinessValueV2::TextList(
+                        items
+                            .iter()
+                            .map(|i| i.text().map(str::to_owned))
+                            .collect::<Result<_, _>>()
+                            .expect("validated text list"),
+                    ),
                     _ => unreachable!("validated flat typed fields"),
                 };
                 (name.clone(), value)
@@ -554,7 +597,10 @@ pub(super) fn identifier(s: &str, max: usize) -> bool {
         && s.bytes()
             .all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c))
 }
-fn control_text(s: &str) -> bool {
+/// Bounds of a text-list control: at most this many items, each a control text.
+pub const MAX_TEXT_LIST_ITEMS_V2: usize = 32;
+
+pub(super) fn control_text(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 1024
         && s.trim() == s
@@ -681,6 +727,7 @@ pub fn decode_business_profile_v2(bytes: &[u8]) -> Result<BusinessProfileV2, Bus
             1 => BusinessFieldTypeV2::Text,
             2 => BusinessFieldTypeV2::Unsigned,
             3 => BusinessFieldTypeV2::Boolean,
+            4 => BusinessFieldTypeV2::TextList,
             _ => return Err(BusinessCodecErrorV2::Unsupported),
         };
         fields.push(BusinessFieldV2::new(name, role, kind)?);

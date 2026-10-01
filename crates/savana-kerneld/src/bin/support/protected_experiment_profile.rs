@@ -43,7 +43,7 @@ fn field_role(s:&str)->Result<R,String> {
         "destination"=>Ok(R::Destination),"parameter"=>Ok(R::Parameter),_=>Err("field role".into())}
 }
 fn field_type(s:&str)->Result<T,String> {
-    match s {"text"=>Ok(T::Text),_=>Err("field type".into())}
+    match s {"text"=>Ok(T::Text),"text_list"=>Ok(T::TextList),_=>Err("field type".into())}
 }
 /// The intent-flow-confinement validator's fixed build identity (id 6, v1.0.0).
 /// A declaration and its registry build must carry the same non-zero digest;

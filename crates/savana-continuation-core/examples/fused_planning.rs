@@ -39,6 +39,8 @@ fn main() {
                     result_path: None,
                     result_max_bytes: None,
                     result_source_clause: None,
+                    result_list: false,
+                    result_compute: None,
                     argument: "input".into(),
                     slot: [id as u8; 16],
                 }],

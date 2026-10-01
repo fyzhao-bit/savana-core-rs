@@ -67,6 +67,15 @@ enum DeriveOperationKindV2 {
     /// path grammar matches signed observations; the node must be a single
     /// scalar. Not reachable from the agent wire (no `map_operation` entry).
     SelectResultJsonPathV04 { path: Vec<String>, max_bytes: u16 },
+    /// The same projection for a typed edge: either a bounded list of texts
+    /// (`list`) or one text with an owner-signed deterministic computation
+    /// applied (`compute`). Exactly one of the two; plain edges keep tag 9.
+    SelectResultJsonEdgeV04 {
+        path: Vec<String>,
+        max_bytes: u16,
+        list: bool,
+        compute: Option<savana_continuation_core::planning_observation::ResultComputeV04>,
+    },
 }
 
 const MAX_RESULT_PATH_SEGMENTS_V04: usize = 16;
@@ -131,6 +140,27 @@ impl DeriveOperationV2 {
         }))
     }
 
+    pub fn select_result_json_edge_v04(
+        path: Vec<String>,
+        max_bytes: u16,
+        list: bool,
+        compute: Option<savana_continuation_core::planning_observation::ResultComputeV04>,
+    ) -> Result<Self, G3Error> {
+        if !valid_result_path(&path)
+            || max_bytes == 0
+            || list == compute.is_some()
+            || compute.is_some_and(|c| !c.valid())
+        {
+            return Err(G3Error::DeriveTypeMismatch);
+        }
+        Ok(Self(DeriveOperationKindV2::SelectResultJsonEdgeV04 {
+            path,
+            max_bytes,
+            list,
+            compute,
+        }))
+    }
+
     pub const fn tag(&self) -> u16 {
         match &self.0 {
             DeriveOperationKindV2::OwnerInputTextV04(_) => 8,
@@ -142,6 +172,7 @@ impl DeriveOperationV2 {
             DeriveOperationKindV2::AssembleObject(_) => 5,
             DeriveOperationKindV2::PolicyConstant(_) => 6,
             DeriveOperationKindV2::SelectResultJsonPathV04 { .. } => 9,
+            DeriveOperationKindV2::SelectResultJsonEdgeV04 { .. } => 10,
         }
     }
 
@@ -251,6 +282,40 @@ impl DeriveOperationV2 {
                         .map_err(|_| G3Error::DeriveTypeMismatch),
                 }
             }
+            DeriveOperationKindV2::SelectResultJsonEdgeV04 {
+                path,
+                max_bytes,
+                list,
+                compute,
+            } => {
+                use savana_continuation_core::planning_observation::{
+                    select_scalar, select_text_list, ScalarSelectionV04,
+                };
+                let [(value, _)] = parents else {
+                    return Err(G3Error::DeriveArityMismatch);
+                };
+                let bytes = value.as_bytes_value().ok_or(G3Error::DeriveTypeMismatch)?;
+                if *list {
+                    let items = select_text_list(bytes, path, *max_bytes)
+                        .map_err(|_| G3Error::DeriveFieldMissing)?;
+                    let values = items
+                        .into_iter()
+                        .map(KernelValueV2::text)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return KernelValueV2::list(values);
+                }
+                let compute = compute.ok_or(G3Error::DeriveTypeMismatch)?;
+                let ScalarSelectionV04::Text(text) = select_scalar(bytes, path, *max_bytes)
+                    .map_err(|_| G3Error::DeriveFieldMissing)?
+                else {
+                    return Err(G3Error::DeriveTypeMismatch);
+                };
+                let computed = compute.apply(&text).ok_or(G3Error::DeriveTypeMismatch)?;
+                if computed.len() > usize::from(*max_bytes) {
+                    return Err(G3Error::DeriveTypeMismatch);
+                }
+                KernelValueV2::text(computed)
+            }
         }
     }
 }
@@ -298,6 +363,26 @@ impl<C> minicbor::Encode<C> for DeriveOperationV2 {
                 }
                 encoder.u16(*max_bytes)?;
             }
+            DeriveOperationKindV2::SelectResultJsonEdgeV04 {
+                path,
+                max_bytes,
+                list,
+                compute,
+            } => {
+                encoder.array(5)?.u16(10)?.array(path.len() as u64)?;
+                for segment in path {
+                    encoder.str(segment)?;
+                }
+                encoder.u16(*max_bytes)?.bool(*list)?;
+                match compute {
+                    Some(compute) => {
+                        encoder.array(2)?.u16(compute.op.code())?.i64(compute.amount)?;
+                    }
+                    None => {
+                        encoder.null()?;
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -340,29 +425,55 @@ impl<'bytes, C> minicbor::Decode<'bytes, C> for DeriveOperationV2 {
                 decoder, context,
             )?)),
             (3, 9) => {
-                let count = decode_bounded_array(decoder, MAX_RESULT_PATH_SEGMENTS_V04, position)?;
-                let mut path = Vec::new();
-                path.try_reserve_exact(count).map_err(|_| {
-                    minicbor::decode::Error::message("derive path allocation failed").at(position)
-                })?;
-                for _ in 0..count {
-                    let segment = decoder.str()?;
-                    if segment.is_empty() || segment.len() > MAX_RESULT_PATH_SEGMENT_BYTES_V04 {
-                        return Err(
-                            minicbor::decode::Error::message("invalid result path segment")
-                                .at(position),
-                        );
-                    }
-                    path.push(segment.to_owned());
-                }
+                let path = decode_result_path(decoder, position)?;
                 let max_bytes = decoder.u16()?;
                 Self::select_result_json_path_v04(path, max_bytes).map_err(|_| {
                     minicbor::decode::Error::message("invalid result path derive").at(position)
                 })
             }
+            (5, 10) => {
+                use savana_continuation_core::planning_observation::{ComputeOpV04, ResultComputeV04};
+                let path = decode_result_path(decoder, position)?;
+                let max_bytes = decoder.u16()?;
+                let list = decoder.bool()?;
+                let compute = if decoder.datatype()? == minicbor::data::Type::Null {
+                    decoder.null()?;
+                    None
+                } else {
+                    if decoder.array()? != Some(2) {
+                        return Err(minicbor::decode::Error::message("invalid computation").at(position));
+                    }
+                    let op = ComputeOpV04::from_code(decoder.u16()?).ok_or_else(|| {
+                        minicbor::decode::Error::message("unknown computation").at(position)
+                    })?;
+                    Some(ResultComputeV04 { op, amount: decoder.i64()? })
+                };
+                Self::select_result_json_edge_v04(path, max_bytes, list, compute).map_err(|_| {
+                    minicbor::decode::Error::message("invalid result edge derive").at(position)
+                })
+            }
             _ => Err(minicbor::decode::Error::message("unknown derive operation").at(position)),
         }
     }
+}
+
+fn decode_result_path(
+    decoder: &mut minicbor::Decoder<'_>,
+    position: usize,
+) -> Result<Vec<String>, minicbor::decode::Error> {
+    let count = decode_bounded_array(decoder, MAX_RESULT_PATH_SEGMENTS_V04, position)?;
+    let mut path = Vec::new();
+    path.try_reserve_exact(count).map_err(|_| {
+        minicbor::decode::Error::message("derive path allocation failed").at(position)
+    })?;
+    for _ in 0..count {
+        let segment = decoder.str()?;
+        if segment.is_empty() || segment.len() > MAX_RESULT_PATH_SEGMENT_BYTES_V04 {
+            return Err(minicbor::decode::Error::message("invalid result path segment").at(position));
+        }
+        path.push(segment.to_owned());
+    }
+    Ok(path)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

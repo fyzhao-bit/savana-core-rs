@@ -1120,3 +1120,122 @@ fn task_execution_payload_carries_the_signed_derived_rules() {
     assert_eq!(decode_result_derived_controls_v2(&rules).unwrap(), derived);
     assert!(decode_result_derived_controls_v2(&[0x80, 0x00]).is_err());
 }
+
+fn list_profile() -> BusinessProfileV2 {
+    let mut fields = vec![
+        BusinessFieldV2::new("body", BusinessFieldRoleV2::Payload, BusinessFieldTypeV2::Text).unwrap(),
+        BusinessFieldV2::new("cc", BusinessFieldRoleV2::Parameter, BusinessFieldTypeV2::TextList).unwrap(),
+        BusinessFieldV2::new("end", BusinessFieldRoleV2::Parameter, BusinessFieldTypeV2::Text).unwrap(),
+        BusinessFieldV2::new("file", BusinessFieldRoleV2::Resource, BusinessFieldTypeV2::Text).unwrap(),
+        BusinessFieldV2::new("to", BusinessFieldRoleV2::Destination, BusinessFieldTypeV2::TextList).unwrap(),
+    ];
+    fields.sort_by(|a, b| a.name().cmp(b.name()));
+    BusinessProfileV2::new(
+        ActionCodecProfileV2::McpToolsCallJsonV1, "mail.send", d(1), d(2), TaskEffectV2::Send,
+        BusinessMagnitudeV2::FixedCount(1), fields,
+    )
+    .unwrap()
+}
+
+#[test]
+fn text_lists_are_typed_controls_with_their_own_destination_domain() {
+    // Only a destination or a parameter may be a list; the profile codec keeps it.
+    for role in [BusinessFieldRoleV2::Resource, BusinessFieldRoleV2::Payload, BusinessFieldRoleV2::Magnitude] {
+        assert!(BusinessFieldV2::new("x", role, BusinessFieldTypeV2::TextList).is_err());
+    }
+    let p = list_profile();
+    let encoded = encode_business_profile_v2(&p).unwrap();
+    assert_eq!(decode_business_profile_v2(&encoded).unwrap(), p);
+
+    let request = |args: &str| {
+        BusinessRequestV2::parse(&p, "r1", format!(
+            r#"{{"jsonrpc":"2.0","id":"r1","method":"tools/call","params":{{"name":"mail.send","arguments":{args}}}}}"#
+        ).as_bytes())
+    };
+    let two = request(r#"{"body":"hi","cc":[],"end":"","file":"A","to":["alice@x.com","bob@y.com"]}"#).unwrap();
+    assert_eq!(two.destination_items(), vec!["alice@x.com", "bob@y.com"]);
+    assert!(two.destination_is_list());
+    // The order and the membership of the list are both bound.
+    let swapped = request(r#"{"body":"hi","cc":[],"end":"","file":"A","to":["bob@y.com","alice@x.com"]}"#).unwrap();
+    let one = request(r#"{"body":"hi","cc":[],"end":"","file":"A","to":["alice@x.com"]}"#).unwrap();
+    assert_ne!(two.destination_digest(), swapped.destination_digest());
+    assert_ne!(two.destination_digest(), one.destination_digest());
+    // A one-item list never collides with the same single text destination.
+    let text_profile = profile(ActionCodecProfileV2::McpToolsCallJsonV1, BusinessMagnitudeV2::FixedCount(1));
+    let text = BusinessRequestV2::parse(&text_profile, "r1", br#"{"jsonrpc":"2.0","id":"r1","method":"tools/call","params":{"name":"mail.send","arguments":{"body":"hi","file":"A","subject":"s","to":"alice@x.com"}}}"#).unwrap();
+    assert_ne!(one.destination_digest(), text.destination_digest());
+    // Controls built from typed values give the same alternative as the request.
+    let controls = BusinessControlsV2::from_fields(&p, vec![
+        ("cc".into(), BusinessValueV2::TextList(vec![])),
+        ("end".into(), BusinessValueV2::Text(String::new())),
+        ("file".into(), BusinessValueV2::Text("A".into())),
+        ("to".into(), BusinessValueV2::TextList(vec!["alice@x.com".into(), "bob@y.com".into()])),
+    ]).unwrap();
+    assert_eq!(controls.action_alternative(d(9)).unwrap(), two.action_alternative(d(9)).unwrap());
+
+    // An empty destination list is "no one", under its own digest.
+    let nobody = request(r#"{"body":"hi","cc":[],"end":"","file":"A","to":[]}"#).unwrap();
+    assert!(nobody.destination_items().is_empty());
+    assert_ne!(nobody.destination_digest(), one.destination_digest());
+    // Refused: a non-text item, an empty or padded item, a control character,
+    // too many items, a list where text belongs, and an empty resource (only a
+    // parameter text may be empty).
+    let many = (0..33).map(|i| format!("\"u{i}@x.com\"")).collect::<Vec<_>>().join(",");
+    for args in [
+        r#"{"body":"hi","cc":[],"end":"","file":"A","to":["a@x.com",1]}"#.to_owned(),
+        r#"{"body":"hi","cc":[""],"end":"","file":"A","to":["a@x.com"]}"#.to_owned(),
+        r#"{"body":"hi","cc":[" a"],"end":"","file":"A","to":["a@x.com"]}"#.to_owned(),
+        r#"{"body":"hi","cc":["a\nb"],"end":"","file":"A","to":["a@x.com"]}"#.to_owned(),
+        format!(r#"{{"body":"hi","cc":[],"end":"","file":"A","to":[{many}]}}"#),
+        r#"{"body":"hi","cc":"a@x.com","end":"","file":"A","to":["a@x.com"]}"#.to_owned(),
+        r#"{"body":"hi","cc":[],"end":["x"],"file":"A","to":["a@x.com"]}"#.to_owned(),
+        r#"{"body":"hi","cc":[],"end":"","file":"","to":["a@x.com"]}"#.to_owned(),
+    ] {
+        assert!(request(&args).is_err(), "{args}");
+    }
+}
+
+#[test]
+fn computed_rules_are_signed_bounded_and_plain_rules_keep_their_bytes() {
+    let plain = ResultDerivedControlV2::new(1, vec!["start".into()], BusinessFieldTypeV2::Text, 32).unwrap();
+    let computed = plain.clone()
+        .with_compute(ResultComputeV2::new(ResultComputeOpV2::AddMinutes, 60).unwrap()).unwrap();
+    let rules = |r: &ResultDerivedControlV2| {
+        let map: std::collections::BTreeMap<String, ResultDerivedControlV2> =
+            [("end".to_string(), r.clone())].into_iter().collect();
+        encode_result_derived_controls_v2(&map).unwrap()
+    };
+    let plain_bytes = rules(&plain);
+    // [[ "end", [1, ["start"], 1, 32] ]]: the original four-element rule.
+    assert_eq!(plain_bytes, vec![0x81, 0x82, 0x63, b'e', b'n', b'd', 0x84, 0x01, 0x81, 0x65,
+                                 b's', b't', b'a', b'r', b't', 0x01, 0x18, 0x20]);
+    let computed_bytes = rules(&computed);
+    assert_ne!(computed_bytes, plain_bytes);
+    let decoded = decode_result_derived_controls_v2(&computed_bytes).unwrap();
+    assert_eq!(decoded["end"], computed);
+    assert_eq!(decoded["end"].compute().unwrap().amount(), 60);
+    // A computed rule and a plain one (or another amount) sign different alternatives.
+    let p = list_profile();
+    let alternative = |rule: &ResultDerivedControlV2| {
+        BusinessControlsV2::from_fields_with_derived(&p, vec![
+            ("cc".into(), BusinessValueV2::TextList(vec![])),
+            ("file".into(), BusinessValueV2::Text("A".into())),
+            ("to".into(), BusinessValueV2::TextList(vec!["a@x.com".into()])),
+        ], [("end".to_string(), rule.clone())].into_iter().collect()).unwrap().action_alternative(d(9)).unwrap()
+    };
+    let other = plain.clone()
+        .with_compute(ResultComputeV2::new(ResultComputeOpV2::AddMinutes, 30).unwrap()).unwrap();
+    assert_ne!(alternative(&plain), alternative(&computed));
+    assert_ne!(alternative(&other), alternative(&computed));
+    // Bounds: amounts within range, and only a text field can be computed.
+    assert!(ResultComputeV2::new(ResultComputeOpV2::AddDays, 3_661).is_err());
+    assert!(ResultComputeV2::new(ResultComputeOpV2::AddMinutes, -527_041).is_err());
+    assert!(ResultDerivedControlV2::new(1, vec!["x".into()], BusinessFieldTypeV2::TextList, 32).unwrap()
+        .with_compute(ResultComputeV2::new(ResultComputeOpV2::AddDays, 1).unwrap()).is_err());
+    // Unknown computation codes are refused.
+    let mut unknown = computed_bytes.clone();
+    let at = unknown.len() - 2; // [op, amount] = 0x82, op, 0x18 0x3c
+    assert_eq!(&unknown[at - 2..], &[0x82, 0x01, 0x18, 0x3c][..2 + 2]);
+    unknown[at - 1] = 0x09;
+    assert!(decode_result_derived_controls_v2(&unknown).is_err());
+}

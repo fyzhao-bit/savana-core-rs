@@ -180,6 +180,8 @@ fn policy() -> Policy {
                 result_path: None,
                 result_max_bytes: None,
                 result_source_clause: None,
+                result_list: false,
+                result_compute: None,
                 argument: "input".into(),
                 slot: [id as u8; 16],
             }],
@@ -616,4 +618,149 @@ fn invalid_registry_cycles_jobs_and_corrupt_frozen_envelopes_fail_closed() {
     value["rounds"][0]["envelope"]["suggested_templates"] = serde_json::json!([2]);
     let corrupt: PlanningState = serde_json::from_value(value).unwrap();
     assert!(corrupt.validate().is_err());
+}
+
+#[test]
+fn list_and_computed_edges_are_path_edges_with_bounded_amounts() {
+    use savana_continuation_core::planning_observation::{ComputeOpV04, ResultComputeV04};
+    let mut good = policy();
+    good.schema = 2;
+    let edge = &mut good.operations[1].bindings[0];
+    edge.argument = "end_time".into();
+    edge.result_of = Some(1);
+    edge.result_path = Some(vec!["start_time".into()]);
+    edge.result_max_bytes = Some(64);
+    edge.result_source_clause = Some(1);
+    let mut computed = good.clone();
+    computed.operations[1].bindings[0].result_compute = Some(ResultComputeV04 {
+        op: ComputeOpV04::AddMinutes,
+        amount: 60,
+    });
+    computed.validate().unwrap();
+    // The encoding of a plain edge is unchanged; a computed one round-trips.
+    assert!(!String::from_utf8(bytes(&good))
+        .unwrap()
+        .contains("result_compute"));
+    let restored: Policy = serde_json::from_slice(&bytes(&computed)).unwrap();
+    assert_eq!(
+        restored.commitment().unwrap(),
+        computed.commitment().unwrap()
+    );
+    let mut list = good.clone();
+    list.operations[1].bindings[0].result_list = true;
+    list.validate().unwrap();
+
+    let mut cases = Vec::new();
+    // Both at once, an out-of-range amount, and either one on a whole-result edge.
+    let mut both = computed.clone();
+    both.operations[1].bindings[0].result_list = true;
+    cases.push(both);
+    let mut huge = computed.clone();
+    huge.operations[1].bindings[0].result_compute = Some(ResultComputeV04 {
+        op: ComputeOpV04::AddDays,
+        amount: 100_000,
+    });
+    cases.push(huge);
+    for field in 0..2 {
+        let mut whole = good.clone();
+        let b = &mut whole.operations[1].bindings[0];
+        b.argument = "body".into();
+        b.result_path = None;
+        b.result_max_bytes = None;
+        b.result_source_clause = None;
+        if field == 0 {
+            b.result_list = true;
+        } else {
+            b.result_compute = Some(ResultComputeV04 {
+                op: ComputeOpV04::AddMinutes,
+                amount: 1,
+            });
+        }
+        cases.push(whole);
+    }
+    for bad in cases {
+        assert!(bad.validate().is_err());
+    }
+}
+
+#[test]
+fn computations_are_exact_or_refused() {
+    use savana_continuation_core::planning_observation::{ComputeOpV04, ResultComputeV04};
+    let c = |op, amount| ResultComputeV04 { op, amount };
+    let minutes = c(ComputeOpV04::AddMinutes, 60);
+    assert_eq!(
+        minutes.apply("2024-05-16 10:00").as_deref(),
+        Some("2024-05-16 11:00")
+    );
+    assert_eq!(
+        minutes.apply("2024-12-31 23:30").as_deref(),
+        Some("2025-01-01 00:30")
+    );
+    assert_eq!(
+        c(ComputeOpV04::AddMinutes, -90)
+            .apply("2024-03-01 00:15")
+            .as_deref(),
+        Some("2024-02-29 22:45")
+    );
+    assert_eq!(
+        c(ComputeOpV04::AddDays, 3).apply("2024-02-27").as_deref(),
+        Some("2024-03-01")
+    );
+    assert_eq!(
+        c(ComputeOpV04::AddDays, 1)
+            .apply("2023-02-28 09:05")
+            .as_deref(),
+        Some("2023-03-01 09:05")
+    );
+    assert_eq!(
+        c(ComputeOpV04::AddCents, -1200).apply("50").as_deref(),
+        Some("38.00")
+    );
+    assert_eq!(
+        c(ComputeOpV04::AddCents, 5).apply("12.5").as_deref(),
+        Some("12.55")
+    );
+    for (compute, input) in [
+        (minutes, "2024-05-16T10:00"),
+        (minutes, "2024-5-16 10:00"),
+        (minutes, "2024-05-16 24:00"),
+        (minutes, "2024-02-30 10:00"),
+        (minutes, "2024-05-16"),
+        (minutes, " 2024-05-16 10:00"),
+        (c(ComputeOpV04::AddDays, 1), "2024-05-16 7:00"),
+        (c(ComputeOpV04::AddDays, 1), "16/05/2024"),
+        (c(ComputeOpV04::AddCents, -1), "0"),
+        (c(ComputeOpV04::AddCents, 1), "1.234"),
+        (c(ComputeOpV04::AddCents, 1), "-5"),
+        (c(ComputeOpV04::AddCents, 1), "1e3"),
+        (c(ComputeOpV04::AddCents, 1), "01"),
+        (c(ComputeOpV04::AddCents, 1), "1."),
+        (c(ComputeOpV04::AddDays, 3_661), "2024-05-16"),
+        (c(ComputeOpV04::AddDays, 1), "9999-12-31"),
+    ] {
+        assert_eq!(compute.apply(input), None, "{compute:?} {input}");
+    }
+}
+
+#[test]
+fn text_lists_are_exact_bounded_string_arrays() {
+    use savana_continuation_core::planning_observation::select_text_list;
+    let doc = br#"{"a":{"names":["Le Marais Boutique","Good Night"],"mixed":["x",1],"one":"x"}}"#;
+    let path = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        select_text_list(doc, &path(&["a", "names"]), 64).unwrap(),
+        vec!["Le Marais Boutique".to_owned(), "Good Night".to_owned()]
+    );
+    assert!(select_text_list(doc, &path(&["a", "names"]), 20).is_err());
+    assert!(select_text_list(doc, &path(&["a", "mixed"]), 64).is_err());
+    assert!(select_text_list(doc, &path(&["a", "one"]), 64).is_err());
+    assert!(select_text_list(doc, &path(&["a", "missing"]), 64).is_err());
+    let many = format!(
+        "{{\"l\":[{}]}}",
+        (0..33)
+            .map(|i| format!("\"{i}\""))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    assert!(select_text_list(many.as_bytes(), &path(&["l"]), 1000).is_err());
 }

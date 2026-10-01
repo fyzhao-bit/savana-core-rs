@@ -16,6 +16,7 @@ pub const OWNER_TEXT_ORIGIN_V04: &str = "owner_text";
 const OWNER_TEXT_ITEM_SEPARATOR: &str = "; ";
 const MAX_OWNER_CONSTANTS: usize = 32;
 const MAX_OWNER_CONSTANT_BYTES: usize = 128;
+const MAX_OWNER_LIST_ITEMS: usize = 32;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,14 +30,33 @@ pub struct FusedInputDocumentV04 {
     pub constants: Option<Vec<String>>,
 }
 
+/// One owner input: a text, or (with `items`, and `text` empty) a list of
+/// texts for a text-list field. The business profile still decides which
+/// field each may fill: a list never fills a text field, nor a text a list.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FusedInputTextV04 {
     pub slot: [u8; 16],
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items: Option<Vec<String>>,
 }
 impl Drop for FusedInputTextV04 {
-    fn drop(&mut self) { self.text.zeroize(); }
+    fn drop(&mut self) {
+        self.text.zeroize();
+        self.items.iter_mut().flatten().for_each(Zeroize::zeroize);
+    }
+}
+impl FusedInputTextV04 {
+    fn valid(&self) -> bool {
+        match &self.items {
+            None => self.text.len() <= 16_384,
+            Some(items) => self.text.is_empty()
+                && items.len() <= MAX_OWNER_LIST_ITEMS
+                && items.iter().all(|i| !i.is_empty())
+                && items.iter().map(String::len).sum::<usize>() <= 16_384,
+        }
+    }
 }
 impl Drop for FusedInputDocumentV04 {
     fn drop(&mut self) { self.prompt.zeroize(); }
@@ -60,7 +80,7 @@ impl FusedInputDocumentV04 {
         };
         if !declared || value.prompt.is_empty() || value.prompt.len() > 16_384
             || value.inputs.is_empty() || value.inputs.len() > 256
-            || value.inputs.iter().any(|i| i.slot == [0;16] || i.text.len() > 16_384)
+            || value.inputs.iter().any(|i| i.slot == [0;16] || !i.valid())
             || value.inputs.windows(2).any(|p| p[0].slot >= p[1].slot) {
             return Err(G3Error::DeriveTypeMismatch);
         }
@@ -69,7 +89,8 @@ impl FusedInputDocumentV04 {
     /// A schema-2 document's inputs are all owner text: each is empty, one of
     /// the owner's declared constants, or a text whose every "; "-separated
     /// item is a non-empty substring of the owner's request, both compared NFC
-    /// normalized with whitespace runs folded to one space. A literal the
+    /// normalized with whitespace runs folded to one space. Every item of a
+    /// list input is held to the same rule, one by one. A literal the
     /// request does not contain (an address an injected or compromised planner
     /// proposed) fails here, before any operation runs. Schema 1 documents
     /// carry owner-normalized values and are not subject to this rule.
@@ -79,14 +100,18 @@ impl FusedInputDocumentV04 {
         }
         let constants = self.constants.as_deref().ok_or(G3Error::DeriveTypeMismatch)?;
         let request = folded_owner_text(&self.prompt);
+        let owner_item = |item: &str| {
+            let item = folded_owner_text(item);
+            !item.is_empty() && request.contains(item.as_str())
+        };
         for input in &self.inputs {
-            if input.text.is_empty() || constants.iter().any(|c| *c == input.text) {
-                continue;
-            }
-            if !input.text.split(OWNER_TEXT_ITEM_SEPARATOR).all(|item| {
-                let item = folded_owner_text(item);
-                !item.is_empty() && request.contains(item.as_str())
-            }) {
+            let owned = match &input.items {
+                Some(items) => items.iter().all(|item| constants.contains(item) || owner_item(item)),
+                None => input.text.is_empty()
+                    || constants.contains(&input.text)
+                    || input.text.split(OWNER_TEXT_ITEM_SEPARATOR).all(owner_item),
+            };
+            if !owned {
                 return Err(G3Error::DeriveTypeMismatch);
             }
         }
@@ -96,7 +121,11 @@ impl FusedInputDocumentV04 {
         let document = Self::parse(text)?;
         let input = document.inputs.iter().find(|i| i.slot == slot)
             .ok_or(G3Error::DeriveFieldMissing)?;
-        KernelValueV2::text(input.text.clone())
+        match &input.items {
+            None => KernelValueV2::text(input.text.clone()),
+            Some(items) => KernelValueV2::list(
+                items.iter().map(|i| KernelValueV2::text(i.clone())).collect::<Result<_, _>>()?),
+        }
     }
 }
 
@@ -155,6 +184,34 @@ mod tests {
         // A schema-1 document keeps owner-normalized values (e.g. dates).
         let legacy = serde_json::json!({"schema":1,"prompt":"May 26th","inputs":[{"slot":vec![1;16],"text":"2024-05-26"}]});
         FusedInputDocumentV04::parse(&legacy.to_string()).unwrap().check_owner_text_origin().unwrap();
+    }
+
+    #[test]
+    fn list_inputs_are_typed_and_every_item_is_owner_text() {
+        let prompt = "Invite alice@x.com and bob@y.com to the review.";
+        let document = |items: serde_json::Value, text: &str| serde_json::json!({"schema":2,"prompt":prompt,
+            "origin":"owner_text","constants":["primary"],
+            "inputs":[{"slot":vec![1u8;16],"text":text,"items":items}]}).to_string();
+        let good = document(serde_json::json!(["alice@x.com", "bob@y.com", "primary"]), "");
+        FusedInputDocumentV04::parse(&good).unwrap().check_owner_text_origin().unwrap();
+        let value = FusedInputDocumentV04::select(&good, [1; 16]).unwrap();
+        assert_eq!(value.text_list(), Some(vec!["alice@x.com", "bob@y.com", "primary"]));
+        // An empty list is a list left unset; the profile decides if it may be.
+        let empty = document(serde_json::json!([]), "");
+        assert_eq!(FusedInputDocumentV04::select(&empty, [1; 16]).unwrap().text_list(), Some(vec![]));
+        // An item not in the request fails, as does a joined pair as one item.
+        for refused in [serde_json::json!(["alice@x.com", "mallory@evil.com"]),
+                        serde_json::json!(["alice@x.com; bob@y.com"])] {
+            let d = FusedInputDocumentV04::parse(&document(refused.clone(), "")).unwrap();
+            assert!(d.check_owner_text_origin().is_err(), "{refused}");
+        }
+        // Closed shape: a list carries no text, no empty item, at most 32 items.
+        for malformed in [document(serde_json::json!(["alice@x.com"]), "alice@x.com"),
+                          document(serde_json::json!([""]), ""),
+                          document(serde_json::json!(vec!["alice@x.com"; 33]), ""),
+                          document(serde_json::json!("alice@x.com"), "")] {
+            assert!(FusedInputDocumentV04::parse(&malformed).is_err(), "{malformed}");
+        }
     }
 
     #[test]

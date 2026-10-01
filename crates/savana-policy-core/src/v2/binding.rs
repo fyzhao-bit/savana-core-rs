@@ -586,10 +586,7 @@ impl<'value> VerifiedStoredBindingsV2<'value> {
         profile: &savana_kernel_protocol::v2::BusinessProfileV2,
         request_id: &str,
     ) -> Result<savana_kernel_protocol::v2::BusinessRequestV2, G4Error> {
-        use super::value::KernelScalarRefV2;
-        use savana_kernel_protocol::v2::{
-            BusinessRequestV2, BusinessValueV2, MAX_BUSINESS_JSON_BYTES_V2,
-        };
+        use savana_kernel_protocol::v2::BusinessRequestV2;
         if self.arguments.len() != profile.fields().len() {
             return Err(G4Error::InvalidIntentBinding);
         }
@@ -597,16 +594,10 @@ impl<'value> VerifiedStoredBindingsV2<'value> {
             .arguments
             .iter()
             .map(|argument| {
-                let value = match argument.value().scalar_ref() {
-                    Some(KernelScalarRefV2::Text(s)) if s.len() <= MAX_BUSINESS_JSON_BYTES_V2 => {
-                        BusinessValueV2::Text(s.to_owned())
-                    }
-                    Some(KernelScalarRefV2::I64(n)) if n >= 0 => {
-                        BusinessValueV2::Unsigned(n as u64)
-                    }
-                    Some(KernelScalarRefV2::Bool(b)) => BusinessValueV2::Boolean(b),
-                    _ => return Err(G4Error::InvalidIntentBinding),
-                };
+                let value = argument
+                    .value()
+                    .business_value()
+                    .ok_or(G4Error::InvalidIntentBinding)?;
                 Ok((argument.argument_name().as_str().to_owned(), value))
             })
             .collect::<Result<Vec<_>, G4Error>>()?;

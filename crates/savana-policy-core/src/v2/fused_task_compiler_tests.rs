@@ -165,6 +165,8 @@ fn fixture() -> (
                         result_path: None,
                         result_max_bytes: None,
                         result_source_clause: None,
+                        result_list: false,
+                        result_compute: None,
                     })
                     .collect(),
                 after: vec![],
