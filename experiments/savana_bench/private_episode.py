@@ -11,6 +11,8 @@ import math
 import inspect
 import time
 
+# How often the owner client asks for pending approvals and the publication.
+POLL_INTERVAL = 0.25
 
 @dataclass(frozen=True)
 class PrivateOutcome:
@@ -66,8 +68,10 @@ async def finish_private_episode(*, session, expected_task, expected_run,
               "run_id": expected_run.hex(), "root_digest": expected_root.hex(),
               "destination_digest": expected_destination.hex()})
         async with asyncio.timeout(timeout):
+            # Within the SDK's bounded range; the kernel's own pacing is unchanged.
             receipt = await session.wait_publication(expected_task=expected_task,
-                expected_root=expected_root, approval=approval, timeout=timeout)
+                expected_root=expected_root, approval=approval, timeout=timeout,
+                poll_interval=POLL_INTERVAL)
             stage = "publication_scope"
             if (type(receipt) is not PublicationReceipt
                 or receipt.task_id != expected_task or receipt.run_id != expected_run
