@@ -345,9 +345,13 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             if any(case.get("root_author") for case in cases) or any(
                     st.payload_from for case in cases if "contract" in case
                     for st in contract_by_id(case["contract"]).steps()):
-                # The reviewed generator tool's own credential use: one call
-                # per generation step, never shared with the planner/executor.
-                generator = DeepSeekGenerator(key, max_calls=len(cases))
+                # The reviewed generator tool's own credential use, never shared
+                # with the planner/executor: one call per generation step, and a
+                # drafted program may extract at most once per step.
+                from .drafted_tasks import MAX_STEPS
+                steps = MAX_STEPS if any(case.get("root_author") for case in cases) else 1
+                generator = DeepSeekGenerator(key, max_calls=len(cases) * steps,
+                                              max_input_bytes=len(cases) * steps * 98304)
             del key
             broker = WebAuthnBroker(auth_fd, timeout_seconds=120)
             worker = ModelWorker(config["model_worker"], model, audit, listener_fd=model_listener_fd)
