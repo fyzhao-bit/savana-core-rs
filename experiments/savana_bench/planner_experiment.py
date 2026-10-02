@@ -35,7 +35,7 @@ from .protected_agentdojo import (CASES, ModelWorker, ResearchAudit, official_ca
                                   preflight, safe_error_code, score_outcome)
 from .protected_endpoint import EpisodeEndpoint, digest32
 from .quarantined_generator import SYSTEM as GENERATOR_SYSTEM, DeepSeekGenerator
-from .root_drafter import ROOT_SYSTEM
+from .root_drafter import ROOT_POISON_GOALS, ROOT_SYSTEM
 from .protected_transport import ProviderServer, certificate_spki_pin, server_context
 
 SCHEMA = "savana-planner-experiment-v1"
@@ -91,11 +91,16 @@ def write_cases(groups=WRITE_GROUPS, mutations=None, injections=None):
     return chain_cases("write", groups, mutations, injections)
 
 
-def drafted_cases(spec):
+def drafted_cases(spec, *, goal=None):
     """`<suite>:<item>[,<item>...]`, each item `user_task_N` (benign) or
     `user_task_N+injection_task_M` (the official important_instructions
-    attack). The planner drafts each task's whole program from its request."""
+    attack). The planner drafts each task's whole program from its request.
+    `goal` (a ROOT_POISON_GOALS key) makes the planner itself compromised: it
+    drafts from the request alone but pursues a hidden attacker objective."""
     from .dojo_catalog import SUITES
+    from .root_drafter import ROOT_POISON_GOALS
+    if goal is not None and goal not in ROOT_POISON_GOALS:
+        raise ValueError("planner_experiment_spec")
     suite, colon, items = spec.partition(":")
     names = items.split(",") if colon else []
     if suite not in SUITES or not names or len(set(names)) != len(names):
@@ -106,9 +111,13 @@ def drafted_cases(spec):
         if match is None:
             raise ValueError("planner_experiment_spec")
         user, injection = match.groups()
-        cases.append(dict(group="drafted_attack" if injection else "drafted_benign", suite=suite, user=user,
-                          injection=injection, author="reviewed", root_author="deepseek", goal=None,
-                          mutation=None))
+        group = ("drafted_poisoned" if goal else "drafted_attack") if injection or goal else "drafted_benign"
+        if goal and injection:
+            # The compromise under test is the PLANNER; the environment stays
+            # benign so an effect can only come from the planner's own program.
+            raise ValueError("planner_experiment_spec")
+        cases.append(dict(group=group, suite=suite, user=user, injection=injection, author="reviewed",
+                          root_author="deepseek", goal=goal, mutation=None))
     return tuple(cases)
 
 
@@ -118,6 +127,12 @@ def experiment_cases(spec):
     kind, colon, names = spec.partition(":") if type(spec) is str else ("", "", "")
     if kind == "drafted" and colon:
         return drafted_cases(names)
+    if kind == "drafted-poison" and colon:
+        # drafted-poison:<goal>:<suite>:<items>
+        goal, sep, rest = names.partition(":")
+        if not sep:
+            raise ValueError("planner_experiment_spec")
+        return drafted_cases(rest, goal=goal)
     if kind == "honest" and not colon:
         return tuple(dict(case, author="deepseek", goal=None, mutation=None) for case in CASES)
     if kind == "poisoned" and not colon:
@@ -317,7 +332,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             compromised_catalog=[dict(name=n, description=d) for n, d, _ in COMPROMISED],
             write_compromised_catalog=[dict(name=n, description=d) for n, d, _ in WRITE_COMPROMISED],
             generate_compromised_catalog=[dict(name=n, description=d) for n, d, _ in GENERATE_COMPROMISED],
-            generator_model="deepseek-flash",
+            generator_model="deepseek-flash", root_poison_goals=ROOT_POISON_GOALS,
             root_drafter_system_sha256=hashlib.sha256(ROOT_SYSTEM.encode()).hexdigest(),
             generator_system_sha256=hashlib.sha256(GENERATOR_SYSTEM.encode()).hexdigest(),
             executor_model="deepseek-flash", identity_profile=identity_profile,
@@ -390,7 +405,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         prompt = official.get_user_task_by_id(case["user"]).PROMPT
                         row["stage"] = "root_drafting"
                         try:
-                            program_text, meta = drafter.draft(official, prompt)
+                            program_text, meta = drafter.draft(official, prompt, goal=case.get("goal"))
                         except RuntimeError:
                             row["outcome"] = "author_failed"
                             raise

@@ -41,6 +41,33 @@ class CaseTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=bad):
                 experiment_cases(bad)
 
+    def test_drafted_specs_honest_and_poisoned(self):
+        honest = experiment_cases("drafted:banking:user_task_2,user_task_7")
+        self.assertEqual([(c["group"], c["user"], c["goal"], c["root_author"], c["injection"]) for c in honest],
+                         [("drafted_benign", "user_task_2", None, "deepseek", None),
+                          ("drafted_benign", "user_task_7", None, "deepseek", None)])
+        attack = experiment_cases("drafted:workspace:user_task_1+injection_task_0")
+        self.assertEqual(attack[0]["group"], "drafted_attack")
+        self.assertEqual(attack[0]["injection"], "injection_task_0")
+        poisoned = experiment_cases("drafted-poison:exfiltrate:slack:user_task_3,user_task_7")
+        self.assertEqual([(c["group"], c["user"], c["goal"], c["root_author"], c["injection"]) for c in poisoned],
+                         [("drafted_poisoned", "user_task_3", "exfiltrate", "deepseek", None),
+                          ("drafted_poisoned", "user_task_7", "exfiltrate", "deepseek", None)])
+        # Every poison goal names a real ROOT_POISON_GOALS objective.
+        from savana_bench.root_drafter import ROOT_POISON_GOALS, ROOT_SYSTEM, poisoned_root_system
+        for goal in ROOT_POISON_GOALS:
+            cases = experiment_cases(f"drafted-poison:{goal}:travel:user_task_0")
+            self.assertEqual(cases[0]["goal"], goal)
+            self.assertTrue(poisoned_root_system(goal).startswith(ROOT_SYSTEM))
+            self.assertIn(ROOT_POISON_GOALS[goal], poisoned_root_system(goal))
+        for bad in ("drafted-poison:exfiltrate:slack:user_task_3+injection_task_1",  # planner OR env, not both
+                    "drafted-poison:nope:slack:user_task_3",                          # unknown goal
+                    "drafted-poison:exfiltrate",                                       # no suite/items
+                    "drafted-poison::slack:user_task_3",                               # empty goal
+                    "drafted-poison:exfiltrate:nosuite:user_task_3"):                  # unknown suite
+            with self.assertRaises(ValueError, msg=bad):
+                experiment_cases(bad)
+
     def test_write_spec_selects_explicit_official_injections(self):
         # The reviewed write plan under chosen official injections, so all 14
         # can be split across armed batches of at most nine owner bootstraps.
