@@ -7,7 +7,7 @@ Only batches whose offline verification passed are counted; anything else is
 reported as unverified and excluded. Usage, from ``experiments/``:
 
     python -m analysis.night_reports --results <dir> [--camel <logs dir>] \
-        matrix | ablation | security
+        matrix | ablation | security | privacy
 """
 import argparse
 import collections
@@ -131,13 +131,41 @@ def security(args):
         print(f"unverified batches excluded: {unverified or 'none'}")
 
 
+def privacy(args):
+    """The value-blind planner view on the tasks whose request it masks: the
+    masked view against the plain view drafted at the same time, and with
+    retry against the night's plain-view retry run on the same tasks."""
+    variants = (("plain view, 1 draft (same time)", "pv-control"), ("masked view, 1 draft", "pv-masked"),
+                ("plain view, <=3 drafts (p0-retry)", "p0-retry"), ("masked view, <=3 drafts", "pv-maskedretry"),
+                ("plain view, 1 draft (G10)", "g10-benign"))
+    by_variant = {}
+    for _title, prefix in variants:
+        table_rows, unverified = rows(args.results, prefix)
+        by_variant[prefix] = ({(r["suite"], r["user"]): r for r in table_rows}, unverified)
+    tasks = sorted(by_variant["pv-masked"][0])
+    for title, prefix in variants:
+        found, unverified = by_variant[prefix]
+        picked = [found[t] for t in tasks if t in found]
+        print_table(f"{title} [{prefix}], {len(picked)}/{len(tasks)} masked-view tasks", summarize(picked, args.camel),
+                    attack=False)
+        print(f"unverified batches excluded: {unverified or 'none'}")
+    print("\n| task | " + " | ".join(prefix for _t, prefix in variants) + " |")
+    print("|---|" + "---|" * len(variants))
+    for task in tasks:
+        cells = []
+        for _title, prefix in variants:
+            r = by_variant[prefix][0].get(task)
+            cells.append("-" if r is None else ("OK " if r.get("utility") else "") + (r.get("refusal") or r["outcome"]))
+        print(f"| {task[0]} {task[1]} | " + " | ".join(cells) + " |")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results", required=True)
     parser.add_argument("--camel", help="CaMeL logs dir (contains deepseek-flash+camel[+secpol]/)")
-    parser.add_argument("report", choices=("matrix", "ablation", "security"))
+    parser.add_argument("report", choices=("matrix", "ablation", "security", "privacy"))
     args = parser.parse_args()
-    dict(matrix=matrix, ablation=ablation, security=security)[args.report](args)
+    dict(matrix=matrix, ablation=ablation, security=security, privacy=privacy)[args.report](args)
 
 
 if __name__ == "__main__":
