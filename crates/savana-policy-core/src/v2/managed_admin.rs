@@ -59,10 +59,7 @@ pub enum ManagedAdminOperationV04 {
     },
     /// Resolve consented owner inputs and return an UNSIGNED exact recipe
     /// review. This never approves the recipe, a G6 operation or a release.
-    PreparePlanningExecution {
-        task: [u8; 32],
-        root: [u8; 32],
-    },
+    PreparePlanningExecution { task: [u8; 32], root: [u8; 32] },
     ApprovePlanningRecipes {
         approval: Box<super::FusedRecipeApprovalV04>,
         approval_signature: Vec<u8>,
@@ -79,7 +76,9 @@ pub struct ManagedAdminValueV04 {
 impl ManagedAdminCommandV04 {
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, G4Error> {
         if let ManagedAdminOperationV04::PreparePlanningExecution { task, root } = &self.operation {
-            if *task == [0;32] || *root == [0;32] { return Err(G4Error::StateConflict); }
+            if *task == [0; 32] || *root == [0; 32] {
+                return Err(G4Error::StateConflict);
+            }
         }
         if let ManagedAdminOperationV04::CompilePlanning { task, draft } = &self.operation {
             if *task == [0; 32] {
@@ -116,9 +115,14 @@ pub struct VerifiedManagedAdminCommandV04 {
     pub(super) digest: [u8; 32],
 }
 impl VerifiedManagedAdminCommandV04 {
-    pub fn validity(&self) -> (u64, u64) { (self.command.not_before, self.command.expires_at) }
+    pub fn validity(&self) -> (u64, u64) {
+        (self.command.not_before, self.command.expires_at)
+    }
     /// Authenticated operator instruction, not a model or Agent request.
-    pub fn planning_execution_request(&self, now: UnixMillisV2) -> Result<Option<([u8;32],[u8;32])>, G4Error> {
+    pub fn planning_execution_request(
+        &self,
+        now: UnixMillisV2,
+    ) -> Result<Option<([u8; 32], [u8; 32])>, G4Error> {
         self.current(now)?;
         Ok(match self.command.operation {
             ManagedAdminOperationV04::PreparePlanningExecution { task, root } => Some((task, root)),
@@ -317,8 +321,14 @@ impl ManagedAdminJournalV04 {
                 ManagedAdminResultV04::PlanningRecipesApproved { task, approval } => {
                     *task != [0; 32] && *approval != [0; 32]
                 }
-                ManagedAdminResultV04::PlanningExecutionPrepared { task, run, approval } => {
-                    *task != [0;32] && *run != [0;32] && approval.task == *task
+                ManagedAdminResultV04::PlanningExecutionPrepared {
+                    task,
+                    run,
+                    approval,
+                } => {
+                    *task != [0; 32]
+                        && *run != [0; 32]
+                        && approval.task == *task
                         && approval.signing_digest().is_ok()
                 }
             };

@@ -9,12 +9,12 @@ mod fused_approval_delivery;
 mod fused_approval_recovery;
 #[path = "v04_fused_compiler.rs"]
 mod fused_compiler;
-#[path = "v04_fused_input_admission.rs"]
-mod fused_input_admission;
 #[path = "v04_fused_final_result.rs"]
 mod fused_final_result;
 #[path = "v04_fused_host.rs"]
 mod fused_host;
+#[path = "v04_fused_input_admission.rs"]
+mod fused_input_admission;
 #[path = "v04_fused_recovery_driver.rs"]
 mod fused_recovery_driver;
 #[path = "v04_fused_release_driver.rs"]
@@ -1843,25 +1843,31 @@ impl KernelAgentAuthorityV2 {
             .ok_or(StableCode::PolicyDenied)?;
         let proof = trust.verify(&submission)?;
         let now = crate::v04_managed_admin::now()?;
-        if let Some(receipt) = self.policy.as_ref().ok_or(StableCode::KernelUnavailable)?
-            .durable.managed_admin_receipt_v04(&proof).map_err(|_| StableCode::PolicyDenied)? {
+        if let Some(receipt) = self
+            .policy
+            .as_ref()
+            .ok_or(StableCode::KernelUnavailable)?
+            .durable
+            .managed_admin_receipt_v04(&proof)
+            .map_err(|_| StableCode::PolicyDenied)?
+        {
             return Ok(receipt);
         }
         // Before compiling, not inside the pure compiler, which never sees owner text.
-        self.check_compile_owner_views_v04(&proof).map_err(|_| StableCode::PolicyDenied)?;
-        if let Some((task, root)) = proof.planning_execution_request(now).map_err(|_| StableCode::PolicyDenied)? {
-            return self.prepare_owner_execution_review_v04(&proof, task, root, values, now)
+        self.check_compile_owner_views_v04(&proof)
+            .map_err(|_| StableCode::PolicyDenied)?;
+        if let Some((task, root)) = proof
+            .planning_execution_request(now)
+            .map_err(|_| StableCode::PolicyDenied)?
+        {
+            return self
+                .prepare_owner_execution_review_v04(&proof, task, root, values, now)
                 .map_err(|_| StableCode::PolicyDenied);
         }
         let policy = self.policy.as_mut().ok_or(StableCode::KernelUnavailable)?;
         policy
             .durable
-            .apply_managed_admin_with_tools_v04(
-                &proof,
-                &policy.active_tools,
-                policy.role,
-                now,
-            )
+            .apply_managed_admin_with_tools_v04(&proof, &policy.active_tools, policy.role, now)
             .map_err(|_| StableCode::PolicyDenied)
     }
 
@@ -4116,7 +4122,8 @@ impl KernelAgentAuthorityV2 {
         if stored.provenance_set_digest() != task_match.content().provenance_digest() {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
-        let dispatch_plaintext = task_execution_plaintext(&task_match, &business_request, &derived)?;
+        let dispatch_plaintext =
+            task_execution_plaintext(&task_match, &business_request, &derived)?;
         let destination = KernelValueV2::bytes(business_request.canonical_json())
             .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
         // The G4 display commitment includes the complete content, before any
@@ -4449,8 +4456,7 @@ impl KernelAgentAuthorityV2 {
                 &intent.task_match,
                 &projected,
                 &intent.derived_controls.iter().cloned().collect(),
-            )?
-                != intent.dispatch_plaintext
+            )? != intent.dispatch_plaintext
             || stored.provenance_set_digest() != intent.task_match.content().provenance_digest()
         {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
@@ -8482,7 +8488,10 @@ fn match_business_proposal(
     descriptor: Digest32V2,
     plan_revision: PlanRevisionDigestV2,
     provenance: Digest32V2,
-    derived: &std::collections::BTreeMap<String, savana_kernel_protocol::v2::ResultDerivedControlV2>,
+    derived: &std::collections::BTreeMap<
+        String,
+        savana_kernel_protocol::v2::ResultDerivedControlV2,
+    >,
     generation: u64,
     now: UnixMillisV2,
 ) -> Result<savana_policy_core::v2::VerifiedTaskMatchV2, KernelAgentAuthorityErrorV2> {
@@ -8550,7 +8559,10 @@ fn match_business_proposal(
 fn task_execution_plaintext(
     matched: &savana_policy_core::v2::VerifiedTaskMatchV2,
     request: &savana_kernel_protocol::v2::BusinessRequestV2,
-    derived: &std::collections::BTreeMap<String, savana_kernel_protocol::v2::ResultDerivedControlV2>,
+    derived: &std::collections::BTreeMap<
+        String,
+        savana_kernel_protocol::v2::ResultDerivedControlV2,
+    >,
 ) -> Result<Vec<u8>, KernelAgentAuthorityErrorV2> {
     // The step's signed derived rules travel with the sealed payload so every
     // verifier rebuilds the exact alternative G4 matched.
@@ -8568,7 +8580,10 @@ fn task_bound_display(
     matched: &savana_policy_core::v2::VerifiedTaskMatchV2,
     request: &savana_kernel_protocol::v2::BusinessRequestV2,
     state: &savana_policy_core::v2::TaskAuthorizationStateV2,
-    derived: &std::collections::BTreeMap<String, savana_kernel_protocol::v2::ResultDerivedControlV2>,
+    derived: &std::collections::BTreeMap<
+        String,
+        savana_kernel_protocol::v2::ResultDerivedControlV2,
+    >,
 ) -> Result<BoundedApprovalDisplayTextV2, KernelAgentAuthorityErrorV2> {
     if state.revoked()
         || state.authorization().digest() != matched.authorization().digest()
@@ -8923,7 +8938,11 @@ fn encode_prepared_claim_material(
     let provenance = encode_provenance_record_v2(&material.provenance)
         .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
     encoder
-        .array(if material.owner_input.is_some() { 10 } else { 8 })
+        .array(if material.owner_input.is_some() {
+            10
+        } else {
+            8
+        })
         .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
     encode_recovery_value(encoder, &material.durable_run_id)?;
     encode_recovery_value(encoder, &material.producer_identity)?;

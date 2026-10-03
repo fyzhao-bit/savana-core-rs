@@ -143,7 +143,11 @@ fn walk(value: &Value, path: &[String]) -> Option<Value> {
 /// `path` must exist and be a single scalar. `max_bytes` bounds a text result's
 /// UTF-8 length. This is projection, never endorsement: the caller keeps the
 /// value's untrusted provenance.
-pub fn select_scalar(bytes: &[u8], path: &[String], max_bytes: u16) -> Result<ScalarSelectionV04, Error> {
+pub fn select_scalar(
+    bytes: &[u8],
+    path: &[String],
+    max_bytes: u16,
+) -> Result<ScalarSelectionV04, Error> {
     if bytes.len() > 16 * 1024
         || path.len() > 16
         || path
@@ -174,7 +178,11 @@ pub fn select_scalar(bytes: &[u8], path: &[String], max_bytes: u16) -> Result<Sc
 /// Strict list projection for a signed text-list control: the node at `path`
 /// must be a JSON array of at most `MAX_TEXT_LIST_ITEMS_V04` strings whose
 /// total UTF-8 length is at most `max_bytes`. Anything else fails closed.
-pub fn select_text_list(bytes: &[u8], path: &[String], max_bytes: u16) -> Result<Vec<String>, Error> {
+pub fn select_text_list(
+    bytes: &[u8],
+    path: &[String],
+    max_bytes: u16,
+) -> Result<Vec<String>, Error> {
     if bytes.len() > 16 * 1024
         || path.len() > 16
         || path
@@ -276,7 +284,12 @@ impl ResultComputeV04 {
                 let minute = minutes_from_time(time)?;
                 let total = (days * 1440 + minute).checked_add(self.amount)?;
                 let (day, minute) = (total.div_euclid(1440), total.rem_euclid(1440));
-                Some(format!("{} {:02}:{:02}", date_from_days(day)?, minute / 60, minute % 60))
+                Some(format!(
+                    "{} {:02}:{:02}",
+                    date_from_days(day)?,
+                    minute / 60,
+                    minute % 60
+                ))
             }
             ComputeOpV04::AddDays => {
                 let (date, time) = match input.split_once(' ') {
@@ -314,12 +327,29 @@ fn digits(text: &str, width: usize) -> Option<i64> {
 /// Days since 1970-01-01 of a strict "YYYY-MM-DD" civil date (1000..=9999).
 fn days_from_date(text: &str) -> Option<i64> {
     let mut parts = text.split('-');
-    let (y, m, d) = (digits(parts.next()?, 4)?, digits(parts.next()?, 2)?, digits(parts.next()?, 2)?);
+    let (y, m, d) = (
+        digits(parts.next()?, 4)?,
+        digits(parts.next()?, 2)?,
+        digits(parts.next()?, 2)?,
+    );
     if parts.next().is_some() || !(1000..=9999).contains(&y) || !(1..=12).contains(&m) {
         return None;
     }
     let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     if !(1..=month_days[(m - 1) as usize]).contains(&d) {
         return None;
     }
@@ -343,7 +373,9 @@ fn date_from_days(days: i64) -> Option<String> {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
-    (1000..=9999).contains(&y).then(|| format!("{y:04}-{m:02}-{d:02}"))
+    (1000..=9999)
+        .contains(&y)
+        .then(|| format!("{y:04}-{m:02}-{d:02}"))
 }
 
 fn minutes_from_time(text: &str) -> Option<i64> {
@@ -368,7 +400,11 @@ fn cents_from_decimal(text: &str) -> Option<i64> {
         return None;
     }
     let whole: i64 = whole.parse().ok()?;
-    let fraction: i64 = if fraction.is_empty() { 0 } else { format!("{fraction:0<2}").parse().ok()? };
+    let fraction: i64 = if fraction.is_empty() {
+        0
+    } else {
+        format!("{fraction:0<2}").parse().ok()?
+    };
     whole.checked_mul(100)?.checked_add(fraction)
 }
 

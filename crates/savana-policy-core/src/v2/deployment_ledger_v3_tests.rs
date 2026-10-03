@@ -687,7 +687,10 @@ fn typed_evidence_matches_actual_installed_and_committed_ledger_chain() {
     replay
         .validate_normal_commit(&verification, &attestation)
         .unwrap();
-    let mut fresh = super::super::deployment_v3_test_support::transaction_material_on(&committed, c.platform().clone());
+    let mut fresh = super::super::deployment_v3_test_support::transaction_material_on(
+        &committed,
+        c.platform().clone(),
+    );
     let fresh_tx = sign_transaction(fresh.clone());
     assert!(replay
         .validate_new_transaction(&fresh_tx, c.platform(), 150100, None)

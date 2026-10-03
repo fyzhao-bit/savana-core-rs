@@ -321,8 +321,7 @@ impl OwnerIngress {
                     acknowledged_sequence: 0,
                     ..
                 }
-            )
-            {
+            ) {
                 return Err(SavanaError::InvalidResponse);
             }
             let finalize = || {

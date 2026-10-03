@@ -712,7 +712,8 @@ impl DeploymentTransactionV2 {
             || deployment_trust_root_set_digest != expected.deployment_trust_root_set_digest()
             || activation_trust_root_set_digest != expected.activation_trust_root_set_digest()
             || release_trust_root_set_digest != expected.release_trust_root_set_digest()
-            || declassification_trust_root_set_digest != expected.declassification_trust_root_set_digest()
+            || declassification_trust_root_set_digest
+                != expected.declassification_trust_root_set_digest()
         {
             return Err(DeploymentControlErrorV2::TransactionBindingMismatch);
         }

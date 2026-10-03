@@ -405,11 +405,17 @@ impl KernelValueOwnerV2 {
     /// Private intake: select only bytes inside the exact, previously consented
     /// owner document. No caller-provided value/provenance or new authority.
     pub(crate) fn derive_owner_input_text_v04(
-        &mut self, run: RunHandleV2, initial: ValueHandleV2, slot: [u8;16], now: UnixMillisV2,
+        &mut self,
+        run: RunHandleV2,
+        initial: ValueHandleV2,
+        slot: [u8; 16],
+        now: UnixMillisV2,
     ) -> Result<KernelDerivedValueV2, KernelValueErrorV2> {
         let parent = self.resolve_g4_value(run, initial, now)?;
-        if !matches!(parent.provenance().source_kind(),
-            savana_policy_core::v2::SourceKindV2::GatedIngress { .. }) {
+        if !matches!(
+            parent.provenance().source_kind(),
+            savana_policy_core::v2::SourceKindV2::GatedIngress { .. }
+        ) {
             return Err(KernelValueErrorV2::PolicyDenied);
         }
         let mut hash = Sha256::new();
@@ -419,27 +425,51 @@ impl KernelValueOwnerV2 {
         hash.update(slot);
         let request = Digest32V2::new(hash.finalize().into());
         let handle = self.derived_handle(request)?;
-        if let Some(prior) = self.values.iter().find(|v| v.derive_request_digest == Some(request)) {
+        if let Some(prior) = self
+            .values
+            .iter()
+            .find(|v| v.derive_request_digest == Some(request))
+        {
             if prior.run_commitment != run.authority_commitment(&self.handle_key)
-                || prior.commitment != handle.authority_commitment(&self.handle_key) {
+                || prior.commitment != handle.authority_commitment(&self.handle_key)
+            {
                 return Err(KernelValueErrorV2::StateConflict);
             }
-            return Ok(KernelDerivedValueV2 { handle, value_digest: prior.provenance.value_digest() });
+            return Ok(KernelDerivedValueV2 {
+                handle,
+                value_digest: prior.provenance.value_digest(),
+            });
         }
         let p = parent.provenance();
-        let context = ProvenanceContextV2::from_authenticated_runtime(p.producer_identity(),
-            p.run_internal_id(), p.active_state_manifest_digest(), now, p.expires_at())
-            .map_err(map_g3_error)?;
-        let (value, provenance) = ProvenanceRecordV2::derived(context,
-            DeriveOperationV2::owner_input_text_v04(slot), &[(parent.value(), p)], p.label().effects())
-            .map_err(map_g3_error)?;
+        let context = ProvenanceContextV2::from_authenticated_runtime(
+            p.producer_identity(),
+            p.run_internal_id(),
+            p.active_state_manifest_digest(),
+            now,
+            p.expires_at(),
+        )
+        .map_err(map_g3_error)?;
+        let (value, provenance) = ProvenanceRecordV2::derived(
+            context,
+            DeriveOperationV2::owner_input_text_v04(slot),
+            &[(parent.value(), p)],
+            p.label().effects(),
+        )
+        .map_err(map_g3_error)?;
         let value_digest = provenance.value_digest();
         let commitment = handle.authority_commitment(&self.handle_key);
-        self.push_value(ValueRecordV2 { commitment,
+        self.push_value(ValueRecordV2 {
+            commitment,
             identity: ValueInternalIdV2::new(*commitment.as_bytes()),
-            run_commitment: run.authority_commitment(&self.handle_key), value, provenance,
-            derive_request_digest: Some(request) })?;
-        Ok(KernelDerivedValueV2 { handle, value_digest })
+            run_commitment: run.authority_commitment(&self.handle_key),
+            value,
+            provenance,
+            derive_request_digest: Some(request),
+        })?;
+        Ok(KernelDerivedValueV2 {
+            handle,
+            value_digest,
+        })
     }
 
     pub(crate) fn derive(

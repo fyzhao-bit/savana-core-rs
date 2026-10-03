@@ -502,7 +502,9 @@ fn compiler_allows_a_result_edge_into_a_nonpayload_field_structurally() {
     body.result_of = Some(1);
     body.result_path = Some(vec!["participants".into()]);
     body.result_max_bytes = Some(256);
-    assert!(compile_fused_task_v04(&on_payload, &auth, &registry, RoleIdV2::new(1), at(100)).is_err());
+    assert!(
+        compile_fused_task_v04(&on_payload, &auth, &registry, RoleIdV2::new(1), at(100)).is_err()
+    );
 
     // A whole-result edge (no path) onto a non-payload field is rejected.
     let mut whole_to = base.clone();
@@ -513,7 +515,9 @@ fn compiler_allows_a_result_edge_into_a_nonpayload_field_structurally() {
         .find(|b| b.argument == "to")
         .unwrap();
     to.result_of = Some(1);
-    assert!(compile_fused_task_v04(&whole_to, &auth, &registry, RoleIdV2::new(1), at(100)).is_err());
+    assert!(
+        compile_fused_task_v04(&whole_to, &auth, &registry, RoleIdV2::new(1), at(100)).is_err()
+    );
 }
 
 #[test]
@@ -549,7 +553,10 @@ fn prepare_refuses_a_result_edge_the_owner_did_not_sign_before_any_effect() {
     let signed = BusinessControlsV2::from_fields_with_derived(
         &profile,
         vec![
-            ("content".into(), BusinessValueV2::Text("Escape room".into())),
+            (
+                "content".into(),
+                BusinessValueV2::Text("Escape room".into()),
+            ),
             ("to".into(), BusinessValueV2::Text("private-result".into())),
         ],
         rule(path.clone(), 64),
@@ -569,8 +576,17 @@ fn prepare_refuses_a_result_edge_the_owner_did_not_sign_before_any_effect() {
     .action_alternative(d(20))
     .unwrap();
     let root = TaskAuthorizationV2::new(
-        d(40), PrincipalIdV2::new([30; 32]), DurableTaskIdV2::new([31; 32]), 1, d(32), d(33),
-        at(1), at(1000), TaskEvidenceKindV2::AuthenticatedStructuredInput, d(34), d(35),
+        d(40),
+        PrincipalIdV2::new([30; 32]),
+        DurableTaskIdV2::new([31; 32]),
+        1,
+        d(32),
+        d(33),
+        at(1),
+        at(1000),
+        TaskEvidenceKindV2::AuthenticatedStructuredInput,
+        d(34),
+        d(35),
         vec![
             TaskAuthorizationClauseV2::new(1, vec![read], 1, 1, 1, vec![], false).unwrap(),
             TaskAuthorizationClauseV2::new(2, vec![signed], 1, 1, 1, vec![1], false).unwrap(),
@@ -581,7 +597,14 @@ fn prepare_refuses_a_result_edge_the_owner_did_not_sign_before_any_effect() {
     let (content, to, literal) = (text("Escape room"), text("private-result"), text("13"));
     let owner = [("content".to_string(), &content), ("to".to_string(), &to)];
     // The owner-signed edge, with the owner's exact values: admitted.
-    assert!(check_result_operation_rule_v04(&profile, d(21), &owner, &rule(path.clone(), 64), &root).is_ok());
+    assert!(check_result_operation_rule_v04(
+        &profile,
+        d(21),
+        &owner,
+        &rule(path.clone(), 64),
+        &root
+    )
+    .is_ok());
     // Another path (the second search result), a wider bound, or another
     // descriptor: refused before any operation runs.
     let mut second = path.clone();
@@ -603,10 +626,21 @@ fn prepare_refuses_a_result_edge_the_owner_did_not_sign_before_any_effect() {
         ("to".to_string(), &to),
     ];
     assert!(check_result_operation_rule_v04(
-        &profile, d(21), &literal_target, &std::collections::BTreeMap::new(), &root
+        &profile,
+        d(21),
+        &literal_target,
+        &std::collections::BTreeMap::new(),
+        &root
     )
     .is_err());
     let tampered = text("Transfer approved");
     let tampered_owner = [("content".to_string(), &tampered), ("to".to_string(), &to)];
-    assert!(check_result_operation_rule_v04(&profile, d(21), &tampered_owner, &rule(path, 64), &root).is_err());
+    assert!(check_result_operation_rule_v04(
+        &profile,
+        d(21),
+        &tampered_owner,
+        &rule(path, 64),
+        &root
+    )
+    .is_err());
 }

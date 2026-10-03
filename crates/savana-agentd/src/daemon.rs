@@ -1515,7 +1515,10 @@ mod implementation {
             32,
         )
         .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)?;
-        bytes.as_slice().try_into().map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)
+        bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| AgentdDaemonErrorV2::DeploymentUnavailable)
     }
 
     #[cfg(target_os = "macos")]
@@ -1549,7 +1552,10 @@ mod implementation {
     }
 
     #[cfg(target_os = "linux")]
-    fn read_credential_blob(name: &str, maximum_bytes: usize) -> Result<Vec<u8>, AgentdDaemonErrorV2> {
+    fn read_credential_blob(
+        name: &str,
+        maximum_bytes: usize,
+    ) -> Result<Vec<u8>, AgentdDaemonErrorV2> {
         savana_platform_identity::read_linux_service_credential_v2(
             savana_platform_identity::LinuxCredentialServiceV2::Agent,
             name,

@@ -4,48 +4,52 @@ use core::fmt;
 
 mod deployment_invocation;
 #[cfg(target_os = "linux")]
-mod linux_tpm;
-#[cfg(target_os = "linux")]
-mod linux_tpm_journal;
-#[cfg(target_os = "linux")]
 mod linux_credentials;
 #[cfg(target_os = "linux")]
 mod linux_readiness;
 #[cfg(target_os = "linux")]
-pub use linux_readiness::notify_linux_service_ready_v2;
+mod linux_tpm;
 #[cfg(target_os = "linux")]
-pub use linux_credentials::{read_linux_kerneld_credential_v3, read_linux_service_credential_v2,
-    validate_linux_kerneld_credential_directory_v3, LinuxCredentialServiceV2};
+mod linux_tpm_journal;
+#[cfg(target_os = "linux")]
+pub use linux_credentials::{
+    read_linux_kerneld_credential_v3, read_linux_service_credential_v2,
+    validate_linux_kerneld_credential_directory_v3, LinuxCredentialServiceV2,
+};
+#[cfg(target_os = "linux")]
+pub use linux_readiness::notify_linux_service_ready_v2;
 #[cfg(target_os = "linux")]
 mod linux_tpm_authority;
 #[cfg(target_os = "linux")]
 pub use linux_tpm_authority::{run_linux_tpm_authority_v3, LinuxTpmAuthorityClientV3};
-mod tpm_signature_v3;
-mod tpm_wire;
-mod tpm_policy;
-mod tpm_nv;
+mod deployment_record_v3;
 mod tpm_enrollment;
 mod tpm_enrollment_tool;
-mod deployment_record_v3;
+mod tpm_nv;
+mod tpm_policy;
+mod tpm_signature_v3;
+mod tpm_wire;
 pub use deployment_record_v3::{DeploymentRecordScopeV3, VerifiedDeploymentRecordEnvelopeV3};
 #[cfg(target_os = "linux")]
 mod linux_deployment_journal_v3;
-#[cfg(target_os = "linux")]
-pub use linux_deployment_journal_v3::LinuxDeploymentJournalV3;
 #[cfg(any(test, target_os = "linux"))]
 pub use deployment_record_v3::runtime::DeploymentJournalSnapshotV3;
+#[cfg(target_os = "linux")]
+pub use linux_deployment_journal_v3::LinuxDeploymentJournalV3;
+#[cfg(target_os = "linux")]
+mod linux_tpm_first_install;
 #[cfg(any(test, target_os = "linux"))]
 mod tpm_first_install;
 #[cfg(target_os = "linux")]
-mod linux_tpm_first_install;
+pub use linux_tpm::LinuxTpmDeploymentSignerV3;
 #[cfg(target_os = "linux")]
 pub use linux_tpm_first_install::run_linux_tpm_first_install_v3;
+pub use tpm_enrollment::{
+    TpmClientIdentityV3, TpmEnrollmentProposalV3, TpmEnrollmentV3, TpmStoreV3,
+};
 pub use tpm_enrollment_tool::process_tpm_enrollment_request_v3;
-pub use tpm_enrollment::{TpmEnrollmentV3, TpmEnrollmentProposalV3, TpmClientIdentityV3, TpmStoreV3};
 pub use tpm_nv::{TpmNvBindingV3, TpmStateHeadV3};
 pub use tpm_policy::TpmPcrPolicyV3;
-#[cfg(target_os = "linux")]
-pub use linux_tpm::LinuxTpmDeploymentSignerV3;
 pub use tpm_signature_v3::{
     TpmSignatureEnvelopeV3, TpmSignatureErrorV3, TpmSignatureRequestV3, TpmSigningBindingV3,
     TpmSigningPublicV3, VerifiedTpmSignatureV3,

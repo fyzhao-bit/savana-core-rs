@@ -688,7 +688,10 @@ mod implementation {
             32,
         )
         .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)?;
-        bytes.as_slice().try_into().map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)
+        bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| IngressdDaemonErrorV2::DeploymentUnavailable)
     }
 
     #[cfg(target_os = "macos")]

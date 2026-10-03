@@ -8,8 +8,8 @@ use super::{
     Digest32V2, DispatchCoreV2, DispatchSubjectV2, ResultDerivedControlV2,
     MAX_BUSINESS_JSON_BYTES_V2, MAX_BUSINESS_PROFILE_BYTES_V2,
 };
-use std::collections::BTreeMap;
 use sha2::{Digest as _, Sha256};
+use std::collections::BTreeMap;
 
 pub const MAX_TASK_EXECUTION_PAYLOAD_BYTES_V2: usize = 96 * 1024;
 
@@ -65,7 +65,8 @@ impl TaskExecutionPayloadV2 {
         request: BusinessRequestV2,
         derived: BTreeMap<String, ResultDerivedControlV2>,
     ) -> Result<Self, BusinessCodecErrorV2> {
-        if request.action_alternative_with_derived(content.action().tool_descriptor_digest(), &derived)?
+        if request
+            .action_alternative_with_derived(content.action().tool_descriptor_digest(), &derived)?
             != *content.action()
             || request.magnitude() != content.magnitude()
             || request.payload_digest() != content.payload_digest()
@@ -176,7 +177,8 @@ pub fn encode_task_execution_payload_v2(
         .and_then(|e| e.bytes(&request))
         .map_err(|_| BusinessCodecErrorV2::Malformed)?;
     if let Some(derived) = derived {
-        e.bytes(&derived).map_err(|_| BusinessCodecErrorV2::Malformed)?;
+        e.bytes(&derived)
+            .map_err(|_| BusinessCodecErrorV2::Malformed)?;
     }
     let bytes = e.into_writer();
     if bytes.len() > MAX_TASK_EXECUTION_PAYLOAD_BYTES_V2 {

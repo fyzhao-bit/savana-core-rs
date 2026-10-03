@@ -9,21 +9,23 @@ mod continuation_state;
 mod fused_execution_recovery;
 mod fused_final_result;
 pub use fused_final_result::FusedFinalResultCandidateV04;
-mod fused_inputs;
 mod fused_input_document;
-pub use fused_input_document::{FusedInputDocumentV04, FusedInputTextV04};
+mod fused_inputs;
 pub use fused_execution_recovery::{FusedResultScopeV04, RecoveredFusedExecutionV04};
+pub use fused_input_document::{FusedInputDocumentV04, FusedInputTextV04};
 mod fused_model_exchange;
 mod fused_plan_adapter;
 mod fused_planning;
 mod fused_recipe;
 mod fused_task_compiler;
+pub use fused_inputs::{
+    FusedOwnedInputV04, FusedOwnedResultV04, RecoveredFusedInputV04, RecoveredFusedInputsV04,
+};
 pub use fused_task_compiler::{
     check_fused_owner_views_v04, check_result_operation_rule_v04, compile_fused_task_v04,
     fused_operation_derived_rules_v04, fused_owner_view_v04, FusedTaskDraftV04,
     FusedTaskOperationV04,
 };
-pub use fused_inputs::{FusedOwnedInputV04, FusedOwnedResultV04, RecoveredFusedInputV04, RecoveredFusedInputsV04};
 mod fused_recipe_approval;
 pub use fused_model_exchange::{
     exchange_fused_model_v04, exchange_scheduled_fused_model_v04, DisabledFusedModelTransportV04,
@@ -69,14 +71,20 @@ mod deployment_ledger_v3;
 #[cfg(target_os = "linux")]
 mod deployment_staging_v3;
 #[cfg(target_os = "linux")]
-pub use deployment_staging_v3::{VerifiedDeploymentStagingV3, VerifiedNativeDeploymentPreparationV3};
+pub use deployment_staging_v3::{
+    VerifiedDeploymentStagingV3, VerifiedNativeDeploymentPreparationV3,
+};
 #[cfg(test)]
 mod deployment_v3_test_support;
-pub use deployment_ledger_v3::{DeploymentLedgerHistoryV3, DeploymentLedgerMaterialV3, DeploymentLedgerStateV3,
-    VerifiedDeploymentLedgerRecordV3};
+pub use deployment_ledger_v3::{
+    DeploymentLedgerHistoryV3, DeploymentLedgerMaterialV3, DeploymentLedgerStateV3,
+    VerifiedDeploymentLedgerRecordV3,
+};
 mod deployment_evidence_v3;
-pub use deployment_evidence_v3::{CommitClaimsV3, VerificationClaimsV3,
-    VerifiedCommitAttestationV3, VerifiedVerificationEvidenceV3};
+pub use deployment_evidence_v3::{
+    CommitClaimsV3, VerificationClaimsV3, VerifiedCommitAttestationV3,
+    VerifiedVerificationEvidenceV3,
+};
 mod deployment_limits;
 mod deployment_manifest;
 mod deployment_manifest_claim;

@@ -206,7 +206,9 @@ impl TaskAuthorizationContextV2 {
                                 .map_err(|_| malformed())?;
                                 if let Some(compute) = rule.compute {
                                     let op = match compute.op.as_str() {
-                                        "add_minutes" => super::super::ResultComputeOpV2::AddMinutes,
+                                        "add_minutes" => {
+                                            super::super::ResultComputeOpV2::AddMinutes
+                                        }
                                         "add_days" => super::super::ResultComputeOpV2::AddDays,
                                         "add_cents" => super::super::ResultComputeOpV2::AddCents,
                                         _ => return Err(malformed()),
@@ -265,7 +267,8 @@ impl TaskAuthorizationContextV2 {
             "source": hex(self.source.as_bytes()),
             "not_before": self.not_before.get(),
             "expires_at": self.expires_at.get(),
-        })).map_err(|_| malformed())
+        }))
+        .map_err(|_| malformed())
     }
     /// Pure selector construction for an owner draft, not an output or grant.
     /// Resolve only a descriptor in this authenticated context. This prevents
@@ -275,7 +278,11 @@ impl TaskAuthorizationContextV2 {
         operation: u16,
         descriptor: Digest32V2,
     ) -> Result<Digest32V2, ProtocolError> {
-        if !self.tools().iter().any(|t| t.descriptor_digest() == descriptor) {
+        if !self
+            .tools()
+            .iter()
+            .any(|t| t.descriptor_digest() == descriptor)
+        {
             return Err(malformed());
         }
         super::super::fused_final_result_resource_v04(self.task, operation, descriptor)

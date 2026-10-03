@@ -57,7 +57,9 @@ fn run() -> Result<(), String> {
     let first = arguments.next().ok_or("missing output directory")?;
     if first == "--protected-experiment-profile" {
         let stage = arguments.next().map(PathBuf::from).ok_or("missing stage")?;
-        if arguments.next().is_some() { return Err("unexpected argument".into()); }
+        if arguments.next().is_some() {
+            return Err("unexpected argument".into());
+        }
         return protected_experiment_profile::materialize(&stage);
     }
     let output = Some(first).map(PathBuf::from).ok_or_else(|| {
@@ -709,9 +711,13 @@ fn signed_input_assets(
 /// envelope may only name these, so it must list exactly what the deployment
 /// generator registered, never a fixed subset.
 fn signed_input_assets_for_profile(
-    signing_key: &SigningKey, signing_key_id: Ed25519KeyIdV2, protected: Option<&[u32]>,
+    signing_key: &SigningKey,
+    signing_key_id: Ed25519KeyIdV2,
+    protected: Option<&[u32]>,
 ) -> Result<Vec<u8>, String> {
-    if protected.is_some_and(|t| t.is_empty() || t[0] != ACTION_TEMPLATE || t.windows(2).any(|w| w[0] >= w[1])) {
+    if protected.is_some_and(|t| {
+        t.is_empty() || t[0] != ACTION_TEMPLATE || t.windows(2).any(|w| w[0] >= w[1])
+    }) {
         return Err("protected action templates".into());
     }
     let mut payload = minicbor::Encoder::new(Vec::new());
@@ -738,7 +744,13 @@ fn signed_input_assets_for_profile(
         .and_then(|encoder| encoder.array(1))
         .and_then(|encoder| encoder.array(6))
         .and_then(|encoder| encoder.u32(1))
-        .and_then(|encoder| encoder.str(if protected.is_some() { "\"inputs\":" } else { "summarize" }))
+        .and_then(|encoder| {
+            encoder.str(if protected.is_some() {
+                "\"inputs\":"
+            } else {
+                "summarize"
+            })
+        })
         .and_then(|encoder| encoder.u16(3))
         .and_then(|encoder| encoder.u32(1))
         .and_then(|encoder| encoder.array(protected.map_or(1, |t| t.len() as u64)))

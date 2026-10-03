@@ -524,14 +524,13 @@ fn active_registry_is_the_exact_policy_registry_intersection() {
 fn shipped_write_descriptor_with_confinement_validates_and_activates_at_g5() {
     use crate::v2::{
         activate_internal_validator_registry, deployment_requires_intent_flow_confinement,
-        AttemptKindV2, BoundedConnectorRetryPolicyV2, EffectSetV2,
-        ExecutorIdempotencyContractV2, InternalValidatorBuildV2,
-        InternalValidatorImplementationKindV2,
+        AttemptKindV2, BoundedConnectorRetryPolicyV2, EffectSetV2, ExecutorIdempotencyContractV2,
+        InternalValidatorBuildV2, InternalValidatorImplementationKindV2,
     };
     use savana_kernel_protocol::v2::{
         ActionCodecProfileV2, ActionTemplateIdV2, BusinessFieldRoleV2, BusinessFieldTypeV2,
         BusinessFieldV2, BusinessMagnitudeV2, BusinessProfileV2, DisplayProjectionIdV2,
-        ExecutorIdentityV2, ToolClassIdV2, TaskEffectV2,
+        ExecutorIdentityV2, TaskEffectV2, ToolClassIdV2,
     };
 
     // Exactly the append_to_file business profile the deployment generator
@@ -556,8 +555,11 @@ fn shipped_write_descriptor_with_confinement_validates_and_activates_at_g5() {
 
     let kind = InternalValidatorImplementationKindV2::IntentFlowConfinement;
     let build_digest = Digest32V2::new([6; 32]);
-    let confinement =
-        InternalValidatorDeclarationV2::new(kind.implementation_id(), VersionV2::new(1, 0, 0), build_digest);
+    let confinement = InternalValidatorDeclarationV2::new(
+        kind.implementation_id(),
+        VersionV2::new(1, 0, 0),
+        build_digest,
+    );
     let build = |validators: Vec<InternalValidatorDeclarationV2>| {
         UnsignedToolDescriptorV2::from_verified_manifest(
             2,
@@ -615,7 +617,9 @@ fn shipped_write_descriptor_with_confinement_validates_and_activates_at_g5() {
         build_digest,
     )])
     .unwrap();
-    registry.activate_exact(write.internal_validators()).unwrap();
+    registry
+        .activate_exact(write.internal_validators())
+        .unwrap();
 
     // A build with a different digest cannot activate the same declaration:
     // the constraint and the registry build must carry the generator's digest.

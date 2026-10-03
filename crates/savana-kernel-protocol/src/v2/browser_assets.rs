@@ -816,8 +816,10 @@ mod tests {
 
     #[test]
     fn enrollment_reports_uncertainty_without_replaying_codes() {
-        let script = serde_json::to_string(std::str::from_utf8(SAVANA_BROWSER_SCRIPT_V2).unwrap()).unwrap();
-        let harness = format!("const browserScript = {script};") + r####"
+        let script =
+            serde_json::to_string(std::str::from_utf8(SAVANA_BROWSER_SCRIPT_V2).unwrap()).unwrap();
+        let harness = format!("const browserScript = {script};")
+            + r####"
 const assert = require('assert/strict'), vm = require('vm');
 const bytes = b => Buffer.concat([Buffer.from([0x58,b.length]),b]);
 const pair = (a,b) => Buffer.concat([Buffer.from([0x82]),bytes(a),bytes(b)]);
@@ -861,8 +863,16 @@ for(const mode of ['invalid','network','expired','cancel','finish-failure','succ
 }
 })().catch(e=>{console.error(e);process.exitCode=1;});
 "####;
-        let output = Command::new("node").arg("-e").arg(harness).output().expect("Node.js required");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let output = Command::new("node")
+            .arg("-e")
+            .arg(harness)
+            .output()
+            .expect("Node.js required");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

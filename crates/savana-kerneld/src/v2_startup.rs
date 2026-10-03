@@ -502,7 +502,7 @@ mod native {
     }
 
     struct ProductionV2SuccessorPublisher {
-        fused_worker_fingerprint: [u8;32],
+        fused_worker_fingerprint: [u8; 32],
         config_path: PathBuf,
         kernel_boot_id: BootIdV2,
         coordinator: Arc<crate::policy_runtime::PolicyRolloverCoordinator>,
@@ -860,7 +860,8 @@ mod native {
         )
         .map_err(|_| StableCode::KernelUnavailable)?;
         let fused_worker_fingerprint = runtime_material.fused_model_workers.fingerprint;
-        policy_runtime.install_fused_workers_v04(runtime_material.fused_model_workers.workers)
+        policy_runtime
+            .install_fused_workers_v04(runtime_material.fused_model_workers.workers)
             .map_err(|_| StableCode::KernelUnavailable)?;
         if let Some(material) = keys.kernel_approval {
             let client = savana_approvald::ApprovalSuiteOneClientV2::from_verified_deployment(
@@ -3152,7 +3153,9 @@ mod native {
         );
         Ok(RuntimeMaterialV2 {
             fused_model_workers: crate::v04_model_workers::load_workers(
-                &bootstrap.fused_model_workers, read_fused_model_credential_v04)?,
+                &bootstrap.fused_model_workers,
+                read_fused_model_credential_v04,
+            )?,
             input_runtime_assets,
             input_runtime_publisher_key_id,
             input_runtime_publisher_public_key,
@@ -3611,14 +3614,21 @@ mod native {
         #[cfg(target_os = "linux")]
         {
             savana_platform_identity::read_linux_service_credential_v2(
-                savana_platform_identity::LinuxCredentialServiceV2::Kernel, name, 16384)
-                .map_err(|_| StableCode::KernelUnavailable)
+                savana_platform_identity::LinuxCredentialServiceV2::Kernel,
+                name,
+                16384,
+            )
+            .map_err(|_| StableCode::KernelUnavailable)
         }
         #[cfg(target_os = "macos")]
         {
             let path = native_credential_path(name)?;
-            read_regular_file(&path, 16384, Some((0,nix::unistd::getegid().as_raw(),0o440)))
-                .map(Zeroizing::new)
+            read_regular_file(
+                &path,
+                16384,
+                Some((0, nix::unistd::getegid().as_raw(), 0o440)),
+            )
+            .map(Zeroizing::new)
         }
     }
 

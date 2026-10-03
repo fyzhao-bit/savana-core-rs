@@ -595,7 +595,8 @@ fn a_result_derived_edge_is_admitted_and_shown_to_the_owner() {
         false,
     )
     .unwrap();
-    let send = TaskAuthorizationDraftClauseV2::new(2, vec![edge_alt], 1, 1, 1, vec![1], false).unwrap();
+    let send =
+        TaskAuthorizationDraftClauseV2::new(2, vec![edge_alt], 1, 1, 1, vec![1], false).unwrap();
     let draft = TaskAuthorizationDraftV2::new(
         d(4),
         PrincipalIdV2::new([5; 32]),

@@ -1421,7 +1421,8 @@ fn path(segments: &[&str]) -> Vec<String> {
 
 #[test]
 fn result_json_path_extracts_scalars_and_keeps_untrusted_provenance() {
-    let json = br#"{"result":{"event":{"participants":["a@x.com","b@y.com"],"count":2,"public":true}}}"#;
+    let json =
+        br#"{"result":{"event":{"participants":["a@x.com","b@y.com"],"count":2,"public":true}}}"#;
     let (raw, parent) = tool_result_bytes(json);
     // A text scalar reached through objects and an array index.
     let op = DeriveOperationV2::select_result_json_path_v04(
@@ -1440,7 +1441,10 @@ fn result_json_path_extracts_scalars_and_keeps_untrusted_provenance() {
     assert_eq!(value.as_text(), Some("a@x.com"));
     // Projection is not endorsement: the value stays exactly as untrusted as the result.
     assert_eq!(derived.label().integrity(), IntegrityV2::ExternalUntrusted);
-    assert_eq!(derived.label().confidentiality(), ConfidentialityV2::VaultBound);
+    assert_eq!(
+        derived.label().confidentiality(),
+        ConfidentialityV2::VaultBound
+    );
     assert_eq!(derived.label().readers(), ReaderSetV2::KERNEL);
     assert_eq!(derived.value_digest(), value_digest_v2(&value).unwrap());
     // Even offered every effect, an extracted value keeps only READ: it can be
@@ -1458,25 +1462,35 @@ fn result_json_path_extracts_scalars_and_keeps_untrusted_provenance() {
     .unwrap();
     assert_eq!(widened.label().effects(), EffectSetV2::READ);
 
-    let integer = DeriveOperationV2::select_result_json_path_v04(
-        path(&["result", "event", "count"]),
-        16,
+    let integer =
+        DeriveOperationV2::select_result_json_path_v04(path(&["result", "event", "count"]), 16)
+            .unwrap();
+    let (count, _) = ProvenanceRecordV2::derived(
+        context(1, 2),
+        integer,
+        &[(&raw, &parent)],
+        EffectSetV2::READ,
     )
     .unwrap();
-    let (count, _) =
-        ProvenanceRecordV2::derived(context(1, 2), integer, &[(&raw, &parent)], EffectSetV2::READ)
-            .unwrap();
-    assert!(matches!(count.scalar_ref(), Some(crate::v2::value::KernelScalarRefV2::I64(2))));
+    assert!(matches!(
+        count.scalar_ref(),
+        Some(crate::v2::value::KernelScalarRefV2::I64(2))
+    ));
 
-    let boolean = DeriveOperationV2::select_result_json_path_v04(
-        path(&["result", "event", "public"]),
-        16,
+    let boolean =
+        DeriveOperationV2::select_result_json_path_v04(path(&["result", "event", "public"]), 16)
+            .unwrap();
+    let (flag, _) = ProvenanceRecordV2::derived(
+        context(1, 2),
+        boolean,
+        &[(&raw, &parent)],
+        EffectSetV2::READ,
     )
     .unwrap();
-    let (flag, _) =
-        ProvenanceRecordV2::derived(context(1, 2), boolean, &[(&raw, &parent)], EffectSetV2::READ)
-            .unwrap();
-    assert!(matches!(flag.scalar_ref(), Some(crate::v2::value::KernelScalarRefV2::Bool(true))));
+    assert!(matches!(
+        flag.scalar_ref(),
+        Some(crate::v2::value::KernelScalarRefV2::Bool(true))
+    ));
 }
 
 #[test]
@@ -1484,12 +1498,12 @@ fn result_json_path_fails_closed_on_non_scalar_missing_and_oversize() {
     let json = br#"{"a":{"b":"value"},"list":[1,2],"n":123,"big":18446744073709551615,"f":1.5}"#;
     let (raw, parent) = tool_result_bytes(json);
     let cases = [
-        (path(&["a"]), 256u16),            // object node, not scalar
-        (path(&["list"]), 256),            // array node, not scalar
-        (path(&["a", "missing"]), 256),    // absent path
-        (path(&["a", "b"]), 3),            // "value" exceeds max_bytes
-        (path(&["big"]), 32),              // > i64::MAX
-        (path(&["f"]), 32),                // float rejected
+        (path(&["a"]), 256u16),         // object node, not scalar
+        (path(&["list"]), 256),         // array node, not scalar
+        (path(&["a", "missing"]), 256), // absent path
+        (path(&["a", "b"]), 3),         // "value" exceeds max_bytes
+        (path(&["big"]), 32),           // > i64::MAX
+        (path(&["f"]), 32),             // float rejected
     ];
     for (p, max) in cases {
         let op = DeriveOperationV2::select_result_json_path_v04(p.clone(), max).unwrap();
@@ -1507,9 +1521,7 @@ fn result_json_path_fails_closed_on_non_scalar_missing_and_oversize() {
             .is_err()
     );
     let op = DeriveOperationV2::select_result_json_path_v04(path(&["n"]), 32).unwrap();
-    assert!(
-        ProvenanceRecordV2::derived(context(1, 2), op, &[], EffectSetV2::READ).is_err()
-    );
+    assert!(ProvenanceRecordV2::derived(context(1, 2), op, &[], EffectSetV2::READ).is_err());
 }
 
 #[test]
@@ -1523,7 +1535,14 @@ fn result_json_path_construction_and_decode_bounds() {
     assert!(DeriveOperationV2::select_result_json_path_v04(too_deep, 8).is_err());
     // A decoder must reject an out-of-grammar segment even if the array length is fine.
     let mut bad = minicbor::Encoder::new(Vec::new());
-    bad.array(3).unwrap().u16(9).unwrap().array(1).unwrap().str(&"x".repeat(200)).unwrap();
+    bad.array(3)
+        .unwrap()
+        .u16(9)
+        .unwrap()
+        .array(1)
+        .unwrap()
+        .str(&"x".repeat(200))
+        .unwrap();
     bad.u16(8).unwrap();
     assert!(minicbor::decode::<DeriveOperationV2>(&bad.into_writer()).is_err());
 }
@@ -1582,7 +1601,12 @@ fn result_json_path_decodes_a_nested_tool_output_string_with_json_step() {
     assert!(select_scalar(dup.as_bytes(), &path(&["t", "$json", "a"]), 8).is_err());
     let prose = serde_json::json!({"t": "not json"}).to_string();
     assert!(select_scalar(prose.as_bytes(), &path(&["t", "$json"]), 8).is_err());
-    assert!(select_scalar(response.as_bytes(), &path(&["result", "content", "0", "text", "$json", "0"]), 64).is_err());
+    assert!(select_scalar(
+        response.as_bytes(),
+        &path(&["result", "content", "0", "text", "$json", "0"]),
+        64
+    )
+    .is_err());
     let long = path(&["result", "content", "0", "text", "$json", "0", "filename"]);
     assert!(matches!(
         select_scalar(response.as_bytes(), &long, 4),

@@ -179,16 +179,27 @@ impl AuthenticatedNativeDeploymentTrustV2 {
         history: &super::DeploymentLedgerHistoryV3,
         platform: &super::PlatformLockV2,
         now_ms: u64,
-        completed: Option<(&super::VerifiedVerificationEvidenceV3, &super::VerifiedCommitAttestationV3)>,
+        completed: Option<(
+            &super::VerifiedVerificationEvidenceV3,
+            &super::VerifiedCommitAttestationV3,
+        )>,
     ) -> Result<DeploymentTransactionV2, DeploymentControlErrorV2> {
         let (rollback, authorization) = self.transaction_authorization_verifiers(canonical)?;
-        let transaction = DeploymentTransactionV2::from_canonical_bytes(canonical, &rollback, &authorization)?;
+        let transaction =
+            DeploymentTransactionV2::from_canonical_bytes(canonical, &rollback, &authorization)?;
         transaction.validate_authenticated_pre_state_v3(
             history.latest_ledger(),
-            self.deployment_trust_root_set().binding().member_set_digest(),
-            self.activation_trust_root_set().binding().member_set_digest(),
-            self.release_trust_root_set().release_trust_root_set_digest(),
-            self.declassification_trust_root_set().binding().member_set_digest(),
+            self.deployment_trust_root_set()
+                .binding()
+                .member_set_digest(),
+            self.activation_trust_root_set()
+                .binding()
+                .member_set_digest(),
+            self.release_trust_root_set()
+                .release_trust_root_set_digest(),
+            self.declassification_trust_root_set()
+                .binding()
+                .member_set_digest(),
         )?;
         history.validate_new_transaction(&transaction, platform, now_ms, completed)?;
         Ok(transaction)

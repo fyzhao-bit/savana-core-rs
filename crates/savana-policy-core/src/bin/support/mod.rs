@@ -82,9 +82,9 @@ pub fn run_apply(
     // Even the legacy driver must compare the authenticated descriptor to the
     // actual closed Linux spool; a signed tree digest is not a file measurement.
     #[cfg(target_os = "linux")]
-    let _staging = savana_policy_core::v2::VerifiedDeploymentStagingV3::open(
-        &spool, selector, &transaction,
-    ).map_err(map_deployment_control_error)?;
+    let _staging =
+        savana_policy_core::v2::VerifiedDeploymentStagingV3::open(&spool, selector, &transaction)
+            .map_err(map_deployment_control_error)?;
     let activation_verifier = ledger.activation_verifier().clone();
     let transaction_cores = DurableDeploymentTransactionCoreStoreV2::open_fixed_platform(
         activation_verifier.clone(),

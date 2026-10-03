@@ -549,19 +549,27 @@ impl DurableG4StateV2 {
     }
 
     /// Private historical replay, including after expiry. No new authority.
-    pub fn managed_admin_receipt_v04(&self, proof: &super::VerifiedManagedAdminCommandV04)
-        -> Result<Option<super::ManagedAdminReceiptV04>, G4Error> {
+    pub fn managed_admin_receipt_v04(
+        &self,
+        proof: &super::VerifiedManagedAdminCommandV04,
+    ) -> Result<Option<super::ManagedAdminReceiptV04>, G4Error> {
         self.ensure_usable()?;
         if proof.command.installation != *self.namespace.installation_id().as_bytes()
-            || proof.command.store != *self.namespace.store_id().as_bytes() { return Err(G4Error::StateConflict); }
+            || proof.command.store != *self.namespace.store_id().as_bytes()
+        {
+            return Err(G4Error::StateConflict);
+        }
         self.snapshot.continuations.admin.replay(proof)
     }
 
     /// The host supplies a draft built from owned, pinned inputs and real G4
     /// material. Persisting this review is NOT installation of its approval.
-    pub fn record_fused_execution_review_v04(&mut self,
+    pub fn record_fused_execution_review_v04(
+        &mut self,
         proof: &super::VerifiedManagedAdminCommandV04,
-        run: DurableRunIdV2, approval: super::FusedRecipeApprovalV04, now: UnixMillisV2,
+        run: DurableRunIdV2,
+        approval: super::FusedRecipeApprovalV04,
+        now: UnixMillisV2,
     ) -> Result<super::ManagedAdminReceiptV04, G4Error> {
         self.apply_managed_admin_inner_v04(proof, None, Some((run, approval)), now)
     }
@@ -595,23 +603,43 @@ impl DurableG4StateV2 {
                 let (run, approval) = prepared.ok_or(G4Error::StateConflict)?;
                 let task_id = DurableTaskIdV2::new(*task);
                 let state = next.tasks.current(task_id)?.ok_or(G4Error::StateConflict)?;
-                let active = next.continuations.planning.active_plan(task_id, &next.tasks, now)?;
-                let inputs = next.continuations.planning.recover_inputs(task_id,
-                    approval.deployment_generation, &next.tasks, now)?;
+                let active = next
+                    .continuations
+                    .planning
+                    .active_plan(task_id, &next.tasks, now)?;
+                let inputs = next.continuations.planning.recover_inputs(
+                    task_id,
+                    approval.deployment_generation,
+                    &next.tasks,
+                    now,
+                )?;
                 approval.signing_digest()?;
-                if state.revoked() || state.authorization().digest().as_bytes() != root
-                    || approval.task != *task || approval.root != *root
+                if state.revoked()
+                    || state.authorization().digest().as_bytes() != root
+                    || approval.task != *task
+                    || approval.root != *root
                     || approval.installation != proof.command.installation
                     || approval.manifest != *inputs.manifest().as_bytes()
-                    || inputs.run() != run || approval.profile != active.profile_digest()
-                    || approval.recipe_schema != 2 || approval.inputs_digest != active.input_commitment()
+                    || inputs.run() != run
+                    || approval.profile != active.profile_digest()
+                    || approval.recipe_schema != 2
+                    || approval.inputs_digest != active.input_commitment()
                     || approval.not_before != proof.command.not_before
                     || approval.expires_at > active.expires_at().get()
                     || approval.expires_at > proof.command.expires_at
-                    || next.dispatch.entries.iter().any(|e| e.core.durable_task_id == task_id) {
+                    || next
+                        .dispatch
+                        .entries
+                        .iter()
+                        .any(|e| e.core.durable_task_id == task_id)
+                {
                     return Err(G4Error::StateConflict);
                 }
-                ResultValue::PlanningExecutionPrepared { task: *task, run: *run.as_bytes(), approval: Box::new(approval) }
+                ResultValue::PlanningExecutionPrepared {
+                    task: *task,
+                    run: *run.as_bytes(),
+                    approval: Box::new(approval),
+                }
             }
             Op::CompilePlanning { task, draft } => {
                 let task_id = DurableTaskIdV2::new(*task);

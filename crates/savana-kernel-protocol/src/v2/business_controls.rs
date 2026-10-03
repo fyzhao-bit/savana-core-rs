@@ -378,7 +378,10 @@ fn text_role_digest(
     match derived.get(&field.name) {
         // A derived control commits to its rule under a distinct domain, so a
         // literal request (which carries no rule) can never collide with it.
-        Some(rule) => hash(derived_domain, &[profile.target.as_bytes(), &rule.canonical()]),
+        Some(rule) => hash(
+            derived_domain,
+            &[profile.target.as_bytes(), &rule.canonical()],
+        ),
         None => match &values[&field.name] {
             // A destination list commits to its canonical JSON array under a
             // list domain, so no list collides with a single text.
@@ -399,7 +402,8 @@ fn text_role_digest(
 /// `SAVANA_BUSINESS_X_V2_SCHEMA1\0` -> `SAVANA_BUSINESS_X_LIST_V2_SCHEMA1\0`.
 fn list_domain(exact_domain: &[u8]) -> Vec<u8> {
     let text = std::str::from_utf8(exact_domain).expect("ascii domain");
-    text.replacen("_V2_SCHEMA1", "_LIST_V2_SCHEMA1", 1).into_bytes()
+    text.replacen("_V2_SCHEMA1", "_LIST_V2_SCHEMA1", 1)
+        .into_bytes()
 }
 pub(super) fn resource_digest(
     profile: &BusinessProfileV2,
@@ -516,7 +520,10 @@ pub fn decode_business_controls_v2(
     };
     let mut derived = BTreeMap::new();
     if discriminant == 2 {
-        let count = d.array().map_err(malformed)?.ok_or(BusinessCodecErrorV2::Malformed)?;
+        let count = d
+            .array()
+            .map_err(malformed)?
+            .ok_or(BusinessCodecErrorV2::Malformed)?;
         if count == 0 || count > 32 {
             return Err(BusinessCodecErrorV2::Malformed);
         }
@@ -559,7 +566,10 @@ pub fn decode_result_derived_controls_v2(
     bytes: &[u8],
 ) -> Result<BTreeMap<String, ResultDerivedControlV2>, BusinessCodecErrorV2> {
     let mut d = minicbor::Decoder::new(bytes);
-    let count = d.array().map_err(malformed)?.ok_or(BusinessCodecErrorV2::Malformed)?;
+    let count = d
+        .array()
+        .map_err(malformed)?
+        .ok_or(BusinessCodecErrorV2::Malformed)?;
     if count > 32 {
         return Err(BusinessCodecErrorV2::Limit);
     }
@@ -591,7 +601,10 @@ fn decode_result_derived_control(
         return Err(BusinessCodecErrorV2::Malformed);
     }
     let source_clause = d.u64().map_err(malformed)?;
-    let segments = d.array().map_err(malformed)?.ok_or(BusinessCodecErrorV2::Malformed)?;
+    let segments = d
+        .array()
+        .map_err(malformed)?
+        .ok_or(BusinessCodecErrorV2::Malformed)?;
     if segments > 16 {
         return Err(BusinessCodecErrorV2::Malformed);
     }

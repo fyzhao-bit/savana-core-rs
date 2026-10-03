@@ -30,8 +30,8 @@ use std::collections::BTreeMap;
 mod controls;
 pub use controls::{
     decode_business_controls_v2, decode_result_derived_controls_v2, encode_business_controls_v2,
-    encode_result_derived_controls_v2, BusinessControlsV2,
-    ResultComputeOpV2, ResultComputeV2, ResultDerivedControlV2,
+    encode_result_derived_controls_v2, BusinessControlsV2, ResultComputeOpV2, ResultComputeV2,
+    ResultDerivedControlV2,
 };
 
 pub const MAX_BUSINESS_JSON_BYTES_V2: usize = 64 * 1024;
@@ -433,19 +433,26 @@ impl BusinessRequestV2 {
     }
     /// True when the destination is a list of recipients.
     pub fn destination_is_list(&self) -> bool {
-        self.profile
-            .fields
-            .iter()
-            .any(|f| f.role == BusinessFieldRoleV2::Destination && f.kind == BusinessFieldTypeV2::TextList)
+        self.profile.fields.iter().any(|f| {
+            f.role == BusinessFieldRoleV2::Destination && f.kind == BusinessFieldTypeV2::TextList
+        })
     }
     pub fn payload(&self) -> &str {
         self.text_role(BusinessFieldRoleV2::Payload)
     }
     pub fn resource_digest(&self) -> Digest32V2 {
-        controls::resource_digest(&self.profile, &self.fields, &std::collections::BTreeMap::new())
+        controls::resource_digest(
+            &self.profile,
+            &self.fields,
+            &std::collections::BTreeMap::new(),
+        )
     }
     pub fn destination_digest(&self) -> Digest32V2 {
-        controls::destination_digest(&self.profile, &self.fields, &std::collections::BTreeMap::new())
+        controls::destination_digest(
+            &self.profile,
+            &self.fields,
+            &std::collections::BTreeMap::new(),
+        )
     }
     pub fn payload_digest(&self) -> Digest32V2 {
         hash(
@@ -503,7 +510,11 @@ impl BusinessRequestV2 {
         .map_err(malformed)
     }
     pub fn parameters_digest(&self) -> Digest32V2 {
-        controls::parameters_digest(&self.profile, &self.fields, &std::collections::BTreeMap::new())
+        controls::parameters_digest(
+            &self.profile,
+            &self.fields,
+            &std::collections::BTreeMap::new(),
+        )
     }
     pub fn digest(&self) -> Digest32V2 {
         hash(

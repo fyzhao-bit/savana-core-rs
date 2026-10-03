@@ -66,7 +66,10 @@ enum DeriveOperationKindV2 {
     /// verified result bytes, for an owner-signed result-derived control. The
     /// path grammar matches signed observations; the node must be a single
     /// scalar. Not reachable from the agent wire (no `map_operation` entry).
-    SelectResultJsonPathV04 { path: Vec<String>, max_bytes: u16 },
+    SelectResultJsonPathV04 {
+        path: Vec<String>,
+        max_bytes: u16,
+    },
     /// The same projection for a typed edge: either a bounded list of texts
     /// (`list`) or one text with an owner-signed deterministic computation
     /// applied (`compute`). Exactly one of the two; plain edges keep tag 9.
@@ -92,7 +95,7 @@ fn valid_result_path(path: &[String]) -> bool {
 
 impl DeriveOperationV2 {
     /// Host-private deterministic selection from already owned ingress text.
-    pub const fn owner_input_text_v04(slot: [u8;16]) -> Self {
+    pub const fn owner_input_text_v04(slot: [u8; 16]) -> Self {
         Self(DeriveOperationKindV2::OwnerInputTextV04(slot))
     }
     pub const fn decode_utf8() -> Self {
@@ -182,9 +185,13 @@ impl DeriveOperationV2 {
     ) -> Result<KernelValueV2, G3Error> {
         match &self.0 {
             DeriveOperationKindV2::OwnerInputTextV04(slot) => {
-                let [(value, _)] = parents else { return Err(G3Error::DeriveArityMismatch); };
+                let [(value, _)] = parents else {
+                    return Err(G3Error::DeriveArityMismatch);
+                };
                 super::fused_input_document::FusedInputDocumentV04::select(
-                    value.as_text().ok_or(G3Error::DeriveTypeMismatch)?, *slot)
+                    value.as_text().ok_or(G3Error::DeriveTypeMismatch)?,
+                    *slot,
+                )
             }
             DeriveOperationKindV2::DecodeUtf8 => {
                 let [(value, _)] = parents else {
@@ -267,7 +274,9 @@ impl DeriveOperationV2 {
                 value.try_clone_internal()
             }
             DeriveOperationKindV2::SelectResultJsonPathV04 { path, max_bytes } => {
-                use savana_continuation_core::planning_observation::{select_scalar, ScalarSelectionV04};
+                use savana_continuation_core::planning_observation::{
+                    select_scalar, ScalarSelectionV04,
+                };
                 let [(value, _)] = parents else {
                     return Err(G3Error::DeriveArityMismatch);
                 };
@@ -376,7 +385,10 @@ impl<C> minicbor::Encode<C> for DeriveOperationV2 {
                 encoder.u16(*max_bytes)?.bool(*list)?;
                 match compute {
                     Some(compute) => {
-                        encoder.array(2)?.u16(compute.op.code())?.i64(compute.amount)?;
+                        encoder
+                            .array(2)?
+                            .u16(compute.op.code())?
+                            .i64(compute.amount)?;
                     }
                     None => {
                         encoder.null()?;
@@ -399,8 +411,12 @@ impl<'bytes, C> minicbor::Decode<'bytes, C> for DeriveOperationV2 {
         })?;
         let tag = decoder.u16()?;
         match (length, tag) {
-            (2, 8) => Ok(Self::owner_input_text_v04(decoder.bytes()?.try_into()
-                .map_err(|_| minicbor::decode::Error::message("invalid owner input slot"))?)),
+            (2, 8) => Ok(Self::owner_input_text_v04(
+                decoder
+                    .bytes()?
+                    .try_into()
+                    .map_err(|_| minicbor::decode::Error::message("invalid owner input slot"))?,
+            )),
             (1, 7) => Ok(Self::decode_utf8()),
             (1, 1) => Ok(Self::concatenate_text()),
             (1, 2) => Ok(Self::normalize_nfc()),
@@ -432,7 +448,9 @@ impl<'bytes, C> minicbor::Decode<'bytes, C> for DeriveOperationV2 {
                 })
             }
             (5, 10) => {
-                use savana_continuation_core::planning_observation::{ComputeOpV04, ResultComputeV04};
+                use savana_continuation_core::planning_observation::{
+                    ComputeOpV04, ResultComputeV04,
+                };
                 let path = decode_result_path(decoder, position)?;
                 let max_bytes = decoder.u16()?;
                 let list = decoder.bool()?;
@@ -441,12 +459,17 @@ impl<'bytes, C> minicbor::Decode<'bytes, C> for DeriveOperationV2 {
                     None
                 } else {
                     if decoder.array()? != Some(2) {
-                        return Err(minicbor::decode::Error::message("invalid computation").at(position));
+                        return Err(
+                            minicbor::decode::Error::message("invalid computation").at(position)
+                        );
                     }
                     let op = ComputeOpV04::from_code(decoder.u16()?).ok_or_else(|| {
                         minicbor::decode::Error::message("unknown computation").at(position)
                     })?;
-                    Some(ResultComputeV04 { op, amount: decoder.i64()? })
+                    Some(ResultComputeV04 {
+                        op,
+                        amount: decoder.i64()?,
+                    })
                 };
                 Self::select_result_json_edge_v04(path, max_bytes, list, compute).map_err(|_| {
                     minicbor::decode::Error::message("invalid result edge derive").at(position)
@@ -469,7 +492,9 @@ fn decode_result_path(
     for _ in 0..count {
         let segment = decoder.str()?;
         if segment.is_empty() || segment.len() > MAX_RESULT_PATH_SEGMENT_BYTES_V04 {
-            return Err(minicbor::decode::Error::message("invalid result path segment").at(position));
+            return Err(
+                minicbor::decode::Error::message("invalid result path segment").at(position),
+            );
         }
         path.push(segment.to_owned());
     }

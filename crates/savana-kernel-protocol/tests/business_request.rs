@@ -103,7 +103,14 @@ fn action_review_is_exact_readable_bounded_and_not_model_prose() {
             1,
         )
         .unwrap();
-        render_task_action_display_v2(&content, &root, request, &std::collections::BTreeMap::new(), used, charged)
+        render_task_action_display_v2(
+            &content,
+            &root,
+            request,
+            &std::collections::BTreeMap::new(),
+            used,
+            charged,
+        )
     };
     let source = String::from_utf8(input(2))
         .unwrap()
@@ -880,7 +887,13 @@ fn derived_destination_never_collides_with_a_literal_request() {
     let mut same_rule = std::collections::BTreeMap::new();
     same_rule.insert(
         "to".to_string(),
-        ResultDerivedControlV2::new(1, vec!["participants".into(), "0".into()], BusinessFieldTypeV2::Text, 256).unwrap(),
+        ResultDerivedControlV2::new(
+            1,
+            vec!["participants".into(), "0".into()],
+            BusinessFieldTypeV2::Text,
+            256,
+        )
+        .unwrap(),
     );
     let other_resource = BusinessControlsV2::from_fields_with_derived(
         &p,
@@ -891,7 +904,10 @@ fn derived_destination_never_collides_with_a_literal_request() {
         same_rule,
     )
     .unwrap();
-    assert_ne!(other_resource.action_alternative(d(90)).unwrap(), derived_alt);
+    assert_ne!(
+        other_resource.action_alternative(d(90)).unwrap(),
+        derived_alt
+    );
 }
 
 #[test]
@@ -941,9 +957,13 @@ fn derived_controls_validate_coverage_disjointness_and_kind() {
     .is_err());
 
     // Rule bounds: clause 0, empty/over-long path, zero max_bytes.
-    assert!(ResultDerivedControlV2::new(0, vec!["x".into()], BusinessFieldTypeV2::Text, 8).is_err());
+    assert!(
+        ResultDerivedControlV2::new(0, vec!["x".into()], BusinessFieldTypeV2::Text, 8).is_err()
+    );
     assert!(ResultDerivedControlV2::new(1, vec!["".into()], BusinessFieldTypeV2::Text, 8).is_err());
-    assert!(ResultDerivedControlV2::new(1, vec!["x".into()], BusinessFieldTypeV2::Text, 0).is_err());
+    assert!(
+        ResultDerivedControlV2::new(1, vec!["x".into()], BusinessFieldTypeV2::Text, 0).is_err()
+    );
 }
 
 #[test]
@@ -990,7 +1010,9 @@ fn a_request_matches_the_owner_signed_derived_alternative_iff_the_rule_matches()
         .unwrap();
         // With the signed rule: equal (the concrete "to" value is ignored).
         assert_eq!(
-            request.action_alternative_with_derived(d(90), &signed).unwrap(),
+            request
+                .action_alternative_with_derived(d(90), &signed)
+                .unwrap(),
             root_alt
         );
         // Without the rule (treating "to" as a literal): never equal.
@@ -1011,7 +1033,9 @@ fn a_request_matches_the_owner_signed_derived_alternative_iff_the_rule_matches()
     )
     .unwrap();
     assert_ne!(
-        request.action_alternative_with_derived(d(90), &other).unwrap(),
+        request
+            .action_alternative_with_derived(d(90), &other)
+            .unwrap(),
         root_alt
     );
 }
@@ -1028,7 +1052,15 @@ fn action_review_of_a_result_derived_field_renders_under_the_signed_rule() {
     );
     let rule = ResultDerivedControlV2::new(
         1,
-        vec!["result".into(), "content".into(), "0".into(), "text".into(), "$json".into(), "0".into(), "id_".into()],
+        vec![
+            "result".into(),
+            "content".into(),
+            "0".into(),
+            "text".into(),
+            "$json".into(),
+            "0".into(),
+            "id_".into(),
+        ],
         BusinessFieldTypeV2::Text,
         64,
     )
@@ -1037,22 +1069,51 @@ fn action_review_of_a_result_derived_field_renders_under_the_signed_rule() {
         [("file".to_string(), rule)].into_iter().collect();
     let source = br#"{"jsonrpc":"2.0","id":"request-1","method":"tools/call","params":{"name":"mail.send","arguments":{"body":"hello","file":"3","subject":"report","to":"Alice"}}}"#;
     let request = BusinessRequestV2::parse(&p, "request-1", source).unwrap();
-    let action = request.action_alternative_with_derived(d(21), &derived).unwrap();
+    let action = request
+        .action_alternative_with_derived(d(21), &derived)
+        .unwrap();
     assert_ne!(action, request.action_alternative(d(21)).unwrap());
     let root = TaskAuthorizationV2::new(
-        d(20), PrincipalIdV2::new([30; 32]), DurableTaskIdV2::new([31; 32]), 1, d(32), d(33),
-        UnixMillisV2::new(1), UnixMillisV2::new(1000), TaskEvidenceKindV2::AuthenticatedStructuredInput,
-        d(34), d(35),
+        d(20),
+        PrincipalIdV2::new([30; 32]),
+        DurableTaskIdV2::new([31; 32]),
+        1,
+        d(32),
+        d(33),
+        UnixMillisV2::new(1),
+        UnixMillisV2::new(1000),
+        TaskEvidenceKindV2::AuthenticatedStructuredInput,
+        d(34),
+        d(35),
         vec![
-            TaskAuthorizationClauseV2::new(1, vec![request.action_alternative(d(40)).unwrap()], 1, 1, 1, vec![], false)
+            TaskAuthorizationClauseV2::new(
+                1,
+                vec![request.action_alternative(d(40)).unwrap()],
+                1,
+                1,
+                1,
+                vec![],
+                false,
+            )
+            .unwrap(),
+            TaskAuthorizationClauseV2::new(2, vec![action.clone()], 1, 1, 1, vec![1], false)
                 .unwrap(),
-            TaskAuthorizationClauseV2::new(2, vec![action.clone()], 1, 1, 1, vec![1], false).unwrap(),
         ],
     )
     .unwrap();
     let content = ActionContentV2::new(
-        d(20), 1, 2, 0, action, request.magnitude(), request.payload_digest(),
-        d(22), d(23), d(24), d(25), 1,
+        d(20),
+        1,
+        2,
+        0,
+        action,
+        request.magnitude(),
+        request.payload_digest(),
+        d(22),
+        d(23),
+        d(24),
+        d(25),
+        1,
     )
     .unwrap();
     let display = render_task_action_display_v2(&content, &root, &request, &derived, 0, 0).unwrap();
@@ -1063,7 +1124,12 @@ fn action_review_of_a_result_derived_field_renders_under_the_signed_rule() {
     assert_eq!(decoded["derived_fields"]["file"]["path"][4], "$json");
     // Without the rule the matched action cannot be re-derived: refused.
     assert!(render_task_action_display_v2(
-        &content, &root, &request, &std::collections::BTreeMap::new(), 0, 0
+        &content,
+        &root,
+        &request,
+        &std::collections::BTreeMap::new(),
+        0,
+        0
     )
     .is_err());
 }
@@ -1074,47 +1140,69 @@ fn task_execution_payload_carries_the_signed_derived_rules() {
         ActionCodecProfileV2::McpToolsCallJsonV1,
         BusinessMagnitudeV2::FixedCount(1),
     );
-    let rule = ResultDerivedControlV2::new(1, vec!["id_".into()], BusinessFieldTypeV2::Text, 64).unwrap();
+    let rule =
+        ResultDerivedControlV2::new(1, vec!["id_".into()], BusinessFieldTypeV2::Text, 64).unwrap();
     let derived: std::collections::BTreeMap<String, ResultDerivedControlV2> =
         [("file".to_string(), rule)].into_iter().collect();
     let source = br#"{"jsonrpc":"2.0","id":"request-1","method":"tools/call","params":{"name":"mail.send","arguments":{"body":"hello","file":"3","subject":"report","to":"Alice"}}}"#;
     let request = BusinessRequestV2::parse(&p, "request-1", source).unwrap();
     let content_for = |action| {
         ActionContentV2::new(
-            d(20), 1, 2, 0, action, request.magnitude(), request.payload_digest(),
-            d(22), d(23), d(24), d(25), 1,
+            d(20),
+            1,
+            2,
+            0,
+            action,
+            request.magnitude(),
+            request.payload_digest(),
+            d(22),
+            d(23),
+            d(24),
+            d(25),
+            1,
         )
         .unwrap()
     };
-    let derived_content = content_for(request.action_alternative_with_derived(d(21), &derived).unwrap());
+    let derived_content = content_for(
+        request
+            .action_alternative_with_derived(d(21), &derived)
+            .unwrap(),
+    );
     // Without the rules the matched derived action cannot be re-verified.
     assert!(TaskExecutionPayloadV2::new(derived_content.clone(), request.clone()).is_err());
     let payload =
-        TaskExecutionPayloadV2::new_with_derived(derived_content, request.clone(), derived.clone()).unwrap();
+        TaskExecutionPayloadV2::new_with_derived(derived_content, request.clone(), derived.clone())
+            .unwrap();
     let bytes = encode_task_execution_payload_v2(&payload).unwrap();
     assert_eq!(&bytes[..2], &[0x86, 0x02]); // array(6), version 2
     let decoded = decode_task_execution_payload_v2(&bytes).unwrap();
     assert_eq!(decoded.derived(), &derived);
     assert_eq!(decoded, payload);
     // An exact-only payload keeps the version 1 encoding and carries no rules.
-    let exact = TaskExecutionPayloadV2::new(content_for(request.action_alternative(d(21)).unwrap()), request.clone()).unwrap();
+    let exact = TaskExecutionPayloadV2::new(
+        content_for(request.action_alternative(d(21)).unwrap()),
+        request.clone(),
+    )
+    .unwrap();
     let exact_bytes = encode_task_execution_payload_v2(&exact).unwrap();
     assert_eq!(&exact_bytes[..2], &[0x85, 0x01]);
-    assert!(decode_task_execution_payload_v2(&exact_bytes).unwrap().derived().is_empty());
+    assert!(decode_task_execution_payload_v2(&exact_bytes)
+        .unwrap()
+        .derived()
+        .is_empty());
     // Rules cannot be stripped (v2 relabeled as v1) or swapped for other rules.
     let mut relabeled = bytes.clone();
     relabeled[0] = 0x85;
     relabeled[1] = 0x01;
     assert!(decode_task_execution_payload_v2(&relabeled).is_err());
-    let other = ResultDerivedControlV2::new(1, vec!["other".into()], BusinessFieldTypeV2::Text, 64).unwrap();
+    let other = ResultDerivedControlV2::new(1, vec!["other".into()], BusinessFieldTypeV2::Text, 64)
+        .unwrap();
     let swapped: std::collections::BTreeMap<String, ResultDerivedControlV2> =
         [("file".to_string(), other)].into_iter().collect();
-    assert!(TaskExecutionPayloadV2::new_with_derived(
-        decoded.content().clone(),
-        request,
-        swapped
-    )
-    .is_err());
+    assert!(
+        TaskExecutionPayloadV2::new_with_derived(decoded.content().clone(), request, swapped)
+            .is_err()
+    );
     // Canonical rule-set codec round-trips and refuses an empty v2 rule set.
     let rules = encode_result_derived_controls_v2(&derived).unwrap();
     assert_eq!(decode_result_derived_controls_v2(&rules).unwrap(), derived);
@@ -1123,16 +1211,46 @@ fn task_execution_payload_carries_the_signed_derived_rules() {
 
 fn list_profile() -> BusinessProfileV2 {
     let mut fields = vec![
-        BusinessFieldV2::new("body", BusinessFieldRoleV2::Payload, BusinessFieldTypeV2::Text).unwrap(),
-        BusinessFieldV2::new("cc", BusinessFieldRoleV2::Parameter, BusinessFieldTypeV2::TextList).unwrap(),
-        BusinessFieldV2::new("end", BusinessFieldRoleV2::Parameter, BusinessFieldTypeV2::Text).unwrap(),
-        BusinessFieldV2::new("file", BusinessFieldRoleV2::Resource, BusinessFieldTypeV2::Text).unwrap(),
-        BusinessFieldV2::new("to", BusinessFieldRoleV2::Destination, BusinessFieldTypeV2::TextList).unwrap(),
+        BusinessFieldV2::new(
+            "body",
+            BusinessFieldRoleV2::Payload,
+            BusinessFieldTypeV2::Text,
+        )
+        .unwrap(),
+        BusinessFieldV2::new(
+            "cc",
+            BusinessFieldRoleV2::Parameter,
+            BusinessFieldTypeV2::TextList,
+        )
+        .unwrap(),
+        BusinessFieldV2::new(
+            "end",
+            BusinessFieldRoleV2::Parameter,
+            BusinessFieldTypeV2::Text,
+        )
+        .unwrap(),
+        BusinessFieldV2::new(
+            "file",
+            BusinessFieldRoleV2::Resource,
+            BusinessFieldTypeV2::Text,
+        )
+        .unwrap(),
+        BusinessFieldV2::new(
+            "to",
+            BusinessFieldRoleV2::Destination,
+            BusinessFieldTypeV2::TextList,
+        )
+        .unwrap(),
     ];
     fields.sort_by(|a, b| a.name().cmp(b.name()));
     BusinessProfileV2::new(
-        ActionCodecProfileV2::McpToolsCallJsonV1, "mail.send", d(1), d(2), TaskEffectV2::Send,
-        BusinessMagnitudeV2::FixedCount(1), fields,
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        "mail.send",
+        d(1),
+        d(2),
+        TaskEffectV2::Send,
+        BusinessMagnitudeV2::FixedCount(1),
+        fields,
     )
     .unwrap()
 }
@@ -1140,7 +1258,11 @@ fn list_profile() -> BusinessProfileV2 {
 #[test]
 fn text_lists_are_typed_controls_with_their_own_destination_domain() {
     // Only a destination or a parameter may be a list; the profile codec keeps it.
-    for role in [BusinessFieldRoleV2::Resource, BusinessFieldRoleV2::Payload, BusinessFieldRoleV2::Magnitude] {
+    for role in [
+        BusinessFieldRoleV2::Resource,
+        BusinessFieldRoleV2::Payload,
+        BusinessFieldRoleV2::Magnitude,
+    ] {
         assert!(BusinessFieldV2::new("x", role, BusinessFieldTypeV2::TextList).is_err());
     }
     let p = list_profile();
@@ -1152,26 +1274,43 @@ fn text_lists_are_typed_controls_with_their_own_destination_domain() {
             r#"{{"jsonrpc":"2.0","id":"r1","method":"tools/call","params":{{"name":"mail.send","arguments":{args}}}}}"#
         ).as_bytes())
     };
-    let two = request(r#"{"body":"hi","cc":[],"end":"","file":"A","to":["alice@x.com","bob@y.com"]}"#).unwrap();
+    let two =
+        request(r#"{"body":"hi","cc":[],"end":"","file":"A","to":["alice@x.com","bob@y.com"]}"#)
+            .unwrap();
     assert_eq!(two.destination_items(), vec!["alice@x.com", "bob@y.com"]);
     assert!(two.destination_is_list());
     // The order and the membership of the list are both bound.
-    let swapped = request(r#"{"body":"hi","cc":[],"end":"","file":"A","to":["bob@y.com","alice@x.com"]}"#).unwrap();
+    let swapped =
+        request(r#"{"body":"hi","cc":[],"end":"","file":"A","to":["bob@y.com","alice@x.com"]}"#)
+            .unwrap();
     let one = request(r#"{"body":"hi","cc":[],"end":"","file":"A","to":["alice@x.com"]}"#).unwrap();
     assert_ne!(two.destination_digest(), swapped.destination_digest());
     assert_ne!(two.destination_digest(), one.destination_digest());
     // A one-item list never collides with the same single text destination.
-    let text_profile = profile(ActionCodecProfileV2::McpToolsCallJsonV1, BusinessMagnitudeV2::FixedCount(1));
+    let text_profile = profile(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        BusinessMagnitudeV2::FixedCount(1),
+    );
     let text = BusinessRequestV2::parse(&text_profile, "r1", br#"{"jsonrpc":"2.0","id":"r1","method":"tools/call","params":{"name":"mail.send","arguments":{"body":"hi","file":"A","subject":"s","to":"alice@x.com"}}}"#).unwrap();
     assert_ne!(one.destination_digest(), text.destination_digest());
     // Controls built from typed values give the same alternative as the request.
-    let controls = BusinessControlsV2::from_fields(&p, vec![
-        ("cc".into(), BusinessValueV2::TextList(vec![])),
-        ("end".into(), BusinessValueV2::Text(String::new())),
-        ("file".into(), BusinessValueV2::Text("A".into())),
-        ("to".into(), BusinessValueV2::TextList(vec!["alice@x.com".into(), "bob@y.com".into()])),
-    ]).unwrap();
-    assert_eq!(controls.action_alternative(d(9)).unwrap(), two.action_alternative(d(9)).unwrap());
+    let controls = BusinessControlsV2::from_fields(
+        &p,
+        vec![
+            ("cc".into(), BusinessValueV2::TextList(vec![])),
+            ("end".into(), BusinessValueV2::Text(String::new())),
+            ("file".into(), BusinessValueV2::Text("A".into())),
+            (
+                "to".into(),
+                BusinessValueV2::TextList(vec!["alice@x.com".into(), "bob@y.com".into()]),
+            ),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        controls.action_alternative(d(9)).unwrap(),
+        two.action_alternative(d(9)).unwrap()
+    );
 
     // An empty destination list is "no one", under its own digest.
     let nobody = request(r#"{"body":"hi","cc":[],"end":"","file":"A","to":[]}"#).unwrap();
@@ -1180,7 +1319,10 @@ fn text_lists_are_typed_controls_with_their_own_destination_domain() {
     // Refused: a non-text item, an empty or padded item, a control character,
     // too many items, a list where text belongs, and an empty resource (only a
     // parameter text may be empty).
-    let many = (0..33).map(|i| format!("\"u{i}@x.com\"")).collect::<Vec<_>>().join(",");
+    let many = (0..33)
+        .map(|i| format!("\"u{i}@x.com\""))
+        .collect::<Vec<_>>()
+        .join(",");
     for args in [
         r#"{"body":"hi","cc":[],"end":"","file":"A","to":["a@x.com",1]}"#.to_owned(),
         r#"{"body":"hi","cc":[""],"end":"","file":"A","to":["a@x.com"]}"#.to_owned(),
@@ -1197,9 +1339,12 @@ fn text_lists_are_typed_controls_with_their_own_destination_domain() {
 
 #[test]
 fn computed_rules_are_signed_bounded_and_plain_rules_keep_their_bytes() {
-    let plain = ResultDerivedControlV2::new(1, vec!["start".into()], BusinessFieldTypeV2::Text, 32).unwrap();
-    let computed = plain.clone()
-        .with_compute(ResultComputeV2::new(ResultComputeOpV2::AddMinutes, 60).unwrap()).unwrap();
+    let plain = ResultDerivedControlV2::new(1, vec!["start".into()], BusinessFieldTypeV2::Text, 32)
+        .unwrap();
+    let computed = plain
+        .clone()
+        .with_compute(ResultComputeV2::new(ResultComputeOpV2::AddMinutes, 60).unwrap())
+        .unwrap();
     let rules = |r: &ResultDerivedControlV2| {
         let map: std::collections::BTreeMap<String, ResultDerivedControlV2> =
             [("end".to_string(), r.clone())].into_iter().collect();
@@ -1207,8 +1352,13 @@ fn computed_rules_are_signed_bounded_and_plain_rules_keep_their_bytes() {
     };
     let plain_bytes = rules(&plain);
     // [[ "end", [1, ["start"], 1, 32] ]]: the original four-element rule.
-    assert_eq!(plain_bytes, vec![0x81, 0x82, 0x63, b'e', b'n', b'd', 0x84, 0x01, 0x81, 0x65,
-                                 b's', b't', b'a', b'r', b't', 0x01, 0x18, 0x20]);
+    assert_eq!(
+        plain_bytes,
+        vec![
+            0x81, 0x82, 0x63, b'e', b'n', b'd', 0x84, 0x01, 0x81, 0x65, b's', b't', b'a', b'r',
+            b't', 0x01, 0x18, 0x20
+        ]
+    );
     let computed_bytes = rules(&computed);
     assert_ne!(computed_bytes, plain_bytes);
     let decoded = decode_result_derived_controls_v2(&computed_bytes).unwrap();
@@ -1217,21 +1367,37 @@ fn computed_rules_are_signed_bounded_and_plain_rules_keep_their_bytes() {
     // A computed rule and a plain one (or another amount) sign different alternatives.
     let p = list_profile();
     let alternative = |rule: &ResultDerivedControlV2| {
-        BusinessControlsV2::from_fields_with_derived(&p, vec![
-            ("cc".into(), BusinessValueV2::TextList(vec![])),
-            ("file".into(), BusinessValueV2::Text("A".into())),
-            ("to".into(), BusinessValueV2::TextList(vec!["a@x.com".into()])),
-        ], [("end".to_string(), rule.clone())].into_iter().collect()).unwrap().action_alternative(d(9)).unwrap()
+        BusinessControlsV2::from_fields_with_derived(
+            &p,
+            vec![
+                ("cc".into(), BusinessValueV2::TextList(vec![])),
+                ("file".into(), BusinessValueV2::Text("A".into())),
+                (
+                    "to".into(),
+                    BusinessValueV2::TextList(vec!["a@x.com".into()]),
+                ),
+            ],
+            [("end".to_string(), rule.clone())].into_iter().collect(),
+        )
+        .unwrap()
+        .action_alternative(d(9))
+        .unwrap()
     };
-    let other = plain.clone()
-        .with_compute(ResultComputeV2::new(ResultComputeOpV2::AddMinutes, 30).unwrap()).unwrap();
+    let other = plain
+        .clone()
+        .with_compute(ResultComputeV2::new(ResultComputeOpV2::AddMinutes, 30).unwrap())
+        .unwrap();
     assert_ne!(alternative(&plain), alternative(&computed));
     assert_ne!(alternative(&other), alternative(&computed));
     // Bounds: amounts within range, and only a text field can be computed.
     assert!(ResultComputeV2::new(ResultComputeOpV2::AddDays, 3_661).is_err());
     assert!(ResultComputeV2::new(ResultComputeOpV2::AddMinutes, -527_041).is_err());
-    assert!(ResultDerivedControlV2::new(1, vec!["x".into()], BusinessFieldTypeV2::TextList, 32).unwrap()
-        .with_compute(ResultComputeV2::new(ResultComputeOpV2::AddDays, 1).unwrap()).is_err());
+    assert!(
+        ResultDerivedControlV2::new(1, vec!["x".into()], BusinessFieldTypeV2::TextList, 32)
+            .unwrap()
+            .with_compute(ResultComputeV2::new(ResultComputeOpV2::AddDays, 1).unwrap())
+            .is_err()
+    );
     // Unknown computation codes are refused.
     let mut unknown = computed_bytes.clone();
     let at = unknown.len() - 2; // [op, amount] = 0x82, op, 0x18 0x3c

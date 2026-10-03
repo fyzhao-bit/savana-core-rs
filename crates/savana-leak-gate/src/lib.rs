@@ -226,8 +226,16 @@ pub fn security_match(s: &str) -> bool {
             return window_match(rest);
         }
         let (Some(end), Some(next)) = (
-            separator_in(text, start + SCAN_WINDOW - SCAN_OVERLAP / 2, start + SCAN_WINDOW),
-            separator_in(text, start + SCAN_WINDOW - SCAN_OVERLAP, start + SCAN_WINDOW - SCAN_OVERLAP / 2),
+            separator_in(
+                text,
+                start + SCAN_WINDOW - SCAN_OVERLAP / 2,
+                start + SCAN_WINDOW,
+            ),
+            separator_in(
+                text,
+                start + SCAN_WINDOW - SCAN_OVERLAP,
+                start + SCAN_WINDOW - SCAN_OVERLAP / 2,
+            ),
         ) else {
             // Nothing to cut at: one search over the rest, bounded and failing
             // closed as it always did.

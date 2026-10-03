@@ -239,6 +239,8 @@ mod socket;
 mod startup_identity_tests;
 #[allow(dead_code)]
 mod state;
+#[cfg(target_os = "linux")]
+mod tpm_anchor_v3;
 mod v04_managed_admin;
 #[cfg(unix)]
 mod v04_model_workers;
@@ -284,8 +286,6 @@ mod v2_runtime;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod v2_server;
 mod v2_startup;
-#[cfg(target_os = "linux")]
-mod tpm_anchor_v3;
 #[allow(dead_code)] // Activated by the V2 authenticated dispatch routes.
 mod v2_state_owner;
 mod v2_task_authority;

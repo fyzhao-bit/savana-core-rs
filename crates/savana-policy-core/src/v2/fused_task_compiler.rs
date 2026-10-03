@@ -315,12 +315,13 @@ pub fn compile_fused_task_v04(
                 for binding in &mut bindings {
                     // A path edge's source clause is authoritative from the
                     // compiler; a whole-result (payload) edge carries none.
-                    binding.result_source_clause = match (binding.result_of, binding.result_path.is_some()) {
-                        (Some(source), true) => {
-                            Some(*op_clause.get(&source).ok_or(G4Error::StateConflict)?)
-                        }
-                        _ => None,
-                    };
+                    binding.result_source_clause =
+                        match (binding.result_of, binding.result_path.is_some()) {
+                            (Some(source), true) => {
+                                Some(*op_clause.get(&source).ok_or(G4Error::StateConflict)?)
+                            }
+                            _ => None,
+                        };
                 }
                 bindings
             },
@@ -396,8 +397,10 @@ pub fn check_result_operation_rule_v04(
     use savana_kernel_protocol::v2::BusinessControlsV2;
     let mut fields = Vec::new();
     for field in profile.fields() {
-        if matches!(field.role(), BusinessFieldRoleV2::Payload | BusinessFieldRoleV2::Magnitude)
-            || derived.contains_key(field.name())
+        if matches!(
+            field.role(),
+            BusinessFieldRoleV2::Payload | BusinessFieldRoleV2::Magnitude
+        ) || derived.contains_key(field.name())
         {
             continue;
         }
@@ -408,12 +411,15 @@ pub fn check_result_operation_rule_v04(
             .ok_or(G4Error::InvalidIntentBinding)?;
         fields.push((
             field.name().to_owned(),
-            value.business_value().ok_or(G4Error::InvalidIntentBinding)?,
+            value
+                .business_value()
+                .ok_or(G4Error::InvalidIntentBinding)?,
         ));
     }
-    let alternative = BusinessControlsV2::from_fields_with_derived(profile, fields, derived.clone())
-        .and_then(|controls| controls.action_alternative(descriptor))
-        .map_err(|_| G4Error::InvalidIntentBinding)?;
+    let alternative =
+        BusinessControlsV2::from_fields_with_derived(profile, fields, derived.clone())
+            .and_then(|controls| controls.action_alternative(descriptor))
+            .map_err(|_| G4Error::InvalidIntentBinding)?;
     if authorization
         .clauses()
         .iter()
@@ -435,9 +441,11 @@ pub fn fused_operation_derived_rules_v04(
 ) -> Result<Vec<(String, savana_kernel_protocol::v2::ResultDerivedControlV2)>, G4Error> {
     let mut rules = Vec::new();
     for b in &operation.bindings {
-        if let (Some(source_clause), Some(path), Some(max_bytes)) =
-            (b.result_source_clause, b.result_path.as_ref(), b.result_max_bytes)
-        {
+        if let (Some(source_clause), Some(path), Some(max_bytes)) = (
+            b.result_source_clause,
+            b.result_path.as_ref(),
+            b.result_max_bytes,
+        ) {
             let field = profile
                 .fields()
                 .iter()
@@ -445,7 +453,8 @@ pub fn fused_operation_derived_rules_v04(
                 .ok_or(G4Error::InvalidIntentBinding)?;
             // A list edge fills exactly a text-list field, and only a text
             // field can be computed: the binding cannot reshape the field.
-            if b.result_list != (field.kind() == savana_kernel_protocol::v2::BusinessFieldTypeV2::TextList)
+            if b.result_list
+                != (field.kind() == savana_kernel_protocol::v2::BusinessFieldTypeV2::TextList)
                 || (b.result_compute.is_some()
                     && field.kind() != savana_kernel_protocol::v2::BusinessFieldTypeV2::Text)
             {

@@ -27,16 +27,26 @@ fn private_context_binding_contains_only_verified_operator_metadata() {
     let before = encode_task_authorization_context_v2(&context).unwrap();
     let binding: serde_json::Value =
         serde_json::from_str(&context.private_binding_json().unwrap()).unwrap();
-    assert_eq!(binding, serde_json::json!({
-        "schema": 1, "task": "02".repeat(32), "installation": "03".repeat(32),
-        "manifest": "04".repeat(32), "generation": 7, "source": "05".repeat(32),
-        "not_before": 100, "expires_at": 500
-    }));
-    assert_eq!(before, encode_task_authorization_context_v2(&context).unwrap());
-    assert_eq!(context.final_result_resource(1, d(7)).unwrap(),
-        fused_final_result_resource_v04(context.task(), 1, d(7)).unwrap());
-    assert_ne!(context.final_result_resource(1, d(7)).unwrap(),
-        context.final_result_resource(2, d(7)).unwrap());
+    assert_eq!(
+        binding,
+        serde_json::json!({
+            "schema": 1, "task": "02".repeat(32), "installation": "03".repeat(32),
+            "manifest": "04".repeat(32), "generation": 7, "source": "05".repeat(32),
+            "not_before": 100, "expires_at": 500
+        })
+    );
+    assert_eq!(
+        before,
+        encode_task_authorization_context_v2(&context).unwrap()
+    );
+    assert_eq!(
+        context.final_result_resource(1, d(7)).unwrap(),
+        fused_final_result_resource_v04(context.task(), 1, d(7)).unwrap()
+    );
+    assert_ne!(
+        context.final_result_resource(1, d(7)).unwrap(),
+        context.final_result_resource(2, d(7)).unwrap()
+    );
     assert!(context.final_result_resource(0, d(7)).is_err());
     assert!(context.final_result_resource(1, d(8)).is_err());
 }
@@ -170,8 +180,13 @@ fn draft_from_json_admits_a_result_derived_edge() {
     let tool = &context.tools()[0];
     let derived: std::collections::BTreeMap<String, ResultDerivedControlV2> = [(
         "destination".to_string(),
-        ResultDerivedControlV2::new(1, vec!["recipient".to_string()], BusinessFieldTypeV2::Text, 64)
-            .unwrap(),
+        ResultDerivedControlV2::new(
+            1,
+            vec!["recipient".to_string()],
+            BusinessFieldTypeV2::Text,
+            64,
+        )
+        .unwrap(),
     )]
     .into_iter()
     .collect();
@@ -209,7 +224,10 @@ fn draft_from_json_admits_a_result_derived_edge() {
         "predecessor_clause_ids": [], "retry_after_proven_no_effect": false
     }])
     .to_string();
-    assert_eq!(context.draft_from_json(d(6), json.as_bytes()).unwrap(), expected);
+    assert_eq!(
+        context.draft_from_json(d(6), json.as_bytes()).unwrap(),
+        expected
+    );
 
     // A derived edge that overlaps an exact control (both name the same field),
     // an unknown field type, or a zero source clause is refused.

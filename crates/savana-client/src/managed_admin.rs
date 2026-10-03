@@ -156,10 +156,19 @@ fn parse_reply(
     use savana_policy_core::v2::ManagedAdminOperationV04 as Op;
     use ManagedAdminResultV04 as Result;
     let matching = match (&cmd.operation, &reply.result) {
-        (Op::PreparePlanningExecution { task, root },
-            Result::PlanningExecutionPrepared { task: actual, run, approval }) => {
-            task == actual && task == &approval.task && root == &approval.root
-                && *run != [0;32] && approval.installation == cmd.installation
+        (
+            Op::PreparePlanningExecution { task, root },
+            Result::PlanningExecutionPrepared {
+                task: actual,
+                run,
+                approval,
+            },
+        ) => {
+            task == actual
+                && task == &approval.task
+                && root == &approval.root
+                && *run != [0; 32]
+                && approval.installation == cmd.installation
                 && approval.signing_digest().is_ok()
         }
         (Op::RegisterSource { policy, .. }, Result::SourceRegistered { source, namespace }) => {

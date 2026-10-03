@@ -1085,7 +1085,8 @@ impl PyTaskAuthorizationContext {
     }
     /// Owner/operator-only metadata; never put this in a model prompt.
     fn private_binding_json(&self) -> PyResult<String> {
-        self.inner.private_binding_json()
+        self.inner
+            .private_binding_json()
             .map_err(|_| map_client_error(ClientError::InvalidRequest))
     }
     fn final_result_resource<'py>(
@@ -1094,11 +1095,16 @@ impl PyTaskAuthorizationContext {
         operation: u16,
         descriptor: &[u8],
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let bytes = descriptor.try_into()
+        let bytes = descriptor
+            .try_into()
             .map_err(|_| map_client_error(ClientError::InvalidRequest))?;
-        let resource = self.inner.final_result_resource(
-            operation, savana_kernel_protocol::v2::Digest32V2::new(bytes),
-        ).map_err(|_| map_client_error(ClientError::InvalidRequest))?;
+        let resource = self
+            .inner
+            .final_result_resource(
+                operation,
+                savana_kernel_protocol::v2::Digest32V2::new(bytes),
+            )
+            .map_err(|_| map_client_error(ClientError::InvalidRequest))?;
         Ok(PyBytes::new_bound(py, resource.as_bytes()))
     }
     fn draft(

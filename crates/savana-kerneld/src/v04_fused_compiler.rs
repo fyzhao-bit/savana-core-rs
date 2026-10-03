@@ -494,7 +494,9 @@ impl KernelAgentAuthorityV2 {
                         .value;
                     resolved.push((
                         b.argument.clone(),
-                        values.resolve_g4_value(run, handle, now).map_err(map_value_error)?,
+                        values
+                            .resolve_g4_value(run, handle, now)
+                            .map_err(map_value_error)?,
                     ));
                 }
                 let exact: Vec<_> = resolved

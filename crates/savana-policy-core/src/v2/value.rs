@@ -147,9 +147,9 @@ impl KernelValueV2 {
             Some(KernelScalarRefV2::I64(n)) if n >= 0 => Some(BusinessValueV2::Unsigned(n as u64)),
             Some(KernelScalarRefV2::Bool(b)) => Some(BusinessValueV2::Boolean(b)),
             Some(_) => None,
-            None => self
-                .text_list()
-                .map(|items| BusinessValueV2::TextList(items.into_iter().map(str::to_owned).collect())),
+            None => self.text_list().map(|items| {
+                BusinessValueV2::TextList(items.into_iter().map(str::to_owned).collect())
+            }),
         }
     }
 

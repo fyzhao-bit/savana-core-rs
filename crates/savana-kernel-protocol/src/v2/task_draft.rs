@@ -257,11 +257,12 @@ impl TaskAuthorizationDraftV2 {
         let mut clauses = Vec::new();
         // Present only when some alternative signs a result-derived edge, so an
         // exact-only root renders byte-identically to before.
-        let any_derived = self
-            .clauses
-            .0
-            .iter()
-            .any(|c| c.alternatives.0.iter().any(|a| !a.controls.derived().is_empty()));
+        let any_derived = self.clauses.0.iter().any(|c| {
+            c.alternatives
+                .0
+                .iter()
+                .any(|a| !a.controls.derived().is_empty())
+        });
         for clause in &self.clauses.0 {
             let mut alternatives = Vec::new();
             for (index, alt) in clause.alternatives.0.iter().enumerate() {

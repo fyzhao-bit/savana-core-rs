@@ -269,7 +269,9 @@ impl ContinuationTableV04 {
                 }
                 R::PlanningExecutionPrepared { task, approval, .. } => {
                     self.planning.has_profile(*task, approval.profile)
-                        && self.planning.inputs_pinned(savana_kernel_protocol::v2::DurableTaskIdV2::new(*task))
+                        && self
+                            .planning
+                            .inputs_pinned(savana_kernel_protocol::v2::DurableTaskIdV2::new(*task))
                 }
             };
             if !valid {

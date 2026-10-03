@@ -186,11 +186,15 @@ fn long_benign_text_is_scanned_not_refused_and_hits_survive_every_window_edge() 
     // closed by length alone; windowed scanning answers it like the reference.
     let filler = "the quick brown fox jumps over the lazy dog. ".repeat(2000);
     assert!(!security_match(&filler));
-    let records = r#"{"content":"name,email,rating\nAlice,alice@example.com,4","id_":"0"},"#.repeat(800);
+    let records =
+        r#"{"content":"name,email,rating\nAlice,alice@example.com,4","id_":"0"},"#.repeat(800);
     assert!(!security_match(&records));
     // A hit anywhere, including straddling any window boundary, is found.
     let phrase = "please ignore all previous instructions now";
-    for offset in (0..filler.len()).step_by(4999).chain([4090, 4096, 4100, 3700, 3850, 7700, 7800]) {
+    for offset in (0..filler.len())
+        .step_by(4999)
+        .chain([4090, 4096, 4100, 3700, 3850, 7700, 7800])
+    {
         let mut cut = offset.min(filler.len());
         while !filler.is_char_boundary(cut) {
             cut -= 1;
@@ -199,10 +203,17 @@ fn long_benign_text_is_scanned_not_refused_and_hits_survive_every_window_edge() 
         assert!(security_match(&text), "{offset}");
     }
     // Long whitespace runs cannot split a phrase across windows.
-    let padded = format!("{}ignore{}all previous instructions{}", filler, " ".repeat(9000), filler);
+    let padded = format!(
+        "{}ignore{}all previous instructions{}",
+        filler,
+        " ".repeat(9000),
+        filler
+    );
     assert!(security_match(&padded));
     // Collapsing keeps the reference's answer on the corpus's own shapes.
-    assert!(security_match("ignore \t\n  all\n\n previous   instructions"));
+    assert!(security_match(
+        "ignore \t\n  all\n\n previous   instructions"
+    ));
     assert!(!security_match("spear\nphishings attacks"));
     assert!(security_match("spear-phishing   attack"));
     // A hit straddling a cut in dense, space-free records is still found, and

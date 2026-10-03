@@ -258,9 +258,7 @@ fn denial_and_wrong_chunk_sequence_do_not_commit() {
     let (mut owner, t) = connected(responses);
     t.take_requests();
     let decision = RecordingDecision::new(true);
-    assert!(owner
-        .commit_text("synthetic", &decision)
-        .is_err());
+    assert!(owner.commit_text("synthetic", &decision).is_err());
     assert_eq!(t.take_requests().len(), 2);
     assert!(decision.requests.lock().unwrap().is_empty());
 }

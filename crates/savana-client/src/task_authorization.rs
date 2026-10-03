@@ -293,7 +293,10 @@ impl Session {
     }
 }
 
-pub(crate) fn issuance_request_digest(d: &TaskAuthorizationDraftV2, nonce: Nonce32V2) -> Digest32V2 {
+pub(crate) fn issuance_request_digest(
+    d: &TaskAuthorizationDraftV2,
+    nonce: Nonce32V2,
+) -> Digest32V2 {
     let mut h = Sha256::new();
     h.update(b"SAVANA_TASK_ISSUANCE_REQUEST_V2_SCHEMA1\0");
     for b in [

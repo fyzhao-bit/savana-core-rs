@@ -449,8 +449,10 @@ impl RecoveredFusedInputV04 {
 mod result_edge_tests {
     use super::*;
     use crate::v2::intent::StableActionArgumentBindingV2;
-    use crate::v2::{encode_provenance_record_v2, EffectSetV2, ProvenanceContextV2, ProvenanceRecordV2};
     use crate::v2::ArgumentNameV2;
+    use crate::v2::{
+        encode_provenance_record_v2, EffectSetV2, ProvenanceContextV2, ProvenanceRecordV2,
+    };
     use savana_kernel_protocol::v2::{
         Digest32V2, DurableRunIdV2, InternalSlotDigestV2, ProducerIdentityV2, UnixMillisV2,
     };
@@ -488,7 +490,12 @@ mod result_edge_tests {
     }
 
     fn at(path: &[String], max_bytes: u16) -> Option<ResultExtractV04<'_>> {
-        Some(ResultExtractV04 { path, max_bytes, list: false, compute: None })
+        Some(ResultExtractV04 {
+            path,
+            max_bytes,
+            list: false,
+            compute: None,
+        })
     }
 
     fn matching_argument(
@@ -524,7 +531,10 @@ mod result_edge_tests {
         let (_, path_prov) = input.result_value(extract).unwrap();
         let (whole, whole_prov) = input.result_value(None).unwrap();
         assert!(whole.as_text().unwrap().contains("participants"));
-        assert_ne!(path_prov.provenance_digest(), whole_prov.provenance_digest());
+        assert_ne!(
+            path_prov.provenance_digest(),
+            whole_prov.provenance_digest()
+        );
 
         // G7 accepts an argument built from the kernel's own extraction.
         let ok = matching_argument(&input, slot, extract);
@@ -563,65 +573,120 @@ mod result_edge_tests {
         let input = result_input(json);
         let slot = [5; 16];
         let people = path(&["events", "0", "participants"]);
-        let list = Some(ResultExtractV04 { path: &people, max_bytes: 256, list: true, compute: None });
+        let list = Some(ResultExtractV04 {
+            path: &people,
+            max_bytes: 256,
+            list: true,
+            compute: None,
+        });
         let (value, list_prov) = input.result_value(list).unwrap();
         assert_eq!(value.text_list(), Some(vec!["a@x.com", "b@y.com"]));
         // A list bound is on the total bytes; a scalar node is not a list.
         assert!(input
-            .result_value(Some(ResultExtractV04 { path: &people, max_bytes: 10, list: true, compute: None }))
+            .result_value(Some(ResultExtractV04 {
+                path: &people,
+                max_bytes: 10,
+                list: true,
+                compute: None
+            }))
             .is_err());
         let one = path(&["events", "0", "participants", "0"]);
         assert!(input
-            .result_value(Some(ResultExtractV04 { path: &one, max_bytes: 256, list: true, compute: None }))
+            .result_value(Some(ResultExtractV04 {
+                path: &one,
+                max_bytes: 256,
+                list: true,
+                compute: None
+            }))
             .is_err());
 
         let start = path(&["events", "0", "start"]);
-        let hour = ResultComputeV04 { op: ComputeOpV04::AddMinutes, amount: 90 };
-        let end = Some(ResultExtractV04 { path: &start, max_bytes: 64, list: false, compute: Some(hour) });
+        let hour = ResultComputeV04 {
+            op: ComputeOpV04::AddMinutes,
+            amount: 90,
+        };
+        let end = Some(ResultExtractV04 {
+            path: &start,
+            max_bytes: 64,
+            list: false,
+            compute: Some(hour),
+        });
         let (value, end_prov) = input.result_value(end).unwrap();
         assert_eq!(value.as_text(), Some("2024-05-19 11:30"));
         // The signed amount is part of the provenance: a different amount, the
         // plain path, or the list edge never verifies the same argument.
         let ok = matching_argument(&input, slot, end);
         assert!(input.check_result_argument(slot, &ok, end).is_ok());
-        let longer = ResultComputeV04 { op: ComputeOpV04::AddMinutes, amount: 91 };
+        let longer = ResultComputeV04 {
+            op: ComputeOpV04::AddMinutes,
+            amount: 91,
+        };
         assert!(input
             .check_result_argument(
                 slot,
                 &ok,
-                Some(ResultExtractV04 { path: &start, max_bytes: 64, list: false, compute: Some(longer) })
+                Some(ResultExtractV04 {
+                    path: &start,
+                    max_bytes: 64,
+                    list: false,
+                    compute: Some(longer)
+                })
             )
             .is_err());
-        assert!(input.check_result_argument(slot, &ok, at(&start, 64)).is_err());
+        assert!(input
+            .check_result_argument(slot, &ok, at(&start, 64))
+            .is_err());
         assert_ne!(list_prov.provenance_digest(), end_prov.provenance_digest());
         // An operand not in the operation's exact form fails closed.
         let count = path(&["events", "0", "count"]);
         assert!(input
-            .result_value(Some(ResultExtractV04 { path: &count, max_bytes: 64, list: false, compute: Some(hour) }))
+            .result_value(Some(ResultExtractV04 {
+                path: &count,
+                max_bytes: 64,
+                list: false,
+                compute: Some(hour)
+            }))
             .is_err());
         // List and computation together, or an out-of-range amount, are refused.
-        let huge = ResultComputeV04 { op: ComputeOpV04::AddDays, amount: 100_000 };
+        let huge = ResultComputeV04 {
+            op: ComputeOpV04::AddDays,
+            amount: 100_000,
+        };
         assert!(input
-            .result_value(Some(ResultExtractV04 { path: &start, max_bytes: 64, list: false, compute: Some(huge) }))
+            .result_value(Some(ResultExtractV04 {
+                path: &start,
+                max_bytes: 64,
+                list: false,
+                compute: Some(huge)
+            }))
             .is_err());
         assert!(input
-            .result_value(Some(ResultExtractV04 { path: &start, max_bytes: 64, list: true, compute: Some(hour) }))
+            .result_value(Some(ResultExtractV04 {
+                path: &start,
+                max_bytes: 64,
+                list: true,
+                compute: Some(hour)
+            }))
             .is_err());
     }
 
     #[test]
     fn edge_derive_operations_round_trip_and_plain_ones_keep_tag_nine() {
-        use savana_continuation_core::planning_observation::{ComputeOpV04, ResultComputeV04};
         use crate::v2::DeriveOperationV2;
+        use savana_continuation_core::planning_observation::{ComputeOpV04, ResultComputeV04};
         let p = path(&["a", "0"]);
         let plain = DeriveOperationV2::select_result_json_path_v04(p.clone(), 64).unwrap();
         assert_eq!(plain.tag(), 9);
-        let list = DeriveOperationV2::select_result_json_edge_v04(p.clone(), 64, true, None).unwrap();
+        let list =
+            DeriveOperationV2::select_result_json_edge_v04(p.clone(), 64, true, None).unwrap();
         let compute = DeriveOperationV2::select_result_json_edge_v04(
             p.clone(),
             64,
             false,
-            Some(ResultComputeV04 { op: ComputeOpV04::AddCents, amount: -250 }),
+            Some(ResultComputeV04 {
+                op: ComputeOpV04::AddCents,
+                amount: -250,
+            }),
         )
         .unwrap();
         for op in [plain, list, compute] {
