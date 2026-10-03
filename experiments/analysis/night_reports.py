@@ -7,7 +7,7 @@ Only batches whose offline verification passed are counted; anything else is
 reported as unverified and excluded. Usage, from ``experiments/``:
 
     python -m analysis.night_reports --results <dir> [--camel <logs dir>] \
-        matrix | ablation | security | privacy
+        matrix | ablation | security | privacy | privacy2
 """
 import argparse
 import collections
@@ -159,13 +159,60 @@ def privacy(args):
         print(f"| {task[0]} {task[1]} | " + " | ".join(cells) + " |")
 
 
+def programs(results, prefix):
+    """The accepted program text per (suite, user) of verified batches."""
+    out = {}
+    for batch in sorted(glob.glob(f"{results}/{prefix}-*")):
+        verification = os.path.join(batch, "offline-verification.json")
+        if not (os.path.exists(verification) and os.path.getsize(verification) > 0):
+            continue
+        for events in glob.glob(f"{batch}/*/events.jsonl"):
+            lines = [json.loads(line) for line in open(events)]
+            cases = lines[0]["cases"]
+            for e in lines:
+                if e.get("kind") == "root_drafted":
+                    c = cases[e["episode"]]
+                    out[(c["suite"], c["user"])] = e["program_text"]
+    return out
+
+
+def privacy2(args):
+    """Masking the extractor's input: the planner's masked view throughout,
+    and the extractor sent raw / quantities-visible / strictly masked text.
+    Also on exactly the tasks whose drafted program is the same text in every
+    variant, where any difference can only come from extraction."""
+    variants = (("extractor raw (planner masked)", "pv2-control"),
+                ("extractor masked, quantities visible", "pv2-quantities"),
+                ("extractor strictly masked", "pv2-strict"))
+    found, texts = {}, {}
+    for title, prefix in variants:
+        table_rows, unverified = rows(args.results, prefix)
+        found[prefix] = {(r["suite"], r["user"]): r for r in table_rows}
+        texts[prefix] = programs(args.results, prefix)
+        print_table(f"{title} [{prefix}]", summarize(table_rows, args.camel), attack=False)
+        print(f"unverified batches excluded: {unverified or 'none'}")
+    common = set.intersection(*(set(found[p]) for _t, p in variants))
+    same = {t for t in common if len({texts[p].get(t) for _t, p in variants}) == 1 and texts[variants[0][1]].get(t)}
+    print(f"\n## Same program in all three variants: {len(same)} of {len(common)} tasks")
+    for _title, prefix in variants:
+        picked = [found[prefix][t] for t in sorted(same)]
+        print(f"{prefix}: utility {sum(r.get('utility') is True for r in picked)}, "
+              f"published {sum(r['outcome'] == 'published' for r in picked)}")
+    print("\n| task | " + " | ".join(p for _t, p in variants) + " |")
+    print("|---|" + "---|" * len(variants))
+    for task in sorted(same):
+        cells = [("OK " if found[p][task].get("utility") else "") + found[p][task]["outcome"] for _t, p in variants]
+        if len(set(cells)) > 1:
+            print(f"| {task[0]} {task[1]} | " + " | ".join(cells) + " |")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results", required=True)
     parser.add_argument("--camel", help="CaMeL logs dir (contains deepseek-flash+camel[+secpol]/)")
-    parser.add_argument("report", choices=("matrix", "ablation", "security", "privacy"))
+    parser.add_argument("report", choices=("matrix", "ablation", "security", "privacy", "privacy2"))
     args = parser.parse_args()
-    dict(matrix=matrix, ablation=ablation, security=security, privacy=privacy)[args.report](args)
+    dict(matrix=matrix, ablation=ablation, security=security, privacy=privacy, privacy2=privacy2)[args.report](args)
 
 
 if __name__ == "__main__":
