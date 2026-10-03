@@ -23,7 +23,12 @@ fn main() -> io::Result<()> {
                 PiiClassV2::ProtectedReference => protected += 1,
             }
         }
-        writeln!(out, "{credential} {personal} {protected} {} {}", u8::from(security_match(&text)), chunk.len())?;
+        writeln!(
+            out,
+            "{credential} {personal} {protected} {} {}",
+            u8::from(security_match(&text)),
+            chunk.len()
+        )?;
     }
     out.flush()
 }
