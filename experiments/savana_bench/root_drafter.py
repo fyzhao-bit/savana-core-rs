@@ -182,6 +182,15 @@ REFUSAL_HINTS = {
 }
 
 
+# Policy refusals are final: the task needs authority the owner's policy does
+# not grant (a recipient chosen by data). A retry cannot supply that
+# authority; measured offline on G10, re-drafting after this refusal only
+# dropped the requested action (answer-only) or picked some other name from
+# the request as the recipient. Retry is for planner mistakes, not for asking
+# the owner's policy again.
+NON_RETRYABLE = frozenset({"derived_destination"})
+
+
 def refusal_message(reason, step=None, field=None):
     """The fixed feedback text for one refusal: code, location in the planner's
     own program, and the fixed hint. Built from no data."""

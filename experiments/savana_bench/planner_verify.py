@@ -85,7 +85,7 @@ def _drafted_contract(case, local, row):
     from agentdojo.task_suite.load_suites import get_suite
     from .agentdojo_tasks import BENCHMARK, register_drafted
     from .drafted_tasks import ProgramRefused, parse_program_text, review_program
-    from .root_drafter import draft_request_body
+    from .root_drafter import NON_RETRYABLE, draft_request_body
     drafted = [e for e in local if e["kind"] == "root_drafted"]
     refusals = [e for e in local if e["kind"] == "program_refused"]
     max_drafts = case["max_drafts"]
@@ -113,18 +113,22 @@ def _drafted_contract(case, local, row):
             history.append((event["program_text"], str(error), error.step, error.field))
         if contract is not None and number != len(drafted):
             raise ValueError("accepted_program_was_redrafted")
+        if refusal is not None and str(refusal) in NON_RETRYABLE and number != len(drafted):
+            raise ValueError("policy_refusal_was_redrafted")
     expected = [dict(attempt=i, reason=reason, step=step, field=field)
                 for i, (_text, reason, step, field) in enumerate(history, 1)]
     if [{k: e.get(k) for k in ("attempt", "reason", "step", "field")} for e in refusals] != expected:
         raise ValueError("program_refusal_mismatch")
     if row["outcome"] == "author_failed":
         # The drafter failed on the attempt after the last recorded draft.
-        if contract is not None or len(drafted) >= max_drafts:
+        if (contract is not None or len(drafted) >= max_drafts
+                or (refusal is not None and str(refusal) in NON_RETRYABLE)):
             raise ValueError("drafter_failure_with_program")
         return None
     if refusal is not None:
+        # Drafting ends at the limit, or early on a final policy refusal.
         if (row["outcome"] != "program_refused" or row.get("refusal") != str(refusal)
-                or len(drafted) != max_drafts):
+                or (len(drafted) != max_drafts and str(refusal) not in NON_RETRYABLE)):
             raise ValueError("program_refusal_mismatch")
         return None
     if contract is None:

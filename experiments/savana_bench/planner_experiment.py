@@ -35,7 +35,7 @@ from .protected_agentdojo import (CASES, ModelWorker, ResearchAudit, official_ca
                                   preflight, safe_error_code, score_outcome)
 from .protected_endpoint import EpisodeEndpoint, digest32
 from .quarantined_generator import SYSTEM as GENERATOR_SYSTEM, DeepSeekGenerator
-from .root_drafter import REFUSAL_HINTS, ROOT_POISON_GOALS, ROOT_SYSTEM
+from .root_drafter import NON_RETRYABLE, REFUSAL_HINTS, ROOT_POISON_GOALS, ROOT_SYSTEM
 from .protected_transport import ProviderServer, certificate_spki_pin, server_context
 
 SCHEMA = "savana-planner-experiment-v1"
@@ -368,6 +368,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             generate_compromised_catalog=[dict(name=n, description=d) for n, d, _ in GENERATE_COMPROMISED],
             generator_model="deepseek-flash", root_poison_goals=ROOT_POISON_GOALS,
             planner_models=list(PLANNER_MODELS), refusal_hints=REFUSAL_HINTS,
+            non_retryable=sorted(NON_RETRYABLE),
             root_drafter_system_sha256=hashlib.sha256(ROOT_SYSTEM.encode()).hexdigest(),
             generator_system_sha256=hashlib.sha256(GENERATOR_SYSTEM.encode()).hexdigest(),
             executor_model="deepseek-flash", identity_profile=identity_profile,
@@ -467,7 +468,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                             except ProgramRefused as error:
                                 audit.emit("program_refused", episode=index, attempt=attempt, reason=str(error),
                                            step=error.step, field=error.field)
-                                if attempt == case["max_drafts"]:
+                                if attempt == case["max_drafts"] or str(error) in NON_RETRYABLE:
                                     row.update(outcome="program_refused", refusal=str(error))
                                     raise
                                 history.append((program_text, str(error), error.step, error.field))

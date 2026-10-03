@@ -22,6 +22,12 @@ GOOD = json.dumps({"steps": [{"tool": "dojo.bank.recent", "args": {"n": 50}},
 BAD = json.dumps({"steps": [{"tool": "dojo.bank.recent", "args": {"n": 50}},
                             {"tool": "dojo.model.extract", "source": 1,
                              "args": {"target": {"text": "answer"}, "context": {"text": "x"}}}]})
+DEST = json.dumps({"steps": [{"tool": "dojo.bank.recent", "args": {"n": 50}},
+                             {"tool": "dojo.bank.send_money", "args": {
+                                 "amount": {"from": 1, "path": ["0", "amount"]},
+                                 "date": {"from": 1, "path": ["0", "date"]},
+                                 "recipient": {"from": 1, "path": ["0", "recipient"]},
+                                 "subject": {"from": 1, "path": ["0", "subject"]}}}]})
 
 
 def _suite():
@@ -159,6 +165,18 @@ class VerifierReplayTests(unittest.TestCase):
             _drafted_contract(_case(), accepted_then_more, dict(outcome="published", drafts=2))
         with self.assertRaisesRegex(ValueError, "draft_count_row"):
             _drafted_contract(_case(), events, dict(outcome="published", drafts=1))
+
+    def test_a_policy_refusal_ends_drafting(self):
+        # A recipient chosen by data is refused by policy; a retry cannot
+        # grant that authority, so drafting stops at once.
+        events = _events([DEST])
+        self.assertEqual(events[-1]["reason"], "derived_destination")
+        self.assertIsNone(_drafted_contract(_case(max_drafts=3), events,
+                                            dict(outcome="program_refused", refusal="derived_destination", drafts=1)))
+        with self.assertRaisesRegex(ValueError, "policy_refusal_was_redrafted"):
+            _drafted_contract(_case(max_drafts=3), _events([DEST, GOOD]), dict(outcome="published", drafts=2))
+        with self.assertRaisesRegex(ValueError, "drafter_failure_with_program"):
+            _drafted_contract(_case(max_drafts=3), events, dict(outcome="author_failed", drafts=1))
 
     def test_drafter_failure_after_a_refusal(self):
         events = _events([BAD])
