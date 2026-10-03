@@ -76,29 +76,59 @@ def _submitted_draft(case, contract, local):
 
 
 def _drafted_contract(case, local, row):
-    """Replay the owner's fixed review of the planner's recorded program: the
-    same program must yield the same contract, or the same refusal."""
+    """Replay the owner's fixed review of every recorded draft, in order: each
+    draft before the last must be refused with exactly the recorded code and
+    location, and the last must yield the recorded contract or refusal. The
+    digest of what the planner was actually sent is recomputed from the
+    request, the catalog and the earlier refusals alone, so the planner
+    provably saw nothing else (no tool result, no model output)."""
     from agentdojo.task_suite.load_suites import get_suite
     from .agentdojo_tasks import BENCHMARK, register_drafted
     from .drafted_tasks import ProgramRefused, parse_program_text, review_program
+    from .root_drafter import draft_request_body
     drafted = [e for e in local if e["kind"] == "root_drafted"]
+    refusals = [e for e in local if e["kind"] == "program_refused"]
+    max_drafts = case["max_drafts"]
+    if [e.get("attempt") for e in drafted] != list(range(1, len(drafted) + 1)) or len(drafted) > max_drafts:
+        raise ValueError("root_drafter_evidence")
+    if row.get("drafts") != len(drafted):
+        raise ValueError("draft_count_row")
+    official = get_suite(BENCHMARK, case["suite"])
+    prompt = official.get_user_task_by_id(case["user"]).PROMPT
+    tools = {t.name for t in official.tools}
+    history, contract, refusal = [], None, None
+    for number, event in enumerate(drafted, 1):
+        body = draft_request_body(official, prompt, model=case["planner_model"], goal=case.get("goal"),
+                                  history=tuple(history))
+        if hashlib.sha256(body).hexdigest() != event["request_sha256"]:
+            raise ValueError("planner_input_mismatch")
+        if hashlib.sha256(event["program_text"].encode()).hexdigest() != event["response_sha256"]:
+            raise ValueError("program_text_digest")
+        try:
+            contract = review_program(suite=case["suite"], suite_tools=tools, task_id=case["user"],
+                                      prompt=prompt, program=parse_program_text(event["program_text"]))
+            refusal = None
+        except ProgramRefused as error:
+            contract, refusal = None, error
+            history.append((event["program_text"], str(error), error.step, error.field))
+        if contract is not None and number != len(drafted):
+            raise ValueError("accepted_program_was_redrafted")
+    expected = [dict(attempt=i, reason=reason, step=step, field=field)
+                for i, (_text, reason, step, field) in enumerate(history, 1)]
+    if [{k: e.get(k) for k in ("attempt", "reason", "step", "field")} for e in refusals] != expected:
+        raise ValueError("program_refusal_mismatch")
     if row["outcome"] == "author_failed":
-        if drafted:
+        # The drafter failed on the attempt after the last recorded draft.
+        if contract is not None or len(drafted) >= max_drafts:
             raise ValueError("drafter_failure_with_program")
         return None
-    if len(drafted) != 1:
-        raise ValueError("root_drafter_evidence")
-    official = get_suite(BENCHMARK, case["suite"])
-    try:
-        contract = review_program(suite=case["suite"], suite_tools={t.name for t in official.tools},
-                                  task_id=case["user"], prompt=official.get_user_task_by_id(case["user"]).PROMPT,
-                                  program=parse_program_text(drafted[0]["program_text"]))
-    except ProgramRefused as error:
-        refusals = [e for e in local if e["kind"] == "program_refused"]
-        if (row["outcome"] != "program_refused" or row.get("refusal") != str(error)
-                or len(refusals) != 1 or refusals[0]["reason"] != str(error)):
+    if refusal is not None:
+        if (row["outcome"] != "program_refused" or row.get("refusal") != str(refusal)
+                or len(drafted) != max_drafts):
             raise ValueError("program_refusal_mismatch")
         return None
+    if contract is None:
+        raise ValueError("root_drafter_evidence")
     if row["outcome"] == "program_refused":
         raise ValueError("program_refusal_mismatch")
     return register_drafted(contract)

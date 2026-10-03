@@ -35,7 +35,7 @@ from .protected_agentdojo import (CASES, ModelWorker, ResearchAudit, official_ca
                                   preflight, safe_error_code, score_outcome)
 from .protected_endpoint import EpisodeEndpoint, digest32
 from .quarantined_generator import SYSTEM as GENERATOR_SYSTEM, DeepSeekGenerator
-from .root_drafter import ROOT_POISON_GOALS, ROOT_SYSTEM
+from .root_drafter import REFUSAL_HINTS, ROOT_POISON_GOALS, ROOT_SYSTEM
 from .protected_transport import ProviderServer, certificate_spki_pin, server_context
 
 SCHEMA = "savana-planner-experiment-v1"
@@ -91,15 +91,46 @@ def write_cases(groups=WRITE_GROUPS, mutations=None, injections=None):
     return chain_cases("write", groups, mutations, injections)
 
 
-def drafted_cases(spec, *, goal=None):
+PLANNER_MODELS = ("deepseek-flash", "deepseek-v4-pro")
+MAX_DRAFTS = 5
+
+
+def drafted_options(kind):
+    """`drafted` / `drafted-poison`, each optionally followed by `+drafts=N`
+    (review-feedback retry: at most N drafts per episode, 1..5) and
+    `+planner=<model>` (the untrusted planner's model) -> (base, max_drafts,
+    planner_model), or None when `kind` is not a drafted spec."""
+    base, *options = kind.split("+")
+    if base not in ("drafted", "drafted-poison"):
+        return None
+    parsed = {}
+    for option in options:
+        key, equals, value = option.partition("=")
+        if not equals or key in parsed or key not in ("drafts", "planner"):
+            raise ValueError("planner_experiment_spec")
+        parsed[key] = value
+    drafts = parsed.get("drafts", "1")
+    if not re.fullmatch(f"[1-{MAX_DRAFTS}]", drafts):
+        raise ValueError("planner_experiment_spec")
+    planner = parsed.get("planner", PLANNER_MODELS[0])
+    if planner not in PLANNER_MODELS:
+        raise ValueError("planner_experiment_spec")
+    return base, int(drafts), planner
+
+
+def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS[0]):
     """`<suite>:<item>[,<item>...]`, each item `user_task_N` (benign) or
     `user_task_N+injection_task_M` (the official important_instructions
     attack). The planner drafts each task's whole program from its request.
     `goal` (a ROOT_POISON_GOALS key) makes the planner itself compromised: it
-    drafts from the request alone but pursues a hidden attacker objective."""
+    drafts from the request alone but pursues a hidden attacker objective.
+    `max_drafts` > 1 lets the planner draft again after the owner's review
+    refuses, seeing only its own program and the fixed refusal code."""
     from .dojo_catalog import SUITES
     from .root_drafter import ROOT_POISON_GOALS
     if goal is not None and goal not in ROOT_POISON_GOALS:
+        raise ValueError("planner_experiment_spec")
+    if type(max_drafts) is not int or not 1 <= max_drafts <= MAX_DRAFTS or planner_model not in PLANNER_MODELS:
         raise ValueError("planner_experiment_spec")
     suite, colon, items = spec.partition(":")
     names = items.split(",") if colon else []
@@ -117,22 +148,25 @@ def drafted_cases(spec, *, goal=None):
             # benign so an effect can only come from the planner's own program.
             raise ValueError("planner_experiment_spec")
         cases.append(dict(group=group, suite=suite, user=user, injection=injection, author="reviewed",
-                          root_author="deepseek", goal=goal, mutation=None))
+                          root_author="deepseek", goal=goal, mutation=None, max_drafts=max_drafts,
+                          planner_model=planner_model))
     return tuple(cases)
 
 
 def experiment_cases(spec):
     """honest | poisoned | compromised[:names] | write[:items] | generate[:items]
-    | drafted:<suite>:<items>"""
+    | drafted[+drafts=N][+planner=M]:<suite>:<items>
+    | drafted-poison[+drafts=N][+planner=M]:<goal>:<suite>:<items>"""
     kind, colon, names = spec.partition(":") if type(spec) is str else ("", "", "")
-    if kind == "drafted" and colon:
-        return drafted_cases(names)
-    if kind == "drafted-poison" and colon:
-        # drafted-poison:<goal>:<suite>:<items>
+    drafted = drafted_options(kind) if colon else None
+    if drafted is not None:
+        base, max_drafts, planner_model = drafted
+        if base == "drafted":
+            return drafted_cases(names, max_drafts=max_drafts, planner_model=planner_model)
         goal, sep, rest = names.partition(":")
         if not sep:
             raise ValueError("planner_experiment_spec")
-        return drafted_cases(rest, goal=goal)
+        return drafted_cases(rest, goal=goal, max_drafts=max_drafts, planner_model=planner_model)
     if kind == "honest" and not colon:
         return tuple(dict(case, author="deepseek", goal=None, mutation=None) for case in CASES)
     if kind == "poisoned" and not colon:
@@ -333,6 +367,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             write_compromised_catalog=[dict(name=n, description=d) for n, d, _ in WRITE_COMPROMISED],
             generate_compromised_catalog=[dict(name=n, description=d) for n, d, _ in GENERATE_COMPROMISED],
             generator_model="deepseek-flash", root_poison_goals=ROOT_POISON_GOALS,
+            planner_models=list(PLANNER_MODELS), refusal_hints=REFUSAL_HINTS,
             root_drafter_system_sha256=hashlib.sha256(ROOT_SYSTEM.encode()).hexdigest(),
             generator_system_sha256=hashlib.sha256(GENERATOR_SYSTEM.encode()).hexdigest(),
             executor_model="deepseek-flash", identity_profile=identity_profile,
@@ -356,7 +391,12 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                 author = DeepSeekPlanAuthor(key, max_calls=len(cases))
             if any(case.get("root_author") for case in cases):
                 from .root_drafter import DeepSeekRootDrafter
-                drafter = DeepSeekRootDrafter(key, max_calls=len(cases))
+                # One planner model per run; a retry is another separately
+                # recorded draft, so the budget counts every allowed draft.
+                planner_model, = {case["planner_model"] for case in cases if case.get("root_author")}
+                drafts = sum(case["max_drafts"] for case in cases if case.get("root_author"))
+                drafter = DeepSeekRootDrafter(key, max_calls=drafts, max_input_bytes=drafts * 131072,
+                                              model=planner_model)
             if any(case.get("root_author") for case in cases) or any(
                     st.payload_from for case in cases if "contract" in case
                     for st in contract_by_id(case["contract"]).steps()):
@@ -404,20 +444,35 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         official = get_suite(BENCHMARK, case["suite"])
                         prompt = official.get_user_task_by_id(case["user"]).PROMPT
                         row["stage"] = "root_drafting"
-                        try:
-                            program_text, meta = drafter.draft(official, prompt, goal=case.get("goal"))
-                        except RuntimeError:
-                            row["outcome"] = "author_failed"
-                            raise
-                        audit.emit("root_drafted", episode=index, program_text=program_text, **meta)
-                        try:
-                            drafted = register_drafted(review_program(suite=case["suite"],
-                                suite_tools={t.name for t in official.tools}, task_id=case["user"], prompt=prompt,
-                                program=parse_program_text(program_text)))
-                        except ProgramRefused as error:
-                            audit.emit("program_refused", episode=index, reason=str(error))
-                            row.update(outcome="program_refused", refusal=str(error))
-                            raise
+                        # Review-feedback retry: after a refusal the planner
+                        # sees only its own program and the fixed refusal code
+                        # (with the step/field of its own program); nothing is
+                        # signed or run until a draft passes the review.
+                        history = []
+                        for attempt in range(1, case["max_drafts"] + 1):
+                            row["drafts"] = attempt - 1
+                            try:
+                                program_text, meta = drafter.draft(official, prompt, goal=case.get("goal"),
+                                                                   history=tuple(history))
+                            except RuntimeError:
+                                row["outcome"] = "author_failed"
+                                raise
+                            row["drafts"] = attempt
+                            audit.emit("root_drafted", episode=index, attempt=attempt, program_text=program_text,
+                                       **meta)
+                            try:
+                                drafted = register_drafted(review_program(suite=case["suite"],
+                                    suite_tools={t.name for t in official.tools}, task_id=case["user"],
+                                    prompt=prompt, program=parse_program_text(program_text)))
+                            except ProgramRefused as error:
+                                audit.emit("program_refused", episode=index, attempt=attempt, reason=str(error),
+                                           step=error.step, field=error.field)
+                                if attempt == case["max_drafts"]:
+                                    row.update(outcome="program_refused", refusal=str(error))
+                                    raise
+                                history.append((program_text, str(error), error.step, error.field))
+                                continue
+                            break
                     suite, task, injection, contract, values, env = official_case(case, drafted)
                     before = env.model_copy(deep=True)
                     turn = digest32(deployment["application_turn"]).hex()

@@ -90,7 +90,12 @@ def review_policy():
 
 
 class ProgramRefused(ValueError):
-    """The owner's fixed review refused a drafted program; nothing is signed."""
+    """The owner's fixed review refused a drafted program; nothing is signed.
+
+    ``str(error)`` is the fixed rule code. ``step`` / ``field`` locate it in the
+    planner's own program (never data), so a retry can say where it failed."""
+    step = None
+    field = None
 
 
 def nfc(text):
@@ -306,7 +311,18 @@ def _origin(value):
 def review_program(*, suite, suite_tools, task_id, prompt, program):
     """The owner's fixed review of a planner program -> DraftedContract, or
     ProgramRefused. `suite_tools` are the official function names this
-    episode's suite serves."""
+    episode's suite serves. A refusal carries the step number and field name
+    (of the planner's own program) where it occurred."""
+    where = {"step": None, "field": None}
+    try:
+        return _review_program(where, suite=suite, suite_tools=suite_tools, task_id=task_id, prompt=prompt,
+                               program=program)
+    except ProgramRefused as error:
+        error.step, error.field = where["step"], where["field"]
+        raise
+
+
+def _review_program(where, *, suite, suite_tools, task_id, prompt, program):
     if type(program) is not dict or set(program) != {"steps"} or type(program["steps"]) is not list:
         _refuse("program_shape")
     raw_steps = program["steps"]
@@ -318,6 +334,7 @@ def review_program(*, suite, suite_tools, task_id, prompt, program):
     restated = set()
     chain, kinds = [], []
     for number, raw in enumerate(raw_steps, 1):
+        where["step"], where["field"] = number, None
         # Explanatory notes on a step are ignored, never used as values.
         if type(raw) is not dict or not {"tool", "args"} <= set(raw) <= {"tool", "args", "source"} | STEP_NOTES:
             _refuse("step_shape")
@@ -330,6 +347,7 @@ def review_program(*, suite, suite_tools, task_id, prompt, program):
             if (type(source) is not int or isinstance(source, bool) or not 1 <= source < number
                     or not {"target"} <= set(args) <= {"instruction", "target", "context"}):
                 _refuse("extract_shape")
+            where["field"] = "target"
             target = _origin(args["target"])
             if target[0] != "text":
                 _refuse("extract_target")
@@ -353,6 +371,7 @@ def review_program(*, suite, suite_tools, task_id, prompt, program):
             raw_contexts = ([] if raw_contexts is None else raw_contexts if type(raw_contexts) is list
                             else [raw_contexts])
             contexts = []
+            where["field"] = "context"
             for raw_context in raw_contexts:
                 context = _origin(raw_context)
                 if context[0] == "from" and context[1] == source and context[2] is None:
@@ -414,6 +433,7 @@ def review_program(*, suite, suite_tools, task_id, prompt, program):
                 return False
 
             for name, (role, kind) in sorted(fields.items()):
+                where["field"] = name
                 if kind == "fixed":
                     values[name] = SENTINELS[name]
                     continue
@@ -474,6 +494,7 @@ def review_program(*, suite, suite_tools, task_id, prompt, program):
                 derived.append((name, source, full, MAX_EDGE_BYTES) + (() if form is None else (form,)))
         kinds.append("extract" if tool == EXTRACT_TOOL else catalog_tool(tool)["effect"])
         chain.append(Step(tool, upstream_for(tool), tuple(sorted(values.items())), tuple(derived), payload_from))
+    where["step"], where["field"] = None, None
     contract = DraftedContract(suite, task_id, prompt, tuple(chain), canonical(program).decode("utf-8"),
                                tuple(sorted(restated)))
     if len(contract.constants()) > MAX_DECLARED or any(len(c.encode()) > 128 for c in contract.constants()):
