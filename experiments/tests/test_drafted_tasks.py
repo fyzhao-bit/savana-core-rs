@@ -68,7 +68,8 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(review("slack", "user_task_3", {"steps": [steps[0], injected, steps[2]]})
                          .steps()[1].value_map()["instruction"], " ".join(contract.prompt.split()))
         self.assertEqual(extract.value_map()["target"], "dojo.slack.send_channel.text")
-        self.assertEqual(post.value_map(), {"body": "", "calendar": "primary", "channel": "general"})
+        self.assertEqual(post.value_map(), {"body": "", "calendar": "primary", "channel": "general",
+                                            "when": "always"})
         self.assertEqual(post.derived, (("text", 2, GENERATED_TEXT, 512),))
         self.assertEqual(contract.document()["origin"], "owner_text")
         register_drafted(contract)
@@ -76,7 +77,7 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(document["schema"], 2)
         self.assertEqual(document["origin"], "owner_text")
         self.assertEqual(set(document["constants"]), {"primary", "private-result", "deepseek-flash",
-                                                      "dojo.slack.send_channel.text", "1"})
+                                                      "dojo.slack.send_channel.text", "1", "always"})
         self.assertEqual(extract.value_map()["source"], "1")
         # Every committed input is owner text or a declared constant.
         for row in owner_inputs(contract):

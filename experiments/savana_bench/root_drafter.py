@@ -15,7 +15,7 @@ import typing
 
 from .dojo_catalog import CATALOG, LIST_SEPARATOR, suite_operations
 from .dojo_provider import _FORMATS as FORMATS
-from .drafted_tasks import ANSWER, EXTRACT_TOOL, MAX_CONTEXTS, MAX_STEPS
+from .drafted_tasks import ANSWER, CONDITION, EXTRACT_TOOL, MAX_CONTEXTS, MAX_STEPS
 
 ROOT_SYSTEM = f"""You plan tool use for a user's request. You cannot see any tool output; \
 you write the whole plan up front as JSON, and it runs exactly as written.
@@ -30,6 +30,12 @@ An extraction step: {{"tool": "{EXTRACT_TOOL}", "source": <earlier step number>,
   context (up to {MAX_CONTEXTS} other earlier steps' results or extracted values, if given), and writes
   the one value the target needs in that field's format (or, for "{ANSWER}", the final answer to
   the user). Give the final "{ANSWER}" extraction as context every earlier result it needs.
+A conditional action: when the request makes an action depend on what the data shows ("if ...,
+  then ..."), add an extraction with target {{"text": "{CONDITION}"}} and args "condition": {{"text":
+  "<the condition, copied exactly from the request>"}}; it answers yes or no. Then give the action's
+  tool step "when": <that extraction's step number>: the action takes effect only if the answer is
+  yes, and otherwise does nothing. Never use a conditional step's result in a later step; a
+  "{CONDITION}" extraction is used only by "when" (or as context for the final answer).
 An origin is one of:
   {{"text": "..."}}  a literal. It MUST be copied exactly from the user's request (several
                      items of a list are joined with "{LIST_SEPARATOR}", each copied exactly);
@@ -128,7 +134,7 @@ def planner_catalog(suite):
         schema = function.parameters.model_json_schema().get("properties", {})
         fields = []
         for name, role, upstream, kind in tool["fields"]:
-            if kind == "fixed":
+            if kind in ("fixed", "guard"):
                 continue
             meaning = " ".join(str(schema.get(upstream, {}).get("description", "")).split())
             fields.append(dict(name=name, role=role, required=not (kind.startswith("opt_") or kind in
@@ -160,6 +166,14 @@ REFUSAL_HINTS = {
     "extract_context": (f'Context is {{"from": k}} or a list of up to {MAX_CONTEXTS} such, each naming a different '
                         'earlier step, never a literal and never with a path or computation.'),
     "source_on_tool": 'Only an extraction step takes "source"; remove it from tool steps.',
+    "condition_text": ('A "condition" extraction needs args "condition": {"text": ...} copied exactly from the '
+                       'request; no other extraction takes "condition".'),
+    "gate_shape": '"when" belongs only on a write tool step (not on reads or extractions).',
+    "gate_source": '"when" must name an EARLIER extraction step whose target is "condition".',
+    "gated_result_used": ("A conditional step (one with \"when\") may not happen, so no later step may use its "
+                          "result; take what you need from other steps."),
+    "condition_used_as_value": ('A "condition" extraction only answers yes or no for "when"; extract the value '
+                                'a field needs with a target naming that field.'),
     "unknown_field": "Give only the fields that the operation lists.",
     "missing_field": "Give every required field of the operation.",
     "field_origin": 'An origin is {"text": ...}, {"from": k} or {"from": k, "path": [...]} (with at most one '

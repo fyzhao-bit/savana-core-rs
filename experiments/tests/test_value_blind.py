@@ -171,7 +171,7 @@ REQUEST = "Reply to mark.black-2134@gmail.com about the meeting."
 class ExtractorViewTests(unittest.TestCase):
     def test_one_table_over_instruction_source_and_context(self):
         from savana_bench.value_blind import extractor_inputs
-        instruction, source, context, bindings = extractor_inputs(REQUEST, SOURCE, "", "strict")
+        instruction, source, _context, _question, bindings = extractor_inputs(REQUEST, SOURCE, "", "strict")
         self.assertEqual(instruction, "Reply to <EMAIL_1> about the meeting.")
         self.assertIn('"sender": "<EMAIL_1>"', source)
         self.assertIn("<DATE_1>T11:00:00", source)  # a date inside a timestamp stays a date
@@ -179,11 +179,11 @@ class ExtractorViewTests(unittest.TestCase):
         self.assertEqual(dict(bindings)["<EMAIL_1>"], "mark.black-2134@gmail.com")
         for text in (instruction, source):
             self.assertEqual(savana_core.pii_spans(text), [])
-        self.assertEqual(extractor_inputs(REQUEST, SOURCE, "", "raw"), (REQUEST, SOURCE, "", ()))
+        self.assertEqual(extractor_inputs(REQUEST, SOURCE, "", "raw"), (REQUEST, SOURCE, "", "", ()))
 
     def test_quantities_stay_visible_and_contacts_do_not(self):
         from savana_bench.value_blind import extractor_inputs
-        _instruction, source, _context, bindings = extractor_inputs(REQUEST, SOURCE, "", "quantities")
+        _instruction, source, _context, _question, bindings = extractor_inputs(REQUEST, SOURCE, "", "quantities")
         self.assertIn("2024-05-19T11:00:00", source)
         self.assertIn("240.0 - 400.0", source)
         self.assertNotIn("mark.black", source)
@@ -203,8 +203,8 @@ class ExtractorViewTests(unittest.TestCase):
 
         tools = {t.name: t for t in get_suite("v1.2.2", "workspace").tools}
         arguments = dict(body=SOURCE, context="", context2="", context3="", context4="", context5="",
-                         instruction=REQUEST,
-                         model=GENERATOR_MODEL, source="1", target="answer", to=SENTINELS["to"])
+                         instruction=REQUEST, model=GENERATOR_MODEL, question="", source="1", target="answer",
+                         to=SENTINELS["to"])
         result = _extract_tool(generator, tools, "strict")(**arguments)
         self.assertEqual(result, {"text": "Write back to mark.black-2134@gmail.com before 2024-05-19."})
         self.assertNotIn("mark.black", sent[0].decode())
@@ -231,8 +231,8 @@ class ExtractorVerifierTests(unittest.TestCase):
         from savana_bench.dojo_catalog import SENTINELS
         from savana_bench.dojo_provider import extract_request
         arguments = dict(body=SOURCE, context="", context2="", context3="", context4="", context5="",
-                         instruction=REQUEST,
-                         model=GENERATOR_MODEL, source="1", target="answer", to=SENTINELS["to"])
+                         instruction=REQUEST, model=GENERATOR_MODEL, question="", source="1", target="answer",
+                         to=SENTINELS["to"])
         payload = json.dumps(dict(jsonrpc="2.0", id="x", method="tools/call",
                                   params=dict(name="dojo.model.extract", arguments=arguments))).encode()
         tools = {t.name: t for t in get_suite("v1.2.2", "workspace").tools}

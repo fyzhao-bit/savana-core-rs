@@ -100,7 +100,7 @@ class ReadToolCatalogTests(unittest.TestCase):
         self.assertEqual((xname, xupstream, xeffect), ("dojo.model.extract", "quarantined_extract", "send"))
         self.assertEqual(dict(xfields), dict(fields, target="parameter", context="parameter", context2="parameter",
                                              context3="parameter", context4="parameter", context5="parameter",
-                                             source="parameter"))
+                                             question="parameter", source="parameter"))
 
     def test_upstream_functions_are_the_reviewed_read_set(self):
         # Exactly the official AgentDojo workspace read functions we serve.

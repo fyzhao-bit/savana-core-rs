@@ -181,17 +181,18 @@ EXTRACT_NOTE = (" Some values in INSTRUCTION, SOURCE and CONTEXT are hidden as p
                 "hidden value, write its placeholder exactly; it is replaced by the real value afterwards.")
 
 
-def extractor_inputs(instruction, source, context, view):
-    """(instruction, source, context, bindings) as the quarantined extractor's
-    model is sent them: "raw" as given; "strict" with every leak-gate span of
-    all three masked by one placeholder table; "quantities" the same but with
-    dates, clock times and decimal quantities left visible (`keep_quantity`)."""
+def extractor_inputs(instruction, source, context, view, question=""):
+    """(instruction, source, context, question, bindings) as the quarantined
+    extractor's model is sent them: "raw" as given; "strict" with every
+    leak-gate span of all four masked by one placeholder table; "quantities"
+    the same but with dates, clock times and decimal quantities left visible
+    (`keep_quantity`). `question` is the owner's condition text, if any."""
     if view == "raw":
-        return instruction, source, context, ()
+        return instruction, source, context, question, ()
     if view not in EXTRACTOR_VIEWS:
         raise ValueError("extractor_view")
     masker = Masker(keep=keep_quantity if view == "quantities" else None)
-    masked = tuple(masker.mask(text) for text in (instruction, source, context))
+    masked = tuple(masker.mask(text) for text in (instruction, source, context, question))
     return (*masked, tuple(masker.bindings))
 
 

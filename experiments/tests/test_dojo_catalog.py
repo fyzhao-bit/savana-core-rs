@@ -11,7 +11,7 @@ ORIGINAL = ("dojo.calendar.search", "dojo.calendar.day", "dojo.email.search", "d
             "dojo.file.list", "dojo.file.search_name", "dojo.file.search", "dojo.file.append")
 SAMPLE = {"text": "x", "opt_text": "", "null_text": "", "list": ["a", "b"], "opt_list": [], "number": "12.5",
           "opt_number": "", "integer": "3", "opt_integer": "", "boolean": "false",
-          "opt_boolean": "", "permission": "r", "attachments": []}
+          "opt_boolean": "", "permission": "r", "attachments": [], "guard": "always"}
 
 
 def call(name, arguments, request_id):
@@ -50,7 +50,8 @@ class CatalogShapeTests(unittest.TestCase):
             for name, role, upstream, kind in tool["fields"]:
                 self.assertIn(role, ("resource", "destination", "payload", "parameter"))
                 self.assertTrue(kind == "fixed" or kind in KINDS)
-                self.assertEqual(kind == "fixed", upstream is None)
+                # Fixed controls and the condition gate are never forwarded.
+                self.assertEqual(kind in ("fixed", "guard"), upstream is None)
                 if kind == "fixed":
                     self.assertIn(name, SENTINELS)
             # Reads stay on the fixed synthetic controls; writes declare their

@@ -46,10 +46,14 @@ from .agentdojo_provider import canonical
 from .agentdojo_tasks import (BENCHMARK, CALENDAR_YEAR, GENERATED_ITEMS, GENERATED_MAX_BYTES, GENERATED_TEXT,
                               GENERATOR_MODEL, LIST, PACKAGE_VERSION, Step, catalog_tool, edge_document,
                               upstream_for)
-from .dojo_catalog import LIST_KINDS, LIST_SEPARATOR, SENTINELS, decode_argument, entry, suite_operations
+from .dojo_catalog import (GUARD_ALWAYS, GUARD_FIELD, LIST_KINDS, LIST_SEPARATOR, SENTINELS, decode_argument, entry,
+                           suite_operations)
 
 EXTRACT_TOOL = "dojo.model.extract"
 ANSWER = "answer"
+# An extraction that answers yes or no to a condition the owner's request
+# states; its only use is a later write's `when` gate.
+CONDITION = "condition"
 MAX_STEPS = 12
 RESULT_PREFIX = ("result", "content", "0", "text", "$json")
 # A tool result's whole text, as an extraction's context (a second source).
@@ -88,7 +92,9 @@ def review_policy():
             "list_fields": "typed items; each literal item owner text", "computations": sorted(COMPUTE_KEYS),
             "compute_amounts": "magnitude stated in the request",
             "calendar_year": CALENDAR_YEAR, "max_declared": MAX_DECLARED,
-            "extract_instruction": "the whole request"}
+            "extract_instruction": "the whole request",
+            "conditions": "a write may be gated by a yes/no extraction of owner-text condition; "
+                          "a gated step's result is never used"}
 
 
 class ProgramRefused(ValueError):
@@ -214,11 +220,13 @@ def owner_amounts(prompt):
 
 def extract_targets():
     """Every label an extraction step may name: a non-fixed field of a reviewed
-    operation, or the owner's final answer. Labels are inert vocabulary."""
+    operation, the owner's final answer, or a yes/no condition. Labels are
+    inert vocabulary."""
     from .dojo_catalog import CATALOG
-    labels = [ANSWER]
+    labels = [ANSWER, CONDITION]
     for tool in CATALOG:
-        labels += [f"{tool['operation']}.{name}" for name, _r, _u, kind in tool["fields"] if kind != "fixed"]
+        labels += [f"{tool['operation']}.{name}" for name, _r, _u, kind in tool["fields"]
+                   if kind not in ("fixed", "guard")]
     return tuple(labels)
 
 
@@ -249,6 +257,8 @@ class DraftedContract:
         for step in self.chain:
             if step.tool == EXTRACT_TOOL:
                 values |= {step.value_map()[k] for k in ("model", "target", "source")}
+            elif step.value_map().get(GUARD_FIELD) == GUARD_ALWAYS:
+                values.add(GUARD_ALWAYS)
         return sorted(values)
 
     def document(self):
@@ -344,10 +354,17 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
     restatable = owner_normalized(prompt)
     restated = set()
     chain, kinds = [], []
+    gated = set()  # steps whose effect a condition decides: their result is never used
+
+    def usable(source):
+        """An earlier step another may draw on: not a gated one."""
+        if source in gated:
+            _refuse("gated_result_used")
+        return source
     for number, raw in enumerate(raw_steps, 1):
         where["step"], where["field"] = number, None
         # Explanatory notes on a step are ignored, never used as values.
-        if type(raw) is not dict or not {"tool", "args"} <= set(raw) <= {"tool", "args", "source"} | STEP_NOTES:
+        if type(raw) is not dict or not {"tool", "args"} <= set(raw) <= {"tool", "args", "source", "when"} | STEP_NOTES:
             _refuse("step_shape")
         tool, args = raw["tool"], raw["args"]
         if tool not in served or type(args) is not dict:
@@ -356,8 +373,10 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
         if tool == EXTRACT_TOOL:
             source = raw.get("source")
             if (type(source) is not int or isinstance(source, bool) or not 1 <= source < number
-                    or not {"target"} <= set(args) <= {"instruction", "target", "context"}):
+                    or not {"target"} <= set(args) <= {"instruction", "target", "context", "condition"}
+                    or "when" in raw):
                 _refuse("extract_shape")
+            usable(source)
             where["field"] = "target"
             target = _origin(args["target"])
             if target[0] != "text":
@@ -371,10 +390,21 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                     _refuse("extract_target")
                 label = matches[0]
             target = ("text", label)
+            # A condition target carries the condition, copied from the
+            # owner's request; any other target carries none.
+            where["field"] = "condition"
+            question = ""
+            if label == CONDITION:
+                condition = _origin(args.get("condition"))
+                if condition[0] != "text" or not condition[1] or not owner_text(condition[1], prompt):
+                    _refuse("condition_text")
+                question = condition[1]
+            elif "condition" in args:
+                _refuse("condition_text")
             # The extractor's instruction is always the owner's whole request;
             # whatever the planner wrote there is not used.
             values = {"instruction": folded(prompt), "target": target[1], "model": extractor_model,
-                      "to": SENTINELS["to"], "source": str(source)}
+                      "to": SENTINELS["to"], "source": str(source), "question": question}
             payload_from = source
             # Up to MAX_CONTEXTS other earlier steps as context, one signed edge
             # each, so one answer can combine several results.
@@ -394,7 +424,7 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                 if (context[0] != "from" or context[2] is not None or context[3] is not None
                         or not 1 <= context[1] < number or context[1] in contexts):
                     _refuse("extract_context")
-                contexts.append(context[1])
+                contexts.append(usable(context[1]))
             if len(contexts) > MAX_CONTEXTS:
                 _refuse("extract_context")
             for field, earlier in zip(CONTEXT_FIELDS, contexts + [None] * MAX_CONTEXTS):
@@ -414,7 +444,7 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                 _refuse("source_on_tool")
             reading = catalog_tool(tool)["effect"] == "read"
             fields = {name: (role, kind) for name, role, _u, kind in entry(tool)["fields"]}
-            open_fields = {n for n, (_r, k) in fields.items() if k != "fixed"}
+            open_fields = {n for n, (_r, k) in fields.items() if k not in ("fixed", "guard")}
             if set(args) - open_fields:
                 _refuse("unknown_field")
             def decodable(value):
@@ -443,10 +473,27 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                     return True
                 return False
 
+            if "when" in raw and GUARD_FIELD not in fields:
+                where["field"] = "when"
+                _refuse("gate_shape")
             for name, (role, kind) in sorted(fields.items()):
                 where["field"] = name
                 if kind == "fixed":
                     values[name] = SENTINELS[name]
+                    continue
+                if kind == "guard":
+                    # The owner's condition gate: always, or a signed edge from
+                    # an earlier yes/no extraction of an owner-text condition.
+                    gate = raw.get("when")
+                    if gate is None:
+                        values[name] = GUARD_ALWAYS
+                        continue
+                    if (type(gate) is not int or isinstance(gate, bool) or not 1 <= gate < number
+                            or kinds[gate - 1] != "extract"
+                            or chain[gate - 1].value_map()["target"] != CONDITION):
+                        _refuse("gate_source")
+                    derived.append((name, gate, GENERATED_TEXT, MAX_EDGE_BYTES))
+                    gated.add(number)
                     continue
                 listed = kind in LIST_KINDS
                 if name not in args:
@@ -485,6 +532,7 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                 _kind, source, path, compute = origin
                 if not 1 <= source < number:
                     _refuse("edge_source")
+                usable(source)
                 if compute is not None:
                     # Only one text is computed, by an amount the request states.
                     if listed or abs(compute[1]) not in owner_amounts(prompt)[compute[0]]:
@@ -496,6 +544,9 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                         # The final answer is unbounded prose; a value a later
                         # field uses comes from an extraction for that field.
                         _refuse("answer_used_as_value")
+                    if chain[source - 1].value_map()["target"] == CONDITION:
+                        # A yes/no answer only ever gates a write.
+                        _refuse("condition_used_as_value")
                     full = GENERATED_ITEMS if listed else GENERATED_TEXT
                 else:
                     if path is None:

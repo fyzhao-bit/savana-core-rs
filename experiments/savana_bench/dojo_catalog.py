@@ -33,6 +33,16 @@ the recipients, channel, user, URL or account a write discloses to or acts on.
 
 The eight tools of the original workspace catalog keep their exact names and
 fields; everything else is added beside them.
+
+Every other write carries one more field, `when` (kind `guard`): the owner's
+condition gate. It is the owner constant GUARD_ALWAYS, or an owner-signed edge
+from an extraction that answered yes or no to a condition the owner's request
+states. The adapter performs the official call only when the gate is
+GUARD_ALWAYS or exactly "yes" (case and final punctuation aside); otherwise it
+does nothing and says so. The kernel binds the gate like every other field, so
+a condition can only decide WHETHER an owner-signed effect happens, never what
+it does or whom it reaches. The gate is never forwarded to the official
+function.
 """
 import re
 
@@ -40,6 +50,9 @@ SENTINELS = {"body": "", "calendar": "primary", "to": "private-result"}
 READ_SYNTHETIC = (("body", "payload"), ("calendar", "resource"), ("to", "destination"))
 LIST_SEPARATOR = "; "
 LIST_KINDS = frozenset({"list", "opt_list", "attachments"})
+GUARD_ALWAYS = "always"
+GUARD_FIELD = "when"
+SKIPPED = "Skipped: the owner's condition for this action does not hold."
 SUITES = ("workspace", "banking", "slack", "travel")
 # The official AgentDojo v1.2.2 functions of each suite (pinned against the
 # installed package by a test). A deployment serves exactly one suite, so the
@@ -75,7 +88,7 @@ SUITE_TOOLS = {
 # kind -> (official argument may be omitted when the text is empty)
 KINDS = {"text": False, "opt_text": True, "null_text": False, "list": False, "opt_list": True, "number": False,
          "opt_number": True, "integer": False, "opt_integer": True, "boolean": False,
-         "opt_boolean": True, "permission": False, "attachments": True}
+         "opt_boolean": True, "permission": False, "attachments": True, "guard": False}
 
 
 def _read(operation, upstream, *params):
@@ -85,11 +98,16 @@ def _read(operation, upstream, *params):
     return dict(operation=operation, upstream=upstream, effect="read", fields=tuple(fields))
 
 
-def _write(operation, upstream, effect, *fields):
+def _write(operation, upstream, effect, *fields, guarded=True):
     """A write tool: (adapter name, role, upstream name or None, kind). Missing
     resource/destination/payload roles are filled with the fixed synthetic
-    fields; an upstream argument named like a synthetic field is renamed."""
+    fields; an upstream argument named like a synthetic field is renamed. A
+    guarded write (all but the original catalog's) adds the `when` gate."""
     fields = list(fields)
+    if guarded:
+        if any(f[0] == GUARD_FIELD for f in fields):
+            raise ValueError("guard_field_collision")
+        fields.append((GUARD_FIELD, "parameter", None, "guard"))
     for name, role in READ_SYNTHETIC:
         if not any(f[1] == role for f in fields):
             if any(f[0] == name for f in fields):
@@ -109,7 +127,7 @@ CATALOG = (
     _read("dojo.file.search_name", "search_files_by_filename", ("filename", "text")),
     _read("dojo.file.search", "search_files", ("query", "text")),
     _write("dojo.file.append", "append_to_file", "update",
-           ("content", P, "content", "text"), ("file_id", "resource", "file_id", "text")),
+           ("content", P, "content", "text"), ("file_id", "resource", "file_id", "text"), guarded=False),
     # --- workspace reads ---
     _read("dojo.calendar.search_any", "search_calendar_events", ("query", "text")),
     _read("dojo.calendar.today", "get_current_day"),
@@ -265,7 +283,18 @@ def decode_argument(kind, text):
         if text not in ("r", "rw"):
             raise ValueError("adapter_permission")
         return text
+    if kind == "guard":
+        return OMIT  # decides whether the call happens; never an argument
     raise ValueError("adapter_argument")
+
+
+def guard_holds(text):
+    """Whether a `when` gate lets the write happen: the owner constant, or an
+    answer that is exactly yes (case, surrounding space and one final mark
+    aside). Anything else, including an unexpected answer, means no."""
+    if text == GUARD_ALWAYS:
+        return True
+    return type(text) is str and text.strip().rstrip(".!").strip().lower() == "yes"
 
 
 class _Omit:
