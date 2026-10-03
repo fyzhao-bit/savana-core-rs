@@ -81,23 +81,26 @@ def _kind(cls, value):
 
 
 def _units(text):
-    """The leak gate's spans in `text`, each widened to the whole word it lies
-    in (a match inside an account number masks the whole number) and trimmed
-    of edge punctuation, overlapping ones merged (the stronger class wins)."""
+    """The leak gate's spans in `text`, a span that is one alphanumeric run
+    widened to the whole word it lies in (a match inside an account number
+    masks the whole number; a date inside "2024-05-15T10:00" stays a date),
+    trimmed of edge punctuation, overlapping ones merged (the stronger class
+    wins)."""
     widened = []
     for start, end, cls in _spans(text):
         if not 0 <= start < end <= len(text) or cls not in CLASSES:
             raise MaskError("mask_span")
-        while start > 0 and text[start - 1].isalnum():
-            start -= 1
-        while end < len(text) and text[end].isalnum():
-            end += 1
         while start < end and text[start] in _EDGE:
             start += 1
         while end > start and text[end - 1] in _EDGE:
             end -= 1
         if start == end:
             raise MaskError("mask_span")
+        if text[start:end].isalnum():
+            while start > 0 and text[start - 1].isalnum():
+                start -= 1
+            while end < len(text) and text[end].isalnum():
+                end += 1
         widened.append((start, end, cls))
     units = []
     for start, end, cls in sorted(widened):
@@ -109,39 +112,87 @@ def _units(text):
     return units
 
 
+def keep_quantity(cls, value):
+    """A date, a clock time or a decimal quantity (no letter, no "@"): the
+    leak gate's telephone rules match these too, and an extractor that cannot
+    see them cannot compare dates or prices. Kept visible by the `quantities`
+    extractor view only."""
+    if cls != "personal_data" or "@" in value or re.search(r"[A-Za-z]", value):
+        return False
+    return bool(re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value)) or ":" in value or "." in value
+
+
+class Masker:
+    """One placeholder table over several texts (equal values share one
+    placeholder, numbered per kind in order of first appearance), so the
+    masked texts are a pure function of the texts and their order. `keep`
+    names leak-gate spans left visible; every other span is masked."""
+
+    def __init__(self, keep=None):
+        self._keep = keep
+        self._counters, self._by_value, self.bindings = {}, {}, []
+
+    def mask(self, text):
+        """`text` with every span replaced, repeated until the same definition
+        finds no span left but kept ones. Fails closed if the text already
+        contains placeholder syntax (a binding would be ambiguous), if a later
+        span touches a placeholder, or if spans remain after MAX_PASSES."""
+        if type(text) is not str:
+            raise MaskError("mask_input")
+        if PLACEHOLDER.search(text):
+            raise MaskError("mask_placeholder_collision")
+        for _pass in range(MAX_PASSES):
+            units = [u for u in _units(text) if not (self._keep and self._keep(u[2], text[u[0]:u[1]]))]
+            if not units:
+                return text
+            placed = [m.span() for m in PLACEHOLDER.finditer(text)]
+            parts, at = [], 0
+            for start, end, cls in units:
+                if any(start < b and a < end for a, b in placed):
+                    raise MaskError("mask_overlap")
+                parts += [text[at:start], self._placeholder(cls, text[start:end])]
+                at = end
+            parts.append(text[at:])
+            text = "".join(parts)
+        raise MaskError("mask_residual")
+
+    def _placeholder(self, cls, value):
+        kind = _kind(cls, value)
+        placeholder = self._by_value.get((kind, value))
+        if placeholder is None:
+            self._counters[kind] = self._counters.get(kind, 0) + 1
+            placeholder = f"<{kind}_{self._counters[kind]}>"
+            self._by_value[(kind, value)] = placeholder
+            self.bindings.append((placeholder, value))
+        return placeholder
+
+
 def mask_request(prompt):
-    """The owner's request with every leak-gate span replaced by a typed
-    placeholder, repeated until the same definition finds no span in the
-    masked text. Fails closed if the request already contains placeholder
-    syntax (a binding would be ambiguous), if a later span touches a
-    placeholder, or if spans remain after MAX_PASSES."""
-    if type(prompt) is not str:
-        raise MaskError("mask_input")
-    if PLACEHOLDER.search(prompt):
-        raise MaskError("mask_placeholder_collision")
-    counters, by_value, bindings, text = {}, {}, [], prompt
-    for _pass in range(MAX_PASSES):
-        units = _units(text)
-        if not units:
-            return MaskedRequest(text, tuple(bindings))
-        placed = [m.span() for m in PLACEHOLDER.finditer(text)]
-        parts, at = [], 0
-        for start, end, cls in units:
-            if any(start < b and a < end for a, b in placed):
-                raise MaskError("mask_overlap")
-            value = text[start:end]
-            kind = _kind(cls, value)
-            placeholder = by_value.get((kind, value))
-            if placeholder is None:
-                counters[kind] = counters.get(kind, 0) + 1
-                placeholder = f"<{kind}_{counters[kind]}>"
-                by_value[(kind, value)] = placeholder
-                bindings.append((placeholder, value))
-            parts += [text[at:start], placeholder]
-            at = end
-        parts.append(text[at:])
-        text = "".join(parts)
-    raise MaskError("mask_residual")
+    """The owner's request as the value-blind planner sees it."""
+    masker = Masker()
+    text = masker.mask(prompt)
+    return MaskedRequest(text, tuple(masker.bindings))
+
+
+EXTRACTOR_VIEWS = ("raw", "strict", "quantities")
+# Told to the extractor only when its input actually carries a placeholder.
+EXTRACT_NOTE = (" Some values in INSTRUCTION, SOURCE and CONTEXT are hidden as placeholders such as <EMAIL_1>; "
+                "equal values share one placeholder. Where the value you must produce is, or contains, such a "
+                "hidden value, write its placeholder exactly; it is replaced by the real value afterwards.")
+
+
+def extractor_inputs(instruction, source, context, view):
+    """(instruction, source, context, bindings) as the quarantined extractor's
+    model is sent them: "raw" as given; "strict" with every leak-gate span of
+    all three masked by one placeholder table; "quantities" the same but with
+    dates, clock times and decimal quantities left visible (`keep_quantity`)."""
+    if view == "raw":
+        return instruction, source, context, ()
+    if view not in EXTRACTOR_VIEWS:
+        raise ValueError("extractor_view")
+    masker = Masker(keep=keep_quantity if view == "quantities" else None)
+    masked = tuple(masker.mask(text) for text in (instruction, source, context))
+    return (*masked, tuple(masker.bindings))
 
 
 def planner_request(prompt, view):

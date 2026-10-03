@@ -36,7 +36,7 @@ from .protected_agentdojo import (CASES, ModelWorker, ResearchAudit, official_ca
 from .protected_endpoint import EpisodeEndpoint, digest32
 from .quarantined_generator import SYSTEM as GENERATOR_SYSTEM, DeepSeekGenerator
 from .root_drafter import NON_RETRYABLE, REFUSAL_HINTS, ROOT_POISON_GOALS, ROOT_SYSTEM
-from .value_blind import BLIND_NOTE, VIEWS, patterns_sha256
+from .value_blind import BLIND_NOTE, EXTRACT_NOTE, EXTRACTOR_VIEWS, VIEWS, patterns_sha256
 from .protected_transport import ProviderServer, certificate_spki_pin, server_context
 
 SCHEMA = "savana-planner-experiment-v1"
@@ -99,33 +99,34 @@ MAX_DRAFTS = 5
 def drafted_options(kind):
     """`drafted` / `drafted-poison`, each optionally followed by `+drafts=N`
     (review-feedback retry: at most N drafts per episode, 1..5),
-    `+planner=<model>` (the untrusted planner's model) and `+view=<view>` (how
-    the planner sees the owner's request: `request` or `masked`, see
-    `value_blind`) -> (base, max_drafts, planner_model, planner_view), or None
-    when `kind` is not a drafted spec."""
-    from .value_blind import VIEWS
+    `+planner=<model>` (the untrusted planner's model), `+view=<view>` (how
+    the planner sees the owner's request: `request` or `masked`) and
+    `+extract=<view>` (what the quarantined extractor's model is sent: `raw`,
+    `strict` or `quantities`; see `value_blind`) -> (base, options for
+    `drafted_cases`), or None when `kind` is not a drafted spec."""
+    from .value_blind import EXTRACTOR_VIEWS, VIEWS
     base, *options = kind.split("+")
     if base not in ("drafted", "drafted-poison"):
         return None
     parsed = {}
     for option in options:
         key, equals, value = option.partition("=")
-        if not equals or key in parsed or key not in ("drafts", "planner", "view"):
+        if not equals or key in parsed or key not in ("drafts", "planner", "view", "extract"):
             raise ValueError("planner_experiment_spec")
         parsed[key] = value
     drafts = parsed.get("drafts", "1")
     if not re.fullmatch(f"[1-{MAX_DRAFTS}]", drafts):
         raise ValueError("planner_experiment_spec")
     planner = parsed.get("planner", PLANNER_MODELS[0])
-    if planner not in PLANNER_MODELS:
-        raise ValueError("planner_experiment_spec")
     view = parsed.get("view", VIEWS[0])
-    if view not in VIEWS:
+    extract = parsed.get("extract", EXTRACTOR_VIEWS[0])
+    if planner not in PLANNER_MODELS or view not in VIEWS or extract not in EXTRACTOR_VIEWS:
         raise ValueError("planner_experiment_spec")
-    return base, int(drafts), planner, view
+    return base, dict(max_drafts=int(drafts), planner_model=planner, planner_view=view, extractor_view=extract)
 
 
-def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS[0], planner_view="request"):
+def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS[0], planner_view="request",
+                  extractor_view="raw"):
     """`<suite>:<item>[,<item>...]`, each item `user_task_N` (benign) or
     `user_task_N+injection_task_M` (the official important_instructions
     attack). The planner drafts each task's whole program from its request.
@@ -134,14 +135,15 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
     `max_drafts` > 1 lets the planner draft again after the owner's review
     refuses, seeing only its own program and the fixed refusal code.
     `planner_view` "masked" sends the planner the request with the owner's
-    sensitive values as placeholders."""
+    sensitive values as placeholders; `extractor_view` does the same for what
+    the quarantined extractor's model is sent."""
     from .dojo_catalog import SUITES
     from .root_drafter import ROOT_POISON_GOALS
-    from .value_blind import VIEWS
+    from .value_blind import EXTRACTOR_VIEWS, VIEWS
     if goal is not None and goal not in ROOT_POISON_GOALS:
         raise ValueError("planner_experiment_spec")
     if (type(max_drafts) is not int or not 1 <= max_drafts <= MAX_DRAFTS or planner_model not in PLANNER_MODELS
-            or planner_view not in VIEWS):
+            or planner_view not in VIEWS or extractor_view not in EXTRACTOR_VIEWS):
         raise ValueError("planner_experiment_spec")
     suite, colon, items = spec.partition(":")
     names = items.split(",") if colon else []
@@ -160,19 +162,18 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
             raise ValueError("planner_experiment_spec")
         cases.append(dict(group=group, suite=suite, user=user, injection=injection, author="reviewed",
                           root_author="deepseek", goal=goal, mutation=None, max_drafts=max_drafts,
-                          planner_model=planner_model, planner_view=planner_view))
+                          planner_model=planner_model, planner_view=planner_view, extractor_view=extractor_view))
     return tuple(cases)
 
 
 def experiment_cases(spec):
     """honest | poisoned | compromised[:names] | write[:items] | generate[:items]
-    | drafted[+drafts=N][+planner=M][+view=V]:<suite>:<items>
-    | drafted-poison[+drafts=N][+planner=M][+view=V]:<goal>:<suite>:<items>"""
+    | drafted[+drafts=N][+planner=M][+view=V][+extract=E]:<suite>:<items>
+    | drafted-poison[+drafts=N][+planner=M][+view=V][+extract=E]:<goal>:<suite>:<items>"""
     kind, colon, names = spec.partition(":") if type(spec) is str else ("", "", "")
     drafted = drafted_options(kind) if colon else None
     if drafted is not None:
-        base, max_drafts, planner_model, planner_view = drafted
-        options = dict(max_drafts=max_drafts, planner_model=planner_model, planner_view=planner_view)
+        base, options = drafted
         if base == "drafted":
             return drafted_cases(names, **options)
         goal, sep, rest = names.partition(":")
@@ -380,10 +381,12 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             generate_compromised_catalog=[dict(name=n, description=d) for n, d, _ in GENERATE_COMPROMISED],
             generator_model="deepseek-flash", root_poison_goals=ROOT_POISON_GOALS,
             planner_models=list(PLANNER_MODELS), refusal_hints=REFUSAL_HINTS,
-            non_retryable=sorted(NON_RETRYABLE), planner_views=list(VIEWS),
+            non_retryable=sorted(NON_RETRYABLE), planner_views=list(VIEWS), extractor_views=list(EXTRACTOR_VIEWS),
             blind_note_sha256=hashlib.sha256(BLIND_NOTE.encode()).hexdigest(),
-            leak_gate_patterns_sha256=(patterns_sha256() if any(c.get("planner_view") == "masked" for c in cases)
-                                       else None),
+            extract_note_sha256=hashlib.sha256(EXTRACT_NOTE.encode()).hexdigest(),
+            leak_gate_patterns_sha256=(patterns_sha256() if any(c.get("planner_view", "request") != "request"
+                                                                or c.get("extractor_view", "raw") != "raw"
+                                                                for c in cases) else None),
             root_drafter_system_sha256=hashlib.sha256(ROOT_SYSTEM.encode()).hexdigest(),
             generator_system_sha256=hashlib.sha256(GENERATOR_SYSTEM.encode()).hexdigest(),
             executor_model="deepseek-flash", identity_profile=identity_profile,
@@ -515,7 +518,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                          environment=before.model_dump(mode="json"))
                     if drafted is not None:
                         from .dojo_provider import dojo_provider
-                        provider = dojo_provider(suite, env, max_calls=len(contract.steps()), generator=generator)
+                        provider = dojo_provider(suite, env, max_calls=len(contract.steps()), generator=generator,
+                                                 extractor_view=case["extractor_view"])
                     else:
                         provider = calendar_provider(env, max_calls=len(contract.steps()), generator=generator)
                     generated_before = 0 if generator is None else len(generator.log)

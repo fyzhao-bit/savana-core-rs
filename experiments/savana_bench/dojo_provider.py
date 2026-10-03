@@ -84,10 +84,34 @@ def target_description(target, functions):
             f"Format: {_FORMATS[kind]}.", FIELD_BYTES)
 
 
-def _extract_tool(generator, functions):
+def extract_request(arguments, functions, view):
+    """(the exact body the extractor's model is sent, the placeholder
+    bindings, the byte bound) for one `dojo.model.extract` call's kernel
+    arguments under an extractor view (`value_blind.extractor_inputs`). Pure,
+    so the offline verifier recomputes what left the host."""
+    from .quarantined_generator import generator_request_body
+    from .value_blind import EXTRACT_NOTE, extractor_inputs
+    description, max_bytes = target_description(arguments["target"], functions)
+    contexts = [arguments.get(c, "") for c in ("context", "context2", "context3")]
+    instruction, source, context, bindings = extractor_inputs(
+        arguments["instruction"], arguments["body"], "\n\n".join(c for c in contexts if c), view)
+    body = generator_request_body(model=arguments["model"], instruction=instruction, source=source,
+                                  target=description, max_bytes=max_bytes, context=context,
+                                  note=EXTRACT_NOTE if bindings else "")
+    return body, bindings, max_bytes
+
+
+def _extract_tool(generator, functions, view="raw"):
     """The reviewed `dojo.model.extract` adapter: the payload is the earlier
     result the kernel passed (data), the instruction is the owner's text, the
-    target an inert catalog label; model/destination controls are fixed."""
+    target an inert catalog label; model/destination controls are fixed.
+
+    Under a masked `view` this connector sends the model the instruction,
+    payload and context with the leak gate's spans as placeholders (one table
+    per call) and puts the values back into the model's reply. A value put
+    back is one of this call's own inputs, so the reply can carry nothing the
+    unmasked model could not have copied; it still reaches a later operation
+    only through an owner-signed edge, and the kernel bounds it there."""
     def extract(body: str, context: str, context2: str, context3: str, instruction: str, model: str,
                 source: str, target: str, to: str):
         """Quarantined extraction of one value from an untrusted source; no tools, no actions.
@@ -107,8 +131,15 @@ def _extract_tool(generator, functions):
             raise ValueError("generator_control_mismatch")
         description, max_bytes = target_description(target, functions)
         contexts = [c for c in (context, context2, context3) if c]
-        line = generator(instruction=instruction, source=body, target=description, max_bytes=max_bytes,
-                         context="\n\n".join(contexts))
+        from .value_blind import EXTRACT_NOTE, bind_text, extractor_inputs
+        sent_instruction, sent_source, sent_context, bindings = extractor_inputs(
+            instruction, body, "\n\n".join(contexts), view)
+        # The note is passed only with placeholders: a raw call is unchanged.
+        line = generator(instruction=sent_instruction, source=sent_source, target=description, max_bytes=max_bytes,
+                         context=sent_context, **(dict(note=EXTRACT_NOTE) if bindings else {}))
+        if bindings:
+            from .quarantined_generator import bounded_line
+            line = bounded_line(bind_text(line, bindings), max_bytes)
         if target_kind(target) not in LIST_KINDS:
             return {"text": line}
         # A list target: the same line, and its items split by the reviewed
@@ -120,7 +151,7 @@ def _extract_tool(generator, functions):
     return extract
 
 
-def dojo_provider(suite, environment, *, max_calls=1, generator=None):
+def dojo_provider(suite, environment, *, max_calls=1, generator=None, extractor_view="raw"):
     """The provider for one episode of `suite` (an AgentDojo TaskSuite).
 
     Only the original functions of that suite back an operation; an operation
@@ -145,5 +176,5 @@ def dojo_provider(suite, environment, *, max_calls=1, generator=None):
         functions.append(make_function(adapter))
     if generator is not None:
         functions.append(make_function(_generator_tool(generator)))
-        functions.append(make_function(_extract_tool(generator, tools)))
+        functions.append(make_function(_extract_tool(generator, tools, extractor_view)))
     return AgentDojoProvider(FunctionsRuntime(functions), environment, max_calls=max_calls)

@@ -151,6 +151,41 @@ def _drafted_contract(case, local, row):
     return register_drafted(contract)
 
 
+def _extractor_inputs(case, local):
+    """Under a masked extractor view, what left the host for the extractor's
+    model: every `dojo.model.extract` call's body is recomputed from the
+    arguments the kernel dispatched; none may carry a hidden value, and every
+    body the generator recorded as sent must be one of them, in order."""
+    view = case.get("extractor_view", "raw")
+    if view == "raw":
+        return
+    from agentdojo.task_suite.load_suites import get_suite
+    from .agentdojo_tasks import BENCHMARK
+    from .dojo_provider import extract_request
+    from .drafted_tasks import EXTRACT_TOOL
+    from .value_blind import MaskError
+    tools = {t.name: t for t in get_suite(BENCHMARK, case["suite"]).tools}
+    digests = []
+    for event in local:
+        if event["kind"] != "provider_attempt":
+            continue
+        params = json.loads(base64.b64decode(event["payload_base64"], validate=True)).get("params") or {}
+        if params.get("name") != EXTRACT_TOOL:
+            continue
+        try:
+            body, bindings, _bound = extract_request(params["arguments"], tools, view)
+        except MaskError:
+            continue  # the connector refused before sending anything
+        sent = [m["content"] for m in json.loads(body)["messages"]]
+        if any(value in text for _placeholder, value in bindings for text in sent):
+            raise ValueError("extractor_saw_hidden_value")
+        digests.append(hashlib.sha256(body).hexdigest())
+    logged = [c["request_sha256"] for e in local if e["kind"] == "generator_calls" for c in e["calls"]]
+    remaining = iter(digests)
+    if not all(digest in remaining for digest in logged):
+        raise ValueError("extractor_input_mismatch")
+
+
 def verify_episode(directory, local, case, row, profile, turns):
     drafted = None
     if case.get("root_author"):
@@ -230,6 +265,7 @@ def verify_episode(directory, local, case, row, profile, turns):
     if (row["provider_attempts"] != len(verdicts) or row["owner_releases"] != verdicts.count("owner_release")
             or row["unauthorized_provider_attempts"] != sum(v.startswith("unauthorized") for v in verdicts)):
         raise ValueError("provider_attempt_counts")
+    _extractor_inputs(case, local)
     if row["outcome"] == "published":
         utility, attacker = verify_published_episode(directory, local, case, dict(row, status="scored"), profile,
                                                      drafted)

@@ -75,6 +75,24 @@ def bounded_line(text, max_bytes=480):
     return line
 
 
+def generator_request_body(*, model, instruction, source, target=None, max_bytes=480, context="", note=""):
+    """The exact request body the generator's model is sent (pure, so a
+    verifier can recompute its digest from the tool call's arguments). `note`
+    is appended to the extractor's system text (the value-blind view)."""
+    if target is None:
+        system, user = SYSTEM, dict(INSTRUCTION=instruction, SOURCE=source)
+    else:
+        system, user = EXTRACT_SYSTEM + note, dict(INSTRUCTION=instruction, TARGET=target, SOURCE=source)
+        if context:
+            user["CONTEXT"] = context
+    return json.dumps(dict(model=model,
+        messages=[dict(role="system", content=system),
+                  dict(role="user", content=json.dumps(user, ensure_ascii=False))],
+        temperature=0, max_tokens=256 if max_bytes <= 480 else 1024,
+        thinking={"type": "disabled"}, stream=False),
+        ensure_ascii=False, allow_nan=False).encode()
+
+
 class DeepSeekGenerator:
     """Explicit in-memory credential; no retry, redirect, proxy or fallback."""
 
@@ -92,19 +110,9 @@ class DeepSeekGenerator:
     def close(self):
         self._key = ""
 
-    def __call__(self, *, instruction, source, target=None, max_bytes=480, context="", timeout=30.0):
-        if target is None:
-            system, user = SYSTEM, dict(INSTRUCTION=instruction, SOURCE=source)
-        else:
-            system, user = EXTRACT_SYSTEM, dict(INSTRUCTION=instruction, TARGET=target, SOURCE=source)
-            if context:
-                user["CONTEXT"] = context
-        body = json.dumps(dict(model=self._model,
-            messages=[dict(role="system", content=system),
-                      dict(role="user", content=json.dumps(user, ensure_ascii=False))],
-            temperature=0, max_tokens=256 if max_bytes <= 480 else 1024,
-            thinking={"type": "disabled"}, stream=False),
-            ensure_ascii=False, allow_nan=False).encode()
+    def __call__(self, *, instruction, source, target=None, max_bytes=480, context="", note="", timeout=30.0):
+        body = generator_request_body(model=self._model, instruction=instruction, source=source, target=target,
+                                      max_bytes=max_bytes, context=context, note=note)
         if not self._key or self.calls >= self._max_calls or self.input_bytes + len(body) > self._max_bytes:
             raise RuntimeError("generator_budget")
         self.calls += 1

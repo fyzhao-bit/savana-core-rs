@@ -13,7 +13,9 @@ Channels per drafted episode:
              feedback), sent by the harness directly, outside kernel mediation;
   extractor  each dojo.model.extract / dojo.model.generate call, dispatched by
              the kernel as an owner-approved SEND action: tool data (body and
-             contexts) plus the owner request as instruction;
+             contexts) plus the owner request as instruction, as the
+             extraction connector actually sent them (recomputed under the
+             case's extractor view, masked or raw);
   kernel     the kernel-mediated model view (released_model_view), which the
              kernel's G2 gate requires to carry no residual PII;
 and, for comparison, every official tool result of the episode (what an
@@ -81,14 +83,31 @@ def planner_inputs(events):
     return out
 
 
+def extractor_sent(arguments, suite, view):
+    """(data, instruction) the extractor's model was sent for one call."""
+    if view == "raw":
+        data = "\n\n".join(arguments.get(k, "") for k in ("body", "context", "context2", "context3")
+                           if arguments.get(k))
+        return data, arguments.get("instruction", "")
+    from agentdojo.task_suite.load_suites import get_suite
+    from savana_bench.dojo_provider import extract_request
+    body, _bindings, _bound = extract_request(arguments, {t.name: t for t in get_suite("v1.2.2", suite).tools},
+                                              view)
+    user = json.loads(json.loads(body)["messages"][1]["content"])
+    return "\n\n".join(user[k] for k in ("SOURCE", "CONTEXT") if user.get(k)), user["INSTRUCTION"]
+
+
 def collect(results, prefix):
     planner, extractor, tools = [], [], []
     views = collections.Counter()
     for _batch, events in verified_runs(results, prefix):
         planner += planner_inputs([json.loads(line) for line in open(events)])
+        cases = []
         for line in open(events):
             e = json.loads(line)
             kind = e.get("kind")
+            if kind == "manifest":
+                cases = e["cases"]
             if kind == "released_model_view":
                 views["views"] += 1
                 views["public_view_bytes"] += len(e.get("job", {}).get("public_view") or [])
@@ -98,9 +117,9 @@ def collect(results, prefix):
                 p = json.loads(base64.b64decode(e["payload_base64"]))
                 params = p.get("params") or {}
                 if params.get("name") in EXTRACT_TOOLS:
-                    a = params.get("arguments") or {}
-                    data = "\n\n".join(a.get(k, "") for k in ("body", "context", "context2", "context3") if a.get(k))
-                    extractor.append((data, a.get("instruction", "")))
+                    case = cases[e["episode"]]
+                    view = case.get("extractor_view", "raw") if params["name"] == "dojo.model.extract" else "raw"
+                    extractor.append(extractor_sent(params.get("arguments") or {}, case["suite"], view))
     return planner, extractor, tools, views
 
 
