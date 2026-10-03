@@ -58,6 +58,17 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(ungated.steps()[4].value_map()["when"], GUARD_ALWAYS)
         self.assertIn(GUARD_ALWAYS, ungated.constants())
 
+    def test_an_otherwise_branch_uses_the_negated_condition(self):
+        both = program()
+        both["steps"][3]["args"]["target"] = {"text": "condition_not"}
+        contract = review(both)
+        self.assertEqual(contract.steps()[3].value_map()["target"], "condition_not")
+        self.assertEqual(contract.steps()[4].derived, (("when", 4, GENERATED_TEXT, 512),))
+        from savana_bench.dojo_provider import target_description
+        description, _ = target_description("condition_not", {}, CONDITION)
+        self.assertIn("is FALSE", description)
+        self.assertIn(CONDITION, description)
+
     def test_what_a_gate_may_and_may_not_do(self):
         self.assertEqual(refusal(program(when=3)), "gate_source")  # not a condition extraction
         self.assertEqual(refusal(program(when=5)), "gate_source")  # not earlier

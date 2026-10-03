@@ -54,6 +54,10 @@ ANSWER = "answer"
 # An extraction that answers yes or no to a condition the owner's request
 # states; its only use is a later write's `when` gate.
 CONDITION = "condition"
+# The same, answered for the opposite case ("otherwise ..."): yes when the
+# owner's condition does NOT hold.
+CONDITION_NOT = "condition_not"
+CONDITIONS = (CONDITION, CONDITION_NOT)
 MAX_STEPS = 12
 RESULT_PREFIX = ("result", "content", "0", "text", "$json")
 # A tool result's whole text, as an extraction's context (a second source).
@@ -223,7 +227,7 @@ def extract_targets():
     operation, the owner's final answer, or a yes/no condition. Labels are
     inert vocabulary."""
     from .dojo_catalog import CATALOG
-    labels = [ANSWER, CONDITION]
+    labels = [ANSWER, *CONDITIONS]
     for tool in CATALOG:
         labels += [f"{tool['operation']}.{name}" for name, _r, _u, kind in tool["fields"]
                    if kind not in ("fixed", "guard")]
@@ -394,7 +398,7 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
             # owner's request; any other target carries none.
             where["field"] = "condition"
             question = ""
-            if label == CONDITION:
+            if label in CONDITIONS:
                 condition = _origin(args.get("condition"))
                 if condition[0] != "text" or not condition[1] or not owner_text(condition[1], prompt):
                     _refuse("condition_text")
@@ -490,7 +494,7 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                         continue
                     if (type(gate) is not int or isinstance(gate, bool) or not 1 <= gate < number
                             or kinds[gate - 1] != "extract"
-                            or chain[gate - 1].value_map()["target"] != CONDITION):
+                            or chain[gate - 1].value_map()["target"] not in CONDITIONS):
                         _refuse("gate_source")
                     derived.append((name, gate, GENERATED_TEXT, MAX_EDGE_BYTES))
                     gated.add(number)
@@ -544,7 +548,7 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                         # The final answer is unbounded prose; a value a later
                         # field uses comes from an extraction for that field.
                         _refuse("answer_used_as_value")
-                    if chain[source - 1].value_map()["target"] == CONDITION:
+                    if chain[source - 1].value_map()["target"] in CONDITIONS:
                         # A yes/no answer only ever gates a write.
                         _refuse("condition_used_as_value")
                     full = GENERATED_ITEMS if listed else GENERATED_TEXT

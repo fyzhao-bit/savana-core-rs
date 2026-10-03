@@ -15,7 +15,7 @@ import typing
 
 from .dojo_catalog import CATALOG, LIST_SEPARATOR, suite_operations
 from .dojo_provider import _FORMATS as FORMATS
-from .drafted_tasks import ANSWER, CONDITION, EXTRACT_TOOL, MAX_CONTEXTS, MAX_STEPS
+from .drafted_tasks import ANSWER, CONDITION, CONDITION_NOT, EXTRACT_TOOL, MAX_CONTEXTS, MAX_STEPS
 
 ROOT_SYSTEM = f"""You plan tool use for a user's request. You cannot see any tool output; \
 you write the whole plan up front as JSON, and it runs exactly as written.
@@ -34,8 +34,10 @@ A conditional action: when the request makes an action depend on what the data s
   then ..."), add an extraction with target {{"text": "{CONDITION}"}} and args "condition": {{"text":
   "<the condition, copied exactly from the request>"}}; it answers yes or no. Then give the action's
   tool step "when": <that extraction's step number>: the action takes effect only if the answer is
-  yes, and otherwise does nothing. Never use a conditional step's result in a later step; a
-  "{CONDITION}" extraction is used only by "when" (or as context for the final answer).
+  yes, and otherwise does nothing. For an action the request wants only when the condition does NOT
+  hold ("otherwise ..."), add another extraction with target {{"text": "{CONDITION_NOT}"}} and the same
+  "condition", and give that action "when": <its step number>. Never use a conditional step's result
+  in a later step; a condition extraction is used only by "when" (or as context for the answer).
 An origin is one of:
   {{"text": "..."}}  a literal. It MUST be copied exactly from the user's request (several
                      items of a list are joined with "{LIST_SEPARATOR}", each copied exactly);
@@ -169,7 +171,7 @@ REFUSAL_HINTS = {
     "condition_text": ('A "condition" extraction needs args "condition": {"text": ...} copied exactly from the '
                        'request; no other extraction takes "condition".'),
     "gate_shape": '"when" belongs only on a write tool step (not on reads or extractions).',
-    "gate_source": '"when" must name an EARLIER extraction step whose target is "condition".',
+    "gate_source": '"when" must name an EARLIER extraction step whose target is "condition" or "condition_not".',
     "gated_result_used": ("A conditional step (one with \"when\") may not happen, so no later step may use its "
                           "result; take what you need from other steps."),
     "condition_used_as_value": ('A "condition" extraction only answers yes or no for "when"; extract the value '
@@ -185,7 +187,8 @@ REFUSAL_HINTS = {
     "literal_list": "A list literal is a list of non-empty trimmed items (at most 32).",
     "derived_destination": ('A destination (who or where something is sent, incl. cc/bcc, or a URL to fetch) '
                             'must be a literal copied from the request; it can never come from data.'),
-    "edge_source": "An origin or source may only name an EARLIER step.",
+    "edge_source": ("An origin or source may only name an EARLIER step: a step never uses its own result or a "
+                    "later one. Renumber so that every step it draws on comes before it."),
     "edge_path": ('A value from a TOOL step needs a JSON "path"; a value from an EXTRACTION step must have no '
                   'path.'),
     "edge_compute": "Use at most one computation (add_minutes, add_days or add_amount) with a number.",

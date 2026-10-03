@@ -61,7 +61,7 @@ def _adapter_source(pyname, operation):
 
 def target_kind(target):
     """The reviewed kind of a field label ("answer" for the final answer)."""
-    if target in ("answer", "condition"):
+    if target in ("answer", "condition", "condition_not"):
         return target
     operation, _, name = target.rpartition(".")
     spec = next((f for f in entry(operation)["fields"] if f[0] == name and f[3] != "fixed"), None)
@@ -81,6 +81,9 @@ def target_description(target, functions, question=""):
     if target == "condition":
         return ("Whether this condition from the owner's request holds, judged only from SOURCE and CONTEXT: "
                 f"\"{question}\". Reply with exactly yes or no.", FIELD_BYTES)
+    if target == "condition_not":
+        return ("Whether this condition from the owner's request is FALSE, judged only from SOURCE and CONTEXT: "
+                f"\"{question}\". Reply with exactly yes (it is false) or no (it holds).", FIELD_BYTES)
     operation, _, name = target.rpartition(".")
     spec = next((f for f in entry(operation)["fields"] if f[0] == name and f[3] != "fixed"), None)
     if spec is None:
