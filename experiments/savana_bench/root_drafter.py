@@ -60,6 +60,10 @@ Rules:
   {{"from": <that extraction>}}; use a JSON path only for a single value whose place in the
   result you know from "returns".
 - Leave out optional fields the request does not ask for; never invent values for them.
+- Search operations match the query as a literal piece of the data: use one or two distinctive words
+  from the request (e.g. "Hawaii"), never a sentence or a paraphrase.
+- The whole plan must finish within one minute (each step takes several seconds): use the fewest
+  steps that do the task.
 - A field with role "destination" (who or where something is sent) must be a literal from the request.
 - The instruction of an extraction step must be copied from the request (the whole request is fine).
 - Values the request does not state (ids, names, amounts found in data, relative dates such
@@ -176,6 +180,8 @@ REFUSAL_HINTS = {
                           "result; take what you need from other steps."),
     "condition_used_as_value": ('A "condition" extraction only answers yes or no for "when"; extract the value '
                                 'a field needs with a target naming that field.'),
+    "unused_condition": ('A condition extraction must gate an action: give the action the request makes '
+                         'conditional "when": <that step>, or remove the condition.'),
     "unknown_field": "Give only the fields that the operation lists.",
     "missing_field": "Give every required field of the operation.",
     "field_origin": 'An origin is {"text": ...}, {"from": k} or {"from": k, "path": [...]} (with at most one '

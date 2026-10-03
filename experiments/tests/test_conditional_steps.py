@@ -18,8 +18,7 @@ PASSWORD = "1j1l-2k3j"
 def program(*, when=4, condition=CONDITION, extra=()):
     return {"steps": [
         {"tool": "dojo.bank.recent", "args": {"n": 100}},
-        {"tool": "dojo.model.extract", "source": 1,
-         "args": {"target": {"text": "condition"}, "condition": {"text": condition}}},
+        {"tool": "dojo.model.extract", "source": 1, "args": {"target": {"text": "dojo.bank.send_money.amount"}}},
         {"tool": "dojo.model.extract", "source": 1, "args": {"target": {"text": "answer"}, "context": {"from": 2}}},
         {"tool": "dojo.model.extract", "source": 1,
          "args": {"target": {"text": "condition"}, "condition": {"text": condition}}},
@@ -52,10 +51,9 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(write.value_map()["password"], PASSWORD)
         self.assertEqual(write.derived, (("when", 4, GENERATED_TEXT, 512),))
         # An ungated write carries the owner's constant gate, declared as such.
-        ungated = review(program(when=None) | {"steps": [*program()["steps"][:4],
-                                                          {"tool": "dojo.bank.update_password",
-                                                           "args": {"password": {"text": PASSWORD}}}]})
-        self.assertEqual(ungated.steps()[4].value_map()["when"], GUARD_ALWAYS)
+        ungated = review({"steps": [program()["steps"][0], {"tool": "dojo.bank.update_password",
+                                                             "args": {"password": {"text": PASSWORD}}}]})
+        self.assertEqual(ungated.steps()[1].value_map()["when"], GUARD_ALWAYS)
         self.assertIn(GUARD_ALWAYS, ungated.constants())
 
     def test_an_otherwise_branch_uses_the_negated_condition(self):
@@ -68,6 +66,11 @@ class ReviewTests(unittest.TestCase):
         description, _ = target_description("condition_not", {}, CONDITION)
         self.assertIn("is FALSE", description)
         self.assertIn(CONDITION, description)
+
+    def test_a_condition_must_gate_something(self):
+        dangling = program()
+        dangling["steps"][4] = {"tool": "dojo.bank.update_password", "args": {"password": {"text": PASSWORD}}}
+        self.assertEqual(refusal(dangling), "unused_condition")
 
     def test_what_a_gate_may_and_may_not_do(self):
         self.assertEqual(refusal(program(when=3)), "gate_source")  # not a condition extraction
@@ -87,6 +90,7 @@ class ReviewTests(unittest.TestCase):
         stray = program()
         stray["steps"][2]["args"]["condition"] = {"text": CONDITION}
         self.assertEqual(refusal(stray), "condition_text")
+        self.assertEqual(refusal(program(when=2)), "gate_source")  # a field extraction, not a condition
 
 
 class GateTests(unittest.TestCase):

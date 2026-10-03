@@ -58,7 +58,12 @@ CONDITION = "condition"
 # owner's condition does NOT hold.
 CONDITION_NOT = "condition_not"
 CONDITIONS = (CONDITION, CONDITION_NOT)
-MAX_STEPS = 12
+# The kernel's input runtime authorizes an owner request for 60 s
+# (savana-input-runtime: now + 60_000 ms); every step of a plan must finish
+# inside it. At about six seconds a step, eight steps fit and twelve do not
+# (G11 runs: longer plans stopped at ~64 s without publication), so the
+# limit stays at eight; the window itself is the owner's to change.
+MAX_STEPS = 8
 RESULT_PREFIX = ("result", "content", "0", "text", "$json")
 # A tool result's whole text, as an extraction's context (a second source).
 RESULT_TEXT = ("result", "content", "0", "text")
@@ -359,6 +364,7 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
     restated = set()
     chain, kinds = [], []
     gated = set()  # steps whose effect a condition decides: their result is never used
+    conditions, gates = set(), set()  # condition extractions, and those some gate uses
 
     def usable(source):
         """An earlier step another may draw on: not a gated one."""
@@ -405,6 +411,8 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                 question = condition[1]
             elif "condition" in args:
                 _refuse("condition_text")
+            if label in CONDITIONS:
+                conditions.add(number)
             # The extractor's instruction is always the owner's whole request;
             # whatever the planner wrote there is not used.
             values = {"instruction": folded(prompt), "target": target[1], "model": extractor_model,
@@ -498,6 +506,7 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                         _refuse("gate_source")
                     derived.append((name, gate, GENERATED_TEXT, MAX_EDGE_BYTES))
                     gated.add(number)
+                    gates.add(gate)
                     continue
                 listed = kind in LIST_KINDS
                 if name not in args:
@@ -560,6 +569,11 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                 derived.append((name, source, full, MAX_EDGE_BYTES) + (() if form is None else (form,)))
         kinds.append("extract" if tool == EXTRACT_TOOL else catalog_tool(tool)["effect"])
         chain.append(Step(tool, upstream_for(tool), tuple(sorted(values.items())), tuple(derived), payload_from))
+    for number in sorted(conditions - gates):
+        # A condition no action depends on decides nothing: the action the
+        # request makes conditional is missing its "when".
+        where["step"], where["field"] = number, "condition"
+        _refuse("unused_condition")
     where["step"], where["field"] = None, None
     contract = DraftedContract(suite, task_id, prompt, tuple(chain), canonical(program).decode("utf-8"),
                                tuple(sorted(restated)))
