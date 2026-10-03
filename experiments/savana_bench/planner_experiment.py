@@ -25,8 +25,8 @@ import threading
 import time
 
 from .agentdojo_provider import canonical
-from .agentdojo_tasks import (BENCHMARK, GENERATE_TASKS, PACKAGE_VERSION, SUITE, WRITE_TASKS, contract_by_id,
-                              prepare_draft)
+from .agentdojo_tasks import (BENCHMARK, GENERATE_TASKS, GENERATOR_MODEL, PACKAGE_VERSION, SUITE, WRITE_TASKS,
+                              contract_by_id, prepare_draft)
 from .official_agentdojo import INJECTIONS, TASKS
 from .planner_authors import (COMPROMISED, GENERATE_COMPROMISED, GENERATE_POISON_GOALS, POISON_GOALS, SYSTEM,
                               WRITE_COMPROMISED, WRITE_POISON_GOALS, PlanUnencodable, compromised_draft,
@@ -102,8 +102,10 @@ def drafted_options(kind):
     `+planner=<model>` (the untrusted planner's model), `+view=<view>` (how
     the planner sees the owner's request: `request` or `masked`) and
     `+extract=<view>` (what the quarantined extractor's model is sent: `raw`,
-    `strict` or `quantities`; see `value_blind`) -> (base, options for
+    `strict` or `quantities`; see `value_blind`) and `+extractor=<model>` (the
+    extractor's model, an owner-signed constant) -> (base, options for
     `drafted_cases`), or None when `kind` is not a drafted spec."""
+    from .drafted_tasks import EXTRACTOR_MODELS
     from .value_blind import EXTRACTOR_VIEWS, VIEWS
     base, *options = kind.split("+")
     if base not in ("drafted", "drafted-poison"):
@@ -111,7 +113,7 @@ def drafted_options(kind):
     parsed = {}
     for option in options:
         key, equals, value = option.partition("=")
-        if not equals or key in parsed or key not in ("drafts", "planner", "view", "extract"):
+        if not equals or key in parsed or key not in ("drafts", "planner", "view", "extract", "extractor"):
             raise ValueError("planner_experiment_spec")
         parsed[key] = value
     drafts = parsed.get("drafts", "1")
@@ -120,13 +122,16 @@ def drafted_options(kind):
     planner = parsed.get("planner", PLANNER_MODELS[0])
     view = parsed.get("view", VIEWS[0])
     extract = parsed.get("extract", EXTRACTOR_VIEWS[0])
-    if planner not in PLANNER_MODELS or view not in VIEWS or extract not in EXTRACTOR_VIEWS:
+    extractor = parsed.get("extractor", EXTRACTOR_MODELS[0])
+    if (planner not in PLANNER_MODELS or view not in VIEWS or extract not in EXTRACTOR_VIEWS
+            or extractor not in EXTRACTOR_MODELS):
         raise ValueError("planner_experiment_spec")
-    return base, dict(max_drafts=int(drafts), planner_model=planner, planner_view=view, extractor_view=extract)
+    return base, dict(max_drafts=int(drafts), planner_model=planner, planner_view=view, extractor_view=extract,
+                      extractor_model=extractor)
 
 
 def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS[0], planner_view="request",
-                  extractor_view="raw"):
+                  extractor_view="raw", extractor_model="deepseek-flash"):
     """`<suite>:<item>[,<item>...]`, each item `user_task_N` (benign) or
     `user_task_N+injection_task_M` (the official important_instructions
     attack). The planner drafts each task's whole program from its request.
@@ -138,12 +143,14 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
     sensitive values as placeholders; `extractor_view` does the same for what
     the quarantined extractor's model is sent."""
     from .dojo_catalog import SUITES
+    from .drafted_tasks import EXTRACTOR_MODELS
     from .root_drafter import ROOT_POISON_GOALS
     from .value_blind import EXTRACTOR_VIEWS, VIEWS
     if goal is not None and goal not in ROOT_POISON_GOALS:
         raise ValueError("planner_experiment_spec")
     if (type(max_drafts) is not int or not 1 <= max_drafts <= MAX_DRAFTS or planner_model not in PLANNER_MODELS
-            or planner_view not in VIEWS or extractor_view not in EXTRACTOR_VIEWS):
+            or planner_view not in VIEWS or extractor_view not in EXTRACTOR_VIEWS
+            or extractor_model not in EXTRACTOR_MODELS):
         raise ValueError("planner_experiment_spec")
     suite, colon, items = spec.partition(":")
     names = items.split(",") if colon else []
@@ -162,14 +169,15 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
             raise ValueError("planner_experiment_spec")
         cases.append(dict(group=group, suite=suite, user=user, injection=injection, author="reviewed",
                           root_author="deepseek", goal=goal, mutation=None, max_drafts=max_drafts,
-                          planner_model=planner_model, planner_view=planner_view, extractor_view=extractor_view))
+                          planner_model=planner_model, planner_view=planner_view, extractor_view=extractor_view,
+                          extractor_model=extractor_model))
     return tuple(cases)
 
 
 def experiment_cases(spec):
     """honest | poisoned | compromised[:names] | write[:items] | generate[:items]
-    | drafted[+drafts=N][+planner=M][+view=V][+extract=E]:<suite>:<items>
-    | drafted-poison[+drafts=N][+planner=M][+view=V][+extract=E]:<goal>:<suite>:<items>"""
+    | drafted[+drafts=N][+planner=M][+view=V][+extract=E][+extractor=X]:<suite>:<items>
+    | drafted-poison[+drafts=N][+planner=M][+view=V][+extract=E][+extractor=X]:<goal>:<suite>:<items>"""
     kind, colon, names = spec.partition(":") if type(spec) is str else ("", "", "")
     drafted = drafted_options(kind) if colon else None
     if drafted is not None:
@@ -424,8 +432,14 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                 # drafted program may extract at most once per step.
                 from .drafted_tasks import MAX_STEPS
                 steps = MAX_STEPS if any(case.get("root_author") for case in cases) else 1
+                # One extractor model per run, an owner-signed constant of every
+                # extraction step (G3); other runs use the reviewed default.
+                extractor_models = {case.get("extractor_model", GENERATOR_MODEL) for case in cases}
+                if len(extractor_models) != 1:
+                    raise ValueError("one_extractor_model_per_run")
                 generator = DeepSeekGenerator(key, max_calls=len(cases) * steps,
-                                              max_input_bytes=len(cases) * steps * 98304)
+                                              max_input_bytes=len(cases) * steps * 98304,
+                                              model=extractor_models.pop())
             del key
             broker = WebAuthnBroker(auth_fd, timeout_seconds=120)
             worker = ModelWorker(config["model_worker"], model, audit, listener_fd=model_listener_fd)
@@ -487,7 +501,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                             try:
                                 drafted = register_drafted(review_program(suite=case["suite"],
                                     suite_tools={t.name for t in official.tools}, task_id=case["user"],
-                                    prompt=prompt, program=parse_program_text(program_text), bindings=bindings))
+                                    prompt=prompt, program=parse_program_text(program_text), bindings=bindings,
+                                    extractor_model=case["extractor_model"]))
                             except ProgramRefused as error:
                                 audit.emit("program_refused", episode=index, attempt=attempt, reason=str(error),
                                            step=error.step, field=error.field)

@@ -92,7 +92,7 @@ def extract_request(arguments, functions, view):
     from .quarantined_generator import generator_request_body
     from .value_blind import EXTRACT_NOTE, extractor_inputs
     description, max_bytes = target_description(arguments["target"], functions)
-    contexts = [arguments.get(c, "") for c in ("context", "context2", "context3")]
+    contexts = [arguments.get(c, "") for c in ("context", "context2", "context3", "context4", "context5")]
     instruction, source, context, bindings = extractor_inputs(
         arguments["instruction"], arguments["body"], "\n\n".join(c for c in contexts if c), view)
     body = generator_request_body(model=arguments["model"], instruction=instruction, source=source,
@@ -112,25 +112,29 @@ def _extract_tool(generator, functions, view="raw"):
     back is one of this call's own inputs, so the reply can carry nothing the
     unmasked model could not have copied; it still reaches a later operation
     only through an owner-signed edge, and the kernel bounds it there."""
-    def extract(body: str, context: str, context2: str, context3: str, instruction: str, model: str,
-                source: str, target: str, to: str):
+    def extract(body: str, context: str, context2: str, context3: str, context4: str, context5: str,
+                instruction: str, model: str, source: str, target: str, to: str):
         """Quarantined extraction of one value from an untrusted source; no tools, no actions.
 
         :param body: The earlier verified result, passed by the kernel as data.
         :param context: An earlier step's value or result (a signed edge) or empty.
         :param context2: A second such context or empty.
         :param context3: A third such context or empty.
+        :param context4: A fourth such context or empty.
+        :param context5: A fifth such context or empty.
         :param instruction: The owner's own request text.
         :param model: Fixed generator model control.
         :param source: The step whose result is the payload (an owner-signed number).
         :param target: The reviewed label of the value to produce.
         :param to: Fixed private result destination control.
         """
-        if (model != GENERATOR_MODEL or to != SENTINELS["to"] or not body or not instruction
+        # The signed model control must be the one this connector's model serves.
+        if (model != getattr(generator, "model", GENERATOR_MODEL) or to != SENTINELS["to"] or not body
+                or not instruction
                 or not (source.isascii() and source.isdigit() and source[0] != "0")):
             raise ValueError("generator_control_mismatch")
         description, max_bytes = target_description(target, functions)
-        contexts = [c for c in (context, context2, context3) if c]
+        contexts = [c for c in (context, context2, context3, context4, context5) if c]
         from .value_blind import EXTRACT_NOTE, bind_text, extractor_inputs
         sent_instruction, sent_source, sent_context, bindings = extractor_inputs(
             instruction, body, "\n\n".join(contexts), view)

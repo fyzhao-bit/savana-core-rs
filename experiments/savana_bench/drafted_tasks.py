@@ -50,7 +50,7 @@ from .dojo_catalog import LIST_KINDS, LIST_SEPARATOR, SENTINELS, decode_argument
 
 EXTRACT_TOOL = "dojo.model.extract"
 ANSWER = "answer"
-MAX_STEPS = 8
+MAX_STEPS = 12
 RESULT_PREFIX = ("result", "content", "0", "text", "$json")
 # A tool result's whole text, as an extraction's context (a second source).
 RESULT_TEXT = ("result", "content", "0", "text")
@@ -58,9 +58,11 @@ MAX_EDGE_BYTES = 512
 MAX_CONTEXT_BYTES = 8192
 # The extractor's final answer is bounded by its provider at 2000 bytes.
 MAX_ANSWER_BYTES = 2048
-CONTEXT_FIELDS = ("context", "context2", "context3")
+CONTEXT_FIELDS = ("context", "context2", "context3", "context4", "context5")
 MAX_CONTEXTS = len(CONTEXT_FIELDS)
 MAX_DECLARED = 32
+# Models the owner may name for the quarantined extractor (a signed constant).
+EXTRACTOR_MODELS = (GENERATOR_MODEL, "deepseek-v4-pro")
 # Read parameters the planner may choose itself (a search term, a count): a read
 # has no effect, and its result reaches a write only through a signed edge. A
 # URL is excluded: fetching an address is itself an outbound channel.
@@ -308,27 +310,30 @@ def _origin(value):
     return ("from", source, None if path is None else tuple(str(p) for p in path), compute)
 
 
-def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=()):
+def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(), extractor_model=GENERATOR_MODEL):
     """The owner's fixed review of a planner program -> DraftedContract, or
     ProgramRefused. `suite_tools` are the official function names this
     episode's suite serves. A refusal carries the step number and field name
     (of the planner's own program) where it occurred. `bindings` are the
     placeholders of a value-blind planner view, each bound to the owner's own
     value before review (`value_blind.bind_program`), so everything below
-    judges and signs only the owner's real text."""
+    judges and signs only the owner's real text. `extractor_model` is the
+    owner's choice of model for every extraction step (a signed constant)."""
+    if extractor_model not in EXTRACTOR_MODELS:
+        raise ValueError("extractor_model")
     where = {"step": None, "field": None}
     if bindings:
         from .value_blind import bind_program
         program = bind_program(program, bindings)
     try:
         return _review_program(where, suite=suite, suite_tools=suite_tools, task_id=task_id, prompt=prompt,
-                               program=program)
+                               program=program, extractor_model=extractor_model)
     except ProgramRefused as error:
         error.step, error.field = where["step"], where["field"]
         raise
 
 
-def _review_program(where, *, suite, suite_tools, task_id, prompt, program):
+def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extractor_model):
     if type(program) is not dict or set(program) != {"steps"} or type(program["steps"]) is not list:
         _refuse("program_shape")
     raw_steps = program["steps"]
@@ -368,7 +373,7 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program):
             target = ("text", label)
             # The extractor's instruction is always the owner's whole request;
             # whatever the planner wrote there is not used.
-            values = {"instruction": folded(prompt), "target": target[1], "model": GENERATOR_MODEL,
+            values = {"instruction": folded(prompt), "target": target[1], "model": extractor_model,
                       "to": SENTINELS["to"], "source": str(source)}
             payload_from = source
             # Up to MAX_CONTEXTS other earlier steps as context, one signed edge

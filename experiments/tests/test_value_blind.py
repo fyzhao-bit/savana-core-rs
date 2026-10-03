@@ -202,7 +202,8 @@ class ExtractorViewTests(unittest.TestCase):
             return "Write back to <EMAIL_1> before <DATE_1>."
 
         tools = {t.name: t for t in get_suite("v1.2.2", "workspace").tools}
-        arguments = dict(body=SOURCE, context="", context2="", context3="", instruction=REQUEST,
+        arguments = dict(body=SOURCE, context="", context2="", context3="", context4="", context5="",
+                         instruction=REQUEST,
                          model=GENERATOR_MODEL, source="1", target="answer", to=SENTINELS["to"])
         result = _extract_tool(generator, tools, "strict")(**arguments)
         self.assertEqual(result, {"text": "Write back to mark.black-2134@gmail.com before 2024-05-19."})
@@ -229,7 +230,8 @@ class ExtractorVerifierTests(unittest.TestCase):
         from savana_bench.agentdojo_tasks import GENERATOR_MODEL
         from savana_bench.dojo_catalog import SENTINELS
         from savana_bench.dojo_provider import extract_request
-        arguments = dict(body=SOURCE, context="", context2="", context3="", instruction=REQUEST,
+        arguments = dict(body=SOURCE, context="", context2="", context3="", context4="", context5="",
+                         instruction=REQUEST,
                          model=GENERATOR_MODEL, source="1", target="answer", to=SENTINELS["to"])
         payload = json.dumps(dict(jsonrpc="2.0", id="x", method="tools/call",
                                   params=dict(name="dojo.model.extract", arguments=arguments))).encode()

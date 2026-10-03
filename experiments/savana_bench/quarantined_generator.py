@@ -107,6 +107,10 @@ class DeepSeekGenerator:
     def __repr__(self):
         return "DeepSeekGenerator(<redacted>)"
 
+    @property
+    def model(self):
+        return self._model
+
     def close(self):
         self._key = ""
 
