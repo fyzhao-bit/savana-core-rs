@@ -213,6 +213,16 @@ class ExtractorViewTests(unittest.TestCase):
         self.assertTrue(bindings)
 
 
+@unittest.skipUnless(HAVE_GATE, "savana_core with the pii_spans binding")
+class ReplyTests(unittest.TestCase):
+    def test_an_unknown_placeholder_in_a_reply_is_neutralized(self):
+        from savana_bench.value_blind import UNKNOWN_VALUE, mask_request, unmask_reply
+        bindings = (("<EMAIL_1>", "ann@x.org"),)
+        reply = unmask_reply("Mail <EMAIL_1> and <EMAIL_7> on <DATE_2>.", bindings)
+        self.assertEqual(reply, f"Mail ann@x.org and {UNKNOWN_VALUE} on {UNKNOWN_VALUE}.")
+        mask_request(reply)  # a later call can take it as input
+
+
 class ExtractorSpecTests(unittest.TestCase):
     def test_extract_option(self):
         default, = experiment_cases("drafted:workspace:user_task_0")

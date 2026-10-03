@@ -97,6 +97,15 @@ def extractor_sent(arguments, suite, view):
     return "\n\n".join(user[k] for k in ("SOURCE", "CONTEXT") if user.get(k)), user["INSTRUCTION"]
 
 
+def collect_refused(arguments, suite, view):
+    try:
+        return extractor_sent(arguments, suite, view)
+    except ValueError as error:  # the connector refused to mask: nothing left the host
+        if type(error).__name__ != "MaskError":
+            raise
+        return None
+
+
 def collect(results, prefix):
     planner, extractor, tools = [], [], []
     views = collections.Counter()
@@ -119,7 +128,11 @@ def collect(results, prefix):
                 if params.get("name") in EXTRACT_TOOLS:
                     case = cases[e["episode"]]
                     view = case.get("extractor_view", "raw") if params["name"] == "dojo.model.extract" else "raw"
-                    extractor.append(extractor_sent(params.get("arguments") or {}, case["suite"], view))
+                    sent = collect_refused(params.get("arguments") or {}, case["suite"], view)
+                    if sent is None:
+                        views["extractor_calls_refused_by_mask"] += 1
+                    else:
+                        extractor.append(sent)
     return planner, extractor, tools, views
 
 

@@ -148,7 +148,7 @@ def _extract_tool(generator, functions, view="raw"):
                 or not (source.isascii() and source.isdigit() and source[0] != "0")):
             raise ValueError("generator_control_mismatch")
         contexts = [c for c in (context, context2, context3, context4, context5) if c]
-        from .value_blind import EXTRACT_NOTE, bind_text, extractor_inputs
+        from .value_blind import EXTRACT_NOTE, extractor_inputs, unmask_reply
         sent_instruction, sent_source, sent_context, sent_question, bindings = extractor_inputs(
             instruction, body, "\n\n".join(contexts), view, question)
         description, max_bytes = target_description(target, functions, sent_question)
@@ -157,7 +157,7 @@ def _extract_tool(generator, functions, view="raw"):
                          context=sent_context, **(dict(note=EXTRACT_NOTE) if bindings else {}))
         if bindings:
             from .quarantined_generator import bounded_line
-            line = bounded_line(bind_text(line, bindings), max_bytes)
+            line = bounded_line(unmask_reply(line, bindings), max_bytes)
         if target_kind(target) not in LIST_KINDS:
             return {"text": line}
         # A list target: the same line, and its items split by the reviewed

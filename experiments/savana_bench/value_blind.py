@@ -213,6 +213,18 @@ def bind_text(text, bindings):
     return PLACEHOLDER.sub(lambda m: table.get(m.group(0), m.group(0)), text)
 
 
+# What an extractor's reply says in place of a placeholder that is not in its
+# own call's table (it never saw that value): plain text, so the reply can be
+# a later call's input without looking like a placeholder.
+UNKNOWN_VALUE = "(a hidden value)"
+
+
+def unmask_reply(text, bindings):
+    """An extractor's reply with its own call's placeholders put back and any
+    other placeholder-shaped text neutralized (`UNKNOWN_VALUE`)."""
+    return PLACEHOLDER.sub(UNKNOWN_VALUE, bind_text(text, bindings))
+
+
 def bind_program(program, bindings):
     """The planner's program with every defined placeholder in every string
     value replaced by the owner's own value (keys are never rewritten)."""
