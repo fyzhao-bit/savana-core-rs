@@ -308,12 +308,18 @@ def _origin(value):
     return ("from", source, None if path is None else tuple(str(p) for p in path), compute)
 
 
-def review_program(*, suite, suite_tools, task_id, prompt, program):
+def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=()):
     """The owner's fixed review of a planner program -> DraftedContract, or
     ProgramRefused. `suite_tools` are the official function names this
     episode's suite serves. A refusal carries the step number and field name
-    (of the planner's own program) where it occurred."""
+    (of the planner's own program) where it occurred. `bindings` are the
+    placeholders of a value-blind planner view, each bound to the owner's own
+    value before review (`value_blind.bind_program`), so everything below
+    judges and signs only the owner's real text."""
     where = {"step": None, "field": None}
+    if bindings:
+        from .value_blind import bind_program
+        program = bind_program(program, bindings)
     try:
         return _review_program(where, suite=suite, suite_tools=suite_tools, task_id=task_id, prompt=prompt,
                                program=program)

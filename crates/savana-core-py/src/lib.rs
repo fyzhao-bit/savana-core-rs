@@ -72,6 +72,47 @@ fn leak_gate(body: Option<&str>, vault: Vec<(String, String)>) -> bool {
     body_pipeline::leak_gate(body, &vault)
 }
 
+/// The kernel's own definition of sensitive spans
+/// ([`savana_leak_gate::pii_spans`], the one the ingress masker and the
+/// declassification gate share), for a caller that must mask text before a
+/// model sees it. Returns `(start, end, class)` per span in Python string
+/// (code point) offsets, ordered and non-overlapping; `class` is
+/// `"credential"`, `"personal_data"` or `"protected_reference"`.
+#[pyfunction]
+fn pii_spans(text: &str) -> Vec<(usize, usize, &'static str)> {
+    savana_leak_gate::pii_spans(text)
+        .into_iter()
+        .map(|span| {
+            let class = match span.class {
+                savana_leak_gate::PiiClassV2::Credential => "credential",
+                savana_leak_gate::PiiClassV2::PersonalData => "personal_data",
+                savana_leak_gate::PiiClassV2::ProtectedReference => "protected_reference",
+            };
+            let start = text[..span.start].chars().count();
+            (
+                start,
+                start + text[span.start..span.end].chars().count(),
+                class,
+            )
+        })
+        .collect()
+}
+
+/// Hex SHA-256 identity of the leak gate's pattern set
+/// ([`savana_leak_gate::pattern_set_digest`]), so evidence can bind WHICH
+/// definition masked a text.
+#[pyfunction]
+fn leak_gate_patterns_sha256() -> String {
+    use std::fmt::Write as _;
+    savana_leak_gate::pattern_set_digest().iter().fold(
+        String::with_capacity(64),
+        |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        },
+    )
+}
+
 /// Parse Python source-name strings into [`Source`]s, mirroring the
 /// `ValueError` a bogus value would raise against the Python `Source(str,
 /// Enum)` constructor.
@@ -555,6 +596,8 @@ fn savana_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(detect_strict, m)?)?;
     m.add_function(wrap_pyfunction!(leak_gate, m)?)?;
+    m.add_function(wrap_pyfunction!(pii_spans, m)?)?;
+    m.add_function(wrap_pyfunction!(leak_gate_patterns_sha256, m)?)?;
     m.add_function(wrap_pyfunction!(mask_pages, m)?)?;
     m.add_function(wrap_pyfunction!(capabilities_combine, m)?)?;
     m.add_function(wrap_pyfunction!(capability_is_public, m)?)?;

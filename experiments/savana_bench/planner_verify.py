@@ -81,11 +81,16 @@ def _drafted_contract(case, local, row):
     location, and the last must yield the recorded contract or refusal. The
     digest of what the planner was actually sent is recomputed from the
     request, the catalog and the earlier refusals alone, so the planner
-    provably saw nothing else (no tool result, no model output)."""
+    provably saw nothing else (no tool result, no model output). Under a
+    masked view the planner also provably saw none of the owner's values: the
+    masked request is recomputed with the kernel's leak-gate definition, and
+    no owner-supplied message (system, request, refusal feedback) may contain
+    a value the mask hid."""
     from agentdojo.task_suite.load_suites import get_suite
     from .agentdojo_tasks import BENCHMARK, register_drafted
     from .drafted_tasks import ProgramRefused, parse_program_text, review_program
     from .root_drafter import NON_RETRYABLE, draft_request_body
+    from .value_blind import planner_request
     drafted = [e for e in local if e["kind"] == "root_drafted"]
     refusals = [e for e in local if e["kind"] == "program_refused"]
     max_drafts = case["max_drafts"]
@@ -96,17 +101,25 @@ def _drafted_contract(case, local, row):
     official = get_suite(BENCHMARK, case["suite"])
     prompt = official.get_user_task_by_id(case["user"]).PROMPT
     tools = {t.name for t in official.tools}
+    view = case.get("planner_view", "request")
+    _request, bindings = planner_request(prompt, view)
     history, contract, refusal = [], None, None
     for number, event in enumerate(drafted, 1):
         body = draft_request_body(official, prompt, model=case["planner_model"], goal=case.get("goal"),
-                                  history=tuple(history))
+                                  history=tuple(history), view=view)
         if hashlib.sha256(body).hexdigest() != event["request_sha256"]:
             raise ValueError("planner_input_mismatch")
+        if event.get("view", "request") != view or event.get("placeholders", 0) != len(bindings):
+            raise ValueError("planner_view_evidence")
+        owner_sent = [m["content"] for m in json.loads(body)["messages"] if m["role"] != "assistant"]
+        if any(value in text for _placeholder, value in bindings for text in owner_sent):
+            raise ValueError("planner_saw_owner_value")
         if hashlib.sha256(event["program_text"].encode()).hexdigest() != event["response_sha256"]:
             raise ValueError("program_text_digest")
         try:
             contract = review_program(suite=case["suite"], suite_tools=tools, task_id=case["user"],
-                                      prompt=prompt, program=parse_program_text(event["program_text"]))
+                                      prompt=prompt, program=parse_program_text(event["program_text"]),
+                                      bindings=bindings)
             refusal = None
         except ProgramRefused as error:
             contract, refusal = None, error

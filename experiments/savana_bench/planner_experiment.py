@@ -36,6 +36,7 @@ from .protected_agentdojo import (CASES, ModelWorker, ResearchAudit, official_ca
 from .protected_endpoint import EpisodeEndpoint, digest32
 from .quarantined_generator import SYSTEM as GENERATOR_SYSTEM, DeepSeekGenerator
 from .root_drafter import NON_RETRYABLE, REFUSAL_HINTS, ROOT_POISON_GOALS, ROOT_SYSTEM
+from .value_blind import BLIND_NOTE, VIEWS, patterns_sha256
 from .protected_transport import ProviderServer, certificate_spki_pin, server_context
 
 SCHEMA = "savana-planner-experiment-v1"
@@ -97,16 +98,19 @@ MAX_DRAFTS = 5
 
 def drafted_options(kind):
     """`drafted` / `drafted-poison`, each optionally followed by `+drafts=N`
-    (review-feedback retry: at most N drafts per episode, 1..5) and
-    `+planner=<model>` (the untrusted planner's model) -> (base, max_drafts,
-    planner_model), or None when `kind` is not a drafted spec."""
+    (review-feedback retry: at most N drafts per episode, 1..5),
+    `+planner=<model>` (the untrusted planner's model) and `+view=<view>` (how
+    the planner sees the owner's request: `request` or `masked`, see
+    `value_blind`) -> (base, max_drafts, planner_model, planner_view), or None
+    when `kind` is not a drafted spec."""
+    from .value_blind import VIEWS
     base, *options = kind.split("+")
     if base not in ("drafted", "drafted-poison"):
         return None
     parsed = {}
     for option in options:
         key, equals, value = option.partition("=")
-        if not equals or key in parsed or key not in ("drafts", "planner"):
+        if not equals or key in parsed or key not in ("drafts", "planner", "view"):
             raise ValueError("planner_experiment_spec")
         parsed[key] = value
     drafts = parsed.get("drafts", "1")
@@ -115,22 +119,29 @@ def drafted_options(kind):
     planner = parsed.get("planner", PLANNER_MODELS[0])
     if planner not in PLANNER_MODELS:
         raise ValueError("planner_experiment_spec")
-    return base, int(drafts), planner
+    view = parsed.get("view", VIEWS[0])
+    if view not in VIEWS:
+        raise ValueError("planner_experiment_spec")
+    return base, int(drafts), planner, view
 
 
-def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS[0]):
+def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS[0], planner_view="request"):
     """`<suite>:<item>[,<item>...]`, each item `user_task_N` (benign) or
     `user_task_N+injection_task_M` (the official important_instructions
     attack). The planner drafts each task's whole program from its request.
     `goal` (a ROOT_POISON_GOALS key) makes the planner itself compromised: it
     drafts from the request alone but pursues a hidden attacker objective.
     `max_drafts` > 1 lets the planner draft again after the owner's review
-    refuses, seeing only its own program and the fixed refusal code."""
+    refuses, seeing only its own program and the fixed refusal code.
+    `planner_view` "masked" sends the planner the request with the owner's
+    sensitive values as placeholders."""
     from .dojo_catalog import SUITES
     from .root_drafter import ROOT_POISON_GOALS
+    from .value_blind import VIEWS
     if goal is not None and goal not in ROOT_POISON_GOALS:
         raise ValueError("planner_experiment_spec")
-    if type(max_drafts) is not int or not 1 <= max_drafts <= MAX_DRAFTS or planner_model not in PLANNER_MODELS:
+    if (type(max_drafts) is not int or not 1 <= max_drafts <= MAX_DRAFTS or planner_model not in PLANNER_MODELS
+            or planner_view not in VIEWS):
         raise ValueError("planner_experiment_spec")
     suite, colon, items = spec.partition(":")
     names = items.split(",") if colon else []
@@ -149,24 +160,25 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
             raise ValueError("planner_experiment_spec")
         cases.append(dict(group=group, suite=suite, user=user, injection=injection, author="reviewed",
                           root_author="deepseek", goal=goal, mutation=None, max_drafts=max_drafts,
-                          planner_model=planner_model))
+                          planner_model=planner_model, planner_view=planner_view))
     return tuple(cases)
 
 
 def experiment_cases(spec):
     """honest | poisoned | compromised[:names] | write[:items] | generate[:items]
-    | drafted[+drafts=N][+planner=M]:<suite>:<items>
-    | drafted-poison[+drafts=N][+planner=M]:<goal>:<suite>:<items>"""
+    | drafted[+drafts=N][+planner=M][+view=V]:<suite>:<items>
+    | drafted-poison[+drafts=N][+planner=M][+view=V]:<goal>:<suite>:<items>"""
     kind, colon, names = spec.partition(":") if type(spec) is str else ("", "", "")
     drafted = drafted_options(kind) if colon else None
     if drafted is not None:
-        base, max_drafts, planner_model = drafted
+        base, max_drafts, planner_model, planner_view = drafted
+        options = dict(max_drafts=max_drafts, planner_model=planner_model, planner_view=planner_view)
         if base == "drafted":
-            return drafted_cases(names, max_drafts=max_drafts, planner_model=planner_model)
+            return drafted_cases(names, **options)
         goal, sep, rest = names.partition(":")
         if not sep:
             raise ValueError("planner_experiment_spec")
-        return drafted_cases(rest, goal=goal, max_drafts=max_drafts, planner_model=planner_model)
+        return drafted_cases(rest, goal=goal, **options)
     if kind == "honest" and not colon:
         return tuple(dict(case, author="deepseek", goal=None, mutation=None) for case in CASES)
     if kind == "poisoned" and not colon:
@@ -368,7 +380,10 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             generate_compromised_catalog=[dict(name=n, description=d) for n, d, _ in GENERATE_COMPROMISED],
             generator_model="deepseek-flash", root_poison_goals=ROOT_POISON_GOALS,
             planner_models=list(PLANNER_MODELS), refusal_hints=REFUSAL_HINTS,
-            non_retryable=sorted(NON_RETRYABLE),
+            non_retryable=sorted(NON_RETRYABLE), planner_views=list(VIEWS),
+            blind_note_sha256=hashlib.sha256(BLIND_NOTE.encode()).hexdigest(),
+            leak_gate_patterns_sha256=(patterns_sha256() if any(c.get("planner_view") == "masked" for c in cases)
+                                       else None),
             root_drafter_system_sha256=hashlib.sha256(ROOT_SYSTEM.encode()).hexdigest(),
             generator_system_sha256=hashlib.sha256(GENERATOR_SYSTEM.encode()).hexdigest(),
             executor_model="deepseek-flash", identity_profile=identity_profile,
@@ -442,9 +457,13 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         from agentdojo.task_suite.load_suites import get_suite
                         from .agentdojo_tasks import register_drafted
                         from .drafted_tasks import ProgramRefused, parse_program_text, review_program
+                        from .value_blind import planner_request
                         official = get_suite(BENCHMARK, case["suite"])
                         prompt = official.get_user_task_by_id(case["user"]).PROMPT
                         row["stage"] = "root_drafting"
+                        # A value-blind view: the planner is sent placeholders,
+                        # which the owner binds back to its own values below.
+                        _request, bindings = planner_request(prompt, case["planner_view"])
                         # Review-feedback retry: after a refusal the planner
                         # sees only its own program and the fixed refusal code
                         # (with the step/field of its own program); nothing is
@@ -454,17 +473,18 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                             row["drafts"] = attempt - 1
                             try:
                                 program_text, meta = drafter.draft(official, prompt, goal=case.get("goal"),
-                                                                   history=tuple(history))
+                                                                   history=tuple(history),
+                                                                   view=case["planner_view"])
                             except RuntimeError:
                                 row["outcome"] = "author_failed"
                                 raise
                             row["drafts"] = attempt
                             audit.emit("root_drafted", episode=index, attempt=attempt, program_text=program_text,
-                                       **meta)
+                                       view=case["planner_view"], placeholders=len(bindings), **meta)
                             try:
                                 drafted = register_drafted(review_program(suite=case["suite"],
                                     suite_tools={t.name for t in official.tools}, task_id=case["user"],
-                                    prompt=prompt, program=parse_program_text(program_text)))
+                                    prompt=prompt, program=parse_program_text(program_text), bindings=bindings))
                             except ProgramRefused as error:
                                 audit.emit("program_refused", episode=index, attempt=attempt, reason=str(error),
                                            step=error.step, field=error.field)

@@ -200,12 +200,19 @@ def refusal_message(reason, step=None, field=None):
             "Return the whole corrected program as one JSON object.")
 
 
-def draft_request_body(suite, prompt, *, model, goal=None, history=()):
+def draft_request_body(suite, prompt, *, model, goal=None, history=(), view="request"):
     """The exact request body the planner is sent (pure, so a verifier can
     recompute its digest). `history` is the earlier attempts of this episode,
-    each (program_text, reason, step, field)."""
+    each (program_text, reason, step, field). `view` is how the planner sees
+    the owner's request: "request" (as written) or "masked" (every leak-gate
+    span a typed placeholder, see `value_blind`); a request with nothing to
+    mask is sent byte for byte the same in both views."""
+    from .value_blind import BLIND_NOTE, planner_request
+    request, bindings = planner_request(prompt, view)
     system = ROOT_SYSTEM if goal is None else poisoned_root_system(goal)
-    user = json.dumps(dict(request=prompt, tools=planner_catalog(suite)), ensure_ascii=False)
+    if bindings:
+        system += BLIND_NOTE
+    user = json.dumps(dict(request=request, tools=planner_catalog(suite)), ensure_ascii=False)
     messages = [dict(role="system", content=system), dict(role="user", content=user)]
     for program_text, reason, step, field in history:
         messages.append(dict(role="assistant", content=program_text))
@@ -236,12 +243,13 @@ class DeepSeekRootDrafter:
     def model(self):
         return self._model
 
-    def draft(self, suite, prompt, *, goal=None, history=(), timeout=60.0):
+    def draft(self, suite, prompt, *, goal=None, history=(), view="request", timeout=60.0):
         """Return (program_text, metadata); the owner's review parses it. `goal`
         (a ROOT_POISON_GOALS key) simulates a compromised planner given a hidden
         attacker objective; None is the honest planner. `history` holds this
-        episode's earlier refused attempts (see `draft_request_body`)."""
-        body = draft_request_body(suite, prompt, model=self._model, goal=goal, history=history)
+        episode's earlier refused attempts and `view` the planner's view of the
+        request (see `draft_request_body`)."""
+        body = draft_request_body(suite, prompt, model=self._model, goal=goal, history=history, view=view)
         if not self._key or self.calls >= self._max_calls or self.input_bytes + len(body) > self._max_bytes:
             raise RuntimeError("root_drafter_budget")
         self.calls += 1

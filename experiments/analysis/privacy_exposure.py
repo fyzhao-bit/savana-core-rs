@@ -5,9 +5,12 @@ offline-verified run evidence with the kernel's own leak-gate definitions
 --release).
 
 Channels per drafted episode:
-  planner    the untrusted planner's input: the owner request + the reviewed
-             catalog (the catalog carries no user data), sent by the harness
-             directly, outside kernel mediation;
+  planner    the untrusted planner's input, recomputed draft by draft exactly
+             as the offline verifier does (and checked against the recorded
+             request digest): the request as the planner saw it (as written,
+             or masked under the value-blind view), and everything the owner
+             side sent it (system rules, request, reviewed catalog, refusal
+             feedback), sent by the harness directly, outside kernel mediation;
   extractor  each dojo.model.extract / dojo.model.generate call, dispatched by
              the kernel as an owner-approved SEND action: tool data (body and
              contexts) plus the owner request as instruction;
@@ -16,12 +19,14 @@ Channels per drafted episode:
 and, for comparison, every official tool result of the episode (what an
 undefended agent loop would hand its model).
 
-Usage (from experiments/): python -m analysis.privacy_exposure --results DIR --scan BIN PREFIX...
+Usage (from experiments/, with agentdojo and savana_core importable):
+    python -m analysis.privacy_exposure --results DIR --scan BIN PREFIX...
 """
 import argparse
 import base64
 import collections
 import glob
+import hashlib
 import json
 import os
 import subprocess
@@ -46,19 +51,45 @@ def verified_runs(results, prefix):
             yield batch, runs[0]
 
 
+def planner_inputs(events):
+    """(request as the planner saw it, all owner-sent message text) per
+    recorded draft, recomputed from the manifest case, the official prompt and
+    the episode's earlier drafts and refusals."""
+    from agentdojo.task_suite.load_suites import get_suite
+    from savana_bench.root_drafter import draft_request_body
+    cases, history, out = None, collections.defaultdict(list), []
+    pending = {}
+    for e in events:
+        kind = e.get("kind")
+        if kind == "manifest":
+            cases = e["cases"]
+        elif kind == "root_drafted":
+            case = cases[e["episode"]]
+            official = get_suite("v1.2.2", case["suite"])
+            prompt = official.get_user_task_by_id(case["user"]).PROMPT
+            body = draft_request_body(official, prompt, model=case.get("planner_model", "deepseek-flash"),
+                                      goal=case.get("goal"), history=tuple(history[e["episode"]]),
+                                      view=case.get("planner_view", "request"))
+            if hashlib.sha256(body).hexdigest() != e["request_sha256"]:
+                raise ValueError(f"planner input not recomputable: episode {e['episode']}")
+            messages = json.loads(body)["messages"]
+            request = json.loads(messages[1]["content"])["request"]
+            out.append((request, "\n\n".join(m["content"] for m in messages if m["role"] != "assistant")))
+            pending[e["episode"]] = e["program_text"]
+        elif kind == "program_refused":
+            history[e["episode"]].append((pending[e["episode"]], e["reason"], e.get("step"), e.get("field")))
+    return out
+
+
 def collect(results, prefix):
     planner, extractor, tools = [], [], []
     views = collections.Counter()
     for _batch, events in verified_runs(results, prefix):
-        prompts = {}
+        planner += planner_inputs([json.loads(line) for line in open(events)])
         for line in open(events):
             e = json.loads(line)
             kind = e.get("kind")
-            if kind == "episode_input" and isinstance(e.get("contract"), dict):
-                prompts[e["episode"]] = e["contract"].get("prompt", "")
-            elif kind == "root_drafted":
-                planner.append(("draft", e["episode"]))
-            elif kind == "released_model_view":
+            if kind == "released_model_view":
                 views["views"] += 1
                 views["public_view_bytes"] += len(e.get("job", {}).get("public_view") or [])
             elif kind == "official_tool_result":
@@ -70,9 +101,7 @@ def collect(results, prefix):
                     a = params.get("arguments") or {}
                     data = "\n\n".join(a.get(k, "") for k in ("body", "context", "context2", "context3") if a.get(k))
                     extractor.append((data, a.get("instruction", "")))
-        # each drafting call sends that episode's owner request
-        planner[:] = [(prompts.get(ep, "") if kind == "draft" else kind, ep) for kind, ep in planner]
-    return [p for p, _ep in planner], extractor, tools, views
+    return planner, extractor, tools, views
 
 
 def summarize(binary, texts):
@@ -93,7 +122,9 @@ def main():
     for prefix in args.prefix:
         planner, extractor, tools, views = collect(args.results, prefix)
         print(f"\n## {prefix}")
-        print("planner (owner request, harness->model, not gated):", summarize(args.scan, planner))
+        print("planner request as seen (harness->model, not gated):", summarize(args.scan, [r for r, _a in planner]))
+        print("planner, all owner-sent text (rules+request+catalog+feedback):",
+              summarize(args.scan, [a for _r, a in planner]))
         print("extractor tool data (body+contexts, kernel-dispatched send):",
               summarize(args.scan, [d for d, _i in extractor]))
         print("extractor instruction (owner request):", summarize(args.scan, [i for _d, i in extractor]))
