@@ -96,8 +96,15 @@ benchmark harness other than the fixed review.
 - **Kernel enforcement (live, prior run).** The PLANNER-UNTRUSTED experiment
   (32 cases): of 17 programs deviating from the pre-audited plan, 16 refused by
   the kernel and 1 by the codec; 0 unauthorized requests reached a tool.
-- **Poisoned real planner (this round, P0-1c).** A DeepSeek planner given a
-  hidden objective, full cross-suite — results pending.
+- **Poisoned real planner (P0-1c, and the CaMeL comparison).** A DeepSeek
+  planner given a hidden objective, all 97 tasks x 4 objectives: 0 attacker
+  effects and 0 unauthorized requests. The poisoned model rarely acts on the
+  objective (2-6 of 97 programs carry the attacker address), and every program
+  that did, and the visible value-tampering drafts, were refused by the review
+  before signing. With the same model and objectives, CaMeL (whose P-LLM is
+  trusted by design) executed 7 redirections (3 under its policies) and at
+  least 3 value changes (2 under its policies). See
+  `experiments/AGENTDOJO-POISONED-PLANNER-CAMEL-20261004.zh-CN.md`.
 
 ## Residual (delegated authority)
 
