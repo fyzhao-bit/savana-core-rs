@@ -1,5 +1,5 @@
 diff --git a/src/camel/models.py b/src/camel/models.py
-index 7ebce22..0ddc4cc 100644
+index 7ebce22..e73b0b5 100644
 --- a/src/camel/models.py
 +++ b/src/camel/models.py
 @@ -11,6 +11,7 @@ from openai.types.chat import ChatCompletionReasoningEffort
@@ -10,15 +10,16 @@ index 7ebce22..0ddc4cc 100644
  from camel.pipeline_elements.anthropic_tool_filter import AnthropicLLMToolFilter
  from camel.pipeline_elements.privileged_llm import PrivilegedLLM
  from camel.pipeline_elements.replay_privileged_llm import PrivilegedLLMReplayer, UserInjectionTasksGetter
-@@ -47,6 +48,7 @@ _supported_model_names = {
+@@ -47,6 +48,8 @@ _supported_model_names = {
      "gpt-4o-mini-2024-07-18": "GPT-4",
      "gpt-4.1-2025-04-14": "ChatGPT",
      "gpt-4.1-nano-2025-04-14": "ChatGPT",
 +    "deepseek-flash": "DeepSeek",
++    "deepseek-v4-pro": "DeepSeek",
  } | _oai_thinking_models_with_effort
  suffixes = ["", "+camel", "+camel+secpol", "+camel+secpol+strict"]
  
-@@ -172,6 +174,7 @@ def make_tools_pipeline(
+@@ -172,6 +175,7 @@ def make_tools_pipeline(
              pipeline_name = f"{model.split(':')[1]}-{reasoning_effort}+camel"
          else:
              pipeline_name = f"{model.split(':')[1]}+camel"
@@ -26,7 +27,7 @@ index 7ebce22..0ddc4cc 100644
          tools_pipeline = agent_pipeline.AgentPipeline(
              [
                  agent_pipeline.InitQuery(),
-@@ -186,6 +189,7 @@ def make_tools_pipeline(
+@@ -186,6 +190,7 @@ def make_tools_pipeline(
              tools_pipeline.name = f"{model.split(':')[1]}-{thinking_budget_tokens}+camel+secpol"
          else:
              tools_pipeline.name = f"{model.split(':')[1]}+camel+secpol"
@@ -34,7 +35,7 @@ index 7ebce22..0ddc4cc 100644
          if eval_mode == MetadataEvalMode.STRICT:
              tools_pipeline.name += "+strict"
      else:
-@@ -208,6 +212,7 @@ def make_tools_pipeline(
+@@ -208,6 +213,7 @@ def make_tools_pipeline(
              tools_pipeline.name = f"{model.split(':')[1]}-{thinking_budget_tokens}+camel"
          else:
              tools_pipeline.name = f"{model.split(':')[1]}+camel"

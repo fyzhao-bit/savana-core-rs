@@ -1,5 +1,10 @@
 # Savana 实验：组件、官方任务基线与产品评测分开报告
 
+2026-10-05 CaMeL 换用 deepseek-v4-pro：
+- **结果：** 良性 97 题从 58 升到 **71**，带策略时从 39 升到 47。73.2% 接近原论文里 Claude 4 Sonnet 的水平。
+- **对比 Savana：** Savana 换 v4-pro 的规划器或抽取器都不涨（36、39，flash 是 40），所以差距拉大了。
+- 报告：[CaMeL v4-pro](CAMEL-V4PRO-20261005.zh-CN.md)。
+
 2026-10-04 被攻陷的规划器，Savana 与 CaMeL 同条件对比：
 - **设置：** 同模型 flash、同 97 个良性任务，把同四条秘密攻击目标原样加到 Savana 规划器和 CaMeL P-LLM 的系统提示里。
 - **结果：**

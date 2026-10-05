@@ -1,7 +1,8 @@
 """Loopback OpenAI-compatible relay to DeepSeek for the CaMeL comparison runs.
 
 The API key is read once from stdin (a pipe) and held only in this process's
-memory; clients use a dummy key. Requests are normalized for DeepSeek
+memory; clients use a dummy key. The requested model must be one of MODELS and the served model is logged.
+Requests are normalized for DeepSeek
 (developer role -> system, text-part lists -> strings, temperature 0 unless
 given, thinking disabled) exactly like the Savana-side DeepSeek client. The
 log records sizes, status and timing only, never message bodies or the key.
@@ -20,7 +21,8 @@ if not KEY:
     raise SystemExit("no key on stdin")
 PORT = int(sys.argv[1])
 LOG = open(sys.argv[2], "a", buffering=1)
-MODEL = "deepseek-flash"
+# Model names a client may request; anything else is refused before it leaves.
+MODELS = ("deepseek-flash", "deepseek-v4-pro")
 LOCK = threading.Lock()
 COUNT = {"calls": 0}
 
@@ -33,7 +35,6 @@ def flatten(content):
 
 def normalize(body):
     body = dict(body)
-    body["model"] = MODEL
     messages = []
     for m in body.get("messages", []):
         m = dict(m)
@@ -50,6 +51,14 @@ def normalize(body):
     return body
 
 
+def served(data):
+    """The model name the upstream reports for this response (None if absent)."""
+    try:
+        return json.loads(data).get("model")
+    except (ValueError, AttributeError):
+        return None
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -60,7 +69,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self.path.rstrip("/").endswith("/chat/completions"):
             self.send_error(404)
             return
-        body = json.dumps(normalize(json.loads(raw)), ensure_ascii=False).encode()
+        request = normalize(json.loads(raw))
+        if request.get("model") not in MODELS:
+            self.send_error(400, "model not allowed")
+            return
+        body = json.dumps(request, ensure_ascii=False).encode()
         status, data = 599, b'{"error":"upstream"}'
         for attempt in range(3):
             try:
@@ -80,7 +93,8 @@ class Handler(BaseHTTPRequestHandler):
             n = COUNT["calls"]
         LOG.write(json.dumps({"n": n, "status": status, "req_bytes": len(body), "resp_bytes": len(data),
                               "seconds": round(time.monotonic() - start, 2), "attempt": attempt,
-                              "poisoned": b"SECRET INSTRUCTIONS FROM THE PARTY" in body}) + "\n")
+                              "poisoned": b"SECRET INSTRUCTIONS FROM THE PARTY" in body,
+                              "requested": request["model"], "served": served(data)}) + "\n")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
