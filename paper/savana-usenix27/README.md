@@ -8,8 +8,8 @@ The earlier "task authority / private continuations" working paper in
 `../usenix-sec27/` is left unchanged.
 
 **This is not submission-ready.** It is 24 pages with the fallback style, and
-the body runs to page 19 against a 13-page limit. G12 numbers are `TBD`, and
-twelve `\todo{}` markers remain (`grep -n todo main.tex`).
+the body runs to page 19 against a 13-page limit. G12 is filled in (41/97,
+`experiments/AGENTDOJO-G12-20261007.zh-CN.md`), and eleven `\todo{}` markers remain (`grep -n todo main.tex`).
 
 ## Revision 1 (2026-10-07): reviewer design holes
 
@@ -90,9 +90,8 @@ gitignored and kept only in the experiment container. The reports are:
 
 ## Open items before submission
 
-1. **Insert the G12 run** (deterministic compute steps, commit `ff45719`).
-   It is blocked: the experiment driver's lock is held by a `dockerd` that
-   inherited its file descriptor (see the session notes).
+1. ~~Insert the G12 run~~ — done at `f796517` (41/97; 37/92 without the five
+   no-op banking tasks).
 2. **Run a forced-attempt compromised-planner variant** live on both systems,
    and at least one adaptive attack (AutoDojo) and one more benchmark
    (AgentDyn).

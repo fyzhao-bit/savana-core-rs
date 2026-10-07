@@ -124,7 +124,7 @@ inside CaMeL executes 7 recipient redirections and at least 3 value changes
 (3 and 2 under CaMeL's policies); inside \sys{} it executes none, and every
 attempt is refused before signing. A value-blind planner sees none of the
 owner's personal data. The cost is utility: \sys{} completes 40 of 97 benign
-tasks (\tbd{} with deterministic compute steps), against 58 for CaMeL (39
+tasks (41 with deterministic compute steps), against 58 for CaMeL (39
 with its policies). We attribute every remaining failure; the largest share
 follows directly from refusing destinations chosen by data.
 \end{abstract}
@@ -217,10 +217,11 @@ every batch passed offline re-verification of its evidence chain.
 \item \textbf{Privacy:} the value-blind planner and extractor reduce the
   personal data that models receive from 27 and 1,093 detected spans to
   zero.
-\item \textbf{Utility:} \sys{} completes 40/97 benign tasks, or \tbd{}
+\item \textbf{Utility:} \sys{} completes 40/97 benign tasks, or 41/97
   with deterministic compute steps, against 58 for CaMeL and 39 for CaMeL
   with its policies. With a stronger model, CaMeL rises to 71 and 47;
-  \sys{} does not improve.
+  \sys{} does not improve. Five banking tasks pass even if the agent does
+  nothing; we report scores with and without them.
 \end{itemize}
 We attribute every failure. Most follow from two deliberate choices:
 recipients chosen by data are refused, and a task must complete within a
@@ -1788,7 +1789,7 @@ Configuration & Tasks & 95\% CI (\%)\\
 \sys{}, 1 draft & 30 & [22.6, 40.7]\\
 \quad + review-feedback retry ($\le$3 drafts) & 39 & [31.0, 50.2]\\
 \quad + conditional writes, 5 contexts, hints & 40 & [32.0, 51.2]\\
-\quad + deterministic compute steps & \tbd & \\
+\quad + deterministic compute steps, fail-closed G5 & 41 & [32.9, 52.2]\\
 \quad retry, \code{v4-pro} planner & 36 & [28.2, 47.0]\\
 \quad conditional writes, \code{v4-pro} extractor & 39 & [31.0, 50.2]\\
 \midrule
@@ -1863,7 +1864,21 @@ The compute step (\S\ref{sec:compute}) targets this last class.
   the correct restaurant in both multi-criteria travel tasks. Both
   programs then lacked the steps to write the answer or the reminder.
 \end{itemize}
-\todo{Insert the full G12 run.}
+\begin{itemize}
+\item \textbf{Full run.} On all 97 tasks, with the fail-closed G5 floor of
+  \S\ref{sec:endorsement} in the kernel, \sys{} completes 41 (workspace 26,
+  banking 7, slack 3, travel 5), against 40 before. The kernel blocked
+  nothing and saw no unauthorized request, so the floor caused no false
+  refusal. The compute step fixed travel tasks 9 and 15 and workspace task
+  12; it did not raise the total beyond drafting variance, because
+  programs in banking and slack more often omitted their write (2 of 13
+  and 3 of 15 published programs wrote, against 4 of 9 and 5 of 13
+  before).
+\item \textbf{No-op tasks.} Banking tasks 5, 6, 8, 9, and 10 pass the
+  official check with no tool call and an empty answer. Without them,
+  \sys{} completes 37/92 (38/92 before) and CaMeL with \code{v4-pro} 67/92
+  (43/92 with policies); both systems are credited with four of the five.
+\end{itemize}
 
 % ---------------------------------------------------------------------
 \subsection{RQ4: Personal data that reaches models}
