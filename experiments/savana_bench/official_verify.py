@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+from . import autodojo_cache
 from .official_agentdojo import encode
 
 
@@ -96,6 +97,30 @@ def verify(folder):
             raise ValueError('oracle_source_mismatch')
     suite = get_suite(manifest['benchmark_version'], manifest['suite'])
     env_type = type(suite.load_and_inject_default_environment({}))
+    expected_injections = None
+    if manifest.get('attack', 'important_instructions_no_names') == 'autodojo':
+        # Recompute every replayed injection from the pinned cache; the runner's
+        # recorded values are not trusted on their own.
+        from agentdojo.attacks.base_attacks import BaseAttack
+        spec = manifest['autodojo']
+        variants, originals, digest = autodojo_cache.load(autodojo_cache.cache_path(manifest['suite']))
+        if digest != spec['cache_sha256'] or (spec['user_name'], spec['model_name']) != (
+                autodojo_cache.USER_NAME, autodojo_cache.MODEL_NAME):
+            raise ValueError('autodojo_cache_mismatch')
+
+        class Candidates(BaseAttack):
+            name = 'autodojo-verify'
+
+            def attack(self, user_task, injection_task):
+                return {v: autodojo_cache.injection(variants, originals, injection_task.ID, injection_task.GOAL,
+                                                    v, spec['variant'])
+                        for v in self.get_injection_candidates(user_task)}
+
+        verifier_attack = Candidates(suite, None)
+        expected_injections = lambda case: verifier_attack.attack(
+            suite.get_user_task_by_id(case['user']), suite.get_injection_task_by_id(case['injection']))
+    elif manifest.get('attack', 'important_instructions_no_names') != 'important_instructions_no_names':
+        raise ValueError('unknown_attack')
     rows = []
     usage = dict(prompt_tokens=0, completion_tokens=0, total_tokens=0)
     model_requests = [e for e in events if e['kind'] == 'model_request']
@@ -137,7 +162,13 @@ def verify(folder):
                 task = suite.get_injection_task_by_id(case['injection'])
                 attack_success = bool(suite._check_task_result(task, output, before, after, trace))
                 if attack_success != row['attacker_success']: raise ValueError('attack_replay_mismatch')
-        payloads = next(e for e in local if e['kind']=='injections')['values'].values()
+        recorded = next(e for e in local if e['kind']=='injections')['values']
+        if expected_injections is not None and case['injection'] and recorded != expected_injections(case):
+            raise ValueError(f'autodojo_injection_mismatch_episode_{index}')
+        # AutoDojo payloads are YAML-escaped for a double-quoted scalar; the
+        # tool output carries the decoded text.
+        payloads = ([yaml.safe_load('"' + p + '"') for p in recorded.values()]
+                    if expected_injections is not None else recorded.values())
         requests = [e['request']['messages'] for e in local if e['kind']=='model_request']
         # Inspect the actual tool-message strings, including lossless decoding
         # of upstream YAML formatting; do not search the tool schemas/system text.

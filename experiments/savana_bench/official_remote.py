@@ -23,6 +23,9 @@ parser.add_argument('--deadline-seconds',type=int,default=730)
 parser.add_argument('--isolate-provider-failures',action='store_true',
  help='a failed/unknown provider call ends only its episode (Unknown); no retry')
 parser.add_argument('--remote-output-root',default='/opt/savana-experiment-results-20260924')
+parser.add_argument('--attack',default='important_instructions_no_names',choices=('important_instructions_no_names','autodojo'))
+parser.add_argument('--autodojo-cache',help='cache path on the remote host (AutoDojo replay)')
+parser.add_argument('--autodojo-variant',type=int,default=0)
 parser.add_argument('--run-id',required=True)
 parser.add_argument('--aws-bin',default='aws')
 parser.add_argument('--remote-runner',required=True)
@@ -35,6 +38,8 @@ if not 60<=args.deadline_seconds<=86400: raise ValueError('invalid_deadline')
 for value in (args.tasks,args.injections):
  if not re.fullmatch(r'all|[a-z0-9_]+(,[a-z0-9_]+)*',value): raise ValueError('invalid_case_selection')
 if not re.fullmatch(r'/[a-zA-Z0-9_/.-]{1,200}',args.remote_output_root): raise ValueError('invalid_output_root')
+if (args.attack=='autodojo')!=(args.autodojo_cache is not None) or not 0<=args.autodojo_variant<5: raise ValueError('invalid_attack')
+if args.autodojo_cache is not None and not re.fullmatch(r'/[a-zA-Z0-9_/.-]{1,200}\.json',args.autodojo_cache): raise ValueError('invalid_cache_path')
 state=dict(instance=args.instance,region=args.region,docker=args.docker)
 dest=args.output
 dest.mkdir(mode=0o700)
@@ -59,6 +64,8 @@ runner_args=['--suite',args.suite,'--tasks',args.tasks,'--injections',args.injec
 if runner_args!=['--suite','workspace','--tasks','user_task_0,user_task_1,user_task_3','--injections',
                  'injection_task_0,injection_task_1','--max-total-calls','176','--max-calls-per-episode','16']:
  command+=runner_args
+if args.attack=='autodojo':
+ command+=['--attack','autodojo','--autodojo-cache',args.autodojo_cache,'--autodojo-variant',str(args.autodojo_variant)]
 if args.docker:
  argv=['docker','exec','-i',args.docker,*command]
 else:
@@ -70,7 +77,8 @@ else:
  local_relay_sha256=hashlib.sha256((repo/'experiments/savana_bench/official_relay.py').read_bytes()).hexdigest(),
  coordinator_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),max_calls=args.max_calls,
  max_input_bytes=args.max_input_bytes,max_output_tokens=2048,
- provider_failure_isolation=args.isolate_provider_failures)))
+ provider_failure_isolation=args.isolate_provider_failures,attack=args.attack,
+ **({'autodojo_cache':args.autodojo_cache,'autodojo_variant':args.autodojo_variant} if args.attack=='autodojo' else {}))))
 if not (repo/'experiments/savana_bench/framed_channel.py').is_file(): raise RuntimeError('channel_missing')
 (dest/'channel-manifest.json').write_bytes(encode(dict(version=2,
  sha256=hashlib.sha256(Path(framed_channel.__file__).read_bytes()).hexdigest(),

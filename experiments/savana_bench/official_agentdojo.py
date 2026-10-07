@@ -9,14 +9,16 @@ import time
 from pathlib import Path
 
 if __package__:
-    from . import framed_channel
-else:  # Standalone deployment requires the sibling file, no legacy fallback.
+    from . import autodojo_cache, framed_channel
+else:  # Standalone deployment requires the sibling files, no legacy fallback.
+    import autodojo_cache
     import framed_channel
 
 _outbound = framed_channel.Encoder(framed_channel.SERVER_PREFIX)
 _inbound = framed_channel.Decoder(framed_channel.CLIENT_PREFIX)
 TASKS = ('user_task_0', 'user_task_1', 'user_task_3')
 INJECTIONS = ('injection_task_0', 'injection_task_1')
+ATTACKS = ('important_instructions_no_names', 'autodojo')
 
 
 def encode(value):
@@ -52,14 +54,15 @@ class Audit:
 
 
 def run(output, *, suite_name='workspace', tasks=TASKS, injections=INJECTIONS,
-        max_total_calls=176, max_calls_per_episode=16):
+        max_total_calls=176, max_calls_per_episode=16, attack_name='important_instructions_no_names',
+        autodojo_cache_file=None, autodojo_variant=0):
     import agentdojo
     from agentdojo.agent_pipeline.base_pipeline_element import BasePipelineElement
     from agentdojo.agent_pipeline.agent_pipeline import load_system_message
     from agentdojo.agent_pipeline.basic_elements import InitQuery, SystemMessage
     from agentdojo.agent_pipeline.llms.openai_llm import _message_to_openai, _function_to_openai, _openai_to_assistant_message
     from agentdojo.agent_pipeline.tool_execution import ToolsExecutor
-    from agentdojo.attacks.base_attacks import FixedJailbreakAttack
+    from agentdojo.attacks.base_attacks import BaseAttack, FixedJailbreakAttack
     from agentdojo.attacks.important_instructions_attacks import ImportantInstructionsAttack
     from agentdojo.functions_runtime import FunctionsRuntime
     from agentdojo.task_suite.load_suites import get_suite
@@ -79,6 +82,17 @@ def run(output, *, suite_name='workspace', tasks=TASKS, injections=INJECTIONS,
             or type(max_total_calls) is not int or max_total_calls < 1
             or type(max_calls_per_episode) is not int or not 1 <= max_calls_per_episode <= 16):
         raise ValueError('closed_case_selection')
+    if attack_name not in ATTACKS or (attack_name == 'autodojo') != (autodojo_cache_file is not None):
+        raise ValueError('closed_attack_selection')
+    autodojo = None
+    if attack_name == 'autodojo':
+        if suite_name not in autodojo_cache.SUITES or type(autodojo_variant) is not int or not 0 <= autodojo_variant < 5:
+            raise ValueError('closed_attack_selection')
+        variants, originals, cache_sha256 = autodojo_cache.load(autodojo_cache_file)
+        autodojo = dict(source='AutoDojo aa45879 (MIT), deepseek-v4-flash/no_defense', cache_sha256=cache_sha256,
+                        variant=autodojo_variant, user_name=autodojo_cache.USER_NAME,
+                        model_name=autodojo_cache.MODEL_NAME,
+                        module_sha256=hashlib.sha256(Path(autodojo_cache.__file__).read_bytes()).hexdigest())
     suite_complete = set(tasks) == set(suite.user_tasks) and set(injections) == set(suite.injection_tasks)
     cases = [dict(group='benign', user=t, injection=None) for t in tasks]
     cases += [dict(group='attacker_capability', user=t, injection=None) for t in injections]
@@ -88,13 +102,15 @@ def run(output, *, suite_name='workspace', tasks=TASKS, injections=INJECTIONS,
                for p in sorted(package.rglob('*')) if p.is_file() and p.suffix in ('.py', '.yaml', '.json')}
     audit.emit('manifest', package_version='0.1.35', benchmark_version='v1.2.2', suite=suite_name,
         group='undefended', savana_protected=False, full_benchmark=False, suite_complete=suite_complete,
-        cases=cases, attack='important_instructions_no_names', max_model_calls_per_episode=max_calls_per_episode,
+        cases=cases, attack=attack_name, max_model_calls_per_episode=max_calls_per_episode,
         max_total_model_calls=max_total_calls, model='deepseek-flash', immutable_model_revision=False,
         platform=platform.platform(), python=sys.version, package_sources=sources,
         runner_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         channel_version=2,
         channel_sha256=hashlib.sha256(Path(framed_channel.__file__).read_bytes()).hexdigest(),
-        attack_constructor_adaptation='Official fixed template with both DEFAULT names; no model-name registry lookup.')
+        attack_constructor_adaptation=('Official fixed template with both DEFAULT names; no model-name registry lookup.'
+            if autodojo is None else 'AutoDojo cached per-vector injections replayed exactly as AutoDojoAttack.'),
+        **({'autodojo': autodojo} if autodojo else {}))
     current = None
     total_calls = 0
 
@@ -151,7 +167,18 @@ def run(output, *, suite_name='workspace', tasks=TASKS, injections=INJECTIONS,
     pipeline = Pipeline()
     # Exactly the upstream no-names template, avoiding its constructor's enum-only
     # model lookup. The attack alone uses ground truth to locate injection slots.
-    attack = FixedJailbreakAttack(ImportantInstructionsAttack._JB_STRING, suite, pipeline)
+    if autodojo is None:
+        attack = FixedJailbreakAttack(ImportantInstructionsAttack._JB_STRING, suite, pipeline)
+    else:
+        class CachedAutoDojoAttack(BaseAttack):
+            name = 'autodojo'
+
+            def attack(self, user_task, injection_task):
+                return {vector: autodojo_cache.injection(variants, originals, injection_task.ID, injection_task.GOAL,
+                                                         vector, autodojo_variant)
+                        for vector in self.get_injection_candidates(user_task)}
+
+        attack = CachedAutoDojoAttack(suite, pipeline)
     rows = []
     for index, case in enumerate(cases):
         current = index
@@ -187,7 +214,11 @@ if __name__ == '__main__':
     parser.add_argument('--injections', default=','.join(INJECTIONS), help="comma list or 'all'")
     parser.add_argument('--max-total-calls', type=int, default=176)
     parser.add_argument('--max-calls-per-episode', type=int, default=16)
+    parser.add_argument('--attack', default='important_instructions_no_names', choices=ATTACKS)
+    parser.add_argument('--autodojo-cache', type=Path)
+    parser.add_argument('--autodojo-variant', type=int, default=0)
     a = parser.parse_args()
     select = lambda v: 'all' if v == 'all' else tuple(x for x in v.split(',') if x)
     run(a.output, suite_name=a.suite, tasks=select(a.tasks), injections=select(a.injections),
-        max_total_calls=a.max_total_calls, max_calls_per_episode=a.max_calls_per_episode)
+        max_total_calls=a.max_total_calls, max_calls_per_episode=a.max_calls_per_episode,
+        attack_name=a.attack, autodojo_cache_file=a.autodojo_cache, autodojo_variant=a.autodojo_variant)
