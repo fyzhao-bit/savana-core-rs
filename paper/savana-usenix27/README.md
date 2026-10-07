@@ -7,9 +7,23 @@ skeleton's structure and core design text, rewrites the framing around an
 The earlier "task authority / private continuations" working paper in
 `../usenix-sec27/` is left unchanged.
 
-**This is not submission-ready.** It is 21 pages with the fallback style, and
-the body runs to page 17 against a 13-page limit. G12 numbers are `TBD`, and
-about ten `\todo{}` markers remain (`grep -n todo main.tex`).
+**This is not submission-ready.** It is 24 pages with the fallback style, and
+the body runs to page 19 against a 13-page limit. G12 numbers are `TBD`, and
+twelve `\todo{}` markers remain (`grep -n todo main.tex`).
+
+## Revision 1 (2026-10-07): reviewer design holes
+
+| Reviewer point | Code | Paper |
+| --- | --- | --- |
+| Planner-output readers undefined | Already defined in `provenance.rs`: (ExternalUntrusted, PlannerAbstract ⊔ parents, {kernel}, ≤READ) | §5.4 source-label table and ℓ_P with four consequences; §5.5 "effects are releases"; P2 split into reveals (a) and effect releases (b) |
+| Singleton has no completeness bound | Domain = whole signed clause (no runtime subsets); result-derived alternatives are *rule*-closed. Singleton is never selected in production | §5.7 owner-closed domains, value- vs rule-closed alternatives, the bound |
+| No robust declassification positioning | — | §4.4 P3 as robustness against an untrusted decider; related work |
+| Descriptor soundness assumed | **Fixed** (commit after `2b41335`): G5 intent-flow fact is a floor, not a declared validator; untrusted values in a destination (or unnamed) field escalate for every effect; `dojo.web.get` url is the read's destination | Discussion "Fail-closed descriptors" (5 rules + residue) |
+
+Also corrected: the benchmark's software owner checks displayed structure but
+accepts any well-formed derived value; the evaluated G5 disposition is
+`require_approval` for every tool (so the measured approval-free fraction is 0;
+§7.6 gives a counterfactual 54.8% under `permit`).
 
 ## Build
 

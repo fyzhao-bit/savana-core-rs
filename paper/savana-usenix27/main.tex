@@ -570,10 +570,18 @@ events are:
 \item[P1 Label closure.] Every ordinary derivation is non-widening in
   readers and effects, and every externally untrusted value satisfies the
   \READ-only ceiling.
-\item[P2 Mediated disclosure.] If $\tau$ reveals bytes $b$ of value $v$ to
-  reader $r$, then either $r\in\readers(v)$ before the reveal, or $\tau$
-  contains an earlier declassification node for the same bytes, rule set,
-  purpose, and recipient.
+\item[P2 Mediated disclosure.] (a) \emph{Reveals.} If $\tau$ reveals bytes
+  $b$ of value $v$ to a system reader $r$ (a component or an exact model,
+  executor, or sink identity), then either $r\in\readers(v)$ before the
+  reveal, or $\tau$ contains an earlier declassification node for the same
+  bytes, rule set, purpose, and recipient. (b) \emph{Releases through
+  effects.} If action $a$ carries bytes $b$ to its external destination
+  $d$, then $d$ is the owner-endorsed \textsf{Destination} facet of $a$,
+  the bytes reached the executor through \textsf{BuildExecutionEnvelope}
+  for $a$'s exact executor, and, if any argument of $a$ is
+  \textsf{ExternalUntrusted} or $d$ was chosen by such a value, $\tau$
+  contains a verified \textsf{ActionApproval} over $a$'s exact request
+  bytes (\S\ref{sec:effect-readers}).
 \item[P3 No data- or selection-derived authority.] An externally untrusted
   value may occur as an argument, but it cannot by itself justify a control
   facet or authorize an effect. For every dispatched action, $\tau$
@@ -596,8 +604,10 @@ events are:
   of the same authority.
 \end{description}
 
-P1 follows by induction over the closed value constructors. P2 reduces
-every reader-widening route to the private declassification constructor.
+P1 follows by induction over the closed value constructors. P2(a) reduces
+every reader-widening route to the private declassification constructor;
+P2(b) reduces to the \textsf{Destination} endorsement and to G5's
+fail-closed floor (\S\ref{sec:endorsement}).
 P3 reduces each facet to its selection record and the endorsement re-check
 at G7. P4 and P5 reduce the external-byte boundary to the kernel and
 executor journals (\S\ref{sec:pipeline}). P6 reduces to two checks.
@@ -612,6 +622,62 @@ executor journals (\S\ref{sec:pipeline}). P6 reduces to two checks.
 \end{itemize}
 These are implementation arguments, not a mechanized proof
 (\S\ref{sec:discussion}).
+
+\subsection{P3 as robustness against an untrusted decider}
+\label{sec:robustness}
+
+P2 and P3 are instances of a property studied for two decades in
+language-based security. \emph{Robust declassification}~\cite{zdancewic2001robust}
+requires that an attacker who controls low-integrity inputs cannot
+influence \emph{what} information is released. \emph{Qualified
+robustness}~\cite{myers2006qualified} relaxes this to allow untrusted data to
+affect a release only through an explicit endorsement, and
+\emph{nonmalleable IFC}~\cite{cecchetti2017nmifc} adds the dual,
+\emph{transparent endorsement}: a principal may only endorse information it
+can read. Askarov and Myers characterize both in terms of attacker
+control~\cite{askarov2011}; Sabelfeld and Sands classify release policies by
+\emph{who}, \emph{what}, \emph{where}, and \emph{when}~\cite{sabelfeld2009declass}.
+
+We use the same vocabulary. The \emph{decision} of an action consists of
+its seven control facets and, for any action that releases data, its
+recipient. P3 says that no low-integrity input---and here every model output
+is low-integrity---influences that decision except through owner evidence:
+\begin{itemize}
+\item \textsf{ExplicitAlternative} and \textsf{CompleteContractSingleton} are
+  decisions the owner made \emph{before} any untrusted byte was read: the
+  candidate domain is the signed clause and nothing else
+  (\S\ref{sec:completeness}). They correspond to robust declassification,
+  where the release point and its policy are fixed in trusted code.
+\item \textsf{ActionApproval} is an endorsement of exact bytes on an
+  authenticated display. It corresponds to qualified robustness, and the
+  display transition (\textsf{BuildApprovalDisplay}) makes it
+  \emph{transparent}: the owner endorses only bytes it has been shown.
+\end{itemize}
+
+\paragraph{What is new.} Classical robustness assumes that the program is
+trusted and the attacker controls only some of its inputs; the release
+points are written by the programmer. In an agent, the ``program'' is a
+plan written by a model, and we assume that model is the attacker. Three
+consequences follow, and they are the parts of the design that the
+classical results do not provide.
+\begin{enumerate}
+\item \textbf{The code is an input.} Robustness must hold when the
+  attacker also chooses \emph{which} release points exist. \sys{} therefore
+  never lets a release point originate in model output. The owner signs
+  the program's control skeleton (the task authority), and every planner
+  choice is recorded as a selection fixed at \textsf{ExternalUntrusted}
+  and \READ, which no derivation can consume.
+\item \textbf{Robustness is enforced dynamically, per action, and across
+  restarts.} The kernel re-checks endorsements against the current
+  authorization revision, pre-state, and candidate-domain digest
+  immediately before durable preparation. A type system checks robustness
+  once, at compile time; we must check it at the moment of effect, against
+  durable state that an adversary can try to race or replay.
+\item \textbf{Effects are releases.} An effect discloses its arguments to
+  its destination. We treat the destination of every effect as a reader
+  (\S\ref{sec:effect-readers}), so the same robustness condition governs
+  both \emph{what} leaves (P2) and \emph{what happens} (P3).
+\end{enumerate}
 
 % =====================================================================
 \section{Information-Flow Labels}
@@ -725,6 +791,97 @@ fn derive_normal(parents: &[Self], allowed: EffectSetV2) -> Result<Self, G3Error
 }
 \end{lstlisting}
 
+\subsection{Source labels and the planner's output}
+\label{sec:source-labels}
+
+Table~\ref{tab:sources} gives the label every source kind receives. Two
+rules matter most for the planner.
+
+\begin{table}[t]
+\centering\scriptsize
+\begin{tabularx}{\columnwidth}{@{}Xllll@{}}
+\toprule
+\textbf{Source} & $\integ$ & $\conf$ & $\readers$ & $\effects$\\
+\midrule
+gated ingress & UA & VB & \textsc{k} & $A$\\
+policy constant & KT & decl. & decl.\,$\cap$\,pol. & $A$\\
+planner output & EU & PA$\,\sqcup\,\bigsqcup_i\conf(p_i)$ & \textsc{k} & $\le$\READ\\
+tool result & EU & VB & \textsc{k} & $\le$\READ\\
+extraction, derived & $\bigsqcup$ & $\bigsqcup$ & $\bigcap$ & ceiling\\
+declassification & parents & target & target & parents\\
+recovered execution & EU & VB & \textsc{k} & $\le$\READ\\
+\bottomrule
+\end{tabularx}
+\caption{Labels at each source (\code{provenance.rs}). UA/KT/EU:
+\textsf{UserAuthorized}, \textsf{KernelTrusted}, \textsf{ExternalUntrusted};
+VB/PA: \textsf{VaultBound}, \textsf{PlannerAbstract}; \textsc{k}: the
+kernel only; $A$: the session's signed effect allowance; ceiling: the
+untrusted-effect ceiling.}
+\label{tab:sources}
+\end{table}
+
+\paragraph{Planner output.} A value the planner writes---a literal, a plan,
+a program---is labeled
+\begin{align*}
+\ell_P=\bigl(&\textsf{ExternalUntrusted},\;
+  \textsf{PlannerAbstract}\sqcup\textstyle\bigsqcup_i\conf(p_i),\\
+  &\{\textsc{kernel}\},\;\effects\subseteq\{\READ\}\bigr),
+\end{align*}
+where $p_i$ are the values in the planner's envelope. The rule has four
+consequences.
+\begin{enumerate}
+\item \textbf{Readers.} Planner output is readable by the kernel alone,
+  whatever the planner saw. It cannot be handed to any component, model,
+  executor, or sink except through a declassification transition that
+  names the exact recipient (\S\ref{sec:declass}). The planner's readers do
+  not ``inherit'' from its inputs: they are the minimum.
+\item \textbf{Confidentiality.} The join with \textsf{PlannerAbstract}
+  records that the bytes were produced by a remote model. A planner value
+  combined with an agent-visible value joins to \textsf{VaultBound}, so it
+  can be shown to neither model (\S\ref{sec:labels}).
+\item \textbf{Integrity.} Planner output is never more trusted than a
+  tool result. Hence a planner-written value that reaches an argument of a
+  state-changing call, or the destination of any call, escalates at G5
+  (\S\ref{sec:endorsement}).
+\item \textbf{Effects.} By the ceiling, planner output authorizes nothing.
+  Its only path to an effect is as the \emph{selection} recorded against
+  it, which needs owner evidence.
+\end{enumerate}
+In the evaluated task-program path the planner cannot write an argument at
+all (S6): its output labels the program, and every argument is owner text,
+an owner constant, or a kernel derivation. The rule above governs the
+interactive path and is what makes S6 a defense in depth rather than the
+only line.
+
+\subsection{Effects are releases}
+\label{sec:effect-readers}
+
+Readers name system components, not people: there is no reader bit for
+Bob. An effect, however, discloses its arguments to its destination. We
+therefore treat every effect as a release to its \textsf{Destination}
+facet, and mediate it with the same three questions a declassification
+answers: \emph{who} receives (the endorsed destination), \emph{what} bytes
+(the exact business request), and \emph{who decided} (owner evidence).
+
+Consider a planner that tries to send the content of a secret $S$ to Bob.
+\begin{itemize}
+\item If the planner writes $S$'s bytes as the body, they are planner
+  output, so the call escalates: the owner sees the exact body and
+  recipient before anything is sent. The planner sees $S$ only if a
+  declassification gave it $S$; under value-blind planning it sees a
+  placeholder (\S\ref{sec:blind}).
+\item If the body is bound along a signed edge to a result containing $S$,
+  the body is \textsf{ExternalUntrusted} by P1, and the call escalates in
+  the same way.
+\item If Bob is not the owner's recipient, the \textsf{Destination} facet
+  has no owner evidence, so G4 refuses the action before G5 runs. If Bob
+  was chosen by data, the address floor escalates even on a read.
+\end{itemize}
+The confidentiality label is \emph{not} compared with the destination: an
+owner who signs ``send my report to Bob'' has declassified the report to
+Bob. P2(b) is therefore an owner-mediation property, not a label-flow
+property, and we state it as such.
+
 \subsection{Control facets and endorsement}
 \label{sec:endorsement}
 
@@ -764,10 +921,56 @@ preparation, mapping a change to \code{StateConflict}. Endorsements and
 ordinary values are separate types, and a \code{compile_fail} test pins
 that separation.
 
-G5's \code{IntentFlowConfinement} validator closes the remaining path. An
-authorizing-effect call that binds \emph{any} \textsf{ExternalUntrusted}
-argument requires approval: such a call cannot be permitted silently, even
-when every facet matches.
+G5's intent-flow fact closes the remaining path. It is a kernel
+\emph{floor}, met with every other G5 contributor, and does not depend on a
+descriptor declaring the validator. A call escalates to approval when
+(i) it has a state-changing effect and binds \emph{any}
+\textsf{ExternalUntrusted} argument, or (ii) whatever its effect, an
+\textsf{ExternalUntrusted} value fills a field the signed profile does not
+name as a non-destination field. Such a call cannot be permitted silently,
+even when every facet matches.
+
+\subsection{Candidate completeness}
+\label{sec:completeness}
+
+An approval-free endorsement is sound only if the owner's evidence
+determines the action's controls \emph{before} an adversary can influence
+them. We make the condition explicit.
+
+\paragraph{Owner-closed domains.} The candidate domain of a clause is the
+list of its alternatives in the signed contract and nothing else
+(\code{candidate_domain}). Its digest binds the whole canonical contract,
+its revision, and the clause; no API accepts a subset, a search result, a
+runtime value, or a caller's assertion of completeness, and G7 re-checks
+the digest before durable preparation. The domain is therefore fixed when
+the owner signs, before any tool result exists, and a tool result cannot
+remove or add a candidate.
+
+\paragraph{Value-closed versus rule-closed alternatives.} An alternative
+commits to resource, destination, and parameter digests. For an owner
+literal the digest is over the value; the alternative is \emph{value-closed}
+and denotes exactly one request. For a result-derived control the digest is
+over the signed \emph{rule}---source clause, path, bound, computation---under
+a separate domain, so a literal can never collide with it. Such an
+alternative is \emph{rule-closed}: it denotes whatever value an adversary
+places at the signed path. Counting alternatives therefore says nothing
+about how many concrete requests a rule-closed alternative admits.
+
+\paragraph{The completeness bound.} Let $V(f)$ be the set of concrete
+values the owner's evidence admits for facet $f$. Approval-free evidence
+(\textsf{ExplicitAlternative} or \textsf{CompleteContractSingleton})
+requires $|V(f)|=1$ for every facet that can change external state or
+choose a recipient, and $V(f)$ must be a function of the signed contract
+alone. Value-closed alternatives satisfy this by construction. A
+rule-closed control is filled by a kernel derivation from a tool result,
+which is \textsf{ExternalUntrusted} (P1), so the G5 floor sends it to
+\textsf{ActionApproval} whenever it steers a state-changing call or fills a
+destination. The only rule-closed controls that remain approval-free are
+non-destination fields of reads: data may choose \emph{which} record a
+fixed provider returns, which is the residue of \S\ref{sec:planner-residue}.
+\textsf{CompleteContractSingleton} is implemented and tested in the policy
+core, but the evaluated deployment never selects it; every approval-free
+action in our evaluation uses \textsf{ExplicitAlternative}.
 
 \subsection{Provenance}
 
@@ -988,12 +1191,14 @@ sensitive-span definition (\S\ref{sec:gate}).
 \end{itemize}
 
 \subsection{What a compromised planner can do}
+\label{sec:planner-residue}
 
 Under S6, a compromised planner cannot introduce a destination, a literal
 the owner did not write or declare, an unrequested computation, or a tool
-outside the reviewed catalog. Data never becomes control: an instruction
-inside a result can fill only a non-destination field along a signed edge,
-and a write that binds such a value requires approval. ``Do what the e-mail
+outside the reviewed catalog. Data never becomes control: a value from a
+result reaches a field only along a signed edge, a write that binds such a
+value requires approval, and a destination filled by such a value requires
+approval even on a read (\S\ref{sec:completeness}). ``Do what the e-mail
 says'' is therefore not expressible.
 
 What remains is choice \emph{within} the grant. The planner may:
@@ -1360,9 +1565,12 @@ reported by each response.
 \paragraph{Hosts and verification.} Each batch of at most nine episodes
 runs on a fresh, disposable host with its own deployment and keys. The
 benchmark's software identity admits at most nine bootstraps per armed
-batch. The owner is a software identity with finite pre-consent: it
-approves exactly the fixed task's displays, and it is not a human
-(\S\ref{sec:discussion}).
+batch. The owner is a software identity with finite pre-consent, not a
+human (\S\ref{sec:discussion}). It approves a display only if every
+owner-literal field equals the signed program, every derived field shows
+exactly the signed rule, and a result-fed payload is byte-for-byte that
+result. A derived \emph{value} is checked only for form and bound: the
+software owner accepts whatever the kernel extracted at the signed path.
 
 After a run, every batch is re-verified offline against the source
 revision it ran. The verifier re-runs the review, recomputes every model
@@ -1545,6 +1753,28 @@ different record of the same read. \todo{Run a forced-attempt variant
 live on both systems: the same mechanical mutations applied to each
 system's honest programs, then executed.}
 
+\paragraph{Attacks on the label and completeness rules.} Two attacks target
+the rules of \S\ref{sec:effect-readers} and \S\ref{sec:completeness}
+directly, at the kernel rather than at the review.
+\begin{itemize}
+\item \textbf{Planner-written disclosure.} The planner binds a recipient
+  and a body it wrote itself to an owner-signed \SEND{} alternative whose
+  descriptor declares \emph{no} intent-flow validator. Before the
+  fail-closed floor, G5 permitted this call; it now escalates to approval
+  (a kerneld regression test). The same alternative with owner-gated
+  inputs is still permitted.
+\item \textbf{Candidate-universe poisoning.} An injection places the
+  attacker's address at the path a rule-closed destination reads, so the
+  owner's single alternative now denotes the attacker. The domain digest is
+  unchanged, so the alternative still matches; the derived value is
+  \textsf{ExternalUntrusted}, so the floor escalates the action on a write
+  and, through address confinement, on a read (a policy-core unit
+  test).
+\end{itemize}
+\todo{Run both attacks end to end on fresh hosts, with a software owner
+that declines any approval whose destination is not owner text, and report
+dispatched-effect counts next to RQ1.}
+
 % ---------------------------------------------------------------------
 \subsection{RQ3: Utility and its attribution}
 \label{sec:eval-utility}
@@ -1699,6 +1929,25 @@ host's history, from 38\,s to over 60\,s within five rounds. We fixed it
 by re-verifying only changed journal entries, together with an optimized
 integration build; round time is now flat at about 17\,s.
 
+\paragraph{Approval-free paths.} In the evaluated deployment, the signed
+G5 policy disposition is \textsf{RequireApproval} for every tool, so every
+operation---read, extraction, compute, or write---was settled by the
+software owner's pre-consent; the measured approval-free fraction is
+therefore zero, by configuration. To estimate the fraction under a
+\textsf{Permit} disposition, where only the kernel's floor escalates, we
+classify each step of the reviewed programs by the rule of
+\S\ref{sec:endorsement}. Of 299 steps in the 76 accepted G12 programs, 164
+(54.8\%) would be approval-free: 89 reads with owner literals, 50 reads
+with derived query fields, 20 compute steps, and 5 writes with owner
+literals only. The other 135 are 119 quarantined extractions, which send
+data to a model and are therefore \SEND{} calls with an untrusted payload,
+and 16 writes with a derived argument. The executed G11 programs give
+142 of 307 (46.3\%). No program is approval-free end to end, because each
+composes its answer through an extraction. \todo{Re-run with a
+\textsf{Permit} disposition and report the measured fraction; consider
+treating extraction to a pinned model identity as a declassification
+(\textsf{BuildFusedModelEnvelope}) rather than an effect.}
+
 \paragraph{Model usage.} Per benign task, \sys{} makes 2.8 model calls with
 about 7.3k input tokens:
 \begin{itemize}
@@ -1726,9 +1975,10 @@ fewer input tokens, and pays for it with the latency of mediation.
   figures.
 \item \textbf{One run per configuration.} Drafting variance is about
   $\pm2$ tasks.
-\item \textbf{A software owner.} The owner is software and approves only
-  what the fixed task displays. A human owner would both add a check and
-  add latency.
+\item \textbf{A software owner.} The owner is software. It checks the
+  signed structure of each display but accepts any well-formed derived
+  value, so in our runs an approval adds no semantic check on data-derived
+  bytes. A human owner would both add that check and add latency.
 \end{itemize}
 
 % =====================================================================
@@ -1742,14 +1992,13 @@ on. The origin rule (S6) is enforced again by the kernel, both at
 preparation and at dispatch. In six poisoned episodes the kernel refused
 a program that the review had admitted (\S\ref{sec:eval-planner}).
 
-One rule lives only on the owner's side: \emph{no destination derived
-from data}. The kernel does admit a result edge into a write, but G5's
-intent-flow confinement then requires approval for the write. A human
-owner would therefore see every data-chosen recipient before it is used.
-Our software owner approves only what the fixed task displays, and the
-review refuses such programs outright. This is the largest single cost in
-utility (\S\ref{sec:eval-utility}), and it is a policy choice, not a
-mechanism limit.
+The review refuses \emph{any} destination derived from data. The kernel
+is less strict but not silent: it admits a result edge into a destination,
+and G5's floor then requires approval for the action, on a write or a read
+alike. A human owner would therefore see every data-chosen recipient or
+address before it is used. Refusing outright is the largest single cost in
+utility (\S\ref{sec:eval-utility}); it is a policy choice, not a mechanism
+limit.
 
 \paragraph{The residue of a compromised planner.} Within the grant, a
 compromised planner can still choose: another record of an authorized
@@ -1783,11 +2032,32 @@ declassification. P2 therefore proves mediation of the configured rule,
 not semantic noninterference. Because the pattern-set digest pins the
 masking contract, changing recall is a visible, signed policy change.
 
-\paragraph{Descriptor soundness.} P3 and P6 depend on the signed
-descriptors assigning roles correctly: every routing-, target-, scope-,
-and magnitude-affecting argument must be a control rather than payload.
-Misclassifying a field is a policy defect, and the implementation does
-not infer roles from connector code.
+\paragraph{Fail-closed descriptors.} P3 and P6 rely on signed descriptors,
+so we make their defaults fail closed rather than assume them correct.
+\begin{enumerate}
+\item \textbf{No default role.} Every business field declares one of
+  resource, destination, magnitude, payload, or parameter; a missing or
+  unknown role rejects the descriptor. A request must carry exactly the
+  profile's fields.
+\item \textbf{Everything but payload is control.} Resource, destination,
+  and parameter fields feed the \textsf{Scope}, \textsf{Destination}, and
+  \textsf{Argument} facets; only payload is outside every facet, and it is
+  bound by the payload digest and, when untrusted, by approval.
+\item \textbf{The flow floor is not declared.} Intent-flow confinement is
+  applied by G5 to every call, so a descriptor that omits the validator
+  cannot let untrusted data steer a state-changing call.
+\item \textbf{Addresses are destinations by default.} An untrusted value
+  in any field the profile does not name as a non-destination field
+  escalates, for every effect; a descriptor without a profile treats all
+  its fields as addresses. A field that chooses where a read goes (a URL)
+  must be the read's destination; \code{dojo.web.get} declares its URL so.
+\item \textbf{Effects are cross-checked.} A descriptor's effect set must
+  contain its profile's effect, so a \SEND{} profile cannot ship as a read.
+\end{enumerate}
+What remains trusted is the publisher's choice of \emph{which} field is a
+URL or a recipient: if a signed descriptor declares a real address as a
+query parameter, a data-chosen value can reach it on a read. That is a
+signed policy defect, visible in the descriptor, not a runtime bypass.
 
 \paragraph{Approval semantics and human factors.} The tool-approval
 display is rendered from the exact business request, but it has not been
@@ -1826,6 +2096,13 @@ lattice but its application to agents:
 \item the authority over \emph{effects} comes from an owner-signed task
   rather than from the plan.
 \end{itemize}
+Robust declassification~\cite{zdancewic2001robust}, qualified
+robustness~\cite{myers2006qualified}, decentralized
+robustness~\cite{chong2006decentralized}, and nonmalleable
+IFC~\cite{cecchetti2017nmifc} are the closest formal notions to P3; they
+assume trusted code with untrusted inputs, whereas \sys{} must enforce
+robustness when the code itself is written by the adversary
+(\S\ref{sec:robustness}).
 
 \paragraph{System-level agent defenses.} The table in
 Appendix~\ref{app:related-comparison} compares the closest systems.
