@@ -36,7 +36,8 @@ A compute step (exact, no model): {{"tool": "{COMPUTE_TOOL}", "args": {{"input1"
   input1..input4: earlier steps' results (a tool's result or an extracted value). input1 gives the
   rows: an object's entries (key -> value), a list of records, or a list of names; input2..input4 are
   objects joined to those rows by key (e.g. ratings and prices of the same hotels).
-  A ref is "key", N (the value in inputN) or "N.field" (a field of a record in inputN).
+  A ref is "key", N (the value in inputN), "N.field" (a field of a record in inputN) or just
+  "field" (a field of input1's records, e.g. "amount", "date", "size").
   filter1..filter3 (optional): "<ref> <op> <text or number>", op one of contains lacks startswith is
   isnt = > >= < <= (e.g. "2 contains vegan", "3 <= 210", "1.date startswith 2022-03").
   order1, order2 (optional): "max <ref>" or "min <ref>" by the first number in the value (order2

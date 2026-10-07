@@ -45,6 +45,14 @@ class FunctionTests(unittest.TestCase):
         pairs = run(RATINGS, orders=("min 1",), output="pairs 1")["items"]
         self.assertEqual(pairs[0], "Le Marais Boutique: Rating: 4.2 Reviews: fine")  # one line per item
 
+    def test_a_bare_field_names_a_field_of_input1(self):
+        self.assertEqual(run(PAYMENTS, filters=("date startswith 2022-03", "sender is me"),
+                             output="sum amount")["text"], "1050")
+        files = json.dumps([{"id_": "11", "filename": "a.docx", "size": 300},
+                            {"id_": "12", "filename": "b.xlsx", "size": 900}])
+        self.assertEqual(run(files, orders=("max size",), output="key")["text"], "12")  # the file id
+        self.assertEqual(run(files, orders=("max size",), output="value filename")["text"], "b.xlsx")
+
     def test_input_shapes(self):
         self.assertEqual([k for k, _ in table('"Hotel Names: A\\nB\\nC\\n"')], ["A", "B", "C"])
         self.assertEqual([k for k, _ in table("A; B; C")], ["A", "B", "C"])

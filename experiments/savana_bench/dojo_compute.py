@@ -14,11 +14,12 @@ comparison as a fixed function instead:
     output             "key" | "keys [n]" | "count" | "sum <ref>" | "value <ref>"
                        | "values <ref>" | "pairs <ref>"
 
-    ref      "key" | N | "N.field"       (N names inputN, 1..4)
+    ref      "key" | N | "N.field" | "field"   (N names inputN, 1..4; a bare
+             field is a field of input1's records, i.e. "1.field")
     op       contains | lacks | startswith | is | isnt | = | > | >= | < | <=
 
 input1 gives the rows: an object's entries (key -> value), a list of records
-(key = its "name", "id" or "title", else its position), a list of texts, or a
+(key = its "id", "id_", "name", "title" or "filename", else its position), a list of texts, or a
 text (lines, or items separated by "; "). Every other input is an object or
 list joined to those rows by key. A ref's number is the first decimal number
 in its text ("Rating: 4.2" -> 4.2).
@@ -51,6 +52,7 @@ MAX_ITEM_BYTES = 160
 MAX_TEXT_BYTES = 480
 SEPARATOR = "; "
 _REF = re.compile(r"^(?:key|[1-4](?:\.[A-Za-z_][A-Za-z0-9_]{0,31})?)$")
+_FIELD = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,31}$")
 _NUMBER = re.compile(r"-?[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?")
 _LABEL = re.compile(r"^[A-Za-z][A-Za-z ]{0,39}:\s*(\S.*)$")
 
@@ -67,6 +69,8 @@ def _spec_text(text):
 
 
 def _ref(text, inputs):
+    if text != "key" and _FIELD.match(text):
+        text = "1." + text  # a bare field: of input1's records
     if not _REF.match(text):
         raise ComputeSpecError("compute_spec")
     if text != "key" and int(text[0]) > inputs:
@@ -152,7 +156,7 @@ def _format(number):
 
 
 def _record_key(record, index):
-    for name in ("name", "id", "title"):
+    for name in ("id", "id_", "name", "title", "filename"):
         if name in record and _text(record[name]):
             return _text(record[name])
     return str(index + 1)
