@@ -78,6 +78,9 @@ An origin is one of:
 A field whose format is list, opt_list or attachments takes a list: a literal is
   {{"text": ["item", ...]}} (or the items joined with "{LIST_SEPARATOR}"), each item copied exactly.
 Rules:
+- If the request asks you to do something (send, pay, schedule, create, update, delete, share,
+  invite, add, post, reschedule, ...), the program must call the tool that does it. Never replace
+  an action with an answer that describes it; an "{ANSWER}" extraction alone only answers a question.
 - Steps are numbered from 1; an origin or source may only name an EARLIER step.
 - A whole tool result is never a field value. To use data from a result in a field (a list of
   names, an id, a date, an amount), add an extraction step that targets that field (or a compute
