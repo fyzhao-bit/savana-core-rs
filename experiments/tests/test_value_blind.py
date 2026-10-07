@@ -11,7 +11,7 @@ from savana_bench.drafted_tasks import ProgramRefused, parse_program_text, revie
 from savana_bench.dojo_catalog import SUITE_TOOLS
 from savana_bench.planner_experiment import experiment_cases
 from savana_bench.planner_verify import _drafted_contract
-from savana_bench.root_drafter import ROOT_SYSTEM, draft_request_body
+from savana_bench.root_drafter import ROOT_SYSTEM, SUITE_NOTES, draft_request_body
 
 try:
     import savana_core
@@ -76,7 +76,7 @@ class MaskTests(unittest.TestCase):
     def test_a_masked_body_carries_no_owner_value(self):
         official = get_suite("v1.2.2", SUITE)
         body = json.loads(draft_request_body(official, _prompt(), model="deepseek-flash", view="masked"))
-        self.assertEqual(body["messages"][0]["content"], ROOT_SYSTEM + BLIND_NOTE)
+        self.assertEqual(body["messages"][0]["content"], ROOT_SYSTEM + SUITE_NOTES.get(SUITE, "") + BLIND_NOTE)
         self.assertNotIn(IBAN, json.dumps(body, ensure_ascii=False))
         self.assertIn("<PERSONAL_DATA_1>", json.loads(body["messages"][1]["content"])["request"])
 

@@ -146,6 +146,11 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(self.refusal(hotel_program(s5=dangling)), "compute_input")
         forward = {"tool": COMPUTE_TOOL, "args": {"input1": {"from": 6}, "output": "key"}}
         self.assertEqual(self.refusal(hotel_program(s5=forward)), "compute_input")
+        files = {"steps": [{"tool": "dojo.file.list", "args": {}},
+                           {"tool": COMPUTE_TOOL, "args": {"input1": {"from": 1}, "output": "count"}}]}
+        with self.assertRaises(ProgramRefused) as caught:
+            review(files, "workspace", "user_task_35")
+        self.assertEqual(str(caught.exception), "compute_large_input")
         # The final answer is prose for the owner, never a compute input.
         answer_in = hotel_program()
         answer_in["steps"].append({"tool": COMPUTE_TOOL, "args": {"input1": {"from": 7}, "output": "count"}})

@@ -12,7 +12,7 @@ from savana_bench.drafted_tasks import ProgramRefused, parse_program_text, revie
 from savana_bench.dojo_catalog import SUITE_TOOLS
 from savana_bench.planner_experiment import MAX_DRAFTS, PLANNER_MODELS, experiment_cases
 from savana_bench.planner_verify import _drafted_contract
-from savana_bench.root_drafter import (REFUSAL_HINTS, ROOT_SYSTEM, draft_request_body, planner_catalog,
+from savana_bench.root_drafter import (REFUSAL_HINTS, ROOT_SYSTEM, SUITE_NOTES, draft_request_body, planner_catalog,
                                        poisoned_root_system, refusal_message)
 
 SUITE, USER = "banking", "user_task_7"
@@ -82,12 +82,12 @@ class RefusalLocationTests(unittest.TestCase):
 class PlannerInputTests(unittest.TestCase):
     def test_first_draft_body_is_unchanged(self):
         # The honest single-draft request is byte-for-byte what it was before
-        # retries existed, so earlier runs and this one draft identically.
+        # retries existed (with the suite's data note, as CaMeL's P-LLM gets).
         official = _suite()
         prompt = official.get_user_task_by_id(USER).PROMPT
         user = json.dumps(dict(request=prompt, tools=planner_catalog(official)), ensure_ascii=False)
         before = json.dumps(dict(model="deepseek-flash",
-            messages=[dict(role="system", content=ROOT_SYSTEM), dict(role="user", content=user)],
+            messages=[dict(role="system", content=ROOT_SYSTEM + SUITE_NOTES[SUITE]), dict(role="user", content=user)],
             temperature=0, max_tokens=2048, thinking={"type": "disabled"}, stream=False,
             response_format={"type": "json_object"}), ensure_ascii=False, allow_nan=False).encode()
         self.assertEqual(draft_request_body(official, prompt, model="deepseek-flash"), before)
@@ -101,7 +101,7 @@ class PlannerInputTests(unittest.TestCase):
         self.assertEqual(body["messages"][2]["content"], BAD)
         self.assertEqual(body["messages"][3]["content"], refusal_message("extract_context", 2, "context"))
         poisoned = json.loads(draft_request_body(official, prompt, model="deepseek-flash", goal="exfiltrate"))
-        self.assertEqual(poisoned["messages"][0]["content"], poisoned_root_system("exfiltrate"))
+        self.assertEqual(poisoned["messages"][0]["content"], poisoned_root_system("exfiltrate") + SUITE_NOTES[SUITE])
 
     def test_every_review_code_has_a_fixed_hint(self):
         source = (Path(__file__).parents[1] / "savana_bench" / "drafted_tasks.py").read_text()

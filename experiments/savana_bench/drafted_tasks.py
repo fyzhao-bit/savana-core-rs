@@ -50,6 +50,11 @@ from .dojo_catalog import (GUARD_ALWAYS, GUARD_FIELD, LIST_KINDS, LIST_SEPARATOR
                            suite_operations)
 from .dojo_compute import COMPUTE_TOOL, FIELDS as COMPUTE_FIELDS, INPUT_FIELDS, ComputeSpecError, validate_spec
 
+# Reads whose whole result exceeds a compute input's signed bound
+# (MAX_CONTEXT_BYTES) in the benchmark environments (list_files: about 29 KB
+# of file contents); the edge could never be derived, so the plan would stall.
+LARGE_RESULT_TOOLS = frozenset({"dojo.file.list"})
+
 EXTRACT_TOOL = "dojo.model.extract"
 ANSWER = "answer"
 # An extraction that answers yes or no to a condition the owner's request
@@ -485,6 +490,8 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                 elif kinds[earlier - 1] == "compute":
                     derived.append((name, earlier, GENERATED_TEXT, MAX_ANSWER_BYTES))
                 else:
+                    if chain[earlier - 1].tool in LARGE_RESULT_TOOLS:
+                        _refuse("compute_large_input")
                     derived.append((name, earlier, RESULT_TEXT, MAX_CONTEXT_BYTES))
             where["field"] = "output"
             try:
