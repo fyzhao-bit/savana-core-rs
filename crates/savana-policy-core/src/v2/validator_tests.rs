@@ -567,3 +567,56 @@ fn binding_validators_deny_and_flow_confinement_escalates() {
         B::RequireApproval
     );
 }
+
+#[test]
+fn address_confinement_is_fail_closed_for_every_effect() {
+    use crate::v2::validator::address_flow_is_confined;
+    use crate::v2::IntegrityV2::{ExternalUntrusted as U, UserAuthorized as A};
+    use savana_kernel_protocol::v2::*;
+
+    // A read profile whose address is the destination field.
+    let read = BusinessProfileV2::new(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        "web.get",
+        Digest32V2::new([30; 32]),
+        Digest32V2::new([31; 32]),
+        TaskEffectV2::Read,
+        BusinessMagnitudeV2::FixedCount(1),
+        vec![
+            BusinessFieldV2::new(
+                "body",
+                BusinessFieldRoleV2::Payload,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+            BusinessFieldV2::new(
+                "query",
+                BusinessFieldRoleV2::Resource,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+            BusinessFieldV2::new(
+                "url",
+                BusinessFieldRoleV2::Destination,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let p = Some(&read);
+    // Fetched content may fill a query term or a payload of a read...
+    assert!(address_flow_is_confined(
+        p,
+        [("query", U), ("body", U), ("url", A)].into_iter()
+    ));
+    // ...but never the address the read goes to.
+    assert!(!address_flow_is_confined(p, [("url", U)].into_iter()));
+    // An argument the signed profile does not name is treated as an address.
+    assert!(!address_flow_is_confined(p, [("cc", U)].into_iter()));
+    assert!(address_flow_is_confined(p, [("cc", A)].into_iter()));
+    // A descriptor without a business profile names no non-address field:
+    // every untrusted argument escalates.
+    assert!(!address_flow_is_confined(None, [("query", U)].into_iter()));
+    assert!(address_flow_is_confined(None, [("query", A)].into_iter()));
+}

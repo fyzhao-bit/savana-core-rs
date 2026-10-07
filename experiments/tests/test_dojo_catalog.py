@@ -54,10 +54,17 @@ class CatalogShapeTests(unittest.TestCase):
                 self.assertEqual(kind in ("fixed", "guard"), upstream is None)
                 if kind == "fixed":
                     self.assertIn(name, SENTINELS)
-            # Reads stay on the fixed synthetic controls; writes declare their
-            # real target and destination where the function has one.
+            # Reads stay on the fixed synthetic controls, except a read whose
+            # field chooses where the fetch goes: that field is the read's
+            # destination (the kernel confines it). Writes declare their real
+            # target and destination where the function has one.
             if tool["effect"] == "read":
-                self.assertTrue(all(r == "parameter" for (n, r, u, k) in tool["fields"] if k != "fixed"))
+                open_roles = {n: r for (n, r, u, k) in tool["fields"] if k != "fixed"}
+                if tool["operation"] == "dojo.web.get":
+                    self.assertEqual(open_roles, {"url": "destination"})
+                    self.assertNotIn("to", {f[0] for f in tool["fields"]})
+                else:
+                    self.assertTrue(all(r == "parameter" for r in open_roles.values()))
 
     def test_original_workspace_entries_are_unchanged(self):
         from savana_bench.agentdojo_tasks import catalog_json

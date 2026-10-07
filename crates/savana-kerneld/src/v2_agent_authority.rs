@@ -13215,6 +13215,19 @@ pub(crate) mod tests {
         destination: &str,
         now: u64,
     ) -> ProposeToolCallRequestV2 {
+        replan_business_proposal_from(f, resource, destination, now, true)
+    }
+
+    /// `owner_inputs` binds the arguments as owner-gated input
+    /// (`UserAuthorized`); otherwise they are planner output
+    /// (`ExternalUntrusted`), which no SEND may consume without approval.
+    fn replan_business_proposal_from(
+        f: &mut PlannerAuthorityFixtureV2,
+        resource: &str,
+        destination: &str,
+        now: u64,
+        owner_inputs: bool,
+    ) -> ProposeToolCallRequestV2 {
         let s = &f.authority.sessions[0];
         let descriptor = f
             .authority
@@ -13241,15 +13254,27 @@ pub(crate) mod tests {
             ("to", destination),
         ] {
             let value = KernelValueV2::text(text).unwrap();
-            let provenance = ProvenanceRecordV2::planner_output(
-                &value,
-                context,
-                Digest32V2::new([0x86; 32]),
-                Digest32V2::new([0x87; 32]),
-                Digest32V2::new([0x88; 32]),
-                &[],
-                EffectSetV2::SEND,
-            )
+            let provenance = if owner_inputs {
+                ProvenanceRecordV2::from_verified_kernel_input(
+                    &value,
+                    context,
+                    Digest32V2::new([0x89; 32]),
+                    Digest32V2::new([0x8a; 32]),
+                    Digest32V2::new([0x8b; 32]),
+                    Digest32V2::new([0x8c; 32]),
+                    EffectSetV2::SEND,
+                )
+            } else {
+                ProvenanceRecordV2::planner_output(
+                    &value,
+                    context,
+                    Digest32V2::new([0x86; 32]),
+                    Digest32V2::new([0x87; 32]),
+                    Digest32V2::new([0x88; 32]),
+                    &[],
+                    EffectSetV2::SEND,
+                )
+            }
             .unwrap();
             let handle = f
                 .values
@@ -13549,6 +13574,50 @@ pub(crate) mod tests {
             );
             assert!(f.authority.intents.is_empty());
         }
+    }
+
+    #[test]
+    fn planner_written_recipient_and_body_escalate_even_without_a_declared_validator() {
+        // The fixture's SEND descriptor declares no IntentFlowConfinement
+        // validator. The same owner-signed alternative ("A" to "Alice") is
+        // permitted when its arguments are owner input, but when the planner
+        // writes the recipient and the body itself, G5's fail-closed floor
+        // escalates to owner approval: a model can neither choose whom a
+        // write reaches nor what it carries without an endorsement of the
+        // exact bytes.
+        let (mut f, _) = business_proposal_fixture("A", "Alice");
+        let request = replan_business_proposal_from(&mut f, "A", "Alice", 200, false);
+        let proposed = f
+            .authority
+            .propose_tool_call(
+                RequestIdV2::new([0xc6; 16]),
+                b"planner-written proposal",
+                &request,
+                &f.values,
+                f.caller_identity,
+                Digest32V2::new([0x85; 32]),
+                7,
+                UnixMillisV2::new(202),
+            )
+            .unwrap();
+        let ActionIntentCurrentStateV2::Proposed { pending } = proposed.current() else {
+            panic!("proposed")
+        };
+        let evaluated = f
+            .authority
+            .evaluate_tool_call(
+                EvaluateToolCallRequestV2::new(pending),
+                &f.values,
+                f.caller_identity,
+                Digest32V2::new([0x85; 32]),
+                7,
+                UnixMillisV2::new(203),
+            )
+            .unwrap();
+        assert!(
+            !matches!(evaluated, EvaluateToolCallResponseV2::Allowed { .. }),
+            "planner output must not reach a SEND without approval"
+        );
     }
 
     #[test]

@@ -58,7 +58,8 @@ class ReviewTests(unittest.TestCase):
     def test_a_read_extract_write_program_becomes_signed_edges(self):
         contract = review("slack", "user_task_3", SUMMARY_PROGRAM)
         read, extract, post = contract.steps()
-        self.assertEqual(read.value_map(), {"body": "", "calendar": "primary", "to": "private-result",
+        # The fetched URL is the read's destination; there is no synthetic `to`.
+        self.assertEqual(read.value_map(), {"body": "", "calendar": "primary",
                                             "url": "www.informations.com"})
         self.assertEqual((extract.tool, extract.payload_from), (EXTRACT_TOOL, 1))
         # The extractor's instruction is always the owner's whole request.

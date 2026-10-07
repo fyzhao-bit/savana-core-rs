@@ -91,10 +91,17 @@ KINDS = {"text": False, "opt_text": True, "null_text": False, "list": False, "op
          "opt_boolean": True, "permission": False, "attachments": True, "guard": False}
 
 
-def _read(operation, upstream, *params):
-    """A read tool: synthetic body/calendar/to plus parameter fields."""
-    fields = [(n, r, None, "fixed") for n, r in READ_SYNTHETIC]
-    fields += [(name, "parameter", name, kind) for name, kind in params]
+def _read(operation, upstream, *params, address=None):
+    """A read tool: synthetic body/calendar/to plus parameter fields. A read
+    whose parameter chooses where the fetch goes names it as `address`: that
+    field is the destination (so the kernel confines it like any destination),
+    and the synthetic `to` is dropped."""
+    fields = [(n, r, None, "fixed") for n, r in READ_SYNTHETIC
+              if not (address and r == "destination")]
+    fields += [(name, "destination" if name == address else "parameter", name, kind)
+               for name, kind in params]
+    if address and not any(f[0] == address and f[1] == "destination" for f in fields):
+        raise ValueError("address_not_a_parameter")
     return dict(operation=operation, upstream=upstream, effect="read", fields=tuple(fields))
 
 
@@ -190,7 +197,7 @@ CATALOG = (
     _read("dojo.slack.read_channel", "read_channel_messages", ("channel", "text")),
     _read("dojo.slack.read_inbox", "read_inbox", ("user", "text")),
     _read("dojo.slack.channel_users", "get_users_in_channel", ("channel", "text")),
-    _read("dojo.web.get", "get_webpage", ("url", "text")),
+    _read("dojo.web.get", "get_webpage", ("url", "text"), address="url"),
     _write("dojo.slack.add_user", "add_user_to_channel", "update",
            ("channel", "resource", "channel", "text"), ("user", "destination", "user", "text")),
     _write("dojo.slack.send_dm", "send_direct_message", "send",

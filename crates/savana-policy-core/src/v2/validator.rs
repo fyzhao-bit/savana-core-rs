@@ -450,6 +450,14 @@ impl VerifiedG5EvaluationInputV2 {
                 .arguments()
                 .iter()
                 .map(|argument| argument.label().integrity()),
+        ) && address_flow_is_confined(
+            descriptor.business_profile(),
+            stored.arguments().iter().map(|argument| {
+                (
+                    argument.argument_name().as_str(),
+                    argument.label().integrity(),
+                )
+            }),
         );
         let validator_facts = ClosedValidatorFactsV2 {
             argument_binding_integrity,
@@ -643,7 +651,20 @@ impl G5DecisionIndexV2 {
             G5PolicyDispositionKindV2::RequireApproval => G5DecisionBranchV2::RequireApproval,
             G5PolicyDispositionKindV2::Deny => G5DecisionBranchV2::Deny,
         };
-        let branch = ontology_branch.meet(validator_branch).meet(policy_branch);
+        // Fail-closed floor: intent-flow confinement does not depend on a
+        // descriptor declaring it. A descriptor that omits the validator (a
+        // policy defect) still cannot let an `ExternalUntrusted` argument
+        // steer a state-changing effect without owner approval. The fact is
+        // computed for every call; reads are always confined.
+        let flow_floor = if input.validator_facts.intent_flow_confinement {
+            G5DecisionBranchV2::Permit
+        } else {
+            G5DecisionBranchV2::RequireApproval
+        };
+        let branch = ontology_branch
+            .meet(validator_branch)
+            .meet(policy_branch)
+            .meet(flow_floor);
         let decision_record_digest = decision_record_digest(
             input.action_intent_id,
             input.evaluation_input_digest,
@@ -701,6 +722,29 @@ pub(crate) fn intent_flow_is_confined(
 ) -> bool {
     descriptor_effects.intersection(EFFECT_AUTHORIZING_V2) == EffectSetV2::EMPTY
         || !argument_integrities.any(|integrity| integrity == IntegrityV2::ExternalUntrusted)
+}
+
+/// Address confinement, the fail-closed descriptor default. An argument that
+/// chooses *where* a call goes must not be `ExternalUntrusted`, whatever the
+/// call's effect: a read whose address came from fetched content discloses to
+/// whoever chose that address. An argument counts as an address unless the
+/// signed business profile names it as a field with a non-destination role, so
+/// a descriptor without a profile, or an argument the profile does not name,
+/// is treated as an address. Combined into the intent-flow fact, a violation
+/// escalates to owner approval rather than denying.
+pub(crate) fn address_flow_is_confined<'a>(
+    profile: Option<&savana_kernel_protocol::v2::BusinessProfileV2>,
+    mut arguments: impl Iterator<Item = (&'a str, IntegrityV2)>,
+) -> bool {
+    use savana_kernel_protocol::v2::BusinessFieldRoleV2;
+    arguments.all(|(name, integrity)| {
+        integrity != IntegrityV2::ExternalUntrusted
+            || profile.is_some_and(|profile| {
+                profile.fields().iter().any(|field| {
+                    field.name() == name && field.role() != BusinessFieldRoleV2::Destination
+                })
+            })
+    })
 }
 
 fn evaluate_internal_validator(
