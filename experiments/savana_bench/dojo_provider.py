@@ -169,6 +169,38 @@ def _extract_tool(generator, functions, view="raw"):
     return extract
 
 
+def _compute_tool():
+    """The reviewed `dojo.compute.table` adapter: a fixed deterministic function
+    of the owner-signed inputs and spec texts (`dojo_compute.compute`). It calls
+    no model and no AgentDojo function and contacts nothing."""
+    from .dojo_compute import compute
+
+    def table(body: str, calendar: str, to: str, input1: str, input2: str, input3: str, input4: str,
+              filter1: str, filter2: str, filter3: str, order1: str, order2: str, output: str):
+        """Deterministic filter/order/aggregate over earlier results; no tools, no models, no actions.
+
+        :param body: Must be empty; never parsed as code or tool arguments.
+        :param calendar: Fixed primary resource control.
+        :param to: Fixed private result destination control.
+        :param input1: An earlier step's result (a signed edge): the rows.
+        :param input2: A second earlier result joined by key, or empty.
+        :param input3: A third earlier result joined by key, or empty.
+        :param input4: A fourth earlier result joined by key, or empty.
+        :param filter1: An owner-declared filter, or empty.
+        :param filter2: An owner-declared filter, or empty.
+        :param filter3: An owner-declared filter, or empty.
+        :param order1: An owner-declared order, or empty.
+        :param order2: An owner-declared tie-break order, or empty.
+        :param output: The owner-declared output.
+        """
+        if (body != SENTINELS["body"] or calendar != SENTINELS["calendar"] or to != SENTINELS["to"]):
+            raise ValueError("compute_control_mismatch")
+        return compute([input1, input2, input3, input4], [filter1, filter2, filter3], [order1, order2], output)
+
+    table.__name__ = "dojo.compute.table"
+    return table
+
+
 def dojo_provider(suite, environment, *, max_calls=1, generator=None, extractor_view="raw"):
     """The provider for one episode of `suite` (an AgentDojo TaskSuite).
 
@@ -193,6 +225,7 @@ def dojo_provider(suite, environment, *, max_calls=1, generator=None, extractor_
         adapter = namespace.pop(pyname)
         adapter.__name__ = operation
         functions.append(make_function(adapter))
+    functions.append(make_function(_compute_tool()))
     if generator is not None:
         functions.append(make_function(_generator_tool(generator)))
         functions.append(make_function(_extract_tool(generator, tools, extractor_view)))

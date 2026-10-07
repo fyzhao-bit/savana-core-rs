@@ -335,7 +335,7 @@ def suite_operations(suite_tools):
     return tuple(t["operation"] for t in CATALOG if t["upstream"] in names)
 
 
-def catalog_document(suite, extra_write_tools=()):
+def catalog_document(suite, extra_write_tools=(), extra_read_tools=()):
     """Schema-2 catalog of one suite for the deployment generator: every field
     is text (a list kind: text list) with an explicit role; authorizing tools
     carry intent-flow confinement. Catalog order is kept, so the original
@@ -353,4 +353,4 @@ def catalog_document(suite, extra_write_tools=()):
             reads.append(item)
         else:
             writes.append(dict(item, validators=["intent_flow_confinement"]))
-    return {"schema": 2, "read_tools": reads, "write_tools": writes + list(extra_write_tools)}
+    return {"schema": 2, "read_tools": reads + list(extra_read_tools), "write_tools": writes + list(extra_write_tools)}

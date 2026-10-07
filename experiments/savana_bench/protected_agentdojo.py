@@ -363,7 +363,7 @@ def official_case(case, contract=None):
 
 # Upstream names of reviewed tools that are not AgentDojo functions; the official
 # oracle only ever sees AgentDojo calls in its trace.
-NON_AGENTDOJO_UPSTREAMS = ("quarantined_generate", "quarantined_extract")
+NON_AGENTDOJO_UPSTREAMS = ("quarantined_generate", "quarantined_extract", "savana_compute_table")
 
 
 def score_outcome(*, suite, task, injection, contract, before, after, provider, outcome):

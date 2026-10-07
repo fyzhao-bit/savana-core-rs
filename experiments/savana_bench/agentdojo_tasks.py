@@ -303,8 +303,19 @@ MODEL_CATALOG = (
 )
 
 
+# Deterministic computation over earlier results (`dojo_compute`): a READ that
+# contacts nothing and changes nothing. Its inputs are owner-signed result
+# edges, its filter/order/output texts are owner-declared constants, and its
+# output is data that reaches a later field only through a signed edge.
+def _compute_catalog():
+    from .dojo_compute import COMPUTE_TOOL, COMPUTE_UPSTREAM, FIELDS
+    return ((COMPUTE_TOOL, COMPUTE_UPSTREAM, "read",
+             (("body", "payload"), ("calendar", "resource"), ("to", "destination"),
+              *((name, "parameter") for name in FIELDS))),)
+
+
 def upstream_for(tool):
-    for name, upstream, *_ in (*TOOL_CATALOG, *WRITE_CATALOG, *MODEL_CATALOG):
+    for name, upstream, *_ in (*TOOL_CATALOG, *WRITE_CATALOG, *MODEL_CATALOG, *_compute_catalog()):
         if name == tool:
             return upstream
     from .dojo_catalog import entry
@@ -323,7 +334,10 @@ def catalog_json(suite=SUITE):
         fields = [{"name": n, "role": r, "type": "text"} for n, r in sorted(spec)]
         model_tools.append({"operation": name, "effect": effect, "fixed_magnitude": 1,
                             "fields": fields, "validators": list(WRITE_VALIDATORS)})
-    return catalog_document(suite, extra_write_tools=model_tools)
+    compute_tools = [{"operation": name, "effect": effect, "fixed_magnitude": 1,
+                      "fields": [{"name": n, "role": r, "type": "text"} for n, r in sorted(spec)]}
+                     for name, _, effect, spec in _compute_catalog()]
+    return catalog_document(suite, extra_write_tools=model_tools, extra_read_tools=compute_tools)
 
 
 def catalog_operations(suite=SUITE):

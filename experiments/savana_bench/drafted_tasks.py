@@ -48,6 +48,7 @@ from .agentdojo_tasks import (BENCHMARK, CALENDAR_YEAR, GENERATED_ITEMS, GENERAT
                               upstream_for)
 from .dojo_catalog import (GUARD_ALWAYS, GUARD_FIELD, LIST_KINDS, LIST_SEPARATOR, SENTINELS, decode_argument, entry,
                            suite_operations)
+from .dojo_compute import COMPUTE_TOOL, FIELDS as COMPUTE_FIELDS, INPUT_FIELDS, ComputeSpecError, validate_spec
 
 EXTRACT_TOOL = "dojo.model.extract"
 ANSWER = "answer"
@@ -103,7 +104,10 @@ def review_policy():
             "calendar_year": CALENDAR_YEAR, "max_declared": MAX_DECLARED,
             "extract_instruction": "the whole request",
             "conditions": "a write may be gated by a yes/no extraction of owner-text condition; "
-                          "a gated step's result is never used"}
+                          "a gated step's result is never used",
+            "compute": {"tool": COMPUTE_TOOL, "inputs": "signed edges to earlier results",
+                        "spec": "filter/order/output texts in a fixed grammar, declared as owner constants",
+                        "output": "data: never a destination, used only through a signed edge"}}
 
 
 class ProgramRefused(ValueError):
@@ -358,7 +362,7 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
     raw_steps = program["steps"]
     if not 1 <= len(raw_steps) <= MAX_STEPS:
         _refuse("program_length")
-    served = set(suite_operations(suite_tools)) | {EXTRACT_TOOL}
+    served = set(suite_operations(suite_tools)) | {EXTRACT_TOOL, COMPUTE_TOOL}
     labels = set(extract_targets())
     restatable = owner_normalized(prompt)
     restated = set()
@@ -448,9 +452,48 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                     # request with several parts can be answered in full.
                     answer = chain[earlier - 1].value_map()["target"] == ANSWER
                     derived.append((field, earlier, GENERATED_TEXT, MAX_ANSWER_BYTES if answer else MAX_EDGE_BYTES))
+                elif kinds[earlier - 1] == "compute":
+                    derived.append((field, earlier, GENERATED_TEXT, MAX_EDGE_BYTES))
                 else:
                     # Another tool result, whole, as bounded text.
                     derived.append((field, earlier, RESULT_TEXT, MAX_CONTEXT_BYTES))
+        elif tool == COMPUTE_TOOL:
+            # A fixed deterministic function of earlier results: its inputs are
+            # signed edges, its filter/order/output texts a fixed grammar the
+            # owner declares as constants, and its output is data like an
+            # extraction's (never a destination; used only through an edge).
+            if "source" in raw or "when" in raw or set(args) - set(COMPUTE_FIELDS):
+                _refuse("compute_shape")
+            given = [name for name in INPUT_FIELDS if name in args]
+            where["field"] = "input1"
+            if not given or given != list(INPUT_FIELDS[:len(given)]):
+                _refuse("compute_input")
+            for name in given:
+                where["field"] = name
+                origin = _origin(args[name])
+                if (origin[0] != "from" or origin[2] is not None or origin[3] is not None
+                        or not 1 <= origin[1] < number):
+                    _refuse("compute_input")
+                earlier = usable(origin[1])
+                if kinds[earlier - 1] == "extract":
+                    label = chain[earlier - 1].value_map()["target"]
+                    if label == ANSWER:
+                        _refuse("answer_used_as_value")
+                    if label in CONDITIONS:
+                        _refuse("condition_used_as_value")
+                    derived.append((name, earlier, GENERATED_TEXT, MAX_ANSWER_BYTES))
+                elif kinds[earlier - 1] == "compute":
+                    derived.append((name, earlier, GENERATED_TEXT, MAX_ANSWER_BYTES))
+                else:
+                    derived.append((name, earlier, RESULT_TEXT, MAX_CONTEXT_BYTES))
+            where["field"] = "output"
+            try:
+                spec = validate_spec(args, len(given))
+            except ComputeSpecError as error:
+                _refuse(str(error))
+            values = {**{name: "" for name in INPUT_FIELDS[len(given):]}, **spec,
+                      "body": SENTINELS["body"], "calendar": SENTINELS["calendar"], "to": SENTINELS["to"]}
+            restated |= {text for text in spec.values() if text}
         else:
             if "source" in raw:
                 _refuse("source_on_tool")
@@ -550,7 +593,11 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                     # Only one text is computed, by an amount the request states.
                     if listed or abs(compute[1]) not in owner_amounts(prompt)[compute[0]]:
                         _refuse("compute_amount")
-                if kinds[source - 1] == "extract":
+                if kinds[source - 1] == "compute":
+                    if path is not None:
+                        _refuse("edge_path")
+                    full = GENERATED_ITEMS if listed else GENERATED_TEXT
+                elif kinds[source - 1] == "extract":
                     if path is not None:
                         _refuse("edge_path")
                     if chain[source - 1].value_map()["target"] == ANSWER:
@@ -567,7 +614,8 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                     full = RESULT_PREFIX + path
                 form = LIST if listed else compute
                 derived.append((name, source, full, MAX_EDGE_BYTES) + (() if form is None else (form,)))
-        kinds.append("extract" if tool == EXTRACT_TOOL else catalog_tool(tool)["effect"])
+        kinds.append("extract" if tool == EXTRACT_TOOL else "compute" if tool == COMPUTE_TOOL
+                     else catalog_tool(tool)["effect"])
         chain.append(Step(tool, upstream_for(tool), tuple(sorted(values.items())), tuple(derived), payload_from))
     for number in sorted(conditions - gates):
         # A condition no action depends on decides nothing: the action the

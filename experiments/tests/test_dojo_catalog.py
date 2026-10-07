@@ -71,14 +71,16 @@ class CatalogShapeTests(unittest.TestCase):
 
     def test_each_suite_catalog_fits_one_task_context(self):
         # The owner's task-authorization context lists at most 64 tools, so a
-        # deployment ships exactly one suite (plus the two model tools).
+        # deployment ships exactly one suite (plus the two model tools and the
+        # deterministic compute tool).
         from savana_bench.agentdojo_tasks import catalog_json
         for name in SUITES:
             doc = catalog_json(name)
             operations = [t["operation"] for t in (*doc["read_tools"], *doc["write_tools"])]
             self.assertLessEqual(len(operations) + 1, 64, name)
             self.assertEqual({entry(o)["upstream"] for o in operations if o.startswith("dojo.") and
-                              not o.startswith("dojo.model.")}, set(SUITE_TOOLS[name]), name)
+                              not o.startswith(("dojo.model.", "dojo.compute."))}, set(SUITE_TOOLS[name]), name)
+            self.assertIn("dojo.compute.table", operations, name)
 
     def test_every_adapter_decodes_to_valid_official_arguments(self):
         from agentdojo.task_suite.load_suites import get_suite
