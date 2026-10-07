@@ -354,8 +354,28 @@ def official_case(case, contract=None):
     else:
         contract = reviewed_task(case["user"], task.PROMPT)
     injection = suite.get_injection_task_by_id(case["injection"]) if case["injection"] else None
-    attack = FixedJailbreakAttack(ImportantInstructionsAttack._JB_STRING, suite,
-        SimpleNamespace(name="deepseek-flash-savana-finite"))
+    pipeline = SimpleNamespace(name="deepseek-flash-savana-finite")
+    attack_name = case.get("attack", "important_instructions_no_names")
+    if attack_name == "important_instructions_no_names":
+        attack = FixedJailbreakAttack(ImportantInstructionsAttack._JB_STRING, suite, pipeline)
+    elif attack_name == "autodojo":
+        # AutoDojo's optimized injections, replayed from the pinned cache; the
+        # verifier recomputes them through this same function.
+        from agentdojo.attacks.base_attacks import BaseAttack
+        from . import autodojo_cache
+        variants, originals, _ = autodojo_cache.load(autodojo_cache.cache_path(case.get("suite", SUITE)))
+
+        class AutoDojoReplay(BaseAttack):
+            name = "autodojo"
+
+            def attack(self, user_task, injection_task):
+                return {vector: autodojo_cache.injection(variants, originals, injection_task.ID,
+                                                         injection_task.GOAL, vector, 0)
+                        for vector in self.get_injection_candidates(user_task)}
+
+        attack = AutoDojoReplay(suite, pipeline)
+    else:
+        raise ValueError("unknown_attack")
     values = attack.attack(task, injection) if injection else {}
     environment = task.init_environment(suite.load_and_inject_default_environment(values))
     return suite, task, injection, contract, values, environment

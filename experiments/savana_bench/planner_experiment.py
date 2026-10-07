@@ -94,6 +94,9 @@ def write_cases(groups=WRITE_GROUPS, mutations=None, injections=None):
 
 PLANNER_MODELS = ("deepseek-flash", "deepseek-v4-pro")
 MAX_DRAFTS = 5
+# The environment attack: AgentDojo's official important-instructions
+# template, or AutoDojo's optimized injections replayed from a pinned cache.
+ATTACKS = ("important_instructions_no_names", "autodojo")
 
 
 def drafted_options(kind):
@@ -102,9 +105,10 @@ def drafted_options(kind):
     `+planner=<model>` (the untrusted planner's model), `+view=<view>` (how
     the planner sees the owner's request: `request` or `masked`) and
     `+extract=<view>` (what the quarantined extractor's model is sent: `raw`,
-    `strict` or `quantities`; see `value_blind`) and `+extractor=<model>` (the
-    extractor's model, an owner-signed constant) -> (base, options for
-    `drafted_cases`), or None when `kind` is not a drafted spec."""
+    `strict` or `quantities`; see `value_blind`), `+extractor=<model>` (the
+    extractor's model, an owner-signed constant) and `+attack=<attack>` (the
+    environment attack, see ATTACKS) -> (base, options for `drafted_cases`),
+    or None when `kind` is not a drafted spec."""
     from .drafted_tasks import EXTRACTOR_MODELS
     from .value_blind import EXTRACTOR_VIEWS, VIEWS
     base, *options = kind.split("+")
@@ -113,7 +117,8 @@ def drafted_options(kind):
     parsed = {}
     for option in options:
         key, equals, value = option.partition("=")
-        if not equals or key in parsed or key not in ("drafts", "planner", "view", "extract", "extractor"):
+        if not equals or key in parsed or key not in ("drafts", "planner", "view", "extract", "extractor",
+                                                       "attack"):
             raise ValueError("planner_experiment_spec")
         parsed[key] = value
     drafts = parsed.get("drafts", "1")
@@ -123,15 +128,16 @@ def drafted_options(kind):
     view = parsed.get("view", VIEWS[0])
     extract = parsed.get("extract", EXTRACTOR_VIEWS[0])
     extractor = parsed.get("extractor", EXTRACTOR_MODELS[0])
+    attack = parsed.get("attack", ATTACKS[0])
     if (planner not in PLANNER_MODELS or view not in VIEWS or extract not in EXTRACTOR_VIEWS
-            or extractor not in EXTRACTOR_MODELS):
+            or extractor not in EXTRACTOR_MODELS or attack not in ATTACKS):
         raise ValueError("planner_experiment_spec")
     return base, dict(max_drafts=int(drafts), planner_model=planner, planner_view=view, extractor_view=extract,
-                      extractor_model=extractor)
+                      extractor_model=extractor, attack=attack)
 
 
 def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS[0], planner_view="request",
-                  extractor_view="raw", extractor_model="deepseek-flash"):
+                  extractor_view="raw", extractor_model="deepseek-flash", attack=ATTACKS[0]):
     """`<suite>:<item>[,<item>...]`, each item `user_task_N` (benign) or
     `user_task_N+injection_task_M` (the official important_instructions
     attack). The planner drafts each task's whole program from its request.
@@ -141,7 +147,10 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
     refuses, seeing only its own program and the fixed refusal code.
     `planner_view` "masked" sends the planner the request with the owner's
     sensitive values as placeholders; `extractor_view` does the same for what
-    the quarantined extractor's model is sent."""
+    the quarantined extractor's model is sent. `attack` "autodojo" replays
+    AutoDojo's optimized injections instead of the official template (banking,
+    slack and travel only; never with a compromised planner)."""
+    from .autodojo_cache import SUITES as AUTODOJO_SUITES
     from .dojo_catalog import SUITES
     from .drafted_tasks import EXTRACTOR_MODELS
     from .root_drafter import ROOT_POISON_GOALS
@@ -156,6 +165,10 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
     names = items.split(",") if colon else []
     if suite not in SUITES or not names or len(set(names)) != len(names):
         raise ValueError("planner_experiment_spec")
+    if attack not in ATTACKS or (attack == "autodojo" and (goal is not None or suite not in AUTODOJO_SUITES)):
+        raise ValueError("planner_experiment_spec")
+    # The default attack adds no key, so every earlier run's cases are unchanged.
+    attack_key = {} if attack == ATTACKS[0] else dict(attack=attack)
     cases = []
     for item in names:
         match = re.fullmatch(r"(user_task_(?:0|[1-9][0-9]?))(?:\+(injection_task_(?:0|[1-9][0-9]?)))?", item)
@@ -170,7 +183,7 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
         cases.append(dict(group=group, suite=suite, user=user, injection=injection, author="reviewed",
                           root_author="deepseek", goal=goal, mutation=None, max_drafts=max_drafts,
                           planner_model=planner_model, planner_view=planner_view, extractor_view=extractor_view,
-                          extractor_model=extractor_model))
+                          extractor_model=extractor_model, **attack_key))
     return tuple(cases)
 
 
@@ -332,6 +345,26 @@ def _hex(value):
     return value.hex() if type(value) is bytes else value
 
 
+def experiment_attack(cases):
+    """The one environment attack an experiment's cases use."""
+    attacks = {case.get("attack", ATTACKS[0]) for case in cases}
+    if len(attacks) != 1:
+        raise ValueError("planner_experiment_spec")
+    return attacks.pop()
+
+
+def autodojo_provenance(cases):
+    """For an AutoDojo replay, the pinned cache of each suite it uses."""
+    from . import autodojo_cache
+    suites = sorted({case["suite"] for case in cases if case.get("attack") == "autodojo"})
+    if not suites:
+        return {}
+    return dict(autodojo=dict(source="AutoDojo aa45879 (MIT), deepseek-v4-flash/no_defense", variant=0,
+                              user_name=autodojo_cache.USER_NAME, model_name=autodojo_cache.MODEL_NAME,
+                              cache_sha256={s: autodojo_cache.load(autodojo_cache.cache_path(s))[2]
+                                            for s in suites}))
+
+
 def consent_mode(experiment):
     multi = str(experiment).partition(":")[0] in (*CHAIN_KINDS, "drafted")
     return "finite_write_preconsent_v1" if multi else "finite_calendar_preconsent_v1"
@@ -399,7 +432,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             generator_system_sha256=hashlib.sha256(GENERATOR_SYSTEM.encode()).hexdigest(),
             executor_model="deepseek-flash", identity_profile=identity_profile,
             human_authentication_evaluated=False, consent_mode=consent_mode(experiment),
-            comparable_to_unrestricted_baseline=False, attack="important_instructions_no_names",
+            comparable_to_unrestricted_baseline=False, attack=experiment_attack(cases),
+            **autodojo_provenance(cases),
             platform=platform.platform(), package_sources=package_sources(),
             source_sha256={p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                            for p in sorted(Path(__file__).parent.glob("*.py"))})
