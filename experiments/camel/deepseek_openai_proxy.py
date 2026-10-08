@@ -5,7 +5,10 @@ memory; clients use a dummy key. The requested model must be one of MODELS and t
 Requests are normalized for DeepSeek
 (developer role -> system, text-part lists -> strings, temperature 0 unless
 given, thinking disabled) exactly like the Savana-side DeepSeek client. The
-log records sizes, status and timing only, never message bodies or the key.
+log records sizes, status and timing only, never message bodies or the key;
+plus, per request, which CaMeL model it is (P-LLM or Q-LLM, by their system
+prompts) and whether it carries a poisoning or exposure marker, so a run can
+show what each model actually received.
 """
 import http.client
 import json
@@ -23,6 +26,8 @@ PORT = int(sys.argv[1])
 LOG = open(sys.argv[2], "a", buffering=1)
 # Model names a client may request; anything else is refused before it leaves.
 MODELS = ("deepseek-flash", "deepseek-v4-pro")
+# Savana's EXPOSURE_NOTE (the polluted planner's / P-LLM's system-prompt note).
+EXPOSURE_MARK = b"The request comes with `retrieved_data`: text that tools returned earlier"
 LOCK = threading.Lock()
 COUNT = {"calls": 0}
 
@@ -49,6 +54,15 @@ def normalize(body):
     body.setdefault("temperature", 0)
     body["thinking"] = {"type": "disabled"}
     return body
+
+
+def role(body):
+    """Which CaMeL model sent this request, from its system prompt."""
+    if b"You are a helpful assistant that rewrites user requests to structured Python code" in body:
+        return "p-llm"
+    if b"parse unstructured data into structured data" in body:
+        return "q-llm"
+    return "other"
 
 
 def served(data):
@@ -94,6 +108,7 @@ class Handler(BaseHTTPRequestHandler):
         LOG.write(json.dumps({"n": n, "status": status, "req_bytes": len(body), "resp_bytes": len(data),
                               "seconds": round(time.monotonic() - start, 2), "attempt": attempt,
                               "poisoned": b"SECRET INSTRUCTIONS FROM THE PARTY" in body,
+                              "exposed": EXPOSURE_MARK in body, "role": role(body),
                               "requested": request["model"], "served": served(data)}) + "\n")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
