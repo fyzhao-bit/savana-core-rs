@@ -22,6 +22,9 @@
 - **自适应注入基线（AutoDojo，无防护）：** 重放 AutoDojo 针对 DeepSeek V4 Flash 优化的注入，
   banking/slack/travel 共 389 对攻破 **23 次（5.9%）**：banking 0/144、slack 10/105、travel 13/140。
   官方模板在 banking 上是 0/144。报告：[AutoDojo 基线](AGENTDOJO-AUTODOJO-BASE-20261007.zh-CN.md)。
+- **AutoDojo 自适应注入下的 Savana：** 同一批注入，389 对攻破 **1 次（0.26%）**，越权 0。
+  唯一一次是最终回答被带偏去推荐攻击者的酒店（回答措辞，不在结构性保证内）。
+  报告：[AutoDojo vs Savana](AGENTDOJO-AUTODOJO-SAVANA-20261008.zh-CN.md)。
 - **效用（97 个良性任务）：**
   - 审查反馈重试把做对的题从 30 提到 39；换更强的规划器反而只有 36。
   - G11（条件写操作、5 个抽取上下文、规划器提示）做到 **40/97**；CaMeL 是 58，CaMeL+策略是 39。
