@@ -19,7 +19,7 @@ from .agentdojo_tasks import prepare_draft
 from .official_verify import restore_environment, verify_chain
 from .planner_authors import SYSTEM, PlanUnencodable, compromised_draft, encode_plan, parse_plan
 from .planner_experiment import (DEFINITIVE, IDS, OPERATOR_MODE, SCHEMA, classify_provider_attempt,
-                                 experiment_cases, summarize)
+                                 experiment_cases, planner_exposure, summarize)
 from .protected_agentdojo import official_case, package_sources, score_outcome
 from .protected_verify import verify_published_episode
 
@@ -104,9 +104,10 @@ def _drafted_contract(case, local, row):
     view = case.get("planner_view", "request")
     _request, bindings = planner_request(prompt, view)
     history, contract, refusal = [], None, None
+    exposure = planner_exposure(case)
     for number, event in enumerate(drafted, 1):
         body = draft_request_body(official, prompt, model=case["planner_model"], goal=case.get("goal"),
-                                  history=tuple(history), view=view)
+                                  history=tuple(history), view=view, exposure=exposure)
         if hashlib.sha256(body).hexdigest() != event["request_sha256"]:
             raise ValueError("planner_input_mismatch")
         if event.get("view", "request") != view or event.get("placeholders", 0) != len(bindings):

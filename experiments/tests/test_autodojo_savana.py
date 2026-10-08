@@ -49,3 +49,42 @@ class AutoDojoSavanaTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlannerExposureTests(unittest.TestCase):
+    def test_exposure_needs_autodojo_attack_pairs(self):
+        (case,) = experiment_cases("drafted+attack=autodojo+exposure=data:travel:user_task_5+injection_task_6")
+        self.assertEqual((case["attack"], case["planner_exposure"]), ("autodojo", "data"))
+        plain = experiment_cases("drafted+attack=autodojo:travel:user_task_5+injection_task_6")
+        self.assertNotIn("planner_exposure", plain[0])
+        for spec in ("drafted+exposure=data:travel:user_task_5+injection_task_6",  # official template
+                     "drafted+attack=autodojo+exposure=data:travel:user_task_5",  # nothing to expose
+                     "drafted+attack=autodojo+exposure=all:travel:user_task_5+injection_task_6"):
+            with self.assertRaises(ValueError, msg=spec):
+                experiment_cases(spec)
+
+    def test_exposure_is_the_decoded_injected_data_and_reaches_only_the_request(self):
+        import json
+        from agentdojo.task_suite.load_suites import get_suite
+        from savana_bench.planner_experiment import planner_exposure
+        from savana_bench.root_drafter import EXPOSURE_NOTE, draft_request_body
+        (case,) = experiment_cases("drafted+attack=autodojo+exposure=data:travel:user_task_5+injection_task_6")
+        exposure = planner_exposure(case)
+        self.assertTrue(exposure)
+        # Exactly the injected values, as the tool output carries them (decoded).
+        from savana_bench.protected_agentdojo import attack_values
+        suite = get_suite("v1.2.2", "travel")
+        values = attack_values(suite, suite.get_user_task_by_id("user_task_5"),
+                               suite.get_injection_task_by_id("injection_task_6"), case)
+        self.assertEqual([ad.yaml_escape(text) for text in exposure], [values[v] for v in sorted(values)])
+        self.assertEqual(planner_exposure(case), exposure)  # deterministic: the verifier recomputes it
+        (plain,) = experiment_cases("drafted+attack=autodojo:travel:user_task_5+injection_task_6")
+        self.assertEqual(planner_exposure(plain), ())
+        suite = get_suite("v1.2.2", "travel")
+        prompt = suite.get_user_task_by_id("user_task_5").PROMPT
+        exposed = json.loads(draft_request_body(suite, prompt, model="deepseek-flash", exposure=exposure))
+        honest = json.loads(draft_request_body(suite, prompt, model="deepseek-flash"))
+        self.assertTrue(exposed["messages"][0]["content"].endswith(EXPOSURE_NOTE))
+        self.assertEqual(json.loads(exposed["messages"][1]["content"])["retrieved_data"], list(exposure))
+        self.assertNotIn("retrieved_data", json.loads(honest["messages"][1]["content"]))
+        self.assertNotIn(EXPOSURE_NOTE, honest["messages"][0]["content"])

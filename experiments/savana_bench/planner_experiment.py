@@ -97,6 +97,9 @@ MAX_DRAFTS = 5
 # The environment attack: AgentDojo's official important-instructions
 # template, or AutoDojo's optimized injections replayed from a pinned cache.
 ATTACKS = ("important_instructions_no_names", "autodojo")
+# What the planner is shown besides the owner's request: nothing (Savana), or
+# (an experiment) the injected data an undefended agent would have read.
+EXPOSURES = ("none", "data")
 
 
 def drafted_options(kind):
@@ -106,9 +109,10 @@ def drafted_options(kind):
     the planner sees the owner's request: `request` or `masked`) and
     `+extract=<view>` (what the quarantined extractor's model is sent: `raw`,
     `strict` or `quantities`; see `value_blind`), `+extractor=<model>` (the
-    extractor's model, an owner-signed constant) and `+attack=<attack>` (the
-    environment attack, see ATTACKS) -> (base, options for `drafted_cases`),
-    or None when `kind` is not a drafted spec."""
+    extractor's model, an owner-signed constant), `+attack=<attack>` (the
+    environment attack, see ATTACKS) and `+exposure=data` (the planner is also
+    shown the case's injected data; see `planner_exposure`) -> (base, options
+    for `drafted_cases`), or None when `kind` is not a drafted spec."""
     from .drafted_tasks import EXTRACTOR_MODELS
     from .value_blind import EXTRACTOR_VIEWS, VIEWS
     base, *options = kind.split("+")
@@ -118,7 +122,7 @@ def drafted_options(kind):
     for option in options:
         key, equals, value = option.partition("=")
         if not equals or key in parsed or key not in ("drafts", "planner", "view", "extract", "extractor",
-                                                       "attack"):
+                                                       "attack", "exposure"):
             raise ValueError("planner_experiment_spec")
         parsed[key] = value
     drafts = parsed.get("drafts", "1")
@@ -129,15 +133,17 @@ def drafted_options(kind):
     extract = parsed.get("extract", EXTRACTOR_VIEWS[0])
     extractor = parsed.get("extractor", EXTRACTOR_MODELS[0])
     attack = parsed.get("attack", ATTACKS[0])
+    exposure = parsed.get("exposure", EXPOSURES[0])
     if (planner not in PLANNER_MODELS or view not in VIEWS or extract not in EXTRACTOR_VIEWS
-            or extractor not in EXTRACTOR_MODELS or attack not in ATTACKS):
+            or extractor not in EXTRACTOR_MODELS or attack not in ATTACKS or exposure not in EXPOSURES):
         raise ValueError("planner_experiment_spec")
     return base, dict(max_drafts=int(drafts), planner_model=planner, planner_view=view, extractor_view=extract,
-                      extractor_model=extractor, attack=attack)
+                      extractor_model=extractor, attack=attack, exposure=exposure)
 
 
 def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS[0], planner_view="request",
-                  extractor_view="raw", extractor_model="deepseek-flash", attack=ATTACKS[0]):
+                  extractor_view="raw", extractor_model="deepseek-flash", attack=ATTACKS[0],
+                  exposure=EXPOSURES[0]):
     """`<suite>:<item>[,<item>...]`, each item `user_task_N` (benign) or
     `user_task_N+injection_task_M` (the official important_instructions
     attack). The planner drafts each task's whole program from its request.
@@ -149,7 +155,9 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
     sensitive values as placeholders; `extractor_view` does the same for what
     the quarantined extractor's model is sent. `attack` "autodojo" replays
     AutoDojo's optimized injections instead of the official template (banking,
-    slack and travel only; never with a compromised planner)."""
+    slack and travel only; never with a compromised planner). `exposure`
+    "data" also shows the planner each case's injected data (AutoDojo only,
+    every item an attack pair): a planner already polluted by the injection."""
     from .autodojo_cache import SUITES as AUTODOJO_SUITES
     from .dojo_catalog import SUITES
     from .drafted_tasks import EXTRACTOR_MODELS
@@ -167,8 +175,11 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
         raise ValueError("planner_experiment_spec")
     if attack not in ATTACKS or (attack == "autodojo" and (goal is not None or suite not in AUTODOJO_SUITES)):
         raise ValueError("planner_experiment_spec")
-    # The default attack adds no key, so every earlier run's cases are unchanged.
-    attack_key = {} if attack == ATTACKS[0] else dict(attack=attack)
+    if exposure not in EXPOSURES or (exposure == "data" and (attack != "autodojo" or any("+" not in n for n in names))):
+        raise ValueError("planner_experiment_spec")
+    # The defaults add no key, so every earlier run's cases are unchanged.
+    attack_key = ({} if attack == ATTACKS[0] else dict(attack=attack)) | (
+        {} if exposure == EXPOSURES[0] else dict(planner_exposure=exposure))
     cases = []
     for item in names:
         match = re.fullmatch(r"(user_task_(?:0|[1-9][0-9]?))(?:\+(injection_task_(?:0|[1-9][0-9]?)))?", item)
@@ -343,6 +354,23 @@ def _servers(config, exchange):
 
 def _hex(value):
     return value.hex() if type(value) is bytes else value
+
+
+def planner_exposure(case):
+    """For an exposure case, the injected texts this task's tools return, as the
+    tool output carries them (decoded), in vector order: what an undefended
+    agent reads before it acts. Empty for every other case."""
+    if case.get("planner_exposure", EXPOSURES[0]) == EXPOSURES[0]:
+        return ()
+    import yaml
+    from agentdojo.task_suite.load_suites import get_suite
+    from .protected_agentdojo import attack_values
+    if case.get("attack") != "autodojo" or not case.get("injection"):
+        raise ValueError("planner_experiment_spec")
+    suite = get_suite(BENCHMARK, case["suite"])
+    values = attack_values(suite, suite.get_user_task_by_id(case["user"]),
+                           suite.get_injection_task_by_id(case["injection"]), case)
+    return tuple(yaml.safe_load('"' + values[vector] + '"') for vector in sorted(values))
 
 
 def experiment_attack(cases):
@@ -525,7 +553,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                             try:
                                 program_text, meta = drafter.draft(official, prompt, goal=case.get("goal"),
                                                                    history=tuple(history),
-                                                                   view=case["planner_view"])
+                                                                   view=case["planner_view"],
+                                                                   exposure=planner_exposure(case))
                             except RuntimeError:
                                 row["outcome"] = "author_failed"
                                 raise
