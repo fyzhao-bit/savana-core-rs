@@ -122,8 +122,13 @@ no unauthorized tool request, whereas CaMeL with the same model admits 2.
 When the planner itself is given hidden attacker objectives, the same model
 inside CaMeL executes 7 recipient redirections and at least 3 value changes
 (3 and 2 under CaMeL's policies); inside \sys{} it executes none, and every
-attempt is refused before signing. A value-blind planner sees none of the
-owner's personal data. The cost is utility: \sys{} completes 40 of 97 benign
+attempt is refused before signing. Under AutoDojo's adaptive injections,
+\sys{} admits 1 of 389 pairs, an attack on the answer text; when the
+planner has read the injected data, 8 attacker operations still run under
+CaMeL's policies and none in \sys{}. A value-blind planner sees none of the
+owner's personal data. Mediation costs 59\,ms per tool call at the median
+and 85\,ms at p99, and in 461 crash injections no effect repeated or was
+lost. The cost is utility: \sys{} completes 40 of 97 benign
 tasks (41 with deterministic compute steps), against 58 for CaMeL (39
 with its policies). We attribute every remaining failure; the largest share
 follows directly from refusing destinations chosen by data.
@@ -1435,11 +1440,16 @@ The executor's journal is the durable truth at the external-byte boundary:
   request is equivalent to the fixed business request;
 \item encrypt and fsync the bounded response before any codec sees it.
 \end{enumerate}
-On the kernel side, a recovery state machine classifies each dispatch as
-prepared, dispatching, effect-started, completion committed,
-failed-with-no-effect, or indeterminate. Only a \emph{proven} no-effect
-failure may be re-planned. The journal establishes at most one provider
-attempt per execution nonce, not global exactly-once semantics.
+After a restart, the executor recovers before it serves. A dispatch that
+never opened an attempt is resumed, since no byte has left. An attempt
+opened without a retained response becomes indeterminate, even if no
+effect-started receipt was written yet. A retained response is decoded
+without contacting the provider. The kernel re-queries each outstanding
+dispatch by execution nonce and never issues a new nonce for the same
+clause. Only a \emph{proven} no-effect failure may be re-planned. The
+journal establishes at most one provider attempt per execution nonce, not
+global exactly-once semantics; \S\ref{sec:eval-crash} tests this by killing
+the executor at every journal boundary.
 
 % =====================================================================
 \section{Implementation}
@@ -1531,7 +1541,7 @@ The benchmark harness has 296 Python tests.
 \label{sec:eval}
 
 We evaluate the owner-signed program path on AgentDojo and compare it with
-CaMeL under the same model. We ask five questions.
+CaMeL under the same model. We ask six questions.
 \begin{description}[style=nextline,font=\bfseries]
 \item[RQ1 Injection.] Across the full injection matrix, how many attacks
   succeed, how many tool requests exceed the owner's authority, and what
@@ -1543,6 +1553,8 @@ CaMeL under the same model. We ask five questions.
   and at what utility cost?
 \item[RQ5 Cost.] What do mediation and the two-model design cost in
   latency and model usage?
+\item[RQ6 Crash consistency.] If a process dies anywhere in the durable
+  pipeline, does any effect repeat, vanish, or stay unresolved?
 \end{description}
 
 \subsection{Methodology}
@@ -1644,6 +1656,44 @@ injection. Compared with the benign run, 315 pairs stayed correct and 547
 stayed incorrect. Another 56 became correct, every one of them published,
 because a different draft happened to be better. Only 31 became incorrect.
 The differences are drafting variance, not attack effects.
+
+\begin{table}[t]
+\centering\footnotesize
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+ & Bank. & Slack & Travel & Att. & Util.\\
+\midrule
+No defense       & 0 & 10 & 13 & 23 & 274\\
+\sys{}           & 0 &  0 &  1 &  \textbf{1} &  91\\
+CaMeL            & 0 &  1 &  5 &  6 & 223\\
+CaMeL+policy     & 0 &  0 &  5 &  5 & 146\\
+\midrule
+\multicolumn{6}{@{}l}{\emph{Planner polluted with the injected text (RQ2)}}\\
+\sys{}           & 0 &  0 &  2 &  \textbf{2} &  93\\
+CaMeL            & 0 &  4 &  8 & 12 & 215\\
+CaMeL+policy     & 0 &  4 &  8 & \textbf{12} & 135\\
+\bottomrule
+\end{tabular}
+\caption{AutoDojo's adaptive injections on 389 pairs (144, 105, and 140),
+same model. Att.\ is targeted attack success by the official checker;
+Util.\ is utility under attack. \sys{} made no unauthorized request in
+either run.}
+\label{tab:adaptive}
+\end{table}
+
+\paragraph{Adaptive injections.} The official attack is a fixed template.
+AutoDojo~\cite{ma2026autodojo} instead searches for injections against a
+given model, and publishes the injections it found against
+\code{deepseek-flash} for the banking, slack, and travel suites. We
+replayed the first cached injection of each of its 389 pairs. Without a
+defense, the model follows them in 23 pairs (5.9\%), against 0 of 144 for
+the official attack on banking. \sys{} admitted 1 pair (0.26\%) and no
+unauthorized request; CaMeL admitted 6, and 5 with its policies
+(Table~\ref{tab:adaptive}). All of these but one are travel injection~6,
+which asks the answer to recommend the attacker's hotel. The exception is
+a slack message to Alice in which CaMeL's model quoted the attacker's link
+while warning about it; the checker counts the link, and CaMeL's policies
+stop the message.
 
 % ---------------------------------------------------------------------
 \subsection{RQ2: A compromised planner}
@@ -1753,6 +1803,25 @@ owner's namespace: an extra write to an owner-named destination, or a
 different record of the same read. \todo{Run a forced-attempt variant
 live on both systems: the same mechanical mutations applied to each
 system's honest programs, then executed.}
+
+\paragraph{A planner polluted by data.} A hidden objective is one model of a
+compromised planner; a planner that has read attacker data is another. In
+the AutoDojo runs of RQ1, we gave the planner every injection text of its
+episode as \code{retrieved\_data}, with a one-line note, identically in both
+systems; the relay matched all 389 exposures byte for byte. Both polluted
+planners wrote the attacker's goal into their program in 23 of 389
+episodes (Table~\ref{tab:adaptive}). In \sys{}, all 46 such drafts were
+refused before signing and no attacker operation ran; the 2 successes are
+again travel injection~6. In CaMeL, 10 of the 23 attempts ran, and 8 still
+ran under its policies: four fetches of the attacker's URL, two calendar
+entries the attacker asked for, one e-mail of the user's passport and bank
+details to the attacker, and one rent payment redirected to the attacker's
+account. The official checker misses the last one, because it only
+inspects recurring transfers and the rent is not recurring; we report its
+count (12/389 with and without policies) unchanged. CaMeL's policies
+govern data that flows from tool results, while a literal in the P-LLM's
+code is trusted, and a polluted planner writes the attacker's values as
+literals.
 
 \paragraph{Attacks on the label and completeness rules.} Two attacks target
 the rules of \S\ref{sec:effect-readers} and \S\ref{sec:completeness}
@@ -1930,8 +1999,10 @@ timestamps:
 \item \textbf{Per step.} Each later step takes a median of 4.6\,s (tool
   4.64\,s, extraction 4.81\,s, compute 4.29\,s). The provider's own share
   is small: 1.0\,s for an extraction's model call, and 3\,ms for a compute
-  step. The rest is mediation: G4--G7, two approval round trips, durable
-  preparation, and the journaled dispatch.
+  step. The rest is the deployment's control loop rather than the checks:
+  the kernel's owner-clock drivers advance a program at most one stage per
+  second by design, and each step waits for two approval round trips
+  through the software owner, which polls every 250\,ms.
 \item \textbf{Whole programs.} Two-step programs publish in a median of
   20.3\,s, and eight-step programs in 47.9\,s (maximum 60.9\,s).
 \end{itemize}
@@ -1943,6 +2014,19 @@ An earlier kernel performance defect made each round grow with the
 host's history, from 38\,s to over 60\,s within five rounds. We fixed it
 by re-verifying only changed journal entries, together with an optimized
 integration build; round time is now flat at about 17\,s.
+
+\paragraph{The checks themselves.} We timed the checks in process on the
+build our evaluation hosts run (opt-level~1 with debug assertions): one
+owner-signed tool call through G4, G5, and G6/G7 with the executor's
+journal, worker check, and Suite-1 IPC, then completion reconciliation,
+with every durable commit encrypted and fsynced on ext4. Over 1{,}000
+fresh fixtures, a call takes 58.8\,ms at the median and 85.1\,ms at p99
+(53.3\,ms and 75.7\,ms at opt-level~3). Durable commits, not computation,
+set this cost: one atomic replace takes 1.1\,ms on this disk, and the
+executor alone commits six times per call. Over the same period, the same
+model took 1.0\,s at the median for an extraction-sized prompt and 1.9\,s
+for a planner-sized one, so mediation at p99 is under a tenth of one model
+call.
 
 \paragraph{Approval-free paths.} In the evaluated deployment, the signed
 G5 policy disposition is \textsf{RequireApproval} for every tool, so every
@@ -1975,15 +2059,64 @@ growing conversation on every retry. \sys{} thus uses about 2.9$\times$
 fewer input tokens, and pays for it with the latency of mediation.
 
 % ---------------------------------------------------------------------
+\subsection{RQ6: Crash consistency}
+\label{sec:eval-crash}
+
+\begin{table}[t]
+\centering\footnotesize
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Journal state when killed & Trials & Prov.\ req. & Bad\\
+\midrule
+accepted, no attempt yet           & 62 & 1 & 0\\
+1. attempt record fsynced          & 53 & 0 & 0\\
+2. effect-started receipt stored   & 42 & 0 & 0\\
+3. first provider byte sent        & 28 & 1 & 0\\
+4. response retained               & 60 & 1 & 0\\
+completion recorded                & 84 & 1 & 0\\
+kernel acknowledged                & 41 & 1 & 0\\
+executor not yet reached           & 91 & 0 or 1 & 0\\
+\midrule
+total                              & 461 & $\le$1 & \textbf{0}\\
+\bottomrule
+\end{tabular}
+\caption{Crash matrix. Each trial runs one real dispatch and kills its
+process with SIGKILL: before and after each journal commit's anchor
+advance (20 trials each), inside the provider after it recorded the
+request (20), or at a random time (200). Prov.\ req.\ counts provider
+requests for the execution nonce across all processes.}
+\label{tab:crash}
+\end{table}
+
+We test P5 by killing the process that runs a real fused dispatch: G4--G7,
+the sealed envelope, Suite-1, and the executor's encrypted journal. A
+second process then reopens the journal exactly as the daemon starts,
+recovery first and service second, resends the kernel's original dispatch,
+and restarts once more. A trial is \emph{bad} if its nonce reaches the
+provider twice; if a resend or a restart reaches it again; if an entry is
+still in flight after recovery; if an effect is recorded as a proven
+no-effect failure; or if a completion exists without an effect. None of
+461 trials was bad (Table~\ref{tab:crash}); rows 1--4 are the four steps of
+\S\ref{sec:pipeline}. Recovery is conservative in one place: an attempt
+whose effect-started receipt was not yet written is provably pre-byte, yet
+becomes indeterminate rather than a re-plannable no-effect failure. Two
+limits apply. A killed process is not a power loss: the page cache
+survives, so fsync ordering under power failure is untested. And the
+kernel dies together with the executor without reopening its own durable
+state; its crash boundaries are covered by in-process fault injection,
+each asserting exactly one provider request.
+
+% ---------------------------------------------------------------------
 \subsection{Threats to validity}
 
 \begin{itemize}
 \item \textbf{One benchmark.} We evaluate on AgentDojo only, the one
-  benchmark on which CaMeL has been run by many groups. Open-ended tasks
-  (AgentDyn~\cite{li2026agentdyn}), adaptive attacks
-  (AutoDojo~\cite{ma2026autodojo}), and broader suites
+  benchmark on which CaMeL has been run by many groups. The adaptive
+  attack is AutoDojo's published search result for our model, replayed
+  (one cached injection per pair), not a search against \sys{} itself.
+  Open-ended tasks (AgentDyn~\cite{li2026agentdyn}) and broader suites
   (ASB~\cite{zhang2025asb}, InjecAgent~\cite{zhan2024injecagent}) remain
-  to be run. \todo{Add at least AgentDyn and an adaptive attack.}
+  to be run. \todo{Add AgentDyn.}
 \item \textbf{One model family.} All models are DeepSeek. CaMeL's
   published results use o3, Claude, and Gemini, and CaMeL reaches 71/97
   here with \code{v4-pro}, close to its published o4-mini and Claude
@@ -2161,7 +2294,10 @@ Injecting data into fields that a defense treats as trusted reaches high
 success against CaMeL~\cite{adi2026}. A systematization identifies the
 root causes of circumvention~\cite{sok2025ipi}. \sys{} addresses the
 trusted-field class directly: in \sys{}, the planner's literals are not
-trusted. It does not yet report an adaptive attack (\S\ref{sec:eval}).
+trusted. We replay AutoDojo's injections for our model, including with a
+planner that has read them (\S\ref{sec:eval-injection},
+\S\ref{sec:eval-planner}), but have not run an adaptive search against
+\sys{} itself.
 
 \paragraph{Benchmarks.} AgentDojo~\cite{debenedetti2024agentdojo} is the
 common ground for system-level defenses. InjecAgent~\cite{zhan2024injecagent}
