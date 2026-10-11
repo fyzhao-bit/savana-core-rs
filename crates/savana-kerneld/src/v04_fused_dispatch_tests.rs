@@ -108,8 +108,10 @@ fn private_dispatch_fixture_with_provider(
         matches!(case, 41 | 42),
     );
     f.authority.policy.as_mut().unwrap().declassification_rules =
+        // A step whose body is a predecessor's result needs an approval the
+        // owner can see (fail-closed G5 floor), so those cases display it.
         planner_declassification_rules_with_model(
-            matches!(case, 24 | 25 | 30 | 31 | 34 | 41 | 42),
+            matches!(case, 24 | 25 | 30..=34 | 36 | 38..=42),
             Some(Digest32V2::new([0xa7; 32])),
             None,
             if case == 38 {
@@ -840,7 +842,10 @@ fn private_dispatch_fixture_with_provider(
                 assert_eq!(server.join().unwrap().len(), messages);
                 return;
             }
-            if matches!(case, 31 | 34) {
+            // From case 32 the second step's body is the first step's result,
+            // which is ExternalUntrusted: the fail-closed G5 floor escalates
+            // that write to approval whatever its descriptor declares.
+            if (31..=42).contains(&case) {
                 assert_eq!(observed.requests().len(), 1);
                 assert_eq!(f.authority.tool_approvals.len(), 1);
                 let receipt = private_loop_signed_approval(&f, 2205, 3400);
@@ -900,25 +905,40 @@ fn private_dispatch_fixture_with_provider(
                 requests[0], requests[1],
                 "the two authorized destinations are distinct"
             );
-            let settled_at = if case == 36 {
-                3204
-            } else if matches!(case, 31 | 34) {
-                3205
-            } else {
-                2205
-            };
+            let settled_at = if (31..=42).contains(&case) { 3205 } else { 2205 };
             service_clock.store(settled_at, std::sync::atomic::Ordering::SeqCst);
             f.authority
                 .tick_fused_recovery_v04(&mut vault, manifest, 7, 8, UnixMillisV2::new(settled_at))
                 .unwrap();
             let settled_at = if case == 36 {
-                service_clock.store(4204, std::sync::atomic::Ordering::SeqCst);
+                // Recovery is paced to one tick a second after the 3205 one.
+                service_clock.store(4205, std::sync::atomic::Ordering::SeqCst);
                 f.authority
-                    .tick_fused_recovery_v04(&mut vault, manifest, 7, 8, UnixMillisV2::new(4204))
+                    .tick_fused_recovery_v04(&mut vault, manifest, 7, 8, UnixMillisV2::new(4205))
                     .unwrap();
                 service_clock.store(4205, std::sync::atomic::Ordering::SeqCst);
                 f.authority
                     .tick_fused_actions_v04(&mut f.values, &mut || UnixMillisV2::new(4205))
+                    .unwrap();
+                // The third step's body is the second step's result: it waits
+                // for its own approval too.
+                assert_eq!(observed.requests().len(), 2);
+                let receipt = private_loop_signed_approval(&f, 4206, 5400);
+                let action = super::super::fused_actions::FusedPrivateActionV04 {
+                    intent: f.authority.intents.last().unwrap().intent,
+                };
+                f.authority
+                    .authorize_fused_action_v04(
+                        &action,
+                        receipt,
+                        manifest,
+                        7,
+                        UnixMillisV2::new(4206),
+                    )
+                    .unwrap();
+                service_clock.store(5205, std::sync::atomic::Ordering::SeqCst);
+                f.authority
+                    .tick_fused_actions_v04(&mut f.values, &mut || UnixMillisV2::new(5205))
                     .unwrap();
                 let requests = observed.requests();
                 assert_eq!(requests.len(), 3);
@@ -2126,6 +2146,10 @@ fn private_loop_signed_approval(
     };
     let envelope = &f.authority.tool_approvals.last().unwrap().envelope;
     let material = envelope.unverified_material().unwrap();
+    // One settlement nonce per issue time: the kernel refuses a reused nonce,
+    // and a final release in the same task settles with its own.
+    let mut nonce = [0xd4; 32];
+    nonce[..8].copy_from_slice(&issued.to_be_bytes());
     let unsigned = UnsignedApprovalSettlementV2::new(
         f.authority.config.installation_id,
         f.authority.sessions[0].active_state_manifest_digest,
@@ -2142,7 +2166,7 @@ fn private_loop_signed_approval(
         false,
         2,
         material.decision_challenge(),
-        Nonce32V2::new([0xd3; 32]),
+        Nonce32V2::new(nonce),
         UnixMillisV2::new(issued),
         UnixMillisV2::new(expires),
     )
