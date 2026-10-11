@@ -158,6 +158,8 @@ class FiniteConsent:
         except BaseException as error:
             self.failed=True
             reason=dict(reason=str(error)) if self.permit or self.strict else {}
+            if reason and purpose=='tool_execution' and getattr(self,'_asked',None) is not None:
+                reason['clause']=self._asked
             self.emit('benchmark_consent',purpose=purpose,decision='refuse',
                 policy=self.policy,human_review=False,**reason)
             raise
@@ -219,6 +221,7 @@ class FiniteConsent:
             if type(number) is not int or not self.action<number<=n:
                 raise ValueError('consent_action_order')
         if number>n+1: raise ValueError('consent_action_order')
+        self._asked=number if purpose=='tool_execution' else None
         step=self.steps[number-1] if purpose=='tool_execution' else None
         clause=self.clauses[number-1];alternative=clause['alternatives'][0]
         profile=self.profiles[alternative['descriptor_digest']]

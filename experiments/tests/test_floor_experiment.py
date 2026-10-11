@@ -133,6 +133,7 @@ class StrictOwnerTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), "consent_derived_destination")
         self.assertEqual(events[-1][1]["decision"], "refuse")
         self.assertEqual(events[-1][1]["reason"], "consent_derived_destination")
+        self.assertEqual(events[-1][1]["clause"], 3)
         self.assertEqual(events[-1][1]["policy"], "finite_write_preconsent_v1+strict_destination")
 
 
