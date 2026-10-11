@@ -4,6 +4,8 @@ mod fused_compiler_tests {
     include!("v04_fused_approval_recovery_tests.rs");
     include!("v04_fused_approval_delivery_tests.rs");
     include!("v04_fused_dispatch_tests.rs");
+    include!("v04_fused_crash_matrix_tests.rs");
+    include!("v04_fused_latency_tests.rs");
     include!("v04_private_session_tests.rs");
     use super::super::fused_compiler::{FusedLocalValueBindingV04, FusedPreparedCandidateV04};
     use super::*;

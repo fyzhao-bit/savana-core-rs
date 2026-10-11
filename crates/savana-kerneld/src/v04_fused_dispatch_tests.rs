@@ -83,7 +83,37 @@ fn fused_private_g7_rejects_old_pending_revision_and_expired_recipe() {
 
 #[cfg(feature = "test-support")]
 fn private_dispatch_fixture(case: u8) {
-    private_dispatch_fixture_with_provider(case, None, None);
+    private_dispatch_fixture_with_provider(case, None, None, None);
+}
+
+/// Wall time per kernel stage and executor operation.
+#[cfg(feature = "test-support")]
+type StageTimings = std::sync::Arc<std::sync::Mutex<Vec<(&'static str, std::time::Duration)>>>;
+
+/// Instrumentation for the plain success case (case 0).
+#[cfg(feature = "test-support")]
+#[derive(Default)]
+struct DispatchHarness {
+    /// Crash-matrix child: the executor journal and its anchors live in this
+    /// directory, and the executor kills its own process at `crash`.
+    crash_dir: Option<std::path::PathBuf>,
+    crash: Option<savana_execd::intent_bound_test_support::JournalCrashV2>,
+    /// Latency benchmark.
+    timings: Option<StageTimings>,
+}
+
+#[cfg(feature = "test-support")]
+fn harness_time<T>(
+    harness: Option<&DispatchHarness>,
+    stage: &'static str,
+    run: impl FnOnce() -> T,
+) -> T {
+    let started = std::time::Instant::now();
+    let value = run();
+    if let Some(timings) = harness.and_then(|h| h.timings.as_ref()) {
+        timings.lock().unwrap().push((stage, started.elapsed()));
+    }
+    value
 }
 
 #[cfg(feature = "test-support")]
@@ -91,6 +121,7 @@ fn private_dispatch_fixture_with_provider(
     case: u8,
     exchange: Option<savana_execd::intent_bound_test_support::ProviderExchange>,
     replies: Option<std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>>,
+    harness: Option<&DispatchHarness>,
 ) {
     use savana_execd::intent_bound_test_support::{
         deployment_connector, service_with_provider, ProviderReply,
@@ -251,24 +282,47 @@ fn private_dispatch_fixture_with_provider(
         .unwrap()
         .declassification_rules
         .set_recovery_fence_for_test(8);
-    let root = f._directory.path().join("executor");
+    let crash_dir = harness.and_then(|h| h.crash_dir.clone());
+    let root = match &crash_dir {
+        Some(dir) => dir.join("executor"),
+        None => f._directory.path().join("executor"),
+    };
     fs::create_dir(&root).unwrap();
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-    let (service, observed) = service_with_provider(
-        &root,
-        installation,
-        manifest,
-        7,
-        8,
-        case == 2,
-        if case == 37 {
-            ProviderReply::Unknown
-        } else {
-            ProviderReply::Success
-        },
-        connectors,
-        exchange,
-    );
+    let (service, observed) = match &crash_dir {
+        Some(dir) => {
+            assert_eq!(case, 0, "crash matrix runs the plain success case");
+            crash_matrix_record_deployment(dir, installation, manifest, &connectors);
+            savana_execd::intent_bound_test_support::durable_service_with_provider(
+                &root,
+                installation,
+                manifest,
+                7,
+                8,
+                connectors,
+                exchange,
+                harness.and_then(|h| h.crash),
+                UnixMillisV2::new(205),
+            )
+        }
+        None => service_with_provider(
+            &root,
+            installation,
+            manifest,
+            7,
+            8,
+            case == 2,
+            if case == 37 {
+                ProviderReply::Unknown
+            } else {
+                ProviderReply::Success
+            },
+            connectors,
+            exchange,
+        ),
+    };
+    let dispatch_capture = crash_dir.as_ref().map(|dir| dir.join("dispatch.cbor"));
+    let executor_timings = harness.and_then(|h| h.timings.clone());
     let messages = if case == 42 {
         16
     } else if case == 41 {
@@ -322,6 +376,19 @@ fn private_dispatch_fixture_with_provider(
                 let KernelServiceOperationV2::Executor(operation) = request.operation() else {
                     panic!("executor")
                 };
+                if let Some(path) = &dispatch_capture {
+                    // The kernel's first dispatch, kept for replay after a crash.
+                    if operation.tag() == 60 && !path.exists() {
+                        crash_matrix_write(
+                            path,
+                            &savana_kernel_protocol::v2::encode_kernel_executor_operation_v2(
+                                operation,
+                            )
+                            .unwrap(),
+                        );
+                    }
+                }
+                let started = std::time::Instant::now();
                 let mut bytes = service
                     .execute(
                         operation.clone(),
@@ -329,6 +396,17 @@ fn private_dispatch_fixture_with_provider(
                         std::time::Instant::now() + std::time::Duration::from_secs(5),
                     )
                     .unwrap();
+                if let Some(timings) = &executor_timings {
+                    let stage = match operation.tag() {
+                        60 => "executor.dispatch",
+                        61 => "executor.query",
+                        62 => "executor.acknowledge",
+                        63 => "executor.fetch_completion",
+                        64 => "executor.registry_sync",
+                        _ => "executor.other",
+                    };
+                    timings.lock().unwrap().push((stage, started.elapsed()));
+                }
                 if request.operation().tag() == 61 {
                     queries.set(queries.get() + 1);
                 }
@@ -1015,11 +1093,15 @@ fn private_dispatch_fixture_with_provider(
         assert_eq!(server.join().unwrap().len(), messages);
         return;
     }
-    let action = prepare_private(&mut f, 202).unwrap();
-    let evaluation = f
-        .authority
-        .evaluate_fused_action_v04(&action, &f.values, manifest, 7, UnixMillisV2::new(203))
-        .unwrap();
+    let action = harness_time(harness, "kernel.g4_prepare", || {
+        prepare_private(&mut f, 202)
+    })
+    .unwrap();
+    let evaluation = harness_time(harness, "kernel.g5_evaluate", || {
+        f.authority
+            .evaluate_fused_action_v04(&action, &f.values, manifest, 7, UnixMillisV2::new(203))
+    })
+    .unwrap();
     let EvaluateToolCallResponseV2::Allowed { ticket, .. } = evaluation.0 else {
         panic!("permit")
     };
@@ -1050,14 +1132,22 @@ fn private_dispatch_fixture_with_provider(
         12 | 14 | 16 | 17 | 19 => Some(FusedRecoveryFaultV04::ResultCheckpointed),
         _ => None,
     };
-    let sent = f.authority.dispatch_fused_action_v04(
-        &action,
-        RequestIdV2::new([21; 16]),
-        manifest,
-        7,
-        8,
-        UnixMillisV2::new(205),
-    );
+    if let Some(dir) = &crash_dir {
+        crash_matrix_write(&dir.join("dispatching"), b"");
+    }
+    let sent = harness_time(harness, "kernel.g6_g7_dispatch", || {
+        f.authority.dispatch_fused_action_v04(
+            &action,
+            RequestIdV2::new([21; 16]),
+            manifest,
+            7,
+            8,
+            UnixMillisV2::new(205),
+        )
+    });
+    if let Some(dir) = &crash_dir {
+        crash_matrix_write(&dir.join("dispatched"), b"");
+    }
     assert_eq!(sent.is_err(), matches!(case, 1 | 8 | 9 | 13));
     let after = disk(&f);
     if case == 9 {
@@ -1393,15 +1483,17 @@ fn private_dispatch_fixture_with_provider(
             .is_err());
         assert_eq!(disk(&f), after, "restoring query handles is read-only");
     }
-    let mut result = f.authority.reconcile_fused_execution_v04(
-        &retry,
-        RequestIdV2::new([26; 16]),
-        &mut vault,
-        manifest,
-        7,
-        8,
-        UnixMillisV2::new(207),
-    );
+    let mut result = harness_time(harness, "kernel.reconcile_completion", || {
+        f.authority.reconcile_fused_execution_v04(
+            &retry,
+            RequestIdV2::new([26; 16]),
+            &mut vault,
+            manifest,
+            7,
+            8,
+            UnixMillisV2::new(207),
+        )
+    });
     if (10..=12).contains(&case) {
         assert!(result.is_err(), "injected recovery cut");
         forget_private_execution_memory(&mut f);
@@ -2099,7 +2191,7 @@ fn fused_agentdojo_provider_roundtrip_v04() {
             Ok(reply)
         },
     );
-    private_dispatch_fixture_with_provider(case, Some(exchange), Some(replies));
+    private_dispatch_fixture_with_provider(case, Some(exchange), Some(replies), None);
 }
 
 #[cfg(feature = "test-support")]

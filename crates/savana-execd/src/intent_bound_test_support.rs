@@ -21,7 +21,8 @@ use sha2::{Digest as _, Sha256};
 use std::{
     fs,
     fs::OpenOptions,
-    path::Path,
+    io::Write as _,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -234,6 +235,104 @@ impl RollbackProtectedStateAnchorV2 for RegistryAnchor {
     }
 }
 
+/// Where a crash-matrix child process kills itself. SIGKILL runs no destructor
+/// and flushes nothing. Journal commits are counted from 1 in each process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JournalCrashV2 {
+    /// Journal commit `n` is on disk; its rollback anchor has not advanced.
+    BeforeAnchor(u32),
+    /// Journal commit `n` and its rollback anchor are both on disk.
+    AfterAnchor(u32),
+}
+
+pub fn kill_self() -> ! {
+    let _ = nix::sys::signal::raise(nix::sys::signal::Signal::SIGKILL);
+    std::process::abort()
+}
+
+fn write_durably(path: &Path, bytes: &[u8]) {
+    let temp = path.with_extension("tmp");
+    let mut file = fs::File::create(&temp).unwrap();
+    file.write_all(bytes).unwrap();
+    file.sync_all().unwrap();
+    fs::rename(&temp, path).unwrap();
+    fs::File::open(path.parent().unwrap())
+        .unwrap()
+        .sync_all()
+        .unwrap();
+}
+
+fn read_head(path: &Path) -> Option<(u64, Digest32V2)> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => panic!("anchor: {error}"),
+    };
+    assert_eq!(bytes.len(), 40, "anchor file");
+    Some((
+        u64::from_be_bytes(bytes[..8].try_into().unwrap()),
+        Digest32V2::new(bytes[8..].try_into().unwrap()),
+    ))
+}
+
+fn write_head(path: &Path, sequence: u64, digest: Digest32V2) {
+    let mut bytes = sequence.to_be_bytes().to_vec();
+    bytes.extend_from_slice(digest.as_bytes());
+    write_durably(path, &bytes);
+}
+
+/// File-backed journal anchor, so another process can reopen the journal. It
+/// stands in for the TPM anchor; it is not tamper evidence.
+struct FileAnchor {
+    path: PathBuf,
+    crash: Option<JournalCrashV2>,
+    commits: u32,
+}
+impl ExecdRollbackAnchorV2 for FileAnchor {
+    fn current_head(&self) -> Result<ExecdStateHeadV2, ExecdErrorV2> {
+        match read_head(&self.path) {
+            Some((sequence, digest)) => ExecdStateHeadV2::new(sequence, digest),
+            None => Ok(ExecdStateHeadV2::default()),
+        }
+    }
+    fn compare_and_advance(
+        &mut self,
+        expected: ExecdStateHeadV2,
+        next: ExecdStateHeadV2,
+    ) -> Result<(), ExecdErrorV2> {
+        if self.current_head()? != expected {
+            return Err(ExecdErrorV2::RollbackDetected);
+        }
+        self.commits += 1;
+        if self.crash == Some(JournalCrashV2::BeforeAnchor(self.commits)) {
+            kill_self();
+        }
+        write_head(&self.path, next.sequence(), next.state_digest());
+        if self.crash == Some(JournalCrashV2::AfterAnchor(self.commits)) {
+            kill_self();
+        }
+        Ok(())
+    }
+}
+struct FileRegistryAnchor(PathBuf);
+impl RollbackProtectedStateAnchorV2 for FileRegistryAnchor {
+    fn current_head(&self) -> Result<RollbackProtectedStateHeadV2, G4Error> {
+        let (sequence, digest) = read_head(&self.0).unwrap_or((0, Digest32V2::new([0; 32])));
+        RollbackProtectedStateHeadV2::new(sequence, digest)
+    }
+    fn compare_and_advance(
+        &mut self,
+        expected: RollbackProtectedStateHeadV2,
+        next: RollbackProtectedStateHeadV2,
+    ) -> Result<(), G4Error> {
+        if self.current_head()? != expected || next.sequence() != expected.sequence() + 1 {
+            return Err(G4Error::DurableStateRollback);
+        }
+        write_head(&self.0, next.sequence(), next.state_digest());
+        Ok(())
+    }
+}
+
 /// Fixed test keys match the native G7 fixture. The caller supplies an isolated
 /// test directory; this never reads an installed deployment or user credentials.
 pub struct ReopenableExecutor {
@@ -334,11 +433,12 @@ pub fn service_with_provider(
             fence,
             substitute_request,
             reply,
-            anchor.clone(),
-            registry_anchor.clone(),
+            Box::new(anchor.clone()),
+            Box::new(registry_anchor.clone()),
             observed.clone(),
             connectors.clone(),
             exchange.clone(),
+            None,
         )
     };
     let service = rebuild();
@@ -351,6 +451,87 @@ pub fn service_with_provider(
     )
 }
 
+/// Like `service_with_provider`, but every rollback anchor lives in `root`, so
+/// a fresh process can reopen the journal, and each (re)start first runs the
+/// daemon's startup recovery (`recover_prepared_with_connector_registry`).
+/// `crash` kills the process at one journal commit.
+#[allow(clippy::too_many_arguments)]
+pub fn durable_service_with_provider(
+    root: &Path,
+    installation: Digest32V2,
+    manifest: Digest32V2,
+    generation: u64,
+    fence: u64,
+    connectors: Vec<ConnectorDescriptorV2>,
+    exchange: Option<ProviderExchange>,
+    crash: Option<JournalCrashV2>,
+    now: UnixMillisV2,
+) -> (ReopenableExecutor, Observations) {
+    let root = root.to_path_buf();
+    let observed = Observations::default();
+    let output = observed.clone();
+    let rebuild = move || {
+        build(
+            &root,
+            installation,
+            manifest,
+            generation,
+            fence,
+            false,
+            ProviderReply::Success,
+            Box::new(FileAnchor {
+                path: root.join("journal-anchor"),
+                crash,
+                commits: 0,
+            }),
+            Box::new(FileRegistryAnchor(root.join("registry-anchor"))),
+            observed.clone(),
+            connectors.clone(),
+            exchange.clone(),
+            Some(now),
+        )
+    };
+    let service = rebuild();
+    (
+        ReopenableExecutor {
+            service: Mutex::new(Some(service)),
+            rebuild: Box::new(rebuild),
+        },
+        output,
+    )
+}
+
+/// Every journal entry as (nonce, state), sorted by nonce, read by opening the
+/// journal with its file anchor and running no recovery: after a crash, the
+/// state the crash left. The journal must not be open elsewhere.
+pub fn durable_journal_states(
+    root: &Path,
+    installation: Digest32V2,
+    manifest: Digest32V2,
+    generation: u64,
+    fence: u64,
+) -> Vec<(Nonce32V2, ExecdJournalStateV2)> {
+    let anchor = FileAnchor {
+        path: root.join("journal-anchor"),
+        crash: None,
+        commits: 0,
+    };
+    let (owner, _, _) = open_owner(
+        root,
+        installation,
+        manifest,
+        generation,
+        fence,
+        Box::new(anchor),
+    );
+    owner
+        .recovery_projection(Instant::now() + Duration::from_secs(5))
+        .unwrap()
+        .into_iter()
+        .map(|query| (query.execution_nonce(), query.state()))
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build(
     root: &Path,
@@ -360,12 +541,101 @@ fn build(
     fence: u64,
     substitute_request: bool,
     reply: ProviderReply,
-    anchor: Anchor,
-    registry_anchor: RegistryAnchor,
+    anchor: Box<dyn ExecdRollbackAnchorV2>,
+    registry_anchor: Box<dyn RollbackProtectedStateAnchorV2>,
     observed: Observations,
     connectors: Vec<ConnectorDescriptorV2>,
     exchange: Option<ProviderExchange>,
+    recover_at: Option<UnixMillisV2>,
 ) -> ExecdProtocolServiceV2 {
+    let (owner, protocol, genesis) =
+        open_owner(root, installation, manifest, generation, fence, anchor);
+    let registry = Arc::new(
+        ExecdConnectorRegistryV2::open(
+            &root.join("connector-registry-v2.cbor"),
+            [0xd4; 32],
+            DurableStateNamespaceV2::from_verified_installation(
+                installation,
+                Digest32V2::new([0xd5; 32]),
+            )
+            .unwrap(),
+            registry_anchor,
+            ExecdConnectorRegistryTrustV2::from_authenticated_deployment(
+                installation,
+                manifest,
+                generation,
+                genesis,
+                Ed25519KeyIdV2::new([0; 32]),
+                [0; 32],
+                vec![],
+                connectors,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    let issuer = ConnectorJobDescriptorIssuerV2::from_verified_deployment(
+        installation,
+        manifest,
+        generation,
+        fence,
+        Digest32V2::new([0xe1; 32]),
+        Digest32V2::new([0xe2; 32]),
+        Digest32V2::new([0xe3; 32]),
+        Digest32V2::new([0x29; 32]),
+        Zeroizing::new([0xe4; 32]),
+    )
+    .unwrap();
+    let supervisor = ConnectorWorkerSupervisorV2::from_verified_launcher(
+        issuer.trust(),
+        Some(Box::new(
+            crate::worker_process::intent_bound_fixture::Launcher {
+                now: UnixMillisV2::new(205),
+                substitute_request,
+            },
+        )),
+    )
+    .unwrap();
+    let processor = VerifiedConnectorExecutionRuntimeV2::from_verified_components(
+        supervisor,
+        issuer,
+        Box::new(Provider {
+            observed: observed.clone(),
+            reply,
+            exchange,
+        }),
+    );
+    if let Some(now) = recover_at {
+        // The daemon's startup order (daemon.rs): recover, then serve.
+        ExecdProtocolServiceV2::recover_prepared_with_connector_registry(
+            &protocol,
+            &owner,
+            &processor,
+            &registry,
+            now,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap();
+    }
+    ExecdProtocolServiceV2::new_with_connector_registry(
+        protocol,
+        owner,
+        Box::new(processor),
+        registry,
+    )
+    .unwrap()
+}
+
+/// Fixed-key deployment and journal owner shared by `build` and
+/// `durable_journal_states`.
+fn open_owner(
+    root: &Path,
+    installation: Digest32V2,
+    manifest: Digest32V2,
+    generation: u64,
+    fence: u64,
+    anchor: Box<dyn ExecdRollbackAnchorV2>,
+) -> (ExecdStateOwnerV2, ExecdProtocolDeploymentV2, Digest32V2) {
     let kernel = SigningKey::from_bytes(&[0xc0; 32]);
     let receipt = SigningKey::from_bytes(&[0xbd; 32]);
     let deployment = VerifiedExecdDeploymentV2::from_verified_manifest(
@@ -460,7 +730,7 @@ fn build(
             Digest32V2::new([0xd3; 32]),
         )
         .unwrap(),
-        Box::new(anchor),
+        anchor,
         deployment,
         OpenOptions::new().read(true).open(gate_path).unwrap(),
         OpenOptions::new().read(true).open(projection_path).unwrap(),
@@ -469,66 +739,5 @@ fn build(
         16,
     )
     .unwrap();
-    let registry = Arc::new(
-        ExecdConnectorRegistryV2::open(
-            &root.join("connector-registry-v2.cbor"),
-            [0xd4; 32],
-            DurableStateNamespaceV2::from_verified_installation(
-                installation,
-                Digest32V2::new([0xd5; 32]),
-            )
-            .unwrap(),
-            Box::new(registry_anchor),
-            ExecdConnectorRegistryTrustV2::from_authenticated_deployment(
-                installation,
-                manifest,
-                generation,
-                genesis,
-                Ed25519KeyIdV2::new([0; 32]),
-                [0; 32],
-                vec![],
-                connectors,
-            )
-            .unwrap(),
-        )
-        .unwrap(),
-    );
-    let issuer = ConnectorJobDescriptorIssuerV2::from_verified_deployment(
-        installation,
-        manifest,
-        generation,
-        fence,
-        Digest32V2::new([0xe1; 32]),
-        Digest32V2::new([0xe2; 32]),
-        Digest32V2::new([0xe3; 32]),
-        Digest32V2::new([0x29; 32]),
-        Zeroizing::new([0xe4; 32]),
-    )
-    .unwrap();
-    let supervisor = ConnectorWorkerSupervisorV2::from_verified_launcher(
-        issuer.trust(),
-        Some(Box::new(
-            crate::worker_process::intent_bound_fixture::Launcher {
-                now: UnixMillisV2::new(205),
-                substitute_request,
-            },
-        )),
-    )
-    .unwrap();
-    let processor = VerifiedConnectorExecutionRuntimeV2::from_verified_components(
-        supervisor,
-        issuer,
-        Box::new(Provider {
-            observed: observed.clone(),
-            reply,
-            exchange,
-        }),
-    );
-    ExecdProtocolServiceV2::new_with_connector_registry(
-        protocol,
-        owner,
-        Box::new(processor),
-        registry,
-    )
-    .unwrap()
+    (owner, protocol, genesis)
 }
