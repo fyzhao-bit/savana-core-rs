@@ -106,15 +106,22 @@ def _drafted_contract(case, local, row):
     history, contract, refusal = [], None, None
     exposure = planner_exposure(case)
     for number, event in enumerate(drafted, 1):
-        body = draft_request_body(official, prompt, model=case["planner_model"], goal=case.get("goal"),
-                                  history=tuple(history), view=view, exposure=exposure)
-        if hashlib.sha256(body).hexdigest() != event["request_sha256"]:
-            raise ValueError("planner_input_mismatch")
-        if event.get("view", "request") != view or event.get("placeholders", 0) != len(bindings):
-            raise ValueError("planner_view_evidence")
-        owner_sent = [m["content"] for m in json.loads(body)["messages"] if m["role"] != "assistant"]
-        if any(value in text for _placeholder, value in bindings for text in owner_sent):
-            raise ValueError("planner_saw_owner_value")
+        if case.get("root_author") == "fixed":
+            # No planner: the program is the fixed text for this task.
+            from .fixed_programs import fixed_program_text
+            if (event.get("request_sha256") is not None
+                    or event["program_text"] != fixed_program_text(case["suite"], case["user"])):
+                raise ValueError("fixed_program_evidence")
+        else:
+            body = draft_request_body(official, prompt, model=case["planner_model"], goal=case.get("goal"),
+                                      history=tuple(history), view=view, exposure=exposure)
+            if hashlib.sha256(body).hexdigest() != event["request_sha256"]:
+                raise ValueError("planner_input_mismatch")
+            if event.get("view", "request") != view or event.get("placeholders", 0) != len(bindings):
+                raise ValueError("planner_view_evidence")
+            owner_sent = [m["content"] for m in json.loads(body)["messages"] if m["role"] != "assistant"]
+            if any(value in text for _placeholder, value in bindings for text in owner_sent):
+                raise ValueError("planner_saw_owner_value")
         if hashlib.sha256(event["program_text"].encode()).hexdigest() != event["response_sha256"]:
             raise ValueError("program_text_digest")
         try:

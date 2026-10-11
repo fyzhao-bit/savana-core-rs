@@ -139,3 +139,29 @@ class StrictOwnerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FixedProgramTests(unittest.TestCase):
+    def test_each_fixed_program_needs_an_owner_who_signs_a_derived_destination(self):
+        from savana_bench.drafted_tasks import parse_program_text
+        from savana_bench.fixed_programs import FIXED_PROGRAMS, fixed_program_text
+        for suite, user in FIXED_PROGRAMS:
+            program = parse_program_text(fixed_program_text(suite, user))
+            with self.assertRaises(ProgramRefused) as caught:
+                review(suite, user, program)
+            self.assertEqual(str(caught.exception), "derived_destination")
+            contract = review(suite, user, program, derived_destinations=True)
+            chosen = [n for n, step in enumerate(contract.steps(), 1) if _chosen_by_data(step)]
+            self.assertEqual(len(chosen), 1, (suite, user))
+
+    def test_a_fixed_author_is_one_draft_of_a_known_task(self):
+        case, = experiment_cases("drafted+author=fixed+review=derived+owner=strict+attack=autodojo"
+                                 ":slack:user_task_1+injection_task_3")
+        self.assertEqual((case["root_author"], case["max_drafts"]), ("fixed", 1))
+        plain, = experiment_cases("drafted:slack:user_task_1")
+        self.assertEqual(plain["root_author"], "deepseek")
+        for spec in ("drafted+author=fixed+drafts=3:slack:user_task_1",
+                     "drafted+author=fixed:slack:user_task_2",
+                     "drafted+author=human:slack:user_task_1"):
+            with self.assertRaises(ValueError):
+                experiment_cases(spec)
