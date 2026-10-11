@@ -100,6 +100,10 @@ ATTACKS = ("important_instructions_no_names", "autodojo")
 # What the planner is shown besides the owner's request: nothing (Savana), or
 # (an experiment) the injected data an undefended agent would have read.
 EXPOSURES = ("none", "data")
+# Experiments on the kernel's own floor: an owner who signs destinations derived
+# from data, and a software owner who refuses to approve them.
+REVIEWS = ("owner", "derived")
+OWNERS = ("finite", "strict")
 
 
 def drafted_options(kind):
@@ -112,7 +116,10 @@ def drafted_options(kind):
     extractor's model, an owner-signed constant), `+attack=<attack>` (the
     environment attack, see ATTACKS) and `+exposure=data` (the planner is also
     shown the case's injected data; see `planner_exposure`) -> (base, options
-    for `drafted_cases`), or None when `kind` is not a drafted spec."""
+    for `drafted_cases`), or None when `kind` is not a drafted spec.
+    For experiments on the kernel's own floor: `+review=derived` (the owner
+    signs destinations derived from data) and `+owner=strict` (the software
+    owner refuses every approval whose destination data chose)."""
     from .drafted_tasks import EXTRACTOR_MODELS
     from .value_blind import EXTRACTOR_VIEWS, VIEWS
     base, *options = kind.split("+")
@@ -122,7 +129,7 @@ def drafted_options(kind):
     for option in options:
         key, equals, value = option.partition("=")
         if not equals or key in parsed or key not in ("drafts", "planner", "view", "extract", "extractor",
-                                                       "attack", "exposure"):
+                                                       "attack", "exposure", "review", "owner"):
             raise ValueError("planner_experiment_spec")
         parsed[key] = value
     drafts = parsed.get("drafts", "1")
@@ -134,16 +141,19 @@ def drafted_options(kind):
     extractor = parsed.get("extractor", EXTRACTOR_MODELS[0])
     attack = parsed.get("attack", ATTACKS[0])
     exposure = parsed.get("exposure", EXPOSURES[0])
+    review = parsed.get("review", REVIEWS[0])
+    owner = parsed.get("owner", OWNERS[0])
     if (planner not in PLANNER_MODELS or view not in VIEWS or extract not in EXTRACTOR_VIEWS
-            or extractor not in EXTRACTOR_MODELS or attack not in ATTACKS or exposure not in EXPOSURES):
+            or extractor not in EXTRACTOR_MODELS or attack not in ATTACKS or exposure not in EXPOSURES
+            or review not in REVIEWS or owner not in OWNERS):
         raise ValueError("planner_experiment_spec")
     return base, dict(max_drafts=int(drafts), planner_model=planner, planner_view=view, extractor_view=extract,
-                      extractor_model=extractor, attack=attack, exposure=exposure)
+                      extractor_model=extractor, attack=attack, exposure=exposure, review=review, owner=owner)
 
 
 def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS[0], planner_view="request",
                   extractor_view="raw", extractor_model="deepseek-flash", attack=ATTACKS[0],
-                  exposure=EXPOSURES[0]):
+                  exposure=EXPOSURES[0], review=None, owner=None):
     """`<suite>:<item>[,<item>...]`, each item `user_task_N` (benign) or
     `user_task_N+injection_task_M` (the official important_instructions
     attack). The planner drafts each task's whole program from its request.
@@ -177,9 +187,13 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
         raise ValueError("planner_experiment_spec")
     if exposure not in EXPOSURES or (exposure == "data" and (attack != "autodojo" or any("+" not in n for n in names))):
         raise ValueError("planner_experiment_spec")
+    review, owner = review or REVIEWS[0], owner or OWNERS[0]
+    if review not in REVIEWS or owner not in OWNERS:
+        raise ValueError("planner_experiment_spec")
     # The defaults add no key, so every earlier run's cases are unchanged.
     attack_key = ({} if attack == ATTACKS[0] else dict(attack=attack)) | (
-        {} if exposure == EXPOSURES[0] else dict(planner_exposure=exposure))
+        {} if exposure == EXPOSURES[0] else dict(planner_exposure=exposure)) | (
+        {} if review == REVIEWS[0] else dict(review=review)) | ({} if owner == OWNERS[0] else dict(owner=owner))
     cases = []
     for item in names:
         match = re.fullmatch(r"(user_task_(?:0|[1-9][0-9]?))(?:\+(injection_task_(?:0|[1-9][0-9]?)))?", item)
@@ -565,7 +579,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                 drafted = register_drafted(review_program(suite=case["suite"],
                                     suite_tools={t.name for t in official.tools}, task_id=case["user"],
                                     prompt=prompt, program=parse_program_text(program_text), bindings=bindings,
-                                    extractor_model=case["extractor_model"]))
+                                    extractor_model=case["extractor_model"],
+                                    derived_destinations=case.get("review") == "derived"))
                             except ProgramRefused as error:
                                 audit.emit("program_refused", episode=index, attempt=attempt, reason=str(error),
                                            step=error.step, field=error.field)
@@ -620,7 +635,9 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                             raise
                     else:
                         emit("plan_authored", author=case["author"], mutation=case["mutation"])
-                    consent = FiniteConsent(contract, identity_profile["principal"], emit)
+                    consent = FiniteConsent(contract, identity_profile["principal"], emit,
+                                            disposition=deployment["disposition"],
+                                            strict_destinations=case.get("owner") == "strict")
 
                     def progress(stage):
                         row["stage"] = stage

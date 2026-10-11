@@ -163,7 +163,7 @@ def load_config(path):
         if (config['operator_socket']!=SOCKET or type(d) is not dict
             or set(d)!={'schema','descriptors','planner','destination_digest','application_turn','store',
                         'installation','disposition','scope','task_grants_installed'}
-            or d['schema']!=1 or d['disposition']!='require_approval'
+            or d['schema']!=1 or d['disposition'] not in ('require_approval','permit')
             or d['scope']!='finite_workspace_read_subset' or d['task_grants_installed'] is not False
             or set(d['descriptors'])!=expected_descriptors):
             raise ValueError('closed_provisioning_profile')

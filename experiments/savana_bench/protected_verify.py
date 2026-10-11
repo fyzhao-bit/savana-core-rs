@@ -42,8 +42,21 @@ def verify_published_episode(directory, local, case, row, profile, contract=None
     steps = contract.steps()
     if profile is not None:
         votes=[e for e in local if e['kind']=='benchmark_consent']
-        policy='finite_calendar_preconsent_v1' if len(steps)==1 else 'finite_write_preconsent_v1'
-        if ([v.get('purpose') for v in votes]!=['ingress','task_authorization',*['tool_execution']*len(steps),'final_release']
+        base='finite_calendar_preconsent_v1' if len(steps)==1 else 'finite_write_preconsent_v1'
+        policy=votes[0].get('policy') if votes else None
+        if policy not in (base+m for m in ('','+permit','+strict_destination','+permit+strict_destination')):
+            raise ValueError('finite_consent_evidence_missing')
+        if '+permit' in policy:
+            # Under a permit disposition only escalated steps ask, each once,
+            # in ascending clause order.
+            asked=[v.get('clause') for v in votes if v.get('purpose')=='tool_execution']
+            ordered=(all(type(c) is int and 1<=c<=len(steps) for c in asked)
+                     and asked==sorted(set(asked)))
+        else:
+            asked=[None]*len(steps);ordered=True
+        if ([v.get('purpose') for v in votes]!=['ingress','task_authorization',*['tool_execution']*len(asked),
+                                                 'final_release']
+            or not ordered
             or any(v.get('decision')!='approve' or v.get('human_review') is not False
                 or v.get('policy')!=policy for v in votes)):
             raise ValueError('finite_consent_evidence_missing')

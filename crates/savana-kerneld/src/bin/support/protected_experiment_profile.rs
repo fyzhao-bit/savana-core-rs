@@ -256,6 +256,19 @@ fn sign_descriptor(d: &UnsignedToolDescriptorV2, key: &SigningKey) -> Result<Vec
     Ok(e.into_writer())
 }
 
+/// The signed G5 disposition. By default every call needs the owner's
+/// approval; an experiment on the kernel's own floor may install `permit`,
+/// where only the calls the kernel escalates ask.
+fn experiment_disposition(
+    value: Result<String, std::env::VarError>,
+) -> Result<&'static str, String> {
+    match value.as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("require_approval") => Ok("require_approval"),
+        Ok("permit") => Ok("permit"),
+        _ => Err("experiment disposition must be require_approval or permit".into()),
+    }
+}
+
 pub(super) fn materialize(stage: &Path) -> Result<(), String> {
     if !cfg!(debug_assertions)
         || !stage.is_absolute()
@@ -283,6 +296,11 @@ pub(super) fn materialize(stage: &Path) -> Result<(), String> {
     let mut endpoints = read(stage, "etc/savana/experiment-endpoints-v04.json")?;
     let identity = read(stage, "etc/savana/experiment-model-identity.json")?;
     let recipient = parse_digest(&identity, "recipient")?;
+    let disposition =
+        experiment_disposition(std::env::var("SAVANA_PROTECTED_EXPERIMENT_DISPOSITION"))?;
+    if kernel["policy_runtime"]["disposition"] != "require_approval" {
+        return Err("unexpected template disposition".into());
+    }
     if exec["provider_routing_mode"] != "split-final-release" {
         return Err("split provider required".into());
     }
@@ -520,6 +538,7 @@ pub(super) fn materialize(stage: &Path) -> Result<(), String> {
     }
     constraints.sort_by_key(|v| v["descriptor_digest"].as_str().unwrap().to_owned());
     let policy = &mut kernel["policy_runtime"];
+    policy["disposition"] = json!(disposition);
     policy["registry_publisher_key_id"] = json!(hex(*derive_ed25519_key_id_v2(
         registry.verifying_key().to_bytes()
     )
@@ -672,7 +691,7 @@ pub(super) fn materialize(stage: &Path) -> Result<(), String> {
     let binding = json!({"schema":1,"descriptors":descriptors,"planner":hex(recipient),
         "destination_digest":hex(destination),"application_turn":hex(*turn.as_bytes()),
         "store":kernel["g4_store_id"],
-        "installation":manifest["installation_id"],"disposition":"require_approval",
+        "installation":manifest["installation_id"],"disposition":disposition,
         "scope":"finite_workspace_read_subset","task_grants_installed":false});
     write_json(
         &stage.join("etc/savana/experiment-provisioning-v04.json"),
@@ -684,4 +703,27 @@ pub(super) fn materialize(stage: &Path) -> Result<(), String> {
         "deployment_shipped_connectors":connectors.len(),"installed":false}),
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::experiment_disposition;
+    use std::env::VarError;
+
+    #[test]
+    fn only_the_two_closed_dispositions_are_accepted() {
+        assert_eq!(
+            experiment_disposition(Err(VarError::NotPresent)),
+            Ok("require_approval")
+        );
+        assert_eq!(
+            experiment_disposition(Ok("require_approval".into())),
+            Ok("require_approval")
+        );
+        assert_eq!(experiment_disposition(Ok("permit".into())), Ok("permit"));
+        for value in ["deny", "Permit", "", "permit "] {
+            assert!(experiment_disposition(Ok(value.into())).is_err());
+        }
+        assert!(experiment_disposition(Err(VarError::NotUnicode("permit".into()))).is_err());
+    }
 }

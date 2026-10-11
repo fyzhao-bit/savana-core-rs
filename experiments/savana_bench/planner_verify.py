@@ -121,7 +121,8 @@ def _drafted_contract(case, local, row):
             contract = review_program(suite=case["suite"], suite_tools=tools, task_id=case["user"],
                                       prompt=prompt, program=parse_program_text(event["program_text"]),
                                       bindings=bindings,
-                                      extractor_model=case.get("extractor_model", "deepseek-flash"))
+                                      extractor_model=case.get("extractor_model", "deepseek-flash"),
+                                      derived_destinations=case.get("review") == "derived")
             refusal = None
         except ProgramRefused as error:
             contract, refusal = None, error

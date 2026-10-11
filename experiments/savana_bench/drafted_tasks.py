@@ -338,7 +338,8 @@ def _origin(value):
     return ("from", source, None if path is None else tuple(str(p) for p in path), compute)
 
 
-def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(), extractor_model=GENERATOR_MODEL):
+def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(), extractor_model=GENERATOR_MODEL,
+                   derived_destinations=False):
     """The owner's fixed review of a planner program -> DraftedContract, or
     ProgramRefused. `suite_tools` are the official function names this
     episode's suite serves. A refusal carries the step number and field name
@@ -346,7 +347,10 @@ def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(),
     placeholders of a value-blind planner view, each bound to the owner's own
     value before review (`value_blind.bind_program`), so everything below
     judges and signs only the owner's real text. `extractor_model` is the
-    owner's choice of model for every extraction step (a signed constant)."""
+    owner's choice of model for every extraction step (a signed constant).
+    `derived_destinations` (experiments on the kernel's own floor only) is an
+    owner who signs a destination or fetched address derived from data, which
+    this review otherwise never does."""
     if extractor_model not in EXTRACTOR_MODELS:
         raise ValueError("extractor_model")
     where = {"step": None, "field": None}
@@ -355,13 +359,15 @@ def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(),
         program = bind_program(program, bindings)
     try:
         return _review_program(where, suite=suite, suite_tools=suite_tools, task_id=task_id, prompt=prompt,
-                               program=program, extractor_model=extractor_model)
+                               program=program, extractor_model=extractor_model,
+                               derived_destinations=derived_destinations)
     except ProgramRefused as error:
         error.step, error.field = where["step"], where["field"]
         raise
 
 
-def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extractor_model):
+def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extractor_model,
+                    derived_destinations=False):
     if type(program) is not dict or set(program) != {"steps"} or type(program["steps"]) is not list:
         _refuse("program_shape")
     raw_steps = program["steps"]
@@ -588,7 +594,8 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                         _refuse("literal_kind")
                     values[name] = tuple(items)
                     continue
-                if role == "destination" or (tool, name) in OWNER_ONLY_READ_FIELDS | OWNER_ONLY_WRITE_FIELDS:
+                if (not derived_destinations
+                        and (role == "destination" or (tool, name) in OWNER_ONLY_READ_FIELDS | OWNER_ONLY_WRITE_FIELDS)):
                     # Whom a write reaches, or which address a fetch contacts,
                     # is never chosen by data an injection could control.
                     _refuse("derived_destination")

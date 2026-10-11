@@ -60,15 +60,35 @@ def _derived_value_ok(value, bound, form):
     return text(value, bound)
 
 
+DISPOSITIONS = ('require_approval', 'permit')
+
+
+def _chosen_by_data(step):
+    """The derived fields of a step that choose where its call goes: the
+    destination of its tool, or an owner-only address (a fetched URL, cc, bcc)."""
+    from .drafted_tasks import OWNER_ONLY_READ_FIELDS, OWNER_ONLY_WRITE_FIELDS
+    destination = _roles(step)[2]
+    return [field for field, *_ in step.edges()
+            if field == destination or (step.tool, field) in OWNER_ONLY_READ_FIELDS | OWNER_ONLY_WRITE_FIELDS]
+
+
 class FiniteConsent:
-    def __init__(self, contract, principal, emit):
+    """`disposition` is the deployment's signed G5 disposition. Under
+    `require_approval` every step asks, in order. Under `permit` only the steps
+    the kernel escalates ask, in ascending clause order, and the final release
+    may follow any of them. `strict_destinations` refuses any step whose
+    destination (or fetched address) was derived from data."""
+    def __init__(self, contract, principal, emit, *, disposition='require_approval', strict_destinations=False):
         if (contract not in all_contracts() or type(principal) is not str
-            or not re.fullmatch('[0-9a-f]{64}',principal) or principal=='0'*64):
+            or not re.fullmatch('[0-9a-f]{64}',principal) or principal=='0'*64
+            or disposition not in DISPOSITIONS or type(strict_destinations) is not bool):
             raise ValueError('finite_consent_catalog')
         self.contract,self.principal,self.emit=contract,principal,emit
         self.steps=contract.steps();self.action=0
+        self.permit=disposition=='permit';self.strict=strict_destinations
         # Read-only contracts keep their original policy label and behavior.
-        self.policy='finite_calendar_preconsent_v1' if len(self.steps)==1 else 'finite_write_preconsent_v1'
+        self.policy=('finite_calendar_preconsent_v1' if len(self.steps)==1 else 'finite_write_preconsent_v1')+(
+            '+permit' if self.permit else '')+('+strict_destination' if self.strict else '')
         self.stage='ingress';self.task=self.binding=self.clauses=self.authorization=None
         self.profiles=None;self.failed=False;self.results=None
 
@@ -122,22 +142,28 @@ class FiniteConsent:
         purpose,display=request.purpose,request.display
         if self.failed: raise ValueError('consent_closed')
         try:
-            if purpose!=self.stage or type(display) is not str or len(display.encode())>131072:
+            # Under permit the steps the kernel does not escalate never ask, so
+            # the final release may come while tool approvals are still possible.
+            expected={self.stage,'final_release'} if self.permit and self.stage=='tool_execution' else {self.stage}
+            if purpose not in expected or type(display) is not str or len(display.encode())>131072:
                 raise ValueError('consent_unexpected_request')
             if purpose=='ingress': self._ingress(display)
             elif purpose=='task_authorization': self._root(strict_json(display))
             elif purpose in ('tool_execution','final_release'): self._action(strict_json(display),purpose)
             else: raise ValueError('consent_purpose')
+            clause=dict(clause=self.action) if self.permit and purpose=='tool_execution' else {}
             self.emit('benchmark_consent',purpose=purpose,decision='approve',
                 contract_sha256=self.contract.digest(),display_sha256=hashlib.sha256(display.encode()).hexdigest(),
-                policy=self.policy,human_review=False)
-        except BaseException:
+                policy=self.policy,human_review=False,**clause)
+        except BaseException as error:
             self.failed=True
+            reason=dict(reason=str(error)) if self.permit or self.strict else {}
             self.emit('benchmark_consent',purpose=purpose,decision='refuse',
-                policy=self.policy,human_review=False)
+                policy=self.policy,human_review=False,**reason)
             raise
         if purpose=='tool_execution':
-            self.action+=1
+            if not self.permit:
+                self.action+=1
             self.stage='tool_execution' if self.action<len(self.steps) else 'final_release'
         else:
             self.stage={'ingress':'task_authorization','task_authorization':'tool_execution',
@@ -187,6 +213,11 @@ class FiniteConsent:
     def _action(self, d, purpose):
         n=len(self.steps)
         number=self.action+1 if purpose=='tool_execution' else n+1
+        if self.permit and purpose=='tool_execution':
+            # Only escalated steps ask: any later clause, never an earlier one.
+            number=d.get('clause_id') if type(d) is dict else None
+            if type(number) is not int or not self.action<number<=n:
+                raise ValueError('consent_action_order')
         if number>n+1: raise ValueError('consent_action_order')
         step=self.steps[number-1] if purpose=='tool_execution' else None
         clause=self.clauses[number-1];alternative=clause['alternatives'][0]
@@ -203,6 +234,9 @@ class FiniteConsent:
         if type(d) is not dict or any(d.get(k)!=v or type(d.get(k)) is not type(v) for k,v in expected.items()):
             raise ValueError('consent_action_scope')
         r=d['exact_business_request']
+        if step is not None and self.strict and _chosen_by_data(step):
+            # A software owner that only approves destinations it wrote itself.
+            raise ValueError('consent_derived_destination')
         if step is not None:
             _,resource,destination=_roles(step)
             if (set(r)!={'jsonrpc','id','method','params'} or r['jsonrpc']!='2.0' or r['method']!='tools/call'
@@ -229,6 +263,8 @@ class FiniteConsent:
                 or d['resource']!=r['params']['arguments'][resource]
                 or d['destination']!=r['params']['arguments'][destination]):
                 raise ValueError('consent_action_arguments')
+            if self.permit:
+                self.action=number
         else:
             controls=dict(alternative['controls'])
             if (set(r)!={'method','path','request_id','body'} or r['method']!='POST'
