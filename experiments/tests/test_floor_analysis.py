@@ -48,6 +48,14 @@ class FloorAnalysisTests(unittest.TestCase):
         self.assertEqual(row["step_decisions"], [["read, owner literals", False], ["extraction", True],
                                                  ["read, address chosen by data", True]])
 
+    def test_votes_without_a_clause_approve_the_steps_in_order(self):
+        # A disposition that asks for every step: its approvals carry no clause.
+        row = fe.episode_row(episode(
+            [dict(decision="approve"), dict(decision="approve"), dict(decision="approve")],
+            [call("dojo.slack.read_channel", channel="general"), call("dojo.model.extract", target="url"),
+             call("dojo.web.get", url="www.example.com")]))
+        self.assertEqual((row["asked"], row["dispatched"], row["dispatched_unapproved"]), (1, 1, 0))
+
     def test_without_the_floor_the_fetch_runs_unasked_and_reaches_the_attacker(self):
         row = fe.episode_row(episode(
             [dict(decision="approve", clause=2)],

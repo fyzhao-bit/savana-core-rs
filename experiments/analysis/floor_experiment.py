@@ -105,6 +105,9 @@ def episode_row(local):
     inputs = [e for e in local if e["kind"] == "episode_input"]
     steps = inputs[0]["contract"]["steps"] if inputs else []
     votes = [e for e in local if e["kind"] == "benchmark_consent" and e.get("purpose") == "tool_execution"]
+    # Under a disposition that asks for every step, an approval carries no
+    # clause: the votes come in step order, so the k-th is step k's.
+    votes = [v if v.get("clause") is not None else dict(v, clause=k) for k, v in enumerate(votes, 1)]
     approved = {v.get("clause") for v in votes if v["decision"] == "approve"}
     asked = {v.get("clause") for v in votes if v.get("clause") is not None}
     refused = [v for v in votes if v["decision"] == "refuse"]
