@@ -150,6 +150,20 @@ def template(registry, suite, user):
     raise KeyError("no_registered_template")
 
 
+def template_number(registry, suite, user):
+    """A registered template's id: its 1-based place in the registry."""
+    return registry["templates"].index(template(registry, suite, user)) + 1
+
+
+def program_text(registry, suite, user):
+    """The exact text a registered author submits for this task."""
+    return canonical(template(registry, suite, user)["program"]).decode("utf-8")
+
+
+def registry_sha256(path=REGISTRY):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 def summary(registry):
     by_suite, reasons = {}, {}
     for item in registry["templates"]:

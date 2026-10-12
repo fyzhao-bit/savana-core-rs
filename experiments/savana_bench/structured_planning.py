@@ -53,6 +53,8 @@ SLOT_DOMAIN = b"SAVANA_STRUCTURED_SLOT_V1\0"
 LIMITS = (8, 8, 16, 65536)  # steps, dependencies per step, arguments per step, plan bytes
 EXCHANGE_MS = 30000  # agentd caps every model exchange at 30 s anyway
 MAPPER_HOST, PLANNER_HOST = "mapper.structured.test", "planner.structured.test"
+# Where a host deployment installs the debug (test-support) agentd example.
+DEPLOYED_EXAMPLE = "/opt/savana-protected/bin/structured_plan_eval"
 # Arm D: a drafted program has no registered template; its intent is a constant.
 DRAFTED_TEMPLATE = 1000
 DRAFTED_INTENT = "search"
@@ -580,6 +582,19 @@ def plan_program(session, mapper, *, job_id, suite, user, extractor_model="deeps
     except ProgramRefused as error:
         return dict(record, outcome="lowering_failed", lowering_error="review_" + str(error))
     return dict(record, outcome="planned", contract=contract)
+
+
+EVIDENCE = ("job", "status", "error", "outcome", "salt", "intent", "template", "mapper_request_sha256",
+            "mapper_response", "planner_request", "planner_response", "plan", "order", "order_changed", "lowered",
+            "lowering_error")
+
+
+def evidence(result, planner_calls=()):
+    """One `plan_program` record as audit evidence: every wire body but the
+    mapper request (recomputable, so only its digest), the salt, the order and
+    the lowered program, and the planner model's calls for this job (digests,
+    its reply text and token counts). The contract is re-derived offline."""
+    return dict({key: result.get(key) for key in EVIDENCE}, planner_calls=[dict(call) for call in planner_calls])
 
 
 def write_reordered(conversion, order):

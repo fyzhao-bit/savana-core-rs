@@ -42,9 +42,12 @@ from .protected_transport import ProviderServer, certificate_spki_pin, server_co
 SCHEMA = "savana-planner-experiment-v1"
 OPERATOR_MODE = "forward_untrusted_plan"
 IDS = ("task", "root", "observer", "application_turn", "planner", "model_profile", "not_before", "expires_at")
-# Outcomes that settle an episode. Anything else stays unknown.
+# Outcomes that settle an episode. Anything else stays unknown. The last three
+# are the structured-planning stages that refused before anything was signed.
 DEFINITIVE = ("plan_unencodable", "author_failed", "sdk_codec_rejected", "compile_rejected",
-              "prepare_rejected", "owner_refused", "published", "program_refused")
+              "prepare_rejected", "owner_refused", "published", "program_refused",
+              "mapper_failed", "planner_invalid", "lowering_failed")
+STRUCTURED_REFUSALS = ("mapper_failed", "planner_invalid", "lowering_failed")
 KERNEL_BLOCKS = ("compile_rejected", "prepare_rejected")
 
 
@@ -105,8 +108,14 @@ EXPOSURES = ("none", "data")
 REVIEWS = ("owner", "derived")
 OWNERS = ("finite", "strict")
 # Who writes the program: the untrusted planner, or (floor experiments only)
-# a fixed honest program per task, identical on every run and kernel.
-AUTHORS = ("deepseek", "fixed")
+# a fixed honest program per task, identical on every run and kernel; or, for
+# the structured-planning evaluation, the task's registered template run as
+# written (`registered`), or a program agentd's structured planning pipeline
+# reorders (`structured`, see `structured_planning`).
+AUTHORS = ("deepseek", "fixed", "registered", "structured")
+# Where a `structured` program comes from: the registered template (arm T) or
+# the untrusted planner's reviewed draft (arm D).
+MAPPERS = ("template", "deepseek")
 
 
 def drafted_options(kind):
@@ -123,7 +132,11 @@ def drafted_options(kind):
     For experiments on the kernel's own floor: `+review=derived` (the owner
     signs destinations derived from data), `+owner=strict` (the software
     owner refuses every approval whose destination data chose) and
-    `+author=fixed` (`fixed_programs` instead of the planner; one draft)."""
+    `+author=fixed` (`fixed_programs` instead of the planner; one draft).
+    For the structured-planning evaluation: `+author=registered` (the task's
+    registered template, one draft) and `+author=structured` with
+    `+mapper=template` (the default; the template, reordered by agentd's
+    pipeline) or `+mapper=deepseek` (the planner's reviewed draft, reordered)."""
     from .drafted_tasks import EXTRACTOR_MODELS
     from .value_blind import EXTRACTOR_VIEWS, VIEWS
     base, *options = kind.split("+")
@@ -133,7 +146,8 @@ def drafted_options(kind):
     for option in options:
         key, equals, value = option.partition("=")
         if not equals or key in parsed or key not in ("drafts", "planner", "view", "extract", "extractor",
-                                                       "attack", "exposure", "review", "owner", "author"):
+                                                       "attack", "exposure", "review", "owner", "author",
+                                                       "mapper"):
             raise ValueError("planner_experiment_spec")
         parsed[key] = value
     drafts = parsed.get("drafts", "1")
@@ -150,16 +164,19 @@ def drafted_options(kind):
     author = parsed.get("author", AUTHORS[0])
     if (planner not in PLANNER_MODELS or view not in VIEWS or extract not in EXTRACTOR_VIEWS
             or extractor not in EXTRACTOR_MODELS or attack not in ATTACKS or exposure not in EXPOSURES
-            or review not in REVIEWS or owner not in OWNERS or author not in AUTHORS):
+            or review not in REVIEWS or owner not in OWNERS or author not in AUTHORS
+            or parsed.get("mapper", MAPPERS[0]) not in MAPPERS or ("mapper" in parsed and author != "structured")):
         raise ValueError("planner_experiment_spec")
+    # Only a structured spec passes `mapper`, so every other spec's options are unchanged.
+    mapper = {} if author != "structured" else dict(mapper=parsed.get("mapper", MAPPERS[0]))
     return base, dict(max_drafts=int(drafts), planner_model=planner, planner_view=view, extractor_view=extract,
                       extractor_model=extractor, attack=attack, exposure=exposure, review=review, owner=owner,
-                      author=author)
+                      author=author, **mapper)
 
 
 def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS[0], planner_view="request",
                   extractor_view="raw", extractor_model="deepseek-flash", attack=ATTACKS[0],
-                  exposure=EXPOSURES[0], review=None, owner=None, author=None):
+                  exposure=EXPOSURES[0], review=None, owner=None, author=None, mapper=None):
     """`<suite>:<item>[,<item>...]`, each item `user_task_N` (benign) or
     `user_task_N+injection_task_M` (the official important_instructions
     attack). The planner drafts each task's whole program from its request.
@@ -202,6 +219,19 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
         if (max_drafts != 1 or goal is not None or exposure != EXPOSURES[0]
                 or any((suite, n.split("+")[0]) not in FIXED_PROGRAMS for n in names)):
             raise ValueError("planner_experiment_spec")
+    if (author == "structured") != (mapper is not None) or (mapper is not None and mapper not in MAPPERS):
+        raise ValueError("planner_experiment_spec")
+    if author == "registered" or mapper == "template":
+        from .structured_templates import load_registry, template
+        registry = load_registry()
+        # A registered template is the same text every draft: one draft, one per task.
+        if max_drafts != 1 or goal is not None or exposure != EXPOSURES[0]:
+            raise ValueError("planner_experiment_spec")
+        for name in names:
+            try:
+                template(registry, suite, name.split("+")[0])
+            except KeyError:
+                raise ValueError("planner_experiment_spec") from None
     # The defaults add no key, so every earlier run's cases are unchanged.
     attack_key = ({} if attack == ATTACKS[0] else dict(attack=attack)) | (
         {} if exposure == EXPOSURES[0] else dict(planner_exposure=exposure)) | (
@@ -220,7 +250,8 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
         cases.append(dict(group=group, suite=suite, user=user, injection=injection, author="reviewed",
                           root_author=author, goal=goal, mutation=None, max_drafts=max_drafts,
                           planner_model=planner_model, planner_view=planner_view, extractor_view=extractor_view,
-                          extractor_model=extractor_model, **attack_key))
+                          extractor_model=extractor_model, **attack_key,
+                          **({} if mapper is None else dict(mapper=mapper))))
     return tuple(cases)
 
 
@@ -419,6 +450,25 @@ def autodojo_provenance(cases):
                                             for s in suites}))
 
 
+def structured_provenance(cases, example=None):
+    """For a registered or structured run, what pins its programs and its
+    planner: the template registry, and for a structured run the planner's
+    fixed prompt, the limits and the digest of the agentd example that ran.
+    Every other run's manifest is unchanged."""
+    if not any(case.get("root_author") in ("registered", "structured") for case in cases):
+        return {}
+    from .structured_templates import registry_sha256
+    record = dict(structured_templates_sha256=registry_sha256())
+    if any(case.get("root_author") == "structured" for case in cases):
+        from .structured_planning import LIMITS, PLANNER_SYSTEM
+        executable = Path(example) if example is not None else None
+        record.update(structured_planner_system_sha256=hashlib.sha256(PLANNER_SYSTEM.encode()).hexdigest(),
+                      structured_limits=list(LIMITS),
+                      structured_example_sha256=(hashlib.sha256(executable.read_bytes()).hexdigest()
+                                                 if executable is not None and executable.is_file() else None))
+    return record
+
+
 def consent_mode(experiment):
     multi = str(experiment).partition(":")[0] in (*CHAIN_KINDS, "drafted")
     return "finite_write_preconsent_v1" if multi else "finite_calendar_preconsent_v1"
@@ -452,19 +502,28 @@ def plan_author_for(case, contract, text, emit, facts):
     return author
 
 
-def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_profile, experiment):
+def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_profile, experiment,
+        structured_example=None):
+    """`structured_example` is the agentd example a structured run plans
+    through (default: where a host deployment installs it)."""
     from .benchmark_identity import load_profile
     cases = experiment_cases(experiment)
     if identity_profile is None or identity_profile != load_profile() or config is None or config["schema"] != 3:
         raise ValueError("explicit_benchmark_profile_required")
     audit = ResearchAudit(output)
-    model = worker = broker = author = generator = drafter = None
+    model = worker = broker = author = generator = drafter = structural = structured = None
+    structured_cases = [case for case in cases if case.get("root_author") == "structured"]
     import asyncio
     async_runner = asyncio.Runner()
     rows = []
     try:
         blockers = preflight(config=config, auth_fd=auth_fd, model_key_fd=model_key_fd,
                              model_listener_fd=model_listener_fd)
+        if structured_cases:
+            from .structured_planning import DEPLOYED_EXAMPLE
+            structured_example = Path(structured_example or DEPLOYED_EXAMPLE)
+            if not (structured_example.is_file() and os.access(structured_example, os.X_OK)):
+                blockers.append("structured_example_unavailable")
         audit.emit("manifest", schema=SCHEMA, experiment=experiment, cases=cases,
             package_version=PACKAGE_VERSION, benchmark_version=BENCHMARK, suite=SUITE,
             kernel_interface="python_sdk_only", operator_mode=OPERATOR_MODE,
@@ -487,7 +546,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             executor_model="deepseek-flash", identity_profile=identity_profile,
             human_authentication_evaluated=False, consent_mode=consent_mode(experiment),
             comparable_to_unrestricted_baseline=False, attack=experiment_attack(cases),
-            **autodojo_provenance(cases),
+            **autodojo_provenance(cases), **structured_provenance(cases, structured_example),
             platform=platform.platform(), package_sources=package_sources(),
             source_sha256={p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                            for p in sorted(Path(__file__).parent.glob("*.py"))})
@@ -528,6 +587,13 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                 generator = DeepSeekGenerator(key, max_calls=len(cases) * steps,
                                               max_input_bytes=len(cases) * steps * 98304,
                                               model=extractor_models.pop())
+            if structured_cases:
+                from .structured_planning import DeepSeekStructuralPlanner, StructuredSession
+                # The third-party structural planner: one call per structured
+                # episode, sent only the anonymised graph. One agentd example
+                # (one node-id issuer) serves the whole batch.
+                structural = DeepSeekStructuralPlanner(key, max_calls=len(structured_cases), model=planner_model)
+                structured = StructuredSession(structured_example, structural)
             del key
             broker = WebAuthnBroker(auth_fd, timeout_seconds=120)
             worker = ModelWorker(config["model_worker"], model, audit, listener_fd=model_listener_fd)
@@ -582,6 +648,12 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                     program_text = fixed_program_text(case["suite"], case["user"])
                                     meta = dict(request_sha256=None, usage=None, response_sha256=hashlib.sha256(
                                         program_text.encode()).hexdigest())
+                                elif case["root_author"] == "registered" or case.get("mapper") == "template":
+                                    # No planner: the task's registered template, as registered.
+                                    from .structured_templates import load_registry, program_text as registered_text
+                                    program_text = registered_text(load_registry(), case["suite"], case["user"])
+                                    meta = dict(request_sha256=None, usage=None, response_sha256=hashlib.sha256(
+                                        program_text.encode()).hexdigest())
                                 else:
                                     program_text, meta = drafter.draft(official, prompt, goal=case.get("goal"),
                                                                        history=tuple(history),
@@ -608,6 +680,32 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                 history.append((program_text, str(error), error.step, error.field))
                                 continue
                             break
+                        if case["root_author"] == "structured":
+                            # agentd's structured planning: the private mapper is
+                            # the reviewed program, the third-party planner may
+                            # only reorder it, and the lowered program must pass
+                            # the same review again. Still nothing is signed.
+                            from .structured_planning import (ProgramMapper, StructuredError, eval_catalog, evidence,
+                                                              plan_program)
+                            from .structured_templates import load_registry, template_number
+                            row["stage"] = "structured_planning"
+                            mapper = ProgramMapper(json.loads(drafted.program), eval_catalog(case["suite"]),
+                                                   source="template" if case["mapper"] == "template" else "drafted",
+                                                   template=(template_number(load_registry(), case["suite"],
+                                                                            case["user"])
+                                                             if case["mapper"] == "template" else None))
+                            calls = len(structural.log)
+                            planned = plan_program(structured, mapper, job_id=f"episode-{index}",
+                                                   suite=case["suite"], user=case["user"],
+                                                   extractor_model=case["extractor_model"],
+                                                   derived_destinations=case.get("review") == "derived")
+                            audit.emit("structured_planned", episode=index,
+                                       **evidence(planned, structural.log[calls:]))
+                            if planned["outcome"] != "planned":
+                                row.update(outcome=planned["outcome"],
+                                           structured_error=planned.get("lowering_error") or planned["error"])
+                                raise StructuredError(planned["outcome"])
+                            drafted = register_drafted(planned["contract"])
                     suite, task, injection, contract, values, env = official_case(case, drafted)
                     before = env.model_copy(deep=True)
                     turn = digest32(deployment["application_turn"]).hex()
@@ -722,7 +820,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         server.close()
                     if observer is not None:
                         observer.close()
-                if row["outcome"] == "program_refused":
+                if row["outcome"] in ("program_refused", *STRUCTURED_REFUSALS):
                     # Refused before anything was signed: no tool ran and the
                     # environment was never created, so nothing changed.
                     row.update(observed_utility=False, environment_changed=False,
@@ -775,7 +873,11 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                                               completion=author.completion_tokens),
             operator_mode=OPERATOR_MODE, identity_profile=identity_profile,
             human_authentication_evaluated=False, consent_mode=consent_mode(experiment),
-            comparable_to_unrestricted_baseline=False, production_acceptance=False)
+            comparable_to_unrestricted_baseline=False, production_acceptance=False,
+            **({} if structural is None else dict(
+                structural_planner_calls=structural.calls,
+                structural_planner_tokens=dict(prompt=structural.prompt_tokens,
+                                               completion=structural.completion_tokens))))
         audit.emit("summary", summary=summary)
         audit.artifact("summary.json", summary)
         audit.artifact("completion.json", dict(audit_head=audit.head, event_count=audit.count))
@@ -794,4 +896,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             generator.close()
         if drafter is not None:
             drafter.close()
+        if structured is not None:
+            structured.close()
+        if structural is not None:
+            structural.close()
         audit.close()

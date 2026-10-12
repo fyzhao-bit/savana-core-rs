@@ -18,8 +18,9 @@ from .agentdojo_provider import canonical
 from .agentdojo_tasks import prepare_draft
 from .official_verify import restore_environment, verify_chain
 from .planner_authors import SYSTEM, PlanUnencodable, compromised_draft, encode_plan, parse_plan
-from .planner_experiment import (DEFINITIVE, IDS, OPERATOR_MODE, SCHEMA, classify_provider_attempt,
-                                 experiment_cases, planner_exposure, summarize)
+from .planner_experiment import (DEFINITIVE, IDS, OPERATOR_MODE, SCHEMA, STRUCTURED_REFUSALS,
+                                 classify_provider_attempt, experiment_cases, planner_exposure, structured_provenance,
+                                 summarize)
 from .protected_agentdojo import official_case, package_sources, score_outcome
 from .protected_verify import verify_published_episode
 
@@ -112,6 +113,12 @@ def _drafted_contract(case, local, row):
             if (event.get("request_sha256") is not None
                     or event["program_text"] != fixed_program_text(case["suite"], case["user"])):
                 raise ValueError("fixed_program_evidence")
+        elif case.get("root_author") == "registered" or case.get("mapper") == "template":
+            # No planner: the program is this task's registered template.
+            from .structured_templates import load_registry, program_text
+            if (event.get("request_sha256") is not None
+                    or event["program_text"] != program_text(load_registry(), case["suite"], case["user"])):
+                raise ValueError("registered_program_evidence")
         else:
             body = draft_request_body(official, prompt, model=case["planner_model"], goal=case.get("goal"),
                                       history=tuple(history), view=view, exposure=exposure)
@@ -158,7 +165,128 @@ def _drafted_contract(case, local, row):
         raise ValueError("root_drafter_evidence")
     if row["outcome"] == "program_refused":
         raise ValueError("program_refusal_mismatch")
+    if case.get("root_author") == "structured":
+        return _structured_contract(case, local, row, register_drafted(contract))
+    if row["outcome"] in STRUCTURED_REFUSALS:
+        raise ValueError("structured_outcome")
     return register_drafted(contract)
+
+
+def _structured_contract(case, local, row, contract):
+    """agentd's structured planning of the accepted program, re-derived from
+    the evidence: the conversion (the mapper request's digest and the exact
+    workflow agentd took) from the reviewed program, the recorded salt and
+    the catalog; the planner request decoded and found to be exactly that
+    workflow anonymised under the order agentd decoded, the planner model's
+    prompt the pure function of it (its digest) and its reply the recorded
+    order; no owner literal, leak-gate value, tool name or description in any
+    planner byte; and the lowering and the owner's review of the lowered
+    program. Returns the lowered contract, or None for a recorded refusal
+    (nothing signed)."""
+    from agentdojo.task_suite.load_suites import get_suite
+    from .agentdojo_tasks import BENCHMARK, register_drafted
+    from .drafted_tasks import ProgramRefused
+    from .structured_planning import (OP, PLANNER_CODES, ProgramMapper, StructuredError, eval_catalog, exposure,
+                                      lower_plan, order_reply, planner_body, planner_view, review, sentinels)
+    from .structured_templates import load_registry, template_number
+    from .structured_wire import decode_order, decode_ordered_plan, decode_plan, decode_structural_request, validate_order
+    event = _one(local, "structured_planned")
+    outcome = event["outcome"]
+    if (outcome not in ("planned", *STRUCTURED_REFUSALS)
+            or (row["outcome"] in STRUCTURED_REFUSALS) != (outcome != "planned")
+            or (outcome != "planned" and row["outcome"] != outcome)):
+        raise ValueError("structured_outcome")
+    catalog = eval_catalog(case["suite"])
+    program = json.loads(contract.program)
+    template = case["mapper"] == "template"
+    mapper = ProgramMapper(program, catalog, source="template" if template else "drafted",
+                           template=template_number(load_registry(), case["suite"], case["user"]) if template else None,
+                           salt=bytes.fromhex(event["salt"]))
+    if (hashlib.sha256(mapper.request_bytes).hexdigest() != event["mapper_request_sha256"]
+            or (event["intent"], event["template"]) != (mapper.intent, mapper.template)
+            or event["mapper_response"] not in (None, mapper.response.hex())):
+        raise ValueError("structured_mapper_evidence")
+    reached = outcome != "mapper_failed"
+    accepted = outcome in ("planned", "lowering_failed")
+    if (reached != (event["planner_request"] is not None) or (reached and event["mapper_response"] is None)
+            or accepted != (event["status"] == "accepted") or accepted != (event["plan"] is not None)
+            or (outcome == "planner_invalid") != (event["error"] in PLANNER_CODES)):
+        raise ValueError("structured_stage_evidence")
+    calls = event["planner_calls"]
+    if not reached:
+        if calls:
+            raise ValueError("structured_stage_evidence")
+        return None
+    planner_bytes = bytes.fromhex(event["planner_request"])
+    request = decode_structural_request(planner_bytes)
+    labels, view = planner_view(request)
+    prompt = get_suite(BENCHMARK, case["suite"]).get_user_task_by_id(case["user"]).PROMPT
+    if exposure((planner_bytes, view.encode()), sentinels(program, prompt, catalog)):
+        raise ValueError("structured_planner_exposure")
+    if len(calls) > 1 or any(call["request_sha256"] != hashlib.sha256(planner_bytes).hexdigest()
+                             or call["prompt_sha256"] != hashlib.sha256(
+                                 planner_body(request, model=case["planner_model"])[1]).hexdigest() for call in calls):
+        raise ValueError("structured_planner_input")
+    content = calls[0]["content"] if calls else None
+    if outcome == "planner_invalid":
+        # The recorded model reply decides which refusal agentd could give:
+        # unencodable -> no reply sent; not a forward permutation -> agentd
+        # refuses it; a valid order -> only a lost or late reply.
+        if content is not None:
+            try:
+                encoded = order_reply(content, labels)
+            except StructuredError:
+                encoded = None
+            valid = False
+            if encoded is not None:
+                try:
+                    valid = bool(validate_order(request, decode_ordered_plan(encoded)))
+                except ValueError:
+                    valid = False
+            expected = (("planner_unavailable",) if encoded is None else
+                        ("planner_deadline", "planner_unavailable") if valid else ("planner_invalid_plan",))
+            if event["error"] not in expected:
+                raise ValueError("structured_planner_refusal")
+        return None
+    reply = bytes.fromhex(event["planner_response"])
+    ordered = validate_order(request, decode_ordered_plan(reply))
+    if not calls or order_reply(content, labels) != reply:
+        raise ValueError("structured_planner_reply")
+    plan = decode_plan(bytes.fromhex(event["plan"]))
+    workflow = mapper.conversion.workflow
+    positions = {node: mapper.conversion.ops.get(dict(step.bindings).get(OP)) for node, step in zip(ordered, plan.steps)}
+    ids = {ordinal: node for node, ordinal in positions.items()}
+    if sorted(ids) != [n.ordinal for n in workflow.nodes]:
+        raise ValueError("structured_plan")
+    # What the planner was sent is exactly this workflow, anonymised.
+    graph = {n.id: (n.role, n.effects, n.in_arity, n.out_arity) for n in request.nodes}
+    if (graph != {ids[n.ordinal]: (n.role, n.effects, sum(b == n.ordinal for _a, b in workflow.edges),
+                                   sum(a == n.ordinal for a, _b in workflow.edges)) for n in workflow.nodes}
+            or set(request.edges) != {(ids[a], ids[b]) for a, b in workflow.edges}):
+        raise ValueError("structured_planner_graph")
+    if decode_order(workflow.nodes, workflow.edges, ordered, positions) != plan.steps:
+        raise ValueError("structured_plan")
+    order = [positions[node] for node in ordered]
+    if event["order"] != order or event["order_changed"] != (order != sorted(order)):
+        raise ValueError("structured_plan")
+    try:
+        lowered = lower_plan(mapper.conversion, plan.steps)
+    except StructuredError as error:
+        if outcome != "lowering_failed" or event["lowering_error"] != str(error):
+            raise ValueError("structured_lowering") from None
+        return None
+    if event["lowered"] != lowered:
+        raise ValueError("structured_lowering")
+    try:
+        reviewed = review(lowered, suite=case["suite"], user=case["user"], extractor_model=case["extractor_model"],
+                          derived_destinations=case.get("review") == "derived")
+    except ProgramRefused as error:
+        if outcome != "lowering_failed" or event["lowering_error"] != "review_" + str(error):
+            raise ValueError("structured_review") from None
+        return None
+    if outcome != "planned":
+        raise ValueError("structured_review")
+    return register_drafted(reviewed)
 
 
 def _extractor_inputs(case, local):
@@ -316,6 +444,9 @@ def verify(directory):
         raise ValueError("planner_experiment_scope_mismatch")
     if manifest["package_sources"] != package_sources():
         raise ValueError("official_package_source_mismatch")
+    # A registered or structured run's templates and planner prompt are the current ones.
+    if any(manifest.get(k) != v for k, v in structured_provenance(cases).items() if k != "structured_example_sha256"):
+        raise ValueError("structured_provenance_mismatch")
     current = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(Path(__file__).parent.glob("*.py"))}
     if manifest["source_sha256"] != current:
         raise ValueError("experiment_source_mismatch")
