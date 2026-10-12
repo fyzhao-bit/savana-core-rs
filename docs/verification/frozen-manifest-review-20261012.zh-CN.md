@@ -4,14 +4,14 @@
 CI（`.github/workflows/ci.yml`）每次运行 `tools/check-frozen-v2-core.sh` 校验。
 清单最后一次生成于 2026-09-29（`643fa5e`）。
 
-当前有 71 个文件与清单不一致：
+当前有 70 个文件与清单不一致：
 
-- 12 个是本次会话（2026-10-12）在你同意修改冻结文件之后改的，逐一列在第一节；其中 6 个在本次之前就已漂移。
-- 59 个是 2026-09-30 至 10-07 各批工作留下的，本次没有碰，列在第二节。
+- 12 个是本次会话（2026-10-12）在你同意修改冻结文件之后改的，逐一列在第一节；其中 7 个在本次之前就已漂移。
+- 58 个是 2026-09-30 至 10-07 各批工作留下的，本次没有碰，列在第二节。
 - 其中 `crates/savana-kerneld/src/v2_recovery.rs` 已删除，所以校验脚本在 `test -f` 一步就会失败。
-  在本次之前，59 处漂移已经让这项检查不通过。
+  在本次之前，旧的漂移已经让这项检查不通过。
 
-**清单尚未重新生成。** 等你审阅同意后再做（第四节）。重新生成会同时认可第二节的 59 处漂移。
+**清单尚未重新生成。** 等你审阅同意后再做（第四节）。重新生成会同时认可第二节的 58 处漂移。
 
 ## 一、本次会话改动的冻结文件
 
@@ -36,7 +36,7 @@ CI（`.github/workflows/ci.yml`）每次运行 `tools/check-frozen-v2-core.sh` �
 
 残余数据契约（F4）计划放在新 crate 里，不改冻结文件；工作区根 `Cargo.toml` 不在清单里。
 
-## 二、本次之前就已漂移的 59 个文件
+## 二、本次之前就已漂移、本次没有碰的 58 个文件
 
 | 文件 | 改动它的提交（新→旧） |
 | --- | --- |
@@ -74,7 +74,6 @@ CI（`.github/workflows/ci.yml`）每次运行 `tools/check-frozen-v2-core.sh` �
 | `crates/savana-kerneld/src/v2_data_plane.rs` | ce3b3fd |
 | `crates/savana-kerneld/src/v2_runtime.rs` | ce3b3fd |
 | `crates/savana-kerneld/src/v2_startup.rs` | f718f83 755ba70 d8b9b01 |
-| `crates/savana-kerneld/src/v2_value_owner.rs` | f718f83 ce3b3fd |
 | `crates/savana-leak-gate/src/lib.rs` | f718f83 ee39ed8 |
 | `crates/savana-leak-gate/src/tests.rs` | f718f83 ee39ed8 |
 | `crates/savana-platform-identity/src/lib.rs` | f718f83 |
