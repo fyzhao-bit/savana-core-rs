@@ -20,6 +20,11 @@ whose offline verification passed are counted:
   (`u7d`: every such step escalates) and with the directory signed into
   those edges as a candidate set (`u7s`: a member no longer escalates by
   itself); `u7x` is `u7s` under injection;
+* U6 (`u6`, `u6x`): the five requests that hand their action to instructions
+  in data, as a read turn and an act turn under U8's options with
+  `+instructions=adopt`; `u6x` is banking 12's under AutoDojo's injections,
+  the one request whose instructions come from a document with an injection
+  point (`adoption_summary`);
 * U8X (`u8x`): U8 under injection (AutoDojo's for banking, slack and travel,
   the official template for workspace), on the tasks whose U8 program had a
   step whose address data chose (`attack_sample`).
@@ -57,6 +62,7 @@ ATTACK = "u8x"
 # U7 runs under Permit on a sample of tasks, not all 97 (see the docstring).
 TRUSTED_SET_ARMS = dict(U7_directory=("u7d",), U7_set=("u7s",))
 TRUSTED_SET_ATTACK = "u7x"
+ADOPTION_ARMS = dict(U6=("u6",), U6X=("u6x",))
 SUITES = ("banking", "slack", "travel", "workspace")
 DIRECTORY_REFUSAL = "consent_destination_not_in_directory"
 # A batch whose median step interval is above this ran under contention.
@@ -80,6 +86,7 @@ def program_shape(steps):
 def episode_record(local, row, batch):
     """One episode: its summary row, its review refusals and its signed program."""
     refused = sorted((e["attempt"], e["reason"]) for e in local if e["kind"] == "program_refused")
+    adoption = next((e for e in local if e["kind"] == "instructions_adoption"), None)
     inputs = [e for e in local if e["kind"] == "episode_input"]
     floor = episode_row(local)
     record = dict(batch=batch, suite=row["suite"], user=row["user"], injection=row.get("injection"),
@@ -94,7 +101,11 @@ def episode_record(local, row, batch):
                   dispatched_unapproved=floor["dispatched_unapproved"],
                   attacker_chose_address=floor["attacker_chose_address"],
                   attacker_address=floor["attacker_address"], attacker_text=floor["attacker_text"],
-                  unauthorized=floor["unauthorized"], success=floor["success"])
+                  unauthorized=floor["unauthorized"], success=floor["success"],
+                  # U6: which turn this episode was, and the owner's adoption decision after a read turn.
+                  turn=row.get("instructions"),
+                  adoption=None if adoption is None else dict(adopted=adoption["adopted"],
+                                                               reason=adoption["reason"]))
     record.update(program_shape(inputs[0]["contract"]["steps"]) if inputs
                   else dict(steps=0, writes=0, multi=0, mode=0))
     return record
@@ -309,6 +320,27 @@ def trusted_set_summary(rows):
                        for r in rows if r["data_chosen_steps"]])
 
 
+def adoption_summary(rows):
+    """Per task of a U6 arm: the read turn, the owner's adoption decision,
+    and the act turn, which is scored as the whole task."""
+    reads = {(r["suite"], r["user"], r["injection"]): r for r in rows if r["turn"] == "read"}
+    tasks = []
+    for act in (r for r in rows if r["turn"] == "act"):
+        read = reads[(act["suite"], act["user"], act["injection"])]
+        tasks.append(dict(suite=act["suite"], user=act["user"], injection=act["injection"],
+                          read=read["outcome"], read_steps=read["steps"], adoption=read["adoption"],
+                          act=act["outcome"], act_refusal=act["refusal"], act_review_refusals=act["review_refusals"],
+                          act_steps=act["steps"], act_writes=act["writes"], seconds=act["seconds"],
+                          utility=act["utility"], success=act["success"],
+                          owner_refusals=act["owner_refusals"], unauthorized=act["unauthorized"]))
+    return dict(tasks=len(tasks), utility=sum(t["utility"] for t in tasks),
+                success=sum(t["success"] for t in tasks),
+                adopted=sum(1 for t in tasks if t["adoption"] and t["adoption"]["adopted"]),
+                adoption_reasons=dict(collections.Counter(t["adoption"]["reason"] for t in tasks if t["adoption"])),
+                act_outcomes=dict(collections.Counter(t["act"] for t in tasks)),
+                unauthorized=sum(t["unauthorized"] for t in tasks), per_task=tasks)
+
+
 def report(results):
     arms = {arm: episodes(results, prefixes, SUPERSEDED.get(arm, ())) for arm, prefixes in ARMS.items()}
     out = dict(arms={arm: benign_summary(rows) for arm, rows in arms.items() if rows})
@@ -317,6 +349,9 @@ def report(results):
                     if arms[new] and arms[old]}
     out["timeline"] = {arm: timeline(results, prefixes, SUPERSEDED.get(arm, ()))
                        for arm, prefixes in ARMS.items() if arms[arm]}
+    adopted = {arm: episodes(results, prefixes) for arm, prefixes in ADOPTION_ARMS.items()}
+    if any(adopted.values()):
+        out["adopted_instructions"] = {arm: adoption_summary(rows) for arm, rows in adopted.items() if rows}
     trusted = {arm: episodes(results, prefixes) for arm, prefixes in TRUSTED_SET_ARMS.items()}
     if any(trusted.values()):
         out["trusted_set"] = {arm: trusted_set_summary(rows) for arm, rows in trusted.items() if rows}
