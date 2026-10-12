@@ -11,6 +11,41 @@ pub(super) struct PrivateSessionAuthenticationV04 {
     pub(super) next_poll: u64,
 }
 
+/// The input a private login of `task` may admit at `now`, and whether it is
+/// a later login. The first login admits the Ready task's committed input. A
+/// later login, after kerneld restarted, admits only the copy kept for the
+/// same durable run: no new run, root, lifetime or reset charge comes with it.
+/// Either needs a task with no session in this process. A restart retires
+/// every session, run, value, intent, approval and ticket at once; replacing
+/// one expired session in a live process would have to retire its run's
+/// share of them first, which is not implemented.
+pub(super) fn private_login_material_v04<'a>(
+    task: &'a TaskRecordV2,
+    sessions: &[SessionRecordV2],
+    now: UnixMillisV2,
+) -> Result<(&'a PreparedAgentClaimMaterialV2, bool), KernelAgentAuthorityErrorV2> {
+    if sessions
+        .iter()
+        .any(|s| s.durable_task_id == task.durable_task_id)
+    {
+        return Err(KernelAgentAuthorityErrorV2::StateConflict);
+    }
+    match (
+        &task.status,
+        task.material.as_ref(),
+        task.reconnect_material.as_ref(),
+    ) {
+        (PublicTaskStatusV2::Ready { .. }, Some(material), None) => Ok((material, false)),
+        (PublicTaskStatusV2::Running, None, Some(material))
+            if task.durable_run_id == Some(material.durable_run_id)
+                && now.get() < material.expires_at.get() =>
+        {
+            Ok((material, true))
+        }
+        _ => Err(KernelAgentAuthorityErrorV2::StateConflict),
+    }
+}
+
 impl KernelAgentAuthorityV2 {
     /// Legacy polling/claiming cannot expose a private task's execution phase or
     /// receive its plaintext admission handles.
@@ -84,19 +119,25 @@ impl KernelAgentAuthorityV2 {
             }
             return Err(KernelAgentAuthorityErrorV2::Expired);
         }
-        let task = self
+        let index = self
             .tasks
             .iter()
-            .find(|t| t.durable_task_id == task_id)
+            .position(|t| t.durable_task_id == task_id)
             .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
-        let material = task
-            .material
+        if self.tasks[index]
+            .reconnect_material
             .as_ref()
-            .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
+            .is_some_and(|kept| now.get() >= kept.expires_at.get())
+        {
+            // The run's input lifetime is over: no later login, no copy kept.
+            self.tasks[index].reconnect_material = None;
+            self.persist_recovery_snapshot()?;
+            return Err(KernelAgentAuthorityErrorV2::Expired);
+        }
+        let task = &self.tasks[index];
+        let (material, _) = private_login_material_v04(task, &self.sessions, now)?;
         if task.expected_principal != Some(m.principal())
             || task.active_state_manifest_digest != m.manifest_digest()
-            || !matches!(task.status, PublicTaskStatusV2::Ready { .. })
-            || self.sessions.iter().any(|s| s.durable_task_id == task_id)
             || self.private_session_authentications.len() >= self.maximum_records
         {
             return Err(KernelAgentAuthorityErrorV2::StateConflict);
@@ -285,10 +326,6 @@ impl KernelAgentAuthorityV2 {
             || now.get() < m.not_before().get()
             || now.get() >= m.expires_at().get()
             || m.principal() != verified.authenticated_principal()
-            || self
-                .sessions
-                .iter()
-                .any(|s| s.durable_task_id == pending.task)
         {
             return Err(KernelAgentAuthorityErrorV2::StateConflict);
         }
@@ -299,15 +336,13 @@ impl KernelAgentAuthorityV2 {
         {
             return Err(KernelAgentAuthorityErrorV2::StateConflict);
         }
-        let task = self
+        let task_index = self
             .tasks
-            .iter_mut()
-            .find(|t| t.durable_task_id == pending.task)
+            .iter()
+            .position(|t| t.durable_task_id == pending.task)
             .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
-        let material = task
-            .material
-            .as_ref()
-            .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
+        let task = &self.tasks[task_index];
+        let (material, reconnect) = private_login_material_v04(task, &self.sessions, now)?;
         if e.binding()
             != (UiAuthenticationBindingV2::PrivateSessionV04 {
                 durable_task_id: pending.task,
@@ -317,7 +352,6 @@ impl KernelAgentAuthorityV2 {
             })
             || task.expected_principal != e.expected_principal()
             || task.active_state_manifest_digest != e.active_state_manifest_digest()
-            || !matches!(task.status, PublicTaskStatusV2::Ready { .. })
         {
             return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
         }
@@ -364,10 +398,21 @@ impl KernelAgentAuthorityV2 {
         self.sessions
             .try_reserve(1)
             .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
-        let material = task
-            .material
-            .take()
-            .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
+        // Copy before any commit. The first login moves the committed input
+        // into the run and keeps the copy; a later login admits the copy and
+        // leaves the kept input in place for the next one.
+        let copy = material.duplicate()?;
+        let task = &mut self.tasks[task_index];
+        let material = if reconnect {
+            copy
+        } else {
+            let admitted = task
+                .material
+                .take()
+                .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
+            task.reconnect_material = Some(copy);
+            admitted
+        };
         // Commit is infallible after reservation; a missing owner handle only
         // makes later fused preparation fail closed.
         let (_, _, owner_input_value) = values.commit_verified_run_admission_with_owner_input_v04(

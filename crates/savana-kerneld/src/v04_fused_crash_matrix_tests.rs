@@ -133,7 +133,7 @@ fn fused_crash_matrix_child_v04() {
         Some(&DispatchHarness {
             crash_dir: Some(dir.clone()),
             crash,
-            timings: None,
+            ..DispatchHarness::default()
         }),
     );
     crash_matrix_write(&dir.join("completed"), b"");

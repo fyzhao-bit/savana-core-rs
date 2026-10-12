@@ -75,14 +75,28 @@ required; this change is not automatic consumer enrollment or dynamic planning.
   an old logged-in browser. Recovering an already completed signed challenge is
   not a new browser authentication. A restarted kernel cannot accept an old
   boot-bound proof without its original pending record.
-- A consumed task currently loses its volatile input admission material and is
-  restored as indeterminate by the recovery format. The snapshot validator now
-  accepts absent consumed material only in post-admission/terminal states, keeps
-  task/run/root identity, and still rejects a material-free Ready task. A second
-  restart preserves the tombstone; no old session/transfer is reinstated. This
-  fixes a restart rejection, not authenticated continuation. Fresh authenticated
-  private-session recovery/reconnect remains to be implemented. No consumed
-  budget, execution reservation or signed approval is reset to work around it.
+- Reconnect after a kerneld restart (2026-10-12). The first private login moves
+  the committed input into the run and keeps one copy in the encrypted,
+  rollback-anchored authority snapshot (schema 6). After a restart the task is
+  restored as running, not indeterminate, while that copy's lifetime lasts.
+  Nothing is admitted until the owner completes a fresh login. Its envelope is
+  bound to the new boot, so a proof signed for the old boot is rejected. The new
+  session re-admits the same durable run with the same input and provenance,
+  and its lifetime is still bounded by the input, root, envelope and receipt.
+  Durable G4/G7 state decides what runs next: completed steps are not sent
+  again, consumption is not reset and no approval is reused. A result keeps the
+  lifetime of the login that produced it; a later login does not extend it.
+  The copy is cleared on revocation, when its lifetime ends and when restart
+  finds the task lost. The legacy claim path never reads it. A snapshot without
+  a copy (an older schema, or an ended lifetime) still restores the fail-closed
+  indeterminate tombstone, and a Ready task without its input is still rejected.
+- One private login per task per process. A login's session lasts at most five
+  minutes after `open` (the envelope bound). After that, a second login in the
+  same process is refused: the expired session's run still owns volatile values,
+  intents, approvals and tickets that would have to be retired first, and that
+  is not implemented. A restart retires all of them, so the task can continue
+  only after one. No consumed budget, execution reservation or signed approval
+  is reset in either case.
 - The authenticated private poll currently carries approval handoffs only. It
   is not the exclusive result publisher, result reconnect protocol, full error
   observation contract, or a general result-dependent loop compiler.
@@ -103,8 +117,22 @@ component test pass rates as model safety/success rates or product readiness.
 - `savana-kerneld` `fused_private_session_*` checks real receipt verification,
   private value admission, once-only consumption and cross-purpose, digest,
   principal, challenge, boot, key and expiry rejection using signed fixtures.
-  The admission test also checks restart and repeat-restart tombstones and
-  rejects a Ready snapshot whose committed material is missing.
+  The admission test also checks that restart keeps the task running with its
+  kept input, falls back to the tombstone once the input's lifetime ends, and
+  rejects a Ready or indeterminate snapshot that carries a kept input.
+  `fused_private_session_reconnects_after_restart_to_the_same_run_with_a_fresh_login`
+  restores the snapshot under a new boot with an empty value owner, rejects
+  the old boot's proof, and admits a fresh login to the same run and provenance.
+  `fused_private_session_refuses_second_login_in_process_after_revocation_or_input_expiry`
+  and `fused_private_login_gate_admits_first_input_or_kept_copy_never_both`
+  cover the refusals.
+- `fused_result_loop_resumes_after_kerneld_restart_through_a_fresh_owner_login`
+  runs the two-step result loop with a real executor: after step 1 commits,
+  kerneld restarts (authority snapshot restored, G4 owner reopened from disk,
+  new boot, empty value owner, no session, intent, approval, ticket or
+  execution). Nothing runs until the owner logs in again. Step 2 then waits for
+  its own approval and sends step 1's real provider response; the executor
+  receives two requests in total and both clauses end at one use.
 - Protocol tests cover canonical encoding, role separation and fixed HTTP origin
   rules; a Node DOM harness exercises login, in-memory polling and deliberate
   approval-page handoff. This is not a real-browser hardware-key ceremony.

@@ -100,6 +100,9 @@ struct DispatchHarness {
     crash: Option<savana_execd::intent_bound_test_support::JournalCrashV2>,
     /// Latency benchmark.
     timings: Option<StageTimings>,
+    /// Case 33 only: restart kerneld between the two steps instead of
+    /// dropping execution handles, then log the owner in again.
+    restart_kerneld: bool,
 }
 
 #[cfg(feature = "test-support")]
@@ -890,7 +893,10 @@ fn private_dispatch_fixture_with_provider(
                 policy.durable = reopened;
                 f.authority.policy = Some(policy);
             }
-            if matches!(case, 27 | 33) {
+            if harness.is_some_and(|h| h.restart_kerneld) {
+                assert_eq!(case, 33, "the restart runs the reopened result loop");
+                restart_kerneld_and_log_in_again(&mut f, 2203);
+            } else if matches!(case, 27 | 33) {
                 // Drop volatile execution handles, but keep the authenticated
                 // user session: this is execution recovery, not login recovery.
                 f.authority.executions.clear();
@@ -1665,6 +1671,19 @@ fn fused_result_loop_passes_verified_predecessor_result_to_next_effect() {
 fn fused_result_loop_reopens_encrypted_owner_without_resending_predecessor() {
     private_dispatch_fixture(33);
 }
+#[test]
+#[cfg(feature = "test-support")]
+fn fused_result_loop_resumes_after_kerneld_restart_through_a_fresh_owner_login() {
+    private_dispatch_fixture_with_provider(
+        33,
+        None,
+        None,
+        Some(&DispatchHarness {
+            restart_kerneld: true,
+            ..DispatchHarness::default()
+        }),
+    );
+}
 
 #[test]
 #[cfg(feature = "test-support")]
@@ -2222,6 +2241,162 @@ fn fused_private_loop_waits_for_new_action_approval_between_steps() {
 #[test]
 fn fused_private_loop_completes_after_second_step_exact_approval_and_next_owner_tick() {
     private_dispatch_fixture(31);
+}
+
+/// A kerneld restart inside the result loop. Only the encrypted authority
+/// snapshot and the reopened durable G4 owner survive: every session, run,
+/// value, intent, approval, ticket and execution handle is gone. The owner
+/// then logs in again to the new boot (synthetic settlement signer; the
+/// kernel's checks are real).
+#[cfg(feature = "test-support")]
+fn restart_kerneld_and_log_in_again(f: &mut PlannerAuthorityFixtureV2, at: u64) {
+    use super::super::*;
+    // The fixture opens its session directly, not through a private login.
+    // Record what that login leaves behind: a running task and its kept input.
+    let s = &f.authority.sessions[0];
+    let initial = f
+        .values
+        .resolve_g4_value(s.run, s.initial_value, UnixMillisV2::new(at))
+        .unwrap();
+    let mut bytes = Vec::new();
+    minicbor::encode(initial.value(), &mut bytes).unwrap();
+    let provenance = initial.provenance().clone();
+    let kept = PreparedAgentClaimMaterialV2::from_verified_ingress(
+        s.durable_run_id,
+        s.producer_identity,
+        minicbor::decode_with(&bytes, &mut V2DecodeContext).unwrap(),
+        provenance.clone(),
+        s.initial_document,
+        s.policy_allowed_effects,
+        s.signed_planner_policy.clone(),
+        provenance.expires_at(),
+        None,
+    )
+    .unwrap();
+    let target = PrivateLoginTargetV04 {
+        task: s.durable_task_id,
+        run: s.durable_run_id,
+        root: f
+            .authority
+            .policy
+            .as_ref()
+            .unwrap()
+            .durable
+            .task_authorization_state(s.durable_task_id)
+            .unwrap()
+            .authorization()
+            .digest(),
+        manifest: s.active_state_manifest_digest,
+        principal: s.principal,
+    };
+    let c = &f.authority.config;
+    let correlation = SignedDurableTaskCorrelationV2::sign(
+        UnsignedDurableTaskCorrelationV2::new(
+            c.installation_id,
+            target.manifest,
+            7,
+            target.task,
+            c.agentd_identity,
+            c.agentd_kernel_client_boot_id,
+            c.kerneld_server_boot_id,
+            c.machine_boot_id,
+            UnixMillisV2::new(1),
+            UnixMillisV2::new(9000),
+            UnixMillisV2::new(10000),
+        )
+        .unwrap(),
+        &c.correlation_signing_key,
+    )
+    .unwrap();
+    f.authority.tasks.push(TaskRecordV2 {
+        preparation: NewTaskPreparationHandleV2::from_authority_entropy([71; 32]).unwrap(),
+        agent_task_nonce: Nonce32V2::new([72; 32]),
+        client_request_nonce: Nonce32V2::new([73; 32]),
+        durable_task_id: target.task,
+        active_state_manifest_digest: target.manifest,
+        correlation,
+        ingress_transfer: KernelIngressBootstrapTransferCapabilityV2::from_authority_entropy(
+            [74; 32],
+        )
+        .unwrap(),
+        status: PublicTaskStatusV2::Running,
+        expected_principal: Some(target.principal),
+        claim_digest: Some(Digest32V2::new([75; 32])),
+        durable_run_id: Some(target.run),
+        material: None,
+        reconnect_material: Some(kept),
+        current_authentication_preparation: None,
+        source_input_digest: Some(Digest32V2::new([76; 32])),
+        task_authorization_digest: Some(target.root),
+    });
+    let snapshot = f.authority.encode_recovery_snapshot().unwrap();
+    let c = &f.authority.config;
+    let config = KernelAgentSecurityConfigV2 {
+        installation_id: c.installation_id,
+        kerneld_identity: c.kerneld_identity,
+        agentd_identity: c.agentd_identity,
+        approvald_identity: c.approvald_identity,
+        agentd_kernel_client_boot_id: c.agentd_kernel_client_boot_id,
+        kerneld_server_boot_id: BootIdV2::new([0x7e; 32]),
+        approvald_boot_id: c.approvald_boot_id,
+        machine_boot_id: c.machine_boot_id,
+        correlation_signing_key: c.correlation_signing_key.clone(),
+        envelope_signing_key: c.envelope_signing_key.clone(),
+        ui_settlement_key_id: c.ui_settlement_key_id,
+        ui_settlement_public_key: c.ui_settlement_public_key,
+    };
+    let old_boot = c.kerneld_server_boot_id;
+    let (old_login, old_proof) = signed_private_login_v04(
+        &f.authority,
+        target,
+        &SigningKey::from_bytes(&[0x92; 32]),
+        0x61,
+        at,
+        at + 6000,
+        at + 5900,
+    );
+    let mut restarted = KernelAgentAuthorityV2::new(config, 32).unwrap();
+    restarted
+        .restore_recovery_snapshot(&snapshot, UnixMillisV2::new(at))
+        .unwrap();
+    restarted
+        .install_g4_g5_runtime(f.authority.policy.take().unwrap())
+        .unwrap();
+    f.authority = restarted;
+    f.values = KernelValueOwnerV2::new(4, 32).unwrap();
+    assert_ne!(f.authority.config.kerneld_server_boot_id, old_boot);
+    assert_eq!(f.authority.tasks[0].status, PublicTaskStatusV2::Running);
+    assert!(f.authority.sessions.is_empty() && f.authority.intents.is_empty());
+    assert!(f.authority.executions.is_empty() && f.authority.tool_approvals.is_empty());
+    // Nothing runs before the owner logs in again. Keep the pacing cursor as
+    // it was, so the loop below runs on the same owner clock as case 33.
+    let paced = f.authority.policy.as_ref().unwrap().fused_action_not_before;
+    let unchanged = f
+        .authority
+        .tick_fused_actions_v04(&mut f.values, &mut || UnixMillisV2::new(at));
+    assert!(unchanged.is_ok() && f.authority.intents.is_empty());
+    f.authority.policy.as_mut().unwrap().fused_action_not_before = paced;
+    // A login the old boot would have accepted is not one to this kernel.
+    f.authority.private_session_authentications.push(old_login);
+    assert!(f
+        .authority
+        .accept_private_session_v04(0, old_proof, &mut f.values, UnixMillisV2::new(at + 1))
+        .is_err());
+    let (login, proof) = signed_private_login_v04(
+        &f.authority,
+        target,
+        &SigningKey::from_bytes(&[0x92; 32]),
+        0x63,
+        at,
+        at + 6000,
+        at + 5900,
+    );
+    f.authority.private_session_authentications.push(login);
+    f.authority
+        .accept_private_session_v04(1, proof, &mut f.values, UnixMillisV2::new(at + 1))
+        .unwrap();
+    assert_eq!(f.authority.sessions.len(), 1);
+    assert_eq!(f.authority.sessions[0].durable_run_id, target.run);
 }
 
 // Cryptographically valid synthetic approvald settlement, not browser/hardware

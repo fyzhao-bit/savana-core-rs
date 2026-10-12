@@ -349,6 +349,21 @@ impl std::fmt::Debug for PreparedAgentClaimMaterialV2 {
 }
 
 impl PreparedAgentClaimMaterialV2 {
+    /// A separately owned copy through the canonical snapshot encoding,
+    /// checked field for field. Used only to keep a private task's admitted
+    /// input for a later login to the same run.
+    fn duplicate(&self) -> Result<Self, KernelAgentAuthorityErrorV2> {
+        let mut encoder = minicbor::Encoder::new(Vec::new());
+        encode_prepared_claim_material(&mut encoder, self)?;
+        let bytes = zeroize::Zeroizing::new(encoder.into_writer());
+        let mut decoder = minicbor::Decoder::new(&bytes);
+        let copy = decode_prepared_claim_material(&mut decoder, &mut V2DecodeContext)?;
+        if decoder.position() != bytes.len() || !copy.matches_exactly(self)? {
+            return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+        }
+        Ok(copy)
+    }
+
     fn matches_exactly(&self, other: &Self) -> Result<bool, KernelAgentAuthorityErrorV2> {
         Ok(self.durable_run_id == other.durable_run_id
             && self.producer_identity == other.producer_identity
@@ -501,6 +516,11 @@ struct TaskRecordV2 {
     claim_digest: Option<Digest32V2>,
     durable_run_id: Option<DurableRunIdV2>,
     material: Option<PreparedAgentClaimMaterialV2>,
+    /// Private (v0.4) tasks only: a copy of the admitted input, kept in the
+    /// encrypted snapshot so the owner can log in again to the same durable
+    /// run after its session expires or kerneld restarts. The legacy claim
+    /// path never reads it. Cleared on revocation, expiry and lost tasks.
+    reconnect_material: Option<PreparedAgentClaimMaterialV2>,
     current_authentication_preparation: Option<usize>,
     source_input_digest: Option<Digest32V2>,
     task_authorization_digest: Option<Digest32V2>,
@@ -1608,6 +1628,8 @@ impl KernelAgentAuthorityV2 {
             .find(|t| t.durable_task_id == request.draft().task())
         {
             t.task_authorization_digest = Some(digest);
+            // A revoked root admits no later login; keep no owner input for one.
+            t.reconnect_material = None;
             if matches!(
                 t.status,
                 PublicTaskStatusV2::AwaitingInput
@@ -2025,22 +2047,23 @@ impl KernelAgentAuthorityV2 {
     }
 
     fn encode_recovery_snapshot(&self) -> Result<Vec<u8>, KernelAgentAuthorityErrorV2> {
-        self.encode_recovery_snapshot_schema(5)
+        self.encode_recovery_snapshot_schema(6)
     }
 
     fn encode_recovery_snapshot_schema(
         &self,
         schema: u16,
     ) -> Result<Vec<u8>, KernelAgentAuthorityErrorV2> {
-        if !matches!(schema, 2..=5)
+        if !matches!(schema, 2..=6)
             || (schema < 4 && !self.fused_approval_recovery.is_empty())
             || (schema < 5 && !self.fused_release_recovery.is_empty())
+            || (schema < 6 && self.tasks.iter().any(|t| t.reconnect_material.is_some()))
         {
             return Err(KernelAgentAuthorityErrorV2::Unavailable);
         }
         let mut encoder = minicbor::Encoder::new(Vec::new());
         encoder
-            .array(if schema == 5 {
+            .array(if schema >= 5 {
                 6
             } else if schema == 4 {
                 5
@@ -2053,7 +2076,13 @@ impl KernelAgentAuthorityV2 {
             .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
         for task in &self.tasks {
             encoder
-                .array(if schema >= 3 { 15 } else { 13 })
+                .array(if schema >= 6 {
+                    16
+                } else if schema >= 3 {
+                    15
+                } else {
+                    13
+                })
                 .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
             encode_recovery_value(&mut encoder, &task.preparation)?;
             encode_recovery_value(&mut encoder, &task.agent_task_nonce)?;
@@ -2096,6 +2125,16 @@ impl KernelAgentAuthorityV2 {
                     task.task_authorization_digest.as_ref(),
                 )?;
             }
+            if schema >= 6 {
+                match task.reconnect_material.as_ref() {
+                    Some(material) => encode_prepared_claim_material(&mut encoder, material)?,
+                    None => {
+                        encoder
+                            .null()
+                            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+                    }
+                }
+            }
         }
         encoder
             .array(self.authentication_preparations.len() as u64)
@@ -2128,7 +2167,7 @@ impl KernelAgentAuthorityV2 {
         if schema >= 4 {
             self.encode_fused_approval_recovery_v04(&mut encoder)?;
         }
-        if schema == 5 {
+        if schema >= 5 {
             self.encode_fused_release_recovery_v04(&mut encoder)?;
         }
         Ok(encoder.into_writer())
@@ -2155,9 +2194,9 @@ impl KernelAgentAuthorityV2 {
         let schema = decoder
             .u16()
             .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
-        if !matches!(schema, 2..=5)
+        if !matches!(schema, 2..=6)
             || fields
-                != Some(if schema == 5 {
+                != Some(if schema >= 5 {
                     6
                 } else if schema == 4 {
                     5
@@ -2180,7 +2219,16 @@ impl KernelAgentAuthorityV2 {
                 .to_bytes(),
         );
         for _ in 0..task_count {
-            require_recovery_array(&mut decoder, if schema >= 3 { 15 } else { 13 })?;
+            require_recovery_array(
+                &mut decoder,
+                if schema >= 6 {
+                    16
+                } else if schema >= 3 {
+                    15
+                } else {
+                    13
+                },
+            )?;
             let mut context = V2DecodeContext;
             let preparation = decode_recovery_value(&mut decoder, &mut context)?;
             let agent_task_nonce = decode_recovery_value(&mut decoder, &mut context)?;
@@ -2217,6 +2265,31 @@ impl KernelAgentAuthorityV2 {
             } else {
                 None
             };
+            let reconnect_material = if schema >= 6
+                && decoder
+                    .datatype()
+                    .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?
+                    != minicbor::data::Type::Null
+            {
+                Some(decode_prepared_claim_material(&mut decoder, &mut context)?)
+            } else {
+                if schema >= 6 {
+                    decoder
+                        .null()
+                        .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+                }
+                None
+            };
+            let inconsistent = |material: &PreparedAgentClaimMaterialV2| {
+                Some(material.durable_run_id) != durable_run_id
+                    || material.provenance.producer_identity() != material.producer_identity
+                    || material.provenance.run_internal_id() != material.durable_run_id
+                    || material.provenance.active_state_manifest_digest()
+                        != active_state_manifest_digest
+                    || material.provenance.expires_at() != material.expires_at
+                    || value_digest_v2(&material.initial_value)
+                        .map_or(true, |digest| digest != material.provenance.value_digest())
+            };
             let verified = correlation
                 .verify(
                     correlation_key_id,
@@ -2234,16 +2307,14 @@ impl KernelAgentAuthorityV2 {
                 || source_input_digest.is_some_and(|d| d.as_bytes() == &[0; 32])
                 || task_authorization_digest.is_some_and(|d| d.as_bytes() == &[0; 32])
                 || (task_authorization_digest.is_some() && source_input_digest.is_none())
-                || material.as_ref().is_some_and(|material| {
-                    Some(material.durable_run_id) != durable_run_id
-                        || material.provenance.producer_identity() != material.producer_identity
-                        || material.provenance.run_internal_id() != material.durable_run_id
-                        || material.provenance.active_state_manifest_digest()
-                            != active_state_manifest_digest
-                        || material.provenance.expires_at() != material.expires_at
-                        || value_digest_v2(&material.initial_value)
-                            .map_or(true, |digest| digest != material.provenance.value_digest())
-                })
+                || material.as_ref().is_some_and(inconsistent)
+                || reconnect_material.as_ref().is_some_and(inconsistent)
+                // A retained login input belongs only to an admitted task that
+                // is still running: never beside the unconsumed input.
+                || (reconnect_material.is_some()
+                    && (material.is_some()
+                        || expected_principal.is_none()
+                        || status != PublicTaskStatusV2::Running))
                 || expected_principal.is_some() != claim_digest.is_some()
                 || expected_principal.is_some() != durable_run_id.is_some()
                 || (material.is_some() && expected_principal.is_none())
@@ -2281,6 +2352,7 @@ impl KernelAgentAuthorityV2 {
                 claim_digest,
                 durable_run_id,
                 material,
+                reconnect_material,
                 current_authentication_preparation: current_authentication_preparation
                     .map(|value| value as usize),
                 source_input_digest,
@@ -2379,7 +2451,7 @@ impl KernelAgentAuthorityV2 {
         if schema >= 4 {
             self.decode_fused_approval_recovery_v04(&mut decoder, &mut V2DecodeContext)?;
         }
-        if schema == 5 {
+        if schema >= 5 {
             self.decode_fused_release_recovery_v04(&mut decoder, &mut V2DecodeContext)?;
         }
         if decoder.position() != bytes.len()
@@ -2412,13 +2484,24 @@ impl KernelAgentAuthorityV2 {
             if now.get() >= verified.status_retain_until().get() {
                 task.status = PublicTaskStatusV2::Expired;
                 task.material = None;
+                task.reconnect_material = None;
                 task.current_authentication_preparation = None;
+            } else if task.status == PublicTaskStatusV2::Running
+                && task
+                    .reconnect_material
+                    .as_ref()
+                    .is_some_and(|m| now.get() < m.expires_at.get())
+            {
+                // A private task keeps running in durable G4/G7 state. Its
+                // session is gone with the old boot; it waits for a fresh
+                // owner login to the same run. Nothing is admitted here.
             } else if matches!(
                 task.status,
                 PublicTaskStatusV2::Running | PublicTaskStatusV2::Dispatching
             ) {
                 task.status = PublicTaskStatusV2::Indeterminate;
                 task.material = None;
+                task.reconnect_material = None;
                 task.current_authentication_preparation = None;
             }
         }
@@ -2428,6 +2511,7 @@ impl KernelAgentAuthorityV2 {
             {
                 self.tasks[record.task_index].status = PublicTaskStatusV2::Indeterminate;
                 self.tasks[record.task_index].material = None;
+                self.tasks[record.task_index].reconnect_material = None;
                 self.tasks[record.task_index].current_authentication_preparation = None;
             }
         }
@@ -2543,6 +2627,7 @@ impl KernelAgentAuthorityV2 {
             claim_digest: None,
             durable_run_id: None,
             material: None,
+            reconnect_material: None,
             current_authentication_preparation: None,
             source_input_digest: None,
             task_authorization_digest: None,
@@ -9609,6 +9694,7 @@ pub(crate) mod tests {
             claim_digest: None,
             durable_run_id: None,
             material: None,
+            reconnect_material: None,
             current_authentication_preparation: None,
             source_input_digest: None,
             task_authorization_digest: None,
@@ -12737,6 +12823,7 @@ pub(crate) mod tests {
             claim_digest: None,
             durable_run_id: Some(run),
             material: None,
+            reconnect_material: None,
             current_authentication_preparation: None,
             source_input_digest: Some(source),
             task_authorization_digest: Some(root_digest),
