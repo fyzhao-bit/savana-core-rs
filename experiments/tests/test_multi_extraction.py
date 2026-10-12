@@ -59,6 +59,17 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(refused(refund(amount={"from": 2})), ("edge_path", "amount"))
         self.assertEqual(refused(refund(amount={"from": 2, "path": ["recipient"]})), ("edge_path", "amount"))
         self.assertEqual(refused(refund(amount={"from": 2, "path": ["amount", "x"]})), ("edge_path", "amount"))
+        self.assertEqual(refused(refund(amount={"from": 2, "path": ["dojo.bank.send_money.recipient"]})),
+                         ("edge_path", "amount"))
+        self.assertEqual(refused(refund(amount={"from": 2, "path": ["money.amount"]})), ("edge_path", "amount"))
+
+    def test_a_field_may_be_named_by_its_target_label(self):
+        # Planners take a field by the label they wrote in the target; the
+        # signed edge names the field either way.
+        by_name = review("banking", "user_task_4", refund())
+        for label in ("dojo.bank.send_money.amount", "send_money.amount"):
+            contract = review("banking", "user_task_4", refund(amount={"from": 2, "path": [label]}))
+            self.assertEqual(contract.steps()[2].derived, by_name.steps()[2].derived, label)
 
     def test_the_target_is_two_to_four_fields_of_one_operation(self):
         for target in (["send_money.amount"], FIELDS + ["send_money.recipient", "schedule.amount"],

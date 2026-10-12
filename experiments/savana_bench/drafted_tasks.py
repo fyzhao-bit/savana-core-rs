@@ -372,6 +372,18 @@ def extracted_fields(step):
     return tuple(label.rpartition(".")[2] for label in step.value_map()["target"].split(LIST_SEPARATOR))
 
 
+def _multi_field(step, path):
+    """The field of a multi-field extraction a one-segment path names: the
+    field itself, or one of the step's target labels (or a dotted suffix of
+    one, as `send_money.amount`). None for anything else."""
+    if path is None or len(path) != 1 or type(path[0]) is not str:
+        return None
+    labels = step.value_map()["target"].split(LIST_SEPARATOR)
+    named = [label.rpartition(".")[2] for label in labels
+             if path[0] in (label, label.rpartition(".")[2]) or label.endswith("." + path[0])]
+    return named[0] if len(named) == 1 else None
+
+
 def requested_action(prompt):
     """The first action verb the owner's request asks for, or None."""
     match = _ACTION.search(" ".join(prompt.split()))
@@ -693,10 +705,13 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                         _refuse("edge_path")
                     full = GENERATED_ITEMS if listed else GENERATED_TEXT
                 elif kinds[source - 1] == "extract" and extracted_fields(chain[source - 1]):
-                    # One field of a multi-field extraction, by its name.
-                    if listed or path is None or list(path) not in [[f] for f in extracted_fields(chain[source - 1])]:
+                    # One field of a multi-field extraction, by its name, or by
+                    # the label the target gave it (planners write either): the
+                    # signed edge always names the field.
+                    field = _multi_field(chain[source - 1], path)
+                    if listed or field is None:
                         _refuse("edge_path")
-                    full = MULTI_PREFIX + tuple(path)
+                    full = MULTI_PREFIX + (field,)
                 elif kinds[source - 1] == "extract":
                     if path is not None:
                         _refuse("edge_path")
