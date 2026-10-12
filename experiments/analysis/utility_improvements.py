@@ -16,6 +16,10 @@ whose offline verification passed are counted:
   field by its target label, which the review then refused). The same
   contention rule applies: `u8r` reruns the batch above 5 s and replaces it,
   and `U8_first` keeps the original;
+* U8S (`u8s`): U8 with agentd's structured planning on every accepted draft
+  (the reviewed program as the private mapper, DeepSeek as the third-party
+  planner that may only reorder it, the lowered program reviewed again), the
+  same 97 tasks in the same batches;
 * U7 (`u7d`, `u7s`): under the Permit disposition, where the kernel asks the
   owner only when G5 escalates, the tasks whose U12 or U8 program had a step
   whose address data chose (`trusted_set_sample`), with the directory owner
@@ -58,7 +62,7 @@ from analysis.floor_experiment import episode_row, episodes as by_episode
 from analysis.structured_planning import _events, batches
 
 ARMS = dict(G12=("g12k",), D=("f5d",), U12=("u12c", "u12r"), U12_first=("u12c",), U8=("u8f", "u8r"),
-            U8_first=("u8f",))
+            U8_first=("u8f",), U8S=("u8s",))
 # A batch whose measurement a rerun replaces (see the docstring).
 SUPERSEDED = {"U12": {"u12c-slack-2", "u12c-travel-0"}, "U8": {"u8f-slack-2"}}
 ATTACK = "u8x"
@@ -352,7 +356,7 @@ def report(results):
     out = dict(arms={arm: benign_summary(rows) for arm, rows in arms.items() if rows})
     out["flips"] = {f"{new}_vs_{old}": flips(arms[new], arms[old])
                     for new, old in (("U12", "G12"), ("U12", "D"), ("U8", "G12"), ("U8", "D"), ("U8", "U12"),
-                                     ("U8", "U8_first"))
+                                     ("U8", "U8_first"), ("U8S", "U8"))
                     if arms[new] and arms[old]}
     out["timeline"] = {arm: timeline(results, prefixes, SUPERSEDED.get(arm, ()))
                        for arm, prefixes in ARMS.items() if arms[arm]}
