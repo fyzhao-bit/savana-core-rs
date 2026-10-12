@@ -6,18 +6,17 @@ whose offline verification passed are counted:
 * G12 (`g12k`) and D (`f5d`): the starting points, 3 drafts each (D's drafts
   also went through structured planning);
 * U12 (`u12c`): `+actions=ask+review=derived+owner=directory`, i.e. U1 and U2.
-  Two of its batches overlapped local build and scan jobs on the measuring
-  machine (median step interval above 5 s, against 3.8-4.6 s for every other
-  batch); by a rule fixed before their reruns were seen, `u12r` reruns them
-  and replaces them (`SUPERSEDED`), and `U12_first` keeps the originals;
+  Two of its batches had a median step interval above 5 s while local build
+  and scan jobs ran on the measuring machine (against 3.8-4.6 s for every
+  other batch); by a rule fixed before their reruns were seen, `u12r` reruns
+  them and replaces them (`SUPERSEDED`), and `U12_first` keeps the originals
+  (see `timeline` for how the rule reads a step's time);
 * U8 (`u8f`): the same options with U3 (multi-field extraction), U4 (`mode`),
   ten steps and the kernel's masking fix (`u8` is its first two batches,
   stopped when they showed planners naming a multi-field extraction's
   field by its target label, which the review then refused). Stopped after
   10 of its 13 batches, when the owner chose to run U8S in its place:
-  banking, slack and travel complete, workspace 16 of its 40 tasks. Its
-  slack-2 batch had a median step interval of 5.02 s, above the rule's 5 s;
-  the rerun was not run, so it counts as measured and is flagged;
+  banking, slack and travel complete, workspace 16 of its 40 tasks;
 * U8S (`u8s`): U8 with agentd's structured planning on every accepted draft
   (the reviewed program as the private mapper, DeepSeek as the third-party
   planner that may only reorder it, the lowered program reviewed again), the
@@ -38,10 +37,22 @@ whose offline verification passed are counted:
   program had a step whose address data chose (`attack_sample`).
 
 `timeline` reads each batch's own clock: the median interval between an
-episode's consecutive provider attempts (a step's time; above
-`CONTENDED_STEP_SECONDS` the batch shared the machine with other work), and
-for U5 the seconds from the owner input commit, where the kernel's 60 s task
-window starts, to binding and to publication, by program length.
+episode's consecutive provider attempts (a step's time), and for U5 the
+seconds from the owner input commit, where the kernel's 60 s task window
+starts, to binding and to publication, by program length. The contention
+rule reads a plain step's time: one that calls no model (a model call adds
+its own latency, so a batch of short programs, most of whose steps are
+extractions, is slow by itself) and that starts while no earlier episode's
+task is live (an episode left unfinished, refused by the owner or stuck,
+keeps its kernel task live until its window ends, and every live task slows
+each later step, U5; so is a batch of mostly refused episodes). Above
+`CONTENDED_STEP_SECONDS` the batch shared the machine with other work. The
+rule first read the median over all steps; read on plain steps, only U12's
+travel-0 batch is contended (5.47 s, against at most 4.28 s for every other
+batch of every arm, injection runs included). U12's slack-2 batch, replaced
+under the first reading, was slowed by refusals, not contended; its rerun
+completes the same 0 of its 7 tasks, so U12's utility is the same either
+way. U8's slack-2 batch is not contended.
 
 Per episode, from its own evidence: the outcome and the official utility; the
 review's refusal code for each refused draft; whether the planner was asked
@@ -56,6 +67,7 @@ Usage, from ``experiments/``::
     python -m analysis.utility_improvements --results results/local-container-20260930 [report | sample]
 """
 import argparse
+import base64
 import collections
 import json
 import statistics
@@ -73,8 +85,14 @@ TRUSTED_SET_ATTACK = "u7x"
 ADOPTION_ARMS = dict(U6=("u6",), U6X=("u6x",))
 SUITES = ("banking", "slack", "travel", "workspace")
 DIRECTORY_REFUSAL = "consent_destination_not_in_directory"
-# A batch whose median step interval is above this ran under contention.
+# A batch whose median plain step (see the docstring) is above this ran under
+# contention.
 CONTENDED_STEP_SECONDS = 5.0
+# A step that calls one of these waits for a model as well.
+MODEL_TOOLS = "dojo.model."
+# The kernel task's window: the planner envelope expires 60 s after the owner
+# input commit (crates/savana-input-runtime).
+WINDOW_SECONDS = 60.0
 
 
 def program_shape(steps):
@@ -137,26 +155,55 @@ def episodes(results, prefix, superseded=()):
     return records
 
 
+def _called(attempt):
+    """The tool a provider attempt calls, or None."""
+    if "payload_base64" not in attempt:
+        return None
+    payload = json.loads(base64.b64decode(attempt["payload_base64"]))
+    return payload.get("params", {}).get("name") if payload.get("method") == "tools/call" else None
+
+
 def episode_times(events):
-    """From one episode's events: the intervals between its consecutive
-    provider attempts, and the seconds from the owner input commit to the
-    episode's binding and to its observation (publication), or None."""
+    """From one episode's events: its provider attempts as (time in ns, the
+    tool called), the intervals between consecutive ones, its owner input
+    commit (ns), and the seconds from that commit to the episode's binding and
+    to its observation (publication), or None."""
     def first(kind, **match):
         return next((e["time_ns"] for e in events
                      if e["kind"] == kind and all(e.get(k) == v for k, v in match.items())), None)
-    attempts = [e["time_ns"] for e in events if e["kind"] == "provider_attempt"]
+    attempts = [(e["time_ns"], _called(e)) for e in events if e["kind"] == "provider_attempt"]
     commit = first("admission_stage_started", stage="owner_input_commit")
 
     def since(t):
         return None if commit is None or t is None else round((t - commit) / 1e9, 3)
-    return dict(gaps=[(b - a) / 1e9 for a, b in zip(attempts, attempts[1:])],
-                binding=since(first("episode_binding")), observation=since(first("episode_observation")))
+    return dict(attempts=attempts, gaps=[(b - a) / 1e9 for (a, _), (b, _) in zip(attempts, attempts[1:])],
+                commit=commit, binding=since(first("episode_binding")),
+                observation=since(first("episode_observation")))
+
+
+def pace(rows, local):
+    """One batch's median step interval, its median plain step (see the
+    docstring), and whether that marks contention; `rows` are its summary
+    rows, `local` its events by episode."""
+    gaps, plain, live = [], [], []
+    for row in sorted(rows, key=lambda r: min(e["time_ns"] for e in local[r["episode"]])):
+        times = episode_times(local[row["episode"]])
+        for (start, tool), gap in zip(times["attempts"], times["gaps"]):
+            gaps.append(gap)
+            if not (tool or "").startswith(MODEL_TOOLS) and not any(a <= start < b for a, b in live):
+                plain.append(gap)
+        # Left unfinished, its task stays live until its window ends.
+        if row["outcome"] != "published" and times["commit"] is not None:
+            live.append((times["commit"], times["commit"] + WINDOW_SECONDS * 1e9))
+    median = round(statistics.median(gaps), 2) if gaps else None
+    paced = round(statistics.median(plain), 2) if plain else None
+    return dict(intervals=len(gaps), median_step_seconds=median, plain_steps=len(plain),
+                median_plain_step_seconds=paced, contended=None if paced is None else paced > CONTENDED_STEP_SECONDS)
 
 
 def timeline(results, prefix, superseded=()):
-    """Per batch, its median step interval and whether that marks contention;
-    over published episodes, commit to binding and commit to publication by
-    program length."""
+    """Per batch, its pace; over published episodes, commit to binding and
+    commit to publication by program length."""
     per_batch, binding, publication = {}, [], collections.defaultdict(list)
     found = [b for p in ((prefix,) if type(prefix) is str else prefix) for b in batches(results, p)]
     for name, run, _verification in found:
@@ -164,19 +211,16 @@ def timeline(results, prefix, superseded=()):
             continue
         events = _events(run)
         local = by_episode(events)
-        gaps = []
-        for row in events[-1]["summary"]["rows"]:
+        rows = events[-1]["summary"]["rows"]
+        per_batch[name] = pace(rows, local)
+        for row in rows:
             episode = local[row["episode"]]
             times = episode_times(episode)
-            gaps += times["gaps"]
             if times["binding"] is not None:
                 binding.append(times["binding"])
             inputs = [e for e in episode if e["kind"] == "episode_input"]
             if row["outcome"] == "published" and inputs and times["observation"] is not None:
                 publication[len(inputs[0]["contract"]["steps"])].append(times["observation"])
-        median = round(statistics.median(gaps), 2) if gaps else None
-        per_batch[name] = dict(intervals=len(gaps), median_step_seconds=median,
-                               contended=median is not None and median > CONTENDED_STEP_SECONDS)
 
     def spread(values):
         return dict(n=len(values), median=round(statistics.median(values), 1), max=round(max(values), 1))
@@ -369,6 +413,11 @@ def report(results):
                     if arms[new] and arms[old]}
     out["timeline"] = {arm: timeline(results, prefixes, SUPERSEDED.get(arm, ()))
                        for arm, prefixes in ARMS.items() if arms[arm]}
+    # Every other run's pace, for the contention rule.
+    for arm, prefixes in dict(U8SX=ATTACK, U7X=TRUSTED_SET_ATTACK, **TRUSTED_SET_ARMS, **ADOPTION_ARMS).items():
+        paced = timeline(results, prefixes)
+        if paced["batches"]:
+            out["timeline"][arm] = paced
     adopted = {arm: episodes(results, prefixes) for arm, prefixes in ADOPTION_ARMS.items()}
     if any(adopted.values()):
         out["adopted_instructions"] = {arm: adoption_summary(rows) for arm, rows in adopted.items() if rows}
