@@ -1066,11 +1066,19 @@ mod tests {
             .any(|window| window == b"alice@example.com"));
     }
 
-    #[test]
-    fn finalized_kernel_owned_input_flows_through_g1_g2_g3_and_vault() {
+    /// Commit `content` as the owner's chat input, then accept it into the
+    /// kernel: G1/G2 masking, the G3 leak check on the masked view, the vault.
+    fn accept_finalized_chat_input(
+        content: &[u8],
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        DurableVaultServiceV2,
+        Result<super::AcceptedKernelIngressV2, super::KernelIngressPipelineErrorV2>,
+    ) {
         let installation = Digest32V2::new([0x30; 32]);
         let manifest = Digest32V2::new([0x35; 32]);
-        let content = b"send to alice@example.com".to_vec();
+        let content = content.to_vec();
         let content_digest = Digest32V2::new(Sha256::digest(&content).into());
         let mut input_owner = KernelInputOwnerV2::new(4, 4096).unwrap();
         let ui_authorization =
@@ -1185,8 +1193,15 @@ mod tests {
             savana_policy_core::v2::EffectSetV2::SEND,
             UnixMillisV2::new(35),
             UnixMillisV2::new(400),
-        )
-        .unwrap();
+        );
+        (directory, vault_path, vault, accepted)
+    }
+
+    #[test]
+    fn finalized_kernel_owned_input_flows_through_g1_g2_g3_and_vault() {
+        let (_directory, vault_path, mut vault, accepted) =
+            accept_finalized_chat_input(b"send to alice@example.com");
+        let accepted = accepted.unwrap();
 
         assert_eq!(accepted.gated_input().protected_values().len(), 1);
         assert_eq!(accepted.provenance().root_evidence().as_slice().len(), 9);
@@ -1226,6 +1241,24 @@ mod tests {
         assert!(!encrypted
             .windows(b"alice@example.com".len())
             .any(|window| window == b"alice@example.com"));
+    }
+
+    #[test]
+    fn an_account_number_whose_masking_exposes_another_number_still_commits() {
+        // AgentDojo banking user_task_15: the mobile-number pattern claims
+        // `13301240023` inside the landlord's account number. Masked once,
+        // `1215421872` followed a placeholder, the G3 leak check found it as
+        // residual PII, and the owner's input could never be committed.
+        let (_directory, _vault_path, _vault, accepted) =
+            accept_finalized_chat_input(b"send the rent to CA133012400231215421872");
+        let accepted = accepted.unwrap();
+        assert_eq!(accepted.gated_input().protected_values().len(), 2);
+        let masked = accepted.gated_input().masked_agent_input().unwrap();
+        assert!(masked
+            .text()
+            .starts_with("send the rent to CA[SAVANA_REDACTED_"));
+        assert!(!masked.text().contains("1215421872"));
+        assert!(!masked.text().contains("13301240023"));
     }
 
     #[test]

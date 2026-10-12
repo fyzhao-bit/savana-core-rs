@@ -4,14 +4,14 @@
 CI（`.github/workflows/ci.yml`）每次运行 `tools/check-frozen-v2-core.sh` 校验。
 清单最后一次生成于 2026-09-29（`643fa5e`）。
 
-当前有 70 个文件与清单不一致：
+当前有 71 个文件与清单不一致：
 
-- 12 个是本次会话（2026-10-12）在你同意修改冻结文件之后改的，逐一列在第一节；其中 7 个在本次之前就已漂移。
-- 58 个是 2026-09-30 至 10-07 各批工作留下的，本次没有碰，列在第二节。
+- 14 个是本次会话（2026-10-12）在你同意修改冻结文件之后改的，逐一列在第一节；其中 8 个在本次之前就已漂移。
+- 57 个是 2026-09-30 至 10-07 各批工作留下的，本次没有碰，列在第二节。
 - 其中 `crates/savana-kerneld/src/v2_recovery.rs` 已删除，所以校验脚本在 `test -f` 一步就会失败。
   在本次之前，旧的漂移已经让这项检查不通过。
 
-**清单尚未重新生成。** 等你审阅同意后再做（第四节）。重新生成会同时认可第二节的 58 处漂移。
+**清单尚未重新生成。** 等你审阅同意后再做（第四节）。重新生成会同时认可第二节的 57 处漂移。
 
 ## 一、本次会话改动的冻结文件
 
@@ -31,12 +31,13 @@ CI（`.github/workflows/ci.yml`）每次运行 `tools/check-frozen-v2-core.sh` �
 | `crates/savana-policy-core/src/v2/mod.rs` | `aaf063b` | 导出 `USER_REGISTERED_TOOL_ORDINAL_V2` | R4 | 同上 |
 | `crates/savana-policy-core/src/v2/connector_registry.rs` | `aaf063b` | 只加了测试（文件内 `tests` 模块） | R4 | `user_registered_tools_join_g4_tagged_once_and_leave_with_their_connector` |
 | `crates/savana-policy-core/src/v2/provenance_tests.rs` | `07508b1` | 只加了测试 | 最终发布读者必须由部署规则点名（F2） | `final_release_to_a_sink_the_deployment_rule_does_not_name_is_refused` |
-
+| `crates/savana-input-runtime/src/lib.rs` | 待提交 | 脱敏改为反复进行：用占位符同形的替身遮盖后再查，查到的残留区域并入原区域，直到内核复核用的 `redact_pii(masked) == masked` 成立；8 轮内不收敛则拒绝 | 一次遮盖可能让剩下的字符落到新的词边界上又被识别（AgentDojo banking 15 的 IBAN 里 `13301240023` 被遮后，`1215421872` 被当成电话号码），内核以"残留 PII"拒绝，这条 owner 输入永远提交不了（历次运行 5/5 失败） | `masking_continues_until_the_verifier_finds_nothing_left`、`residual_regions_map_back_over_the_stand_ins_they_touch` |
+| `crates/savana-kerneld/src/v2_runtime.rs` | 待提交 | 只改了测试：把已有输入提交测试的准备步骤提成辅助函数，加一条端到端测试（不修上面的问题时以 `Provenance` 失败） | 同上 | `an_account_number_whose_masking_exposes_another_number_still_commits` |
 | `crates/savana-agentd/Cargo.toml` | `2b3d6e3` | 加一个 `[[example]]`：`structured_plan_eval`，`required-features = ["test-support"]` | 结构化规划评测（F5）调用 agentd 真实的私有规划管线；不改 agentd 库代码，不带该特性的构建不编译它 | `experiments/tests/test_structured_example.py` 等 61 个 |
 
 残余数据契约（F4）计划放在新 crate 里，不改冻结文件；工作区根 `Cargo.toml` 不在清单里。
 
-## 二、本次之前就已漂移、本次没有碰的 58 个文件
+## 二、本次之前就已漂移、本次没有碰的 57 个文件
 
 | 文件 | 改动它的提交（新→旧） |
 | --- | --- |
@@ -72,7 +73,6 @@ CI（`.github/workflows/ci.yml`）每次运行 `tools/check-frozen-v2-core.sh` �
 | `crates/savana-kerneld/src/v04_fused_release_driver.rs` | 62a70d2 b637672 |
 | `crates/savana-kerneld/src/v04_fused_release_recovery.rs` | b637672 02a3966 |
 | `crates/savana-kerneld/src/v2_data_plane.rs` | ce3b3fd |
-| `crates/savana-kerneld/src/v2_runtime.rs` | ce3b3fd |
 | `crates/savana-kerneld/src/v2_startup.rs` | f718f83 755ba70 d8b9b01 |
 | `crates/savana-leak-gate/src/lib.rs` | f718f83 ee39ed8 |
 | `crates/savana-leak-gate/src/tests.rs` | f718f83 ee39ed8 |
