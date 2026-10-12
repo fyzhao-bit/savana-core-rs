@@ -12,11 +12,16 @@ comparison as a fixed function instead:
     order1, order2     "max <ref>" | "min <ref>" (numeric; ties fall through,
                        then the key in ascending order)
     output             "key" | "keys [n]" | "count" | "sum <ref>" | "value <ref>"
-                       | "values <ref>" | "pairs <ref>"
+                       | "values <ref>" | "pairs <ref>" | "mode <ref>" | "mode *.<field>"
 
     ref      "key" | N | "N.field" | "field"   (N names inputN, 1..4; a bare
              field is a field of input1's records, i.e. "1.field")
     op       contains | lacks | startswith | is | isnt | = | > | >= | < | <=
+
+"mode" is the most frequent value (ties: the first in alphabetical order);
+"mode *.<field>" counts that field over the records of ALL inputs together
+(e.g. the senders of messages read from several channels), with no filter or
+order.
 
 input1 gives the rows: an object's entries (key -> value), a list of records
 (key = its "id", "id_", "name", "title" or "filename", else its position), a list of texts, or a
@@ -43,7 +48,7 @@ OUTPUT_FIELD = "output"
 SPEC_FIELDS = (*FILTER_FIELDS, *ORDER_FIELDS, OUTPUT_FIELD)
 FIELDS = (*INPUT_FIELDS, *SPEC_FIELDS)
 FILTER_OPS = ("contains", "lacks", "startswith", "is", "isnt", "=", ">", ">=", "<", "<=")
-OUTPUTS = ("key", "keys", "count", "sum", "value", "values", "pairs")
+OUTPUTS = ("key", "keys", "count", "sum", "value", "values", "pairs", "mode")
 MAX_SPEC_BYTES = 128
 MAX_OPERAND_BYTES = 96
 MAX_ROWS = 256
@@ -117,6 +122,10 @@ def parse_output(text, inputs=4):
         return kind, None, int(parts[1])
     if len(parts) != 2:
         raise ComputeSpecError("compute_spec")
+    if kind == "mode" and parts[1].startswith("*."):
+        if not _FIELD.match(parts[1][2:]):
+            raise ComputeSpecError("compute_spec")
+        return kind, parts[1], None
     return kind, _ref(parts[1], inputs), None
 
 
@@ -233,6 +242,18 @@ def _bounded(items):
     return {"text": SEPARATOR.join(kept), "items": kept}
 
 
+def _mode(values):
+    """The most frequent non-empty value; ties go to the alphabetically first."""
+    counts = {}
+    for value in values:
+        if value:
+            counts[value] = counts.get(value, 0) + 1
+    if not counts:
+        return {"text": "", "items": []}
+    best = max(counts.values())
+    return _bounded([min(value for value, n in counts.items() if n == best)])
+
+
 def compute(inputs, filters=(), orders=(), output="key"):
     """The step's whole function: input texts (input1 first; "" = absent) and
     spec texts -> {"text": ..., "items": [...]}. Raises only on a malformed spec
@@ -244,6 +265,12 @@ def compute(inputs, filters=(), orders=(), output="key"):
     filters = [parse_filter(f, count) for f in filters if f]
     orders = [parse_order(o, count) for o in orders if o]
     kind, ref, limit = parse_output(output, count)
+    if kind == "mode" and ref.startswith("*."):
+        # One field over the records of every input together.
+        if filters or orders:
+            raise ComputeSpecError("compute_spec")
+        return _mode(_text(value.get(ref[2:])) for text in present for _key, value in table(text)
+                     if type(value) is dict)
     base = table(present[0])
     joins = [_lookup(table(text)) for text in present[1:]]
     rows = []
@@ -275,6 +302,8 @@ def compute(inputs, filters=(), orders=(), output="key"):
         return _bounded([_text(_resolve(ref, rows[0][0], rows[0][1])) or ""])
     if kind == "values":
         return _bounded([t for t in (_text(_resolve(ref, k, c)) for k, c in rows) if t])
+    if kind == "mode":
+        return _mode(_text(_resolve(ref, k, c)) for k, c in rows)
     return _bounded([f"{k}: {_text(_resolve(ref, k, c)) or ''}" for k, c in rows])
 
 
@@ -297,4 +326,6 @@ def validate_spec(args, inputs):
         else:
             parse_output(text, inputs)
         values[name] = text
+    if values[OUTPUT_FIELD].startswith("mode *.") and any(values[name] for name in (*FILTER_FIELDS, *ORDER_FIELDS)):
+        raise ComputeSpecError("compute_spec")
     return values

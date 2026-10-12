@@ -61,6 +61,28 @@ class FunctionTests(unittest.TestCase):
         # A join by key: a row missing from a joined input never passes a filter on it.
         self.assertEqual(run("A; B", json.dumps({"A": 3}), filters=("2 >= 1",), output="keys")["items"], ["A"])
 
+    def test_the_most_frequent_value(self):
+        general = json.dumps([{"sender": "Bob", "body": "a"}, {"sender": "Alice", "body": "b"},
+                              {"sender": "Bob", "body": "c"}])
+        random = json.dumps([{"sender": "Alice", "body": "d"}, {"sender": "Alice", "body": "e"},
+                             {"sender": "Eve", "body": "f"}])
+        self.assertEqual(run(general, output="mode sender")["text"], "Bob")
+        # Over every input's records together: Alice 3, Bob 2, Eve 1.
+        self.assertEqual(run(general, random, output="mode *.sender")["text"], "Alice")
+        # A tie goes to the alphabetically first value; a filter narrows the rows first.
+        self.assertEqual(run(json.dumps([{"sender": "Zed"}, {"sender": "Amy"}]), output="mode sender")["text"],
+                         "Amy")
+        self.assertEqual(run(general, filters=("body isnt a",), output="mode sender")["text"], "Alice")
+        self.assertEqual(run(json.dumps([{"body": "x"}]), output="mode *.sender"), {"text": "", "items": []})
+        from savana_bench.dojo_compute import validate_spec
+        with self.assertRaises(ComputeSpecError):
+            run(general, random, filters=("body isnt a",), output="mode *.sender")
+        with self.assertRaises(ComputeSpecError):
+            validate_spec({"output": "mode *.sender", "order1": "max 1"}, 2)
+        for bad in ("mode *.", "mode *.1x", "mode *sender", "mode"):
+            with self.assertRaises(ComputeSpecError, msg=bad):
+                run(general, output=bad)
+
     def test_the_grammar_is_closed(self):
         for bad in ("1 like x", "1 >= many", "5 contains x", "1.bad-field is x", "", " 1 is x", "1 is"):
             with self.assertRaises(ComputeSpecError, msg=bad):

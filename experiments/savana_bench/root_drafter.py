@@ -46,7 +46,9 @@ A compute step (exact, no model): {{"tool": "{COMPUTE_TOOL}", "args": {{"input1"
   order1, order2 (optional): "max <ref>" or "min <ref>" by the first number in the value (order2
   breaks ties; then the key's alphabetical order).
   output: "key" (the top row's key), "keys" or "keys <n>", "count", "sum <ref>", "value <ref>",
-  "values <ref>" or "pairs <ref>" ("key: value; ...").
+  "values <ref>", "pairs <ref>" ("key: value; ...") or "mode <ref>" (the most frequent value);
+  "mode *.<field>" counts that field over the records of ALL inputs (e.g. the most frequent "sender"
+  of messages read from several channels), with no filter or order.
   Use it whenever the request picks, ranks, filters, counts or adds up items ("the highest rated",
   "the cheapest", "all with vegan options", "total spent in March"): read the data with tools,
   then one compute step over those results, instead of asking an extraction to compare. Put every
@@ -210,7 +212,8 @@ REFUSAL_HINTS = {
     "compute_large_input": ("That result is too large for a compute input; use an extraction step over it "
                             "instead."),
     "compute_spec": ('Write each filter as "<ref> <op> <value>", each order as "max <ref>" or "min <ref>", and '
-                     'output as key, keys [n], count, sum <ref>, value <ref>, values <ref> or pairs <ref>.'),
+                     'output as key, keys [n], count, sum <ref>, value <ref>, values <ref>, pairs <ref> or '
+                     'mode <ref> ("mode *.<field>" takes no filter or order).'),
     "program_text": "Return one JSON object only (at most 16 KB).",
     "program_json": "Return one valid JSON object only, with no prose around it.",
     "program_shape": 'Return exactly {"steps": [...]} and nothing else at the top level.',
