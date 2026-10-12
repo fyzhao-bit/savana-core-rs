@@ -598,17 +598,20 @@ def evidence(result, planner_calls=()):
 
 
 def write_reordered(conversion, order):
-    """Whether the new order moves a write across another step that is not
-    tied to it by an edge path: data edges keep every value's producer first,
-    but an effect on shared state (a write, then a read of what it changed)
-    has no edge to keep it in place."""
+    """Whether the new order moves a write across another tool call on live
+    state (a read or a write) that no edge path ties it to: data edges keep
+    every value's producer first, but an effect on shared state (a write, then
+    a read of what it changed) has no edge to keep it in place. Extraction and
+    computation read recorded results only, so moving them is never flagged."""
     closure = {a: set() for a in range(1, len(order) + 1)}
     for a, b in sorted(conversion.workflow.edges, reverse=True):
         closure[a] |= {b} | closure[b]
     position = {old: p for p, old in enumerate(order)}
-    sinks = {n.ordinal for n in conversion.workflow.nodes if n.role == ROLES["sink"]}
-    return any((a in sinks or b in sinks) and b not in closure[a] and a not in closure[b]
-               and position[a] > position[b] for a in closure for b in closure if a < b)
+    roles = {n.ordinal: n.role for n in conversion.workflow.nodes}
+    live = {o for o, role in roles.items() if role != ROLES["transform"]}
+    return any(a in live and b in live and ROLES["sink"] in (roles[a], roles[b])
+               and b not in closure[a] and a not in closure[b] and position[a] > position[b]
+               for a in closure for b in closure if a < b)
 
 
 def phase0(*, example, output, registry=None):

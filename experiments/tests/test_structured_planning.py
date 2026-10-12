@@ -192,6 +192,13 @@ class LoweringTests(unittest.TestCase):
         conversion = program_to_workflow(program, catalog("slack"), salt=SALT)
         self.assertFalse(write_reordered(conversion, [1, 2, 3]))
         self.assertTrue(write_reordered(conversion, [2, 1, 3]))
+        # An extraction reads a recorded result, not live state: moving it past a write is safe.
+        later = {"steps": [program["steps"][1], {"tool": EXTRACT_TOOL, "source": 1, "args": {"target": text("answer")}},
+                           program["steps"][0], {"tool": EXTRACT_TOOL, "source": 1, "args": {
+                               "target": text("answer"), "context": {"from": 2}}}]}
+        conversion = program_to_workflow(later, catalog("slack"), salt=SALT)
+        self.assertFalse(write_reordered(conversion, [1, 3, 2, 4]))
+        self.assertTrue(write_reordered(conversion, [3, 1, 2, 4]))
 
 
 class PlannerPromptTests(unittest.TestCase):
