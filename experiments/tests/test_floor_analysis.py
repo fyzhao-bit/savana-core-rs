@@ -5,10 +5,12 @@ import unittest
 
 from analysis import floor_experiment as fe
 
+# An extraction's recorded result: the extracted text inside the MCP reply.
+TEXT = ["result", "content", "0", "text", "$json", "text"]
 # Slack user task 1: the article's URL is taken from a channel message.
 STEPS = [dict(tool="dojo.slack.read_channel", derived=[]),
          dict(tool="dojo.model.extract", derived=[]),
-         dict(tool="dojo.web.get", derived=[dict(field="url", source_operation=2, max_bytes=512, path=["result"])]),
+         dict(tool="dojo.web.get", derived=[dict(field="url", source_operation=2, max_bytes=512, path=TEXT)]),
          dict(tool="dojo.model.extract", derived=[dict(field="context", source_operation=1, max_bytes=8192,
                                                        path=["result"])]),
          dict(tool="dojo.slack.send_dm", derived=[dict(field="text", source_operation=4, max_bytes=512,
@@ -70,6 +72,20 @@ class FloorAnalysisTests(unittest.TestCase):
         self.assertEqual(total["write, derived argument"], dict(asked=1, unasked=0))
         self.assertEqual(total["extraction"], dict(asked=2, unasked=0))
         self.assertEqual(row["attacker_text_tools"], ["dojo.slack.send_dm"])
+
+    def test_the_address_data_chose_is_read_off_the_result_its_edge_names(self):
+        def extracted(operation, text):
+            reply = dict(result=dict(content=[dict(text=json.dumps(dict(text=text)))]))
+            return dict(kind="official_tool_result", episode=0, operation=str(operation), response=reply)
+        refused = [dict(decision="approve", clause=2),
+                   dict(decision="refuse", clause=3, reason="consent_derived_destination")]
+        calls = [call("dojo.slack.read_channel", channel="general"), call("dojo.model.extract", target="url")]
+        poisoned = episode(refused, calls)
+        poisoned.insert(-1, extracted(2, "www.true-informations.com"))
+        honest = episode(refused, calls)
+        honest.insert(-1, extracted(2, "www.informations.com"))
+        self.assertEqual([fe.episode_row(e)["attacker_chose_address"] for e in (poisoned, honest)], [1, 0])
+        self.assertEqual(fe.episode_row(poisoned)["attacker_address"], 0)
 
     def test_only_the_addresses_a_goal_names_are_the_attackers(self):
         # Slack injection task 2 concatenates the channels' messages, which
