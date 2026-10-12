@@ -14,6 +14,12 @@ whose offline verification passed are counted:
   ten steps and the kernel's masking fix (`u8` is its first two batches,
   stopped when they showed planners naming a multi-field extraction's
   field by its target label, which the review then refused);
+* U7 (`u7d`, `u7s`): under the Permit disposition, where the kernel asks the
+  owner only when G5 escalates, the tasks whose U12 or U8 program had a step
+  whose address data chose (`trusted_set_sample`), with the directory owner
+  (`u7d`: every such step escalates) and with the directory signed into
+  those edges as a candidate set (`u7s`: a member no longer escalates by
+  itself); `u7x` is `u7s` under injection;
 * U8X (`u8x`): U8 under injection (AutoDojo's for banking, slack and travel,
   the official template for workspace), on the tasks whose U8 program had a
   step whose address data chose (`attack_sample`).
@@ -48,6 +54,9 @@ ARMS = dict(G12=("g12k",), D=("f5d",), U12=("u12c", "u12r"), U12_first=("u12c",)
 # A batch whose measurement a rerun replaces (see the docstring).
 SUPERSEDED = {"U12": {"u12c-slack-2", "u12c-travel-0"}}
 ATTACK = "u8x"
+# U7 runs under Permit on a sample of tasks, not all 97 (see the docstring).
+TRUSTED_SET_ARMS = dict(U7_directory=("u7d",), U7_set=("u7s",))
+TRUSTED_SET_ATTACK = "u7x"
 SUITES = ("banking", "slack", "travel", "workspace")
 DIRECTORY_REFUSAL = "consent_destination_not_in_directory"
 # A batch whose median step interval is above this ran under contention.
@@ -270,6 +279,36 @@ def attack_sample(results, prefix="u8f"):
     return lines
 
 
+def trusted_set_sample(results):
+    """Plan lines `<suite> <items>` (at most nine cases a line) of the tasks
+    whose U12 or U8 program had a step whose address data chose: the only
+    tasks where a signed candidate set can change what happens."""
+    chosen = {_task(r) for arm in ("U12", "U8")
+              for r in episodes(results, ARMS[arm], SUPERSEDED.get(arm, ())) if r["data_chosen_steps"]}
+    lines = []
+    for suite in SUITES:
+        users = sorted((u for s, u in chosen if s == suite), key=lambda u: int(u.rsplit("_", 1)[1]))
+        lines += [(suite, ",".join(users[k:k + 9])) for k in range(0, len(users), 9)]
+    return lines
+
+
+def trusted_set_summary(rows):
+    """What the owner was asked about the steps whose address data chose, and
+    what reached a provider without asking (U7)."""
+    return dict(by_suite=by_suite(rows),
+                outcomes=dict(collections.Counter(r["outcome"] for r in rows)),
+                data_chosen_steps=sum(r["data_chosen_steps"] for r in rows),
+                asked=sum(r["owner_asked"] for r in rows),
+                dispatched_unasked=sum(r["dispatched_unapproved"] for r in rows),
+                owner_refusals=dict(collections.Counter(c for r in rows for c in r["owner_refusals"])),
+                unauthorized=sum(r["unauthorized"] for r in rows),
+                tasks=[dict(suite=r["suite"], user=r["user"], injection=r["injection"], outcome=r["outcome"],
+                            utility=r["utility"], data_chosen_steps=r["data_chosen_steps"], asked=r["owner_asked"],
+                            dispatched_unasked=r["dispatched_unapproved"], owner_refusals=r["owner_refusals"],
+                            attacker_chose_address=r["attacker_chose_address"], success=r["success"])
+                       for r in rows if r["data_chosen_steps"]])
+
+
 def report(results):
     arms = {arm: episodes(results, prefixes, SUPERSEDED.get(arm, ())) for arm, prefixes in ARMS.items()}
     out = dict(arms={arm: benign_summary(rows) for arm, rows in arms.items() if rows})
@@ -278,6 +317,12 @@ def report(results):
                     if arms[new] and arms[old]}
     out["timeline"] = {arm: timeline(results, prefixes, SUPERSEDED.get(arm, ()))
                        for arm, prefixes in ARMS.items() if arms[arm]}
+    trusted = {arm: episodes(results, prefixes) for arm, prefixes in TRUSTED_SET_ARMS.items()}
+    if any(trusted.values()):
+        out["trusted_set"] = {arm: trusted_set_summary(rows) for arm, rows in trusted.items() if rows}
+    trusted_attack = episodes(results, TRUSTED_SET_ATTACK)
+    if trusted_attack:
+        out["trusted_set_attack"] = dict(trusted_set_summary(trusted_attack), attack=attack_summary(trusted_attack))
     attacked = episodes(results, ATTACK)
     if attacked:
         from analysis.night_reports import rows
@@ -289,10 +334,10 @@ def report(results):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--results", default="results/local-container-20260930")
-    parser.add_argument("what", nargs="?", default="report", choices=("report", "sample"))
+    parser.add_argument("what", nargs="?", default="report", choices=("report", "sample", "set-sample"))
     args = parser.parse_args()
-    if args.what == "sample":
-        for suite, items in attack_sample(args.results):
+    if args.what in ("sample", "set-sample"):
+        for suite, items in (attack_sample if args.what == "sample" else trusted_set_sample)(args.results):
             print(suite, items)
     else:
         print(json.dumps(report(args.results), indent=1, sort_keys=True))
