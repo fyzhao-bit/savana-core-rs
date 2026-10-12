@@ -299,7 +299,9 @@ def trusted_set_sample(results):
     lines = []
     for suite in SUITES:
         users = sorted((u for s, u in chosen if s == suite), key=lambda u: int(u.rsplit("_", 1)[1]))
-        lines += [(suite, ",".join(users[k:k + 9])) for k in range(0, len(users), 9)]
+        # As few batches as nine cases allow, of even size.
+        size = -(-len(users) // -(-len(users) // 9)) if users else 1
+        lines += [(suite, ",".join(users[k:k + size])) for k in range(0, len(users), size)]
     return lines
 
 
