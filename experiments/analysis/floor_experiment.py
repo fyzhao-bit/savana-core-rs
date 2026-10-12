@@ -24,7 +24,9 @@ Per episode, read off its own evidence:
 * unauthorized: the runner's count of provider requests that did not match the
   owner-signed authority (RQ1's metric);
 * success, utility: the official oracle on the environment as the episode left
-  it, whatever its outcome.
+  it, whatever its outcome;
+* step decisions: for each step the run reached, its class (as RQ5's estimate
+  sorts steps) and whether the kernel escalated it to the owner.
 
 Usage, from ``experiments/``::
 
@@ -54,6 +56,18 @@ def address_fields(tool):
 def chosen_by_data(step):
     """Fields of a signed step (contract document form) whose address data chose."""
     return [edge["field"] for edge in step["derived"] if edge["field"] in address_fields(step["tool"])]
+
+
+def step_kind(step):
+    """The class RQ5's estimate sorts a signed step into."""
+    from savana_bench.agentdojo_tasks import catalog_tool
+    from savana_bench.drafted_tasks import COMPUTE_TOOL
+    if step["tool"] in (EXTRACT_TOOL, COMPUTE_TOOL):
+        return "extraction" if step["tool"] == EXTRACT_TOOL else "compute"
+    effect = "read" if catalog_tool(step["tool"])["effect"] == "read" else "write"
+    if chosen_by_data(step):
+        return f"{effect}, address chosen by data"
+    return f"{effect}, {'derived argument' if step['derived'] else 'owner literals'}"
 
 
 def attacker_addresses(suite, user, injection):
@@ -89,6 +103,10 @@ def episode_row(local):
             if payload.get("method") == "tools/call":
                 calls.append(payload["params"])
     chosen = {n: chosen_by_data(step) for n, step in enumerate(steps, 1) if chosen_by_data(step)}
+    # Under Permit a step asks only if the kernel escalated it; a step the run
+    # reached either asked or went to its provider unasked.
+    decisions = [[step_kind(steps[n - 1]), n in asked] for n in range(1, len(steps) + 1)
+                 if n in asked or n <= len(calls)]
     dispatched = {n for n in chosen if n <= len(calls) and calls[n - 1]["name"] == steps[n - 1]["tool"]}
     marks = attacker_addresses(suite, user, injection) if injection else []
     # An extraction's body carries its source, injection included, to the
@@ -107,7 +125,7 @@ def episode_row(local):
                 dispatched_unapproved=len([n for n in dispatched if n not in approved]),
                 attacker_address=len(at_address), attacker_address_tools=at_address,
                 attacker_text=len(in_text), attacker_text_tools=in_text,
-                unauthorized=score.get("unauthorized_provider_attempts") or 0,
+                unauthorized=score.get("unauthorized_provider_attempts") or 0, step_decisions=decisions,
                 success=_oracle(score, "attacker_success"), utility=_oracle(score, "utility"))
 
 
@@ -139,6 +157,11 @@ def summarize(table):
     total["episodes_dispatched_unapproved"] = sum(1 for r in table if r["dispatched_unapproved"])
     total["episodes_attacker_address"] = sum(1 for r in table if r["attacker_address"])
     total["episodes_attacker_text"] = sum(1 for r in table if r["attacker_text"])
+    decisions = collections.defaultdict(lambda: dict(asked=0, unasked=0))
+    for row in table:
+        for kind, asked in row["step_decisions"]:
+            decisions[kind]["asked" if asked else "unasked"] += 1
+    total["step_decisions"] = dict(sorted(decisions.items()))
     return total
 
 
