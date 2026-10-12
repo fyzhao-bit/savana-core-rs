@@ -326,40 +326,80 @@ impl ReleasePolicy {
     }
 }
 
+/// Why one library candidate was excluded: a concrete trace that still
+/// distinguishes two worlds under THAT candidate, found by its own full check
+/// or by replaying an earlier candidate's counterexample. Local diagnostic,
+/// never a model receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Exclusion {
+    pub index: usize,
+    pub counterexample: Counterexample,
+    pub by_replay: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Synthesis {
+    /// The first candidate in public order that was PROVED safe. `undetermined`
+    /// lists higher-ranked candidates whose check ran out of resources; the
+    /// caller decides whether a lower-ranked proved policy is acceptable.
     Safe {
         index: usize,
         certificate: Certificate,
         full_checks: usize,
         counterexamples: Vec<Counterexample>,
+        undetermined: Vec<usize>,
     },
-    NoSolutionInLibrary,
-    Unknown,
+    /// Every candidate was excluded; one exclusion per candidate, in order,
+    /// re-checkable with [`verify_exclusions`].
+    NoSolutionInLibrary { exclusions: Vec<Exclusion> },
+    /// No candidate was proved safe and at least one stayed undetermined (or
+    /// the library exceeds the bound). Not a NoSolution verdict.
+    Unknown {
+        undetermined: Vec<usize>,
+        exclusions: Vec<Exclusion>,
+    },
 }
 
+/// Most candidates one search considers. A larger library is not truncated.
+pub const MAX_RELEASE_CANDIDATES: usize = 64;
+
 /// Public order supplies utility ranking. There is no actual production subject
-/// argument. Every SAFE result receives an independent closure check.
+/// argument. Every SAFE result receives an independent closure check. A
+/// candidate whose check is Unknown stays unresolved and the search continues.
 pub fn synthesize_release(
     model: &Model,
     library: &[ReleasePolicy],
     limits: Limits,
 ) -> Result<Synthesis, Error> {
-    if library.len() > 64 {
-        return Ok(Synthesis::Unknown);
+    if library.len() > MAX_RELEASE_CANDIDATES {
+        return Ok(Synthesis::Unknown {
+            undetermined: (0..library.len()).collect(),
+            exclusions: Vec::new(),
+        });
     }
-    let mut counterexamples = Vec::new();
+    let mut counterexamples: Vec<Counterexample> = Vec::new();
+    let mut exclusions = Vec::new();
+    let mut undetermined = Vec::new();
     let mut full_checks = 0;
     for (index, policy) in library.iter().enumerate() {
         let candidate = match policy.apply(model) {
             Ok(candidate) => candidate,
-            Err(Error::Limit) => return Ok(Synthesis::Unknown),
+            Err(Error::Limit) => {
+                undetermined.push(index);
+                continue;
+            }
             Err(error) => return Err(error),
         };
-        if counterexamples
+        if let Some(counterexample) = counterexamples
             .iter()
-            .any(|c| replay_counterexample(&candidate, c))
+            .find(|c| replay_counterexample(&candidate, c))
         {
+            exclusions.push(Exclusion {
+                index,
+                counterexample: counterexample.clone(),
+                by_replay: true,
+            });
             continue;
         }
         full_checks += 1;
@@ -370,11 +410,48 @@ pub fn synthesize_release(
                     certificate,
                     full_checks,
                     counterexamples,
+                    undetermined,
                 })
             }
-            Check::Unsafe(counterexample) => counterexamples.push(counterexample),
-            Check::Unknown => return Ok(Synthesis::Unknown),
+            Check::Unsafe(counterexample) => {
+                counterexamples.push(counterexample.clone());
+                exclusions.push(Exclusion {
+                    index,
+                    counterexample,
+                    by_replay: false,
+                });
+            }
+            Check::Unknown => undetermined.push(index),
         }
     }
-    Ok(Synthesis::NoSolutionInLibrary)
+    Ok(if undetermined.is_empty() {
+        Synthesis::NoSolutionInLibrary { exclusions }
+    } else {
+        Synthesis::Unknown {
+            undetermined,
+            exclusions,
+        }
+    })
+}
+
+/// Independently re-checks a NoSolution verdict over the SAME library: one
+/// exclusion per candidate, in order, each replayed on a freshly applied
+/// candidate. The synthesizer's own candidate models are never trusted.
+pub fn verify_exclusions(
+    model: &Model,
+    library: &[ReleasePolicy],
+    exclusions: &[Exclusion],
+) -> Result<(), Error> {
+    if library.len() > MAX_RELEASE_CANDIDATES
+        || exclusions.len() != library.len()
+        || exclusions.iter().enumerate().any(|(i, e)| e.index != i)
+    {
+        return Err(Error::Invalid);
+    }
+    for (policy, exclusion) in library.iter().zip(exclusions) {
+        if !replay_counterexample(&policy.apply(model)?, &exclusion.counterexample) {
+            return Err(Error::Invalid);
+        }
+    }
+    Ok(())
 }

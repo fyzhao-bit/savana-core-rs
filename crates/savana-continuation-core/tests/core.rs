@@ -256,11 +256,13 @@ fn release_search_rechecks_concrete_examples_and_keeps_safe_candidate() {
         certificate,
         full_checks,
         counterexamples,
+        undetermined,
     } = synthesize_release(&model, &candidates, Limits::default()).unwrap()
     else {
         panic!("no policy")
     };
     assert_eq!((index, full_checks, counterexamples.len()), (1, 2, 1));
+    assert!(undetermined.is_empty());
     let candidate = candidates[1].apply(&model).unwrap();
     assert!(!replay_counterexample(&candidate, &counterexamples[0]));
     verify_certificate(&candidate, &certificate, Limits::default()).unwrap();
@@ -273,10 +275,14 @@ fn release_search_rechecks_concrete_examples_and_keeps_safe_candidate() {
 #[test]
 fn no_solution_and_unknown_are_distinct() {
     let model = Model::new(definition(&["yes", "no"])).unwrap();
-    assert_eq!(
-        synthesize_release(&model, &[policy(&model, false)], Limits::default()).unwrap(),
-        Synthesis::NoSolutionInLibrary
-    );
+    let library = [policy(&model, false)];
+    let Synthesis::NoSolutionInLibrary { exclusions } =
+        synthesize_release(&model, &library, Limits::default()).unwrap()
+    else {
+        panic!("expected no solution")
+    };
+    assert_eq!(exclusions.len(), 1);
+    verify_exclusions(&model, &library, &exclusions).unwrap();
     assert_eq!(
         synthesize_release(
             &model,
@@ -287,7 +293,119 @@ fn no_solution_and_unknown_are_distinct() {
             }
         )
         .unwrap(),
-        Synthesis::Unknown
+        Synthesis::Unknown {
+            undetermined: vec![0],
+            exclusions: vec![]
+        }
+    );
+}
+
+/// A model whose two initial worlds differ, with enough states that a
+/// renderer expanding every output to MAX_BYTES exceeds the output bound.
+fn large_leaking_model() -> (Model, ReleasePolicy) {
+    let mut strings = vec!["x"; MAX_STATES];
+    strings[1] = "y";
+    let model = Model::new(definition(&strings)).unwrap();
+    let mut expanding = policy(&model, false);
+    for rewrite in &mut expanding.rewrites {
+        rewrite.to = vec![b'x'; MAX_BYTES];
+    }
+    assert_eq!(expanding.apply(&model).unwrap_err(), Error::Limit);
+    (model, expanding)
+}
+
+#[test]
+fn an_undetermined_candidate_does_not_stop_the_search() {
+    let (model, expanding) = large_leaking_model();
+    // A lower-ranked candidate can still be proved safe; the result names the
+    // higher-ranked candidate that stayed undetermined.
+    let Synthesis::Safe {
+        index,
+        undetermined,
+        certificate,
+        ..
+    } = synthesize_release(
+        &model,
+        &[expanding.clone(), policy(&model, true)],
+        Limits::default(),
+    )
+    .unwrap()
+    else {
+        panic!("expected the proved candidate")
+    };
+    assert_eq!((index, undetermined), (1, vec![0]));
+    let chosen = policy(&model, true).apply(&model).unwrap();
+    verify_certificate(&chosen, &certificate, Limits::default()).unwrap();
+    // Every other candidate excluded but one undetermined: Unknown, never a
+    // NoSolution verdict.
+    let Synthesis::Unknown {
+        undetermined,
+        exclusions,
+    } = synthesize_release(
+        &model,
+        &[expanding, policy(&model, false)],
+        Limits::default(),
+    )
+    .unwrap()
+    else {
+        panic!("expected unknown")
+    };
+    assert_eq!(undetermined, vec![0]);
+    assert_eq!(
+        exclusions
+            .iter()
+            .map(|e| (e.index, e.by_replay))
+            .collect::<Vec<_>>(),
+        vec![(1, false)]
+    );
+}
+
+#[test]
+fn no_solution_evidence_is_rechecked_against_the_same_library() {
+    let model = Model::new(definition(&["yes", "no"])).unwrap();
+    let mut renamed = policy(&model, false);
+    for rewrite in &mut renamed.rewrites {
+        if rewrite.from != b"fixed-catalog" {
+            rewrite.to = rewrite.from.to_ascii_uppercase();
+        }
+    }
+    let library = [policy(&model, false), renamed];
+    let Synthesis::NoSolutionInLibrary { exclusions } =
+        synthesize_release(&model, &library, Limits::default()).unwrap()
+    else {
+        panic!("expected no solution")
+    };
+    assert_eq!(
+        exclusions
+            .iter()
+            .map(|e| (e.index, e.by_replay))
+            .collect::<Vec<_>>(),
+        vec![(0, false), (1, true)]
+    );
+    verify_exclusions(&model, &library, &exclusions).unwrap();
+    // Missing, reordered or non-distinguishing evidence is refused.
+    assert_eq!(
+        verify_exclusions(&model, &library, &exclusions[..1]),
+        Err(Error::Invalid)
+    );
+    let mut swapped = exclusions.clone();
+    swapped.swap(0, 1);
+    assert_eq!(
+        verify_exclusions(&model, &library, &swapped),
+        Err(Error::Invalid)
+    );
+    let mut blunt = exclusions.clone();
+    blunt[1].counterexample.command = 20;
+    blunt[1].counterexample.prefix.clear();
+    assert_eq!(
+        verify_exclusions(&model, &library, &blunt),
+        Err(Error::Invalid)
+    );
+    // The same evidence does not exclude a library whose second candidate is safe.
+    let other = [policy(&model, false), policy(&model, true)];
+    assert_eq!(
+        verify_exclusions(&model, &other, &exclusions),
+        Err(Error::Invalid)
     );
 }
 
@@ -332,7 +450,10 @@ fn more_than_sixty_four_candidates_is_unknown_not_a_truncated_search() {
     ));
     assert_eq!(
         synthesize_release(&model, &vec![safe; 65], Limits::default()).unwrap(),
-        Synthesis::Unknown
+        Synthesis::Unknown {
+            undetermined: (0..65).collect(),
+            exclusions: vec![]
+        }
     );
 }
 
@@ -355,7 +476,10 @@ fn renderer_expansion_is_bounded_before_building_the_candidate() {
     assert_eq!(candidate.apply(&model).unwrap_err(), Error::Limit);
     assert_eq!(
         synthesize_release(&model, &[candidate], Limits::default()).unwrap(),
-        Synthesis::Unknown
+        Synthesis::Unknown {
+            undetermined: vec![0],
+            exclusions: vec![]
+        }
     );
 }
 

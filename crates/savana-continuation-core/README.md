@@ -17,7 +17,11 @@ module and not a replacement for the V2 authorization/approval/transport gates.
 - Publicly ranked finite release search. This first candidate language is static
   total postprocessing of complete logical messages; it does not implement all
   policy choices in the PDF's unavailable Python package. Old counterexamples
-  eliminate a policy only after concrete replay under that policy.
+  eliminate a policy only after concrete replay under that policy. A candidate
+  whose check runs out of resources stays undetermined and the search goes on;
+  a proved policy reports which higher-ranked candidates stayed undetermined. A
+  NoSolution verdict carries one exclusion per candidate, re-checked against the
+  same library by `verify_exclusions`. At most 64 candidates; more is Unknown.
 - Exact finite labeled partition refinement plus independent quotient checking.
   Safety/goal colors, public labels and private event labels are preserved. This
   is not a C1–C5 compiler, BC5 fairness certificate or K6 progress proof.
