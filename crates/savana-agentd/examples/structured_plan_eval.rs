@@ -633,6 +633,16 @@ fn run_job(session: &Session, value: &Value) -> Value {
         || Ok(prepared),
         |_| Ok(catalog),
         |request, boundary| {
+            // As the browser authority does first: a denied boundary sends nothing.
+            session
+                .mapper
+                .authorize_boundary(boundary)
+                .map_err(|error| {
+                    fail(
+                        mapper_code(error),
+                        AgentBrowserAuthorityErrorV2::Unavailable,
+                    )
+                })?;
             let body = encode_mapper_intent_request_v2(request).map_err(|_| {
                 fail(
                     "mapper_request_invalid",

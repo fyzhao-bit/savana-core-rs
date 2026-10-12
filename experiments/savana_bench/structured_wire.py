@@ -891,6 +891,10 @@ class ExampleProcess:
         self._buffer = bytearray(rest)
         return json.loads(line)
 
+    @property
+    def pid(self):
+        return self._process.pid
+
     def request(self, value, *, timeout=90.0):
         self._send(value)
         return self._receive(timeout)
