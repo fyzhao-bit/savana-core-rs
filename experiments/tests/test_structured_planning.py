@@ -15,7 +15,8 @@ from savana_bench.drafted_tasks import EXTRACT_TOOL, ProgramRefused
 from savana_bench.structured_planning import (
     DRAFTED_INTENT, DRAFTED_TEMPLATE, LIMITS, OP, DeepSeekStructuralPlanner, NullPlanner, ProgramMapper,
     StructuredError, StructuredSession, eval_catalog, exposure, lower_plan, order_reply, plan_program, planner_body,
-    planner_view, program_to_workflow, review, sentinels, template_intent, topological, write_reordered)
+    planner_view, program_to_workflow, review, sentinels, template_intent, topological, valid_orders,
+    write_reordered)
 from savana_bench.structured_templates import load_registry
 from savana_bench.structured_wire import (
     EFFECTS, ROLES, StructuralNode, StructuralRequest, decode_mapper_request, decode_order, decode_ordered_plan,
@@ -199,6 +200,18 @@ class LoweringTests(unittest.TestCase):
         conversion = program_to_workflow(later, catalog("slack"), salt=SALT)
         self.assertFalse(write_reordered(conversion, [1, 3, 2, 4]))
         self.assertTrue(write_reordered(conversion, [3, 1, 2, 4]))
+
+    def test_valid_orders_counts_every_edge_respecting_order(self):
+        program = {"steps": [{"tool": "dojo.slack.send_channel", "args": {"channel": text("general"),
+                                                                        "text": text("hi")}},
+                             {"tool": "dojo.slack.read_channel", "args": {"channel": text("general")}},
+                             {"tool": EXTRACT_TOOL, "source": 2, "args": {"target": text("answer")}}]}
+        conversion = program_to_workflow(program, catalog("slack"), salt=SALT)
+        # The last step stays last and the read feeds it: the send can go first or second.
+        self.assertEqual(valid_orders(conversion), 2)
+        for item in load_registry()["templates"]:
+            conversion = program_to_workflow(item["program"], catalog(item["suite"]), salt=SALT)
+            self.assertGreaterEqual(valid_orders(conversion), 1)
 
 
 class PlannerPromptTests(unittest.TestCase):

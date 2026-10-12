@@ -670,12 +670,200 @@ def phase0(*, example, output, registry=None):
     return summary
 
 
+def valid_orders(conversion, cap=100000):
+    """How many orders of the workflow keep every edge forward (linear
+    extensions, counted over subsets of placed nodes), capped at `cap`."""
+    count = len(conversion.workflow.nodes)
+    before = [0] * count
+    for a, b in conversion.workflow.edges:
+        before[b - 1] |= 1 << (a - 1)
+    ways = {0: 1}
+    for placed in range(count):
+        following = {}
+        for mask, number in ways.items():
+            for node in range(count):
+                if not mask >> node & 1 and before[node] & ~mask == 0:
+                    following[mask | 1 << node] = min(cap, following.get(mask | 1 << node, 0) + number)
+        ways = following
+    return min(cap, sum(ways.values()))
+
+
+def phase1(*, example, output, api_key, repetitions=3, model="deepseek-flash", registry=None):
+    """Arm T offline with the real third-party planner: every registered
+    template through the real example and mTLS endpoints, `repetitions`
+    orderings each by `DeepSeekStructuralPlanner` (one call per ordering, no
+    retry). Records whether agentd accepted the order, whether it changed,
+    whether a write moved across unlinked live state, lowering and the
+    review, the exposure scan of each planner request and the text the model
+    was sent, and the model's calls. Writes summary.json to `output`."""
+    from agentdojo.task_suite.load_suites import get_suite
+    from .agentdojo_tasks import BENCHMARK
+    from .structured_templates import load_registry
+    registry = load_registry() if registry is None else registry
+    if type(repetitions) is not int or repetitions < 1:
+        raise ValueError("repetitions")
+    planner = DeepSeekStructuralPlanner(api_key, max_calls=len(registry["templates"]) * repetitions, model=model)
+    del api_key
+    catalogs, rows = {}, []
+    session = StructuredSession(example, planner)
+    try:
+        for index, item in enumerate(registry["templates"], 1):
+            suite, user = item["suite"], item["user"]
+            catalog = catalogs.setdefault(suite, eval_catalog(suite))
+            prompt = get_suite(BENCHMARK, suite).get_user_task_by_id(user).PROMPT
+            secret = sentinels(item["program"], prompt, catalog)
+            orders = None
+            for repetition in range(1, repetitions + 1):
+                logged = len(planner.log)
+                mapper = ProgramMapper(item["program"], catalog, source="template", template=index)
+                orders = valid_orders(mapper.conversion) if orders is None else orders
+                result = plan_program(session, mapper, job_id=f"phase1-{index}-{repetition}", suite=suite,
+                                      user=user)
+                planner_bytes = bytes.fromhex(result["planner_request"] or "")
+                view = planner_view(decode_structural_request(planner_bytes))[1].encode() if planner_bytes else b""
+                calls = [dict(call) for call in planner.log[logged:]]
+                rows.append(dict(
+                    suite=suite, user=user, template=index, repetition=repetition,
+                    steps=len(item["program"]["steps"]), valid_orders=orders,
+                    accepted=result["status"] == "accepted", error=result["error"], outcome=result["outcome"],
+                    order=result.get("order"), order_changed=result.get("order_changed"),
+                    write_reordered=(write_reordered(mapper.conversion, result["order"])
+                                     if result.get("order") else None),
+                    lowering_ok=result.get("lowered") is not None, review_ok=result["outcome"] == "planned",
+                    planner_request=result["planner_request"], planner_request_bytes=len(planner_bytes),
+                    sentinels=len(secret), exposed=exposure((planner_bytes, view), secret), planner_calls=calls))
+    finally:
+        session.close()
+        planner.close()
+    count = lambda rows, key: sum(row[key] is True for row in rows)
+    per_repetition = [dict(repetition=r, accepted=count(sub, "accepted"), review_ok=count(sub, "review_ok"),
+                           order_changed=count(sub, "order_changed"), write_reordered=count(sub, "write_reordered"))
+                      for r in range(1, repetitions + 1)
+                      for sub in [[row for row in rows if row["repetition"] == r]]]
+    by_template = {}
+    for row in rows:
+        by_template.setdefault(row["template"], []).append(row)
+    multi = [group for group in by_template.values() if group[0]["valid_orders"] > 1]
+    summary = dict(
+        schema="savana-structured-phase1-v1", planner="deepseek", model=model, repetitions=repetitions,
+        templates=len(by_template), jobs=len(rows), accepted=count(rows, "accepted"),
+        refused={code: sum(r["error"] == code for r in rows) for code in sorted({r["error"] for r in rows} - {None})},
+        outcomes={o: sum(r["outcome"] == o for r in rows) for o in sorted({r["outcome"] for r in rows})},
+        lowering_ok=count(rows, "lowering_ok"), review_ok=count(rows, "review_ok"),
+        order_changed=count(rows, "order_changed"), write_reordered=count(rows, "write_reordered"),
+        templates_with_one_valid_order=len(by_template) - len(multi),
+        templates_with_several_valid_orders=len(multi),
+        several_orders_all_accepted=sum(all(r["accepted"] for r in g) for g in multi),
+        several_orders_same_order_every_time=sum(
+            all(r["accepted"] for r in g) and len({tuple(r["order"]) for r in g}) == 1 for g in multi),
+        per_repetition=per_repetition, planner_calls=planner.calls,
+        prompt_tokens=planner.prompt_tokens, completion_tokens=planner.completion_tokens,
+        planner_request_bytes=sum(r["planner_request_bytes"] for r in rows),
+        sentinels_scanned=sum(r["sentinels"] for r in rows), min_sentinel_bytes=MIN_SENTINEL_BYTES,
+        exposure_hits=sum(len(r["exposed"]) for r in rows),
+        planner_system_sha256=hashlib.sha256(PLANNER_SYSTEM.encode()).hexdigest(),
+        registry_sha256=hashlib.sha256((Path(__file__).parent / "data" / "structured_templates.json").read_bytes())
+        .hexdigest(), example_sha256=hashlib.sha256(Path(example).read_bytes()).hexdigest(), rows=rows)
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=False)
+    (output / "summary.json").write_bytes(canonical(summary) + b"\n")
+    return summary
+
+
+def coverage(*, example, output, results=None):
+    """M4, offline and model-free: every recorded G12 draft (accepted or not)
+    judged twice, by agentd's structural validation of the workflow the
+    draft maps to (null planner) and by the owner's review of the draft
+    itself. agentd checks shape only (catalog, slots, limits, acyclicity), not
+    tool choice, values or completeness: the table shows that gap."""
+    from agentdojo.task_suite.load_suites import get_suite
+    from .agentdojo_tasks import BENCHMARK
+    from .drafted_tasks import ProgramRefused, parse_program_text, review_program
+    from .structured_templates import DEFAULT_RESULTS, SOURCE_PREFIX, _source_log
+    from .value_blind import planner_request
+    results = Path(results or DEFAULT_RESULTS)
+    batches = sorted(p for p in results.iterdir() if p.is_dir() and p.name.startswith(SOURCE_PREFIX))
+    if not batches:
+        raise ValueError("no_source_runs")
+    planner = NullPlanner()
+    session = StructuredSession(example, planner)
+    catalogs, rows = {}, []
+    try:
+        for batch in batches:
+            runs = [p for p in batch.iterdir() if p.is_dir() and (p / "events.jsonl").is_file()]
+            if len(runs) != 1:
+                raise ValueError("one_run_per_batch")
+            kept, identity = _source_log(runs[0])
+            for episode, case in enumerate(kept[0]["cases"]):
+                suite, user = case["suite"], case["user"]
+                official = get_suite(BENCHMARK, suite)
+                prompt = official.get_user_task_by_id(user).PROMPT
+                _request, bindings = planner_request(prompt, case.get("planner_view", "request"))
+                catalog = catalogs.setdefault(suite, eval_catalog(suite))
+                for event in (e for e in kept if e["kind"] == "root_drafted" and e["episode"] == episode):
+                    row = dict(suite=suite, user=user, batch=identity["batch"], episode=episode,
+                               attempt=event["attempt"], review=None, agentd=None)
+                    try:
+                        program = parse_program_text(event["program_text"])
+                    except ProgramRefused as error:
+                        rows.append(dict(row, review="refused:" + str(error), agentd="unparsed"))
+                        continue
+                    try:
+                        review_program(suite=suite, suite_tools={t.name for t in official.tools}, task_id=user,
+                                       prompt=prompt, program=program, bindings=bindings,
+                                       extractor_model=case.get("extractor_model", "deepseek-flash"))
+                        row["review"] = "accepted"
+                    except ProgramRefused as error:
+                        row["review"] = "refused:" + str(error)
+                    try:
+                        mapper = ProgramMapper(program, catalog, source="drafted")
+                    except (StructuredError, WireError, KeyError, TypeError, ValueError) as error:
+                        rows.append(dict(row, agentd="unconvertible:" + type(error).__name__))
+                        continue
+                    result = plan_program(session, mapper, job_id=f"m4-{len(rows)}", suite=suite, user=user)
+                    rows.append(dict(row, agentd="accepted" if result["status"] == "accepted"
+                                     else "refused:" + str(result["error"])))
+    finally:
+        session.close()
+    table = {}
+    for row in rows:
+        key = ("review_accepted" if row["review"] == "accepted" else "review_refused",
+               "agentd_accepted" if row["agentd"] == "accepted" else "agentd_not_accepted")
+        table["/".join(key)] = table.get("/".join(key), 0) + 1
+    summary = dict(schema="savana-structured-m4-v1", drafts=len(rows), table=dict(sorted(table.items())),
+                   review_refusals={c: sum(r["review"] == c for r in rows)
+                                    for c in sorted({r["review"] for r in rows} - {"accepted"})},
+                   agentd_refusals={c: sum(r["agentd"] == c for r in rows)
+                                    for c in sorted({r["agentd"] for r in rows} - {"accepted"})},
+                   example_sha256=hashlib.sha256(Path(example).read_bytes()).hexdigest(), rows=rows)
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=False)
+    (output / "summary.json").write_bytes(canonical(summary) + b"\n")
+    return summary
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
     dry = sub.add_parser("phase0", help="All registered templates, null planner, real example and endpoints")
     dry.add_argument("--example", type=Path, required=True)
     dry.add_argument("--output", type=Path, required=True, help="A new directory")
+    real = sub.add_parser("phase1", help="All registered templates, DeepSeek planner (key on stdin, one line)")
+    real.add_argument("--example", type=Path, required=True)
+    real.add_argument("--output", type=Path, required=True, help="A new directory")
+    real.add_argument("--repetitions", type=int, default=3)
+    gap = sub.add_parser("coverage", help="M4: agentd validation versus the owner's review on every G12 draft")
+    gap.add_argument("--example", type=Path, required=True)
+    gap.add_argument("--output", type=Path, required=True, help="A new directory")
+    gap.add_argument("--results", type=Path, default=None)
     args = parser.parse_args()
-    result = phase0(example=args.example, output=args.output)
+    if args.command == "phase0":
+        result = phase0(example=args.example, output=args.output)
+    elif args.command == "phase1":
+        import sys
+        # The key arrives on stdin and stays in this process's memory.
+        result = phase1(example=args.example, output=args.output, api_key=sys.stdin.readline().strip(),
+                        repetitions=args.repetitions)
+    else:
+        result = coverage(example=args.example, output=args.output, results=args.results)
     print(json.dumps({k: v for k, v in result.items() if k != "rows"}, indent=2, sort_keys=True))
