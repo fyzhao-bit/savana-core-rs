@@ -599,6 +599,7 @@ impl CoreKernelRuntimeServicesV2 {
                         deployment_generation,
                     )
                     .map_err(|error| map_connector_authority_error_for_tag(73, error))?;
+                agent_authority.refresh_user_registered_tools();
                 agent_authority
                     .synchronize_executor_connector_registry(
                         active_state_manifest_digest,
@@ -656,6 +657,7 @@ impl CoreKernelRuntimeServicesV2 {
                         now,
                     )
                     .map_err(|error| map_connector_authority_error_for_tag(75, error))?;
+                agent_authority.refresh_user_registered_tools();
                 agent_authority
                     .synchronize_executor_connector_registry(
                         active_state_manifest_digest,

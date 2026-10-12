@@ -9,6 +9,7 @@ use savana_kernel_protocol::v2::{
 };
 use sha2::{Digest as _, Sha256};
 
+use super::connector_registry::{ConnectorRegistryStateV2, ConnectorTierV2};
 use super::{AttemptKindV2, EffectSetV2, G4Error, IdentifierV2};
 
 const TOOL_DESCRIPTOR_SCHEMA_VERSION: u16 = 2;
@@ -850,7 +851,12 @@ pub struct ActiveToolRecordV2 {
     registry_ordinal: u32,
     policy_activation_digest: Digest32V2,
     effective_retry_policy: BoundedConnectorRetryPolicyV2,
+    tier: ConnectorTierV2,
 }
+
+/// Registry ordinal recorded for a user-registered tool: it has no place in
+/// the deployment's signed registry.
+pub const USER_REGISTERED_TOOL_ORDINAL_V2: u32 = u32::MAX;
 
 impl ActiveToolRecordV2 {
     pub const fn descriptor(&self) -> &VerifiedToolDescriptorV2 {
@@ -867,6 +873,12 @@ impl ActiveToolRecordV2 {
 
     pub const fn effective_retry_policy(&self) -> BoundedConnectorRetryPolicyV2 {
         self.effective_retry_policy
+    }
+
+    /// Where the tool came from. Policy uses it to discriminate: a
+    /// user-registered tool always needs a per-call owner approval.
+    pub const fn tier(&self) -> ConnectorTierV2 {
+        self.tier
     }
 }
 
@@ -929,7 +941,91 @@ impl ActiveToolRegistryV2 {
                 registry_ordinal: activation.registry_ordinal,
                 policy_activation_digest: activation.policy_activation_digest,
                 effective_retry_policy,
+                tier: ConnectorTierV2::DeploymentShipped,
             });
+        }
+        Ok(Self(active))
+    }
+
+    /// The deployment's tools plus those of every active user-registered
+    /// connector in the verified chain (design R4). A user tool enters
+    /// authenticated by the chain: the owner approved its connector and the
+    /// connector-authority key signed the delta that added it, so that key is
+    /// recorded as its publisher. It must route exactly as dispatch will route
+    /// it (one descriptor, pinned connector identity, HTTPS target), it never
+    /// carries FINAL_RELEASE, it gets a single attempt, and it never shadows a
+    /// tool already active: a digest or tool class taken by a deployment tool
+    /// or by an earlier registration (chain order) leaves it inactive, so a
+    /// later registration cannot take over a class. Tools of earlier user
+    /// connectors are recomputed, not carried over, so a removed connector's
+    /// tools are gone.
+    pub fn with_user_registered(
+        &self,
+        chain: &ConnectorRegistryStateV2,
+        connector_authority_key_id: Ed25519KeyIdV2,
+    ) -> Result<Self, G4Error> {
+        if is_zero(connector_authority_key_id.as_bytes()) {
+            return Err(G4Error::InvalidDescriptor);
+        }
+        let mut active = self
+            .0
+            .iter()
+            .filter(|record| record.tier == ConnectorTierV2::DeploymentShipped)
+            .cloned()
+            .collect::<Vec<_>>();
+        for delta in chain.deltas() {
+            let Some(connector) = delta.added_descriptor() else {
+                continue;
+            };
+            if connector.tier() != ConnectorTierV2::UserRegistered
+                || !chain.contains_connector(connector.connector_id())
+                || chain.registered_connector(connector.connector_id()) != Some(connector)
+            {
+                continue;
+            }
+            for unsigned in connector.tool_descriptors() {
+                let digest = descriptor_digest_v2(unsigned)?;
+                let routed = chain
+                    .resolve_task_tool_connector(digest)
+                    .map(|c| c.connector_id());
+                if routed != Ok(connector.connector_id())
+                    || unsigned.effects().contains(EffectSetV2::FINAL_RELEASE)
+                    || active.iter().any(|record| {
+                        record.descriptor.descriptor_digest == digest
+                            || record.descriptor.unsigned.tool_class == unsigned.tool_class
+                    })
+                {
+                    continue;
+                }
+                if active.len() >= MAX_ACTIVE_TOOL_DESCRIPTORS {
+                    return Err(G4Error::DescriptorLimitExceeded);
+                }
+                let retry = unsigned.connector_retry_policy;
+                let effective_retry_policy = BoundedConnectorRetryPolicyV2::new(
+                    unsigned.idempotency_contract,
+                    1,
+                    retry.maximum_elapsed_ns,
+                )?;
+                let mut hash = Sha256::new();
+                hash.update(b"SAVANA_USER_REGISTERED_TOOL_ACTIVATION_V2\0");
+                hash.update(connector.connector_id().as_bytes());
+                hash.update(digest.as_bytes());
+                hash.update(connector_authority_key_id.as_bytes());
+                active
+                    .try_reserve(1)
+                    .map_err(|_| G4Error::AllocationFailure)?;
+                active.push(ActiveToolRecordV2 {
+                    descriptor: VerifiedToolDescriptorV2 {
+                        unsigned: unsigned.clone(),
+                        descriptor_digest: digest,
+                        publisher_key_id: connector_authority_key_id,
+                    },
+                    registry_ordinal: USER_REGISTERED_TOOL_ORDINAL_V2,
+                    policy_activation_digest: Digest32V2::new(hash.finalize().into()),
+                    effective_retry_policy,
+                    tier: ConnectorTierV2::UserRegistered,
+                });
+            }
         }
         Ok(Self(active))
     }
@@ -964,6 +1060,22 @@ impl ActiveToolRegistryV2 {
 
     pub fn records(&self) -> &[ActiveToolRecordV2] {
         &self.0
+    }
+
+    /// Test support: the same registry with one tool's tier changed, so the
+    /// kernel's tier rules can be driven through their real G4/G5 paths.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_tier_for_test(
+        mut self,
+        descriptor_digest: Digest32V2,
+        tier: ConnectorTierV2,
+    ) -> Self {
+        for record in &mut self.0 {
+            if record.descriptor.descriptor_digest == descriptor_digest {
+                record.tier = tier;
+            }
+        }
+        self
     }
 
     /// Validates the *entire* draft against this active registry at the supplied

@@ -1668,6 +1668,160 @@ mod tests {
         encode_delta(&delta).unwrap()
     }
 
+    /// A user connector whose one tool routes exactly as dispatch routes it.
+    fn routable_user_connector(
+        name: &str,
+        host: &str,
+        seed: u8,
+        with_profile: bool,
+    ) -> (ConnectorDescriptorV2, Digest32V2) {
+        use savana_kernel_protocol::v2::{
+            business_target_identity_v2, ActionCodecProfileV2, BusinessFieldRoleV2,
+            BusinessFieldTypeV2, BusinessFieldV2, BusinessMagnitudeV2, BusinessProfileV2,
+            TaskEffectV2,
+        };
+        let name = BoundedConnectorNameV2::new(name).unwrap();
+        let url = BoundedConnectorUrlV2::new(format!("https://{host}/mcp")).unwrap();
+        let transport = ConnectorTransportV2::https(url.clone(), test_digest(2)).unwrap();
+        let id = connector_id_v2(ConnectorTierV2::UserRegistered, &name, &transport).unwrap();
+        let mut tool = test_tool_for_provider(seed, id);
+        if with_profile {
+            let field = |n: &str, role| BusinessFieldV2::new(n, role, BusinessFieldTypeV2::Text);
+            let profile = BusinessProfileV2::new(
+                ActionCodecProfileV2::McpToolsCallJsonV1,
+                &format!("tool-{seed}"),
+                business_target_identity_v2(url.as_str(), test_digest(2)).unwrap(),
+                test_digest(4),
+                TaskEffectV2::Read,
+                BusinessMagnitudeV2::FixedCount(1),
+                vec![
+                    field("body", BusinessFieldRoleV2::Payload).unwrap(),
+                    field("file", BusinessFieldRoleV2::Resource).unwrap(),
+                    field("to", BusinessFieldRoleV2::Destination).unwrap(),
+                ],
+            )
+            .unwrap();
+            tool = tool.with_business_profile(profile).unwrap();
+        }
+        let digest = descriptor_digest_v2(&tool).unwrap();
+        let descriptor = ConnectorDescriptorV2::from_decoded(
+            id,
+            name,
+            ConnectorTierV2::UserRegistered,
+            transport,
+            vec![tool],
+            EffectSetV2::READ,
+            ConnectorStructuralRoleV2::Source,
+            1,
+        )
+        .unwrap();
+        (descriptor, digest)
+    }
+
+    #[test]
+    fn user_registered_tools_join_g4_tagged_once_and_leave_with_their_connector() {
+        use crate::v2::descriptor::{
+            VerifiedManifestToolConstraintSetV2, VerifiedPolicyToolSetV2, VerifiedToolRegistryV2,
+        };
+        use crate::v2::{ActiveToolRegistryV2, USER_REGISTERED_TOOL_ORDINAL_V2};
+        let authority = SigningKey::from_bytes(&[0xe1; 32]);
+        let key_id = savana_kernel_protocol::v2::derive_ed25519_key_id_v2(
+            authority.verifying_key().to_bytes(),
+        );
+        let genesis = test_digest(0xe2);
+        let hosts = vec![
+            BoundedConnectorHostV2::new("inside.example").unwrap(),
+            BoundedConnectorHostV2::new("other.example").unwrap(),
+        ];
+        let deployment = ActiveToolRegistryV2::intersect(
+            &VerifiedToolRegistryV2::from_verified_descriptors(VersionV2::new(1, 0, 0), vec![])
+                .unwrap(),
+            &VerifiedPolicyToolSetV2::new_for_test(vec![]).unwrap(),
+            &VerifiedManifestToolConstraintSetV2::new_for_test(vec![]).unwrap(),
+        )
+        .unwrap();
+        let (first, digest) = routable_user_connector("task-reader", "inside.example", 3, true);
+        let first_id = first.connector_id();
+        // The same tool class from a second connector would shadow the first.
+        let (second, shadow) = routable_user_connector("task-shadow", "other.example", 3, true);
+        let (bare, bare_digest) = routable_user_connector("task-bare", "other.example", 9, false);
+        let state_with = |connectors: Vec<ConnectorDescriptorV2>, hosts| {
+            let mut state = ConnectorRegistryStateV2::from_verified_genesis(
+                genesis,
+                authority.verifying_key().to_bytes(),
+                hosts,
+                vec![],
+            )
+            .unwrap();
+            for (index, connector) in connectors.into_iter().enumerate() {
+                let sequence = index as u64 + 1;
+                let delta = signed_add_delta(sequence, state.head_digest(), connector, &authority);
+                // Replay, as after a generation narrowed the host allowlist.
+                state.replay_canonical_delta(&delta).unwrap();
+            }
+            state
+        };
+        // Registration order decides a class clash, not identifier order.
+        let reversed = state_with(vec![second.clone(), first.clone()], hosts.clone());
+        let earlier = deployment.with_user_registered(&reversed, key_id).unwrap();
+        assert_eq!(earlier.len(), 1);
+        assert!(earlier
+            .resolve(shadow, RoleIdV2::new(1), UnixMillisV2::new(5))
+            .is_some());
+        let mut state = state_with(vec![first.clone(), second, bare], hosts.clone());
+        let composed = deployment.with_user_registered(&state, key_id).unwrap();
+        assert_eq!(
+            composed.len(),
+            1,
+            "one routable tool; no shadow, no bare tool"
+        );
+        let record = composed
+            .resolve(digest, RoleIdV2::new(1), UnixMillisV2::new(5))
+            .unwrap();
+        assert_eq!(record.tier(), ConnectorTierV2::UserRegistered);
+        assert_eq!(record.descriptor().publisher_key_id(), key_id);
+        assert_eq!(record.registry_ordinal(), USER_REGISTERED_TOOL_ORDINAL_V2);
+        assert_eq!(record.effective_retry_policy().maximum_attempts(), 1);
+        assert_ne!(record.policy_activation_digest(), test_digest(0));
+        assert!(!record
+            .descriptor()
+            .unsigned()
+            .effects()
+            .contains(EffectSetV2::FINAL_RELEASE));
+        assert!(composed
+            .resolve(shadow, RoleIdV2::new(1), UnixMillisV2::new(5))
+            .is_none());
+        assert!(composed
+            .resolve(bare_digest, RoleIdV2::new(1), UnixMillisV2::new(5))
+            .is_none());
+        // No authority key, no user tools.
+        assert!(deployment
+            .with_user_registered(
+                &state,
+                savana_kernel_protocol::v2::Ed25519KeyIdV2::new([0; 32])
+            )
+            .is_err());
+        // A host the generation no longer allows makes the connector inert.
+        let narrowed = state_with(vec![first], vec![]);
+        assert!(!narrowed.contains_connector(first_id));
+        assert!(deployment
+            .with_user_registered(&narrowed, key_id)
+            .unwrap()
+            .is_empty());
+        // Removal: recomputing, even from the composed table, drops the tool.
+        let remove = state.prepare_remove_delta(first_id, 4).unwrap();
+        let signature = authority
+            .sign(remove.signature_digest().as_bytes())
+            .to_bytes();
+        state
+            .apply_canonical_delta(remove.finalize(signature).unwrap().canonical_bytes())
+            .unwrap();
+        let after = composed.with_user_registered(&state, key_id).unwrap();
+        assert!(after
+            .resolve(digest, RoleIdV2::new(1), UnixMillisV2::new(5))
+            .is_none());
+    }
+
     #[test]
     fn strict_task_route_rechecks_profile_activity_and_signed_removal() {
         use savana_kernel_protocol::v2::{

@@ -154,7 +154,13 @@ impl TestConnectorAuthorityHarnessV2 {
         name: &str,
         tool_count: usize,
     ) -> Result<TestConnectorProposalV2, KernelConnectorAuthorityErrorV2> {
-        let descriptor = test_connector_descriptor(name, tool_count);
+        self.propose_descriptor_add(test_connector_descriptor(name, tool_count))
+    }
+
+    fn propose_descriptor_add(
+        &mut self,
+        descriptor: Vec<u8>,
+    ) -> Result<TestConnectorProposalV2, KernelConnectorAuthorityErrorV2> {
         let session = self.agent.connector_session();
         let caller_identity = self.agent.connector_caller_identity();
         let prepared = self
@@ -373,7 +379,14 @@ impl TestConnectorAuthorityHarnessV2 {
         name: &str,
         tool_count: usize,
     ) -> Result<ConnectorRegistryMutationV2, KernelConnectorAuthorityErrorV2> {
-        let proposal = self.propose_named_add(name, tool_count)?;
+        self.add_descriptor(test_connector_descriptor(name, tool_count))
+    }
+
+    fn add_descriptor(
+        &mut self,
+        descriptor: Vec<u8>,
+    ) -> Result<ConnectorRegistryMutationV2, KernelConnectorAuthorityErrorV2> {
+        let proposal = self.propose_descriptor_add(descriptor)?;
         let settlement =
             self.settlement_for(&proposal, TestConnectorSettlementMutationV2::ExactApprove)?;
         let approved = self.authorize_add(proposal.pending_handle(), &settlement)?;
@@ -645,12 +658,22 @@ impl TestConnectorAuthorityHarnessV2 {
     }
 }
 
+const TEST_CONNECTOR_URL: &str = "https://api.example.com/mcp/v2?scope=full";
+
 fn test_connector_descriptor(name: &str, tool_count: usize) -> Vec<u8> {
-    let tls_pin = Digest32V2::new(Sha256::digest(name.as_bytes()).into());
-    let url = "https://api.example.com/mcp/v2?scope=full";
     let tools = (0..tool_count)
         .map(|index| test_connector_tool(name, index))
         .collect::<Vec<_>>();
+    encode_test_connector(name, &tools)
+}
+
+fn test_connector_tls_pin(name: &str) -> Digest32V2 {
+    Digest32V2::new(Sha256::digest(name.as_bytes()).into())
+}
+
+fn test_user_connector_id(name: &str) -> Digest32V2 {
+    let tls_pin = test_connector_tls_pin(name);
+    let url = TEST_CONNECTOR_URL;
     let mut identity = minicbor::Encoder::new(Vec::new());
     identity
         .array(2)
@@ -665,13 +688,19 @@ fn test_connector_descriptor(name: &str, tool_count: usize) -> Vec<u8> {
         .unwrap()
         .bytes(tls_pin.as_bytes())
         .unwrap();
-    let connector_id = Digest32V2::new(
+    Digest32V2::new(
         Sha256::new()
             .chain_update(CONNECTOR_USER_DOMAIN)
             .chain_update(identity.into_writer())
             .finalize()
             .into(),
-    );
+    )
+}
+
+fn encode_test_connector(name: &str, tools: &[UnsignedToolDescriptorV2]) -> Vec<u8> {
+    let tls_pin = test_connector_tls_pin(name);
+    let url = TEST_CONNECTOR_URL;
+    let connector_id = test_user_connector_id(name);
     let mut descriptor = minicbor::Encoder::new(Vec::new());
     descriptor
         .array(8)
@@ -692,7 +721,7 @@ fn test_connector_descriptor(name: &str, tool_count: usize) -> Vec<u8> {
         .unwrap()
         .array(tools.len() as u64)
         .unwrap();
-    for tool in &tools {
+    for tool in tools {
         descriptor
             .writer_mut()
             .extend_from_slice(&minicbor::to_vec(tool).unwrap());
@@ -713,14 +742,57 @@ fn test_connector_descriptor(name: &str, tool_count: usize) -> Vec<u8> {
     bytes
 }
 
+/// A connector whose one tool routes exactly as dispatch routes it: its
+/// provider identity is the connector and its business profile targets the
+/// connector's pinned HTTPS identity. Returns the descriptor, the tool's
+/// digest and the connector's identifier.
+fn routable_test_connector_descriptor(name: &str) -> (Vec<u8>, Digest32V2, Digest32V2) {
+    use savana_kernel_protocol::v2::{
+        business_target_identity_v2, ActionCodecProfileV2, BusinessFieldRoleV2,
+        BusinessFieldTypeV2, BusinessFieldV2, BusinessMagnitudeV2, BusinessProfileV2, TaskEffectV2,
+    };
+    let connector_id = test_user_connector_id(name);
+    let url = savana_policy_core::v2::BoundedConnectorUrlV2::new(TEST_CONNECTOR_URL).unwrap();
+    let field = |n: &str, role| BusinessFieldV2::new(n, role, BusinessFieldTypeV2::Text).unwrap();
+    let profile = BusinessProfileV2::new(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        &format!("{name}.tool.0"),
+        business_target_identity_v2(url.as_str(), test_connector_tls_pin(name)).unwrap(),
+        Digest32V2::new([0x4d; 32]),
+        TaskEffectV2::Read,
+        BusinessMagnitudeV2::FixedCount(1),
+        vec![
+            field("body", BusinessFieldRoleV2::Payload),
+            field("file", BusinessFieldRoleV2::Resource),
+            field("to", BusinessFieldRoleV2::Destination),
+        ],
+    )
+    .unwrap();
+    let tool = test_connector_tool_for_provider(name, 0, connector_id)
+        .with_business_profile(profile)
+        .unwrap();
+    let digest = savana_policy_core::v2::descriptor_digest_v2(&tool).unwrap();
+    (encode_test_connector(name, &[tool]), digest, connector_id)
+}
+
 fn test_connector_tool(name: &str, index: usize) -> UnsignedToolDescriptorV2 {
+    let seed = Sha256::digest(format!("{name}:{index}").as_bytes());
+    let byte = (seed[0] % 190).saturating_add(1);
+    test_connector_tool_for_provider(name, index, Digest32V2::new([byte; 32]))
+}
+
+fn test_connector_tool_for_provider(
+    name: &str,
+    index: usize,
+    provider: Digest32V2,
+) -> UnsignedToolDescriptorV2 {
     let seed = Sha256::digest(format!("{name}:{index}").as_bytes());
     let byte = (seed[0] % 190).saturating_add(1);
     let contract = ExecutorIdempotencyContractV2::ConnectorIdempotentByExecutionNonce;
     UnsignedToolDescriptorV2::from_verified_manifest(
         2,
         VersionV2::new(1, 0, 0),
-        Digest32V2::new([byte; 32]),
+        provider,
         IdentifierV2::new(format!("{name}.tool.{index}")).unwrap(),
         ActionTemplateIdV2::new(u32::from(byte) + 1),
         ToolClassIdV2::new(u32::from(byte) + 2),
@@ -1178,4 +1250,40 @@ fn maximum_registry_snapshot_is_a_compact_browser_projection() {
         .as_bytes()
         .windows(b"large-projection-connector-15".len())
         .any(|window| window == b"large-projection-connector-15"));
+}
+
+#[test]
+fn approved_user_connector_tools_join_g4_and_leave_on_removal() {
+    let mut harness = TestConnectorAuthorityHarnessV2::enabled();
+    let now = UnixMillisV2::new(206);
+    let before = harness.agent.active_tool_count();
+    // A tool that would not route (foreign provider identity, no business
+    // profile) never becomes proposable, whatever the approval said.
+    harness.add_named_connector("mail", 1).unwrap();
+    harness
+        .agent
+        .connector_agent()
+        .refresh_user_registered_tools();
+    assert_eq!(harness.agent.active_tool_count(), before);
+    let (descriptor, tool, connector_id) = routable_test_connector_descriptor("billing");
+    assert_eq!(harness.agent.active_tool_tier(tool, now), None);
+    harness.add_descriptor(descriptor).unwrap();
+    // The core service refreshes G4 after every approved add or removal.
+    harness
+        .agent
+        .connector_agent()
+        .refresh_user_registered_tools();
+    assert_eq!(
+        harness.agent.active_tool_tier(tool, now),
+        Some(ConnectorTierV2::UserRegistered)
+    );
+    assert_eq!(harness.agent.active_tool_count(), before + 1);
+    let authorization = harness.prepare_remove(connector_id).unwrap();
+    harness.remove(connector_id, authorization).unwrap();
+    harness
+        .agent
+        .connector_agent()
+        .refresh_user_registered_tools();
+    assert_eq!(harness.agent.active_tool_tier(tool, now), None);
+    assert_eq!(harness.agent.active_tool_count(), before);
 }

@@ -298,6 +298,7 @@ pub use descriptor::{
     UnsignedToolDescriptorV2, VerifiedManifestToolConstraintSetV2,
     VerifiedManifestToolConstraintV2, VerifiedPolicyToolActivationV2, VerifiedPolicyToolSetV2,
     VerifiedRegistryPublisherV2, VerifiedToolDescriptorV2, VerifiedToolRegistryV2,
+    USER_REGISTERED_TOOL_ORDINAL_V2,
 };
 pub use digest::{
     evidence_digest_v2, token_set_digest_v2, EvidenceDigestEntryV2, TokenSetDigestEntryV2,

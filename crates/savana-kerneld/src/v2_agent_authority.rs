@@ -1005,7 +1005,11 @@ pub(crate) struct KernelG4G5RuntimeV2 {
     fused_recovery_not_before: u64,
     fused_cleanup_confirmed: std::collections::BTreeSet<[u8; 32]>,
     declassification_rules: ActiveDeclassificationRuleSetV2,
+    /// What G4 resolves: the deployment's tools plus those of active
+    /// user-registered connectors, recomputed whenever the chain changes.
     active_tools: ActiveToolRegistryV2,
+    /// The deployment's own signed tools, the base of every recomputation.
+    deployment_tools: ActiveToolRegistryV2,
     validators: VerifiedInternalValidatorRegistryV2,
     durable: DurableG4StateV2,
     role: RoleIdV2,
@@ -1366,6 +1370,7 @@ impl KernelG4G5RuntimeV2 {
             fused_recovery_not_before: 0,
             fused_cleanup_confirmed: std::collections::BTreeSet::new(),
             declassification_rules,
+            deployment_tools: active_tools.clone(),
             active_tools,
             validators,
             durable,
@@ -1375,6 +1380,31 @@ impl KernelG4G5RuntimeV2 {
             approval,
             g7: None,
         })
+    }
+
+    /// Recompute G4's tools from the deployment's and the current connector
+    /// chain (design R4). Without a connector authority key, or if the chain
+    /// cannot be read or composed, only the deployment's tools stay active:
+    /// a user tool is never kept active on stale or unreadable state.
+    pub(crate) fn refresh_user_registered_tools(&mut self) {
+        let composed = self.g7.as_ref().and_then(|g7| {
+            if g7.connector_authority_key_id.as_bytes() == &[0; 32] {
+                return None;
+            }
+            let chain = g7.connector_registry.snapshot().ok()?;
+            self.deployment_tools
+                .with_user_registered(&chain, g7.connector_authority_key_id)
+                .ok()
+        });
+        self.active_tools = composed.unwrap_or_else(|| self.deployment_tools.clone());
+    }
+
+    /// Tests that swap the deployment's signed tools swap the base too, so a
+    /// later recomputation keeps them.
+    #[cfg(test)]
+    pub(crate) fn replace_deployment_tools_for_test(&mut self, tools: ActiveToolRegistryV2) {
+        self.deployment_tools = tools;
+        self.refresh_user_registered_tools();
     }
 
     pub(crate) fn install_fused_workers_v04(
@@ -1406,6 +1436,7 @@ impl KernelG4G5RuntimeV2 {
             return Err(KernelAgentAuthorityErrorV2::StateConflict);
         }
         self.g7 = Some(g7);
+        self.refresh_user_registered_tools();
         Ok(())
     }
 }
@@ -4574,6 +4605,13 @@ impl KernelAgentAuthorityV2 {
             intent.durable_task_id,
         )
         .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+        // A user-registered tool's every call needs the owner's approval,
+        // whatever the deployment's disposition (design R4, tier table).
+        let disposition = if active.tier() == ConnectorTierV2::UserRegistered {
+            VerifiedPolicyDispositionV2::require_approval_from_verified_policy()
+        } else {
+            policy.disposition
+        };
         let resolution = policy
             .durable
             .evaluate_verified_g5(
@@ -4581,7 +4619,7 @@ impl KernelAgentAuthorityV2 {
                 intent.action_intent_id,
                 &stored,
                 ontology,
-                policy.disposition,
+                disposition,
             )
             .map_err(|_| KernelAgentAuthorityErrorV2::StateConflict)?;
         let trace_digest = resolution.trace().decision_record_digest();
@@ -8011,6 +8049,14 @@ impl KernelAgentAuthorityV2 {
         })
     }
 
+    /// After an approved add or a removal changed the chain: G4 first, so a
+    /// removed connector's tools stop resolving before anything else runs.
+    pub(crate) fn refresh_user_registered_tools(&mut self) {
+        if let Some(policy) = self.policy.as_mut() {
+            policy.refresh_user_registered_tools();
+        }
+    }
+
     pub(crate) fn synchronize_executor_connector_registry(
         &self,
         active_state_manifest_digest: Digest32V2,
@@ -9507,6 +9553,27 @@ pub(crate) mod tests {
 
         pub(crate) fn connector_agent(&mut self) -> &mut KernelAgentAuthorityV2 {
             &mut self.authority
+        }
+
+        /// The tier of an active G4 tool, if the digest resolves for role 1.
+        pub(crate) fn active_tool_tier(
+            &self,
+            descriptor_digest: Digest32V2,
+            now: UnixMillisV2,
+        ) -> Option<ConnectorTierV2> {
+            self.authority
+                .policy
+                .as_ref()?
+                .active_tools
+                .resolve(descriptor_digest, RoleIdV2::new(1), now)
+                .map(|record| record.tier())
+        }
+
+        pub(crate) fn active_tool_count(&self) -> usize {
+            self.authority
+                .policy
+                .as_ref()
+                .map_or(0, |policy| policy.active_tools.len())
         }
 
         pub(crate) fn connector_session(&self) -> AgentSessionHandleV2 {
@@ -12436,7 +12503,11 @@ pub(crate) mod tests {
         use super::*;
         use savana_kernel_protocol::v2::*;
         let mut f = planner_authority_fixture_with_task(true, false);
-        f.authority.policy.as_mut().unwrap().active_tools = planner_active_tools_with_release(true);
+        f.authority
+            .policy
+            .as_mut()
+            .unwrap()
+            .replace_deployment_tools_for_test(planner_active_tools_with_release(true));
         let s = &f.authority.sessions[0];
         let (input_owner, input_session, actual_source) =
             crate::v2_input_owner::tests::finalized_input_for_authority_fixture(
@@ -13259,8 +13330,13 @@ pub(crate) mod tests {
         use savana_kernel_protocol::v2::{BusinessControlsV2, BusinessValueV2};
         let mut f = planner_authority_fixture_with_task(true, false);
         if release {
-            f.authority.policy.as_mut().unwrap().active_tools =
-                planner_active_tools_with_release_mode(true, true);
+            f.authority
+                .policy
+                .as_mut()
+                .unwrap()
+                .replace_deployment_tools_for_test(planner_active_tools_with_release_mode(
+                    true, true,
+                ));
         }
         let s = &f.authority.sessions[0];
         let active = f
@@ -13877,6 +13953,72 @@ pub(crate) mod tests {
             !matches!(evaluated, EvaluateToolCallResponseV2::Allowed { .. }),
             "planner output must not reach a SEND without approval"
         );
+    }
+
+    #[test]
+    fn a_user_registered_tool_needs_the_owners_approval_for_every_call() {
+        // The same owner-signed call: allowed for the deployment's tool under
+        // the fixture's permit disposition, held for approval once that tool
+        // is user-registered (design R4).
+        for user_registered in [false, true] {
+            let (mut f, request) = business_proposal_fixture("A", "Alice");
+            if user_registered {
+                let policy = f.authority.policy.as_mut().unwrap();
+                let digest = policy
+                    .active_tools
+                    .resolve_class(
+                        ToolClassIdV2::new(31),
+                        RoleIdV2::new(1),
+                        UnixMillisV2::new(202),
+                    )
+                    .unwrap()
+                    .descriptor()
+                    .descriptor_digest();
+                policy.active_tools = policy
+                    .active_tools
+                    .clone()
+                    .with_tier_for_test(digest, ConnectorTierV2::UserRegistered);
+            }
+            let proposed = f
+                .authority
+                .propose_tool_call(
+                    RequestIdV2::new([0xc7; 16]),
+                    b"authenticated proposal",
+                    &request,
+                    &f.values,
+                    f.caller_identity,
+                    Digest32V2::new([0x85; 32]),
+                    7,
+                    UnixMillisV2::new(202),
+                )
+                .unwrap();
+            let ActionIntentCurrentStateV2::Proposed { pending } = proposed.current() else {
+                panic!("proposed")
+            };
+            let evaluated = f
+                .authority
+                .evaluate_tool_call(
+                    EvaluateToolCallRequestV2::new(pending),
+                    &f.values,
+                    f.caller_identity,
+                    Digest32V2::new([0x85; 32]),
+                    7,
+                    UnixMillisV2::new(203),
+                )
+                .unwrap();
+            if user_registered {
+                assert!(matches!(
+                    evaluated,
+                    EvaluateToolCallResponseV2::NeedsApproval { .. }
+                ));
+                assert!(f.authority.execution_tickets.is_empty());
+            } else {
+                assert!(matches!(
+                    evaluated,
+                    EvaluateToolCallResponseV2::Allowed { .. }
+                ));
+            }
+        }
     }
 
     #[test]
