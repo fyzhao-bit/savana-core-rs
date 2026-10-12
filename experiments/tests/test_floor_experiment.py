@@ -17,13 +17,14 @@ def text(value):
     return {"text": value}
 
 
-# Paying a bill takes the recipient from the bill itself.
+# Paying a bill takes the recipient (and the amount, subject and date) from the bill itself.
 PAY_BILL = {"steps": [
     {"tool": "dojo.bank.read_file", "args": {"file_path": text("bill-december-2023.txt")}},
-    {"tool": EXTRACT_TOOL, "source": 1, "args": {"instruction": text("pay the bill"),
-                                               "target": text("dojo.bank.send_money.recipient")}},
-    {"tool": "dojo.bank.send_money", "args": {"recipient": {"from": 2}, "amount": {"from": 2},
-                                              "subject": {"from": 2}, "date": {"from": 2}}}]}
+    *({"tool": EXTRACT_TOOL, "source": 1, "args": {"instruction": text("pay the bill"),
+                                                 "target": text(f"dojo.bank.send_money.{field}")}}
+      for field in ("recipient", "amount", "subject", "date")),
+    {"tool": "dojo.bank.send_money", "args": {"recipient": {"from": 2}, "amount": {"from": 3},
+                                              "subject": {"from": 4}, "date": {"from": 5}}}]}
 # The article's address comes from a channel message.
 FETCH_FROM_MESSAGE = {"steps": [
     {"tool": "dojo.slack.read_channel", "args": {"channel": text("general")}},
@@ -47,7 +48,7 @@ class DerivedDestinationReviewTests(unittest.TestCase):
 
     def test_an_owner_who_signs_derived_destinations_accepts_them_and_nothing_else(self):
         bill = review("banking", "user_task_0", PAY_BILL, derived_destinations=True)
-        self.assertEqual(_chosen_by_data(bill.steps()[2]), ["recipient"])
+        self.assertEqual(_chosen_by_data(bill.steps()[5]), ["recipient"])
         self.assertEqual(_chosen_by_data(bill.steps()[0]), [])
         fetch = review("slack", "user_task_1", FETCH_FROM_MESSAGE, derived_destinations=True)
         self.assertEqual(_chosen_by_data(fetch.steps()[2]), ["url"])
@@ -117,28 +118,25 @@ class StrictOwnerTests(unittest.TestCase):
         consent = FiniteConsent(contract, "ab" * 32, lambda kind, **kw: events.append((kind, kw)),
                                 strict_destinations=True)
         consent.stage = "tool_execution"
-        consent.action = 2
+        consent.action = 5
         consent.task, consent.authorization = "cd" * 32, "ef" * 32
-        consent.clauses = [dict(clause_id=n, alternatives=[dict(descriptor_digest=str(n) * 64)]) for n in (1, 2, 3, 4)]
+        consent.clauses = [dict(clause_id=n, alternatives=[dict(descriptor_digest=str(n) * 64)]) for n in range(1, 8)]
         consent.profiles = {str(n) * 64: dict(operation=step.tool) for n, step in enumerate(contract.steps(), 1)}
         display = dict(rendering_schema=2, authorization_id="ef" * 32, authorization_revision=1, task="cd" * 32,
-                       principal="ab" * 32, clause_id=3, alternative_index=0, descriptor_digest="3" * 64,
+                       principal="ab" * 32, clause_id=6, alternative_index=0, descriptor_digest="6" * 64,
                        operation="dojo.bank.send_money", effect="Send", magnitude=1, attempts_used=0,
                        attempts_after_prepare=1, maximum_attempts=1, magnitude_charged=0, magnitude_after_prepare=1,
                        maximum_single_magnitude=1, total_magnitude_budget=1,
-                       requires_verified_success_of_clauses=[1, 2], no_effect_magnitude_refund_permitted=False,
-                       exact_business_request={})
+                       requires_verified_success_of_clauses=[1, 2, 3, 4, 5],
+                       no_effect_magnitude_refund_permitted=False, exact_business_request={})
         with self.assertRaises(ValueError) as caught:
             consent(SimpleNamespace(purpose="tool_execution", display=json.dumps(display)))
         self.assertEqual(str(caught.exception), "consent_derived_destination")
         self.assertEqual(events[-1][1]["decision"], "refuse")
         self.assertEqual(events[-1][1]["reason"], "consent_derived_destination")
-        self.assertEqual(events[-1][1]["clause"], 3)
+        self.assertEqual(events[-1][1]["clause"], 6)
         self.assertEqual(events[-1][1]["policy"], "finite_write_preconsent_v1+strict_destination")
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class FixedProgramTests(unittest.TestCase):
@@ -165,3 +163,7 @@ class FixedProgramTests(unittest.TestCase):
                      "drafted+author=human:slack:user_task_1"):
             with self.assertRaises(ValueError):
                 experiment_cases(spec)
+
+
+if __name__ == "__main__":
+    unittest.main()

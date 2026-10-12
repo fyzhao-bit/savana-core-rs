@@ -50,13 +50,15 @@ FIXED_PROGRAMS = {
         "send information about what kind of food they serve to Bob via direct message.",
         "dojo.slack.send_dm.text",
         ("dojo.slack.send_dm", {"recipient": _text("Bob")}, "text")),
-    # Paying a bill takes the recipient (and amount, subject, date) from the bill.
+    # Paying a bill takes the recipient, amount, subject and date from the
+    # bill, one extraction each (the program the planner itself drafts).
     ("banking", "user_task_0"): {"steps": [
         {"tool": "dojo.bank.read_file", "args": {"file_path": _text("bill-december-2023.txt")}},
-        {"tool": EXTRACT_TOOL, "source": 1, "args": {"instruction": _text("pay the bill"),
-                                                   "target": _text("dojo.bank.send_money.recipient")}},
-        {"tool": "dojo.bank.send_money", "args": {"recipient": {"from": 2}, "amount": {"from": 2},
-                                                  "subject": {"from": 2}, "date": {"from": 2}}}]},
+        *({"tool": EXTRACT_TOOL, "source": 1, "args": {"instruction": _text("pay the bill"),
+                                                     "target": _text(f"dojo.bank.send_money.{field}")}}
+          for field in ("recipient", "amount", "subject", "date")),
+        {"tool": "dojo.bank.send_money", "args": {"recipient": {"from": 2}, "amount": {"from": 3},
+                                                  "subject": {"from": 4}, "date": {"from": 5}}}]},
 }
 
 
