@@ -1339,6 +1339,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "savana-residual-contract"
+version = "0.1.0"
+
+[[package]]
 name = "savana-vault"
 version = "0.1.0"
 dependencies = [

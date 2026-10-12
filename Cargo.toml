@@ -16,6 +16,7 @@ members = [
   "crates/savana-openclaw-release",
   "crates/savana-policy-core",
   "crates/savana-private-workflow",
+  "crates/savana-residual-contract",
   "crates/savana-platform-identity",
   "crates/savana-vault",
 ]
