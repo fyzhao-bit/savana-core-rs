@@ -13,7 +13,9 @@ whose offline verification passed are counted:
 * U8 (`u8f`): the same options with U3 (multi-field extraction), U4 (`mode`),
   ten steps and the kernel's masking fix (`u8` is its first two batches,
   stopped when they showed planners naming a multi-field extraction's
-  field by its target label, which the review then refused);
+  field by its target label, which the review then refused). The same
+  contention rule applies: `u8r` reruns the batch above 5 s and replaces it,
+  and `U8_first` keeps the original;
 * U7 (`u7d`, `u7s`): under the Permit disposition, where the kernel asks the
   owner only when G5 escalates, the tasks whose U12 or U8 program had a step
   whose address data chose (`trusted_set_sample`), with the directory owner
@@ -55,9 +57,10 @@ import statistics
 from analysis.floor_experiment import episode_row, episodes as by_episode
 from analysis.structured_planning import _events, batches
 
-ARMS = dict(G12=("g12k",), D=("f5d",), U12=("u12c", "u12r"), U12_first=("u12c",), U8=("u8f",))
+ARMS = dict(G12=("g12k",), D=("f5d",), U12=("u12c", "u12r"), U12_first=("u12c",), U8=("u8f", "u8r"),
+            U8_first=("u8f",))
 # A batch whose measurement a rerun replaces (see the docstring).
-SUPERSEDED = {"U12": {"u12c-slack-2", "u12c-travel-0"}}
+SUPERSEDED = {"U12": {"u12c-slack-2", "u12c-travel-0"}, "U8": {"u8f-slack-2"}}
 ATTACK = "u8x"
 # U7 runs under Permit on a sample of tasks, not all 97 (see the docstring).
 TRUSTED_SET_ARMS = dict(U7_directory=("u7d",), U7_set=("u7s",))
@@ -272,14 +275,15 @@ def attack_summary(rows, baseline=()):
                               success=sum(b.get("observed_attacker_success") is True for b in before)))
 
 
-def attack_sample(results, prefix="u8f"):
+def attack_sample(results, arm="U8"):
     """The tasks of a benign arm whose signed program had a step whose address
     data chose, each crossed with every injection task of its suite (AutoDojo's
     for banking, slack and travel; the official ones for workspace), as plan
     lines of at most nine cases: `<suite> <items>`."""
     from agentdojo.task_suite.load_suites import get_suite
     from savana_bench.agentdojo_tasks import BENCHMARK
-    chosen = sorted({_task(r) for r in episodes(results, prefix) if r["data_chosen_steps"]},
+    chosen = sorted({_task(r) for r in episodes(results, ARMS[arm], SUPERSEDED.get(arm, ()))
+                     if r["data_chosen_steps"]},
                     key=lambda t: (SUITES.index(t[0]), int(t[1].rsplit("_", 1)[1])))
     lines = []
     for suite in SUITES:
@@ -347,7 +351,8 @@ def report(results):
     arms = {arm: episodes(results, prefixes, SUPERSEDED.get(arm, ())) for arm, prefixes in ARMS.items()}
     out = dict(arms={arm: benign_summary(rows) for arm, rows in arms.items() if rows})
     out["flips"] = {f"{new}_vs_{old}": flips(arms[new], arms[old])
-                    for new, old in (("U12", "G12"), ("U12", "D"), ("U8", "G12"), ("U8", "D"), ("U8", "U12"))
+                    for new, old in (("U12", "G12"), ("U12", "D"), ("U8", "G12"), ("U8", "D"), ("U8", "U12"),
+                                     ("U8", "U8_first"))
                     if arms[new] and arms[old]}
     out["timeline"] = {arm: timeline(results, prefixes, SUPERSEDED.get(arm, ()))
                        for arm, prefixes in ARMS.items() if arms[arm]}
