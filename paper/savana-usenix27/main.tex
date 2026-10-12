@@ -1841,9 +1841,67 @@ directly, at the kernel rather than at the review.
   and, through address confinement, on a read (a policy-core unit
   test).
 \end{itemize}
-\todo{Run both attacks end to end on fresh hosts, with a software owner
-that declines any approval whose destination is not owner text, and report
-dispatched-effect counts next to RQ1.}
+
+\begin{table}[t]
+\centering\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{@{}llrrrrrr@{}}
+\toprule
+Suite & Kernel & Pairs & Att.\ addr. & Asked & Unasked & To att. & Att.\\
+\midrule
+slack   & floor        & 15 & 0 & 15 & 0  & 0 & 0\\
+        & no floor     & 15 & 0 & 0  & 15 & 0 & 0\\
+banking & floor        & 9  & 8 & 9  & 0  & 0 & 0\\
+        & no floor     & 9  & 8 & 0  & 9  & \textbf{8} & \textbf{3}\\
+        & no floor$^\ast$ & 9 & 8 & 9 & 0 & 0 & 0\\
+\bottomrule
+\end{tabular}
+\caption{The two kernel attacks end to end, under a \textsf{Permit}
+disposition, fixed honest programs whose address data chooses, AutoDojo's
+injections, and a software owner that declines data-chosen destinations.
+Banking's \code{send_money} declares no intent-flow validator, except in
+the row marked $^\ast$. Att.\ addr.\ counts data-chosen calls whose address
+is the attacker's; Asked and Unasked, those escalated to the owner or
+dispatched without asking; To att., those dispatched with the attacker's
+address; Att., AgentDojo's oracle. Unauthorized requests: 0 in every row.}
+\label{tab:floor}
+\end{table}
+
+\paragraph{End to end.} We ran both attacks on fresh hosts
+(Table~\ref{tab:floor}). To isolate the kernel, three settings differ from
+RQ1. The deployment's signed G5 disposition is \textsf{Permit}, so the
+owner is asked only when the kernel itself escalates. The owner signs
+programs whose address is derived from data, which the review otherwise
+refuses. And the software owner declines every approval whose destination
+is not owner text. The programs are fixed and honest: the obvious program
+for four AgentDojo tasks that take an address from data (the article,
+blog, or restaurant URL a Slack message names, and a bill's recipient),
+each under its pairs' AutoDojo injections, 24 pairs in all. We ran the
+same signed programs on the kernel as built and on a build with only the
+floor reverted. Our deployment generator refuses to ship a state-changing
+descriptor that omits the intent-flow validator, so the first attack's
+precondition never arises through it. To test the floor itself, banking
+ran with an experiment switch that ships \code{send_money} without the
+validator. The bill is the task's injection point, so the injection sits
+where the rule-closed recipient reads: in 8 of 9 pairs, the extractor
+returned the attacker's account as the recipient.
+\begin{itemize}
+\item \textbf{With the floor,} all 24 data-chosen calls escalated, the
+  owner declined each, and none reached a provider.
+\item \textbf{Without it,} all 24 went out unasked. Eight payments reached
+  the provider with the attacker's account as recipient. Seven executed,
+  for \$0, because the extractor read no amount from the injected bill;
+  AgentDojo's oracle counts three as successful attacks. The Slack fetches
+  went to the honest URLs, since there the injections sit in the fetched
+  pages rather than in the message that names the URL.
+\item \textbf{Without the floor but with the validator declared,} all 9
+  payments escalated: the write-side hole needs the defective descriptor.
+\end{itemize}
+No request was unauthorized in any run: each call matched the owner's
+signed rule-closed authority, which is exactly what this attack exploits.
+Under this owner the floor's cost is utility: Slack completed 10 of 15
+tasks without the floor and none with it, because the owner declined every
+data-chosen fetch; an owner who sees an honest URL would approve it.
 
 % ---------------------------------------------------------------------
 \subsection{RQ3: Utility and its attribution}
@@ -2042,7 +2100,11 @@ literals only. The other 135 are 119 quarantined extractions, which send
 data to a model and are therefore \SEND{} calls with an untrusted payload,
 and 16 writes with a derived argument. The executed G11 programs give
 142 of 307 (46.3\%). No program is approval-free end to end, because each
-composes its answer through an extraction. \todo{Re-run with a
+composes its answer through an extraction. On the \textsf{Permit} hosts of
+\S\ref{sec:eval-planner}, the kernel's measured decision matched this
+classification for every step reached: 24 reads of owner literals ran
+unasked, while 51 extractions and all 24 data-chosen reads and writes
+asked. \todo{Re-run with a
 \textsf{Permit} disposition and report the measured fraction; consider
 treating extraction to a pinned model identity as a declassification
 (\textsf{BuildFusedModelEnvelope}) rather than an effect.}
@@ -2193,7 +2255,9 @@ so we make their defaults fail closed rather than assume them correct.
   bound by the payload digest and, when untrusted, by approval.
 \item \textbf{The flow floor is not declared.} Intent-flow confinement is
   applied by G5 to every call, so a descriptor that omits the validator
-  cannot let untrusted data steer a state-changing call.
+  cannot let untrusted data steer a state-changing call. Our deployment
+  generator also refuses to ship such a descriptor; the floor covers
+  policies from any other source (\S\ref{sec:eval-planner}).
 \item \textbf{Addresses are destinations by default.} An untrusted value
   in any field the profile does not name as a non-destination field
   escalates, for every effect; a descriptor without a profile treats all

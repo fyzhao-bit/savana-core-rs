@@ -9,7 +9,7 @@ The earlier "task authority / private continuations" working paper in
 
 **This is not submission-ready.** It is 24 pages with the fallback style, and
 the body runs to page 19 against a 13-page limit. G12 is filled in (41/97,
-`experiments/AGENTDOJO-G12-20261007.zh-CN.md`), and eleven `\todo{}` markers remain (`grep -n todo main.tex`).
+`experiments/AGENTDOJO-G12-20261007.zh-CN.md`), and ten `\todo{}` markers remain (`grep -n todo main.tex`).
 
 ## Revision 1 (2026-10-07): reviewer design holes
 
@@ -82,11 +82,12 @@ gitignored and kept only in the experiment container. The reports are:
 
 | Section | Source reports |
 | --- | --- |
-| RQ1 injection matrix | `experiments/AGENTDOJO-INJECTION-MATRIX-20261003.zh-CN.md` |
-| RQ2 compromised planner | `experiments/AGENTDOJO-POISONED-PLANNER-20261003.zh-CN.md`, `…-CAMEL-20261004.zh-CN.md`, `docs/research/threat-model-tcb.md` (offline sweep) |
+| RQ1 injection matrix | `experiments/AGENTDOJO-INJECTION-MATRIX-20261003.zh-CN.md`; adaptive injections: `AGENTDOJO-AUTODOJO-{BASE-20261007,SAVANA-20261008,CAMEL-20261011}.zh-CN.md` |
+| RQ2 compromised planner | `experiments/AGENTDOJO-POISONED-PLANNER-20261003.zh-CN.md`, `…-CAMEL-20261004.zh-CN.md`, `AGENTDOJO-AUTODOJO-POLLUTED-PLANNER-20261008.zh-CN.md`, `docs/research/threat-model-tcb.md` (offline sweep); kernel attacks end to end (Table 10): `KERNEL-FLOOR-END-TO-END-20261012.zh-CN.md` |
 | RQ3 utility | `experiments/AGENTDOJO-RETRY-MODEL-20261003.zh-CN.md`, `AGENTDOJO-G11-20261003.zh-CN.md`, `CAMEL-V4PRO-20261005.zh-CN.md` |
 | RQ4 privacy | `experiments/PRIVACY-VALUE-BLIND-20261003.zh-CN.md`, `PRIVACY-EXTRACTOR-20261003.zh-CN.md` |
-| RQ5 cost | `experiments/KERNEL-PERF-20261001.zh-CN.md`, plus per-step timing measured from the evidence timestamps of the G11 and G12-smoke runs |
+| RQ5 cost | `experiments/KERNEL-PERF-20261001.zh-CN.md`, plus per-step timing measured from the evidence timestamps of the G11 and G12-smoke runs; mediation latency: `KERNEL-CRASH-LATENCY-20261011.zh-CN.md` |
+| RQ6 crash consistency | `experiments/KERNEL-CRASH-LATENCY-20261011.zh-CN.md` |
 
 ## Open items before submission
 
