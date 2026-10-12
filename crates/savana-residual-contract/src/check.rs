@@ -16,15 +16,16 @@
 //! binding instead and shows why this matters (§8.4).
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::full::{full_check, FullReport, Proposal};
+use crate::full::{full_check, full_check_from, FullReport, PreCut, Proposal};
 use crate::model::{
-    compile, disclosure_witness, explore, merge_next, run_success, Cond, Ctx, EnvMode, NextMap,
-    Phase, Program, Rt, Stmt, Sys, Var, Violation, World,
+    compile, disclosure_witness, explore, explore_many, merge_next, run_success, Cond, Ctx,
+    EnvMode, FastMap, NextMap, Phase, Program, Root, Rt, Stmt, Sys, Var, Violation, World,
 };
 use crate::residual::{
-    bind, rebuild, AState, LocalResidualBinding, SymbolicResidualContract, VarKind,
+    bind, project, rebuild, AState, Interface, LocalResidualBinding, SymbolicResidualContract,
+    VarKind,
 };
 
 pub const CHECK_LIMIT: usize = 200_000;
@@ -88,6 +89,11 @@ impl CheckConfig {
 /// ops, slots and historical variables; every effect is an `Attempt` and so
 /// goes through `try_reserve`; variables are used at their declared kinds.
 pub fn k2_static(contract: &SymbolicResidualContract, cand: &Program) -> Result<(), String> {
+    k2_static_in(&contract.meta.root, &contract.meta.interface, cand)
+}
+
+/// K2 static check against an explicit root and interface.
+pub fn k2_static_in(root: &Root, iface: &Interface, cand: &Program) -> Result<(), String> {
     fn define(kinds: &mut BTreeMap<Var, VarKind>, v: Var, k: VarKind) -> Result<(), String> {
         if v.ix() >= crate::model::MAX_VARS {
             return Err(format!("variable {} out of range", v.0));
@@ -98,14 +104,13 @@ pub fn k2_static(contract: &SymbolicResidualContract, cand: &Program) -> Result<
         }
     }
     fn walk(
-        c: &SymbolicResidualContract,
+        c: (&Root, &Interface),
         stmts: &[Stmt],
         kinds: &mut BTreeMap<Var, VarKind>,
         items: &BTreeSet<Var>,
         loops: &mut usize,
     ) -> Result<(), String> {
-        let root = &c.meta.root;
-        let iface = &c.meta.interface;
+        let (root, iface) = c;
         let kind = |kinds: &BTreeMap<Var, VarKind>, v: Var| kinds.get(&v).copied();
         for s in stmts {
             match s {
@@ -187,9 +192,15 @@ pub fn k2_static(contract: &SymbolicResidualContract, cand: &Program) -> Result<
         }
         Ok(())
     }
-    let mut kinds = contract.meta.interface.vars.clone();
+    let mut kinds = iface.vars.clone();
     let mut loops = 0;
-    walk(contract, cand, &mut kinds, &BTreeSet::new(), &mut loops)
+    walk(
+        (root, iface),
+        cand,
+        &mut kinds,
+        &BTreeSet::new(),
+        &mut loops,
+    )
 }
 
 /// Public result of K2–K6 for one candidate against one contract.
@@ -247,100 +258,137 @@ pub fn prepare(cfg: &CheckConfig, contract: &SymbolicResidualContract, cand: &Pr
     };
     let prefix = &contract.meta.prefix;
     let goals = &contract.closure.goals;
-    let mut maps: Vec<(AState, NextMap)> = Vec::new();
-    let mut failures: BTreeMap<K, String> = BTreeMap::new();
-    let mut unknown: Option<String> = None;
-    for a in &contract.relational.states {
-        let start = a.to_sys(prefix, Phase::New, 0);
-        let ex = explore(&ctx, start.clone(), CHECK_LIMIT, false);
-        out.states_explored += ex.states;
-        let mut verdict = Verdict::Accept;
-        if ex.truncated {
-            unknown = Some("local exploration truncated".into());
-            verdict = Verdict::Unknown("local exploration truncated".into());
-        }
-        for v in &ex.violations {
-            let k = classify(*v);
-            if cfg.on(k) && verdict.accepted() {
-                verdict = Verdict::Reject(k, format!("{v:?} from a state of S"));
-            }
-        }
-        if verdict.accepted() && cfg.on(K::K6) {
-            let end = run_success(&ctx, start);
-            let old_goals = &contract.relational.old_goals[a];
-            for (i, g) in goals.iter().enumerate() {
-                if old_goals[i] && end.truth.successes(g.dom) < g.count {
-                    verdict = Verdict::Reject(
-                        K::K6,
-                        format!("goal {g:?} reached by the old remainder but not by the candidate"),
-                    );
-                    break;
-                }
-            }
-        }
-        if let Verdict::Reject(k, why) = &verdict {
-            failures.entry(*k).or_insert_with(|| why.clone());
-        }
-        out.per_state.insert(a.clone(), verdict);
-        maps.push((a.clone(), ex.next));
-    }
-    let k4_leak = |subset: &dyn Fn(&AState) -> bool| -> Option<String> {
-        let mut per_world: BTreeMap<World, NextMap> = BTreeMap::new();
-        for (a, m) in &maps {
-            if subset(a) {
-                merge_next(per_world.entry(a.world).or_default(), m);
-            }
-        }
-        let v: Vec<(World, NextMap)> = per_world.into_iter().collect();
-        disclosure_witness(&v).map(|(p, x, y)| format!("after {p:?}: {x:?} vs {y:?}"))
+    let k6_fails = |a: &AState| -> Option<String> {
+        let end = run_success(&ctx, a.to_sys(prefix, Phase::New, 0));
+        let old_goals = &contract.relational.old_goals[a];
+        goals.iter().enumerate().find_map(|(i, g)| {
+            (old_goals[i] && end.truth.successes(g.dom) < g.count).then(|| {
+                format!("goal {g:?} reached by the old remainder but not by the candidate")
+            })
+        })
     };
     let k5_fail = cfg.on(K::K5) && !contract.relational.env_closed;
+    let mut failures: BTreeMap<K, String> = BTreeMap::new();
+    let mut unknown: Option<String> = None;
     if cfg.uniform_decision {
+        // All abstract states of one world are explored together: the
+        // per-world union is what K4 compares, and any violation rejects.
+        let mut by_world: BTreeMap<World, Vec<&AState>> = BTreeMap::new();
+        for a in &contract.relational.states {
+            by_world.entry(a.world).or_default().push(a);
+        }
+        let mut world_maps: Vec<(World, NextMap)> = Vec::new();
+        for (w, states) in &by_world {
+            let inits = states
+                .iter()
+                .map(|a| a.to_sys(prefix, Phase::New, 0))
+                .collect();
+            let ex = explore_many(&ctx, inits, CHECK_LIMIT, false);
+            out.states_explored += ex.states;
+            if ex.truncated {
+                unknown = Some("local exploration truncated".into());
+            }
+            for v in &ex.violations {
+                let k = classify(*v);
+                if cfg.on(k) {
+                    failures
+                        .entry(k)
+                        .or_insert_with(|| format!("{v:?} from a state of S"));
+                }
+            }
+            world_maps.push((*w, ex.next));
+        }
+        if cfg.on(K::K4) {
+            if let Some((p, x, y)) = disclosure_witness(&world_maps) {
+                failures.insert(
+                    K::K4,
+                    format!("new/new pair differs after {p:?}: {x:?} vs {y:?}"),
+                );
+            }
+        }
+        if k5_fail {
+            failures.insert(K::K5, "S is not closed under late results".into());
+        }
+        if failures.is_empty() && cfg.on(K::K6) {
+            if let Some(why) = contract.relational.states.iter().find_map(k6_fails) {
+                failures.insert(K::K6, why);
+            }
+        }
         out.public = if let Some(u) = unknown {
             Verdict::Unknown(u)
         } else if let Some((k, why)) = failures.into_iter().next() {
             Verdict::Reject(k, why)
         } else if cfg.on(K::K4) && !contract.relational.old_remainder_safe {
             Verdict::Unknown("old remainder is not per-prefix safe (reject branch)".into())
-        } else if let Some(why) = cfg.on(K::K4).then(|| k4_leak(&|_| true)).flatten() {
-            Verdict::Reject(K::K4, format!("new/new pair differs {why}"))
-        } else if k5_fail {
-            Verdict::Reject(K::K5, "S is not closed under late results".into())
         } else {
             Verdict::Accept
         };
-    } else {
-        // "Each safe": accepted states are those whose own runs pass; the
-        // candidate must be relationally safe among them; nothing compares
-        // the accepted states with the rejected ones.
-        let pass: BTreeSet<AState> = out
-            .per_state
-            .iter()
-            .filter(|(_, v)| v.accepted())
-            .map(|(a, _)| a.clone())
-            .collect();
-        let leak = cfg
-            .on(K::K4)
-            .then(|| k4_leak(&|a| pass.contains(a)))
-            .flatten();
-        for v in out.per_state.values_mut() {
-            if v.accepted() {
-                if let Some(why) = &leak {
-                    *v = Verdict::Reject(K::K4, why.clone());
-                } else if k5_fail {
-                    *v = Verdict::Reject(K::K5, "S is not closed under late results".into());
-                }
+        return out;
+    }
+    // "Each safe": every abstract state is judged on its own runs; the
+    // candidate must be relationally safe among the accepted states only;
+    // nothing compares accepted states with rejected ones.
+    let mut maps: Vec<(AState, NextMap)> = Vec::new();
+    for a in &contract.relational.states {
+        let ex = explore(&ctx, a.to_sys(prefix, Phase::New, 0), CHECK_LIMIT, false);
+        out.states_explored += ex.states;
+        let mut verdict = Verdict::Accept;
+        if ex.truncated {
+            verdict = Verdict::Unknown("local exploration truncated".into());
+        }
+        for v in &ex.violations {
+            let k = classify(*v);
+            if cfg.on(k) && verdict.accepted() {
+                verdict = Verdict::Reject(k, format!("{v:?} from this state"));
             }
         }
-        out.public = Verdict::Unknown("decision depends on the binding".into());
+        if verdict.accepted() && cfg.on(K::K6) {
+            if let Some(why) = k6_fails(a) {
+                verdict = Verdict::Reject(K::K6, why);
+            }
+        }
+        out.per_state.insert(a.clone(), verdict);
+        maps.push((a.clone(), ex.next));
     }
+    let pass: BTreeSet<AState> = out
+        .per_state
+        .iter()
+        .filter(|(_, v)| v.accepted())
+        .map(|(a, _)| a.clone())
+        .collect();
+    let leak = if cfg.on(K::K4) {
+        let mut per_world: BTreeMap<World, NextMap> = BTreeMap::new();
+        for (a, m) in &maps {
+            if pass.contains(a) {
+                merge_next(per_world.entry(a.world).or_default(), m);
+            }
+        }
+        let v: Vec<(World, NextMap)> = per_world.into_iter().collect();
+        disclosure_witness(&v).map(|(p, x, y)| format!("after {p:?}: {x:?} vs {y:?}"))
+    } else {
+        None
+    };
+    for v in out.per_state.values_mut() {
+        if v.accepted() {
+            if let Some(why) = &leak {
+                *v = Verdict::Reject(K::K4, why.clone());
+            } else if k5_fail {
+                *v = Verdict::Reject(K::K5, "S is not closed under late results".into());
+            }
+        }
+    }
+    out.public = Verdict::Unknown("decision depends on the binding".into());
     out
 }
 
 /// K1 plus the prepared verdict.
+///
+/// `contract_digest` is `contract.compute_digest()`, computed by the caller
+/// once per proposal (the contract's own `digest` field is not trusted).
 pub fn decide(
     cfg: &CheckConfig,
     contract: &SymbolicResidualContract,
+    contract_digest: u64,
     prepared: &Prepared,
     binding: &LocalResidualBinding,
 ) -> Verdict {
@@ -351,7 +399,7 @@ pub fn decide(
                 "root/task/version/cut/prefix/interface differ".into(),
             );
         }
-        if binding.trusted_digest != contract.digest() {
+        if binding.trusted_digest != contract_digest {
             return Verdict::Reject(
                 K::K1,
                 "contract differs from the kernel's own construction".into(),
@@ -379,7 +427,7 @@ pub fn check_with(
     cand: &Program,
 ) -> Verdict {
     let p = prepare(cfg, contract, cand);
-    decide(cfg, contract, &p, binding)
+    decide(cfg, contract, contract.compute_digest(), &p, binding)
 }
 
 /// `check_replacement(contract, binding, candidate)` with all of K1–K6.
@@ -400,7 +448,8 @@ pub struct Runtime<'a> {
     pub kernel: &'a SymbolicResidualContract,
     pub proposed: &'a SymbolicResidualContract,
     pub prepared: Prepared,
-    memo: RefCell<HashMap<AState, bool>>,
+    proposed_digest: u64,
+    memo: RefCell<FastMap<AState, bool>>,
 }
 
 impl<'a> Runtime<'a> {
@@ -415,17 +464,28 @@ impl<'a> Runtime<'a> {
             kernel,
             proposed,
             prepared: prepare(&cfg, proposed, cand),
-            memo: RefCell::new(HashMap::new()),
+            proposed_digest: proposed.compute_digest(),
+            memo: RefCell::new(FastMap::default()),
         }
     }
 
     pub fn decide(&self, s: &Sys) -> bool {
-        let b = bind(self.kernel, s);
-        if let Some(v) = self.memo.borrow().get(&b.state) {
+        let k = self.kernel;
+        let state = project(&k.meta.options, &k.closure, k.relational.masked, s);
+        if let Some(v) = self.memo.borrow().get(&state) {
             return *v;
         }
-        let v = decide(&self.cfg, self.proposed, &self.prepared, &b).accepted();
-        self.memo.borrow_mut().insert(b.state, v);
+        let b = bind(k, s);
+        debug_assert_eq!(b.state, state);
+        let v = decide(
+            &self.cfg,
+            self.proposed,
+            self.proposed_digest,
+            &self.prepared,
+            &b,
+        )
+        .accepted();
+        self.memo.borrow_mut().insert(state, v);
         v
     }
 
@@ -455,6 +515,31 @@ pub fn composed_full_check(
         rebuild: &rebuild,
     };
     let report = full_check(&kernel.meta.root, &kernel.meta.old_program, Some(&p));
+    (public, report)
+}
+
+/// [`composed_full_check`] reusing a pre-cut exploration of the old
+/// program (see [`full_check_from`]).
+pub fn composed_full_check_from(
+    cfg: CheckConfig,
+    kernel: &SymbolicResidualContract,
+    proposed: &SymbolicResidualContract,
+    cand: &Program,
+    pre: &PreCut,
+) -> (Verdict, FullReport) {
+    let rt = Runtime::new(cfg, kernel, proposed, cand);
+    let public = rt.prepared.public.clone();
+    let decide = |s: &Sys| rt.decide(s);
+    let rebuild = |s: &Sys| rt.rebuild(s);
+    let p = Proposal {
+        cut: kernel.meta.cut,
+        prefix: kernel.meta.prefix.clone(),
+        candidate: cand,
+        decide: &decide,
+        revalidate: &decide,
+        rebuild: &rebuild,
+    };
+    let report = full_check_from(&kernel.meta.root, &kernel.meta.old_program, pre, &p);
     (public, report)
 }
 

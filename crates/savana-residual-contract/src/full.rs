@@ -18,8 +18,9 @@
 use std::collections::BTreeSet;
 
 use crate::model::{
-    compile, disclosure_witness, explore, run_success, Code, Ctx, EnvMode, Goal, Phase, Program,
-    PublicEvent, Root, Rt, Shape, Switch, Sys, Violation, World,
+    compile, disclosure_witness, explore, explore_many, merge_next, run_success, Code, Ctx,
+    EnvMode, Explored, Goal, NextMap, Phase, Program, PublicEvent, Root, Rt, Shape, Switch, Sys,
+    Violation, World,
 };
 
 /// A replacement proposal as executed by the system under test. The hooks
@@ -53,6 +54,17 @@ impl FullReport {
             && self.leak.is_none()
             && self.progress.is_empty()
             && !self.truncated
+    }
+
+    /// A failure of authorization, consumption, obligations, disclosure or
+    /// goal progress (not merely an ill-formed or stuck step).
+    pub fn substantive(&self) -> bool {
+        self.leak.is_some()
+            || !self.progress.is_empty()
+            || self
+                .violations
+                .iter()
+                .any(|(_, v)| !matches!(v, Violation::IllegalStep | Violation::Stuck))
     }
 
     pub fn summary(&self) -> String {
@@ -102,31 +114,108 @@ pub fn full_check(root: &Root, old: &Program, proposal: Option<&Proposal>) -> Fu
     let mut maps = Vec::new();
     for w in root.worlds() {
         let ex = explore(&ctx, Sys::initial(w), FULL_LIMIT, true);
-        report.states += ex.states;
-        report.truncated |= ex.truncated;
-        report.decisions += ex.deciding.len();
-        for v in &ex.violations {
-            report.violations.push((w, *v));
-        }
-        for c in &ex.deciding {
-            let new_end = run_success(&ctx, c.clone());
-            let mut stay = c.clone();
-            stay.phase = Phase::Old;
-            stay.decided = true;
-            let old_end = run_success(&ctx, stay);
-            for g in &root.goals {
-                let reached = |s: &Sys| s.truth.successes(g.dom) >= g.count;
-                if reached(&old_end) && !reached(&new_end) {
-                    report.progress.push((w, *g));
-                }
+        analyse_world(&ctx, w, ex, &mut report, &mut maps);
+    }
+    finish(report, &maps)
+}
+
+fn analyse_world(
+    ctx: &Ctx,
+    w: World,
+    ex: Explored,
+    report: &mut FullReport,
+    maps: &mut Vec<(World, NextMap)>,
+) {
+    report.states += ex.states;
+    report.truncated |= ex.truncated;
+    report.decisions += ex.deciding.len();
+    for v in &ex.violations {
+        report.violations.push((w, *v));
+    }
+    for c in &ex.deciding {
+        let new_end = run_success(ctx, c.clone());
+        let mut stay = c.clone();
+        stay.phase = Phase::Old;
+        stay.decided = true;
+        let old_end = run_success(ctx, stay);
+        for g in &ctx.root.goals {
+            let reached = |s: &Sys| s.truth.successes(g.dom) >= g.count;
+            if reached(&old_end) && !reached(&new_end) {
+                report.progress.push((w, *g));
             }
         }
-        maps.push((w, ex.next));
     }
-    report.leak = disclosure_witness(&maps);
+    maps.push((w, ex.next));
+}
+
+fn finish(mut report: FullReport, maps: &[(World, NextMap)]) -> FullReport {
+    report.leak = disclosure_witness(maps);
     report.progress.sort();
     report.progress.dedup();
     report
+}
+
+/// Exploration of the old program up to the cut, shared by every candidate
+/// proposed at that cut (it does not depend on the candidate).
+pub struct PreCut {
+    pub cut: usize,
+    pub worlds: Vec<(World, Explored)>,
+}
+
+pub fn precut(root: &Root, old: &Program, cut: usize) -> PreCut {
+    let code = compile(old);
+    let ctx = Ctx {
+        root,
+        old: &code,
+        new: None,
+        switch: None,
+        env: EnvMode::FULL,
+        stop_at: Some(code.cut_pc(cut)),
+    };
+    PreCut {
+        cut,
+        worlds: root
+            .worlds()
+            .into_iter()
+            .map(|w| (w, explore(&ctx, Sys::initial(w), FULL_LIMIT, true)))
+            .collect(),
+    }
+}
+
+/// Same check as [`full_check`] with a proposal, computed as the union of
+/// the shared pre-cut exploration and an exploration from every
+/// configuration at the cut. Every path of the composed system passes
+/// through such a configuration, so both explore the same graph.
+pub fn full_check_from(root: &Root, old: &Program, pre: &PreCut, p: &Proposal) -> FullReport {
+    assert_eq!(pre.cut, p.cut);
+    let old_code = compile(old);
+    let new_code = compile(p.candidate);
+    let switch = Switch {
+        cut_pc: old_code.cut_pc(p.cut),
+        prefix: p.prefix.clone(),
+        decide: p.decide,
+        revalidate: p.revalidate,
+        rebuild: p.rebuild,
+    };
+    let ctx = Ctx {
+        root,
+        old: &old_code,
+        new: Some(&new_code),
+        switch: Some(&switch),
+        env: EnvMode::FULL,
+        stop_at: None,
+    };
+    let mut report = FullReport::default();
+    let mut maps = Vec::new();
+    for (w, before) in &pre.worlds {
+        let mut ex = explore_many(&ctx, before.collected.clone(), FULL_LIMIT, true);
+        ex.states += before.states;
+        ex.truncated |= before.truncated;
+        ex.violations.extend(before.violations.iter().copied());
+        merge_next(&mut ex.next, &before.next);
+        analyse_world(&ctx, *w, ex, &mut report, &mut maps);
+    }
+    finish(report, &maps)
 }
 
 #[cfg(test)]
@@ -196,7 +285,10 @@ pub(crate) mod tests {
             revalidate: &always,
             rebuild,
         };
-        full_check(root, old, Some(&p))
+        let direct = full_check(root, old, Some(&p));
+        let decomposed = full_check_from(root, old, &precut(root, old, cut), &p);
+        assert_eq!(direct.summary(), decomposed.summary());
+        direct
     }
 
     #[test]

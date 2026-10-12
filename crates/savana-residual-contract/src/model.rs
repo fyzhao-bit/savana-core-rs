@@ -14,8 +14,55 @@
 //! lossy runtime view after a replacement; the full checker judges the run
 //! against `truth`, so such losses show up as concrete violations.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
+use std::hash::{BuildHasherDefault, Hasher};
+
+/// Small multiplicative hasher for the explorers' visited sets (std's
+/// SipHash dominates debug-build run time). Hash quality only affects speed:
+/// sets and maps still compare keys with `Eq`.
+#[derive(Default, Clone, Copy)]
+pub struct FxHasher {
+    hash: u64,
+}
+
+impl FxHasher {
+    #[inline]
+    fn add(&mut self, w: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ w).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
+
+impl Hasher for FxHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut b = [0u8; 8];
+            b[..chunk.len()].copy_from_slice(chunk);
+            self.add(u64::from_le_bytes(b));
+        }
+    }
+    fn write_u8(&mut self, i: u8) {
+        self.add(i as u64);
+    }
+    fn write_u16(&mut self, i: u16) {
+        self.add(i as u64);
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.add(i as u64);
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.add(i);
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+pub type FastSet<T> = HashSet<T, BuildHasherDefault<FxHasher>>;
+pub type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 
 pub const MAX_IDS: usize = 3;
 pub const MAX_DOMS: usize = 2;
@@ -1108,13 +1155,28 @@ pub struct Explored {
 
 /// Depth-first exhaustive exploration with state deduplication.
 pub fn explore(ctx: &Ctx, init: Sys, limit: usize, check_authorization: bool) -> Explored {
+    explore_many(ctx, vec![init], limit, check_authorization)
+}
+
+/// Exploration from several initial configurations with one shared visited
+/// set; the result is the union of the single explorations.
+pub fn explore_many(
+    ctx: &Ctx,
+    inits: Vec<Sys>,
+    limit: usize,
+    check_authorization: bool,
+) -> Explored {
     let mut ex = Explored {
         check_authorization,
         ..Default::default()
     };
-    let mut seen: HashSet<Sys> = HashSet::new();
-    let mut stack = vec![init.clone()];
-    seen.insert(init);
+    let mut seen: FastSet<Sys> = FastSet::default();
+    let mut stack = Vec::new();
+    for init in inits {
+        if seen.insert(init.clone()) {
+            stack.push(init);
+        }
+    }
     while let Some(s) = stack.pop() {
         ex.states += 1;
         if ex.states > limit {

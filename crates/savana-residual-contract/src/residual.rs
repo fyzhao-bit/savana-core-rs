@@ -15,7 +15,7 @@ use std::hash::{Hash, Hasher};
 use crate::model::{
     compile, disclosure_witness, explore, merge_next, resolve, run_success, Code, Ctx, Dom,
     EnvMode, ExecStatus, Goal, NextMap, OpId, Phase, Program, PublicEvent, Root, Rt, SlotId, Stmt,
-    Sys, Val, Var, ViewFn, World, ALL_OUTCOMES, MAX_DOMS, MAX_SLOTS, MAX_VARS,
+    Sys, Val, Var, ViewFn, World, ALL_OUTCOMES, MAX_DOMS, MAX_SLOTS,
 };
 
 pub const SEMANTICS_VERSION: u32 = 1;
@@ -358,12 +358,24 @@ pub struct SymbolicResidualContract {
     pub relational: Relational,
     /// Set when the construction cannot decide; checks then return Unknown.
     pub unknown: Option<String>,
+    /// Digest the kernel computed when it built this contract itself. K1
+    /// never trusts this field on a proposed contract; it recomputes
+    /// [`SymbolicResidualContract::compute_digest`].
+    pub digest: u64,
 }
 
 impl SymbolicResidualContract {
-    pub fn digest(&self) -> u64 {
+    /// Digest of every field except `digest`.
+    pub fn compute_digest(&self) -> u64 {
         let mut h = DefaultHasher::new();
-        self.hash(&mut h);
+        self.meta.hash(&mut h);
+        self.footprint.hash(&mut h);
+        self.closure.hash(&mut h);
+        self.obligations.hash(&mut h);
+        self.history.hash(&mut h);
+        self.params.hash(&mut h);
+        self.relational.hash(&mut h);
+        self.unknown.hash(&mut h);
         h.finish()
     }
 }
@@ -463,6 +475,12 @@ pub fn apply_variant(variant: Variant, closure: &Closure, rt: &mut Rt) {
 }
 
 /// Projection of a configuration at the cut onto the contract's fields.
+///
+/// Only ledger rows of domains outside the closure and slots outside the
+/// closure are ever omitted: K2 confines a candidate to interface domains,
+/// ops and slots, all inside the closure, so it can neither read nor write
+/// them. Variables are never omitted, because a candidate may read a
+/// variable it assigned on only one branch and would then see the old value.
 pub fn project(opts: &BuildOptions, closure: &Closure, mask: bool, s: &Sys) -> AState {
     let mut rt = s.rt.clone();
     rt.pc = 0;
@@ -477,11 +495,6 @@ pub fn project(opts: &BuildOptions, closure: &Closure, mask: bool, s: &Sys) -> A
         for i in 0..MAX_SLOTS {
             if !closure.slots.contains(&SlotId(i as u8)) {
                 rt.store.slots[i] = Default::default();
-            }
-        }
-        for i in 0..MAX_VARS {
-            if !closure.vars.contains(&Var(i as u8)) {
-                rt.vars[i] = Val::None;
             }
         }
     }
@@ -549,6 +562,19 @@ pub fn build_contract(
     prefix: &[PublicEvent],
     iface: &Interface,
 ) -> SymbolicResidualContract {
+    let mut c = build_inner(opts, root, old, cut, prefix, iface);
+    c.digest = c.compute_digest();
+    c
+}
+
+fn build_inner(
+    opts: BuildOptions,
+    root: &Root,
+    old: &Program,
+    cut: usize,
+    prefix: &[PublicEvent],
+    iface: &Interface,
+) -> SymbolicResidualContract {
     let meta = ContractMeta {
         root: root.clone(),
         semantics_version: SEMANTICS_VERSION,
@@ -570,6 +596,7 @@ pub fn build_contract(
         params: Parameters::default(),
         relational: Relational::default(),
         unknown: None,
+        digest: 0,
     };
     if cut > old.len() {
         contract.unknown = Some("cut outside the program".into());
@@ -601,14 +628,6 @@ pub fn build_contract(
     let mask = omission_sound(root, iface, &contract.closure, &full);
     contract.relational.masked = mask;
     if mask {
-        for i in 0..MAX_VARS {
-            if !contract.closure.vars.contains(&Var(i as u8)) {
-                contract
-                    .relational
-                    .omitted
-                    .push(format!("variable {i} (outside the closure)"));
-            }
-        }
         for d in 0..root.domains.len() {
             if !contract.closure.domains.contains(&Dom(d as u8)) {
                 contract
@@ -773,7 +792,7 @@ pub fn bind(contract: &SymbolicResidualContract, s: &Sys) -> LocalResidualBindin
     LocalResidualBinding {
         meta: contract.meta.clone(),
         state: project(&contract.meta.options, &contract.closure, mask, s),
-        trusted_digest: contract.digest(),
+        trusted_digest: contract.digest,
     }
 }
 

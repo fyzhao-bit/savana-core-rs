@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 pub mod check;
+pub mod enumerate;
 pub mod full;
 pub mod model;
 pub mod residual;
