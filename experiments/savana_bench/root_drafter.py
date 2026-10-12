@@ -31,6 +31,9 @@ An extraction step: {{"tool": "{EXTRACT_TOOL}", "source": <earlier step number>,
   context (up to {MAX_CONTEXTS} other earlier steps' results or extracted values, if given), and writes
   the one value the target needs in that field's format (or, for "{ANSWER}", the final answer to
   the user). Give the final "{ANSWER}" extraction as context every earlier result it needs.
+  To fill several fields of ONE operation from the same source, one extraction may list 2 to 4 of
+  them: "target": {{"text": ["<operation>.<field>", ...]}}; a later field then takes one of them as
+  {{"from": <that step>, "path": ["<field>"]}}. This saves a step for each extra field.
 A compute step (exact, no model): {{"tool": "{COMPUTE_TOOL}", "args": {{"input1": {{"from": k}}, "input2": ...,
   "filter1": "...", "order1": "...", "output": "..."}}}}
   input1..input4: earlier steps' results (a tool's result or an extracted value). input1 gives the
@@ -216,7 +219,8 @@ REFUSAL_HINTS = {
     "unserved_tool": "Use only operations listed in tools (or the extraction step), with args as an object.",
     "extract_shape": ('An extraction step needs "source": an EARLIER step number, and args with "target" '
                       '(and optionally "context").'),
-    "extract_target": 'An extraction target is {"text": "<operation>.<field>"} of a listed field, or "answer".',
+    "extract_target": ('An extraction target is {"text": "<operation>.<field>"} of a listed field, or "answer", '
+                       'or {"text": [...]} with 2 to 4 non-list fields of one operation.'),
     "extract_context": (f'Context is {{"from": k}} or a list of up to {MAX_CONTEXTS} such, each naming a different '
                         'earlier step, never a literal and never with a path or computation.'),
     "source_on_tool": 'Only an extraction step takes "source"; remove it from tool steps.',
@@ -245,8 +249,8 @@ REFUSAL_HINTS = {
                             'must be a literal copied from the request; it can never come from data.'),
     "edge_source": ("An origin or source may only name an EARLIER step: a step never uses its own result or a "
                     "later one. Renumber so that every step it draws on comes before it."),
-    "edge_path": ('A value from a TOOL step needs a JSON "path"; a value from an EXTRACTION step must have no '
-                  'path.'),
+    "edge_path": ('A value from a TOOL step needs a JSON "path"; a value from a one-field EXTRACTION step has no '
+                  'path; one field of a several-field extraction is {"from": k, "path": ["<field>"]}.'),
     "edge_compute": "Use at most one computation (add_minutes, add_days or add_amount) with a number.",
     "compute_amount": "A computation's amount must be stated in the request; a list field takes none.",
     "answer_used_as_value": ('The "answer" extraction is only the final answer; to fill a field, add an '

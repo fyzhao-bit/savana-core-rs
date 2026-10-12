@@ -70,6 +70,10 @@ CONDITIONS = (CONDITION, CONDITION_NOT)
 # (G11 runs: longer plans stopped at ~64 s without publication), so the
 # limit stays at eight; the window itself is the owner's to change.
 MAX_STEPS = 8
+# One extraction may produce several fields of one operation (U3), each used
+# through its own signed edge: fewer steps for a call that needs them all.
+MULTI_FIELDS = (2, 4)
+MULTI_PREFIX = ("result", "content", "0", "text", "$json", "fields")
 RESULT_PREFIX = ("result", "content", "0", "text", "$json")
 # A tool result's whole text, as an extraction's context (a second source).
 RESULT_TEXT = ("result", "content", "0", "text")
@@ -101,6 +105,8 @@ def review_policy():
     return {"schema": "savana-drafted-review-v1", "max_steps": MAX_STEPS, "literals": "owner_text",
             "destinations": "owner_text_only", "write_destination": "always named, even where optional",
             "edges": "earlier_steps_only", "extract_tool": EXTRACT_TOOL,
+            "multi_field_extraction": f"{MULTI_FIELDS[0]}-{MULTI_FIELDS[1]} non-list fields of one operation, "
+                                      "each used through its own edge by name",
             "extract_targets_sha256": hashlib.sha256(canonical(list(extract_targets()))).hexdigest(),
             "edge_max_bytes": MAX_EDGE_BYTES, "context_max_bytes": MAX_CONTEXT_BYTES,
             "restated": "owner dates/times (CALENDAR_YEAR default) and end times from stated durations, "
@@ -352,6 +358,19 @@ _ACTION = re.compile(r"(?:^|[.!?:]\s+|\d\.\s+|\b(?:please|can you|could you|woul
                      + "|".join(map(re.escape, _ACTION_VERBS)) + r")\b", re.I)
 
 
+def _label_kind(label):
+    """The reviewed kind of a field label's catalog field."""
+    operation, _, name = label.rpartition(".")
+    return next(f[3] for f in entry(operation)["fields"] if f[0] == name)
+
+
+def extracted_fields(step):
+    """The field names a multi-field extraction step produces, in order, or ()."""
+    if step.tool != EXTRACT_TOOL or LIST_SEPARATOR not in step.value_map()["target"]:
+        return ()
+    return tuple(label.rpartition(".")[2] for label in step.value_map()["target"].split(LIST_SEPARATOR))
+
+
 def requested_action(prompt):
     """The first action verb the owner's request asks for, or None."""
     match = _ACTION.search(" ".join(prompt.split()))
@@ -431,16 +450,31 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
             usable(source)
             where["field"] = "target"
             target = _origin(args["target"])
-            if target[0] != "text":
+            if target[0] not in ("text", "items"):
                 _refuse("extract_target")
-            label = target[1]
-            if label not in labels:
+
+            def full_label(label):
+                if label in labels:
+                    return label
                 # An inert label written without its full prefix names the one
                 # catalog field it uniquely ends with.
                 matches = [known for known in labels if known.endswith("." + label)]
                 if len(matches) != 1:
                     _refuse("extract_target")
-                label = matches[0]
+                return matches[0]
+            if target[0] == "items":
+                # Several fields of ONE operation from the same source, each a
+                # single text value a later field takes by its name.
+                many = [full_label(item) if type(item) is str else _refuse("extract_target")
+                        for item in target[1]]
+                operations = {item.rpartition(".")[0] for item in many}
+                if (not MULTI_FIELDS[0] <= len(many) <= MULTI_FIELDS[1] or len(set(many)) != len(many)
+                        or len(operations) != 1 or set(many) & {ANSWER, *CONDITIONS}
+                        or any(_label_kind(item) in LIST_KINDS for item in many)):
+                    _refuse("extract_target")
+                label = LIST_SEPARATOR.join(many)
+            else:
+                label = full_label(target[1])
             target = ("text", label)
             # A condition target carries the condition, copied from the
             # owner's request; any other target carries none.
@@ -488,8 +522,9 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                     # An earlier answer is only ever more context for a later
                     # extraction (data for the model, never a control), so a
                     # request with several parts can be answered in full.
-                    answer = chain[earlier - 1].value_map()["target"] == ANSWER
-                    derived.append((field, earlier, GENERATED_TEXT, MAX_ANSWER_BYTES if answer else MAX_EDGE_BYTES))
+                    wide = (chain[earlier - 1].value_map()["target"] == ANSWER
+                            or bool(extracted_fields(chain[earlier - 1])))
+                    derived.append((field, earlier, GENERATED_TEXT, MAX_ANSWER_BYTES if wide else MAX_EDGE_BYTES))
                 elif kinds[earlier - 1] == "compute":
                     derived.append((field, earlier, GENERATED_TEXT, MAX_EDGE_BYTES))
                 else:
@@ -515,6 +550,9 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                 earlier = usable(origin[1])
                 if kinds[earlier - 1] == "extract":
                     label = chain[earlier - 1].value_map()["target"]
+                    if extracted_fields(chain[earlier - 1]):
+                        # A multi-field extraction feeds a field, never a table.
+                        _refuse("compute_input")
                     if label == ANSWER:
                         _refuse("answer_used_as_value")
                     if label in CONDITIONS:
@@ -643,6 +681,11 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                     if path is not None:
                         _refuse("edge_path")
                     full = GENERATED_ITEMS if listed else GENERATED_TEXT
+                elif kinds[source - 1] == "extract" and extracted_fields(chain[source - 1]):
+                    # One field of a multi-field extraction, by its name.
+                    if listed or path is None or list(path) not in [[f] for f in extracted_fields(chain[source - 1])]:
+                        _refuse("edge_path")
+                    full = MULTI_PREFIX + tuple(path)
                 elif kinds[source - 1] == "extract":
                     if path is not None:
                         _refuse("edge_path")

@@ -10,6 +10,7 @@ AgentDojo function once. Hostile text in any field is data: it is never parsed
 as a tool call, and no field can name a different function.
 """
 import importlib.metadata
+import json
 
 from .agentdojo_calendar import _generator_tool
 from .agentdojo_provider import AgentDojoProvider
@@ -60,9 +61,12 @@ def _adapter_source(pyname, operation):
 
 
 def target_kind(target):
-    """The reviewed kind of a field label ("answer" for the final answer)."""
+    """The reviewed kind of a field label ("answer" for the final answer,
+    "multi" for several fields of one operation joined by the separator)."""
     if target in ("answer", "condition", "condition_not"):
         return target
+    if LIST_SEPARATOR in target:
+        return "multi"
     operation, _, name = target.rpartition(".")
     spec = next((f for f in entry(operation)["fields"] if f[0] == name and f[3] != "fixed"), None)
     if spec is None:
@@ -84,6 +88,13 @@ def target_description(target, functions, question=""):
     if target == "condition_not":
         return ("Whether this condition from the owner's request is FALSE, judged only from SOURCE and CONTEXT: "
                 f"\"{question}\". Reply with exactly yes (it is false) or no (it holds).", FIELD_BYTES)
+    if LIST_SEPARATOR in target:
+        labels = target.split(LIST_SEPARATOR)
+        names = [label.rpartition(".")[2] for label in labels]
+        parts = " ".join(f'"{name}": {target_description(label, functions)[0]}' for name, label in zip(names, labels))
+        return ("Several values, as ONE JSON object on a single line with exactly the keys "
+                + ", ".join(f'"{name}"' for name in names) + ", each value a JSON string. " + parts,
+                ANSWER_BYTES)
     operation, _, name = target.rpartition(".")
     spec = next((f for f in entry(operation)["fields"] if f[0] == name and f[3] != "fixed"), None)
     if spec is None:
@@ -155,9 +166,21 @@ def _extract_tool(generator, functions, view="raw"):
         # The note is passed only with placeholders: a raw call is unchanged.
         line = generator(instruction=sent_instruction, source=sent_source, target=description, max_bytes=max_bytes,
                          context=sent_context, **(dict(note=EXTRACT_NOTE) if bindings else {}))
+        from .quarantined_generator import bounded_line
         if bindings:
-            from .quarantined_generator import bounded_line
             line = bounded_line(unmask_reply(line, bindings), max_bytes)
+        if target_kind(target) == "multi":
+            # One JSON object with exactly the target's field names, each value
+            # one bounded line; anything else fails the step (nothing is guessed).
+            names = [label.rpartition(".")[2] for label in target.split(LIST_SEPARATOR)]
+            try:
+                value = json.loads(line)
+            except ValueError:
+                raise ValueError("extract_fields") from None
+            if (type(value) is not dict or set(value) != set(names)
+                    or any(type(v) not in (str, int, float) or isinstance(v, bool) for v in value.values())):
+                raise ValueError("extract_fields")
+            return {"text": line, "fields": {name: bounded_line(str(value[name]), FIELD_BYTES) for name in names}}
         if target_kind(target) not in LIST_KINDS:
             return {"text": line}
         # A list target: the same line, and its items split by the reviewed
