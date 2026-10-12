@@ -66,10 +66,11 @@ CONDITION_NOT = "condition_not"
 CONDITIONS = (CONDITION, CONDITION_NOT)
 # The kernel's input runtime authorizes an owner request for 60 s
 # (savana-input-runtime: now + 60_000 ms); every step of a plan must finish
-# inside it. At about six seconds a step, eight steps fit and twelve do not
-# (G11 runs: longer plans stopped at ~64 s without publication), so the
-# limit stays at eight; the window itself is the owner's to change.
-MAX_STEPS = 8
+# inside it. At about six seconds a step (G11), eight steps fit and twelve did
+# not. Steps now take about four seconds: in the F5 runs an eight-step program
+# was released a median 37 s (at most 40 s) after the episode was bound, so
+# ten steps fit with margin. The window itself is the owner's to change.
+MAX_STEPS = 10
 # One extraction may produce several fields of one operation (U3), each used
 # through its own signed edge: fewer steps for a call that needs them all.
 MULTI_FIELDS = (2, 4)
