@@ -53,7 +53,7 @@ CASES = (
     ("savana-kerneld", "lib", "fused_result_loop_waits_for_exact_second_step_approval"),
     ("savana-kerneld", "lib", "fused_result_loop_revocation_stops_downstream_without_resetting_consumption"),
     ("savana-kerneld", "lib", "fused_result_loop_unknown_blocks_without_fabricating_result_or_refunding"),
-    ("savana-continuation-core", "planning", "result_edges_require_schema_two_declared_predecessors_and_payload_slots"),
+    ("savana-continuation-core", "planning", "result_edges_require_schema_two_declared_predecessors_and_wellformed_paths"),
     ("savana-continuation-core", "planning", "model_cannot_supply_result_bindings_or_result_bytes"),
     ("savana-policy-core", "lib", "result_recipe_binds_profile_initial_inputs_and_exact_source_edge"),
     ("savana-policy-core", "lib", "result_utf8_derivation_preserves_untrusted_private_lineage_and_exact_bytes"),

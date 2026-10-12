@@ -292,6 +292,51 @@ fn no_solution_and_unknown_are_distinct() {
 }
 
 #[test]
+fn a_stored_counterexample_skips_a_later_leaking_candidate_without_a_full_check() {
+    let model = Model::new(definition(&["yes", "no"])).unwrap();
+    // A second leaking renderer: different bytes, the same distinction.
+    let mut renamed = policy(&model, false);
+    for rewrite in &mut renamed.rewrites {
+        if rewrite.from != b"fixed-catalog" {
+            rewrite.to = rewrite.from.to_ascii_uppercase();
+        }
+    }
+    let candidates = vec![policy(&model, false), renamed, policy(&model, true)];
+    let Synthesis::Safe {
+        index,
+        full_checks,
+        counterexamples,
+        ..
+    } = synthesize_release(&model, &candidates, Limits::default()).unwrap()
+    else {
+        panic!("no policy")
+    };
+    // The renamed candidate fell to the first counterexample's replay and was
+    // never checked in full; it is genuinely unsafe.
+    assert_eq!((index, full_checks, counterexamples.len()), (2, 2, 1));
+    let renamed = candidates[1].apply(&model).unwrap();
+    assert!(replay_counterexample(&renamed, &counterexamples[0]));
+    assert!(matches!(
+        check_strict(&renamed, Limits::default()),
+        Check::Unsafe(_)
+    ));
+}
+
+#[test]
+fn more_than_sixty_four_candidates_is_unknown_not_a_truncated_search() {
+    let model = Model::new(definition(&["yes", "no"])).unwrap();
+    let safe = policy(&model, true);
+    assert!(matches!(
+        synthesize_release(&model, &vec![safe.clone(); 64], Limits::default()).unwrap(),
+        Synthesis::Safe { index: 0, .. }
+    ));
+    assert_eq!(
+        synthesize_release(&model, &vec![safe; 65], Limits::default()).unwrap(),
+        Synthesis::Unknown
+    );
+}
+
+#[test]
 fn candidate_cannot_omit_renderer_cases() {
     let model = Model::new(definition(&["yes", "no"])).unwrap();
     let mut candidate = policy(&model, true);
