@@ -338,6 +338,32 @@ def _origin(value):
     return ("from", source, None if path is None else tuple(str(p) for p in path), compute)
 
 
+# An action the owner's request asks for: an action verb in request form
+# (imperative, or after please / can you / go ahead and / ...). Judged on the
+# owner's own text alone, and used only to ask a planner once whether it meant
+# to leave the action out (`omitted_write`); it never refuses a program.
+_ACTION_VERBS = ("pay", "refund", "send", "transfer", "schedule", "set up", "update", "adjust", "change", "invite",
+                 "add", "post", "write", "reply", "message", "create", "reschedule", "append", "delete", "share",
+                 "cancel", "book", "reserve", "make a reservation", "remove", "do the actions", "do all the tasks",
+                 "follow the instructions")
+_ACTION = re.compile(r"(?:^|[.!?:]\s+|\d\.\s+|\b(?:please|can you|could you|would you|go ahead and|make sure to|"
+                     r"don'?t forget to|do not forget to|then|also|and|if so,?)\s+)(?:please\s+)?(?P<verb>"
+                     + "|".join(map(re.escape, _ACTION_VERBS)) + r")\b", re.I)
+
+
+def requested_action(prompt):
+    """The first action verb the owner's request asks for, or None."""
+    match = _ACTION.search(" ".join(prompt.split()))
+    return None if match is None else match.group("verb").lower()
+
+
+def performs_action(contract):
+    """Whether a reviewed program has a step that changes state: a write tool
+    (extraction and compute steps only read recorded results)."""
+    return any(step.tool not in (EXTRACT_TOOL, COMPUTE_TOOL) and catalog_tool(step.tool)["effect"] != "read"
+               for step in contract.steps())
+
+
 def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(), extractor_model=GENERATOR_MODEL,
                    derived_destinations=False):
     """The owner's fixed review of a planner program -> DraftedContract, or

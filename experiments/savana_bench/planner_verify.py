@@ -89,7 +89,7 @@ def _drafted_contract(case, local, row):
     a value the mask hid."""
     from agentdojo.task_suite.load_suites import get_suite
     from .agentdojo_tasks import BENCHMARK, register_drafted
-    from .drafted_tasks import ProgramRefused, parse_program_text, review_program
+    from .drafted_tasks import ProgramRefused, parse_program_text, performs_action, requested_action, review_program
     from .root_drafter import NON_RETRYABLE, draft_request_body
     from .value_blind import planner_request
     drafted = [e for e in local if e["kind"] == "root_drafted"]
@@ -104,7 +104,7 @@ def _drafted_contract(case, local, row):
     tools = {t.name for t in official.tools}
     view = case.get("planner_view", "request")
     _request, bindings = planner_request(prompt, view)
-    history, contract, refusal = [], None, None
+    history, contract, refusal, asked = [], None, None, False
     exposure = planner_exposure(case)
     for number, event in enumerate(drafted, 1):
         if case.get("root_author") == "fixed":
@@ -141,6 +141,12 @@ def _drafted_contract(case, local, row):
         except ProgramRefused as error:
             contract, refusal = None, error
             history.append((event["program_text"], str(error), error.step, error.field))
+        if (contract is not None and case.get("actions") == "ask" and not asked and number < max_drafts
+                and requested_action(prompt) and not performs_action(contract)):
+            # The runner asked once whether the request's action was left out
+            # on purpose: nothing was signed, and the planner drafted again.
+            asked, contract = True, None
+            history.append((event["program_text"], "omitted_write", None, None))
         if contract is not None and number != len(drafted):
             raise ValueError("accepted_program_was_redrafted")
         if refusal is not None and str(refusal) in NON_RETRYABLE and number != len(drafted):

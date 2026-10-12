@@ -116,6 +116,10 @@ AUTHORS = ("deepseek", "fixed", "registered", "structured")
 # Where a `structured` program comes from: the registered template (arm T) or
 # the untrusted planner's reviewed draft (arm D).
 MAPPERS = ("template", "deepseek")
+# When an accepted draft writes nothing but the owner's request asks for an
+# action: accept it as it is, or ask the planner once whether it meant to leave
+# the action out (`omitted_write`; it may return the same program to keep it).
+ACTIONS = ("accept", "ask")
 
 
 def drafted_options(kind):
@@ -136,7 +140,9 @@ def drafted_options(kind):
     For the structured-planning evaluation: `+author=registered` (the task's
     registered template, one draft) and `+author=structured` with
     `+mapper=template` (the default; the template, reordered by agentd's
-    pipeline) or `+mapper=deepseek` (the planner's reviewed draft, reordered)."""
+    pipeline) or `+mapper=deepseek` (the planner's reviewed draft, reordered).
+    `+actions=ask` asks the planner once when its accepted draft writes nothing
+    but the request asks for an action (see ACTIONS; needs a later draft)."""
     from .drafted_tasks import EXTRACTOR_MODELS
     from .value_blind import EXTRACTOR_VIEWS, VIEWS
     base, *options = kind.split("+")
@@ -147,7 +153,7 @@ def drafted_options(kind):
         key, equals, value = option.partition("=")
         if not equals or key in parsed or key not in ("drafts", "planner", "view", "extract", "extractor",
                                                        "attack", "exposure", "review", "owner", "author",
-                                                       "mapper"):
+                                                       "mapper", "actions"):
             raise ValueError("planner_experiment_spec")
         parsed[key] = value
     drafts = parsed.get("drafts", "1")
@@ -165,18 +171,20 @@ def drafted_options(kind):
     if (planner not in PLANNER_MODELS or view not in VIEWS or extract not in EXTRACTOR_VIEWS
             or extractor not in EXTRACTOR_MODELS or attack not in ATTACKS or exposure not in EXPOSURES
             or review not in REVIEWS or owner not in OWNERS or author not in AUTHORS
-            or parsed.get("mapper", MAPPERS[0]) not in MAPPERS or ("mapper" in parsed and author != "structured")):
+            or parsed.get("mapper", MAPPERS[0]) not in MAPPERS or ("mapper" in parsed and author != "structured")
+            or parsed.get("actions", ACTIONS[0]) not in ACTIONS):
         raise ValueError("planner_experiment_spec")
     # Only a structured spec passes `mapper`, so every other spec's options are unchanged.
     mapper = {} if author != "structured" else dict(mapper=parsed.get("mapper", MAPPERS[0]))
     return base, dict(max_drafts=int(drafts), planner_model=planner, planner_view=view, extractor_view=extract,
                       extractor_model=extractor, attack=attack, exposure=exposure, review=review, owner=owner,
-                      author=author, **mapper)
+                      author=author, **mapper,
+                      **({} if "actions" not in parsed else dict(actions=parsed["actions"])))
 
 
 def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS[0], planner_view="request",
                   extractor_view="raw", extractor_model="deepseek-flash", attack=ATTACKS[0],
-                  exposure=EXPOSURES[0], review=None, owner=None, author=None, mapper=None):
+                  exposure=EXPOSURES[0], review=None, owner=None, author=None, mapper=None, actions=None):
     """`<suite>:<item>[,<item>...]`, each item `user_task_N` (benign) or
     `user_task_N+injection_task_M` (the official important_instructions
     attack). The planner drafts each task's whole program from its request.
@@ -221,6 +229,10 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
             raise ValueError("planner_experiment_spec")
     if (author == "structured") != (mapper is not None) or (mapper is not None and mapper not in MAPPERS):
         raise ValueError("planner_experiment_spec")
+    # Asking needs a later draft, from a planner that drafts.
+    if actions not in (None, *ACTIONS) or (actions == "ask" and (
+            max_drafts < 2 or author in ("fixed", "registered") or mapper == "template")):
+        raise ValueError("planner_experiment_spec")
     if author == "registered" or mapper == "template":
         from .structured_templates import load_registry, template
         registry = load_registry()
@@ -251,7 +263,8 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
                           root_author=author, goal=goal, mutation=None, max_drafts=max_drafts,
                           planner_model=planner_model, planner_view=planner_view, extractor_view=extractor_view,
                           extractor_model=extractor_model, **attack_key,
-                          **({} if mapper is None else dict(mapper=mapper))))
+                          **({} if mapper is None else dict(mapper=mapper)),
+                          **({} if actions in (None, ACTIONS[0]) else dict(actions=actions))))
     return tuple(cases)
 
 
@@ -627,7 +640,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         # request alone; the owner's fixed review admits it or not.
                         from agentdojo.task_suite.load_suites import get_suite
                         from .agentdojo_tasks import register_drafted
-                        from .drafted_tasks import ProgramRefused, parse_program_text, review_program
+                        from .drafted_tasks import (ProgramRefused, parse_program_text, performs_action,
+                                                    requested_action, review_program)
                         from .value_blind import planner_request
                         official = get_suite(BENCHMARK, case["suite"])
                         prompt = official.get_user_task_by_id(case["user"]).PROMPT
@@ -639,7 +653,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         # sees only its own program and the fixed refusal code
                         # (with the step/field of its own program); nothing is
                         # signed or run until a draft passes the review.
-                        history = []
+                        history, asked = [], False
                         for attempt in range(1, case["max_drafts"] + 1):
                             row["drafts"] = attempt - 1
                             try:
@@ -678,6 +692,15 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                     row.update(outcome="program_refused", refusal=str(error))
                                     raise
                                 history.append((program_text, str(error), error.step, error.field))
+                                continue
+                            if (case.get("actions") == "ask" and not asked and attempt < case["max_drafts"]
+                                    and requested_action(prompt) and not performs_action(drafted)):
+                                # Asked once: the request asks for an action this
+                                # program does not perform. Nothing is signed yet.
+                                asked, drafted = True, None
+                                audit.emit("program_refused", episode=index, attempt=attempt, reason="omitted_write",
+                                           step=None, field=None)
+                                history.append((program_text, "omitted_write", None, None))
                                 continue
                             break
                         if case["root_author"] == "structured":

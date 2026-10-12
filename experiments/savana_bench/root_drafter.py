@@ -237,6 +237,12 @@ REFUSAL_HINTS = {
     "answer_used_as_value": ('The "answer" extraction is only the final answer; to fill a field, add an '
                              'extraction whose target is that field.'),
     "too_many_declared_values": "Use fewer restated dates, constants and extraction labels.",
+    # Asked at most once, and only when the program writes nothing: the
+    # planner may add the action, or return the same program to keep it.
+    "omitted_write": ("The request asks for an action (to pay, send, add, create, update, delete, share, book or "
+                      "post something), but the program has no step that performs one, and an answer cannot "
+                      "replace an action: call the tool that does it. If the request only asks for "
+                      "information, return the same program unchanged."),
 }
 
 
