@@ -20,8 +20,8 @@ pub use business_request::{
     BusinessFieldV2, BusinessMagnitudeV2, BusinessProfileV2, BusinessRequestV2,
     BusinessResponseDispositionV2, BusinessValueV2, ResultCandidatesV2, ResultComputeOpV2,
     ResultComputeV2, ResultDerivedControlV2, MAX_BUSINESS_JSON_BYTES_V2,
-    MAX_BUSINESS_PROFILE_BYTES_V2, MAX_RESULT_CANDIDATES_V2, MAX_RESULT_CANDIDATE_BYTES_V2,
-    MAX_PARAMETER_TEXT_BYTES_V2, MAX_TEXT_LIST_ITEMS_V2,
+    MAX_BUSINESS_PROFILE_BYTES_V2, MAX_PARAMETER_TEXT_BYTES_V2, MAX_RESULT_CANDIDATES_V2,
+    MAX_RESULT_CANDIDATE_BYTES_V2, MAX_TEXT_LIST_ITEMS_V2,
 };
 pub use final_release_business::{
     decode_final_release_delivery_v2, decode_final_result_release_delivery_v04,

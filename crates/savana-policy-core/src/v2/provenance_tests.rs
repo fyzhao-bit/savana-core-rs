@@ -1626,7 +1626,10 @@ fn a_signed_candidate_member_is_endorsed_and_nothing_else_is() {
     );
     // The record survives its own encoding.
     let bytes = crate::v2::encode_provenance_record_v2(&endorsed).unwrap();
-    assert_eq!(crate::v2::decode_provenance_record_v2(&bytes).unwrap(), endorsed);
+    assert_eq!(
+        crate::v2::decode_provenance_record_v2(&bytes).unwrap(),
+        endorsed
+    );
 }
 
 #[test]

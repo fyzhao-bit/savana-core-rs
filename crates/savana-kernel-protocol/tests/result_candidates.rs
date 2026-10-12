@@ -227,3 +227,78 @@ fn a_rule_with_a_set_cannot_be_decoded_out_of_order_or_with_a_computation() {
     computed.extend_from_slice(&bytes[null + 1..]);
     assert!(decode_result_derived_controls_v2(&computed).is_err());
 }
+
+fn display(to: &str, set: &[&str]) -> serde_json::Value {
+    let signed = controls(Some(members(set)));
+    let action = signed.action_alternative(d(90)).unwrap();
+    let root = TaskAuthorizationV2::new(
+        d(20),
+        PrincipalIdV2::new([30; 32]),
+        DurableTaskIdV2::new([31; 32]),
+        1,
+        d(32),
+        d(33),
+        UnixMillisV2::new(1),
+        UnixMillisV2::new(1000),
+        TaskEvidenceKindV2::AuthenticatedStructuredInput,
+        d(34),
+        d(35),
+        vec![
+            TaskAuthorizationClauseV2::new(1, vec![action.clone()], 1, 1, 1, vec![], false)
+                .unwrap(),
+        ],
+    )
+    .unwrap();
+    let request = BusinessRequestV2::parse(
+        &profile(),
+        "request-1",
+        format!(
+            r#"{{"jsonrpc":"2.0","id":"request-1","method":"tools/call","params":{{"name":"mail.send","arguments":{{"body":"hi","file":"A","quantity":1,"subject":"report","to":"{to}"}}}}}}"#
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    let content = ActionContentV2::new(
+        d(20),
+        1,
+        1,
+        0,
+        action,
+        request.magnitude(),
+        request.payload_digest(),
+        d(22),
+        d(23),
+        d(24),
+        d(25),
+        1,
+    )
+    .unwrap();
+    let text =
+        render_task_action_display_v2(&content, &root, &request, signed.derived(), 0, 0).unwrap();
+    serde_json::from_str(text.as_str()).unwrap()
+}
+
+#[test]
+fn the_action_display_says_whether_the_concrete_value_is_a_signed_member() {
+    // The value lives in the request's arguments, not at the top of its
+    // JSON-RPC envelope; reading the envelope called every value a non-member.
+    let shown = display("Bob", &["Alice", "Bob"]);
+    assert_eq!(shown["rendering_schema"], 3);
+    assert_eq!(
+        shown["derived_fields"]["to"]["candidates"],
+        serde_json::json!(["Alice", "Bob"])
+    );
+    assert_eq!(shown["derived_fields"]["to"]["in_candidates"], true);
+    assert_eq!(
+        shown["exact_business_request"]["params"]["arguments"]["to"],
+        "Bob"
+    );
+    // (A value with surrounding space never parses as a request at all.)
+    for outsider in ["Mallory", "bob", "Bobby"] {
+        assert_eq!(
+            display(outsider, &["Alice", "Bob"])["derived_fields"]["to"]["in_candidates"],
+            false,
+            "{outsider}"
+        );
+    }
+}

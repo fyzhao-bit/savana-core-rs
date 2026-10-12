@@ -100,6 +100,8 @@ pub fn render_task_action_display_v2(
     if !derived.is_empty() {
         // The concrete extracted value is in exact_business_request; this shows
         // where the owner's signed root says it must come from.
+        let values: std::collections::BTreeMap<String, BusinessValueV2> =
+            request.field_values().into_iter().collect();
         let fields: serde_json::Map<String, serde_json::Value> = derived
             .iter()
             .map(|(name, r)| {
@@ -115,11 +117,12 @@ pub fn render_task_action_display_v2(
                 if let Some(c) = r.candidates() {
                     // Whether the concrete value is one the owner signed (for a
                     // list, every item); only such a value is endorsed.
-                    let member = match exact.get(name) {
-                        Some(serde_json::Value::String(text)) => c.contains(text),
-                        Some(serde_json::Value::Array(items)) => items
-                            .iter()
-                            .all(|item| item.as_str().is_some_and(|text| c.contains(text))),
+                    // The request's own field, not a key of its JSON-RPC envelope.
+                    let member = match values.get(name) {
+                        Some(BusinessValueV2::Text(text)) => c.contains(text),
+                        Some(BusinessValueV2::TextList(items)) => {
+                            items.iter().all(|item| c.contains(item))
+                        }
                         _ => false,
                     };
                     edge["candidates"] = serde_json::json!(c.members());
