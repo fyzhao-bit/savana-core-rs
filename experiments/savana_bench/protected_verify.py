@@ -44,7 +44,8 @@ def verify_published_episode(directory, local, case, row, profile, contract=None
         votes=[e for e in local if e['kind']=='benchmark_consent']
         base='finite_calendar_preconsent_v1' if len(steps)==1 else 'finite_write_preconsent_v1'
         policy=votes[0].get('policy') if votes else None
-        if policy not in (base+m for m in ('','+permit','+strict_destination','+permit+strict_destination')):
+        owner={'strict':'+strict_destination','directory':'+directory_destination'}.get(case.get('owner'),'')
+        if policy not in (base+m+owner for m in ('','+permit')):
             raise ValueError('finite_consent_evidence_missing')
         if '+permit' in policy:
             # Under a permit disposition only escalated steps ask, each once,
