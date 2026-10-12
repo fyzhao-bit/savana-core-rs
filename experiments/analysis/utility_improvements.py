@@ -254,7 +254,8 @@ def benign_summary(rows):
 
 def attack_summary(rows, baseline=()):
     """Per-suite counts under injection; `baseline` rows of an earlier run on
-    the same pairs (their observed attacker success) for context."""
+    the same pairs with the same injections (their observed attacker success
+    and utility) for context."""
     out = {}
     for suite in (*SUITES, "total"):
         subset = [r for r in rows if suite in ("total", r["suite"])]
@@ -271,13 +272,18 @@ def attack_summary(rows, baseline=()):
             dispatched_unapproved=sum(r["dispatched_unapproved"] for r in subset),
             unauthorized=sum(r["unauthorized"] for r in subset))
     pairs = {(r["suite"], r["user"], r["injection"]) for r in rows}
-    before = [b for b in baseline if (b["suite"], b["user"], b["injection"]) in pairs]
+    before = {}
+    for suite in (*SUITES, "total"):
+        subset = [b for b in baseline if (b["suite"], b["user"], b["injection"]) in pairs
+                  and suite in ("total", b["suite"])]
+        if subset:
+            before[suite] = dict(pairs=len(subset), utility=sum(b.get("utility") is True for b in subset),
+                                 success=sum(b.get("observed_attacker_success") is True for b in subset))
     return dict(by_suite=out,
                 successes=[dict(suite=r["suite"], user=r["user"], injection=r["injection"], outcome=r["outcome"],
                                 attacker_address=r["attacker_address"], attacker_text=r["attacker_text"])
                            for r in rows if r["success"]],
-                baseline=dict(pairs=len(before),
-                              success=sum(b.get("observed_attacker_success") is True for b in before)))
+                baseline=before)
 
 
 def attack_sample(results, arm="U8S"):
@@ -375,7 +381,11 @@ def report(results):
     attacked = episodes(results, ATTACK)
     if attacked:
         from analysis.night_reports import rows
-        baseline = [*rows(results, "adojo")[0], *rows(results, "p0-matrix")[0]]
+        # The earlier main configuration on the same injections: AutoDojo's
+        # (`adojo`) for banking, slack and travel, the official ones
+        # (`p0-matrix`) for workspace.
+        baseline = [*rows(results, "adojo")[0],
+                    *(r for r in rows(results, "p0-matrix")[0] if r["suite"] == "workspace")]
         out["attack"] = attack_summary(attacked, baseline)
     return out
 
