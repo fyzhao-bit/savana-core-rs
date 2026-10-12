@@ -20,7 +20,7 @@ from .official_verify import restore_environment, verify_chain
 from .planner_authors import SYSTEM, PlanUnencodable, compromised_draft, encode_plan, parse_plan
 from .planner_experiment import (DEFINITIVE, IDS, OPERATOR_MODE, SCHEMA, STRUCTURED_REFUSALS,
                                  classify_provider_attempt, directory_provenance, experiment_cases, planner_exposure,
-                                 structured_provenance, summarize)
+                                 structured_provenance, summarize, turn_request)
 from .protected_agentdojo import official_case, package_sources, score_outcome
 from .protected_verify import verify_published_episode
 
@@ -76,7 +76,34 @@ def _submitted_draft(case, contract, local):
     return event["draft"], deviates
 
 
-def _drafted_contract(case, local, row):
+def _adopted_report(case, prior):
+    """The read turn's report if the owner adopted it, else None, recomputed
+    from the read episode's own evidence: its released payload and the owner's
+    directory (`adopted_instructions`). The recorded decision must match."""
+    from .adopted_instructions import adoption_record, report_text
+    from .owner_directory import owner_directory
+    decisions = [e for e in prior if e["kind"] == "instructions_adoption"]
+    if len(decisions) != 1:
+        raise ValueError("instructions_adoption_evidence")
+    recorded = {k: decisions[0].get(k) for k in ("adopted", "reason", "text_sha256", "addresses")}
+    if _one(prior, "episode_score")["outcome"] != "published":
+        if recorded != dict(adopted=False, reason="read_turn_not_published", text_sha256=None, addresses=None):
+            raise ValueError("instructions_adoption_mismatch")
+        return None
+    report = report_text(base64.b64decode(_one(prior, "episode_observation")["output_base64"], validate=True))
+    if recorded != adoption_record(report, owner_directory(case["suite"])):
+        raise ValueError("instructions_adoption_mismatch")
+    return report if recorded["adopted"] else None
+
+
+def _final_environment(local):
+    finals = [e for e in local if e["kind"] in ("episode_observation", "episode_environment")]
+    if len(finals) != 1:
+        raise ValueError("expected_one_final_environment")
+    return finals[0]["environment"]
+
+
+def _drafted_contract(case, local, row, prior=None):
     """Replay the owner's fixed review of every recorded draft, in order: each
     draft before the last must be refused with exactly the recorded code and
     location, and the last must yield the recorded contract or refusal. The
@@ -86,7 +113,10 @@ def _drafted_contract(case, local, row):
     masked view the planner also provably saw none of the owner's values: the
     masked request is recomputed with the kernel's leak-gate definition, and
     no owner-supplied message (system, request, refusal feedback) may contain
-    a value the mask hid."""
+    a value the mask hid. A turn of instructions found in data drafts from its
+    turn's request (`turn_request`); an act turn's is recomputed from its read
+    turn's evidence (`prior`), and an act turn whose report was not adopted
+    drafted nothing."""
     from agentdojo.task_suite.load_suites import get_suite
     from .agentdojo_tasks import BENCHMARK, register_drafted
     from .drafted_tasks import ProgramRefused, parse_program_text, performs_action, requested_action, review_program
@@ -95,12 +125,18 @@ def _drafted_contract(case, local, row):
     drafted = [e for e in local if e["kind"] == "root_drafted"]
     refusals = [e for e in local if e["kind"] == "program_refused"]
     max_drafts = case["max_drafts"]
+    official = get_suite(BENCHMARK, case["suite"])
+    prompt = official.get_user_task_by_id(case["user"]).PROMPT
+    turn = case.get("instructions")
+    request = turn_request(case, prompt, _adopted_report(case, prior) if turn == "act" else None)
+    if request is None:
+        if drafted or refusals or row["outcome"] != "instructions_not_adopted" or "drafts" in row:
+            raise ValueError("unadopted_instructions_were_drafted")
+        return None
     if [e.get("attempt") for e in drafted] != list(range(1, len(drafted) + 1)) or len(drafted) > max_drafts:
         raise ValueError("root_drafter_evidence")
     if row.get("drafts") != len(drafted):
         raise ValueError("draft_count_row")
-    official = get_suite(BENCHMARK, case["suite"])
-    prompt = official.get_user_task_by_id(case["user"]).PROMPT
     tools = {t.name for t in official.tools}
     view = case.get("planner_view", "request")
     _request, bindings = planner_request(prompt, view)
@@ -120,7 +156,7 @@ def _drafted_contract(case, local, row):
                     or event["program_text"] != program_text(load_registry(), case["suite"], case["user"])):
                 raise ValueError("registered_program_evidence")
         else:
-            body = draft_request_body(official, prompt, model=case["planner_model"], goal=case.get("goal"),
+            body = draft_request_body(official, request, model=case["planner_model"], goal=case.get("goal"),
                                       history=tuple(history), view=view, exposure=exposure,
                                       directory=case.get("owner") == "directory")
             if hashlib.sha256(body).hexdigest() != event["request_sha256"]:
@@ -134,16 +170,17 @@ def _drafted_contract(case, local, row):
             raise ValueError("program_text_digest")
         try:
             contract = review_program(suite=case["suite"], suite_tools=tools, task_id=case["user"],
-                                      prompt=prompt, program=parse_program_text(event["program_text"]),
+                                      prompt=request, program=parse_program_text(event["program_text"]),
                                       bindings=bindings,
                                       extractor_model=case.get("extractor_model", "deepseek-flash"),
-                                      derived_destinations=case.get("review") == "derived")
+                                      derived_destinations=case.get("review") == "derived",
+                                      read_only=turn == "read")
             refusal = None
         except ProgramRefused as error:
             contract, refusal = None, error
             history.append((event["program_text"], str(error), error.step, error.field))
         if (contract is not None and case.get("actions") == "ask" and not asked and number < max_drafts
-                and requested_action(prompt) and not performs_action(contract)):
+                and turn != "read" and requested_action(request) and not performs_action(contract)):
             # The runner asked once whether the request's action was left out
             # on purpose: nothing was signed, and the planner drafted again.
             asked, contract = True, None
@@ -331,10 +368,10 @@ def _extractor_inputs(case, local):
         raise ValueError("extractor_input_mismatch")
 
 
-def verify_episode(directory, local, case, row, profile, turns):
+def verify_episode(directory, local, case, row, profile, turns, prior=None):
     drafted = None
     if case.get("root_author"):
-        drafted = _drafted_contract(case, local, row)
+        drafted = _drafted_contract(case, local, row, prior)
         if drafted is None:
             # Refused or not drafted: nothing was signed and no tool ran.
             if any(e["kind"] in ("provider_attempt", "provider_attempt_unbound", "official_tool_result",
@@ -345,7 +382,14 @@ def verify_episode(directory, local, case, row, profile, turns):
     initial = _one(local, "episode_input")
     if initial["contract"] != contract.document() or initial["injections"] != values:
         raise ValueError("task_or_attack_mismatch")
-    if initial["environment"] != env.model_dump(mode="json"):
+    # An act turn starts where its read turn left the environment and is
+    # scored as the whole task: from before the read turn, both turns' calls.
+    continued = None
+    if case.get("instructions") == "act":
+        continued = dict(environment=_final_environment(prior), before=_one(prior, "episode_input")["environment"],
+                         trace=[dict(invoked=True, upstream=e["tool"], arguments=e["arguments"])
+                                for e in prior if e["kind"] == "official_tool_result"])
+    if initial["environment"] != (env.model_dump(mode="json") if continued is None else continued["environment"]):
         raise ValueError("initial_environment_mismatch")
     authored = [e for e in local if e["kind"] == "plan_authored"]
     if case["author"] == "deepseek":
@@ -424,7 +468,7 @@ def verify_episode(directory, local, case, row, profile, turns):
     _extractor_inputs(case, local)
     if row["outcome"] == "published":
         utility, attacker = verify_published_episode(directory, local, case, dict(row, status="scored"), profile,
-                                                     drafted)
+                                                     drafted, continued=continued)
         if (row["utility"], row["attacker_success"]) != (utility, attacker):
             raise ValueError("official_oracle_replay_mismatch")
         final = _one(local, "episode_observation")["environment"]
@@ -436,12 +480,13 @@ def verify_episode(directory, local, case, row, profile, turns):
         if len(finals) != 1:
             raise ValueError("expected_one_final_environment")
         final = finals[0]["environment"]
-        before = restore_environment(type(env), initial["environment"])
+        before = restore_environment(type(env), initial["environment"] if continued is None else continued["before"])
         after = restore_environment(type(env), final)
         tools = [e for e in local if e["kind"] == "official_tool_result"]
         observed = score_outcome(suite=suite, task=task, injection=injection, contract=contract,
             before=before, after=after, provider=SimpleNamespace(audit=[
-                dict(invoked=True, upstream=e["tool"], arguments=e["arguments"]) for e in tools]),
+                *([] if continued is None else continued["trace"]),
+                *(dict(invoked=True, upstream=e["tool"], arguments=e["arguments"]) for e in tools)]),
             outcome=None)
         if (row["observed_utility"], row["observed_attacker_success"]) != observed:
             raise ValueError("official_oracle_replay_mismatch")
@@ -488,7 +533,9 @@ def verify(directory):
         if row["attempted"] and row["status"] != expected_status:
             raise ValueError("episode_status")
         if row["attempted"]:
-            verify_episode(directory, local, case, row, profile, turns)
+            prior = ([e for e in events if e.get("episode") == index - 1]
+                     if case.get("instructions") == "act" else None)
+            verify_episode(directory, local, case, row, profile, turns, prior)
         rows.append(row)
     if len(turns) > 1:
         raise ValueError("owner_release_turn_not_fixed")

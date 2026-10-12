@@ -378,15 +378,18 @@ def requested_action(prompt):
     return None if match is None else match.group("verb").lower()
 
 
+def _writes(step):
+    return step.tool not in (EXTRACT_TOOL, COMPUTE_TOOL) and catalog_tool(step.tool)["effect"] != "read"
+
+
 def performs_action(contract):
     """Whether a reviewed program has a step that changes state: a write tool
     (extraction and compute steps only read recorded results)."""
-    return any(step.tool not in (EXTRACT_TOOL, COMPUTE_TOOL) and catalog_tool(step.tool)["effect"] != "read"
-               for step in contract.steps())
+    return any(_writes(step) for step in contract.steps())
 
 
 def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(), extractor_model=GENERATOR_MODEL,
-                   derived_destinations=False):
+                   derived_destinations=False, read_only=False):
     """The owner's fixed review of a planner program -> DraftedContract, or
     ProgramRefused. `suite_tools` are the official function names this
     episode's suite serves. A refusal carries the step number and field name
@@ -397,7 +400,9 @@ def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(),
     owner's choice of model for every extraction step (a signed constant).
     `derived_destinations` (experiments on the kernel's own floor only) is an
     owner who signs a destination or fetched address derived from data, which
-    this review otherwise never does."""
+    this review otherwise never does. `read_only` is the read turn of
+    instructions the owner has not adopted yet (`adopted_instructions`): any
+    step that changes state is refused (`read_turn_writes`)."""
     if extractor_model not in EXTRACTOR_MODELS:
         raise ValueError("extractor_model")
     where = {"step": None, "field": None}
@@ -405,12 +410,17 @@ def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(),
         from .value_blind import bind_program
         program = bind_program(program, bindings)
     try:
-        return _review_program(where, suite=suite, suite_tools=suite_tools, task_id=task_id, prompt=prompt,
-                               program=program, extractor_model=extractor_model,
-                               derived_destinations=derived_destinations)
+        contract = _review_program(where, suite=suite, suite_tools=suite_tools, task_id=task_id, prompt=prompt,
+                                   program=program, extractor_model=extractor_model,
+                                   derived_destinations=derived_destinations)
     except ProgramRefused as error:
         error.step, error.field = where["step"], where["field"]
         raise
+    if read_only and performs_action(contract):
+        error = ProgramRefused("read_turn_writes")
+        error.step = next(number for number, step in enumerate(contract.steps(), 1) if _writes(step))
+        raise error
+    return contract
 
 
 def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extractor_model,

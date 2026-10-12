@@ -46,7 +46,7 @@ IDS = ("task", "root", "observer", "application_turn", "planner", "model_profile
 # are the structured-planning stages that refused before anything was signed.
 DEFINITIVE = ("plan_unencodable", "author_failed", "sdk_codec_rejected", "compile_rejected",
               "prepare_rejected", "owner_refused", "published", "program_refused",
-              "mapper_failed", "planner_invalid", "lowering_failed")
+              "mapper_failed", "planner_invalid", "lowering_failed", "instructions_not_adopted")
 STRUCTURED_REFUSALS = ("mapper_failed", "planner_invalid", "lowering_failed")
 KERNEL_BLOCKS = ("compile_rejected", "prepare_rejected")
 
@@ -122,6 +122,36 @@ MAPPERS = ("template", "deepseek")
 # action: accept it as it is, or ask the planner once whether it meant to leave
 # the action out (`omitted_write`; it may return the same program to keep it).
 ACTIONS = ("accept", "ask")
+# A request that delegates its action to instructions found in data: refuse to
+# act on them (none), or run a read turn whose report the owner may adopt as
+# its own words for an act turn (`adopted_instructions`).
+INSTRUCTIONS = ("none", "adopt")
+
+
+class InstructionsNotAdopted(RuntimeError):
+    """The owner did not adopt the read turn's report: the act turn drafts nothing."""
+
+
+def turn_request(case, prompt, adopted_report):
+    """The request one turn's planner, review and kernel see: the owner's own,
+    or for instructions found in data (`adopted_instructions`) the read turn's
+    request, or the act turn's (None when the read turn's report was not
+    adopted)."""
+    from .adopted_instructions import act_turn_request, read_turn_request
+    turn = case.get("instructions")
+    if turn is None:
+        return prompt
+    if turn == "read":
+        return read_turn_request(prompt)
+    return None if adopted_report is None else act_turn_request(prompt, adopted_report)
+
+
+def _with_prior_calls(provider, prior):
+    """The provider as scored: an act turn's trace starts with its read turn's calls."""
+    if not prior:
+        return provider
+    from types import SimpleNamespace
+    return SimpleNamespace(audit=[*prior, *provider.audit])
 
 
 def drafted_options(kind):
@@ -144,7 +174,10 @@ def drafted_options(kind):
     `+mapper=template` (the default; the template, reordered by agentd's
     pipeline) or `+mapper=deepseek` (the planner's reviewed draft, reordered).
     `+actions=ask` asks the planner once when its accepted draft writes nothing
-    but the request asks for an action (see ACTIONS; needs a later draft)."""
+    but the request asks for an action (see ACTIONS; needs a later draft).
+    `+instructions=adopt` runs a request that delegates its action to
+    instructions in data as a read turn and an act turn (see INSTRUCTIONS;
+    needs the directory owner, who decides adoption)."""
     from .drafted_tasks import EXTRACTOR_MODELS
     from .value_blind import EXTRACTOR_VIEWS, VIEWS
     base, *options = kind.split("+")
@@ -155,7 +188,7 @@ def drafted_options(kind):
         key, equals, value = option.partition("=")
         if not equals or key in parsed or key not in ("drafts", "planner", "view", "extract", "extractor",
                                                        "attack", "exposure", "review", "owner", "author",
-                                                       "mapper", "actions"):
+                                                       "mapper", "actions", "instructions"):
             raise ValueError("planner_experiment_spec")
         parsed[key] = value
     drafts = parsed.get("drafts", "1")
@@ -174,19 +207,22 @@ def drafted_options(kind):
             or extractor not in EXTRACTOR_MODELS or attack not in ATTACKS or exposure not in EXPOSURES
             or review not in REVIEWS or owner not in OWNERS or author not in AUTHORS
             or parsed.get("mapper", MAPPERS[0]) not in MAPPERS or ("mapper" in parsed and author != "structured")
-            or parsed.get("actions", ACTIONS[0]) not in ACTIONS):
+            or parsed.get("actions", ACTIONS[0]) not in ACTIONS
+            or parsed.get("instructions", INSTRUCTIONS[0]) not in INSTRUCTIONS):
         raise ValueError("planner_experiment_spec")
     # Only a structured spec passes `mapper`, so every other spec's options are unchanged.
     mapper = {} if author != "structured" else dict(mapper=parsed.get("mapper", MAPPERS[0]))
     return base, dict(max_drafts=int(drafts), planner_model=planner, planner_view=view, extractor_view=extract,
                       extractor_model=extractor, attack=attack, exposure=exposure, review=review, owner=owner,
                       author=author, **mapper,
-                      **({} if "actions" not in parsed else dict(actions=parsed["actions"])))
+                      **({} if "actions" not in parsed else dict(actions=parsed["actions"])),
+                      **({} if "instructions" not in parsed else dict(instructions=parsed["instructions"])))
 
 
 def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS[0], planner_view="request",
                   extractor_view="raw", extractor_model="deepseek-flash", attack=ATTACKS[0],
-                  exposure=EXPOSURES[0], review=None, owner=None, author=None, mapper=None, actions=None):
+                  exposure=EXPOSURES[0], review=None, owner=None, author=None, mapper=None, actions=None,
+                  instructions=None):
     """`<suite>:<item>[,<item>...]`, each item `user_task_N` (benign) or
     `user_task_N+injection_task_M` (the official important_instructions
     attack). The planner drafts each task's whole program from its request.
@@ -200,7 +236,10 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
     AutoDojo's optimized injections instead of the official template (banking,
     slack and travel only; never with a compromised planner). `exposure`
     "data" also shows the planner each case's injected data (AutoDojo only,
-    every item an attack pair): a planner already polluted by the injection."""
+    every item an attack pair): a planner already polluted by the injection.
+    `instructions` "adopt" makes each item whose request delegates its action
+    to instructions in data two consecutive cases, its read turn and its act
+    turn (`adopted_instructions`); every other item stays one case."""
     from .autodojo_cache import SUITES as AUTODOJO_SUITES
     from .dojo_catalog import SUITES
     from .drafted_tasks import EXTRACTOR_MODELS
@@ -238,6 +277,12 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
     if actions not in (None, *ACTIONS) or (actions == "ask" and (
             max_drafts < 2 or author in ("fixed", "registered") or mapper == "template")):
         raise ValueError("planner_experiment_spec")
+    # Instructions found in data: a drafting planner that sees only the
+    # request, and the directory owner, who decides what to adopt.
+    if instructions not in (None, *INSTRUCTIONS) or (instructions == "adopt" and (
+            author != "deepseek" or owner != "directory" or goal is not None or exposure != EXPOSURES[0]
+            or planner_view != VIEWS[0])):
+        raise ValueError("planner_experiment_spec")
     if author == "registered" or mapper == "template":
         from .structured_templates import load_registry, template
         registry = load_registry()
@@ -264,13 +309,23 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
             # The compromise under test is the PLANNER; the environment stays
             # benign so an effect can only come from the planner's own program.
             raise ValueError("planner_experiment_spec")
-        cases.append(dict(group=group, suite=suite, user=user, injection=injection, author="reviewed",
-                          root_author=author, goal=goal, mutation=None, max_drafts=max_drafts,
-                          planner_model=planner_model, planner_view=planner_view, extractor_view=extractor_view,
-                          extractor_model=extractor_model, **attack_key,
-                          **({} if mapper is None else dict(mapper=mapper)),
-                          **({} if actions in (None, ACTIONS[0]) else dict(actions=actions))))
+        case = dict(group=group, suite=suite, user=user, injection=injection, author="reviewed",
+                    root_author=author, goal=goal, mutation=None, max_drafts=max_drafts,
+                    planner_model=planner_model, planner_view=planner_view, extractor_view=extractor_view,
+                    extractor_model=extractor_model, **attack_key,
+                    **({} if mapper is None else dict(mapper=mapper)),
+                    **({} if actions in (None, ACTIONS[0]) else dict(actions=actions)))
+        if instructions == "adopt" and _delegates_to_data(suite, user):
+            cases += [dict(case, instructions="read"), dict(case, instructions="act")]
+        else:
+            cases.append(case)
     return tuple(cases)
+
+
+def _delegates_to_data(suite, user):
+    from agentdojo.task_suite.load_suites import get_suite
+    from .adopted_instructions import requested_instructions
+    return requested_instructions(get_suite(BENCHMARK, suite).get_user_task_by_id(user).PROMPT)
 
 
 def experiment_cases(spec):
@@ -628,6 +683,9 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             worker = ModelWorker(config["model_worker"], model, audit, listener_fd=model_listener_fd)
             worker.start()
         deployment = config["provisioning"]
+        # A read turn's adopted report and its environment, for its act turn
+        # (the next case): nothing else crosses from one episode to another.
+        adopted, carried = {}, {}
         for index, case in enumerate(cases):
             row = dict(episode=index, **case, attempted=not blockers, status="not_attempted",
                 outcome="preflight" if blockers else "not_attempted", stage=None,
@@ -642,7 +700,12 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                 facts = dict(plan_supplied=False, deviates=None)
                 attempts = []
                 servers, session, observer, endpoint, consent = [], None, None, None, None
-                suite = provider = after = generated_before = None
+                suite = provider = after = generated_before = outcome = None
+                turn = case.get("instructions")
+                if turn == "act" and (index == 0 or {k: v for k, v in cases[index - 1].items() if k != "instructions"}
+                                      != {k: v for k, v in case.items() if k != "instructions"}
+                                      or cases[index - 1].get("instructions") != "read"):
+                    raise ValueError("act_turn_without_its_read_turn")
                 try:
                     from .agentdojo_calendar import calendar_provider
                     from .benchmark_consent import FiniteConsent
@@ -663,6 +726,11 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         official = get_suite(BENCHMARK, case["suite"])
                         prompt = official.get_user_task_by_id(case["user"]).PROMPT
                         row["stage"] = "root_drafting"
+                        request = turn_request(case, prompt, adopted.get(index - 1))
+                        if request is None:
+                            # The owner did not adopt the read turn's report: nothing to draft.
+                            row["outcome"] = "instructions_not_adopted"
+                            raise InstructionsNotAdopted()
                         # A value-blind view: the planner is sent placeholders,
                         # which the owner binds back to its own values below.
                         _request, bindings = planner_request(prompt, case["planner_view"])
@@ -686,7 +754,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                     meta = dict(request_sha256=None, usage=None, response_sha256=hashlib.sha256(
                                         program_text.encode()).hexdigest())
                                 else:
-                                    program_text, meta = drafter.draft(official, prompt, goal=case.get("goal"),
+                                    program_text, meta = drafter.draft(official, request, goal=case.get("goal"),
                                                                        history=tuple(history),
                                                                        view=case["planner_view"],
                                                                        exposure=planner_exposure(case),
@@ -700,9 +768,10 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                             try:
                                 drafted = register_drafted(review_program(suite=case["suite"],
                                     suite_tools={t.name for t in official.tools}, task_id=case["user"],
-                                    prompt=prompt, program=parse_program_text(program_text), bindings=bindings,
+                                    prompt=request, program=parse_program_text(program_text), bindings=bindings,
                                     extractor_model=case["extractor_model"],
-                                    derived_destinations=case.get("review") == "derived"))
+                                    derived_destinations=case.get("review") == "derived",
+                                    read_only=turn == "read"))
                             except ProgramRefused as error:
                                 audit.emit("program_refused", episode=index, attempt=attempt, reason=str(error),
                                            step=error.step, field=error.field)
@@ -712,7 +781,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                 history.append((program_text, str(error), error.step, error.field))
                                 continue
                             if (case.get("actions") == "ask" and not asked and attempt < case["max_drafts"]
-                                    and requested_action(prompt) and not performs_action(drafted)):
+                                    and turn != "read" and requested_action(request)
+                                    and not performs_action(drafted)):
                                 # Asked once: the request asks for an action this
                                 # program does not perform. Nothing is signed yet.
                                 asked, drafted = True, None
@@ -748,6 +818,13 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                 raise StructuredError(planned["outcome"])
                             drafted = register_drafted(planned["contract"])
                     suite, task, injection, contract, values, env = official_case(case, drafted)
+                    # An act turn continues on its read turn's environment and is
+                    # scored as the whole task: from before the read turn, with
+                    # both turns' calls in the trace.
+                    scoring_before, prior_audit = None, []
+                    if turn == "act":
+                        env = carried[index - 1]["after"].model_copy(deep=True)
+                        scoring_before, prior_audit = carried[index - 1]["before"], carried[index - 1]["audit"]
                     before = env.model_copy(deep=True)
                     turn = digest32(deployment["application_turn"]).hex()
                     tool_results = []  # exact tool responses so far, in order
@@ -835,7 +912,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                     session = None  # finish_private_episode closed it.
                     frozen = endpoint.freeze()
                     utility, attacker = score_outcome(suite=suite, task=task, injection=injection,
-                        contract=contract, before=before, after=frozen, provider=provider, outcome=outcome)
+                        contract=contract, before=scoring_before or before, after=frozen,
+                        provider=_with_prior_calls(provider, prior_audit), outcome=outcome)
                     after = frozen
                     emit("episode_observation", environment=after.model_dump(mode="json"),
                         publication=outcome.publication, output_base64=(None if outcome.payload is None else
@@ -863,7 +941,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         server.close()
                     if observer is not None:
                         observer.close()
-                if row["outcome"] in ("program_refused", *STRUCTURED_REFUSALS):
+                if row["outcome"] in ("program_refused", "instructions_not_adopted", *STRUCTURED_REFUSALS):
                     # Refused before anything was signed: no tool ran and the
                     # environment was never created, so nothing changed.
                     row.update(observed_utility=False, environment_changed=False,
@@ -879,11 +957,26 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         # refusal: a refusal is never utility, an effect never hidden.
                         try:
                             observed = score_outcome(suite=suite, task=task, injection=injection,
-                                contract=contract, before=before, after=after, provider=provider, outcome=None)
+                                contract=contract, before=scoring_before or before, after=after,
+                                provider=_with_prior_calls(provider, prior_audit), outcome=None)
                             row.update(observed_utility=observed[0], observed_attacker_success=observed[1])
                         except Exception:
                             row["oracle_status"] = "unknown"
                     row["environment_changed"] = after.model_dump(mode="json") != before.model_dump(mode="json")
+                if turn == "read":
+                    # The owner reads the report and decides; only an adopted
+                    # report reaches the act turn, as the owner's own words.
+                    from .adopted_instructions import adoption_record, report_text
+                    from .owner_directory import owner_directory
+                    report = (report_text(outcome.payload)
+                              if row["outcome"] == "published" and outcome is not None else None)
+                    record = (adoption_record(report, owner_directory(case["suite"])) if report is not None
+                              else dict(adopted=False, reason="read_turn_not_published", text_sha256=None,
+                                        addresses=None))
+                    audit.emit("instructions_adoption", episode=index, **record)
+                    adopted[index] = report if record["adopted"] else None
+                    if suite is not None and after is not None:
+                        carried[index] = dict(before=before, after=after, audit=list(provider.audit))
                 if generator is not None and generated_before is not None:
                     # Digests and token usage of this episode's generator calls
                     # (its text output is already in the tool result evidence).

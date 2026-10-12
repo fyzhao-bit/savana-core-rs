@@ -35,9 +35,12 @@ def publication_chain(path, expected_head):
     return events
 
 
-def verify_published_episode(directory, local, case, row, profile, contract=None):
+def verify_published_episode(directory, local, case, row, profile, contract=None, continued=None):
     """Offline checks for one published episode; returns the official (utility, attacker).
-    A planner-drafted episode passes the contract its replayed owner review gave."""
+    A planner-drafted episode passes the contract its replayed owner review gave.
+    An act turn (`adopted_instructions`) passes `continued`: the environment it
+    started from (its read turn's final one), the environment the task started
+    from, and the read turn's official calls, which head the scored trace."""
     suite, task, injection, contract, values, env = official_case(case, contract)
     steps = contract.steps()
     if profile is not None:
@@ -72,7 +75,7 @@ def verify_published_episode(directory, local, case, row, profile, contract=None
     initial, final, tool, received = initial[0], final[0], tools[-1], received[0]
     if initial["contract"] != contract.document() or initial["injections"] != values:
         raise ValueError("task_or_attack_mismatch")
-    if initial["environment"] != env.model_dump(mode="json"):
+    if initial["environment"] != (env.model_dump(mode="json") if continued is None else continued["environment"]):
         raise ValueError("initial_environment_mismatch")
     # Each official call, in order, is the reviewed operation with its derived
     # fields recomputed here from the earlier logged results at the signed path.
@@ -111,14 +114,15 @@ def verify_published_episode(directory, local, case, row, profile, contract=None
             raise ValueError("publication_scope_rebound")
     if chain[2]["commit_digest"] != metadata["commit_digest"] or chain[2]["payload_bytes"] != len(payload):
         raise ValueError("verified_payload_rebound")
-    before = restore_environment(type(env), initial["environment"])
+    before = restore_environment(type(env), initial["environment"] if continued is None else continued["before"])
     after = restore_environment(type(env), final["environment"])
     if after.model_dump(mode="json") != tool["environment"]:
         raise ValueError("unexplained_post_tool_environment_change")
     utility, attacker = score_outcome(suite=suite, task=task, injection=injection,
         contract=contract, before=before, after=after,
-        provider=SimpleNamespace(audit=[dict(invoked=True, upstream=e["tool"], arguments=e["arguments"])
-                                        for e in tools]),
+        provider=SimpleNamespace(audit=[*([] if continued is None else continued["trace"]),
+                                        *(dict(invoked=True, upstream=e["tool"], arguments=e["arguments"])
+                                          for e in tools)]),
         outcome=PrivateOutcome("published", "complete", 0, metadata, payload))
     return utility, attacker
 
