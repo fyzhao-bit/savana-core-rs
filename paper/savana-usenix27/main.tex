@@ -2508,15 +2508,18 @@ three stages:
 \item a \emph{deterministic} decoder maps the ordered plan back to tool
   classes.
 \end{enumerate}
-Intent exposure is one explicit knob, and it fails safe to private
-planning.
+Intent exposure is an explicit per-request choice, private by default
+and capped by the deployment; a request beyond the cap is refused before
+any network call rather than re-routed.
 
 \paragraph{Connector registration.} The connector registry is a
 hash-chained state whose genesis and update authority are pinned by the
-deployment channel. A user-registered connector is a tool surface with a
-capability ceiling: it can never become an egress sink. Each registration
-is approved through a distinct-purpose settlement whose display shows the
-complete descriptor.
+deployment channel. A user-registered connector's tools join the tool
+surface under a capability ceiling: every call needs the owner's
+approval, and the connector can never become a release sink, because
+release readers come only from rules signed with a separate key. Each
+registration is approved through a distinct-purpose settlement whose
+display shows what each tool does.
 
 \section{Closest-System Comparison}
 \label{app:related-comparison}
