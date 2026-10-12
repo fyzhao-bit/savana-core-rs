@@ -165,5 +165,31 @@ class FixedProgramTests(unittest.TestCase):
                 experiment_cases(spec)
 
 
+class UnconfinedWriteProvisioningTests(unittest.TestCase):
+    """The materializer's counterfactual (one write shipped without the
+    intent-flow validator) is recorded in the provisioning profile, and the
+    runner accepts it only under permit and only for a shipped write."""
+    def profile(self, **extra):
+        from savana_bench.agentdojo_tasks import catalog_operations
+        ops = catalog_operations("banking") | {"savana.final_result_release"}
+        return dict(dict(schema=1, descriptors={op: "ab" * 32 for op in ops}, planner="cd" * 32,
+                         destination_digest="cd" * 32, application_turn="cd" * 32, store="cd" * 32,
+                         installation="cd" * 32, disposition="permit", scope="finite_workspace_read_subset",
+                         task_grants_installed=False), **extra)
+
+    def test_one_shipped_write_under_permit(self):
+        from savana_bench.protected_agentdojo import check_provisioning
+        check_provisioning(self.profile())
+        check_provisioning(self.profile(unconfined_write="dojo.bank.send_money"))
+        for bad in (self.profile(unconfined_write="dojo.bank.send_money", disposition="require_approval"),
+                    self.profile(unconfined_write="dojo.bank.read_file"),
+                    self.profile(unconfined_write="savana.final_result_release"),
+                    self.profile(unconfined_write="dojo.slack.send_dm"),
+                    self.profile(unconfined_write=["dojo.bank.send_money"])):
+            with self.assertRaises(ValueError) as caught:
+                check_provisioning(bad)
+            self.assertEqual(str(caught.exception), "closed_provisioning_profile")
+
+
 if __name__ == "__main__":
     unittest.main()

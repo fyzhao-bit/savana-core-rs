@@ -129,6 +129,33 @@ class ResearchAudit:
         os.close(self._fd)
 
 
+def check_provisioning(d):
+    """The operator's provisioning profile: exactly one suite's reviewed catalog,
+    a closed disposition, no task grants. A floor experiment may name one write
+    tool its deployment shipped without the intent-flow validator, only under
+    `permit` (the materializer's counterfactual)."""
+    from .agentdojo_tasks import catalog_operations, catalog_tool
+    from .dojo_catalog import SUITES
+    # A deployment ships exactly one suite's reviewed catalog.
+    shipped=set(d['descriptors']) if type(d) is dict and type(d.get('descriptors')) is dict else set()
+    expected_descriptors=next((catalog_operations(s)|{'savana.final_result_release'} for s in SUITES
+        if catalog_operations(s)|{'savana.final_result_release'}==shipped),None)
+    unconfined=d.get('unconfined_write') if type(d) is dict else None
+    if (type(d) is not dict
+        or set(d)-{'unconfined_write'}!={'schema','descriptors','planner','destination_digest','application_turn',
+                                         'store','installation','disposition','scope','task_grants_installed'}
+        or d['schema']!=1 or d['disposition'] not in ('require_approval','permit')
+        or d['scope']!='finite_workspace_read_subset' or d['task_grants_installed'] is not False
+        or set(d['descriptors'])!=expected_descriptors
+        or ('unconfined_write' in d and (d['disposition']!='permit' or type(unconfined) is not str
+                                         or unconfined not in shipped - {'savana.final_result_release'}
+                                         or catalog_tool(unconfined)['effect']=='read'))):
+        raise ValueError('closed_provisioning_profile')
+    for value in (*d['descriptors'].values(),*(d[k] for k in ('planner','destination_digest','application_turn',
+                                                                'store','installation'))):
+        digest32(value)
+
+
 def load_config(path):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
@@ -153,23 +180,8 @@ def load_config(path):
     if config['schema']==3:
         if set(config)!=fields|{'provisioning','operator_socket'}: raise ValueError('closed_deployment_config_required')
         from .protected_operator import SOCKET
-        d=config['provisioning']
-        from .agentdojo_tasks import catalog_operations
-        from .dojo_catalog import SUITES
-        # A deployment ships exactly one suite's reviewed catalog.
-        shipped=set(d['descriptors']) if type(d) is dict and type(d.get('descriptors')) is dict else set()
-        expected_descriptors=next((catalog_operations(s)|{'savana.final_result_release'} for s in SUITES
-            if catalog_operations(s)|{'savana.final_result_release'}==shipped),None)
-        if (config['operator_socket']!=SOCKET or type(d) is not dict
-            or set(d)!={'schema','descriptors','planner','destination_digest','application_turn','store',
-                        'installation','disposition','scope','task_grants_installed'}
-            or d['schema']!=1 or d['disposition'] not in ('require_approval','permit')
-            or d['scope']!='finite_workspace_read_subset' or d['task_grants_installed'] is not False
-            or set(d['descriptors'])!=expected_descriptors):
-            raise ValueError('closed_provisioning_profile')
-        for value in (*d['descriptors'].values(),*(d[k] for k in ('planner','destination_digest','application_turn',
-                                                                    'store','installation'))):
-            digest32(value)
+        if config['operator_socket']!=SOCKET: raise ValueError('closed_provisioning_profile')
+        check_provisioning(config['provisioning'])
     elif (set(config)!=fields|{'entries'} or type(config['entries']) is not list
             or len(config['entries'])!=len(CASES)):
         raise ValueError('closed_deployment_config_required')

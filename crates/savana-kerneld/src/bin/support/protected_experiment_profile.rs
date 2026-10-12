@@ -155,8 +155,9 @@ fn parse_catalog_fields(tool: &Value) -> Result<Vec<(String, R, T)>, String> {
 /// Parse the reviewed tool catalog the staging step copied in. Only operation
 /// names, business field roles/types, effects and required validators are read;
 /// it authorizes no target, credential or value and never re-signs a manifest.
-/// Every authorizing (write) tool must declare intent-flow-confinement.
-fn tool_catalog(stage: &Path) -> Result<Vec<CatalogToolV04>, String> {
+/// Every authorizing (write) tool must declare intent-flow-confinement, except
+/// the one write an experiment names as `unconfined`, which must declare none.
+fn tool_catalog(stage: &Path, unconfined: Option<&str>) -> Result<Vec<CatalogToolV04>, String> {
     let doc = read(stage, "etc/savana/read-tool-catalog-v04.json")?;
     if doc["schema"] != json!(2) {
         return Err("tool catalog schema".into());
@@ -184,35 +185,50 @@ fn tool_catalog(stage: &Path) -> Result<Vec<CatalogToolV04>, String> {
             validators: Vec::new(),
         });
     }
+    let mut unconfined_shipped = false;
     for tool in writes {
         if tool["fixed_magnitude"] != json!(1) {
             return Err("catalog write magnitude".into());
         }
         let (effect, effect_set, attempt) =
             tool_effect(tool["effect"].as_str().ok_or("catalog write effect")?)?;
-        // A write tool declares exactly the intent-flow-confinement validator.
+        let operation = tool["operation"]
+            .as_str()
+            .ok_or("catalog operation name")?
+            .to_owned();
         let names = tool["validators"].as_array().ok_or("catalog validators")?;
-        if names.iter().map(|v| v.as_str()).collect::<Option<Vec<_>>>()
-            != Some(vec!["intent_flow_confinement"])
-        {
-            return Err("catalog write validators".into());
-        }
-        let validators = vec![confinement_declaration()];
-        // The deployment rule: a state-changing tool must bind confinement.
-        if !deployment_requires_intent_flow_confinement(effect_set, &validators) {
-            return Err("authorizing tool without confinement".into());
-        }
+        let validators = if unconfined == Some(operation.as_str()) {
+            // The experiment's defective descriptor: no validator at all.
+            if !names.is_empty() {
+                return Err("unconfined write declares validators".into());
+            }
+            unconfined_shipped = true;
+            Vec::new()
+        } else {
+            // A write tool declares exactly the intent-flow-confinement validator.
+            if names.iter().map(|v| v.as_str()).collect::<Option<Vec<_>>>()
+                != Some(vec!["intent_flow_confinement"])
+            {
+                return Err("catalog write validators".into());
+            }
+            let validators = vec![confinement_declaration()];
+            // The deployment rule: a state-changing tool must bind confinement.
+            if !deployment_requires_intent_flow_confinement(effect_set, &validators) {
+                return Err("authorizing tool without confinement".into());
+            }
+            validators
+        };
         out.push(CatalogToolV04 {
-            operation: tool["operation"]
-                .as_str()
-                .ok_or("catalog operation name")?
-                .to_owned(),
+            operation,
             fields: parse_catalog_fields(tool)?,
             effect,
             effect_set,
             attempt,
             validators,
         });
+    }
+    if unconfined.is_some() && !unconfined_shipped {
+        return Err("unconfined write not in catalog".into());
     }
     Ok(out)
 }
@@ -269,6 +285,28 @@ fn experiment_disposition(
     }
 }
 
+/// A counterfactual for the same experiment: one named write tool shipped
+/// without the intent-flow-confinement validator, the descriptor defect the
+/// deployment rule refuses and the kernel's G5 floor still covers. Absent by
+/// default; only under `permit`, where an unescalated call never asks.
+fn experiment_unconfined_write(
+    value: Result<String, std::env::VarError>,
+    disposition: &str,
+) -> Result<Option<String>, String> {
+    match value {
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Ok(name)
+            if disposition == "permit"
+                && !name.is_empty()
+                && name.len() <= 128
+                && name.bytes().all(|b| b.is_ascii_graphic()) =>
+        {
+            Ok(Some(name))
+        }
+        _ => Err("an unconfined write names one tool under a permit disposition".into()),
+    }
+}
+
 pub(super) fn materialize(stage: &Path) -> Result<(), String> {
     if !cfg!(debug_assertions)
         || !stage.is_absolute()
@@ -301,6 +339,10 @@ pub(super) fn materialize(stage: &Path) -> Result<(), String> {
     if kernel["policy_runtime"]["disposition"] != "require_approval" {
         return Err("unexpected template disposition".into());
     }
+    let unconfined = experiment_unconfined_write(
+        std::env::var("SAVANA_PROTECTED_EXPERIMENT_UNCONFINED_WRITE"),
+        disposition,
+    )?;
     if exec["provider_routing_mode"] != "split-final-release" {
         return Err("split provider required".into());
     }
@@ -321,7 +363,7 @@ pub(super) fn materialize(stage: &Path) -> Result<(), String> {
     // Ordered registry: each reviewed catalog tool (reads then writes), then the
     // one fixed final-result-release tool. Indices drive the tool class/template
     // and the signed descriptor leaf, so this order is the deployment tool order.
-    let catalog_tools = tool_catalog(stage)?;
+    let catalog_tools = tool_catalog(stage, unconfined.as_deref())?;
     let tool_count = catalog_tools.len() + 1;
     // The workspace connector carries every read AND write tool on one native
     // provider endpoint; its effect set is the union it must authorize.
@@ -688,11 +730,14 @@ pub(super) fn materialize(stage: &Path) -> Result<(), String> {
         "etc/savana/experiment-endpoints-v04.json",
         &endpoints,
     )?;
-    let binding = json!({"schema":1,"descriptors":descriptors,"planner":hex(recipient),
+    let mut binding = json!({"schema":1,"descriptors":descriptors,"planner":hex(recipient),
         "destination_digest":hex(destination),"application_turn":hex(*turn.as_bytes()),
         "store":kernel["g4_store_id"],
         "installation":manifest["installation_id"],"disposition":disposition,
         "scope":"finite_workspace_read_subset","task_grants_installed":false});
+    if let Some(name) = &unconfined {
+        binding["unconfined_write"] = json!(name);
+    }
     write_json(
         &stage.join("etc/savana/experiment-provisioning-v04.json"),
         &binding,
@@ -707,7 +752,7 @@ pub(super) fn materialize(stage: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::experiment_disposition;
+    use super::{experiment_disposition, experiment_unconfined_write};
     use std::env::VarError;
 
     #[test]
@@ -725,5 +770,25 @@ mod tests {
             assert!(experiment_disposition(Ok(value.into())).is_err());
         }
         assert!(experiment_disposition(Err(VarError::NotUnicode("permit".into()))).is_err());
+    }
+
+    #[test]
+    fn an_unconfined_write_is_one_named_tool_under_permit_only() {
+        assert_eq!(
+            experiment_unconfined_write(Err(VarError::NotPresent), "require_approval"),
+            Ok(None)
+        );
+        assert_eq!(
+            experiment_unconfined_write(Ok("dojo.bank.send_money".into()), "permit"),
+            Ok(Some("dojo.bank.send_money".into()))
+        );
+        assert!(
+            experiment_unconfined_write(Ok("dojo.bank.send_money".into()), "require_approval")
+                .is_err()
+        );
+        for value in ["", "dojo.bank.send_money dojo.slack.send_dm", "send\nmoney"] {
+            assert!(experiment_unconfined_write(Ok(value.into()), "permit").is_err());
+        }
+        assert!(experiment_unconfined_write(Ok("x".repeat(129)), "permit").is_err());
     }
 }
