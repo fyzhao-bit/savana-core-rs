@@ -639,6 +639,54 @@ fn final_release_consent_validation_is_pure_across_gate_failure_and_retry() {
 }
 
 #[test]
+fn final_release_to_a_sink_the_deployment_rule_does_not_name_is_refused() {
+    // Release readers come only from the deployment's declassification
+    // authority rule set. Connector registration signs registry deltas, never
+    // rules, so a connector added at runtime is not a release sink: G3 refuses
+    // it even when an exact consent names it, while the signed sink passes.
+    let safe = KernelValueV2::text("approved release".to_owned()).unwrap();
+    let parent = declassification_parent(&safe);
+    let (signed_sink, registered_sink) = (digest(0xe1), digest(0xf1));
+    let token_set = digest(0xe2);
+    let set = final_release_set(signed_sink, 30);
+    let purpose = ClosedDeclassificationPurposeV2::FinalRelease.purpose_digest();
+    let consent = |sink| {
+        VerifiedFinalReleaseSettlementV2::from_consumed_exact_settlement(
+            digest(0xe7),
+            DurableReleaseIdV2::new([0xe4; 32]),
+            digest(0xe3),
+            sink,
+            token_set,
+            digest(2),
+            UnixMillisV2::new(30),
+            UnixMillisV2::new(70),
+        )
+        .unwrap()
+    };
+    let release = |sink, consent: &VerifiedFinalReleaseSettlementV2| {
+        ProvenanceRecordV2::declassify(
+            &safe,
+            context(1, 2),
+            DeclassificationTransitionV2::BuildFinalRelease {
+                sink_identity_digest: sink,
+            },
+            &set,
+            purpose,
+            token_set,
+            Some(consent),
+            &[&parent],
+            EffectSetV2::ALL,
+            50,
+        )
+    };
+    assert_eq!(
+        release(registered_sink, &consent(registered_sink)),
+        Err(G3Error::ReaderNotAuthorized)
+    );
+    assert!(release(signed_sink, &consent(signed_sink)).is_ok());
+}
+
+#[test]
 fn root_evidence_is_sorted_unique_and_bounded_to_64() {
     let roots = RootEvidenceV2::new(vec![digest(3), digest(1), digest(2)]).unwrap();
     assert_eq!(roots.as_slice(), &[digest(1), digest(2), digest(3)]);

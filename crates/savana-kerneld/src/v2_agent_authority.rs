@@ -8111,6 +8111,7 @@ fn connector_registration_display(
             tool.effects().bits()
         )
         .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+        push_tool_meaning(&mut display, index, tool)?;
         let canonical =
             minicbor::to_vec(tool).map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
         let semantics = base64::engine::general_purpose::STANDARD.encode(canonical);
@@ -8128,6 +8129,111 @@ fn connector_registration_display(
     .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
     BoundedApprovalDisplayTextV2::new(display)
         .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)
+}
+
+/// What one tool of a proposed connector means, rendered for the human: the
+/// operation and effect, which fields choose where a call goes, every field's
+/// role and type, the validators the tool declares, and how it may retry. The
+/// canonical CBOR that follows remains what the approval binds.
+fn push_tool_meaning(
+    display: &mut String,
+    index: usize,
+    tool: &savana_policy_core::v2::UnsignedToolDescriptorV2,
+) -> Result<(), KernelAgentAuthorityErrorV2> {
+    use savana_kernel_protocol::v2::BusinessFieldRoleV2;
+    use savana_policy_core::v2::{
+        ExecutorIdempotencyContractV2, InternalValidatorImplementationKindV2,
+    };
+    use std::fmt::Write as _;
+
+    let unavailable = |_| KernelAgentAuthorityErrorV2::Unavailable;
+    match tool.business_profile() {
+        None => write!(
+            display,
+            "tool[{index}].business_profile: none, so every argument counts as an address; "
+        )
+        .map_err(unavailable)?,
+        Some(profile) => {
+            write!(
+                display,
+                "tool[{index}].operation: {}; tool[{index}].effect: {:?}; tool[{index}].magnitude: {:?}; tool[{index}].target_identity: ",
+                profile.operation(),
+                profile.effect(),
+                profile.magnitude_rule(),
+            )
+            .map_err(unavailable)?;
+            push_lower_hex(display, profile.target_identity().as_bytes())?;
+            let destinations = profile
+                .fields()
+                .iter()
+                .filter(|field| field.role() == BusinessFieldRoleV2::Destination)
+                .map(|field| field.name())
+                .collect::<Vec<_>>();
+            write!(
+                display,
+                "; tool[{index}].destination_fields: {}; tool[{index}].fields: ",
+                if destinations.is_empty() {
+                    "none".to_owned()
+                } else {
+                    destinations.join(", ")
+                }
+            )
+            .map_err(unavailable)?;
+            for (position, field) in profile.fields().iter().enumerate() {
+                write!(
+                    display,
+                    "{}{} ({:?}, {:?})",
+                    if position == 0 { "" } else { ", " },
+                    field.name(),
+                    field.role(),
+                    field.kind(),
+                )
+                .map_err(unavailable)?;
+            }
+            display.push_str("; ");
+        }
+    }
+    let kinds = [
+        InternalValidatorImplementationKindV2::ArgumentBindingIntegrity,
+        InternalValidatorImplementationKindV2::LabelEffectConfinement,
+        InternalValidatorImplementationKindV2::RootEvidencePresence,
+        InternalValidatorImplementationKindV2::ProjectionBindingIntegrity,
+        InternalValidatorImplementationKindV2::TokenExecutorBinding,
+        InternalValidatorImplementationKindV2::IntentFlowConfinement,
+    ];
+    write!(display, "tool[{index}].validators: ").map_err(unavailable)?;
+    if tool.internal_validators().is_empty() {
+        display.push_str("none");
+    }
+    for (position, validator) in tool.internal_validators().iter().enumerate() {
+        let id = validator.implementation_id();
+        match kinds.iter().find(|kind| kind.implementation_id() == id) {
+            Some(kind) => write!(display, "{}{kind:?}", if position == 0 { "" } else { ", " }),
+            None => write!(
+                display,
+                "{}implementation {}",
+                if position == 0 { "" } else { ", " },
+                id.get()
+            ),
+        }
+        .map_err(unavailable)?;
+    }
+    let retry = tool.connector_retry_policy();
+    write!(
+        display,
+        "; tool[{index}].retry: {}, at most {} attempt(s) within {} ms; tool[{index}].valid_unix_ms: {} to {}; ",
+        match tool.idempotency_contract() {
+            ExecutorIdempotencyContractV2::ConnectorNonIdempotentSingleAttempt =>
+                "not idempotent, single attempt",
+            ExecutorIdempotencyContractV2::ConnectorIdempotentByExecutionNonce =>
+                "idempotent by execution nonce",
+        },
+        retry.maximum_attempts(),
+        retry.maximum_elapsed_ns() / 1_000_000,
+        tool.not_before().get(),
+        tool.expires_at().get(),
+    )
+    .map_err(unavailable)
 }
 
 fn push_lower_hex(output: &mut String, bytes: &[u8]) -> Result<(), KernelAgentAuthorityErrorV2> {
@@ -10965,6 +11071,72 @@ pub(crate) mod tests {
             super::connector_registration_display(&descriptor),
             Err(KernelAgentAuthorityErrorV2::BindingMismatch)
         );
+    }
+
+    #[test]
+    fn connector_display_renders_what_each_tool_means() {
+        use savana_kernel_protocol::v2::{
+            ActionCodecProfileV2, BusinessFieldRoleV2, BusinessFieldTypeV2, BusinessFieldV2,
+            BusinessMagnitudeV2, BusinessProfileV2, TaskEffectV2,
+        };
+        // A tool without a business profile: every argument counts as an address.
+        let canonical = valid_user_stdio_connector_descriptor(1);
+        let descriptor = ConnectorDescriptorV2::from_canonical_bytes(&canonical, &[]).unwrap();
+        let display = super::connector_registration_display(&descriptor).unwrap();
+        for expected in [
+            "tool[0].business_profile: none, so every argument counts as an address; ",
+            "tool[0].validators: ProjectionBindingIntegrity; ",
+            "tool[0].retry: idempotent by execution nonce, at most 2 attempt(s) within 1 ms; ",
+            "tool[0].valid_unix_ms: 1 to 10000; ",
+        ] {
+            assert!(display.as_str().contains(expected), "missing {expected:?}");
+        }
+        // With a profile: the operation, which fields choose where the call
+        // goes, and every field's role and type.
+        let profile = BusinessProfileV2::new(
+            ActionCodecProfileV2::McpToolsCallJsonV1,
+            "mail.send",
+            Digest32V2::new([0x41; 32]),
+            Digest32V2::new([0x42; 32]),
+            TaskEffectV2::Send,
+            BusinessMagnitudeV2::FixedCount(1),
+            vec![
+                BusinessFieldV2::new(
+                    "body",
+                    BusinessFieldRoleV2::Payload,
+                    BusinessFieldTypeV2::Text,
+                )
+                .unwrap(),
+                BusinessFieldV2::new(
+                    "mailbox",
+                    BusinessFieldRoleV2::Resource,
+                    BusinessFieldTypeV2::Text,
+                )
+                .unwrap(),
+                BusinessFieldV2::new(
+                    "to",
+                    BusinessFieldRoleV2::Destination,
+                    BusinessFieldTypeV2::TextList,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let tool = connector_tool_descriptor(0xe1, "mail.send", EffectSetV2::SEND)
+            .with_business_profile(profile)
+            .unwrap();
+        let mut text = String::new();
+        super::push_tool_meaning(&mut text, 1, &tool).unwrap();
+        for expected in [
+            "tool[1].operation: mail.send; tool[1].effect: Send; tool[1].magnitude: FixedCount(1); ",
+            &format!("tool[1].target_identity: {}; ", "41".repeat(32)),
+            "tool[1].destination_fields: to; ",
+            "tool[1].fields: body (Payload, Text), mailbox (Resource, Text), to (Destination, TextList); ",
+            "tool[1].validators: implementation 228; ",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text}");
+        }
+        assert!(!text.chars().any(char::is_control));
     }
 
     fn planner_input_runtime() -> InputRuntimeV2 {
