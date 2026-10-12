@@ -48,7 +48,7 @@ keeps its kernel task live until its window ends, and every live task slows
 each later step, U5; so is a batch of mostly refused episodes). Above
 `CONTENDED_STEP_SECONDS` the batch shared the machine with other work. The
 rule first read the median over all steps; read on plain steps, only U12's
-travel-0 batch is contended (5.47 s, against at most 4.28 s for every other
+travel-0 batch is contended (5.47 s, against at most 4.8 s for every other
 batch of every arm, injection runs included). U12's slack-2 batch, replaced
 under the first reading, was slowed by refusals, not contended; its rerun
 completes the same 0 of its 7 tasks, so U12's utility is the same either

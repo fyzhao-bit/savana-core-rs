@@ -131,7 +131,10 @@ and 85\,ms at p99, and in 461 crash injections no effect repeated or was
 lost. The cost is utility: \sys{} completes 40 of 97 benign
 tasks (41 with deterministic compute steps), against 58 for CaMeL (39
 with its policies). We attribute every remaining failure; the largest share
-follows directly from refusing destinations chosen by data.
+follows directly from refusing destinations chosen by data. When the owner
+instead approves such destinations from its directory, \sys{} completes
+51, and admits no attack on the 202 injection pairs whose tasks let data
+choose a destination.
 \end{abstract}
 
 % =====================================================================
@@ -226,7 +229,10 @@ every batch passed offline re-verification of its evidence chain.
   with deterministic compute steps, against 58 for CaMeL and 39 for CaMeL
   with its policies. With a stronger model, CaMeL rises to 71 and 47;
   \sys{} does not improve. Five banking tasks pass even if the agent does
-  nothing; we report scores with and without them.
+  nothing; we report scores with and without them. When the owner approves
+  recipients chosen by data from its directory, together with smaller
+  changes, \sys{} completes 51/97 and admits no attack on the 202
+  injection pairs whose tasks let data choose a recipient.
 \end{itemize}
 We attribute every failure. Most follow from two deliberate choices:
 recipients chosen by data are refused, and a task must complete within a
@@ -2032,6 +2038,22 @@ the main configuration: it gains 13 tasks and loses 3 to drafting variance.
 Eight of the gains are tasks whose destination comes from data. Eight tasks
 remain refused because their data-chosen destination, a web address or a
 new user, is not in the directory; a human owner could approve them.
+
+Under injection, we ran this configuration on every pair whose task had a
+data-chosen destination in the benign run: 202 pairs of 24 tasks, with
+AutoDojo's injections for banking and slack and the official ones for
+workspace (no travel program had such a destination). The other tasks'
+benign programs fixed every address, as in the main configuration. No attack
+succeeded and no request was unauthorized. Utility under attack was
+83/202, against 12 for the main configuration on the same pairs, which
+refused these destinations. In nine banking pairs the address that data
+chose was the attacker's account, and the directory owner refused all
+nine; in six slack pairs the injection controlled the chosen channel's
+name, which the directory did not contain either. For such a call the
+kernel guarantees only that the owner is asked; here the owner's refusal
+stopped the attack. An injection can still make a task fail: one slack
+task, correct in the benign run, failed under all five injections,
+because each changed the name of the channel it had to write to.
 
 Five requests delegate their action to instructions found in data
 (``follow the instructions in this file''). We run each as a read-only
