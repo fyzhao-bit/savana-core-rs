@@ -845,6 +845,15 @@ pub fn run_and_report(bounds: &Bounds, label: &str) -> (CaseSet, Stats, Vec<(Des
         set.unknown_contracts,
         t0.elapsed()
     );
+    let mut reasons: BTreeMap<&str, usize> = BTreeMap::new();
+    for c in &set.cases {
+        if let Some(u) = &c.contract.unknown {
+            *reasons.entry(u.as_str()).or_default() += 1;
+        }
+    }
+    if !reasons.is_empty() {
+        println!("[{label}] unknown contracts by reason: {reasons:?}");
+    }
     for rb in &bounds.roots {
         println!(
             "[{label}] root R{}: {} ids, {} domains, {} worlds, old length <= {}, candidate length <= {}",
@@ -1141,13 +1150,21 @@ mod tests {
             dom: Dom(0),
             count: 1,
         }];
+        // B archives the first file whose secret bit is set; A' archives
+        // the first discovered file. In the world below they are different
+        // files, so B is refused only because A' used the shared budget.
         let disc = Stmt::Discover {
             dom: Dom(0),
             out: Var(0),
         };
+        let select = Stmt::Select {
+            src: Var(0),
+            keep: true,
+            out: Var(5),
+        };
         let b = for_each(
             1,
-            Var(0),
+            Var(5),
             ITEM,
             vec![attempt(0, ITEM, H2), Stmt::Await { handle: H2 }],
         );
@@ -1157,10 +1174,10 @@ mod tests {
             C_ITEM,
             vec![attempt(0, C_ITEM, C_H), Stmt::Await { handle: C_H }],
         );
-        let old = vec![disc, b.clone()];
+        let old = vec![disc, select, b.clone()];
         assert!(full_check(&root, &old, None).ok());
-        let iface = Interface::default_for(&root, &old, 1);
-        let c = build_contract(BuildOptions::FULL, &root, &old, 1, &[], &iface);
+        let iface = Interface::default_for(&root, &old, 2);
+        let c = build_contract(BuildOptions::FULL, &root, &old, 2, &[], &iface);
         let cand = vec![a_new, b];
         assert_eq!(
             prepare(&CheckConfig::FULL, &c, &cand).public,
@@ -1180,7 +1197,7 @@ mod tests {
             stop_at: None,
         };
         let world = crate::model::World {
-            secret: IdSet::EMPTY,
+            secret: IdSet::of(&[1]),
             exists: [IdSet::full(2), IdSet::full(2)],
         };
         let a = c
@@ -1193,7 +1210,7 @@ mod tests {
         assert_eq!(end.rt.vars[H2.ix()], crate::model::Val::NoExec);
         let old_end = crate::model::run_success(
             &ctx,
-            a.to_sys(&[], crate::model::Phase::Old, old_code.cut_pc(1)),
+            a.to_sys(&[], crate::model::Phase::Old, old_code.cut_pc(2)),
         );
         assert!(matches!(
             old_end.rt.vars[H2.ix()],
