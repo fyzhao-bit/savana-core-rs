@@ -203,5 +203,25 @@ class VerifierTests(unittest.TestCase):
             _drafted_contract(_act_case(), [], dict(outcome="instructions_not_adopted"), prior)
 
 
+class RunLoopTests(unittest.TestCase):
+    def test_the_turn_kind_is_bound_once_in_the_run_loop(self):
+        """Whether an episode is a read or an act turn decides whether the
+        owner's adoption is recorded. The run loop once rebound the same name
+        to the deployment's application turn, so no read turn recorded a
+        decision and every act turn drafted nothing (u6-banking-0's offline
+        verification caught it); the loop cannot be run off a host."""
+        import ast
+        import inspect
+        from savana_bench import planner_experiment
+        tree = ast.parse(inspect.getsource(planner_experiment.run))
+        bound = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store) and n.id == "instructions_turn"]
+        self.assertEqual(len(bound), 1)
+        compared = {c.left.id for c in ast.walk(tree)
+                    if isinstance(c, ast.Compare) and isinstance(c.left, ast.Name)
+                    and any(isinstance(x, ast.Constant) and x.value in ("read", "act") for x in c.comparators)}
+        self.assertEqual(compared, {"instructions_turn"})
+
+
 if __name__ == "__main__":
     unittest.main()

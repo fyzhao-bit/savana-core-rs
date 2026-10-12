@@ -716,10 +716,13 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                 attempts = []
                 servers, session, observer, endpoint, consent = [], None, None, None, None
                 suite = provider = after = generated_before = outcome = None
-                turn = case.get("instructions")
-                if turn == "act" and (index == 0 or {k: v for k, v in cases[index - 1].items() if k != "instructions"}
-                                      != {k: v for k, v in case.items() if k != "instructions"}
-                                      or cases[index - 1].get("instructions") != "read"):
+                # U6's turn kind ("read", "act" or None). Not `turn`: that
+                # name holds this deployment's application turn further down.
+                instructions_turn = case.get("instructions")
+                if instructions_turn == "act" and (
+                        index == 0 or cases[index - 1].get("instructions") != "read"
+                        or {k: v for k, v in cases[index - 1].items() if k != "instructions"}
+                        != {k: v for k, v in case.items() if k != "instructions"}):
                     raise ValueError("act_turn_without_its_read_turn")
                 try:
                     from .agentdojo_calendar import calendar_provider
@@ -741,6 +744,9 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         official = get_suite(BENCHMARK, case["suite"])
                         prompt = official.get_user_task_by_id(case["user"]).PROMPT
                         row["stage"] = "root_drafting"
+                        if instructions_turn == "act" and index - 1 not in adopted:
+                            # Every read turn records the owner's decision, adopted or not.
+                            raise RuntimeError("read_turn_adoption_unrecorded")
                         request = turn_request(case, prompt, adopted.get(index - 1))
                         if request is None:
                             # The owner did not adopt the read turn's report: nothing to draft.
@@ -787,7 +793,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                     prompt=request, program=parse_program_text(program_text), bindings=bindings,
                                     extractor_model=case["extractor_model"],
                                     derived_destinations=case.get("review") == "derived",
-                                    read_only=turn == "read", destination_candidates=destination_candidates(case)))
+                                    read_only=instructions_turn == "read",
+                                    destination_candidates=destination_candidates(case)))
                             except ProgramRefused as error:
                                 audit.emit("program_refused", episode=index, attempt=attempt, reason=str(error),
                                            step=error.step, field=error.field)
@@ -797,7 +804,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                 history.append((program_text, str(error), error.step, error.field))
                                 continue
                             if (case.get("actions") == "ask" and not asked and attempt < case["max_drafts"]
-                                    and turn != "read" and requested_action(request)
+                                    and instructions_turn != "read" and requested_action(request)
                                     and not performs_action(drafted)):
                                 # Asked once: the request asks for an action this
                                 # program does not perform. Nothing is signed yet.
@@ -838,7 +845,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                     # scored as the whole task: from before the read turn, with
                     # both turns' calls in the trace.
                     scoring_before, prior_audit = None, []
-                    if turn == "act":
+                    if instructions_turn == "act":
                         env = carried[index - 1]["after"].model_copy(deep=True)
                         scoring_before, prior_audit = carried[index - 1]["before"], carried[index - 1]["audit"]
                     before = env.model_copy(deep=True)
@@ -980,7 +987,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         except Exception:
                             row["oracle_status"] = "unknown"
                     row["environment_changed"] = after.model_dump(mode="json") != before.model_dump(mode="json")
-                if turn == "read":
+                if instructions_turn == "read":
                     # The owner reads the report and decides; only an adopted
                     # report reaches the act turn, as the owner's own words.
                     from .adopted_instructions import adoption_record, report_text
