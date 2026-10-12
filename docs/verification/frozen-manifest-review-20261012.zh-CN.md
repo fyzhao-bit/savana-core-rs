@@ -4,9 +4,9 @@
 CI（`.github/workflows/ci.yml`）每次运行 `tools/check-frozen-v2-core.sh` 校验。
 清单最后一次生成于 2026-09-29（`643fa5e`）。
 
-当前有 70 个文件与清单不一致：
+当前有 71 个文件与清单不一致：
 
-- 11 个是本次会话（2026-10-12）在你同意修改冻结文件之后改的，逐一列在第一节；其中 6 个在本次之前就已漂移。
+- 12 个是本次会话（2026-10-12）在你同意修改冻结文件之后改的，逐一列在第一节；其中 6 个在本次之前就已漂移。
 - 59 个是 2026-09-30 至 10-07 各批工作留下的，本次没有碰，列在第二节。
 - 其中 `crates/savana-kerneld/src/v2_recovery.rs` 已删除，所以校验脚本在 `test -f` 一步就会失败。
   在本次之前，59 处漂移已经让这项检查不通过。
@@ -32,11 +32,9 @@ CI（`.github/workflows/ci.yml`）每次运行 `tools/check-frozen-v2-core.sh` �
 | `crates/savana-policy-core/src/v2/connector_registry.rs` | `aaf063b` | 只加了测试（文件内 `tests` 模块） | R4 | `user_registered_tools_join_g4_tagged_once_and_leave_with_their_connector` |
 | `crates/savana-policy-core/src/v2/provenance_tests.rs` | `07508b1` | 只加了测试 | 最终发布读者必须由部署规则点名（F2） | `final_release_to_a_sink_the_deployment_rule_does_not_name_is_refused` |
 
-另有两处计划中的冻结文件改动，完成后补进本表：
+| `crates/savana-agentd/Cargo.toml` | `2b3d6e3` | 加一个 `[[example]]`：`structured_plan_eval`，`required-features = ["test-support"]` | 结构化规划评测（F5）调用 agentd 真实的私有规划管线；不改 agentd 库代码，不带该特性的构建不编译它 | `experiments/tests/test_structured_example.py` 等 61 个 |
 
-- 结构化规划评测（F5）给 `crates/savana-agentd/Cargo.toml` 加一个 `[[example]]`（需要 `test-support`），
-  不改 agentd 库代码。
-- 残余数据契约（F4）计划放在新 crate 里，不改冻结文件；工作区根 `Cargo.toml` 不在清单里。
+残余数据契约（F4）计划放在新 crate 里，不改冻结文件；工作区根 `Cargo.toml` 不在清单里。
 
 ## 二、本次之前就已漂移的 59 个文件
 
