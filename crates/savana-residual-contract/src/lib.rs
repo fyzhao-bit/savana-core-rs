@@ -9,4 +9,5 @@
 //! not a refinement proof of the Rust kernel.
 #![forbid(unsafe_code)]
 
+pub mod full;
 pub mod model;
