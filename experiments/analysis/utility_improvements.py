@@ -18,6 +18,12 @@ whose offline verification passed are counted:
   the official template for workspace), on the tasks whose U8 program had a
   step whose address data chose (`attack_sample`).
 
+`timeline` reads each batch's own clock: the median interval between an
+episode's consecutive provider attempts (a step's time; above
+`CONTENDED_STEP_SECONDS` the batch shared the machine with other work), and
+for U5 the seconds from the owner input commit, where the kernel's 60 s task
+window starts, to binding and to publication, by program length.
+
 Per episode, from its own evidence: the outcome and the official utility; the
 review's refusal code for each refused draft; whether the planner was asked
 about an omitted write; the signed program's steps, writes, multi-field
@@ -44,6 +50,8 @@ SUPERSEDED = {"U12": {"u12c-slack-2", "u12c-travel-0"}}
 ATTACK = "u8x"
 SUITES = ("banking", "slack", "travel", "workspace")
 DIRECTORY_REFUSAL = "consent_destination_not_in_directory"
+# A batch whose median step interval is above this ran under contention.
+CONTENDED_STEP_SECONDS = 5.0
 
 
 def program_shape(steps):
@@ -99,6 +107,53 @@ def episodes(results, prefix, superseded=()):
         for row in summary["summary"]["rows"]:
             records.append(episode_record(local[row["episode"]], row, name))
     return records
+
+
+def episode_times(events):
+    """From one episode's events: the intervals between its consecutive
+    provider attempts, and the seconds from the owner input commit to the
+    episode's binding and to its observation (publication), or None."""
+    def first(kind, **match):
+        return next((e["time_ns"] for e in events
+                     if e["kind"] == kind and all(e.get(k) == v for k, v in match.items())), None)
+    attempts = [e["time_ns"] for e in events if e["kind"] == "provider_attempt"]
+    commit = first("admission_stage_started", stage="owner_input_commit")
+
+    def since(t):
+        return None if commit is None or t is None else round((t - commit) / 1e9, 3)
+    return dict(gaps=[(b - a) / 1e9 for a, b in zip(attempts, attempts[1:])],
+                binding=since(first("episode_binding")), observation=since(first("episode_observation")))
+
+
+def timeline(results, prefix, superseded=()):
+    """Per batch, its median step interval and whether that marks contention;
+    over published episodes, commit to binding and commit to publication by
+    program length."""
+    per_batch, binding, publication = {}, [], collections.defaultdict(list)
+    found = [b for p in ((prefix,) if type(prefix) is str else prefix) for b in batches(results, p)]
+    for name, run, _verification in found:
+        if name in superseded:
+            continue
+        events = _events(run)
+        local = by_episode(events)
+        gaps = []
+        for row in events[-1]["summary"]["rows"]:
+            episode = local[row["episode"]]
+            times = episode_times(episode)
+            gaps += times["gaps"]
+            if times["binding"] is not None:
+                binding.append(times["binding"])
+            inputs = [e for e in episode if e["kind"] == "episode_input"]
+            if row["outcome"] == "published" and inputs and times["observation"] is not None:
+                publication[len(inputs[0]["contract"]["steps"])].append(times["observation"])
+        median = round(statistics.median(gaps), 2) if gaps else None
+        per_batch[name] = dict(intervals=len(gaps), median_step_seconds=median,
+                               contended=median is not None and median > CONTENDED_STEP_SECONDS)
+
+    def spread(values):
+        return dict(n=len(values), median=round(statistics.median(values), 1), max=round(max(values), 1))
+    return dict(batches=per_batch, commit_to_binding=spread(binding) if binding else None,
+                commit_to_publication={str(k): spread(v) for k, v in sorted(publication.items())})
 
 
 def _task(r):
@@ -221,6 +276,8 @@ def report(results):
     out["flips"] = {f"{new}_vs_{old}": flips(arms[new], arms[old])
                     for new, old in (("U12", "G12"), ("U12", "D"), ("U8", "G12"), ("U8", "D"), ("U8", "U12"))
                     if arms[new] and arms[old]}
+    out["timeline"] = {arm: timeline(results, prefixes, SUPERSEDED.get(arm, ()))
+                       for arm, prefixes in ARMS.items() if arms[arm]}
     attacked = episodes(results, ATTACK)
     if attacked:
         from analysis.night_reports import rows
