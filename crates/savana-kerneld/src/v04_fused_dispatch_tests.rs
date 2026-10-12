@@ -103,6 +103,9 @@ struct DispatchHarness {
     /// Case 33 only: restart kerneld between the two steps instead of
     /// dropping execution handles, then log the owner in again.
     restart_kerneld: bool,
+    /// Case 33 only: let the owner's login expire between the two steps in
+    /// the same process, then log the owner in again.
+    expire_session: bool,
 }
 
 #[cfg(feature = "test-support")]
@@ -872,6 +875,9 @@ fn private_dispatch_fixture_with_provider(
             if harness.is_some_and(|h| h.restart_kerneld) {
                 assert_eq!(case, 33, "the restart runs the reopened result loop");
                 restart_kerneld_and_log_in_again(&mut f, 2203);
+            } else if harness.is_some_and(|h| h.expire_session) {
+                assert_eq!(case, 33, "the expiry runs the reopened result loop");
+                expire_session_and_log_in_again(&mut f, 2203);
             } else if matches!(case, 27 | 33) {
                 // Drop volatile execution handles, but keep the authenticated
                 // user session: this is execution recovery, not login recovery.
@@ -1660,6 +1666,19 @@ fn fused_result_loop_resumes_after_kerneld_restart_through_a_fresh_owner_login()
         }),
     );
 }
+#[test]
+#[cfg(feature = "test-support")]
+fn fused_result_loop_continues_after_the_owner_login_expires_in_process() {
+    private_dispatch_fixture_with_provider(
+        33,
+        None,
+        None,
+        Some(&DispatchHarness {
+            expire_session: true,
+            ..DispatchHarness::default()
+        }),
+    );
+}
 
 #[test]
 #[cfg(feature = "test-support")]
@@ -2227,8 +2246,15 @@ fn fused_private_loop_completes_after_second_step_exact_approval_and_next_owner_
 #[cfg(feature = "test-support")]
 fn restart_kerneld_and_log_in_again(f: &mut PlannerAuthorityFixtureV2, at: u64) {
     use super::super::*;
-    // The fixture opens its session directly, not through a private login.
-    // Record what that login leaves behind: a running task and its kept input.
+    let target = record_private_login_task(f, at);
+    restart_kerneld_after_private_login(f, target, at);
+}
+
+/// The fixture opens its session directly, not through a private login.
+/// Record what that login leaves behind: a running task and its kept input.
+#[cfg(feature = "test-support")]
+fn record_private_login_task(f: &mut PlannerAuthorityFixtureV2, at: u64) -> PrivateLoginTargetV04 {
+    use super::super::*;
     let s = &f.authority.sessions[0];
     let initial = f
         .values
@@ -2305,6 +2331,16 @@ fn restart_kerneld_and_log_in_again(f: &mut PlannerAuthorityFixtureV2, at: u64) 
         source_input_digest: Some(Digest32V2::new([76; 32])),
         task_authorization_digest: Some(target.root),
     });
+    target
+}
+
+#[cfg(feature = "test-support")]
+fn restart_kerneld_after_private_login(
+    f: &mut PlannerAuthorityFixtureV2,
+    target: PrivateLoginTargetV04,
+    at: u64,
+) {
+    use super::super::*;
     let snapshot = f.authority.encode_recovery_snapshot().unwrap();
     let c = &f.authority.config;
     let config = KernelAgentSecurityConfigV2 {
@@ -2373,6 +2409,41 @@ fn restart_kerneld_and_log_in_again(f: &mut PlannerAuthorityFixtureV2, at: u64) 
         .unwrap();
     assert_eq!(f.authority.sessions.len(), 1);
     assert_eq!(f.authority.sessions[0].durable_run_id, target.run);
+}
+
+/// The owner's login expires between two steps in the same process: the
+/// session, its run and every volatile record stay. Nothing runs until the
+/// owner logs in again; the same session and run then continue.
+#[cfg(feature = "test-support")]
+fn expire_session_and_log_in_again(f: &mut PlannerAuthorityFixtureV2, at: u64) {
+    use super::super::*;
+    let target = record_private_login_task(f, at);
+    let run = f.authority.sessions[0].run;
+    f.authority.sessions[0].expires_at = UnixMillisV2::new(at);
+    let intents = f.authority.intents.len();
+    let paced = f.authority.policy.as_ref().unwrap().fused_action_not_before;
+    let unchanged = f
+        .authority
+        .tick_fused_actions_v04(&mut f.values, &mut || UnixMillisV2::new(at));
+    assert!(unchanged.is_ok() && f.authority.intents.len() == intents);
+    f.authority.policy.as_mut().unwrap().fused_action_not_before = paced;
+    let (login, proof) = signed_private_login_v04(
+        &f.authority,
+        target,
+        &SigningKey::from_bytes(&[0x92; 32]),
+        0x65,
+        at,
+        at + 6000,
+        at + 5900,
+    );
+    f.authority.private_session_authentications.push(login);
+    let index = f.authority.private_session_authentications.len() - 1;
+    f.authority
+        .accept_private_session_v04(index, proof, &mut f.values, UnixMillisV2::new(at + 1))
+        .unwrap();
+    assert_eq!(f.authority.sessions.len(), 1);
+    assert_eq!(f.authority.sessions[0].run, run);
+    assert!(f.authority.sessions[0].expires_at.get() > at + 1);
 }
 
 // Cryptographically valid synthetic approvald settlement, not browser/hardware

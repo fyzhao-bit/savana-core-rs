@@ -11,36 +11,62 @@ pub(super) struct PrivateSessionAuthenticationV04 {
     pub(super) next_poll: u64,
 }
 
-/// The input a private login of `task` may admit at `now`, and whether it is
-/// a later login. The first login admits the Ready task's committed input. A
-/// later login, after kerneld restarted, admits only the copy kept for the
-/// same durable run: no new run, root, lifetime or reset charge comes with it.
-/// Either needs a task with no session in this process. A restart retires
-/// every session, run, value, intent, approval and ticket at once; replacing
-/// one expired session in a live process would have to retire its run's
-/// share of them first, which is not implemented.
+/// What a private login of a task does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PrivateLoginV04 {
+    /// Admits the Ready task's committed input into a new run.
+    First,
+    /// After a kerneld restart: admits the kept copy into a new run with the
+    /// same durable run id.
+    AfterRestart,
+    /// The task's session (at this index) expired in this process: the same
+    /// session and run continue under the new login.
+    Continue(usize),
+}
+
+/// The input a private login of `task` may use at `now`, and what the login
+/// does. A later login never brings a new run, root, lifetime or reset
+/// charge: it uses only the copy kept for the same durable run, while no
+/// session of the task is live. A task never has two sessions.
 pub(super) fn private_login_material_v04<'a>(
     task: &'a TaskRecordV2,
     sessions: &[SessionRecordV2],
     now: UnixMillisV2,
-) -> Result<(&'a PreparedAgentClaimMaterialV2, bool), KernelAgentAuthorityErrorV2> {
-    if sessions
+) -> Result<(&'a PreparedAgentClaimMaterialV2, PrivateLoginV04), KernelAgentAuthorityErrorV2> {
+    let mut same_task = sessions
         .iter()
-        .any(|s| s.durable_task_id == task.durable_task_id)
-    {
+        .enumerate()
+        .filter(|(_, s)| s.durable_task_id == task.durable_task_id);
+    let existing = same_task.next();
+    if same_task.next().is_some() {
         return Err(KernelAgentAuthorityErrorV2::StateConflict);
     }
+    let kept = |material: &PreparedAgentClaimMaterialV2| {
+        task.durable_run_id == Some(material.durable_run_id)
+            && now.get() < material.expires_at.get()
+    };
     match (
         &task.status,
         task.material.as_ref(),
         task.reconnect_material.as_ref(),
+        existing,
     ) {
-        (PublicTaskStatusV2::Ready { .. }, Some(material), None) => Ok((material, false)),
-        (PublicTaskStatusV2::Running, None, Some(material))
-            if task.durable_run_id == Some(material.durable_run_id)
-                && now.get() < material.expires_at.get() =>
+        (PublicTaskStatusV2::Ready { .. }, Some(material), None, None) => {
+            Ok((material, PrivateLoginV04::First))
+        }
+        (PublicTaskStatusV2::Running, None, Some(material), None) if kept(material) => {
+            Ok((material, PrivateLoginV04::AfterRestart))
+        }
+        (PublicTaskStatusV2::Running, None, Some(material), Some((index, session)))
+            if kept(material)
+                && session.durable_run_id == material.durable_run_id
+                && matches!(
+                    session.status,
+                    AgentSessionStatusV2::Ready | AgentSessionStatusV2::Running
+                )
+                && now.get() >= session.expires_at.get() =>
         {
-            Ok((material, true))
+            Ok((material, PrivateLoginV04::Continue(index)))
         }
         _ => Err(KernelAgentAuthorityErrorV2::StateConflict),
     }
@@ -342,7 +368,7 @@ impl KernelAgentAuthorityV2 {
             .position(|t| t.durable_task_id == pending.task)
             .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?;
         let task = &self.tasks[task_index];
-        let (material, reconnect) = private_login_material_v04(task, &self.sessions, now)?;
+        let (material, login) = private_login_material_v04(task, &self.sessions, now)?;
         if e.binding()
             != (UiAuthenticationBindingV2::PrivateSessionV04 {
                 durable_task_id: pending.task,
@@ -363,86 +389,113 @@ impl KernelAgentAuthorityV2 {
                 .min(e.expires_at().get())
                 .min(verified.expires_at().get()),
         );
-        let mut admission = values
-            .prepare_verified_run_admission(
-                material.producer_identity,
-                material.durable_run_id,
-                e.active_state_manifest_digest(),
-                now,
-                expires,
-                material.policy_allowed_effects,
-                &material.initial_value,
-                &material.provenance,
-            )
-            .map_err(map_value_error)?;
-        // The masked value stays the session input; the consented owner
-        // document is reserved beside it for kernel-only fused derivation.
-        if let Some((owner_value, owner_provenance)) = material.owner_input.as_ref() {
+        let task_id = pending.task;
+        if let PrivateLoginV04::Continue(session_index) = login {
+            // The same session and run continue under the new login: no new
+            // run, input or value, and every value keeps its own lifetime.
+            let session = &self.sessions[session_index];
+            if session.principal != verified.authenticated_principal()
+                || session.active_state_manifest_digest != e.active_state_manifest_digest()
+            {
+                return Err(KernelAgentAuthorityErrorV2::BindingMismatch);
+            }
             values
-                .prepare_owner_input_v04(&mut admission, owner_value, owner_provenance)
+                .extend_private_run_v04(session.run, material.durable_run_id, now, expires)
                 .map_err(map_value_error)?;
-        }
-        let run = admission.run_handle();
-        let initial = admission.initial_value();
-        let revision = RunRevisionObservationV2::new(
-            material.durable_run_id,
-            1,
-            run_revision_digest(
-                material.durable_run_id,
-                e.active_state_manifest_digest(),
-                initial.value_digest(),
-            ),
-        )
-        .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
-        let session = mint_handle(AgentSessionHandleV2::from_authority_entropy)?;
-        self.sessions
-            .try_reserve(1)
-            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
-        // Copy before any commit. The first login moves the committed input
-        // into the run and keeps the copy; a later login admits the copy and
-        // leaves the kept input in place for the next one.
-        let copy = material.duplicate()?;
-        let task = &mut self.tasks[task_index];
-        let material = if reconnect {
-            copy
+            let session = &mut self.sessions[session_index];
+            session.expires_at = expires;
+            session.status = AgentSessionStatusV2::Running;
+            session.task_authorization_digest = Some(pending.root);
         } else {
-            let admitted = task
-                .material
-                .take()
-                .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
-            task.reconnect_material = Some(copy);
-            admitted
-        };
-        // Commit is infallible after reservation; a missing owner handle only
-        // makes later fused preparation fail closed.
-        let (_, _, owner_input_value) = values.commit_verified_run_admission_with_owner_input_v04(
-            admission,
-            material.initial_value,
-            material.provenance,
-            material.owner_input,
-        );
-        self.sessions.push(SessionRecordV2 {
-            session,
-            run,
-            durable_run_id: material.durable_run_id,
-            durable_task_id: pending.task,
-            active_state_manifest_digest: e.active_state_manifest_digest(),
-            principal: verified.authenticated_principal(),
-            producer_identity: material.producer_identity,
-            role: p.role,
-            policy_allowed_effects: material.policy_allowed_effects,
-            signed_planner_policy: material.signed_planner_policy,
-            expires_at: expires,
-            revision,
-            initial_document: material.initial_document,
-            initial_value: initial.handle(),
-            owner_input_value,
-            status: AgentSessionStatusV2::Running,
-            task_authorization_digest: Some(pending.root),
-        });
+            let mut admission = values
+                .prepare_verified_run_admission(
+                    material.producer_identity,
+                    material.durable_run_id,
+                    e.active_state_manifest_digest(),
+                    now,
+                    expires,
+                    material.policy_allowed_effects,
+                    &material.initial_value,
+                    &material.provenance,
+                )
+                .map_err(map_value_error)?;
+            // The masked value stays the session input; the consented owner
+            // document is reserved beside it for kernel-only fused derivation.
+            if let Some((owner_value, owner_provenance)) = material.owner_input.as_ref() {
+                values
+                    .prepare_owner_input_v04(&mut admission, owner_value, owner_provenance)
+                    .map_err(map_value_error)?;
+            }
+            let run = admission.run_handle();
+            let initial = admission.initial_value();
+            let revision = RunRevisionObservationV2::new(
+                material.durable_run_id,
+                1,
+                run_revision_digest(
+                    material.durable_run_id,
+                    e.active_state_manifest_digest(),
+                    initial.value_digest(),
+                ),
+            )
+            .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+            let session = mint_handle(AgentSessionHandleV2::from_authority_entropy)?;
+            self.sessions
+                .try_reserve(1)
+                .map_err(|_| KernelAgentAuthorityErrorV2::Unavailable)?;
+            // Copy before any commit. The first login moves the committed input
+            // into the run and keeps the copy; a later login admits the copy and
+            // leaves the kept input in place for the next one.
+            let copy = material.duplicate()?;
+            let task = &mut self.tasks[task_index];
+            let material = if login == PrivateLoginV04::AfterRestart {
+                copy
+            } else {
+                let admitted = task
+                    .material
+                    .take()
+                    .ok_or(KernelAgentAuthorityErrorV2::StateConflict)?;
+                task.reconnect_material = Some(copy);
+                admitted
+            };
+            // Commit is infallible after reservation; a missing owner handle only
+            // makes later fused preparation fail closed.
+            let (_, _, owner_input_value) = values
+                .commit_verified_run_admission_with_owner_input_v04(
+                    admission,
+                    material.initial_value,
+                    material.provenance,
+                    material.owner_input,
+                );
+            self.sessions.push(SessionRecordV2 {
+                session,
+                run,
+                durable_run_id: material.durable_run_id,
+                durable_task_id: pending.task,
+                active_state_manifest_digest: e.active_state_manifest_digest(),
+                principal: verified.authenticated_principal(),
+                producer_identity: material.producer_identity,
+                role: p.role,
+                policy_allowed_effects: material.policy_allowed_effects,
+                signed_planner_policy: material.signed_planner_policy,
+                expires_at: expires,
+                revision,
+                initial_document: material.initial_document,
+                initial_value: initial.handle(),
+                owner_input_value,
+                status: AgentSessionStatusV2::Running,
+                task_authorization_digest: Some(pending.root),
+            });
+        }
         // No session/run/value/tool handle is returned to Agent or the browser.
-        task.status = PublicTaskStatusV2::Running;
+        self.tasks[task_index].status = PublicTaskStatusV2::Running;
         self.private_session_authentications[index].consumed = true;
+        // Only the newest login of a task receives its approval and
+        // publication handoffs; an earlier, spent login cannot reach the owner.
+        let current = self.private_session_authentications[index]
+            .registered
+            .record;
+        self.private_session_authentications
+            .retain(|p| p.task != task_id || !p.consumed || p.registered.record == current);
         self.persist_recovery_snapshot()?;
         Ok(())
     }

@@ -459,9 +459,9 @@ fn signed_private_login_v04(
     (login, proof)
 }
 
-/// Case 0: kerneld restarts. Case 1: the session expires in the same process,
-/// which keeps its run's volatile state, so no second login is admitted.
-/// Case 2: the root is revoked. Case 3: the run's input lifetime is over.
+/// Case 0: kerneld restarts. Case 1: the session expires in the same process;
+/// a second login continues the same session and run. Case 2: the root is
+/// revoked. Case 3: the run's input lifetime is over.
 fn private_session_reconnect_case(case: u8) {
     use super::super::*;
     let mut p = private_task_fixture_v04();
@@ -598,7 +598,7 @@ fn private_session_reconnect_case(case: u8) {
         980,
     );
     let (result, index) = accept(&mut p, login, proof.clone(), 803);
-    if matches!(case, 1 | 2) {
+    if case == 2 {
         assert!(matches!(
             result,
             Err(KernelAgentAuthorityErrorV2::StateConflict)
@@ -610,13 +610,17 @@ fn private_session_reconnect_case(case: u8) {
     }
     result.unwrap();
     // One session: the same durable run, root and input, bounded by the
-    // input's original lifetime. Nothing is renewed or derived again.
+    // input's original lifetime. Nothing is renewed or derived again. After
+    // a restart the input enters a new run; in the same process the same
+    // run continues.
     assert_eq!(p.f.authority.sessions.len(), 1);
     let s = &p.f.authority.sessions[0];
     assert_eq!(s.durable_run_id, p.run);
     assert_eq!(s.task_authorization_digest, Some(p.root));
     assert_eq!(s.expires_at, UnixMillisV2::new(980));
-    assert_ne!(s.run, first_run);
+    assert_eq!(s.status, AgentSessionStatusV2::Running);
+    assert_eq!(s.run == first_run, case == 1);
+    assert_eq!(s.initial_value == first_value, case == 1);
     let again =
         p.f.values
             .resolve_g4_value(s.run, s.initial_value, UnixMillisV2::new(804))
@@ -626,9 +630,23 @@ fn private_session_reconnect_case(case: u8) {
     assert_eq!(t.status, PublicTaskStatusV2::Running);
     assert!(t.material.is_none());
     assert!(t.reconnect_material.is_some());
+    // Only the newest login of the task is kept to receive its handoffs.
+    let logins = &p.f.authority.private_session_authentications;
+    assert_eq!(
+        logins
+            .iter()
+            .filter(|l| l.task == p.task && l.consumed)
+            .count(),
+        1
+    );
+    let current = logins
+        .iter()
+        .position(|l| l.task == p.task && l.consumed)
+        .unwrap();
+    assert!(current <= index);
     // The proof is spent.
     let spent = p.f.authority.accept_private_session_v04(
-        index,
+        current,
         proof,
         &mut p.f.values,
         UnixMillisV2::new(805),
@@ -643,8 +661,13 @@ fn fused_private_session_reconnects_after_restart_to_the_same_run_with_a_fresh_l
 }
 
 #[test]
-fn fused_private_session_refuses_second_login_in_process_after_revocation_or_input_expiry() {
-    for case in 1..=3 {
+fn fused_private_session_continues_the_same_run_after_its_login_expires_in_process() {
+    private_session_reconnect_case(1);
+}
+
+#[test]
+fn fused_private_session_refuses_a_later_login_after_revocation_or_input_expiry() {
+    for case in 2..=3 {
         private_session_reconnect_case(case);
     }
 }
@@ -657,7 +680,7 @@ fn fused_private_login_gate_admits_first_input_or_kept_copy_never_both() {
     let now = UnixMillisV2::new(205);
     let gate = |p: &PrivateTaskFixtureV04| {
         private_login_material_v04(&p.f.authority.tasks[0], &p.f.authority.sessions, now)
-            .map(|(_, reconnect)| reconnect)
+            .map(|(_, login)| login != super::super::private_session::PrivateLoginV04::First)
     };
     assert!(matches!(gate(&p), Ok(false)));
     let copy = p.f.authority.tasks[0]
@@ -700,4 +723,32 @@ fn fused_private_login_gate_admits_first_input_or_kept_copy_never_both() {
         UnixMillisV2::new(1000)
     )
     .is_err());
+    // With a session: refused while it is live, continued once it expired.
+    let mut q = private_task_fixture_v04();
+    let (login, proof) = signed_private_login_v04(
+        &q.f.authority,
+        q.target(),
+        &q.settlement_key,
+        77,
+        200,
+        900,
+        800,
+    );
+    q.f.authority.private_session_authentications.push(login);
+    q.f.authority
+        .accept_private_session_v04(0, proof, &mut q.f.values, UnixMillisV2::new(205))
+        .unwrap();
+    let at = |q: &PrivateTaskFixtureV04, now: u64| {
+        private_login_material_v04(
+            &q.f.authority.tasks[0],
+            &q.f.authority.sessions,
+            UnixMillisV2::new(now),
+        )
+        .map(|(_, login)| login)
+    };
+    assert!(at(&q, 799).is_err());
+    assert_eq!(
+        at(&q, 800).unwrap(),
+        super::super::private_session::PrivateLoginV04::Continue(0)
+    );
 }

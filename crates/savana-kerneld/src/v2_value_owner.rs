@@ -310,6 +310,32 @@ impl KernelValueOwnerV2 {
         })
     }
 
+    /// A later owner login of the same private task lets its run continue up
+    /// to the new login's bound. Every value keeps its own provenance
+    /// lifetime, so nothing produced under the earlier login lives longer.
+    pub(crate) fn extend_private_run_v04(
+        &mut self,
+        run: RunHandleV2,
+        durable_run_id: DurableRunIdV2,
+        now: UnixMillisV2,
+        expires_at: UnixMillisV2,
+    ) -> Result<(), KernelValueErrorV2> {
+        let commitment = run.authority_commitment(&self.handle_key);
+        let record = self
+            .runs
+            .iter_mut()
+            .find(|record| record.commitment == commitment)
+            .ok_or(KernelValueErrorV2::InvalidReference)?;
+        if record.durable_run_id != durable_run_id {
+            return Err(KernelValueErrorV2::WrongRun);
+        }
+        if now.get() == 0 || now.get() >= expires_at.get() {
+            return Err(KernelValueErrorV2::Expired);
+        }
+        record.expires_at = expires_at;
+        Ok(())
+    }
+
     /// Reserve the owner document beside the run's initial value. Only a
     /// GatedIngress value of the same producer, run and manifest qualifies;
     /// all failure happens here, before the run is committed.

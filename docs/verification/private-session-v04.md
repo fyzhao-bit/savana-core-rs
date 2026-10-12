@@ -90,13 +90,15 @@ required; this change is not automatic consumer enrollment or dynamic planning.
   finds the task lost. The legacy claim path never reads it. A snapshot without
   a copy (an older schema, or an ended lifetime) still restores the fail-closed
   indeterminate tombstone, and a Ready task without its input is still rejected.
-- One private login per task per process. A login's session lasts at most five
-  minutes after `open` (the envelope bound). After that, a second login in the
-  same process is refused: the expired session's run still owns volatile values,
-  intents, approvals and tickets that would have to be retired first, and that
-  is not implemented. A restart retires all of them, so the task can continue
-  only after one. No consumed budget, execution reservation or signed approval
-  is reset in either case.
+- A login's session lasts at most five minutes after `open` (the envelope
+  bound). Once it has expired, the owner can log in again in the same process
+  (2026-10-12): the same session and run continue up to the new login's bound.
+  No new run, input or value is created, and every value keeps its own
+  provenance lifetime, so a result produced under the earlier login still
+  expires with it. A task never has two sessions; a login while its session is
+  live is refused. Only the newest login of a task is kept to receive approval
+  and publication handoffs. No consumed budget, execution reservation or signed
+  approval is reset in either case.
 - The authenticated private poll currently carries approval handoffs only. It
   is not the exclusive result publisher, result reconnect protocol, full error
   observation contract, or a general result-dependent loop compiler.
@@ -123,9 +125,11 @@ component test pass rates as model safety/success rates or product readiness.
   `fused_private_session_reconnects_after_restart_to_the_same_run_with_a_fresh_login`
   restores the snapshot under a new boot with an empty value owner, rejects
   the old boot's proof, and admits a fresh login to the same run and provenance.
-  `fused_private_session_refuses_second_login_in_process_after_revocation_or_input_expiry`
+  `fused_private_session_continues_the_same_run_after_its_login_expires_in_process`
+  continues the same session and run after expiry in one process.
+  `fused_private_session_refuses_a_later_login_after_revocation_or_input_expiry`
   and `fused_private_login_gate_admits_first_input_or_kept_copy_never_both`
-  cover the refusals.
+  cover the refusals, including a login while the session is live.
 - `fused_result_loop_resumes_after_kerneld_restart_through_a_fresh_owner_login`
   runs the two-step result loop with a real executor: after step 1 commits,
   kerneld restarts (authority snapshot restored, G4 owner reopened from disk,
@@ -133,6 +137,8 @@ component test pass rates as model safety/success rates or product readiness.
   execution). Nothing runs until the owner logs in again. Step 2 then waits for
   its own approval and sends step 1's real provider response; the executor
   receives two requests in total and both clauses end at one use.
+  `fused_result_loop_continues_after_the_owner_login_expires_in_process` runs
+  the same loop with the login expiring between the steps in one process.
 - Protocol tests cover canonical encoding, role separation and fixed HTTP origin
   rules; a Node DOM harness exercises login, in-memory polling and deliberate
   approval-page handoff. This is not a real-browser hardware-key ceremony.
