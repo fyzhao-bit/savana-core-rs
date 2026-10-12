@@ -146,7 +146,8 @@ class Conversion(NamedTuple):
     slots: tuple  # every slot, sorted by reference
     ops: dict  # op slot ref -> step number
     literals: dict  # literal slot ref -> (step number, binding name, value)
-    data_edges: frozenset  # the edges references give (the rest keep the last step last)
+    data_edges: frozenset  # the edges references give (the rest keep the last step last, or order writes)
+    state_edges: frozenset  # the edges that keep each write in place among calls on live state
 
 
 def program_to_workflow(program, catalog, *, salt):
@@ -199,11 +200,20 @@ def program_to_workflow(program, catalog, *, salt):
     last = len(steps)
     feeding = {a for a, _b in edges}
     edges |= {(number, last) for number in range(1, last) if number not in feeding}
+    # State order: a write keeps its place relative to every other call on
+    # live state (a read or a write). A reference gives each value's producer
+    # an edge, but an effect on shared state (a write, then a read of what it
+    # changed) has none. Extraction and computation read recorded results
+    # only, so they stay free to move; reads stay free among themselves.
+    live = [n for n, tool in enumerate(tools, 1) if tool.role != ROLES["transform"]]
+    writes = {n for n, tool in enumerate(tools, 1) if tool.role == ROLES["sink"]}
+    state_edges = frozenset((a, b) for a in live for b in live if a < b and writes & {a, b})
+    edges |= state_edges
     slots.sort(key=lambda s: s.ref)
     if len({s.ref for s in slots}) != len(slots) or any(s.ref == bytes(16) for s in slots):
         raise StructuredError("conversion_slots")
     return Conversion(program, tuple(tools), Workflow(tuple(nodes), tuple(sorted(edges))), tuple(slots), ops,
-                      literals, data_edges)
+                      literals, data_edges, state_edges)
 
 
 class ProgramMapper:
@@ -604,8 +614,10 @@ def write_reordered(conversion, order):
     """Whether the new order moves a write across another tool call on live
     state (a read or a write) that no edge path ties it to: data edges keep
     every value's producer first, but an effect on shared state (a write, then
-    a read of what it changed) has no edge to keep it in place. Extraction and
-    computation read recorded results only, so moving them is never flagged."""
+    a read of what it changed) has no reference to give it an edge. Since the
+    conversion's state edges, no order agentd accepts can do this; the check
+    stays as an independent one. Extraction and computation read recorded
+    results only, so moving them is never flagged."""
     closure = {a: set() for a in range(1, len(order) + 1)}
     for a, b in sorted(conversion.workflow.edges, reverse=True):
         closure[a] |= {b} | closure[b]

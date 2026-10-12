@@ -97,8 +97,10 @@ class CatalogAndConversionTests(unittest.TestCase):
         self.assertEqual([n.ordinal for n in nodes], [1, 2, 3])
         self.assertEqual([[name for name, _ref in n.bindings] for n in nodes],
                          [[OP, "url"], [OP, "target"], ["channel", OP]])
-        self.assertEqual(conversion.workflow.edges, ((1, 2), (2, 3)))
+        # The fetch also keeps its place before the send: both touch live state.
+        self.assertEqual(conversion.workflow.edges, ((1, 2), (1, 3), (2, 3)))
         self.assertEqual(conversion.data_edges, {(1, 2), (2, 3)})
+        self.assertEqual(conversion.state_edges, {(1, 3)})
         self.assertEqual(sorted(conversion.ops.values()), [1, 2, 3])
         self.assertEqual(sorted((s, n, v) for s, n, v in conversion.literals.values()),
                          [(1, "url", text("www.informations.com")), (2, "target", text("dojo.slack.send_channel.text")),
@@ -109,7 +111,7 @@ class CatalogAndConversionTests(unittest.TestCase):
         lone["steps"][2] = dict(lone["steps"][2], source=1)
         lone["steps"][3] = {"tool": "dojo.slack.send_channel", "args": {"channel": text("general"), "text": {"from": 3}}}
         edges = program_to_workflow(lone, catalog("slack"), salt=SALT).workflow.edges
-        self.assertEqual(edges, ((1, 3), (2, 4), (3, 4)))
+        self.assertEqual(edges, ((1, 3), (1, 4), (2, 4), (3, 4)))
 
     def test_slots_are_keyed_by_the_salt_and_bad_programs_are_refused(self):
         same = program_to_workflow(SUMMARY, catalog("slack"), salt=SALT)
@@ -195,15 +197,36 @@ class LoweringTests(unittest.TestCase):
                              {"tool": "dojo.slack.read_channel", "args": {"channel": text("general")}},
                              {"tool": EXTRACT_TOOL, "source": 2, "args": {"target": text("answer")}}]}
         conversion = program_to_workflow(program, catalog("slack"), salt=SALT)
+        # The read of the channel the send changed has no reference to the
+        # send; a state edge keeps it after, so only the program order is valid.
+        self.assertEqual(conversion.state_edges, {(1, 2)})
+        self.assertEqual(valid_orders(conversion), 1)
         self.assertFalse(write_reordered(conversion, [1, 2, 3]))
-        self.assertTrue(write_reordered(conversion, [2, 1, 3]))
+        # Without the state edges the check itself still catches the move.
+        unordered = conversion._replace(workflow=conversion.workflow._replace(
+            edges=tuple(sorted(set(conversion.workflow.edges) - conversion.state_edges))))
+        self.assertEqual(valid_orders(unordered), 2)
+        self.assertTrue(write_reordered(unordered, [2, 1, 3]))
         # An extraction reads a recorded result, not live state: moving it past a write is safe.
         later = {"steps": [program["steps"][1], {"tool": EXTRACT_TOOL, "source": 1, "args": {"target": text("answer")}},
                            program["steps"][0], {"tool": EXTRACT_TOOL, "source": 1, "args": {
                                "target": text("answer"), "context": {"from": 2}}}]}
         conversion = program_to_workflow(later, catalog("slack"), salt=SALT)
+        self.assertEqual(conversion.state_edges, {(1, 3)})
+        self.assertEqual(valid_orders(conversion), 2)  # the first extraction before or after the send
         self.assertFalse(write_reordered(conversion, [1, 3, 2, 4]))
-        self.assertTrue(write_reordered(conversion, [3, 1, 2, 4]))
+        unordered = conversion._replace(workflow=conversion.workflow._replace(
+            edges=tuple(sorted(set(conversion.workflow.edges) - conversion.state_edges))))
+        self.assertTrue(write_reordered(unordered, [3, 1, 2, 4]))
+        # Reads stay free among themselves, and every write keeps its place.
+        mixed = {"steps": [{"tool": "dojo.slack.read_channel", "args": {"channel": text("general")}},
+                           {"tool": "dojo.slack.read_channel", "args": {"channel": text("random")}},
+                           program["steps"][0],
+                           {"tool": EXTRACT_TOOL, "source": 1, "args": {"target": text("answer"),
+                                                                       "context": {"from": 2}}}]}
+        conversion = program_to_workflow(mixed, catalog("slack"), salt=SALT)
+        self.assertEqual(conversion.state_edges, {(1, 3), (2, 3)})
+        self.assertEqual(valid_orders(conversion), 2)
 
     def test_valid_orders_counts_every_edge_respecting_order(self):
         program = {"steps": [{"tool": "dojo.slack.send_channel", "args": {"channel": text("general"),
@@ -211,8 +234,9 @@ class LoweringTests(unittest.TestCase):
                              {"tool": "dojo.slack.read_channel", "args": {"channel": text("general")}},
                              {"tool": EXTRACT_TOOL, "source": 2, "args": {"target": text("answer")}}]}
         conversion = program_to_workflow(program, catalog("slack"), salt=SALT)
-        # The last step stays last and the read feeds it: the send can go first or second.
-        self.assertEqual(valid_orders(conversion), 2)
+        # The last step stays last, the read feeds it, and the send keeps its
+        # place before the read of the channel it changed: one order.
+        self.assertEqual(valid_orders(conversion), 1)
         for item in load_registry()["templates"]:
             conversion = program_to_workflow(item["program"], catalog(item["suite"]), salt=SALT)
             self.assertGreaterEqual(valid_orders(conversion), 1)
