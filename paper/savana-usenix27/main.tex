@@ -2501,16 +2501,32 @@ three leakage layers. A remote planner also learns the plan's
 \emph{shape} and the user's \emph{intent}. \sys{} can split planning into
 three stages:
 \begin{enumerate}
-\item a local \emph{mapper} model produces a structural graph from an
-  intent projection;
-\item a possibly third-party \emph{planner} model orders that graph, and
-  sees only fresh identifiers, coarse roles, and edges;
+\item a private \emph{mapper}, a model service in the user's trust domain
+  reached over pinned mTLS, binds the session's tools to opaque slots,
+  and \sys{} relabels the result into a structural graph;
+\item a possibly third-party \emph{planner} model orders that graph. It
+  sees only fresh identifiers, coarse roles, effect classes, and edges,
+  and can choose an order but cannot add, drop, or replace a step;
 \item a \emph{deterministic} decoder maps the ordered plan back to tool
   classes.
 \end{enumerate}
 Intent exposure is an explicit per-request choice, private by default
 and capped by the deployment; a request beyond the cap is refused before
 any network call rather than re-routed.
+
+We ran this pipeline on AgentDojo. The mapper returned the owner's
+reviewed program, \code{deepseek-flash} was the third-party planner, and
+every reordered program was reviewed again before signing. On fresh hosts,
+77 registered task programs completed 40 tasks when reordered and 41 in
+their original order. The 23 episodes whose order changed matched their
+pairs task for task, and the one discordant pair had a single valid order.
+With programs drafted by the planner itself, 40 of 97 tasks completed,
+against 41 for the same drafting without reordering. No planner request
+contained a program literal, a value the leak gate marks in the owner's
+request, or a tool name or description. The stage added a median of
+1.1\,s before signing. Structural acceptance
+does not replace the owner's review: the pipeline accepted the shape of
+56 of the 60 recorded drafts the review refused.
 
 \paragraph{Connector registration.} The connector registry is a
 hash-chained state whose genesis and update authority are pinned by the
