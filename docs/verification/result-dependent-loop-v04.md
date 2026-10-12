@@ -1,5 +1,15 @@
 # Result-dependent private loop (batch 43)
 
+> **Note (2026-10-12).** Two statements in this batch-43 record are out of date.
+> Since `7cd8c86` (2026-09-30), a value taken from a prior result at a fixed JSON
+> path may fill a resource, parameter or destination field (never payload or
+> magnitude); G4 matches it against the owner-signed rule, and since `063764c` G5
+> escalates any destination filled from data to owner approval. Only a whole-result
+> edge is still limited to the payload. The model wire format also changed: since
+> `a56f3bd` the model-view deadline is sent as 8 bytes, and schema-3 rounds may
+> place G3-released result observations in the model's public view. See
+> [the component status audit](component-status-audit-20261012.zh-CN.md).
+
 ## Implemented boundary
 
 The owner-clock private workflow now executes a finite, registered result-data
