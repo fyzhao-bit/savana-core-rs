@@ -13,16 +13,18 @@ whose offline verification passed are counted:
 * U8 (`u8f`): the same options with U3 (multi-field extraction), U4 (`mode`),
   ten steps and the kernel's masking fix (`u8` is its first two batches,
   stopped when they showed planners naming a multi-field extraction's
-  field by its target label, which the review then refused). The same
-  contention rule applies: `u8r` reruns the batch above 5 s and replaces it,
-  and `U8_first` keeps the original;
+  field by its target label, which the review then refused). Stopped after
+  10 of its 13 batches, when the owner chose to run U8S in its place:
+  banking, slack and travel complete, workspace 16 of its 40 tasks. Its
+  slack-2 batch had a median step interval of 5.02 s, above the rule's 5 s;
+  the rerun was not run, so it counts as measured and is flagged;
 * U8S (`u8s`): U8 with agentd's structured planning on every accepted draft
   (the reviewed program as the private mapper, DeepSeek as the third-party
   planner that may only reorder it, the lowered program reviewed again), the
   same 97 tasks in the same batches;
 * U7 (`u7d`, `u7s`): under the Permit disposition, where the kernel asks the
-  owner only when G5 escalates, the tasks whose U12 or U8 program had a step
-  whose address data chose (`trusted_set_sample`), with the directory owner
+  owner only when G5 escalates, the tasks whose U12, U8 or U8S program had a
+  step whose address data chose (`trusted_set_sample`), with the directory owner
   (`u7d`: every such step escalates) and with the directory signed into
   those edges as a candidate set (`u7s`: a member no longer escalates by
   itself); `u7x` is `u7s` under injection;
@@ -31,9 +33,9 @@ whose offline verification passed are counted:
   `+instructions=adopt`; `u6x` is banking 12's under AutoDojo's injections,
   the one request whose instructions come from a document with an injection
   point (`adoption_summary`);
-* U8X (`u8x`): U8 under injection (AutoDojo's for banking, slack and travel,
-  the official template for workspace), on the tasks whose U8 program had a
-  step whose address data chose (`attack_sample`).
+* U8SX (`u8sx`): U8S under injection (AutoDojo's for banking, slack and
+  travel, the official template for workspace), on the tasks whose U8S
+  program had a step whose address data chose (`attack_sample`).
 
 `timeline` reads each batch's own clock: the median interval between an
 episode's consecutive provider attempts (a step's time; above
@@ -61,11 +63,10 @@ import statistics
 from analysis.floor_experiment import episode_row, episodes as by_episode
 from analysis.structured_planning import _events, batches
 
-ARMS = dict(G12=("g12k",), D=("f5d",), U12=("u12c", "u12r"), U12_first=("u12c",), U8=("u8f", "u8r"),
-            U8_first=("u8f",), U8S=("u8s",))
+ARMS = dict(G12=("g12k",), D=("f5d",), U12=("u12c", "u12r"), U12_first=("u12c",), U8=("u8f",), U8S=("u8s",))
 # A batch whose measurement a rerun replaces (see the docstring).
-SUPERSEDED = {"U12": {"u12c-slack-2", "u12c-travel-0"}, "U8": {"u8f-slack-2"}}
-ATTACK = "u8x"
+SUPERSEDED = {"U12": {"u12c-slack-2", "u12c-travel-0"}}
+ATTACK = "u8sx"
 # U7 runs under Permit on a sample of tasks, not all 97 (see the docstring).
 TRUSTED_SET_ARMS = dict(U7_directory=("u7d",), U7_set=("u7s",))
 TRUSTED_SET_ATTACK = "u7x"
@@ -279,7 +280,7 @@ def attack_summary(rows, baseline=()):
                               success=sum(b.get("observed_attacker_success") is True for b in before)))
 
 
-def attack_sample(results, arm="U8"):
+def attack_sample(results, arm="U8S"):
     """The tasks of a benign arm whose signed program had a step whose address
     data chose, each crossed with every injection task of its suite (AutoDojo's
     for banking, slack and travel; the official ones for workspace), as plan
@@ -300,9 +301,9 @@ def attack_sample(results, arm="U8"):
 
 def trusted_set_sample(results):
     """Plan lines `<suite> <items>` (at most nine cases a line) of the tasks
-    whose U12 or U8 program had a step whose address data chose: the only
+    whose U12, U8 or U8S program had a step whose address data chose: the only
     tasks where a signed candidate set can change what happens."""
-    chosen = {_task(r) for arm in ("U12", "U8")
+    chosen = {_task(r) for arm in ("U12", "U8", "U8S")
               for r in episodes(results, ARMS[arm], SUPERSEDED.get(arm, ())) if r["data_chosen_steps"]}
     lines = []
     for suite in SUITES:
@@ -355,8 +356,8 @@ def report(results):
     arms = {arm: episodes(results, prefixes, SUPERSEDED.get(arm, ())) for arm, prefixes in ARMS.items()}
     out = dict(arms={arm: benign_summary(rows) for arm, rows in arms.items() if rows})
     out["flips"] = {f"{new}_vs_{old}": flips(arms[new], arms[old])
-                    for new, old in (("U12", "G12"), ("U12", "D"), ("U8", "G12"), ("U8", "D"), ("U8", "U12"),
-                                     ("U8", "U8_first"), ("U8S", "U8"))
+                    for new, old in (("U12", "G12"), ("U12", "D"), ("U8", "G12"), ("U8", "U12"),
+                                     ("U8S", "G12"), ("U8S", "D"), ("U8S", "U12"), ("U8S", "U8"))
                     if arms[new] and arms[old]}
     out["timeline"] = {arm: timeline(results, prefixes, SUPERSEDED.get(arm, ()))
                        for arm, prefixes in ARMS.items() if arms[arm]}
