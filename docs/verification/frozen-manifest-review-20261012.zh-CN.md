@@ -4,9 +4,9 @@
 CI（`.github/workflows/ci.yml`）每次运行 `tools/check-frozen-v2-core.sh` 校验。
 清单最后一次生成于 2026-09-29（`643fa5e`）。
 
-当前有 69 个文件与清单不一致：
+当前有 70 个文件与清单不一致：
 
-- 10 个是本次会话（2026-10-12）在你同意修改冻结文件之后改的，逐一列在第一节；其中 6 个在本次之前就已漂移。
+- 11 个是本次会话（2026-10-12）在你同意修改冻结文件之后改的，逐一列在第一节；其中 6 个在本次之前就已漂移。
 - 59 个是 2026-09-30 至 10-07 各批工作留下的，本次没有碰，列在第二节。
 - 其中 `crates/savana-kerneld/src/v2_recovery.rs` 已删除，所以校验脚本在 `test -f` 一步就会失败。
   在本次之前，59 处漂移已经让这项检查不通过。
@@ -23,7 +23,9 @@ CI（`.github/workflows/ci.yml`）每次运行 `tools/check-frozen-v2-core.sh` �
 | `crates/savana-kerneld/src/v2_agent_authority.rs` | `07508b1` | 连接器注册审批显示里渲染每个工具的含义 | 审批者看得懂描述符（F2） | `connector_display_renders_what_each_tool_means` |
 | 同上 | `be52a80` | 任务记录增加加密保存的重连材料；权限快照升到 schema 6；恢复时带材料的运行中任务保持运行；撤销时清除 | kerneld 重启后 owner 重新登录接续（F3） | 私密会话 4 个新测试、重启端到端测试 |
 | 同上 | `aaf063b` | 保留部署工具表，按连接器链重算 G4；用户层工具每次调用都按"必须审批"评估 | 设计 R4 | `a_user_registered_tool_needs_the_owners_approval_for_every_call` 等 |
-| `crates/savana-kerneld/src/v04_private_session.rs` | `be52a80` | 登录门：首次登录用已提交输入，重启后的登录只用同一 run 的保留副本；本进程内有会话就拒绝 | F3 | `fused_private_login_gate_admits_first_input_or_kept_copy_never_both` 等 |
+| `crates/savana-kerneld/src/v04_private_session.rs` | `be52a80` | 登录门：首次登录用已提交输入，重启后的登录只用同一 run 的保留副本 | F3 | `fused_private_login_gate_admits_first_input_or_kept_copy_never_both` 等 |
+| 同上 | `d2249ce` | 登录门区分首次、重启后、过期后续登三种；续登时同一会话和 run 延到新登录的上限；只保留最新登录接收交接 | 本进程内登录过期后可再登录 | `fused_private_session_continues_the_same_run_after_its_login_expires_in_process`、`fused_result_loop_continues_after_the_owner_login_expires_in_process` |
+| `crates/savana-kerneld/src/v2_value_owner.rs` | `d2249ce` | 新增 `extend_private_run_v04`：同一 run 的期限延到新登录上限，值的来源期限不变 | 同上 | 同上 |
 | `crates/savana-kerneld/src/v2_core_services.rs` | `aaf063b` | 批准新增和删除连接器之后先重算 G4，再同步执行器 | R4 | `approved_user_connector_tools_join_g4_and_leave_on_removal` |
 | `crates/savana-policy-core/src/v2/descriptor.rs` | `aaf063b` | 活动工具记录带层级；`with_user_registered` 组合；测试特性下的改层级辅助函数 | R4 | policy-core 455 个 |
 | `crates/savana-policy-core/src/v2/mod.rs` | `aaf063b` | 导出 `USER_REGISTERED_TOOL_ORDINAL_V2` | R4 | 同上 |
