@@ -295,7 +295,9 @@ def attack_sample(results, arm="U8S"):
         users = [u for s, u in chosen if s == suite]
         injections = sorted(get_suite(BENCHMARK, suite).injection_tasks, key=lambda i: int(i.rsplit("_", 1)[1]))
         items = [f"{u}+{i}" for u in users for i in injections]
-        lines += [(suite, ",".join(items[k:k + 9])) for k in range(0, len(items), 9)]
+        # As few batches as nine cases allow, of even size.
+        size = -(-len(items) // -(-len(items) // 9)) if items else 1
+        lines += [(suite, ",".join(items[k:k + size])) for k in range(0, len(items), size)]
     return lines
 
 
