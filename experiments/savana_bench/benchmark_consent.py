@@ -77,18 +77,24 @@ class FiniteConsent:
     `require_approval` every step asks, in order. Under `permit` only the steps
     the kernel escalates ask, in ascending clause order, and the final release
     may follow any of them. `strict_destinations` refuses any step whose
-    destination (or fetched address) was derived from data."""
-    def __init__(self, contract, principal, emit, *, disposition='require_approval', strict_destinations=False):
+    destination (or fetched address) was derived from data. `directory` (a set
+    of trimmed, case-folded values, see `owner_directory`) approves such a step
+    only if every value data chose for it is in that directory."""
+    def __init__(self, contract, principal, emit, *, disposition='require_approval', strict_destinations=False,
+                 directory=None):
         if (contract not in all_contracts() or type(principal) is not str
             or not re.fullmatch('[0-9a-f]{64}',principal) or principal=='0'*64
-            or disposition not in DISPOSITIONS or type(strict_destinations) is not bool):
+            or disposition not in DISPOSITIONS or type(strict_destinations) is not bool
+            or (directory is not None and (type(directory) is not frozenset or strict_destinations
+                                           or any(type(v) is not str for v in directory)))):
             raise ValueError('finite_consent_catalog')
         self.contract,self.principal,self.emit=contract,principal,emit
         self.steps=contract.steps();self.action=0
-        self.permit=disposition=='permit';self.strict=strict_destinations
+        self.permit=disposition=='permit';self.strict=strict_destinations;self.directory=directory
         # Read-only contracts keep their original policy label and behavior.
         self.policy=('finite_calendar_preconsent_v1' if len(self.steps)==1 else 'finite_write_preconsent_v1')+(
-            '+permit' if self.permit else '')+('+strict_destination' if self.strict else '')
+            '+permit' if self.permit else '')+('+strict_destination' if self.strict else '')+(
+            '+directory_destination' if directory is not None else '')
         self.stage='ingress';self.task=self.binding=self.clauses=self.authorization=None
         self.profiles=None;self.failed=False;self.results=None
 
@@ -157,7 +163,7 @@ class FiniteConsent:
                 policy=self.policy,human_review=False,**clause)
         except BaseException as error:
             self.failed=True
-            reason=dict(reason=str(error)) if self.permit or self.strict else {}
+            reason=dict(reason=str(error)) if self.permit or self.strict or self.directory is not None else {}
             if reason and purpose=='tool_execution' and getattr(self,'_asked',None) is not None:
                 reason['clause']=self._asked
             self.emit('benchmark_consent',purpose=purpose,decision='refuse',
@@ -248,6 +254,11 @@ class FiniteConsent:
                 or not _edges_match(d.get('derived_fields'),step)):
                 raise ValueError('consent_action_arguments')
             arguments=dict(r['params']['arguments'])
+            if self.directory is not None:
+                # A destination data chose is approved only if this owner already knows it.
+                from .owner_directory import in_directory
+                if not all(in_directory(arguments.get(field),self.directory) for field in _chosen_by_data(step)):
+                    raise ValueError('consent_destination_not_in_directory')
             if step.payload_from:
                 # A payload fed from an earlier result is not a root control:
                 # approve it only if it is byte-for-byte that result's text.

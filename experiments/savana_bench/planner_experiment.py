@@ -104,9 +104,11 @@ ATTACKS = ("important_instructions_no_names", "autodojo")
 # (an experiment) the injected data an undefended agent would have read.
 EXPOSURES = ("none", "data")
 # Experiments on the kernel's own floor: an owner who signs destinations derived
-# from data, and a software owner who refuses to approve them.
+# from data, and a software owner who refuses to approve them; or (asking
+# instead of refusing) one who approves them only within its own directory
+# (`owner_directory`).
 REVIEWS = ("owner", "derived")
-OWNERS = ("finite", "strict")
+OWNERS = ("finite", "strict", "directory")
 # Who writes the program: the untrusted planner, or (floor experiments only)
 # a fixed honest program per task, identical on every run and kernel; or, for
 # the structured-planning evaluation, the task's registered template run as
@@ -220,6 +222,9 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
         raise ValueError("planner_experiment_spec")
     review, owner, author = review or REVIEWS[0], owner or OWNERS[0], author or AUTHORS[0]
     if review not in REVIEWS or owner not in OWNERS or author not in AUTHORS:
+        raise ValueError("planner_experiment_spec")
+    # A directory owner judges destinations the owner signed as derived from data.
+    if owner == "directory" and review != "derived":
         raise ValueError("planner_experiment_spec")
     if author == "fixed":
         from .fixed_programs import FIXED_PROGRAMS
@@ -482,6 +487,16 @@ def structured_provenance(cases, example=None):
     return record
 
 
+def directory_provenance(cases):
+    """For a run with a directory owner, the digest of each suite's directory
+    (recomputable from the benchmark package). Every other manifest is unchanged."""
+    suites = sorted({case["suite"] for case in cases if case.get("owner") == "directory"})
+    if not suites:
+        return {}
+    from .owner_directory import directory_sha256, owner_directory
+    return dict(owner_directory_sha256={suite: directory_sha256(owner_directory(suite)) for suite in suites})
+
+
 def consent_mode(experiment):
     multi = str(experiment).partition(":")[0] in (*CHAIN_KINDS, "drafted")
     return "finite_write_preconsent_v1" if multi else "finite_calendar_preconsent_v1"
@@ -560,6 +575,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             human_authentication_evaluated=False, consent_mode=consent_mode(experiment),
             comparable_to_unrestricted_baseline=False, attack=experiment_attack(cases),
             **autodojo_provenance(cases), **structured_provenance(cases, structured_example),
+            **directory_provenance(cases),
             platform=platform.platform(), package_sources=package_sources(),
             source_sha256={p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                            for p in sorted(Path(__file__).parent.glob("*.py"))})
@@ -630,6 +646,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                 try:
                     from .agentdojo_calendar import calendar_provider
                     from .benchmark_consent import FiniteConsent
+                    from .owner_directory import owner_directory
                     from .private_episode import finish_private_episode
                     from .protected_operator import OperatorClient
                     from .protected_setup import provision_owner_episode
@@ -672,7 +689,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                     program_text, meta = drafter.draft(official, prompt, goal=case.get("goal"),
                                                                        history=tuple(history),
                                                                        view=case["planner_view"],
-                                                                       exposure=planner_exposure(case))
+                                                                       exposure=planner_exposure(case),
+                                                                       directory=case.get("owner") == "directory")
                             except RuntimeError:
                                 row["outcome"] = "author_failed"
                                 raise
@@ -776,7 +794,9 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         emit("plan_authored", author=case["author"], mutation=case["mutation"])
                     consent = FiniteConsent(contract, identity_profile["principal"], emit,
                                             disposition=deployment["disposition"],
-                                            strict_destinations=case.get("owner") == "strict")
+                                            strict_destinations=case.get("owner") == "strict",
+                                            directory=(owner_directory(case["suite"])
+                                                       if case.get("owner") == "directory" else None))
 
                     def progress(stage):
                         row["stage"] = stage

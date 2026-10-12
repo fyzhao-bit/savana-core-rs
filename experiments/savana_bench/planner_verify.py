@@ -19,8 +19,8 @@ from .agentdojo_tasks import prepare_draft
 from .official_verify import restore_environment, verify_chain
 from .planner_authors import SYSTEM, PlanUnencodable, compromised_draft, encode_plan, parse_plan
 from .planner_experiment import (DEFINITIVE, IDS, OPERATOR_MODE, SCHEMA, STRUCTURED_REFUSALS,
-                                 classify_provider_attempt, experiment_cases, planner_exposure, structured_provenance,
-                                 summarize)
+                                 classify_provider_attempt, directory_provenance, experiment_cases, planner_exposure,
+                                 structured_provenance, summarize)
 from .protected_agentdojo import official_case, package_sources, score_outcome
 from .protected_verify import verify_published_episode
 
@@ -121,7 +121,8 @@ def _drafted_contract(case, local, row):
                 raise ValueError("registered_program_evidence")
         else:
             body = draft_request_body(official, prompt, model=case["planner_model"], goal=case.get("goal"),
-                                      history=tuple(history), view=view, exposure=exposure)
+                                      history=tuple(history), view=view, exposure=exposure,
+                                      directory=case.get("owner") == "directory")
             if hashlib.sha256(body).hexdigest() != event["request_sha256"]:
                 raise ValueError("planner_input_mismatch")
             if event.get("view", "request") != view or event.get("placeholders", 0) != len(bindings):
@@ -394,6 +395,11 @@ def verify_episode(directory, local, case, row, profile, turns):
     if turn is not None:
         turns.add(turn)
     verdicts, prior = [], []
+    entries = None
+    if case.get("owner") == "directory":
+        from .benchmark_consent import _chosen_by_data
+        from .owner_directory import in_directory, owner_directory
+        entries = owner_directory(case["suite"])
     for event in local:
         if event["kind"] == "official_tool_result":
             prior.append(canonical(event["response"]))
@@ -405,6 +411,12 @@ def verify_episode(directory, local, case, row, profile, turns):
                                              application_turn=turn or "", prior_results=tuple(prior)))
         if event["verdict"] != verdict:
             raise ValueError("provider_attempt_verdict")
+        if entries is not None and verdict == "authorized_tool":
+            # The directory owner approved this call: every value data chose for it is one the owner knows.
+            arguments = json.loads(payload)["params"]["arguments"]
+            if not all(in_directory(arguments.get(field), entries)
+                       for field in _chosen_by_data(contract.steps()[len(prior)])):
+                raise ValueError("directory_owner_approved_unknown_destination")
         verdicts.append(verdict)
     if (row["provider_attempts"] != len(verdicts) or row["owner_releases"] != verdicts.count("owner_release")
             or row["unauthorized_provider_attempts"] != sum(v.startswith("unauthorized") for v in verdicts)):
@@ -453,6 +465,8 @@ def verify(directory):
     # A registered or structured run's templates and planner prompt are the current ones.
     if any(manifest.get(k) != v for k, v in structured_provenance(cases).items() if k != "structured_example_sha256"):
         raise ValueError("structured_provenance_mismatch")
+    if any(manifest.get(k) != v for k, v in directory_provenance(cases).items()):
+        raise ValueError("owner_directory_mismatch")
     current = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(Path(__file__).parent.glob("*.py"))}
     if manifest["source_sha256"] != current:
         raise ValueError("experiment_source_mismatch")
