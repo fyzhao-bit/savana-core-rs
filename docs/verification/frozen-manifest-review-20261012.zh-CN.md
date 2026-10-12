@@ -35,17 +35,17 @@ CI（`.github/workflows/ci.yml`）每次运行 `tools/check-frozen-v2-core.sh` �
 | `crates/savana-kerneld/src/v2_runtime.rs` | `7ed61ba` | 只改了测试：把已有输入提交测试的准备步骤提成辅助函数，加一条端到端测试（不修上面的问题时以 `Provenance` 失败） | 同上 | `an_account_number_whose_masking_exposes_another_number_still_commits` |
 | `crates/savana-kernel-protocol/src/v2/business_controls.rs` | `4e7c577` | 新增 `ResultCandidatesV2`（1–64 个成员、总计 ≤4 KiB、按字节严格升序、精确比较）；派生规则可带集合（只用于不计算的文本或文本列表），规范字节在 6 元素形式里写入集合，因此所有提交该规则的摘要都提交集合；不带集合的规则字节不变；解码上限相应放宽 | U7：owner 签名时给数据派生的目的地附一个候选集合，内核派生时逐字节检查成员资格 | `tests/result_candidates.rs` 5 个 |
 | `crates/savana-kernel-protocol/src/v2/business_request.rs` | `4e7c577` | 导出新类型和常量 | U7：签名时附候选集合，内核逐字节检查成员 | 同上 |
-| `crates/savana-kernel-protocol/src/v2/mod.rs` | `4e7c577` | 导出新类型和常量 | U7：签名时附候选集合，内核逐字节检查成员 | 同上 |
+| `crates/savana-kernel-protocol/src/v2/mod.rs` | `4e7c577`、`b98a04a` | 导出新类型和常量；`b98a04a` 只是 rustfmt 重排导出顺序 | U7：签名时附候选集合，内核逐字节检查成员 | 同上 |
 | `crates/savana-kernel-protocol/src/v2/task_context.rs` | `4e7c577` | owner 草稿 JSON 的派生规则可带 `candidates`（排序后校验，重复则拒绝） | U7：签名时附候选集合，内核逐字节检查成员 | 同上 |
 | `crates/savana-kernel-protocol/src/v2/task_draft.rs` | `4e7c577` | 根审批显示列出集合，并说明集合内的值视为 owner 的选择、其余值仍需批准；有集合时显示版本为 3，其余根的显示不变 | U7：签名时附候选集合，内核逐字节检查成员 | 同上 |
-| `crates/savana-kernel-protocol/src/v2/task_action_display.rs` | `4e7c577` | 单步审批显示列出集合和 `in_candidates`（具体值是否成员，列表逐项）；有集合时版本为 3 | U7：签名时附候选集合，内核逐字节检查成员 | 同上 |
+| `crates/savana-kernel-protocol/src/v2/task_action_display.rs` | `4e7c577`、`b98a04a` | 单步审批显示列出集合和 `in_candidates`（具体值是否成员，列表逐项）；有集合时版本为 3；`b98a04a` 改为从请求自己的字段取值判断成员（原来到 JSON-RPC 外层去找，永远判为非成员，U7 的第一批主机运行因此全部被软件 owner 拒绝），并加了用真实请求渲染的测试 | U7：签名时附候选集合，内核逐字节检查成员 | 同上 |
 | `crates/savana-continuation-core/src/planning.rs` | `4e7c577` | `SlotBinding.result_candidates`（只能在不计算的路径边上，非空、严格升序、有界）；配方摘要按整个操作序列化，自动包含它 | U7：签名时附候选集合，内核逐字节检查成员 | continuation-core 全部 |
 | `crates/savana-policy-core/src/v2/fused_task_compiler.rs` | `4e7c577` | 按绑定重建派生规则时带上集合，G4 在准备和派发时用摘要比对，绑定无法放宽或去掉集合 | U7：签名时附候选集合，内核逐字节检查成员 | `a_trusted_set_edge_is_matched_with_its_set_and_a_binding_cannot_widen_it` |
 | `crates/savana-policy-core/src/v2/provenance.rs` | `4e7c577` | 新派生操作（标签 11）只记录集合摘要；只有 `result_candidate_member_v04` 能产生它：先按原路径取值，成员（列表逐项）才把不可信父值的完整性提为 `UserAuthorized`，保密性、读者、效果不变，根证据记入集合摘要；普通派生拒绝标签 11，代理接口没有入口 | U7：签名时附候选集合，内核逐字节检查成员 | `a_signed_candidate_member_is_endorsed_and_nothing_else_is` |
 | `crates/savana-policy-core/src/v2/fused_inputs.rs` | `4e7c577` | 派生结果值时，带集合且取到成员就走背书，否则与普通边完全相同（仍为不可信，G5 照旧要求批准）；G7 用同一函数重算，因此集合也受 G7 约束 | U7：签名时附候选集合，内核逐字节检查成员 | `a_trusted_set_edge_endorses_only_a_member_and_g7_binds_the_set` |
 | `crates/savana-policy-core/src/v2/fused_plan_adapter.rs` | `4e7c577` | 只改测试里的结构体字面值（新字段 `None`） | U7：签名时附候选集合，内核逐字节检查成员 | policy-core 458 个 |
 | `crates/savana-policy-core/src/v2/fused_recipe_approval.rs` | `4e7c577` | 只改测试里的结构体字面值（新字段 `None`） | U7：签名时附候选集合，内核逐字节检查成员 | 同上 |
-| `crates/savana-policy-core/src/v2/provenance_tests.rs` | `4e7c577` | 加 U7 测试 | U7：签名时附候选集合，内核逐字节检查成员 | 同上 |
+| `crates/savana-policy-core/src/v2/provenance_tests.rs` | `4e7c577`、`b98a04a` | 加 U7 测试；`b98a04a` 只是 rustfmt 换行 | U7：签名时附候选集合，内核逐字节检查成员 | 同上 |
 | `crates/savana-agentd/Cargo.toml` | `2b3d6e3` | 加一个 `[[example]]`：`structured_plan_eval`，`required-features = ["test-support"]` | 结构化规划评测（F5）调用 agentd 真实的私有规划管线；不改 agentd 库代码，不带该特性的构建不编译它 | `experiments/tests/test_structured_example.py` 等 61 个 |
 
 残余数据契约（F4）计划放在新 crate 里，不改冻结文件；工作区根 `Cargo.toml` 不在清单里。
