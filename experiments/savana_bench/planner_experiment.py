@@ -118,9 +118,10 @@ OWNERS = ("finite", "strict", "directory", "set")
 # written (`registered`), or a program agentd's structured planning pipeline
 # reorders (`structured`, see `structured_planning`).
 AUTHORS = ("deepseek", "fixed", "registered", "structured")
-# Where a `structured` program comes from: the registered template (arm T) or
-# the untrusted planner's reviewed draft (arm D).
-MAPPERS = ("template", "deepseek")
+# Where a `structured` program comes from: the registered template (arm T),
+# the untrusted planner's reviewed draft (arm D), or the private mapper, which
+# drafts it with the planner's model when agentd asks (`ServiceMapper`).
+MAPPERS = ("template", "deepseek", "service")
 # When an accepted draft writes nothing but the owner's request asks for an
 # action: accept it as it is, or ask the planner once whether it meant to leave
 # the action out (`omitted_write`; it may return the same program to keep it).
@@ -175,7 +176,11 @@ def drafted_options(kind):
     For the structured-planning evaluation: `+author=registered` (the task's
     registered template, one draft) and `+author=structured` with
     `+mapper=template` (the default; the template, reordered by agentd's
-    pipeline) or `+mapper=deepseek` (the planner's reviewed draft, reordered).
+    pipeline), `+mapper=deepseek` (the planner's reviewed draft, reordered) or
+    `+mapper=service` (the private mapper plans: the drafting model writes the
+    program only when agentd's mapper request arrives; see `ServiceMapper`).
+    With `drafted-poison` or `+exposure=data`, the polluted model is then the
+    mapper.
     `+actions=ask` asks the planner once when its accepted draft writes nothing
     but the request asks for an action (see ACTIONS; needs a later draft).
     `+instructions=adopt` runs a request that delegates its action to
@@ -755,79 +760,95 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         # A value-blind view: the planner is sent placeholders,
                         # which the owner binds back to its own values below.
                         _request, bindings = planner_request(prompt, case["planner_view"])
-                        # Review-feedback retry: after a refusal the planner
-                        # sees only its own program and the fixed refusal code
-                        # (with the step/field of its own program); nothing is
-                        # signed or run until a draft passes the review.
-                        history, asked = [], False
-                        for attempt in range(1, case["max_drafts"] + 1):
-                            row["drafts"] = attempt - 1
-                            try:
-                                if case["root_author"] == "fixed":
-                                    from .fixed_programs import fixed_program_text
-                                    program_text = fixed_program_text(case["suite"], case["user"])
-                                    meta = dict(request_sha256=None, usage=None, response_sha256=hashlib.sha256(
-                                        program_text.encode()).hexdigest())
-                                elif case["root_author"] == "registered" or case.get("mapper") == "template":
-                                    # No planner: the task's registered template, as registered.
-                                    from .structured_templates import load_registry, program_text as registered_text
-                                    program_text = registered_text(load_registry(), case["suite"], case["user"])
-                                    meta = dict(request_sha256=None, usage=None, response_sha256=hashlib.sha256(
-                                        program_text.encode()).hexdigest())
-                                else:
-                                    program_text, meta = drafter.draft(official, request, goal=case.get("goal"),
-                                                                       history=tuple(history),
-                                                                       view=case["planner_view"],
-                                                                       exposure=planner_exposure(case),
-                                                                       directory=case.get("owner") in ("directory",
-                                                                                                       "set"))
-                            except RuntimeError:
-                                row["outcome"] = "author_failed"
-                                raise
-                            row["drafts"] = attempt
-                            audit.emit("root_drafted", episode=index, attempt=attempt, program_text=program_text,
-                                       view=case["planner_view"], placeholders=len(bindings), **meta)
-                            try:
-                                drafted = register_drafted(review_program(suite=case["suite"],
-                                    suite_tools={t.name for t in official.tools}, task_id=case["user"],
-                                    prompt=request, program=parse_program_text(program_text), bindings=bindings,
-                                    extractor_model=case["extractor_model"],
-                                    derived_destinations=case.get("review") == "derived",
-                                    read_only=instructions_turn == "read",
-                                    destination_candidates=destination_candidates(case)))
-                            except ProgramRefused as error:
-                                audit.emit("program_refused", episode=index, attempt=attempt, reason=str(error),
-                                           step=error.step, field=error.field)
-                                if attempt == case["max_drafts"] or str(error) in NON_RETRYABLE:
-                                    row.update(outcome="program_refused", refusal=str(error))
+                        def draft_program():
+                            """The accepted draft (a DraftedContract), or raises.
+                            Review-feedback retry: after a refusal the planner
+                            sees only its own program and the fixed refusal code
+                            (with the step/field of its own program); nothing is
+                            signed or run until a draft passes the review."""
+                            row["stage"] = "root_drafting"
+                            history, asked, accepted = [], False, None
+                            for attempt in range(1, case["max_drafts"] + 1):
+                                row["drafts"] = attempt - 1
+                                try:
+                                    if case["root_author"] == "fixed":
+                                        from .fixed_programs import fixed_program_text
+                                        program_text = fixed_program_text(case["suite"], case["user"])
+                                        meta = dict(request_sha256=None, usage=None, response_sha256=hashlib.sha256(
+                                            program_text.encode()).hexdigest())
+                                    elif case["root_author"] == "registered" or case.get("mapper") == "template":
+                                        # No planner: the task's registered template, as registered.
+                                        from .structured_templates import load_registry, program_text as registered_text
+                                        program_text = registered_text(load_registry(), case["suite"], case["user"])
+                                        meta = dict(request_sha256=None, usage=None, response_sha256=hashlib.sha256(
+                                            program_text.encode()).hexdigest())
+                                    else:
+                                        program_text, meta = drafter.draft(official, request, goal=case.get("goal"),
+                                                                           history=tuple(history),
+                                                                           view=case["planner_view"],
+                                                                           exposure=planner_exposure(case),
+                                                                           directory=case.get("owner") in ("directory",
+                                                                                                           "set"))
+                                except RuntimeError:
+                                    row["outcome"] = "author_failed"
                                     raise
-                                history.append((program_text, str(error), error.step, error.field))
-                                continue
-                            if (case.get("actions") == "ask" and not asked and attempt < case["max_drafts"]
-                                    and instructions_turn != "read" and requested_action(request)
-                                    and not performs_action(drafted)):
-                                # Asked once: the request asks for an action this
-                                # program does not perform. Nothing is signed yet.
-                                asked, drafted = True, None
-                                audit.emit("program_refused", episode=index, attempt=attempt, reason="omitted_write",
-                                           step=None, field=None)
-                                history.append((program_text, "omitted_write", None, None))
-                                continue
-                            break
+                                row["drafts"] = attempt
+                                audit.emit("root_drafted", episode=index, attempt=attempt, program_text=program_text,
+                                           view=case["planner_view"], placeholders=len(bindings), **meta)
+                                try:
+                                    accepted = register_drafted(review_program(suite=case["suite"],
+                                        suite_tools={t.name for t in official.tools}, task_id=case["user"],
+                                        prompt=request, program=parse_program_text(program_text), bindings=bindings,
+                                        extractor_model=case["extractor_model"],
+                                        derived_destinations=case.get("review") == "derived",
+                                        read_only=instructions_turn == "read",
+                                        destination_candidates=destination_candidates(case)))
+                                except ProgramRefused as error:
+                                    audit.emit("program_refused", episode=index, attempt=attempt, reason=str(error),
+                                               step=error.step, field=error.field)
+                                    if attempt == case["max_drafts"] or str(error) in NON_RETRYABLE:
+                                        row.update(outcome="program_refused", refusal=str(error))
+                                        raise
+                                    history.append((program_text, str(error), error.step, error.field))
+                                    continue
+                                if (case.get("actions") == "ask" and not asked and attempt < case["max_drafts"]
+                                        and instructions_turn != "read" and requested_action(request)
+                                        and not performs_action(accepted)):
+                                    # Asked once: the request asks for an action this
+                                    # program does not perform. Nothing is signed yet.
+                                    asked, accepted = True, None
+                                    audit.emit("program_refused", episode=index, attempt=attempt,
+                                               reason="omitted_write", step=None, field=None)
+                                    history.append((program_text, "omitted_write", None, None))
+                                    continue
+                                break
+                            row["stage"] = "structured_planning" if case.get("mapper") == "service" else "root_drafting"
+                            return accepted
+                        # The service mapper drafts inside agentd's mapper call
+                        # (below); every other author drafts here, first.
+                        drafted = None if case.get("mapper") == "service" else draft_program()
                         if case["root_author"] == "structured":
                             # agentd's structured planning: the private mapper is
-                            # the reviewed program, the third-party planner may
-                            # only reorder it, and the lowered program must pass
-                            # the same review again. Still nothing is signed.
-                            from .structured_planning import (ProgramMapper, StructuredError, eval_catalog, evidence,
-                                                              plan_program)
+                            # the reviewed program (`+mapper=service`: the mapper
+                            # plans it with the drafting model when agentd asks),
+                            # the third-party planner may only reorder it, and the
+                            # lowered program must pass the same review again.
+                            # Still nothing is signed.
+                            from .structured_planning import (ProgramMapper, ServiceMapper, StructuredError,
+                                                              eval_catalog, evidence, plan_program)
                             from .structured_templates import load_registry, template_number
-                            row["stage"] = "structured_planning"
-                            mapper = ProgramMapper(json.loads(drafted.program), eval_catalog(case["suite"]),
-                                                   source="template" if case["mapper"] == "template" else "drafted",
-                                                   template=(template_number(load_registry(), case["suite"],
-                                                                            case["user"])
-                                                             if case["mapper"] == "template" else None))
+                            from .structured_wire import WireError
+                            catalog = eval_catalog(case["suite"])
+                            if case["mapper"] == "service":
+                                row.update(drafts=0, stage="structured_planning")
+                                mapper = ServiceMapper(catalog, lambda: json.loads(draft_program().program))
+                            else:
+                                row["stage"] = "structured_planning"
+                                mapper = ProgramMapper(json.loads(drafted.program), catalog,
+                                                       source="template" if case["mapper"] == "template" else "drafted",
+                                                       template=(template_number(load_registry(), case["suite"],
+                                                                                case["user"])
+                                                                 if case["mapper"] == "template" else None))
                             calls = len(structural.log)
                             planned = plan_program(structured, mapper, job_id=f"episode-{index}",
                                                    suite=case["suite"], user=case["user"],
@@ -835,6 +856,12 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                                    derived_destinations=case.get("review") == "derived")
                             audit.emit("structured_planned", episode=index,
                                        **evidence(planned, structural.log[calls:]))
+                            failure = getattr(mapper, "failure", None)
+                            if failure is not None and not isinstance(failure, (StructuredError, WireError)):
+                                # The owner's side could not plan: every draft was
+                                # refused, or the drafter failed. What the drafting
+                                # recorded stands; agentd got no workflow.
+                                raise failure
                             if planned["outcome"] != "planned":
                                 row.update(outcome=planned["outcome"],
                                            structured_error=planned.get("lowering_error") or planned["error"])

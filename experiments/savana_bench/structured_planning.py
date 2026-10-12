@@ -25,6 +25,18 @@ literals, renumbers references and checks every dependency against the
 edges, and the owner's fixed review must accept the lowered program again
 before anything is signed.
 
+`ServiceMapper` is the mapper as a service that plans: the job agentd gets
+is fixed before anything is planned (the drafted template and intent, the
+limits, the catalog and a pool of opaque slots drawn from a per-job salt:
+an op slot per possible step and LITERAL_SLOTS literal slots), and the
+owner's request never enters it. Only when agentd's mapper request arrives,
+exactly the one this job's line makes agentd send, does the service call its
+`plan` (on the owner's side: the drafting model writes a program for the
+owner's request, answered by the owner's fixed review) and convert the
+accepted program onto the pool. A planning failure gets no reply, which
+agentd reports as an unavailable mapper. `ServiceMapper.replay` re-derives
+the request and the workflow offline from the salt and the accepted program.
+
     python -m savana_bench.structured_planning phase0 --example <structured_plan_eval> --output <dir>
 """
 import argparse
@@ -60,6 +72,9 @@ MAPPER_HOST, PLANNER_HOST = "mapper.structured.test", "planner.structured.test"
 DEPLOYED_EXAMPLE = "/opt/savana-protected/bin/structured_plan_eval"
 # Arm D: a drafted program has no registered template; its intent is a constant.
 DRAFTED_TEMPLATE = 1000
+# The service mapper's literal slots per job: enough for any program the review
+# accepts (at most MAX_STEPS steps), well under agentd's 256 planner items.
+LITERAL_SLOTS = 64
 DRAFTED_INTENT = "search"
 SOURCES = ("template", "drafted")
 TRANSFORM_DESCRIPTIONS = {
@@ -150,11 +165,40 @@ class Conversion(NamedTuple):
     state_edges: frozenset  # the edges that keep each write in place among calls on live state
 
 
-def program_to_workflow(program, catalog, *, salt):
+def slot_pool(salt, literals=LITERAL_SLOTS):
+    """One job's slots, from its salt alone: (an op slot per possible step,
+    `literals` literal slots). Nothing about the program goes into them."""
+    if type(salt) is not bytes or len(salt) != 32 or type(literals) is not int or not 1 <= literals <= 128:
+        raise StructuredError("pool_salt")
+
+    def ref(label):
+        return hashlib.sha256(SLOT_DOMAIN + salt + label.encode()).digest()[:16]
+    pool = (tuple(ref(f"pool/op/{n}") for n in range(1, LIMITS[0] + 1)),
+            tuple(ref(f"pool/literal/{n}") for n in range(1, literals + 1)))
+    if len({*pool[0], *pool[1]}) != LIMITS[0] + literals:
+        raise StructuredError("pool_salt")
+    return pool
+
+
+def pool_slots(pool):
+    """A pool's slots as agentd's job declares them, sorted by reference."""
+    ops, literals = pool
+    return tuple(sorted((*(Slot(ref, KIND_OP, CARDINALITIES["exactly_one"], CONFIDENTIALITIES["public_structural"])
+                           for ref in ops),
+                         *(Slot(ref, KIND_LITERAL, CARDINALITIES["exactly_one"],
+                                CONFIDENTIALITIES["confidential_abstract"]) for ref in literals)),
+                        key=lambda slot: slot.ref))
+
+
+def program_to_workflow(program, catalog, *, salt=None, pool=None):
     """The owner's program as agentd's mapped workflow. Slot references are
     keyed hashes of their place in the program (`salt` is per job), so the
-    whole conversion is recomputable from the program, the catalog and the salt."""
-    if type(salt) is not bytes or len(salt) != 32:
+    whole conversion is recomputable from the program, the catalog and the
+    salt. With `pool` (a `slot_pool`) instead, step n binds the n-th op slot
+    and the literals take the pool's literal slots in program order."""
+    if (salt is None) == (pool is None):
+        raise StructuredError("conversion_salt")
+    if pool is None and (type(salt) is not bytes or len(salt) != 32):
         raise StructuredError("conversion_salt")
     program = json.loads(canonical(program))
     by_operation = {tool.operation: tool for tool in catalog}
@@ -162,8 +206,19 @@ def program_to_workflow(program, catalog, *, salt):
     if type(steps) is not list or not 1 <= len(steps) <= LIMITS[0]:
         raise StructuredError("conversion_shape")
 
-    def slot_ref(label):
-        return hashlib.sha256(SLOT_DOMAIN + salt + label.encode()).digest()[:16]
+    if pool is None:
+        def slot_ref(label):
+            return hashlib.sha256(SLOT_DOMAIN + salt + label.encode()).digest()[:16]
+    else:
+        free = iter(pool[1])
+
+        def slot_ref(label):
+            if label.startswith("op/"):
+                return pool[0][int(label[3:]) - 1]
+            ref = next(free, None)
+            if ref is None:
+                raise StructuredError("conversion_slots")
+            return ref
     tools, nodes, slots, ops, literals, edges = [], [], [], {}, {}, set()
     for number, step in enumerate(steps, 1):
         if (type(step) is not dict or step.get("tool") not in by_operation or type(step.get("args")) is not dict
@@ -244,23 +299,91 @@ class ProgramMapper:
 
     def job(self, job_id, *, boundary="private", exchange_ms=EXCHANGE_MS):
         """The example's job line: what a kernel's prepare would put in the envelope."""
-        names = {table: {v: k for k, v in values.items()} for table, values in
-                 (("cardinality", CARDINALITIES), ("confidentiality", CONFIDENTIALITIES), ("role", ROLES))}
-        return dict(job=job_id, template=self.template, intent=self.intent,
-                    slots=[dict(ref=s.ref.hex(), kind=s.kind, cardinality=names["cardinality"][s.cardinality],
-                                confidentiality=names["confidentiality"][s.confidentiality])
-                           for s in self.conversion.slots],
-                    relations=[], limits=list(LIMITS),
-                    catalog=[{"class": t.tool_class, "action": t.action, "role": names["role"][t.role],
-                              "effects": t.effects, "name": t.operation, "description": t.description}
-                             for t in self.catalog],
-                    boundary=boundary, exchange_ms=exchange_ms)
+        return job_line(job_id, template=self.template, intent=self.intent, slots=self.conversion.slots,
+                        catalog=self.catalog, boundary=boundary, exchange_ms=exchange_ms)
 
     def __call__(self, body):
         self.calls += 1
         if self.calls != 1 or body != self.request_bytes:
             raise StructuredError("mapper_request_mismatch")
         return self.response
+
+
+def job_line(job_id, *, template, intent, slots, catalog, boundary="private", exchange_ms=EXCHANGE_MS):
+    """The example's job line: what a kernel's prepare would put in the envelope."""
+    names = {table: {v: k for k, v in values.items()} for table, values in
+             (("cardinality", CARDINALITIES), ("confidentiality", CONFIDENTIALITIES), ("role", ROLES))}
+    return dict(job=job_id, template=template, intent=intent,
+                slots=[dict(ref=s.ref.hex(), kind=s.kind, cardinality=names["cardinality"][s.cardinality],
+                            confidentiality=names["confidentiality"][s.confidentiality]) for s in slots],
+                relations=[], limits=list(LIMITS),
+                catalog=[{"class": t.tool_class, "action": t.action, "role": names["role"][t.role],
+                          "effects": t.effects, "name": t.operation, "description": t.description}
+                         for t in catalog],
+                boundary=boundary, exchange_ms=exchange_ms)
+
+
+class ServiceMapper:
+    """The private mapper as a service that plans (see the module docstring).
+    The job is fixed before anything is planned: the drafted template and
+    intent, the limits, the catalog and the slot pool of a fresh per-job salt.
+    `plan`, on the owner's side, is called with no argument once agentd's
+    request for this job arrives; it returns the accepted program (a dict) or
+    raises. A failure, of the plan or of its conversion onto the pool, is kept
+    in `failure` and gets no reply. Until a reply, `conversion` and
+    `response` are None."""
+
+    def __init__(self, catalog, plan, *, salt=None, literals=LITERAL_SLOTS):
+        if plan is not None and not callable(plan):
+            raise ValueError("mapper_plan")
+        self.source, self.catalog, self.plan = "service", tuple(catalog), plan
+        self.salt = os.urandom(32) if salt is None else salt
+        self.pool = slot_pool(self.salt, literals)
+        self.intent, self.template = DRAFTED_INTENT, DRAFTED_TEMPLATE
+        tools = [tool.wire() for tool in self.catalog]
+        self.request = mapper_request(template=self.template, intent=INTENTS[self.intent],
+                                      actions=sorted({t.action for t in tools}), slots=pool_slots(self.pool),
+                                      relations=(), limits=LIMITS, active=[(t.tool_class, t.action) for t in tools],
+                                      tools=tools)
+        self.request_bytes = encode_mapper_request(self.request)
+        self.conversion = self.response = self.failure = None
+        self.calls = 0
+
+    def job(self, job_id, *, boundary="private", exchange_ms=EXCHANGE_MS):
+        return job_line(job_id, template=self.template, intent=self.intent, slots=pool_slots(self.pool),
+                        catalog=self.catalog, boundary=boundary, exchange_ms=exchange_ms)
+
+    def convert(self, program):
+        """The accepted program on this job's slots, checked as agentd checks it."""
+        conversion = program_to_workflow(program, self.catalog, pool=self.pool)
+        validate_workflow(self.request, conversion.workflow)
+        return conversion
+
+    def __call__(self, body):
+        self.calls += 1
+        if self.calls != 1 or body != self.request_bytes or self.plan is None:
+            raise StructuredError("mapper_request_mismatch")
+        try:
+            program = self.plan()
+        except Exception as error:
+            self.failure = error
+            raise StructuredError("mapper_plan") from None
+        try:
+            self.conversion = self.convert(program)
+        except (StructuredError, WireError) as error:
+            self.failure = error
+            raise StructuredError("mapper_conversion") from None
+        self.response = encode_workflow(self.conversion.workflow)
+        return self.response
+
+    @classmethod
+    def replay(cls, catalog, program, *, salt, literals=LITERAL_SLOTS):
+        """Offline: the request a job with this salt makes agentd send, and the
+        workflow it answers for this accepted program."""
+        mapper = cls(catalog, None, salt=salt, literals=literals)
+        mapper.conversion = mapper.convert(program)
+        mapper.response = encode_workflow(mapper.conversion.workflow)
+        return mapper
 
 
 def topological(request):

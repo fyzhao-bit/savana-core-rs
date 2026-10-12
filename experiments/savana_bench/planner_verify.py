@@ -198,12 +198,18 @@ def _drafted_contract(case, local, row, prior=None):
         if (contract is not None or len(drafted) >= max_drafts
                 or (refusal is not None and str(refusal) in NON_RETRYABLE)):
             raise ValueError("drafter_failure_with_program")
+        _service_unanswered(case, local)
         return None
     if refusal is not None:
         # Drafting ends at the limit, or early on a final policy refusal.
         if (row["outcome"] != "program_refused" or row.get("refusal") != str(refusal)
                 or (len(drafted) != max_drafts and str(refusal) not in NON_RETRYABLE)):
             raise ValueError("program_refusal_mismatch")
+        _service_unanswered(case, local)
+        return None
+    if contract is None and not drafted and case.get("mapper") == "service" and row["outcome"] == "mapper_failed":
+        # agentd failed the job before its mapper request: nothing was drafted.
+        _service_unanswered(case, local)
         return None
     if contract is None:
         raise ValueError("root_drafter_evidence")
@@ -214,6 +220,23 @@ def _drafted_contract(case, local, row, prior=None):
     if row["outcome"] in STRUCTURED_REFUSALS:
         raise ValueError("structured_outcome")
     return register_drafted(contract)
+
+
+def _service_unanswered(case, local):
+    """For a service mapper that produced no program: agentd's job was the one
+    its recorded salt fixes, and agentd got no workflow, so no planner was
+    asked. Any other mapper has nothing to check here."""
+    if case.get("mapper") != "service":
+        return
+    from .structured_planning import DRAFTED_INTENT, DRAFTED_TEMPLATE, ServiceMapper, eval_catalog
+    event = _one(local, "structured_planned")
+    request = ServiceMapper(eval_catalog(case["suite"]), None, salt=bytes.fromhex(event["salt"])).request_bytes
+    if (event["outcome"] != "mapper_failed" or event["status"] == "accepted"
+            or hashlib.sha256(request).hexdigest() != event["mapper_request_sha256"]
+            or (event["intent"], event["template"]) != (DRAFTED_INTENT, DRAFTED_TEMPLATE)
+            or any(event[key] is not None for key in ("mapper_response", "planner_request", "planner_response", "plan"))
+            or event["planner_calls"]):
+        raise ValueError("structured_service_evidence")
 
 
 def _structured_contract(case, local, row, contract):
@@ -230,8 +253,8 @@ def _structured_contract(case, local, row, contract):
     from agentdojo.task_suite.load_suites import get_suite
     from .agentdojo_tasks import BENCHMARK, register_drafted
     from .drafted_tasks import ProgramRefused
-    from .structured_planning import (OP, PLANNER_CODES, ProgramMapper, StructuredError, eval_catalog, exposure,
-                                      lower_plan, order_reply, planner_body, planner_view, review, sentinels)
+    from .structured_planning import (OP, PLANNER_CODES, ProgramMapper, ServiceMapper, StructuredError, eval_catalog,
+                                      exposure, lower_plan, order_reply, planner_body, planner_view, review, sentinels)
     from .structured_templates import load_registry, template_number
     from .structured_wire import decode_order, decode_ordered_plan, decode_plan, decode_structural_request, validate_order
     event = _one(local, "structured_planned")
@@ -243,9 +266,22 @@ def _structured_contract(case, local, row, contract):
     catalog = eval_catalog(case["suite"])
     program = json.loads(contract.program)
     template = case["mapper"] == "template"
-    mapper = ProgramMapper(program, catalog, source="template" if template else "drafted",
-                           template=template_number(load_registry(), case["suite"], case["user"]) if template else None,
-                           salt=bytes.fromhex(event["salt"]))
+    if case["mapper"] == "service":
+        # The job was fixed before the program existed; the workflow is the
+        # accepted program on that job's slots.
+        try:
+            mapper = ServiceMapper.replay(catalog, program, salt=bytes.fromhex(event["salt"]))
+        except (StructuredError, ValueError):
+            # The accepted program did not fit the job: agentd got no workflow.
+            _service_unanswered(case, local)
+            if row["outcome"] != "mapper_failed":
+                raise ValueError("structured_service_evidence") from None
+            return None
+    else:
+        mapper = ProgramMapper(program, catalog, source="template" if template else "drafted",
+                               template=(template_number(load_registry(), case["suite"], case["user"])
+                                         if template else None),
+                               salt=bytes.fromhex(event["salt"]))
     if (hashlib.sha256(mapper.request_bytes).hexdigest() != event["mapper_request_sha256"]
             or (event["intent"], event["template"]) != (mapper.intent, mapper.template)
             or event["mapper_response"] not in (None, mapper.response.hex())):
