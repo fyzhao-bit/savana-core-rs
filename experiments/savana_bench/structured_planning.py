@@ -40,6 +40,7 @@ import time
 from typing import NamedTuple
 
 from .agentdojo_provider import canonical
+from .drafted_tasks import MAX_STEPS
 from .structured_wire import (
     CARDINALITIES, CONFIDENTIALITIES, EFFECTS, INTENTS, MAPPER_PATH, PLANNER_PATH, ROLES, CatalogTool,
     EphemeralPki, ExampleProcess, MappedNode, OneShotServer, Slot, WireError, Workflow, decode_plan,
@@ -50,7 +51,9 @@ OP = "op"
 NOTE = "step:"  # a step-level literal (an explanatory note) binds as "step:<key>"
 KIND_OP, KIND_LITERAL = 1, 2
 SLOT_DOMAIN = b"SAVANA_STRUCTURED_SLOT_V1\0"
-LIMITS = (8, 8, 16, 65536)  # steps, dependencies per step, arguments per step, plan bytes
+# Steps, dependencies per step, arguments per step, plan bytes. A program the
+# review accepts is never too long here: the step bound is the review's own.
+LIMITS = (MAX_STEPS, MAX_STEPS, 16, 65536)
 EXCHANGE_MS = 30000  # agentd caps every model exchange at 30 s anyway
 MAPPER_HOST, PLANNER_HOST = "mapper.structured.test", "planner.structured.test"
 # Where a host deployment installs the debug (test-support) agentd example.

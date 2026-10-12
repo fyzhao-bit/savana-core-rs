@@ -11,7 +11,7 @@ import unittest
 
 from agentdojo.task_suite.load_suites import get_suite
 from savana_bench.agentdojo_provider import canonical
-from savana_bench.drafted_tasks import EXTRACT_TOOL, ProgramRefused
+from savana_bench.drafted_tasks import EXTRACT_TOOL, MAX_STEPS, ProgramRefused
 from savana_bench.structured_planning import (
     DRAFTED_INTENT, DRAFTED_TEMPLATE, LIMITS, OP, DeepSeekStructuralPlanner, NullPlanner, ProgramMapper,
     StructuredError, StructuredSession, eval_catalog, exposure, lower_plan, order_reply, plan_program, planner_body,
@@ -119,9 +119,12 @@ class CatalogAndConversionTests(unittest.TestCase):
         forward = {"steps": [dict(SUMMARY["steps"][1], source=2), SUMMARY["steps"][0]]}
         for program in (forward, {"steps": [{"tool": "dojo.email.send", "args": {}}]},
                         {"steps": [{"tool": "dojo.web.get", "args": {"op": text("x")}}]}, {"steps": []},
-                        {"steps": [SUMMARY["steps"][0]] * 9}):
+                        {"steps": [SUMMARY["steps"][0]] * (MAX_STEPS + 1)}):
             with self.assertRaises(StructuredError):
                 program_to_workflow(program, catalog("slack"), salt=SALT)
+        # The step bound is the review's own: whatever it accepts maps.
+        longest = program_to_workflow({"steps": [SUMMARY["steps"][0]] * MAX_STEPS}, catalog("slack"), salt=SALT)
+        self.assertEqual(len(longest.workflow.nodes), MAX_STEPS)
 
     def test_intent_is_fixed_by_the_writes_or_constant_for_drafts(self):
         self.assertEqual(template_intent(SUMMARY), "send_message")
@@ -139,7 +142,8 @@ class CatalogAndConversionTests(unittest.TestCase):
             template=3, intent=1, actions=sorted({t["action"] for t in job["catalog"]}),
             slots=mapper.conversion.slots, relations=(), limits=LIMITS,
             active=[(t["class"], t["action"]) for t in job["catalog"]], tools=[t.wire() for t in catalog("slack")]))
-        self.assertEqual((job["template"], job["intent"], job["limits"]), (3, "send_message", [8, 8, 16, 65536]))
+        self.assertEqual((job["template"], job["intent"], job["limits"]),
+                         (3, "send_message", [MAX_STEPS, MAX_STEPS, 16, 65536]))
         with self.assertRaises(StructuredError):
             mapper(mapper.request_bytes + b"\x00")
         fresh = ProgramMapper(SUMMARY, catalog("slack"), source="template", template=3, salt=SALT)
