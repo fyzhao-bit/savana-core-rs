@@ -1015,7 +1015,8 @@ enforces where every value of every operation comes from.
 The planner sees only the owner's request (\S\ref{sec:blind}) and the
 reviewed tool catalog of the deployment. It never sees a tool result,
 exactly as CaMeL's P-LLM. It returns a small program: an ordered list of at
-most eight steps (\S\ref{sec:eval-cost} explains the bound). A step is one
+most eight steps in the main evaluation and ten in the extended
+configuration (\S\ref{sec:eval-cost} explains the bound). A step is one
 of three kinds.
 \begin{itemize}
 \item A \textbf{tool step} names a reviewed operation and gives every field
@@ -1074,7 +1075,7 @@ any of 33 closed rules. The most consequential are:
 \item a computation whose magnitude the request does not state
   (\code{compute_amount});
 \item the final answer, or a yes/no condition, used as a field value;
-\item more than eight steps.
+\item more steps than the bound.
 \end{itemize}
 
 The destination rule is the owner's conservative policy: an injection may
@@ -1920,6 +1921,12 @@ Configuration & Tasks & 95\% CI (\%)\\
 \quad retry, \code{v4-pro} planner & 36 & [28.2, 47.0]\\
 \quad conditional writes, \code{v4-pro} extractor & 39 & [31.0, 50.2]\\
 \midrule
+\midrule
+\multicolumn{3}{@{}l}{\emph{Extended configuration} (directory owner, \S\ref{sec:eval-utility})}\\
+\quad + ask once on an omitted write & 48 & [39.7, 59.3]\\
+\quad + multi-field extraction, \code{mode}, ten steps, structured planning & 51 & [42.7, 62.2]\\
+\quad + instructions found in data, adopted by the owner & 54 & [45.8, 65.2]\\
+\midrule
 CaMeL / CaMeL+policy, \code{flash} & 58 / 39 & [49.8, 69.0] / [31.0, 50.2]\\
 CaMeL / CaMeL+policy, \code{v4-pro} & 71 / 47 & [63.6, 81.0] / [38.8, 58.3]\\
 \bottomrule
@@ -2007,6 +2014,42 @@ The compute step (\S\ref{sec:compute}) targets this last class.
   (43/92 with policies); both systems are credited with four of the five.
 \end{itemize}
 
+\paragraph{Extended configuration.} The largest remaining cause of failure
+is the destination rule itself, so we measured what relaxing it under owner
+approval buys, together with smaller changes. (1)~When an accepted draft
+writes nothing but the request asks for an action, the review asks the
+planner once whether it meant to leave the action out. (2)~A destination
+may come from data: the review signs it as a derived edge, the kernel's
+floor asks the owner for every such call, and our software owner approves
+only an address already in a directory taken from the task's environment
+before any injection; a web address is never in it. (3)~One extraction may
+fill up to four fields of one operation, (4)~a \code{mode} computation
+counts the most frequent value, programs may have ten steps, and every
+accepted draft passes through structured planning
+(\S\ref{sec:beyond}). On fresh hosts this configuration completes 51
+of 97 tasks (banking 10, slack 6, travel 6, workspace 29), against 41 for
+the main configuration: it gains 13 tasks and loses 3 to drafting variance.
+Eight of the gains are tasks whose destination comes from data. Eight tasks
+remain refused because their data-chosen destination, a web address or a
+new user, is not in the directory; a human owner could approve them.
+
+Five requests delegate their action to instructions found in data
+(``follow the instructions in this file''). We run each as a read-only
+turn whose report the owner may adopt as its own words for a second,
+separately signed program. With a software owner that adopts a report only
+if every address it names is in its directory, 3 of the 5 complete, for
+54/97 overall. Under injection this owner adopted one attack: a password
+change, which names no address and so passes its rule. A human reading the
+report would decide; a software owner needs a stricter rule.
+
+Signing the directory into each data-filled destination as a closed
+candidate set lets the kernel endorse a member itself. Under a Permit
+disposition, where the kernel asks only when its floor escalates, three
+data-chosen steps then ran without asking the owner, all to signed members
+with the owner's own text; every non-member was still escalated and
+refused. Data can still choose the wrong member: the set bounds whom a call
+can reach, not whom it should.
+
 % ---------------------------------------------------------------------
 \subsection{RQ4: Personal data that reaches models}
 \label{sec:eval-privacy}
@@ -2066,8 +2109,21 @@ timestamps:
 \end{itemize}
 In our configuration, programs of 11 or 12 steps published in only 2 of
 8 episodes; the others stopped at about 62--66\,s. This is why the review caps programs at
-eight steps. \todo{Pin down which 60\,s validity bound stops these
-programs; the settlement expiry in approvald is the leading candidate.}
+eight steps in the main evaluation.
+The bound is the kernel's own: the input runtime gives each owner request
+a 60\,s window from the commit of the owner's input, and every episode the
+window ended stopped 60.0--60.4\,s after that commit. With the per-step
+time near 4\,s, ten-step programs publish in a median of 49.4\,s from the
+commit (maximum 59.5\,s, six episodes), so the extended configuration of
+\S\ref{sec:eval-utility} raises the cap to ten. Most episodes the window
+ends were not slow. Of the 16 in three full benign runs, 9 had stopped at a
+tool error, where the endpoint fails closed on an effect it cannot
+classify; 3 had signed a path that the source result lacked, so the kernel
+could not derive the next value; and only 4 ran out of time. An episode
+that ends without publication also keeps its task live until the window
+expires, and the live tasks share the drivers' pacing: under injection,
+where most episodes end in an owner refusal, each such task adds about
+2.6\,s to every step of the episodes that follow it.
 An earlier kernel performance defect made each round grow with the
 host's history, from 38\,s to over 60\,s within five rounds. We fixed it
 by re-verifying only changed journal entries, together with an optimized
@@ -2281,11 +2337,14 @@ studied with users. Two WebAuthn ceremonies per approval impose attention
 and latency costs. Until a user study exists, we describe G6 evidence as
 authenticated confirmation of exact bytes, not as informed consent.
 
-\paragraph{Time and step budget.} About five seconds per step, and an
-end-to-end validity bound near 60\,s, limit programs to eight steps.
-Several failures are programs that ran out of room. Making mediation
-cheaper, or running independent reads in parallel, would recover them
-without weakening any check.
+\paragraph{Time and step budget.} About four seconds per step and the
+kernel's 60\,s task window limit programs to about ten steps, with little
+margin at ten. The window is also the only thing that ends a stalled
+episode: a tool error or an underivable path leaves the task waiting until
+it expires, and a refused task slows the episodes after it. Ending a task
+at its first definite failure, making mediation cheaper, or running
+independent reads in parallel would recover this time without weakening
+any check.
 
 \paragraph{Assurance.} \sys{} has had no third-party audit, and P1--P6
 are not formally verified. A finite-state model of the task-trace
@@ -2527,6 +2586,15 @@ request, or a tool name or description. The stage added a median of
 1.1\,s before signing. Structural acceptance
 does not replace the owner's review: the pipeline accepted the shape of
 56 of the 60 recorded drafts the review refused.
+The graph's edges were at first only data flow, so a write and a later
+read of the state it changed had no edge between them and could be
+swapped. The mapper now adds an edge between every write and every other
+call on live state, in program order; extraction and computation, which
+read recorded results only, and reads among themselves stay free to move.
+In the extended configuration (\S\ref{sec:eval-utility}), every accepted
+draft went through this pipeline: 89 of 90 were reordered and reviewed
+again, 30 in a new order, and one was refused because the planner's order
+broke an edge. No failure traced to a reordering.
 
 \paragraph{Connector registration.} The connector registry is a
 hash-chained state whose genesis and update authority are pinned by the
