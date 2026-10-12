@@ -5,9 +5,15 @@ whose offline verification passed are counted:
 
 * G12 (`g12k`) and D (`f5d`): the starting points, 3 drafts each (D's drafts
   also went through structured planning);
-* U12 (`u12c`): `+actions=ask+review=derived+owner=directory`, i.e. U1 and U2;
-* U8 (`u8`): the same options with U3 (multi-field extraction), U4 (`mode`)
-  and ten steps;
+* U12 (`u12c`): `+actions=ask+review=derived+owner=directory`, i.e. U1 and U2.
+  Two of its batches overlapped local build and scan jobs on the measuring
+  machine (median step interval above 5 s, against 3.8-4.6 s for every other
+  batch); by a rule fixed before their reruns were seen, `u12r` reruns them
+  and replaces them (`SUPERSEDED`), and `U12_first` keeps the originals;
+* U8 (`u8f`): the same options with U3 (multi-field extraction), U4 (`mode`),
+  ten steps and the kernel's masking fix (`u8` is its first two batches,
+  stopped when they showed planners naming a multi-field extraction's
+  field by its target label, which the review then refused);
 * U8X (`u8x`): U8 under injection (AutoDojo's for banking, slack and travel,
   the official template for workspace), on the tasks whose U8 program had a
   step whose address data chose (`attack_sample`).
@@ -32,7 +38,9 @@ import statistics
 from analysis.floor_experiment import episode_row, episodes as by_episode
 from analysis.structured_planning import _events, batches
 
-ARMS = dict(G12="g12k", D="f5d", U12="u12c", U8="u8")
+ARMS = dict(G12=("g12k",), D=("f5d",), U12=("u12c", "u12r"), U12_first=("u12c",), U8=("u8f",))
+# A batch whose measurement a rerun replaces (see the docstring).
+SUPERSEDED = {"U12": {"u12c-slack-2", "u12c-travel-0"}}
 ATTACK = "u8x"
 SUITES = ("banking", "slack", "travel", "workspace")
 DIRECTORY_REFUSAL = "consent_destination_not_in_directory"
@@ -75,10 +83,14 @@ def episode_record(local, row, batch):
     return record
 
 
-def episodes(results, prefix):
-    """One record per episode of every verified batch with this prefix."""
+def episodes(results, prefix, superseded=()):
+    """One record per episode of every verified batch with this prefix (or
+    these prefixes), less the superseded batches."""
     records = []
-    for name, run, _verification in batches(results, prefix):
+    found = [b for p in ((prefix,) if type(prefix) is str else prefix) for b in batches(results, p)]
+    for name, run, _verification in found:
+        if name in superseded:
+            continue
         events = _events(run)
         local = by_episode(events)
         summary = events[-1]
@@ -185,7 +197,7 @@ def attack_summary(rows, baseline=()):
                               success=sum(b.get("observed_attacker_success") is True for b in before)))
 
 
-def attack_sample(results, prefix="u8"):
+def attack_sample(results, prefix="u8f"):
     """The tasks of a benign arm whose signed program had a step whose address
     data chose, each crossed with every injection task of its suite (AutoDojo's
     for banking, slack and travel; the official ones for workspace), as plan
@@ -204,7 +216,7 @@ def attack_sample(results, prefix="u8"):
 
 
 def report(results):
-    arms = {arm: episodes(results, prefix) for arm, prefix in ARMS.items()}
+    arms = {arm: episodes(results, prefixes, SUPERSEDED.get(arm, ())) for arm, prefixes in ARMS.items()}
     out = dict(arms={arm: benign_summary(rows) for arm, rows in arms.items() if rows})
     out["flips"] = {f"{new}_vs_{old}": flips(arms[new], arms[old])
                     for new, old in (("U12", "G12"), ("U12", "D"), ("U8", "G12"), ("U8", "D"), ("U8", "U12"))
