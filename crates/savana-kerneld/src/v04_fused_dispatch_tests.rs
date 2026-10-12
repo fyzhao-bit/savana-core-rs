@@ -867,31 +867,7 @@ fn private_dispatch_fixture_with_provider(
                     VerifiedPolicyDispositionV2::require_approval_from_verified_policy();
             }
             if matches!(case, 33 | 38 | 39 | 40) {
-                let head = f
-                    .authority
-                    .policy
-                    .as_ref()
-                    .unwrap()
-                    .durable
-                    .authenticated_state_head()
-                    .unwrap();
-                let mut policy = f.authority.policy.take().unwrap();
-                drop(policy.durable);
-                let reopened = DurableG4StateV2::open(
-                    &f._directory.path().join("kernel-g4-state-v2.cbor"),
-                    [0x99; 32],
-                    DurableStateNamespaceV2::from_verified_installation(
-                        Digest32V2::new([0x89; 32]),
-                        Digest32V2::new([0x9b; 32]),
-                    )
-                    .unwrap(),
-                    Box::new(TestG4StateAnchorV2(std::sync::Arc::new(
-                        std::sync::Mutex::new(head),
-                    ))),
-                )
-                .unwrap();
-                policy.durable = reopened;
-                f.authority.policy = Some(policy);
+                reopen_kernel_g4_from_disk(&mut f);
             }
             if harness.is_some_and(|h| h.restart_kerneld) {
                 assert_eq!(case, 33, "the restart runs the reopened result loop");
@@ -2497,21 +2473,77 @@ fn fused_private_g7_recovers_queries_and_results_without_session_intent_or_ticke
 }
 
 #[cfg(feature = "test-support")]
+/// The G4 owner as kerneld reopens it: from its encrypted file, checked
+/// against the rollback anchor's head. Nothing in memory is carried over.
+#[cfg(feature = "test-support")]
+fn reopen_kernel_g4_from_disk(f: &mut PlannerAuthorityFixtureV2) {
+    let head = f
+        .authority
+        .policy
+        .as_ref()
+        .unwrap()
+        .durable
+        .authenticated_state_head()
+        .unwrap();
+    let mut policy = f.authority.policy.take().unwrap();
+    drop(policy.durable);
+    policy.durable = DurableG4StateV2::open(
+        &f._directory.path().join("kernel-g4-state-v2.cbor"),
+        [0x99; 32],
+        DurableStateNamespaceV2::from_verified_installation(
+            Digest32V2::new([0x89; 32]),
+            Digest32V2::new([0x9b; 32]),
+        )
+        .unwrap(),
+        Box::new(TestG4StateAnchorV2(std::sync::Arc::new(
+            std::sync::Mutex::new(head),
+        ))),
+    )
+    .unwrap();
+    f.authority.policy = Some(policy);
+}
+
+/// A kernel restart at a crash boundary. Sessions, runs, values, intents,
+/// approvals, tickets, executions, handles and scheduling cursors are lost.
+/// The kernel's own durable state comes back from disk: the G4 owner from its
+/// file, the agent authority from its encrypted snapshot, and the value owner
+/// starts empty. The executor journal and the result vault are other owners'
+/// durable stores and stay as they are.
+#[cfg(feature = "test-support")]
 fn forget_private_execution_memory(f: &mut PlannerAuthorityFixtureV2) {
-    f.authority.sessions.clear();
-    f.authority.intents.clear();
-    f.authority.execution_tickets.clear();
-    f.authority.tool_approvals.clear();
-    f.authority.executions.clear();
-    let policy = f.authority.policy.as_mut().unwrap();
+    reopen_kernel_g4_from_disk(f);
+    let snapshot = f.authority.encode_recovery_snapshot().unwrap();
+    let c = &f.authority.config;
+    let config = KernelAgentSecurityConfigV2 {
+        installation_id: c.installation_id,
+        kerneld_identity: c.kerneld_identity,
+        agentd_identity: c.agentd_identity,
+        approvald_identity: c.approvald_identity,
+        agentd_kernel_client_boot_id: c.agentd_kernel_client_boot_id,
+        kerneld_server_boot_id: c.kerneld_server_boot_id,
+        approvald_boot_id: c.approvald_boot_id,
+        machine_boot_id: c.machine_boot_id,
+        correlation_signing_key: c.correlation_signing_key.clone(),
+        envelope_signing_key: c.envelope_signing_key.clone(),
+        ui_settlement_key_id: c.ui_settlement_key_id,
+        ui_settlement_public_key: c.ui_settlement_public_key,
+    };
+    let mut restarted = KernelAgentAuthorityV2::new(config, f.authority.maximum_records).unwrap();
+    restarted
+        .restore_recovery_snapshot(&snapshot, UnixMillisV2::new(1))
+        .unwrap();
+    let mut policy = f.authority.policy.take().unwrap();
     policy.fused_workflow_phase = 0;
     policy.fused_action_last_task = None;
     policy.fused_action_not_before = 0;
     policy.fused_recovery_not_before = 0;
     policy.fused_recovery_last_nonce = None;
     policy.fused_cleanup_confirmed.clear();
-    f.authority.handle_key =
-        savana_kernel_protocol::v2::AuthorityHandleKeyV2::from_entropy([0x50; 32]).unwrap();
+    restarted.install_g4_g5_runtime(policy).unwrap();
+    // A crash the test armed for a later step still happens after restart.
+    restarted.fused_recovery_fault = f.authority.fused_recovery_fault.take();
+    f.authority = restarted;
+    f.values = KernelValueOwnerV2::new(4, 32).unwrap();
 }
 
 #[test]

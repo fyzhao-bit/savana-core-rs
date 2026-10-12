@@ -85,6 +85,9 @@ worker 校验，与 `fused_private_g7_success_and_legacy_cache_isolation`（case
   所以这个矩阵检验的是执行器的 P5（同一 nonce 至多一次 provider attempt）以及内核重发派发时的行为。
   内核侧的崩溃边界另有进程内的故障注入测试（G7Prepared、VaultCommitted、OutcomeCommitted、ResultCheckpointed），
   每个都断言 provider 请求恰好 1 次。
+  （2026-10-12 补：这些用例在故障之后改为真正重启内核：G4 状态从磁盘文件重开，权限状态从加密快照恢复，
+  值仓库和全部易失表清空，结果仍是 provider 请求恰好 1 次；另有一个测试在两个相依步骤之间重启 kerneld，
+  owner 重新登录后第二步执行，第一步不重发。SIGKILL 矩阵本身仍只重开执行器。）
 - debug 构建；这里只看正确性，与时序无关。
 
 ## 二、中介延迟

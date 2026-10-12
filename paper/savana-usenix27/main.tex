@@ -2163,10 +2163,14 @@ no-effect failure; or if a completion exists without an effect. None of
 whose effect-started receipt was not yet written is provably pre-byte, yet
 becomes indeterminate rather than a re-plannable no-effect failure. Two
 limits apply. A killed process is not a power loss: the page cache
-survives, so fsync ordering under power failure is untested. And the
-kernel dies together with the executor without reopening its own durable
-state; its crash boundaries are covered by in-process fault injection,
-each asserting exactly one provider request.
+survives, so fsync ordering under power failure is untested. And in
+this matrix the kernel dies together with the executor without reopening
+its own durable state. The kernel's crash boundaries are covered by
+in-process fault injection: after each fault the kernel restarts from
+disk (G4 state reopened, authority snapshot restored, no volatile
+tables), and every case asserts exactly one provider request. A further
+test restarts the kernel between two dependent steps; after the owner
+logs in again, the second step runs and the first is not resent.
 
 % ---------------------------------------------------------------------
 \subsection{Threats to validity}
