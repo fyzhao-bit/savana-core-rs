@@ -660,7 +660,7 @@ def phase0(*, example, output, registry=None):
         sentinels_scanned=sum(r["sentinels"] for r in rows), min_sentinel_bytes=MIN_SENTINEL_BYTES,
         exposure_hits=sum(len(r["exposed"]) for r in rows),
         registry_sha256=hashlib.sha256((Path(__file__).parent / "data" / "structured_templates.json").read_bytes())
-        .hexdigest(), rows=rows)
+        .hexdigest(), example_sha256=hashlib.sha256(Path(example).read_bytes()).hexdigest(), rows=rows)
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
     (output / "summary.json").write_bytes(canonical(summary) + b"\n")
