@@ -25,6 +25,7 @@ import collections
 import glob
 import json
 import os
+import statistics
 
 ARMS = dict(T="f5t", R="f5r", D="f5d")
 G12 = "g12k"
@@ -86,7 +87,8 @@ def episodes(results, prefix):
                           utility=row.get("utility") is True, drafts=row.get("drafts"),
                           refusal=row.get("refusal"), structured_error=row.get("structured_error"),
                           provider_attempts=row.get("provider_attempts", 0),
-                          unauthorized=row.get("unauthorized_provider_attempts", 0))
+                          unauthorized=row.get("unauthorized_provider_attempts", 0),
+                          seconds=row.get("episode_seconds"))
             planned = [e for e in local if e["kind"] == "structured_planned"]
             if planned:
                 event, = planned
@@ -168,7 +170,14 @@ def report(results):
             discordant.append(dict(suite=t["suite"], user=t["user"], kind=kind, T=t["utility"], R=r["utility"],
                                    T_outcome=t["outcome"], R_outcome=r["outcome"], order=t.get("order"),
                                    write_reordered=t.get("write_reordered")))
-    out["paired"] = dict(pairs=len(pairs), by_kind={k: dict(v) for k, v in split.items()}, discordant=discordant)
+    # Episode wall time: what the structured stage adds on top of running the same template.
+    timed = [(t["seconds"], r["seconds"]) for t, r in pairs if t["seconds"] is not None and r["seconds"] is not None]
+    out["paired"] = dict(pairs=len(pairs), by_kind={k: dict(v) for k, v in split.items()}, discordant=discordant,
+                         seconds=dict(pairs=len(timed),
+                                      T_median=statistics.median(t for t, _r in timed) if timed else None,
+                                      R_median=statistics.median(r for _t, r in timed) if timed else None,
+                                      difference_median=(statistics.median(t - r for t, r in timed)
+                                                         if timed else None)))
     structured = [r for arm in ("T", "D") for r in arms[arm] if r.get("structured")]
     out["structured"] = {arm: dict(
         jobs=sum(1 for r in arms[arm] if r.get("structured")),
