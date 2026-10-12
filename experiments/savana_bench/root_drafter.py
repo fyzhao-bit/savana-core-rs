@@ -232,6 +232,8 @@ REFUSAL_HINTS = {
                          'conditional "when": <that step>, or remove the condition.'),
     "unknown_field": "Give only the fields that the operation lists.",
     "missing_field": "Give every required field of the operation.",
+    "missing_destination": ("A write must name who or where it goes: give its destination field, even though "
+                            "the operation lets you leave it out."),
     "field_origin": 'An origin is {"text": ...}, {"from": k} or {"from": k, "path": [...]} (with at most one '
                     'computation).',
     "literal_not_owner_text": ("A literal must be copied exactly from the user's request (dates/times may be "

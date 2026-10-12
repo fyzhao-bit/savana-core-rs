@@ -99,7 +99,8 @@ def review_policy():
     """What the owner's fixed review admits, as a document an armed benchmark
     batch binds (the programs themselves are drafted per episode)."""
     return {"schema": "savana-drafted-review-v1", "max_steps": MAX_STEPS, "literals": "owner_text",
-            "destinations": "owner_text_only", "edges": "earlier_steps_only", "extract_tool": EXTRACT_TOOL,
+            "destinations": "owner_text_only", "write_destination": "always named, even where optional",
+            "edges": "earlier_steps_only", "extract_tool": EXTRACT_TOOL,
             "extract_targets_sha256": hashlib.sha256(canonical(list(extract_targets()))).hexdigest(),
             "edge_max_bytes": MAX_EDGE_BYTES, "context_max_bytes": MAX_CONTEXT_BYTES,
             "restated": "owner dates/times (CALENDAR_YEAR default) and end times from stated durations, "
@@ -592,6 +593,11 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                     continue
                 listed = kind in LIST_KINDS
                 if name not in args:
+                    # A write names who or where it goes even where the operation
+                    # lets the field be left out: the kernel confines every
+                    # write's destination and refuses an empty one.
+                    if role == "destination" and kind == "opt_text" and not reading:
+                        _refuse("missing_destination")
                     if not kind.startswith("opt_") and kind not in ("attachments", "null_text"):
                         _refuse("missing_field")
                     values[name] = () if listed else ""

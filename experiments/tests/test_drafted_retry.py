@@ -212,6 +212,28 @@ class OmittedWriteTests(unittest.TestCase):
                                                dict(outcome="published", drafts=1)))
 
 
+class MissingDestinationTests(unittest.TestCase):
+    def test_a_write_names_its_destination_even_where_the_operation_allows_leaving_it_out(self):
+        official = _suite()
+        prompt = official.get_user_task_by_id("user_task_15").PROMPT  # names the new landlord's account
+        def update(**args):
+            return json.dumps({"steps": [
+                {"tool": "dojo.bank.scheduled", "args": {}},
+                {"tool": "dojo.model.extract", "source": 1, "args": {"target": {"text": "update_scheduled.id"}}},
+                {"tool": "dojo.bank.update_scheduled", "args": {"id": {"from": 2}, "amount": {"text": "2200"},
+                                                                **args}}]})
+        with self.assertRaises(ProgramRefused) as caught:
+            review_program(suite=SUITE, suite_tools=SUITE_TOOLS[SUITE], task_id="user_task_15", prompt=prompt,
+                           program=parse_program_text(update()))
+        self.assertEqual((str(caught.exception), caught.exception.step, caught.exception.field),
+                         ("missing_destination", 3, "recipient"))
+        contract = review_program(suite=SUITE, suite_tools=SUITE_TOOLS[SUITE], task_id="user_task_15",
+                                  prompt=prompt, program=parse_program_text(update(
+                                      recipient={"text": "CA133012400231215421872"})))
+        self.assertEqual(contract.steps()[2].value_map()["recipient"], "CA133012400231215421872")
+        self.assertIn("destination field", refusal_message("missing_destination", 3, "recipient"))
+
+
 class SpecTests(unittest.TestCase):
     def test_drafts_and_planner_options(self):
         default, = experiment_cases("drafted:banking:user_task_7")
