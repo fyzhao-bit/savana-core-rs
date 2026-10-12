@@ -128,6 +128,10 @@ impl TaskAuthorizationContextV2 {
             max_bytes: u16,
             #[serde(default)]
             compute: Option<Compute>,
+            // A trusted-set origin: the members the owner signs; the kernel
+            // endorses a derived value only if it is one (byte for byte).
+            #[serde(default)]
+            candidates: Option<Vec<String>>,
         }
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -216,6 +220,16 @@ impl TaskAuthorizationContextV2 {
                                     control = control
                                         .with_compute(
                                             super::super::ResultComputeV2::new(op, compute.amount)
+                                                .map_err(|_| malformed())?,
+                                        )
+                                        .map_err(|_| malformed())?;
+                                }
+                                if let Some(mut members) = rule.candidates {
+                                    // One canonical order; a repeated member is refused.
+                                    members.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+                                    control = control
+                                        .with_candidates(
+                                            super::super::ResultCandidatesV2::new(members)
                                                 .map_err(|_| malformed())?,
                                         )
                                         .map_err(|_| malformed())?;

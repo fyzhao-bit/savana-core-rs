@@ -167,6 +167,7 @@ fn fixture() -> (
                         result_source_clause: None,
                         result_list: false,
                         result_compute: None,
+                        result_candidates: None,
                     })
                     .collect(),
                 after: vec![],
@@ -518,6 +519,115 @@ fn compiler_allows_a_result_edge_into_a_nonpayload_field_structurally() {
     assert!(
         compile_fused_task_v04(&whole_to, &auth, &registry, RoleIdV2::new(1), at(100)).is_err()
     );
+}
+
+#[test]
+fn a_trusted_set_edge_is_matched_with_its_set_and_a_binding_cannot_widen_it() {
+    use savana_continuation_core::planning::{Operation, SlotBinding};
+    let field = |name, role| BusinessFieldV2::new(name, role, BusinessFieldTypeV2::Text).unwrap();
+    let profile = BusinessProfileV2::new(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        "dojo.email.send",
+        d(30),
+        d(31),
+        TaskEffectV2::Send,
+        BusinessMagnitudeV2::FixedCount(1),
+        vec![
+            field("account", BusinessFieldRoleV2::Resource),
+            field("body", BusinessFieldRoleV2::Payload),
+            field("subject", BusinessFieldRoleV2::Parameter),
+            field("to", BusinessFieldRoleV2::Destination),
+        ],
+    )
+    .unwrap();
+    let path: Vec<String> = ["result", "content", "0", "text", "$json", "0", "sender"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let members = |items: &[&str]| -> Vec<String> { items.iter().map(|s| s.to_string()).collect() };
+    let binding = |candidates: Option<Vec<String>>| Operation {
+        id: 2,
+        tool_class: 3,
+        action_template: 4,
+        after: vec![1],
+        bindings: vec![SlotBinding {
+            argument: "to".into(),
+            slot: [7; 16],
+            result_of: Some(1),
+            result_path: Some(path.clone()),
+            result_max_bytes: Some(64),
+            result_source_clause: Some(1),
+            result_list: false,
+            result_compute: None,
+            result_candidates: candidates,
+        }],
+    };
+    let rules = |candidates: Option<Vec<String>>| -> std::collections::BTreeMap<_, _> {
+        fused_operation_derived_rules_v04(&binding(candidates), &profile)
+            .unwrap()
+            .into_iter()
+            .collect()
+    };
+    // The binding's set becomes the rule's set.
+    let signed_rules = rules(Some(members(&["a@x.com", "b@y.com"])));
+    assert_eq!(
+        signed_rules["to"]
+            .candidates()
+            .map(|c| c.members().to_vec()),
+        Some(members(&["a@x.com", "b@y.com"]))
+    );
+    // A set that is not canonical never becomes a rule.
+    assert!(fused_operation_derived_rules_v04(
+        &binding(Some(members(&["b@y.com", "a@x.com"]))),
+        &profile
+    )
+    .is_err());
+    let signed = BusinessControlsV2::from_fields_with_derived(
+        &profile,
+        vec![
+            ("account".into(), BusinessValueV2::Text("me".into())),
+            ("subject".into(), BusinessValueV2::Text("Hi".into())),
+        ],
+        signed_rules.clone(),
+    )
+    .unwrap()
+    .action_alternative(d(21))
+    .unwrap();
+    let root = TaskAuthorizationV2::new(
+        d(40),
+        PrincipalIdV2::new([30; 32]),
+        DurableTaskIdV2::new([31; 32]),
+        1,
+        d(32),
+        d(33),
+        at(1),
+        at(1000),
+        TaskEvidenceKindV2::AuthenticatedStructuredInput,
+        d(34),
+        d(35),
+        vec![TaskAuthorizationClauseV2::new(2, vec![signed], 1, 1, 1, vec![], false).unwrap()],
+    )
+    .unwrap();
+    let (account, subject) = (
+        KernelValueV2::text("me").unwrap(),
+        KernelValueV2::text("Hi").unwrap(),
+    );
+    let owner = [
+        ("account".to_string(), &account),
+        ("subject".to_string(), &subject),
+    ];
+    assert!(check_result_operation_rule_v04(&profile, d(21), &owner, &signed_rules, &root).is_ok());
+    // Dropping the set, widening it, or swapping a member: refused before any effect.
+    for other in [
+        None,
+        Some(members(&["a@x.com", "b@y.com", "evil@z.com"])),
+        Some(members(&["a@x.com", "evil@z.com"])),
+    ] {
+        assert_eq!(
+            check_result_operation_rule_v04(&profile, d(21), &owner, &rules(other), &root),
+            Err(G4Error::StateConflict)
+        );
+    }
 }
 
 #[test]

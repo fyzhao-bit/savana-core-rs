@@ -312,6 +312,9 @@ pub(super) struct ResultExtractV04<'a> {
     pub max_bytes: u16,
     pub list: bool,
     pub compute: Option<savana_continuation_core::planning_observation::ResultComputeV04>,
+    /// A trusted-set edge's members, as the binding carries them (G4 matched
+    /// them against the owner-signed rule).
+    pub candidates: Option<&'a [String]>,
 }
 impl<'a> ResultExtractV04<'a> {
     /// The binding's edge, or `None` for a whole-result payload edge.
@@ -321,6 +324,7 @@ impl<'a> ResultExtractV04<'a> {
             max_bytes: binding.result_max_bytes?,
             list: binding.result_list,
             compute: binding.result_compute,
+            candidates: binding.result_candidates.as_deref(),
         })
     }
 }
@@ -368,6 +372,30 @@ impl Input {
             p.expires_at(),
         )
         .map_err(|_| G4Error::StateConflict)?;
+        // A trusted-set edge: a member is endorsed as the owner's choice; any
+        // other value is derived below exactly as a plain edge, untrusted.
+        if let Some(ResultExtractV04 {
+            path,
+            max_bytes,
+            list,
+            compute: None,
+            candidates: Some(members),
+        }) = extract
+        {
+            let candidates = savana_kernel_protocol::v2::ResultCandidatesV2::new(members.to_vec())
+                .map_err(|_| G4Error::StateConflict)?;
+            if let Ok(endorsed) = ProvenanceRecordV2::result_candidate_member_v04(
+                context.clone(),
+                path.to_vec(),
+                max_bytes,
+                list,
+                &candidates,
+                (&raw, &p),
+                p.label().effects(),
+            ) {
+                return Ok(endorsed);
+            }
+        }
         let operation = match extract {
             None => super::DeriveOperationV2::decode_utf8(),
             Some(e) if !e.list && e.compute.is_none() => {
@@ -495,6 +523,7 @@ mod result_edge_tests {
             max_bytes,
             list: false,
             compute: None,
+            candidates: None,
         })
     }
 
@@ -578,6 +607,7 @@ mod result_edge_tests {
             max_bytes: 256,
             list: true,
             compute: None,
+            candidates: None,
         });
         let (value, list_prov) = input.result_value(list).unwrap();
         assert_eq!(value.text_list(), Some(vec!["a@x.com", "b@y.com"]));
@@ -587,7 +617,8 @@ mod result_edge_tests {
                 path: &people,
                 max_bytes: 10,
                 list: true,
-                compute: None
+                compute: None,
+                candidates: None
             }))
             .is_err());
         let one = path(&["events", "0", "participants", "0"]);
@@ -596,7 +627,8 @@ mod result_edge_tests {
                 path: &one,
                 max_bytes: 256,
                 list: true,
-                compute: None
+                compute: None,
+                candidates: None
             }))
             .is_err());
 
@@ -610,6 +642,7 @@ mod result_edge_tests {
             max_bytes: 64,
             list: false,
             compute: Some(hour),
+            candidates: None,
         });
         let (value, end_prov) = input.result_value(end).unwrap();
         assert_eq!(value.as_text(), Some("2024-05-19 11:30"));
@@ -629,7 +662,8 @@ mod result_edge_tests {
                     path: &start,
                     max_bytes: 64,
                     list: false,
-                    compute: Some(longer)
+                    compute: Some(longer),
+                    candidates: None
                 })
             )
             .is_err());
@@ -644,7 +678,8 @@ mod result_edge_tests {
                 path: &count,
                 max_bytes: 64,
                 list: false,
-                compute: Some(hour)
+                compute: Some(hour),
+                candidates: None
             }))
             .is_err());
         // List and computation together, or an out-of-range amount, are refused.
@@ -657,7 +692,8 @@ mod result_edge_tests {
                 path: &start,
                 max_bytes: 64,
                 list: false,
-                compute: Some(huge)
+                compute: Some(huge),
+                candidates: None
             }))
             .is_err());
         assert!(input
@@ -665,9 +701,62 @@ mod result_edge_tests {
                 path: &start,
                 max_bytes: 64,
                 list: true,
-                compute: Some(hour)
+                compute: Some(hour),
+                candidates: None
             }))
             .is_err());
+    }
+
+    fn among<'a>(path: &'a [String], members: &'a [String]) -> Option<ResultExtractV04<'a>> {
+        Some(ResultExtractV04 {
+            path,
+            max_bytes: 256,
+            list: false,
+            compute: None,
+            candidates: Some(members),
+        })
+    }
+
+    #[test]
+    fn a_trusted_set_edge_endorses_only_a_member_and_g7_binds_the_set() {
+        let json =
+            br#"{"events":[{"participants":["a@x.com","b@y.com"],"organizer":"z@evil.com"}]}"#;
+        let input = result_input(json);
+        let slot = [5; 16];
+        let to = path(&["events", "0", "participants", "0"]);
+        let organizer = path(&["events", "0", "organizer"]);
+        let set = path(&["a@x.com", "b@y.com"]);
+        let wider = path(&["a@x.com", "b@y.com", "z@evil.com"]);
+
+        // A member: the same value as the plain edge, a different (endorsed)
+        // provenance that names the set.
+        let (value, endorsed) = input.result_value(among(&to, &set)).unwrap();
+        let (plain_value, plain) = input.result_value(at(&to, 256)).unwrap();
+        assert_eq!(value.as_text(), plain_value.as_text());
+        assert_ne!(endorsed.provenance_digest(), plain.provenance_digest());
+        assert!(
+            matches!(endorsed.source_kind(), crate::v2::SourceKindV2::Derived { operation }
+            if operation.tag() == 11)
+        );
+        // G7 accepts the endorsed argument only under the same set.
+        let ok = matching_argument(&input, slot, among(&to, &set));
+        assert!(input
+            .check_result_argument(slot, &ok, among(&to, &set))
+            .is_ok());
+        assert!(input
+            .check_result_argument(slot, &ok, among(&to, &wider))
+            .is_err());
+        assert!(input
+            .check_result_argument(slot, &ok, at(&to, 256))
+            .is_err());
+
+        // Not a member: derived exactly as the plain edge, nothing endorsed.
+        let (_, outside) = input.result_value(among(&organizer, &set)).unwrap();
+        let (_, plain_outside) = input.result_value(at(&organizer, 256)).unwrap();
+        assert_eq!(
+            outside.provenance_digest(),
+            plain_outside.provenance_digest()
+        );
     }
 
     #[test]

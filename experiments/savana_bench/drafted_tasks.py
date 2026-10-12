@@ -401,7 +401,7 @@ def performs_action(contract):
 
 
 def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(), extractor_model=GENERATOR_MODEL,
-                   derived_destinations=False, read_only=False):
+                   derived_destinations=False, read_only=False, destination_candidates=None):
     """The owner's fixed review of a planner program -> DraftedContract, or
     ProgramRefused. `suite_tools` are the official function names this
     episode's suite serves. A refusal carries the step number and field name
@@ -414,7 +414,11 @@ def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(),
     owner who signs a destination or fetched address derived from data, which
     this review otherwise never does. `read_only` is the read turn of
     instructions the owner has not adopted yet (`adopted_instructions`): any
-    step that changes state is refused (`read_turn_writes`)."""
+    step that changes state is refused (`read_turn_writes`).
+    `destination_candidates` (with `derived_destinations`) is the closed set
+    the owner signs into every destination edge data fills, recipients beyond
+    the one destination included (a trusted-set origin): the kernel endorses
+    a derived destination only if it is a member, byte for byte."""
     if extractor_model not in EXTRACTOR_MODELS:
         raise ValueError("extractor_model")
     where = {"step": None, "field": None}
@@ -422,9 +426,12 @@ def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(),
         from .value_blind import bind_program
         program = bind_program(program, bindings)
     try:
+        if destination_candidates is not None and (not derived_destinations or not destination_candidates):
+            raise ValueError("destination_candidates")
         contract = _review_program(where, suite=suite, suite_tools=suite_tools, task_id=task_id, prompt=prompt,
                                    program=program, extractor_model=extractor_model,
-                                   derived_destinations=derived_destinations)
+                                   derived_destinations=derived_destinations,
+                                   destination_candidates=destination_candidates)
     except ProgramRefused as error:
         error.step, error.field = where["step"], where["field"]
         raise
@@ -436,7 +443,7 @@ def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(),
 
 
 def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extractor_model,
-                    derived_destinations=False):
+                    derived_destinations=False, destination_candidates=None):
     if type(program) is not dict or set(program) != {"steps"} or type(program["steps"]) is not list:
         _refuse("program_shape")
     raw_steps = program["steps"]
@@ -728,6 +735,11 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                         _refuse("edge_path")
                     full = RESULT_PREFIX + path
                 form = LIST if listed else compute
+                if destination_candidates is not None and ((role == "destination" and not reading)
+                                                           or (tool, name) in OWNER_ONLY_WRITE_FIELDS):
+                    # The owner's signed set: data may choose which member only.
+                    derived.append((name, source, full, MAX_EDGE_BYTES, form, tuple(destination_candidates)))
+                    continue
                 derived.append((name, source, full, MAX_EDGE_BYTES) + (() if form is None else (form,)))
         kinds.append("extract" if tool == EXTRACT_TOOL else "compute" if tool == COMPUTE_TOOL
                      else catalog_tool(tool)["effect"])

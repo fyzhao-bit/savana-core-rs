@@ -79,6 +79,17 @@ enum DeriveOperationKindV2 {
         list: bool,
         compute: Option<savana_continuation_core::planning_observation::ResultComputeV04>,
     },
+    /// A trusted-set edge's value, endorsed because it is a member of the
+    /// owner-signed candidate set this digest names (for a list, every item).
+    /// Only `ProvenanceRecordV2::result_candidate_member_v04`, which checks
+    /// membership, produces it; `derived` refuses it, and the agent wire has
+    /// no entry for it.
+    SelectResultJsonMemberV04 {
+        path: Vec<String>,
+        max_bytes: u16,
+        list: bool,
+        candidates: Digest32V2,
+    },
 }
 
 const MAX_RESULT_PATH_SEGMENTS_V04: usize = 16;
@@ -164,6 +175,23 @@ impl DeriveOperationV2 {
         }))
     }
 
+    pub fn select_result_json_member_v04(
+        path: Vec<String>,
+        max_bytes: u16,
+        list: bool,
+        candidates: Digest32V2,
+    ) -> Result<Self, G3Error> {
+        if !valid_result_path(&path) || max_bytes == 0 || candidates == Digest32V2::new([0; 32]) {
+            return Err(G3Error::DeriveTypeMismatch);
+        }
+        Ok(Self(DeriveOperationKindV2::SelectResultJsonMemberV04 {
+            path,
+            max_bytes,
+            list,
+            candidates,
+        }))
+    }
+
     pub const fn tag(&self) -> u16 {
         match &self.0 {
             DeriveOperationKindV2::OwnerInputTextV04(_) => 8,
@@ -176,6 +204,7 @@ impl DeriveOperationV2 {
             DeriveOperationKindV2::PolicyConstant(_) => 6,
             DeriveOperationKindV2::SelectResultJsonPathV04 { .. } => 9,
             DeriveOperationKindV2::SelectResultJsonEdgeV04 { .. } => 10,
+            DeriveOperationKindV2::SelectResultJsonMemberV04 { .. } => 11,
         }
     }
 
@@ -325,6 +354,11 @@ impl DeriveOperationV2 {
                 }
                 KernelValueV2::text(computed)
             }
+            // Endorsement needs the set itself, which only the member
+            // constructor holds: never minted by a plain derivation.
+            DeriveOperationKindV2::SelectResultJsonMemberV04 { .. } => {
+                Err(G3Error::DeriveTypeMismatch)
+            }
         }
     }
 }
@@ -394,6 +428,19 @@ impl<C> minicbor::Encode<C> for DeriveOperationV2 {
                         encoder.null()?;
                     }
                 }
+            }
+            DeriveOperationKindV2::SelectResultJsonMemberV04 {
+                path,
+                max_bytes,
+                list,
+                candidates,
+            } => {
+                encoder.array(5)?.u16(11)?.array(path.len() as u64)?;
+                for segment in path {
+                    encoder.str(segment)?;
+                }
+                encoder.u16(*max_bytes)?.bool(*list)?;
+                candidates.encode(encoder, context)?;
             }
         }
         Ok(())
@@ -474,6 +521,20 @@ impl<'bytes, C> minicbor::Decode<'bytes, C> for DeriveOperationV2 {
                 Self::select_result_json_edge_v04(path, max_bytes, list, compute).map_err(|_| {
                     minicbor::decode::Error::message("invalid result edge derive").at(position)
                 })
+            }
+            (5, 11) => {
+                let path = decode_result_path(decoder, position)?;
+                let max_bytes = decoder.u16()?;
+                let list = decoder.bool()?;
+                let candidates = Digest32V2::new(decoder.bytes()?.try_into().map_err(|_| {
+                    minicbor::decode::Error::message("invalid candidate set digest").at(position)
+                })?);
+                Self::select_result_json_member_v04(path, max_bytes, list, candidates).map_err(
+                    |_| {
+                        minicbor::decode::Error::message("invalid result member derive")
+                            .at(position)
+                    },
+                )
             }
             _ => Err(minicbor::decode::Error::message("unknown derive operation").at(position)),
         }
@@ -1036,6 +1097,68 @@ impl ProvenanceRecordV2 {
             context,
             &provenance_parents,
             vec![],
+            label,
+        )?;
+        Ok((value, provenance))
+    }
+
+    /// A trusted-set origin: the value at an owner-signed path of a verified
+    /// tool result, endorsed as the owner's choice because it is, byte for
+    /// byte, a member of the candidate set the owner signed for that edge (for
+    /// a list, every item). The record commits to the set's digest; the label
+    /// keeps the parent's confidentiality, readers and effects and raises only
+    /// an untrusted parent's integrity to the owner's, so G5's flow facts no
+    /// longer treat it as data's choice. A value outside the set is refused
+    /// here: the caller derives it the plain way, as untrusted data, and G5
+    /// still asks the owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn result_candidate_member_v04(
+        context: ProvenanceContextV2,
+        path: Vec<String>,
+        max_bytes: u16,
+        list: bool,
+        candidates: &savana_kernel_protocol::v2::ResultCandidatesV2,
+        parent: (&KernelValueV2, &Self),
+        policy_allowed_effects: EffectSetV2,
+    ) -> Result<(KernelValueV2, Self), G3Error> {
+        let parents = [parent];
+        validate_parent_contexts(&parents, &context)?;
+        validate_parent_values(&parents)?;
+        let plain = if list {
+            DeriveOperationV2::select_result_json_edge_v04(path.clone(), max_bytes, true, None)?
+        } else {
+            DeriveOperationV2::select_result_json_path_v04(path.clone(), max_bytes)?
+        };
+        let value = plain.execute(&parents)?;
+        let member = match (list, value.as_text(), value.text_list()) {
+            (false, Some(text), _) => candidates.contains(text),
+            (true, _, Some(items)) => items.iter().all(|item| candidates.contains(item)),
+            _ => false,
+        };
+        if !member {
+            return Err(G3Error::DeriveTypeMismatch);
+        }
+        let digest = candidates.digest();
+        let operation =
+            DeriveOperationV2::select_result_json_member_v04(path, max_bytes, list, digest)?;
+        let parent_label = parent.1.label;
+        let integrity = match parent_label.integrity() {
+            IntegrityV2::ExternalUntrusted => IntegrityV2::UserAuthorized,
+            kept => kept,
+        };
+        let label = SecurityLabelV2::from_verified_source(
+            integrity,
+            parent_label.confidentiality(),
+            parent_label.readers(),
+            parent_label.effects().intersection(policy_allowed_effects),
+        );
+        let value_digest = value_digest_v2(&value)?;
+        let provenance = Self::build(
+            SourceKindV2::Derived { operation },
+            value_digest,
+            context,
+            &[parent.1],
+            vec![digest],
             label,
         )?;
         Ok((value, provenance))

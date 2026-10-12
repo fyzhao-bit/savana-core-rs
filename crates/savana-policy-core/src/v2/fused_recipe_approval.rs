@@ -222,6 +222,7 @@ mod tests {
                 result_source_clause: None,
                 result_list: false,
                 result_compute: None,
+                result_candidates: None,
             }],
         };
         let mut a = approval();

@@ -65,7 +65,7 @@ pub fn render_task_action_display_v2(
     let exact: serde_json::Value =
         serde_json::from_slice(&request.canonical_json()).map_err(ProtocolError::malformed)?;
     let mut rendering = serde_json::json!({
-        "rendering_schema":if derived.is_empty() {1} else {2},
+        "rendering_schema":if derived.values().any(|r| r.candidates().is_some()) {3} else if derived.is_empty() {1} else {2},
         "approval_kind":"One action; does not amend task authorization",
         "authorization_id":hex(authorization.authorization_id().as_bytes()), "authorization_revision":authorization.revision(),
         "task":hex(authorization.task().as_bytes()), "principal":hex(authorization.principal().as_bytes()),
@@ -111,6 +111,19 @@ pub fn render_task_action_display_v2(
                 if let Some(c) = r.compute() {
                     edge["compute"] = serde_json::json!({"op": c.op().name(), "amount": c.amount()});
                     edge["meaning"] = serde_json::json!("Extracted by the kernel from the verified result of source_clause at this JSON path, then computed by the kernel with compute; not chosen by the planner");
+                }
+                if let Some(c) = r.candidates() {
+                    // Whether the concrete value is one the owner signed (for a
+                    // list, every item); only such a value is endorsed.
+                    let member = match exact.get(name) {
+                        Some(serde_json::Value::String(text)) => c.contains(text),
+                        Some(serde_json::Value::Array(items)) => items
+                            .iter()
+                            .all(|item| item.as_str().is_some_and(|text| c.contains(text))),
+                        _ => false,
+                    };
+                    edge["candidates"] = serde_json::json!(c.members());
+                    edge["in_candidates"] = serde_json::json!(member);
                 }
                 (name.clone(), edge)
             })

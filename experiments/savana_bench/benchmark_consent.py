@@ -10,7 +10,7 @@ import hashlib
 import re
 import time
 
-from .agentdojo_tasks import EFFECT_NAMES, LIST, all_contracts, catalog_tool, signed_edge
+from .agentdojo_tasks import EFFECT_NAMES, LIST, all_contracts, catalog_tool, edge_candidates, signed_edge
 from .benchmark_identity import strict_json
 
 
@@ -29,13 +29,19 @@ def _displayed_edges(step):
     """What the native displays must show for those edges (the meaning text
     is the kernel's fixed explanation and is not part of the check)."""
     shown = {}
-    for field, source, path, bound, form in step.edges():
+    for raw, (field, source, path, bound, form) in zip(step.derived, step.edges()):
         edge = dict(source_clause=source, path=list(path), type="TextList" if form == LIST else "Text",
-                    max_bytes=bound, compute=None)
+                    max_bytes=bound, compute=None, candidates=None)
         if form not in (None, LIST):
             edge["compute"] = dict(op=form[0], amount=form[1])
+        if edge_candidates(raw) is not None:
+            edge["candidates"] = list(edge_candidates(raw))
         shown[field] = edge
     return shown
+
+
+def _signs_candidates(step):
+    return any(edge_candidates(edge) is not None for edge in step.derived)
 
 
 def _edges_match(shown, step):
@@ -43,8 +49,8 @@ def _edges_match(shown, step):
         return shown is None
     if type(shown) is not dict or set(shown) != {f for f, *_ in step.derived}:
         return False
-    keys = ("source_clause", "path", "type", "max_bytes", "compute")
-    return all(type(v) is dict and set(v) <= {*keys, "meaning"}
+    keys = ("source_clause", "path", "type", "max_bytes", "compute", "candidates")
+    return all(type(v) is dict and set(v) <= {*keys, "meaning", "in_candidates"}
                and {k: v.get(k) for k in keys} == _displayed_edges(step)[f] for f, v in shown.items())
 
 
@@ -79,22 +85,27 @@ class FiniteConsent:
     may follow any of them. `strict_destinations` refuses any step whose
     destination (or fetched address) was derived from data. `directory` (a set
     of trimmed, case-folded values, see `owner_directory`) approves such a step
-    only if every value data chose for it is in that directory."""
+    only if every value data chose for it is in that directory. `candidates`
+    (the set owner) approves it only where the kernel's display says every
+    value data chose is a member of the set signed into that edge."""
     def __init__(self, contract, principal, emit, *, disposition='require_approval', strict_destinations=False,
-                 directory=None):
+                 directory=None, candidates=False):
         if (contract not in all_contracts() or type(principal) is not str
             or not re.fullmatch('[0-9a-f]{64}',principal) or principal=='0'*64
             or disposition not in DISPOSITIONS or type(strict_destinations) is not bool
+            or type(candidates) is not bool or (candidates and (strict_destinations or directory is not None))
             or (directory is not None and (type(directory) is not frozenset or strict_destinations
                                            or any(type(v) is not str for v in directory)))):
             raise ValueError('finite_consent_catalog')
         self.contract,self.principal,self.emit=contract,principal,emit
         self.steps=contract.steps();self.action=0
         self.permit=disposition=='permit';self.strict=strict_destinations;self.directory=directory
+        self.candidates=candidates
         # Read-only contracts keep their original policy label and behavior.
         self.policy=('finite_calendar_preconsent_v1' if len(self.steps)==1 else 'finite_write_preconsent_v1')+(
             '+permit' if self.permit else '')+('+strict_destination' if self.strict else '')+(
-            '+directory_destination' if directory is not None else '')
+            '+directory_destination' if directory is not None else '')+(
+            '+candidate_destination' if candidates else '')
         self.stage='ingress';self.task=self.binding=self.clauses=self.authorization=None
         self.profiles=None;self.failed=False;self.results=None
 
@@ -163,7 +174,8 @@ class FiniteConsent:
                 policy=self.policy,human_review=False,**clause)
         except BaseException as error:
             self.failed=True
-            reason=dict(reason=str(error)) if self.permit or self.strict or self.directory is not None else {}
+            reason=(dict(reason=str(error)) if self.permit or self.strict or self.directory is not None
+                    or self.candidates else {})
             if reason and purpose=='tool_execution' and getattr(self,'_asked',None) is not None:
                 reason['clause']=self._asked
             self.emit('benchmark_consent',purpose=purpose,decision='refuse',
@@ -192,7 +204,8 @@ class FiniteConsent:
         b=self.binding
         if b is None: raise ValueError('consent_root_not_bound')
         derived=any(st.derived for st in self.steps)
-        expected=dict(rendering_schema=2 if derived else 1,operation='Create task authorization',
+        signed_sets=any(_signs_candidates(st) for st in self.steps)
+        expected=dict(rendering_schema=3 if signed_sets else 2 if derived else 1,operation='Create task authorization',
             authorization_id=self.authorization,revision=1,expected_previous_revision=0,
             principal=self.principal,task=self.task,installation_digest=b['installation'],
             manifest_digest=b['manifest'],deployment_generation=b['generation'],
@@ -231,7 +244,8 @@ class FiniteConsent:
         step=self.steps[number-1] if purpose=='tool_execution' else None
         clause=self.clauses[number-1];alternative=clause['alternatives'][0]
         profile=self.profiles[alternative['descriptor_digest']]
-        expected=dict(rendering_schema=2 if step is not None and step.derived else 1,
+        expected=dict(rendering_schema=(3 if step is not None and _signs_candidates(step) else
+                                        2 if step is not None and step.derived else 1),
             authorization_id=self.authorization,authorization_revision=1,
             task=self.task,principal=self.principal,clause_id=number,alternative_index=0,
             descriptor_digest=alternative['descriptor_digest'],operation=profile['operation'],
@@ -254,6 +268,12 @@ class FiniteConsent:
                 or not _edges_match(d.get('derived_fields'),step)):
                 raise ValueError('consent_action_arguments')
             arguments=dict(r['params']['arguments'])
+            if self.candidates:
+                # Whom data chose is approved only where the kernel says it is a
+                # member of the set this owner signed into that edge.
+                shown=d.get('derived_fields') or {}
+                if not all((shown.get(field) or {}).get('in_candidates') is True for field in _chosen_by_data(step)):
+                    raise ValueError('consent_destination_not_in_candidates')
             if self.directory is not None:
                 # A destination data chose is approved only if this owner already knows it.
                 from .owner_directory import in_directory

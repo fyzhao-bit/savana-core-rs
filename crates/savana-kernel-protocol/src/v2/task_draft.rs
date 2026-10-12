@@ -263,6 +263,15 @@ impl TaskAuthorizationDraftV2 {
                 .iter()
                 .any(|a| !a.controls.derived().is_empty())
         });
+        // Likewise schema 3 only when some edge signs a candidate set.
+        let any_candidates = self.clauses.0.iter().any(|c| {
+            c.alternatives.0.iter().any(|a| {
+                a.controls
+                    .derived()
+                    .values()
+                    .any(|r| r.candidates().is_some())
+            })
+        });
         for clause in &self.clauses.0 {
             let mut alternatives = Vec::new();
             for (index, alt) in clause.alternatives.0.iter().enumerate() {
@@ -309,6 +318,12 @@ impl TaskAuthorizationDraftV2 {
                                 edge["compute"] = serde_json::json!({"op": c.op().name(), "amount": c.amount()});
                                 edge["meaning"] = serde_json::json!("The value the kernel extracts from the verified result of source_clause at this JSON path, then computes with compute");
                             }
+                            // A trusted-set field shows every member the owner
+                            // signs: data may pick one, nothing else is endorsed.
+                            if let Some(c) = r.candidates() {
+                                edge["candidates"] = serde_json::json!(c.members());
+                                edge["meaning"] = serde_json::json!("The value the kernel extracts from the verified result of source_clause at this JSON path; a value in candidates (for a list, every item) proceeds as your choice, any other value needs your approval");
+                            }
                             (name.clone(), edge)
                         })
                         .collect();
@@ -319,7 +334,7 @@ impl TaskAuthorizationDraftV2 {
             clauses.push(serde_json::json!({"clause_id":clause.clause_id, "alternatives":alternatives, "maximum_single_magnitude":clause.maximum_single_magnitude, "total_magnitude_budget":clause.total_magnitude_budget, "maximum_attempts":clause.maximum_attempts, "predecessor_clause_ids":clause.predecessor_clause_ids.0, "retry_after_proven_no_effect":clause.retry_after_proven_no_effect}));
         }
         let projection = serde_json::json!({
-            "rendering_schema":if any_derived {2} else {1}, "operation":if self.revision == 1 {"Create task authorization"} else {"Replace task authorization; retain prior consumption"},
+            "rendering_schema":if any_candidates {3} else if any_derived {2} else {1}, "operation":if self.revision == 1 {"Create task authorization"} else {"Replace task authorization; retain prior consumption"},
             "authorization_id":hex(self.authorization_id.as_bytes()), "revision":self.revision, "expected_previous_revision":self.revision-1,
             "principal":hex(self.principal.as_bytes()), "task":hex(self.task.as_bytes()), "installation_digest":hex(self.installation_digest.as_bytes()),
             "manifest_digest":hex(self.manifest_digest.as_bytes()), "deployment_generation":self.deployment_generation,

@@ -38,7 +38,8 @@ class Step:
     A derived edge may carry a fifth element, its form: LIST (the node is an
     array of texts, for a text-list field) or (op, amount) (one text the kernel
     computes with an owner-signed operation, `COMPUTE_OPS`). A list field's
-    owner value is a tuple of texts.
+    owner value is a tuple of texts. An uncomputed edge may carry a sixth, the
+    candidate set the owner signs for it (a trusted-set origin, `edge_candidates`).
     """
     tool: str
     upstream_tool: str
@@ -61,14 +62,37 @@ COMPUTE_OPS = {"add_minutes": (1, 527_040), "add_days": (2, 3_660), "add_cents":
 MAX_LIST_ITEMS = 32
 
 
+MAX_CANDIDATES = 64
+MAX_CANDIDATE_BYTES = 4096
+
+
 def edge_parts(edge):
     field, source, path, bound, *rest = edge
     form = rest[0] if rest else None
     if not (form is None or form == LIST or (type(form) is tuple and len(form) == 2 and form[0] in COMPUTE_OPS
                                              and type(form[1]) is int
-                                             and abs(form[1]) <= COMPUTE_OPS[form[0]][1])) or len(rest) > 1:
+                                             and abs(form[1]) <= COMPUTE_OPS[form[0]][1])) or len(rest) > 2:
         raise ValueError("edge_form")
+    if len(rest) == 2:
+        edge_candidates(edge)
     return field, source, tuple(path), bound, form
+
+
+def edge_candidates(edge):
+    """The candidate set an edge carries (members strictly ascending by bytes,
+    each a trimmed text within the edge's bound), or None. Only an uncomputed
+    text or list edge carries one; the kernel endorses a derived value only if
+    it is, byte for byte, a member (for a list, every item)."""
+    if len(edge) < 6:
+        return None
+    members, form, bound = edge[5], edge[4], edge[3]
+    encoded = [m.encode() for m in members] if type(members) is tuple and all(type(m) is str for m in members) else None
+    if (form not in (None, LIST) or encoded is None or not 1 <= len(encoded) <= MAX_CANDIDATES
+            or sum(map(len, encoded)) > MAX_CANDIDATE_BYTES or encoded != sorted(set(encoded))
+            or any(not m or m.strip() != m or len(m.encode()) > bound or any(ord(c) < 32 for c in m)
+                   for m in members)):
+        raise ValueError("edge_candidates")
+    return members
 
 
 def edge_document(edge):
@@ -79,6 +103,8 @@ def edge_document(edge):
         doc["list"] = True
     elif form is not None:
         doc["compute"] = {"op": form[0], "amount": form[1]}
+    if edge_candidates(edge) is not None:
+        doc["candidates"] = list(edge_candidates(edge))
     return doc
 
 
@@ -361,6 +387,8 @@ def signed_edge(edge):
                 max_bytes=bound)
     if form not in (None, LIST):
         rule["compute"] = dict(op=form[0], amount=form[1])
+    if edge_candidates(edge) is not None:
+        rule["candidates"] = list(edge_candidates(edge))
     return rule
 
 
@@ -703,13 +731,16 @@ def prepare_draft(contract, *, task, root, observer, tool_descriptor,
     for number, (step, descriptor, clause) in enumerate(zip(steps, tools, clauses), 1):
         mine = [v for v in inputs if v.get("operation", 1) == number]
         bindings = [{"argument": v["argument"], "slot": v["slot"]} for v in mine]
-        for field, source, path, bound, form in step.edges():
+        for edge in step.derived:
+            field, source, path, bound, form = edge_parts(edge)
             binding = {"argument": field, "slot": result_slot(contract, number, field),
                        "result_of": source, "result_path": list(path), "result_max_bytes": bound}
             if form == LIST:
                 binding["result_list"] = True
             elif form is not None:
                 binding["result_compute"] = {"op": form[0], "amount": form[1]}
+            if edge_candidates(edge) is not None:
+                binding["result_candidates"] = list(edge_candidates(edge))
             bindings.append(binding)
         if step.payload_from:
             # A whole-result edge: no path, no bound; the kernel fills the payload.

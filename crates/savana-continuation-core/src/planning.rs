@@ -58,6 +58,11 @@ pub struct SlotBinding {
     /// the scalar it extracts at the path (e.g. a start time plus a duration).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_compute: Option<crate::planning_observation::ResultComputeV04>,
+    /// A trusted-set edge: the members the owner signed for this field. The
+    /// kernel endorses a derived value only if it is one (for a list, every
+    /// item), byte for byte; G4 matches the set against the signed rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_candidates: Option<Vec<String>>,
 }
 
 /// Private compiler input. Never serialize this registry to a model implicitly.
@@ -166,6 +171,20 @@ impl Policy {
                         || ((b.result_list || b.result_compute.is_some()) && b.result_path.is_none())
                         || (b.result_list && b.result_compute.is_some())
                         || b.result_compute.is_some_and(|c| !c.valid())
+                        // A candidate set rides on a path edge, never a
+                        // computed one: non-empty, strictly ascending, bounded.
+                        || b.result_candidates.as_ref().is_some_and(|members| {
+                            b.result_path.is_none()
+                                || b.result_compute.is_some()
+                                || members.is_empty()
+                                || members.len() > 64
+                                || members.iter().map(String::len).sum::<usize>() > 4096
+                                || members.iter().any(|m| {
+                                    m.is_empty()
+                                        || b.result_max_bytes.is_some_and(|bound| m.len() > usize::from(bound))
+                                })
+                                || members.windows(2).any(|w| w[0].as_bytes() >= w[1].as_bytes())
+                        })
                         || b.result_path.as_ref().is_some_and(|path| {
                             path.len() > 16
                                 || path.iter().any(|s| {

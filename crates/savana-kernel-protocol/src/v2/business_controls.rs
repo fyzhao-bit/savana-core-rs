@@ -15,6 +15,67 @@ pub struct ResultDerivedControlV2 {
     kind: BusinessFieldTypeV2,
     max_bytes: u16,
     compute: Option<ResultComputeV2>,
+    candidates: Option<ResultCandidatesV2>,
+}
+
+/// At most this many members in one signed candidate set, and this many
+/// bytes in all.
+pub const MAX_RESULT_CANDIDATES_V2: usize = 64;
+pub const MAX_RESULT_CANDIDATE_BYTES_V2: usize = 4096;
+
+/// A closed set the owner signs into a derived control (a trusted-set
+/// origin): data may choose which member, never a value outside the set. The
+/// kernel endorses a value, byte for byte a member (for a text list, every
+/// item), when it derives it; any other value keeps a tool result's
+/// integrity, so G5 still puts it in front of the owner. Data can still pick
+/// the wrong member: the set bounds whom a call can reach, not which of them.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ResultCandidatesV2(Vec<String>);
+impl ResultCandidatesV2 {
+    /// Members strictly ascending by bytes (the one canonical order), each a
+    /// control text.
+    pub fn new(members: Vec<String>) -> Result<Self, BusinessCodecErrorV2> {
+        if members.is_empty()
+            || members.len() > MAX_RESULT_CANDIDATES_V2
+            || members.iter().map(String::len).sum::<usize>() > MAX_RESULT_CANDIDATE_BYTES_V2
+            || members.iter().any(|member| !control_text(member))
+            || members
+                .windows(2)
+                .any(|pair| pair[0].as_bytes() >= pair[1].as_bytes())
+        {
+            return Err(BusinessCodecErrorV2::Malformed);
+        }
+        Ok(Self(members))
+    }
+    pub fn members(&self) -> &[String] {
+        &self.0
+    }
+    /// Exact bytes: no trimming or case folding, so a value the kernel lets
+    /// through is exactly one the owner signed.
+    pub fn contains(&self, value: &str) -> bool {
+        self.0
+            .binary_search_by(|member| member.as_bytes().cmp(value.as_bytes()))
+            .is_ok()
+    }
+    /// The set's identity, bound into an endorsed value's provenance.
+    pub fn digest(&self) -> Digest32V2 {
+        let mut e = minicbor::Encoder::new(Vec::new());
+        self.put(&mut e).expect("validated set");
+        hash(
+            b"SAVANA_RESULT_CANDIDATES_V2_SCHEMA1\0",
+            &[&e.into_writer()],
+        )
+    }
+    fn put<W: minicbor::encode::Write>(
+        &self,
+        e: &mut minicbor::Encoder<W>,
+    ) -> Result<(), BusinessCodecErrorV2> {
+        e.array(self.0.len() as u64).map_err(malformed)?;
+        for member in &self.0 {
+            e.str(member).map_err(malformed)?;
+        }
+        Ok(())
+    }
 }
 
 /// A computation the owner signs into a derived control: the kernel applies
@@ -94,12 +155,13 @@ impl ResultDerivedControlV2 {
             kind,
             max_bytes,
             compute: None,
+            candidates: None,
         })
     }
     /// A computed control: the extracted text, transformed by `compute`. Only
     /// a text field can be computed.
     pub fn with_compute(mut self, compute: ResultComputeV2) -> Result<Self, BusinessCodecErrorV2> {
-        if self.kind != BusinessFieldTypeV2::Text {
+        if self.kind != BusinessFieldTypeV2::Text || self.candidates.is_some() {
             return Err(BusinessCodecErrorV2::Malformed);
         }
         self.compute = Some(compute);
@@ -107,6 +169,30 @@ impl ResultDerivedControlV2 {
     }
     pub fn compute(&self) -> Option<ResultComputeV2> {
         self.compute
+    }
+    /// A trusted-set control: a text, or a text list item by item, that is a
+    /// member of `candidates` is the owner's choice. Never computed, and every
+    /// member fits the control's byte bound.
+    pub fn with_candidates(
+        mut self,
+        candidates: ResultCandidatesV2,
+    ) -> Result<Self, BusinessCodecErrorV2> {
+        if !matches!(
+            self.kind,
+            BusinessFieldTypeV2::Text | BusinessFieldTypeV2::TextList
+        ) || self.compute.is_some()
+            || candidates
+                .members()
+                .iter()
+                .any(|member| member.len() > usize::from(self.max_bytes))
+        {
+            return Err(BusinessCodecErrorV2::Malformed);
+        }
+        self.candidates = Some(candidates);
+        Ok(self)
+    }
+    pub fn candidates(&self) -> Option<&ResultCandidatesV2> {
+        self.candidates.as_ref()
     }
     pub fn source_clause(&self) -> u64 {
         self.source_clause
@@ -125,11 +211,18 @@ impl ResultDerivedControlV2 {
         e: &mut minicbor::Encoder<W>,
     ) -> Result<(), BusinessCodecErrorV2> {
         // A plain edge keeps its four-element encoding byte for byte; a
-        // computed edge appends [op, amount].
-        e.array(if self.compute.is_some() { 5 } else { 4 })
-            .and_then(|e| e.u64(self.source_clause))
-            .and_then(|e| e.array(self.path.len() as u64))
-            .map_err(malformed)?;
+        // computed edge appends [op, amount]; a trusted-set edge appends null
+        // (no computation) and its members.
+        e.array(if self.candidates.is_some() {
+            6
+        } else if self.compute.is_some() {
+            5
+        } else {
+            4
+        })
+        .and_then(|e| e.u64(self.source_clause))
+        .and_then(|e| e.array(self.path.len() as u64))
+        .map_err(malformed)?;
         for segment in &self.path {
             e.str(segment).map_err(malformed)?;
         }
@@ -141,6 +234,10 @@ impl ResultDerivedControlV2 {
                 .and_then(|e| e.u16(compute.op as u16))
                 .and_then(|e| e.i64(compute.amount))
                 .map_err(malformed)?;
+        }
+        if let Some(candidates) = &self.candidates {
+            e.null().map_err(malformed)?;
+            candidates.put(e)?;
         }
         Ok(())
     }
@@ -503,8 +600,15 @@ pub fn encode_business_controls_v2(
 pub fn decode_business_controls_v2(
     bytes: &[u8],
 ) -> Result<BusinessControlsV2, BusinessCodecErrorV2> {
-    // Room for up to 32 derived rules (name + 16 path segments of 128 bytes each).
-    if bytes.len() > MAX_BUSINESS_PROFILE_BYTES_V2 + MAX_BUSINESS_JSON_BYTES_V2 + 128 + 96 * 1024 {
+    // Room for up to 32 derived rules (name + 16 path segments of 128 bytes
+    // each, and a candidate set of at most its byte bound plus framing).
+    if bytes.len()
+        > MAX_BUSINESS_PROFILE_BYTES_V2
+            + MAX_BUSINESS_JSON_BYTES_V2
+            + 128
+            + 96 * 1024
+            + 32 * (MAX_RESULT_CANDIDATE_BYTES_V2 + 4 * MAX_RESULT_CANDIDATES_V2)
+    {
         return Err(BusinessCodecErrorV2::Limit);
     }
     let mut d = minicbor::Decoder::new(bytes);
@@ -597,7 +701,7 @@ fn decode_result_derived_control(
     d: &mut minicbor::Decoder<'_>,
 ) -> Result<ResultDerivedControlV2, BusinessCodecErrorV2> {
     let length = d.array().map_err(malformed)?;
-    if length != Some(4) && length != Some(5) {
+    if !matches!(length, Some(4..=6)) {
         return Err(BusinessCodecErrorV2::Malformed);
     }
     let source_clause = d.u64().map_err(malformed)?;
@@ -623,6 +727,21 @@ fn decode_result_derived_control(
     let rule = ResultDerivedControlV2::new(source_clause, path, kind, max_bytes)?;
     if length == Some(4) {
         return Ok(rule);
+    }
+    if length == Some(6) {
+        d.null().map_err(malformed)?;
+        let count = d
+            .array()
+            .map_err(malformed)?
+            .ok_or(BusinessCodecErrorV2::Malformed)?;
+        if count == 0 || count > MAX_RESULT_CANDIDATES_V2 as u64 {
+            return Err(BusinessCodecErrorV2::Malformed);
+        }
+        let mut members = Vec::new();
+        for _ in 0..count {
+            members.push(d.str().map_err(malformed)?.to_owned());
+        }
+        return rule.with_candidates(ResultCandidatesV2::new(members)?);
     }
     if d.array().map_err(malformed)? != Some(2) {
         return Err(BusinessCodecErrorV2::Malformed);

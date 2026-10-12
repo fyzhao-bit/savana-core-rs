@@ -20,7 +20,7 @@ from .official_verify import restore_environment, verify_chain
 from .planner_authors import SYSTEM, PlanUnencodable, compromised_draft, encode_plan, parse_plan
 from .planner_experiment import (DEFINITIVE, IDS, OPERATOR_MODE, SCHEMA, STRUCTURED_REFUSALS,
                                  classify_provider_attempt, directory_provenance, experiment_cases, planner_exposure,
-                                 structured_provenance, summarize, turn_request)
+                                 destination_candidates, structured_provenance, summarize, turn_request)
 from .protected_agentdojo import official_case, package_sources, score_outcome
 from .protected_verify import verify_published_episode
 
@@ -158,7 +158,7 @@ def _drafted_contract(case, local, row, prior=None):
         else:
             body = draft_request_body(official, request, model=case["planner_model"], goal=case.get("goal"),
                                       history=tuple(history), view=view, exposure=exposure,
-                                      directory=case.get("owner") == "directory")
+                                      directory=case.get("owner") in ("directory", "set"))
             if hashlib.sha256(body).hexdigest() != event["request_sha256"]:
                 raise ValueError("planner_input_mismatch")
             if event.get("view", "request") != view or event.get("placeholders", 0) != len(bindings):
@@ -174,7 +174,7 @@ def _drafted_contract(case, local, row, prior=None):
                                       bindings=bindings,
                                       extractor_model=case.get("extractor_model", "deepseek-flash"),
                                       derived_destinations=case.get("review") == "derived",
-                                      read_only=turn == "read")
+                                      read_only=turn == "read", destination_candidates=destination_candidates(case))
             refusal = None
         except ProgramRefused as error:
             contract, refusal = None, error
@@ -461,6 +461,19 @@ def verify_episode(directory, local, case, row, profile, turns, prior=None):
             if not all(in_directory(arguments.get(field), entries)
                        for field in _chosen_by_data(contract.steps()[len(prior)])):
                 raise ValueError("directory_owner_approved_unknown_destination")
+        if case.get("owner") == "set" and verdict == "authorized_tool":
+            # The set owner's call went out: every value data chose for it is,
+            # byte for byte, a member the owner signed into that edge.
+            from .agentdojo_tasks import edge_candidates
+            from .benchmark_consent import _chosen_by_data
+            step = contract.steps()[len(prior)]
+            arguments = json.loads(payload)["params"]["arguments"]
+            signed = {edge[0]: edge_candidates(edge) for edge in step.derived}
+            for field in _chosen_by_data(step):
+                value, members = arguments.get(field), signed.get(field) or ()
+                items = value if type(value) is list else [value]
+                if not all(type(item) is str and item in members for item in items):
+                    raise ValueError("set_owner_dispatched_unsigned_destination")
         verdicts.append(verdict)
     if (row["provider_attempts"] != len(verdicts) or row["owner_releases"] != verdicts.count("owner_release")
             or row["unauthorized_provider_attempts"] != sum(v.startswith("unauthorized") for v in verdicts)):

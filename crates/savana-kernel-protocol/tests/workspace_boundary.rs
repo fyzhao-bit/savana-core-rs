@@ -19,7 +19,7 @@ const FROZEN_CORE_MEMBERS: [&str; 11] = [
     "savana-vault",
 ];
 
-const ALLOWED_WORKSPACE_MEMBERS: [&str; 17] = [
+const ALLOWED_WORKSPACE_MEMBERS: [&str; 18] = [
     "libsavana-ner",
     "savana-agentd",
     "savana-approvald",
@@ -36,6 +36,9 @@ const ALLOWED_WORKSPACE_MEMBERS: [&str; 17] = [
     "savana-platform-identity",
     "savana-policy-core",
     "savana-private-workflow",
+    // The residual data contract's bounded checker (F4): a model and its
+    // proofs' checks, outside the production core.
+    "savana-residual-contract",
     "savana-vault",
 ];
 

@@ -108,7 +108,10 @@ EXPOSURES = ("none", "data")
 # instead of refusing) one who approves them only within its own directory
 # (`owner_directory`).
 REVIEWS = ("owner", "derived")
-OWNERS = ("finite", "strict", "directory")
+# `set` signs the same directory into every destination edge data fills (a
+# trusted-set origin): the kernel endorses a member itself, and this software
+# owner approves a data-chosen destination only where the kernel says it is one.
+OWNERS = ("finite", "strict", "directory", "set")
 # Who writes the program: the untrusted planner, or (floor experiments only)
 # a fixed honest program per task, identical on every run and kernel; or, for
 # the structured-planning evaluation, the task's registered template run as
@@ -262,8 +265,8 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
     review, owner, author = review or REVIEWS[0], owner or OWNERS[0], author or AUTHORS[0]
     if review not in REVIEWS or owner not in OWNERS or author not in AUTHORS:
         raise ValueError("planner_experiment_spec")
-    # A directory owner judges destinations the owner signed as derived from data.
-    if owner == "directory" and review != "derived":
+    # A directory or set owner judges destinations the owner signed as derived from data.
+    if owner in ("directory", "set") and review != "derived":
         raise ValueError("planner_experiment_spec")
     if author == "fixed":
         from .fixed_programs import FIXED_PROGRAMS
@@ -280,7 +283,8 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
     # Instructions found in data: a drafting planner that sees only the
     # request, and the directory owner, who decides what to adopt.
     if instructions not in (None, *INSTRUCTIONS) or (instructions == "adopt" and (
-            author != "deepseek" or owner != "directory" or goal is not None or exposure != EXPOSURES[0]
+            author != "deepseek" or owner not in ("directory", "set") or goal is not None
+            or exposure != EXPOSURES[0]
             or planner_view != VIEWS[0])):
         raise ValueError("planner_experiment_spec")
     if author == "registered" or mapper == "template":
@@ -544,12 +548,23 @@ def structured_provenance(cases, example=None):
 
 def directory_provenance(cases):
     """For a run with a directory owner, the digest of each suite's directory
-    (recomputable from the benchmark package). Every other manifest is unchanged."""
+    (recomputable from the benchmark package); for a set owner, the digest of
+    the members it signs. Every other manifest is unchanged."""
+    from .owner_directory import directory_members, directory_sha256, owner_directory
+    out = {}
     suites = sorted({case["suite"] for case in cases if case.get("owner") == "directory"})
-    if not suites:
-        return {}
-    from .owner_directory import directory_sha256, owner_directory
-    return dict(owner_directory_sha256={suite: directory_sha256(owner_directory(suite)) for suite in suites})
+    if suites:
+        out["owner_directory_sha256"] = {suite: directory_sha256(owner_directory(suite)) for suite in suites}
+    suites = sorted({case["suite"] for case in cases if case.get("owner") == "set"})
+    if suites:
+        out["owner_candidates_sha256"] = {suite: directory_sha256(directory_members(suite)) for suite in suites}
+    return out
+
+
+def destination_candidates(case):
+    """What the owner signs into a data-filled destination edge: the set owner's members, else None."""
+    from .owner_directory import directory_members
+    return directory_members(case["suite"]) if case.get("owner") == "set" else None
 
 
 def consent_mode(experiment):
@@ -758,7 +773,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                                                        history=tuple(history),
                                                                        view=case["planner_view"],
                                                                        exposure=planner_exposure(case),
-                                                                       directory=case.get("owner") == "directory")
+                                                                       directory=case.get("owner") in ("directory",
+                                                                                                       "set"))
                             except RuntimeError:
                                 row["outcome"] = "author_failed"
                                 raise
@@ -771,7 +787,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                     prompt=request, program=parse_program_text(program_text), bindings=bindings,
                                     extractor_model=case["extractor_model"],
                                     derived_destinations=case.get("review") == "derived",
-                                    read_only=turn == "read"))
+                                    read_only=turn == "read", destination_candidates=destination_candidates(case)))
                             except ProgramRefused as error:
                                 audit.emit("program_refused", episode=index, attempt=attempt, reason=str(error),
                                            step=error.step, field=error.field)
@@ -873,7 +889,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                             disposition=deployment["disposition"],
                                             strict_destinations=case.get("owner") == "strict",
                                             directory=(owner_directory(case["suite"])
-                                                       if case.get("owner") == "directory" else None))
+                                                       if case.get("owner") == "directory" else None),
+                                            candidates=case.get("owner") == "set")
 
                     def progress(stage):
                         row["stage"] = stage

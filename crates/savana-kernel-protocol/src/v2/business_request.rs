@@ -30,8 +30,9 @@ use std::collections::BTreeMap;
 mod controls;
 pub use controls::{
     decode_business_controls_v2, decode_result_derived_controls_v2, encode_business_controls_v2,
-    encode_result_derived_controls_v2, BusinessControlsV2, ResultComputeOpV2, ResultComputeV2,
-    ResultDerivedControlV2,
+    encode_result_derived_controls_v2, BusinessControlsV2, ResultCandidatesV2, ResultComputeOpV2,
+    ResultComputeV2, ResultDerivedControlV2, MAX_RESULT_CANDIDATES_V2,
+    MAX_RESULT_CANDIDATE_BYTES_V2,
 };
 
 pub const MAX_BUSINESS_JSON_BYTES_V2: usize = 64 * 1024;

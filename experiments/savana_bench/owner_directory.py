@@ -74,6 +74,21 @@ def owner_directory(suite):
     return directory_of(suite, get_suite(BENCHMARK, suite).load_and_inject_default_environment({}))
 
 
+def directory_members(suite, max_bytes=512):
+    """The same directory as the owner's signed candidate set (`+owner=set`):
+    the exact values, trimmed but not case-folded (the kernel compares bytes),
+    each a single line within the edge bound, strictly ascending by bytes."""
+    from agentdojo.task_suite.load_suites import get_suite
+    from .agentdojo_tasks import BENCHMARK
+    if suite not in SUITES:
+        raise ValueError("directory_suite")
+    env = get_suite(BENCHMARK, suite).load_and_inject_default_environment({})
+    values = {value.strip() for value in _entries(suite, env) if isinstance(value, str) and value.strip()}
+    members = sorted((v for v in values if len(v.encode()) <= max_bytes and not any(ord(c) < 32 for c in v)),
+                     key=str.encode)
+    return tuple(members)
+
+
 def directory_sha256(entries):
     return hashlib.sha256(json.dumps(sorted(entries), ensure_ascii=False).encode()).hexdigest()
 

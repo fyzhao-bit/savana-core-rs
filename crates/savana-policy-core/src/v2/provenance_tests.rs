@@ -1542,6 +1542,94 @@ fn result_json_path_extracts_scalars_and_keeps_untrusted_provenance() {
 }
 
 #[test]
+fn a_signed_candidate_member_is_endorsed_and_nothing_else_is() {
+    use savana_kernel_protocol::v2::ResultCandidatesV2;
+    let set = |members: &[&str]| ResultCandidatesV2::new(path(members)).unwrap();
+    let json =
+        br#"{"result":{"event":{"participants":["a@x.com","b@y.com"],"organizer":"z@evil.com"}}}"#;
+    let (raw, parent) = tool_result_bytes(json);
+    let first = path(&["result", "event", "participants", "0"]);
+    let people = path(&["result", "event", "participants"]);
+    let both = set(&["a@x.com", "b@y.com"]);
+    let (value, endorsed) = ProvenanceRecordV2::result_candidate_member_v04(
+        context(1, 2),
+        first.clone(),
+        256,
+        false,
+        &both,
+        (&raw, &parent),
+        EffectSetV2::ALL,
+    )
+    .unwrap();
+    assert_eq!(value.as_text(), Some("a@x.com"));
+    // Only integrity rises: still vault-bound, kernel-read, and no more than
+    // the result's effects however many are offered.
+    assert_eq!(endorsed.label().integrity(), IntegrityV2::UserAuthorized);
+    assert_eq!(
+        endorsed.label().confidentiality(),
+        ConfidentialityV2::VaultBound
+    );
+    assert_eq!(endorsed.label().readers(), ReaderSetV2::KERNEL);
+    assert_eq!(endorsed.label().effects(), EffectSetV2::READ);
+    // The record commits to the set it was checked against.
+    assert!(endorsed.root_evidence().as_slice().contains(&both.digest()));
+    // A list: every item must be a member.
+    let (list, _) = ProvenanceRecordV2::result_candidate_member_v04(
+        context(1, 2),
+        people.clone(),
+        256,
+        true,
+        &both,
+        (&raw, &parent),
+        EffectSetV2::READ,
+    )
+    .unwrap();
+    assert_eq!(list.text_list(), Some(vec!["a@x.com", "b@y.com"]));
+    for (p, list, candidates) in [
+        (path(&["result", "event", "organizer"]), false, both.clone()),
+        (people.clone(), true, set(&["a@x.com"])),
+        (first.clone(), false, set(&["A@x.com", "b@y.com"])),
+    ] {
+        assert!(ProvenanceRecordV2::result_candidate_member_v04(
+            context(1, 2),
+            p,
+            256,
+            list,
+            &candidates,
+            (&raw, &parent),
+            EffectSetV2::READ,
+        )
+        .is_err());
+    }
+    // Another set is another provenance.
+    let (_, other) = ProvenanceRecordV2::result_candidate_member_v04(
+        context(1, 2),
+        first.clone(),
+        256,
+        false,
+        &set(&["a@x.com", "b@y.com", "c@z.com"]),
+        (&raw, &parent),
+        EffectSetV2::READ,
+    )
+    .unwrap();
+    assert_ne!(other.provenance_digest(), endorsed.provenance_digest());
+    // The operation names the set and round-trips; a plain derivation never
+    // mints it, so only the constructor above (which checks membership) can.
+    let op =
+        DeriveOperationV2::select_result_json_member_v04(first, 256, false, both.digest()).unwrap();
+    let encoded = minicbor::to_vec(&op).unwrap();
+    assert_eq!((encoded[0], encoded[1]), (0x85, 11));
+    assert_eq!(minicbor::decode::<DeriveOperationV2>(&encoded).unwrap(), op);
+    assert!(
+        ProvenanceRecordV2::derived(context(1, 2), op, &[(&raw, &parent)], EffectSetV2::READ)
+            .is_err()
+    );
+    // The record survives its own encoding.
+    let bytes = crate::v2::encode_provenance_record_v2(&endorsed).unwrap();
+    assert_eq!(crate::v2::decode_provenance_record_v2(&bytes).unwrap(), endorsed);
+}
+
+#[test]
 fn result_json_path_fails_closed_on_non_scalar_missing_and_oversize() {
     let json = br#"{"a":{"b":"value"},"list":[1,2],"n":123,"big":18446744073709551615,"f":1.5}"#;
     let (raw, parent) = tool_result_bytes(json);

@@ -478,6 +478,17 @@ pub fn fused_operation_derived_rules_v04(
                     )
                     .map_err(|_| G4Error::InvalidIntentBinding)?;
             }
+            // A trusted-set edge: the binding's members are part of the rule
+            // G4 matches, so a binding cannot widen the set the owner signed.
+            if let Some(members) = &b.result_candidates {
+                use savana_kernel_protocol::v2::ResultCandidatesV2;
+                rule = rule
+                    .with_candidates(
+                        ResultCandidatesV2::new(members.clone())
+                            .map_err(|_| G4Error::InvalidIntentBinding)?,
+                    )
+                    .map_err(|_| G4Error::InvalidIntentBinding)?;
+            }
             rules.push((b.argument.clone(), rule));
         }
     }

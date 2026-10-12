@@ -182,6 +182,7 @@ fn policy() -> Policy {
                 result_source_clause: None,
                 result_list: false,
                 result_compute: None,
+                result_candidates: None,
                 argument: "input".into(),
                 slot: [id as u8; 16],
             }],
