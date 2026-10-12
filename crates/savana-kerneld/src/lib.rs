@@ -279,8 +279,6 @@ mod v2_kernel_owner;
 #[allow(dead_code)] // Activated by the final V2 daemon startup path.
 mod v2_listener;
 mod v2_managed_resource;
-#[allow(dead_code)] // Activated by the V2 startup recovery pass.
-mod v2_recovery;
 #[allow(dead_code)] // Activated by the V2 authenticated dispatch routes.
 mod v2_runtime;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
