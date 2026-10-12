@@ -11,20 +11,30 @@ program inside agentd's mapper call.
   read exactly as `analysis.autodojo_compare` reads the planner's (`adojx`):
   attempting programs, carried out (an attempting program signed), and
   AgentDojo's own security oracle.
+* No pollution (`--honest-prefix`): utility per suite and the tasks whose
+  utility differs from the drafting mapper's run on the same tasks, to show
+  what planning inside the mapper call costs.
 
-Both readings take the drafts from `root_drafted` events, which the service
-mapper records as the drafting planner does. Added here, per structured
+The first two readings take the drafts from `root_drafted` events, which the
+service mapper records as the drafting planner does. Added here, per structured
 episode: how far its job got (`structured_planned`: mapper_failed,
 planner_invalid, lowering_failed or planned). Every batch read passed offline
 verification, which re-derives the job from its salt, the workflow from the
 accepted draft, and checks that no program literal, owner value, tool name
 or description reached the third-party planner.
 
-Usage, from ``experiments/``::
+Usage, from ``experiments/``. The base configuration, against the polluted
+planner's runs on the same batches::
 
     python -m analysis.polluted_mapper --results results/local-container-20260930 \\
-        --goal-prefix mpx-poison --data-prefix mpx-adojo \\
-        --baseline-goal-prefix p0-poisonretry --baseline-data-prefix adojx
+        --goal-prefix mpx-poison --data-prefix mpx-adojo --honest-prefix mpx-honest \\
+        --baseline-goal-prefix p0-poisonretry --baseline-data-prefix adojx --baseline-honest-prefix f5d
+
+The extended configuration (U8S's), against U8S on the same kernel::
+
+    python -m analysis.polluted_mapper --results results/local-container-20260930 \\
+        --goal-prefix mpxx-poison --data-prefix mpxx-data --honest-prefix mpxx-honest \\
+        --baseline-goal-prefix p0-poisonretry --baseline-data-prefix u8sx --baseline-honest-prefix u8s
 """
 import argparse
 import collections
@@ -95,19 +105,41 @@ def data_report(results, prefix, baseline=None):
     return report
 
 
+def honest_report(results, prefix, baseline=None):
+    """No pollution: the service mapper's outcomes and utility per suite, how
+    far each job got, and against the drafting mapper's run on the same tasks
+    (`baseline`) the tasks whose utility differs."""
+    from analysis.utility_improvements import benign_summary, episodes, flips
+    keys = ("by_suite", "outcomes", "final_refusals", "unauthorized", "dispatched_unapproved")
+    rows = episodes(results, prefix)
+    summary = benign_summary(rows)
+    report = dict(mapper={k: summary[k] for k in keys}, stages=stages(results, prefix))
+    if baseline:
+        before = episodes(results, baseline)
+        tasks = {(r["suite"], r["user"]) for r in rows}
+        before = [r for r in before if (r["suite"], r["user"]) in tasks]
+        summary = benign_summary(before)
+        report.update(baseline={k: summary[k] for k in keys}, flips=flips(rows, before))
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--results", required=True)
     parser.add_argument("--goal-prefix")
     parser.add_argument("--data-prefix")
     parser.add_argument("--baseline-goal-prefix")
+    parser.add_argument("--honest-prefix")
     parser.add_argument("--baseline-data-prefix")
+    parser.add_argument("--baseline-honest-prefix")
     args = parser.parse_args()
     report = {}
     if args.goal_prefix:
         report["hidden_objective"] = goal_report(args.results, args.goal_prefix, args.baseline_goal_prefix)
     if args.data_prefix:
         report["injected_data"] = data_report(args.results, args.data_prefix, args.baseline_data_prefix)
+    if args.honest_prefix:
+        report["no_pollution"] = honest_report(args.results, args.honest_prefix, args.baseline_honest_prefix)
     print(json.dumps(report, indent=1, sort_keys=True))
 
 
