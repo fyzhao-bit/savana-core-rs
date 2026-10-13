@@ -1,71 +1,18 @@
-use ed25519_dalek::{Signer as _, SigningKey};
-use minicbor::Encode as _;
 use savana_kernel_protocol::v2::{
-    derive_ed25519_key_id_v2, encode_read_agent_view_response_v2, AgentViewV2, BoundedAgentTextV2,
-    ClosedRedactionClassV2, Digest32V2, Ed25519KeyIdV2, Ed25519SignatureV2, PlaceholderViewV2,
-    ReadAgentViewResponseV2, UnixMillisV2,
+    encode_read_agent_view_response_v2, AgentViewV2, BoundedAgentTextV2, ClosedRedactionClassV2,
+    Digest32V2, PlaceholderViewV2, ReadAgentViewResponseV2, UnixMillisV2,
 };
 use savana_policy_core::v2::{
     ClosedDeclassificationPurposeV2, DeclassificationRuleSetV2, DeclassificationTransitionV2,
-    DispatchSubjectV2, HandoffJudgmentV2, KernelPreparedDispatchV2, KernelValueV2,
-    ProvenanceRecordV2,
+    HandoffJudgmentV2, KernelValueV2, ProvenanceRecordV2,
 };
 use sha2::{Digest as _, Sha256};
-use zeroize::Zeroizing;
 
 use crate::v2_input_owner::FinalizedKernelInputV2;
-use crate::DaemonError;
 
-const SEALED_EXECUTION_ENVELOPE_DOMAIN: &[u8] = b"SAVANA_SEALED_EXECUTION_ENVELOPE_V2\0";
 const MASKED_AGENT_VIEW_RECORD_TAG_V2: u16 = 0;
 const MAX_AGENT_VIEW_RESPONSE_BYTES_V2: usize = 8 * 1024 * 1024;
 const MASKED_SUBSTITUTION_SET_DOMAIN_V2: &[u8] = b"SAVANA_MASKED_SUBSTITUTION_SET_V2\0";
-
-pub(crate) struct KernelTaskSigningIdentityV2 {
-    key_id: Ed25519KeyIdV2,
-    signing_key: SigningKey,
-}
-
-impl std::fmt::Debug for KernelTaskSigningIdentityV2 {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("KernelTaskSigningIdentityV2(<redacted>)")
-    }
-}
-
-impl KernelTaskSigningIdentityV2 {
-    pub(crate) fn from_seed(key_id: Ed25519KeyIdV2, seed: [u8; 32]) -> Result<Self, DaemonError> {
-        let seed = Zeroizing::new(seed);
-        if is_zero(key_id.as_bytes()) || is_zero(seed.as_ref()) {
-            return Err(v2_runtime_error());
-        }
-        let signing_key = SigningKey::from_bytes(&seed);
-        if derive_ed25519_key_id_v2(signing_key.verifying_key().to_bytes()) != key_id {
-            return Err(v2_runtime_error());
-        }
-        Ok(Self {
-            key_id,
-            signing_key,
-        })
-    }
-
-    pub(crate) fn public_key(&self) -> [u8; 32] {
-        self.signing_key.verifying_key().to_bytes()
-    }
-
-    pub(crate) fn sign_statement(
-        &self,
-        statement: savana_agentd::KernelTaskStatementV2,
-    ) -> Result<savana_agentd::SignedKernelTaskStatementV2, DaemonError> {
-        let signing_bytes = statement.signing_bytes().map_err(|_| v2_runtime_error())?;
-        let signature = self.signing_key.sign(&signing_bytes).to_bytes();
-        savana_agentd::SignedKernelTaskStatementV2::from_kernel_signature(
-            statement,
-            self.key_id,
-            Ed25519SignatureV2::new(signature),
-        )
-        .map_err(|_| v2_runtime_error())
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum KernelIngressPipelineErrorV2 {
@@ -102,16 +49,14 @@ impl std::fmt::Debug for AcceptedKernelIngressV2 {
 }
 
 impl AcceptedKernelIngressV2 {
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) const fn gated_input(&self) -> &savana_input_runtime::GatedPlannerInputV2 {
         &self.gated_input
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) const fn provenance(&self) -> &savana_policy_core::v2::ProvenanceRecordV2 {
         &self.provenance
-    }
-
-    pub(crate) const fn live_vault_segment(&self) -> &savana_vault::LiveVaultSegmentV2 {
-        &self.live_vault_segment
     }
 
     pub(crate) fn take_owner_input(&mut self) -> Option<(KernelValueV2, ProvenanceRecordV2)> {
@@ -135,6 +80,7 @@ impl AcceptedKernelIngressV2 {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn accept_ingress_into_kernel(
     input_runtime: &savana_input_runtime::InputRuntimeV2,
@@ -461,175 +407,8 @@ fn masked_substitution_set_digest(
     Ok(digest)
 }
 
-pub(crate) struct KernelDispatchSigningIdentityV2 {
-    key_id: Ed25519KeyIdV2,
-    signing_key: SigningKey,
-}
-
-impl std::fmt::Debug for KernelDispatchSigningIdentityV2 {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("KernelDispatchSigningIdentityV2(<redacted>)")
-    }
-}
-
-impl KernelDispatchSigningIdentityV2 {
-    pub(crate) fn from_seed(key_id: Ed25519KeyIdV2, seed: [u8; 32]) -> Result<Self, DaemonError> {
-        let seed = Zeroizing::new(seed);
-        if is_zero(key_id.as_bytes()) || is_zero(seed.as_ref()) {
-            return Err(v2_runtime_error());
-        }
-        let signing_key = SigningKey::from_bytes(&seed);
-        if derive_ed25519_key_id_v2(signing_key.verifying_key().to_bytes()) != key_id {
-            return Err(v2_runtime_error());
-        }
-        Ok(Self {
-            key_id,
-            signing_key,
-        })
-    }
-
-    pub(crate) fn public_key(&self) -> [u8; 32] {
-        self.signing_key.verifying_key().to_bytes()
-    }
-
-    pub(crate) fn sign_prepared_dispatch(
-        &self,
-        prepared: &KernelPreparedDispatchV2,
-        issued_at: UnixMillisV2,
-        effect_gate_lease_digest: Digest32V2,
-        ledger_projection_digest: Digest32V2,
-    ) -> Result<SignedKernelDispatchEnvelopeV2, DaemonError> {
-        let core = prepared.core();
-        if issued_at.get() == 0
-            || issued_at.get() >= core.expires_at().get()
-            || is_zero(effect_gate_lease_digest.as_bytes())
-            || is_zero(ledger_projection_digest.as_bytes())
-        {
-            return Err(v2_runtime_error());
-        }
-        let kind_tag = match core.subject() {
-            DispatchSubjectV2::ToolExecution { .. } => 1,
-            DispatchSubjectV2::FinalRelease { .. } => 2,
-        };
-        let mut payload = minicbor::Encoder::new(Vec::new());
-        payload
-            .array(15)
-            .and_then(|encoder| encoder.u16(2))
-            .map_err(|_| v2_runtime_error())?;
-        core.installation_id()
-            .encode(&mut payload, &mut ())
-            .map_err(|_| v2_runtime_error())?;
-        core.active_state_manifest_digest()
-            .encode(&mut payload, &mut ())
-            .map_err(|_| v2_runtime_error())?;
-        payload
-            .u64(core.deployment_generation())
-            .and_then(|encoder| encoder.u64(core.effect_fence_epoch()))
-            .map_err(|_| v2_runtime_error())?;
-        Digest32V2::new(*core.executor_identity().as_bytes())
-            .encode(&mut payload, &mut ())
-            .map_err(|_| v2_runtime_error())?;
-        payload.u16(kind_tag).map_err(|_| v2_runtime_error())?;
-        core.execution_nonce()
-            .encode(&mut payload, &mut ())
-            .map_err(|_| v2_runtime_error())?;
-        prepared
-            .preparation()
-            .dispatch_core_digest()
-            .encode(&mut payload, &mut ())
-            .map_err(|_| v2_runtime_error())?;
-        core.dispatch_subject_digest()
-            .encode(&mut payload, &mut ())
-            .map_err(|_| v2_runtime_error())?;
-        prepared
-            .sealed_envelope_digest()
-            .encode(&mut payload, &mut ())
-            .map_err(|_| v2_runtime_error())?;
-        payload
-            .u64(issued_at.get())
-            .and_then(|encoder| encoder.u64(core.expires_at().get()))
-            .map_err(|_| v2_runtime_error())?;
-        effect_gate_lease_digest
-            .encode(&mut payload, &mut ())
-            .map_err(|_| v2_runtime_error())?;
-        ledger_projection_digest
-            .encode(&mut payload, &mut ())
-            .map_err(|_| v2_runtime_error())?;
-
-        let canonical_payload = payload.into_writer();
-        let payload_digest: [u8; 32] = Sha256::digest(&canonical_payload).into();
-        let mut signature_input =
-            Vec::with_capacity(SEALED_EXECUTION_ENVELOPE_DOMAIN.len() + payload_digest.len());
-        signature_input.extend_from_slice(SEALED_EXECUTION_ENVELOPE_DOMAIN);
-        signature_input.extend_from_slice(&payload_digest);
-        let signature = self.signing_key.sign(&signature_input).to_bytes();
-
-        let mut envelope = minicbor::Encoder::new(Vec::new());
-        envelope
-            .array(3)
-            .and_then(|encoder| encoder.bytes(&canonical_payload))
-            .map_err(|_| v2_runtime_error())?;
-        self.key_id
-            .encode(&mut envelope, &mut ())
-            .map_err(|_| v2_runtime_error())?;
-        envelope.bytes(&signature).map_err(|_| v2_runtime_error())?;
-        let canonical_bytes = envelope.into_writer();
-        let envelope_digest = Digest32V2::new(Sha256::digest(&canonical_bytes).into());
-        Ok(SignedKernelDispatchEnvelopeV2 {
-            canonical_bytes,
-            envelope_digest,
-        })
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct SignedKernelDispatchEnvelopeV2 {
-    canonical_bytes: Vec<u8>,
-    envelope_digest: Digest32V2,
-}
-
-impl std::fmt::Debug for SignedKernelDispatchEnvelopeV2 {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("SignedKernelDispatchEnvelopeV2")
-            .field("envelope_digest", &self.envelope_digest)
-            .finish_non_exhaustive()
-    }
-}
-
-impl SignedKernelDispatchEnvelopeV2 {
-    pub(crate) fn canonical_bytes(&self) -> &[u8] {
-        &self.canonical_bytes
-    }
-
-    pub(crate) const fn envelope_digest(&self) -> Digest32V2 {
-        self.envelope_digest
-    }
-}
-
-pub(crate) fn prepare_vault_release_commit(
-    prepared: &KernelPreparedDispatchV2,
-) -> Result<savana_vault::KernelPreparedReleaseDispatchV2, DaemonError> {
-    let binding = match prepared.core().subject() {
-        DispatchSubjectV2::FinalRelease { binding, .. } => *binding,
-        DispatchSubjectV2::ToolExecution { .. } => return Err(v2_runtime_error()),
-    };
-    savana_vault::KernelPreparedReleaseDispatchV2::from_verified_kernel_commit(
-        binding,
-        prepared.consumed_ticket_digest(),
-        prepared.preparation().execution_nonce(),
-        prepared.preparation().dispatch_core_digest(),
-        prepared.preparation().dispatch_subject_digest(),
-    )
-    .map_err(|_| v2_runtime_error())
-}
-
 fn is_zero(bytes: &[u8]) -> bool {
     bytes.iter().all(|byte| *byte == 0)
-}
-
-fn v2_runtime_error() -> DaemonError {
-    DaemonError::stable(savana_kernel_protocol::StableCode::KernelUnavailable)
 }
 
 #[cfg(test)]
@@ -675,10 +454,81 @@ mod tests {
         VaultRollbackAnchorV2, VaultServiceV2, VaultStateHeadV2,
     };
 
-    use super::{
-        accept_finalized_input_into_kernel, accept_ingress_into_kernel,
-        prepare_vault_release_commit, KernelDispatchSigningIdentityV2, KernelTaskSigningIdentityV2,
-    };
+    use super::{accept_finalized_input_into_kernel, accept_ingress_into_kernel, is_zero};
+    use crate::DaemonError;
+    use savana_kernel_protocol::v2::Ed25519SignatureV2;
+    use savana_policy_core::v2::{DispatchSubjectV2, KernelPreparedDispatchV2};
+    use zeroize::Zeroizing;
+
+    /// The kernel side of agentd's task-statement verifier, which production
+    /// has not wired: only this crate's tests sign statements.
+    struct KernelTaskSigningIdentityV2 {
+        key_id: Ed25519KeyIdV2,
+        signing_key: SigningKey,
+    }
+
+    impl std::fmt::Debug for KernelTaskSigningIdentityV2 {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("KernelTaskSigningIdentityV2(<redacted>)")
+        }
+    }
+
+    impl KernelTaskSigningIdentityV2 {
+        fn from_seed(key_id: Ed25519KeyIdV2, seed: [u8; 32]) -> Result<Self, DaemonError> {
+            let seed = Zeroizing::new(seed);
+            if is_zero(key_id.as_bytes()) || is_zero(seed.as_ref()) {
+                return Err(v2_runtime_error());
+            }
+            let signing_key = SigningKey::from_bytes(&seed);
+            if derive_ed25519_key_id_v2(signing_key.verifying_key().to_bytes()) != key_id {
+                return Err(v2_runtime_error());
+            }
+            Ok(Self {
+                key_id,
+                signing_key,
+            })
+        }
+
+        fn public_key(&self) -> [u8; 32] {
+            self.signing_key.verifying_key().to_bytes()
+        }
+
+        fn sign_statement(
+            &self,
+            statement: savana_agentd::KernelTaskStatementV2,
+        ) -> Result<savana_agentd::SignedKernelTaskStatementV2, DaemonError> {
+            let signing_bytes = statement.signing_bytes().map_err(|_| v2_runtime_error())?;
+            let signature = self.signing_key.sign(&signing_bytes).to_bytes();
+            savana_agentd::SignedKernelTaskStatementV2::from_kernel_signature(
+                statement,
+                self.key_id,
+                Ed25519SignatureV2::new(signature),
+            )
+            .map_err(|_| v2_runtime_error())
+        }
+    }
+
+    fn prepare_vault_release_commit(
+        prepared: &KernelPreparedDispatchV2,
+    ) -> Result<savana_vault::KernelPreparedReleaseDispatchV2, DaemonError> {
+        let binding = match prepared.core().subject() {
+            DispatchSubjectV2::FinalRelease { binding, .. } => *binding,
+            DispatchSubjectV2::ToolExecution { .. } => return Err(v2_runtime_error()),
+        };
+        savana_vault::KernelPreparedReleaseDispatchV2::from_verified_kernel_commit(
+            binding,
+            prepared.consumed_ticket_digest(),
+            prepared.preparation().execution_nonce(),
+            prepared.preparation().dispatch_core_digest(),
+            prepared.preparation().dispatch_subject_digest(),
+        )
+        .map_err(|_| v2_runtime_error())
+    }
+
+    fn v2_runtime_error() -> DaemonError {
+        DaemonError::stable(savana_kernel_protocol::StableCode::KernelUnavailable)
+    }
+
     use crate::v2_input_owner::{KernelInputOwnerV2, KernelVerifiedUiAuthorizationV2};
 
     #[derive(Clone)]
@@ -1001,7 +851,7 @@ mod tests {
 
         assert_eq!(accepted.gated_input().protected_values().len(), 1);
         assert_eq!(accepted.provenance().root_evidence().as_slice().len(), 3);
-        assert!(format!("{:?}", accepted.live_vault_segment()).contains("<opaque>"));
+        assert!(format!("{:?}", &accepted.live_vault_segment).contains("<opaque>"));
         assert_eq!(vault.segment_count(), 1);
         let encrypted = std::fs::read(vault_path).unwrap();
         assert!(!encrypted
@@ -1159,7 +1009,7 @@ mod tests {
         .unwrap();
         let document = vault
             .issue_masked_document(
-                accepted.live_vault_segment(),
+                &accepted.live_vault_segment,
                 agent_context,
                 UnixMillisV2::new(36),
             )
@@ -1632,15 +1482,10 @@ mod tests {
     }
 
     #[test]
-    fn signing_identities_reject_key_ids_not_derived_from_the_seed() {
+    fn the_task_signing_identity_rejects_a_key_id_not_derived_from_its_seed() {
         assert!(KernelTaskSigningIdentityV2::from_seed(
             Ed25519KeyIdV2::new([0x61; 32]),
             [0x62; 32],
-        )
-        .is_err());
-        assert!(KernelDispatchSigningIdentityV2::from_seed(
-            Ed25519KeyIdV2::new([0x63; 32]),
-            [0x64; 32],
         )
         .is_err());
     }

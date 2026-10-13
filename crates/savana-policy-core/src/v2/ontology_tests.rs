@@ -2,15 +2,9 @@ use crate::v2::{
     ArgumentNameV2, AttemptKindV2, ContextFieldV2, FieldNameV2, FieldPathV2, G4Error,
     KernelValueV2, OntologyExprV2, OntologyOperandV2, OntologyScalarV2,
 };
-use savana_kernel_protocol::v2::{
-    Digest32V2, DurableTaskIdV2, NamespaceIdV2, OntologySetIdV2, PrincipalIdV2, RoleIdV2,
-    ToolClassIdV2,
-};
+use savana_kernel_protocol::v2::{DurableTaskIdV2, PrincipalIdV2, RoleIdV2, ToolClassIdV2};
 
-use super::{
-    ManifestOntologySetRefV2, OntologyEvaluationContextV2, OntologyEvaluationV2,
-    VerifiedOntologySetV2,
-};
+use super::{OntologyEvaluationContextV2, OntologyEvaluationV2};
 
 #[test]
 fn ontology_scalar_operand_and_context_tags_are_exact() {
@@ -87,7 +81,6 @@ fn ontology_evaluation_matches_exact_values_and_errors_fail_closed() {
     let context = OntologyEvaluationContextV2::new(
         vec![(ArgumentNameV2::new("count").unwrap(), &argument_value)],
         Vec::new(),
-        Vec::new(),
         RoleIdV2::new(3),
         ToolClassIdV2::new(4),
         AttemptKindV2::ToolWrite,
@@ -143,47 +136,6 @@ fn ontology_evaluation_matches_exact_values_and_errors_fail_closed() {
         OntologyExprV2::any(vec![matches, missing])
             .unwrap()
             .evaluate(&context),
-        OntologyEvaluationV2::EvaluationError
-    );
-}
-
-#[test]
-fn ontology_sets_require_the_exact_manifest_reference() {
-    let set_digest = Digest32V2::new([9; 32]);
-    let set = VerifiedOntologySetV2::new(
-        NamespaceIdV2::new(1),
-        OntologySetIdV2::new(2),
-        set_digest,
-        vec![OntologyScalarV2::integer(7)],
-    )
-    .unwrap();
-    let context = OntologyEvaluationContextV2::new(
-        Vec::new(),
-        Vec::new(),
-        vec![set],
-        RoleIdV2::new(7),
-        ToolClassIdV2::new(4),
-        AttemptKindV2::ToolRead,
-        PrincipalIdV2::new([5; 32]),
-        DurableTaskIdV2::new([6; 32]),
-    )
-    .unwrap();
-    let exact = OntologyExprV2::in_set(
-        OntologyOperandV2::context(ContextFieldV2::Role),
-        ManifestOntologySetRefV2::new(NamespaceIdV2::new(1), OntologySetIdV2::new(2), set_digest),
-    );
-    assert_eq!(exact.evaluate(&context), OntologyEvaluationV2::Match);
-
-    let wrong_digest = OntologyExprV2::in_set(
-        OntologyOperandV2::context(ContextFieldV2::Role),
-        ManifestOntologySetRefV2::new(
-            NamespaceIdV2::new(1),
-            OntologySetIdV2::new(2),
-            Digest32V2::new([8; 32]),
-        ),
-    );
-    assert_eq!(
-        wrong_digest.evaluate(&context),
         OntologyEvaluationV2::EvaluationError
     );
 }

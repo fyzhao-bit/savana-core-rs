@@ -169,7 +169,6 @@ pub(crate) struct VerifiedProviderRequestV2 {
     execution_nonce: Nonce32V2,
     dispatch_core_digest: Digest32V2,
     dispatch_subject_digest: Digest32V2,
-    payload_digest: Digest32V2,
     digest: Digest32V2,
     canonical_bytes: Zeroizing<Vec<u8>>,
 }
@@ -241,7 +240,6 @@ impl VerifiedProviderRequestV2 {
             execution_nonce,
             dispatch_core_digest,
             dispatch_subject_digest,
-            payload_digest,
             digest,
             canonical_bytes: Zeroizing::new(canonical_bytes),
         })
@@ -249,10 +247,6 @@ impl VerifiedProviderRequestV2 {
 
     pub(crate) const fn target(&self) -> &VerifiedProviderTargetV2 {
         &self.target
-    }
-
-    pub(crate) const fn payload_digest(&self) -> Digest32V2 {
-        self.payload_digest
     }
 
     pub(crate) const fn digest(&self) -> Digest32V2 {
@@ -857,7 +851,7 @@ fn is_zero(bytes: &[u8]) -> bool {
     bytes.iter().all(|byte| *byte == 0)
 }
 
-fn provider_request_payload_digest(bytes: &[u8]) -> Digest32V2 {
+pub(crate) fn provider_request_payload_digest(bytes: &[u8]) -> Digest32V2 {
     let mut hasher = Sha256::new();
     hasher.update(PROVIDER_REQUEST_PAYLOAD_DOMAIN_V2);
     hasher.update((bytes.len() as u64).to_be_bytes());
@@ -1867,7 +1861,7 @@ mod tests {
             );
             assert_eq!(
                 decoder.bytes().unwrap(),
-                request.payload_digest().as_bytes()
+                super::provider_request_payload_digest(hostile_inner).as_bytes()
             );
             assert_eq!(decoder.bytes().unwrap(), hostile_inner);
             assert_eq!(decoder.position(), request.canonical_bytes().len());

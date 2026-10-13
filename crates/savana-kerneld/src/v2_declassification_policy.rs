@@ -32,7 +32,6 @@ impl V2LiveEndpointRuntimeV2 {
         agent_server_signing_key: SigningKey,
         ingress_client_public_key: [u8; 32],
         ingress_server_signing_key: SigningKey,
-        envelope_signing_key: SigningKey,
         owner: Arc<KernelRuntimeOwnerV2>,
     ) -> Result<Self, DeploymentControlErrorV2> {
         let invalid = || DeploymentControlErrorV2::InvalidDeclassificationRuleSet;
@@ -70,11 +69,6 @@ impl V2LiveEndpointRuntimeV2 {
             || derive_ed25519_key_id_v2(ingress_server_signing_key.verifying_key().to_bytes())
                 != ingress_lock.server_handshake_key_id
         {
-            return Err(invalid());
-        }
-        let envelope_key_id =
-            derive_ed25519_key_id_v2(envelope_signing_key.verifying_key().to_bytes());
-        if envelope_key_id != startup.kernel_envelope_signing_key_id() {
             return Err(invalid());
         }
         let agent_handshake = Arc::new(
@@ -117,8 +111,6 @@ impl V2LiveEndpointRuntimeV2 {
                     startup.deployment_generation(),
                 )
                 .map_err(|_| invalid())?,
-                envelope_key_id,
-                envelope_signing_key,
                 owner,
             )
             .map_err(|_| invalid())?,

@@ -99,8 +99,7 @@ impl MapperEndpointDeploymentV2 {
         Self::new(host, address.port(), vec![address], server_spki_sha256)
     }
 
-    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn for_test_addresses(
         host: String,
         port: u16,
@@ -110,8 +109,7 @@ impl MapperEndpointDeploymentV2 {
         Self::new(host, port, connect_addresses, server_spki_sha256)
     }
 
-    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn with_test_connector<F>(mut self, connect: F) -> Self
     where
         F: Fn(std::net::SocketAddr, std::time::Duration) -> std::io::Result<std::net::TcpStream>

@@ -106,7 +106,6 @@ pub struct PolicyRefused {
 }
 
 impl PolicyRefused {
-    #[allow(dead_code)] // Constructed by the policy workflow added after Task 2.
     pub(crate) fn new(step: Option<PlanStep>, code: String, reason: String) -> Self {
         Self { step, code, reason }
     }

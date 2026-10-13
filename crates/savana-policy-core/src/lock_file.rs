@@ -26,7 +26,6 @@ struct AnchoredLock {
 }
 
 impl LedgerLock {
-
     pub(crate) fn acquire_at(
         parent: &File,
         leaf: &std::ffi::OsStr,
@@ -138,4 +137,3 @@ fn checked_u64<T: TryInto<u64>>(value: T) -> Result<u64, PolicyError> {
 fn checked_u32<T: TryInto<u32>>(value: T) -> Result<u32, PolicyError> {
     value.try_into().map_err(PolicyError::io)
 }
-

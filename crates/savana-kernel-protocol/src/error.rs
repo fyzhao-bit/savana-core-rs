@@ -242,7 +242,6 @@ impl ProtocolError {
             Self::stable(StableCode::ProtocolMalformedCbor)
         }
     }
-
 }
 
 impl fmt::Display for ProtocolError {

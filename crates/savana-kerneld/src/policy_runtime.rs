@@ -392,7 +392,6 @@ impl DispatchGate {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::sync::{mpsc, Arc};

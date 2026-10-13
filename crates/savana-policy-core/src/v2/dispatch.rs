@@ -669,6 +669,7 @@ impl KernelDispatchJournalV2 {
         Ok(projection)
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_tool_or_replay(
         &mut self,
         record: &ActionIntentRecordV2,
@@ -832,6 +833,7 @@ impl KernelDispatchJournalV2 {
         Ok(result)
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_final_release_or_replay(
         &mut self,
         record: &VerifiedFinalReleaseDispatchV2,
@@ -1211,17 +1213,6 @@ struct ExecutorDispositionReceiptPayloadV2 {
 }
 
 impl VerifiedExecutorDispositionV2 {
-    #[cfg(test)]
-    pub(crate) fn effect_started_for_test(entry: &KernelDispatchJournalEntryV2, seed: u8) -> Self {
-        Self {
-            execution_nonce: entry.core.execution_nonce,
-            dispatch_core_digest: entry.core_digest,
-            dispatch_subject_digest: entry.core.dispatch_subject_digest,
-            evidence_digest: Digest32V2::new([seed; 32]),
-            disposition: AuthenticatedEffectDispositionV2::effect_started_for_test(),
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn effect_started_from_preparation_for_test(
         preparation: DispatchPreparationV2,

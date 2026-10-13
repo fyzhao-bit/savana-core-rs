@@ -10,7 +10,6 @@ compile_error!("intent-bound-test-support is forbidden in release builds");
 #[doc(hidden)]
 pub mod intent_bound_test_support;
 
-#[allow(dead_code)] // Wired by the production execd runtime owner.
 mod effect_gate;
 mod runtime;
 
@@ -38,15 +37,12 @@ pub mod openclaw_release_test_support;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod protocol_service;
 mod provider_transport;
-#[allow(dead_code)] // Constructed only by verified production deployment state.
 mod sandbox_process;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod state_owner;
 mod v2_service;
 mod worker_process;
-#[allow(dead_code)] // Activated by the production connector worker supervisor.
 mod worker_protocol;
-#[allow(dead_code)] // Activated by the production connector worker supervisor.
 mod worker_supervisor;
 use durable::DurableExecdServiceV2;
 pub use durable::{DurableExecdNamespaceV2, ExecdRollbackAnchorV2, ExecdStateHeadV2};

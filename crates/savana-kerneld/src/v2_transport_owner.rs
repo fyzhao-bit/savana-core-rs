@@ -71,10 +71,7 @@ impl std::fmt::Debug for CompletedKernelV2Handshake {
 }
 
 impl CompletedKernelV2Handshake {
-    pub(crate) fn accepted_record(&self) -> &[u8] {
-        &self.accepted_record
-    }
-
+    #[cfg(test)]
     pub(crate) const fn peer(&self) -> &VerifiedV2HandshakePeer {
         &self.peer
     }
@@ -490,7 +487,7 @@ mod tests {
             .unwrap();
         assert_eq!(completed.peer().client_boot_id(), BootIdV2::new([0x23; 32]));
         client_session
-            .accept_server_confirmation(completed.accepted_record())
+            .accept_server_confirmation(&completed.accepted_record)
             .unwrap();
     }
 

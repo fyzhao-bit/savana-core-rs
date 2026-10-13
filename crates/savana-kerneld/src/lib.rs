@@ -34,7 +34,6 @@ compile_error!("linux-file-backed-integration is forbidden in release builds");
 
 mod audit;
 mod bootstrap;
-#[allow(dead_code)] // Consumed by V2 daemon startup before readiness publication.
 mod deployment_trust;
 mod error;
 mod panic_report;
@@ -53,9 +52,7 @@ mod v2_activation;
 mod v2_agent_authority;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod v2_agent_durable;
-#[allow(dead_code)] // Activated after V2 mutual authentication completes.
 mod v2_channel;
-#[allow(dead_code)] // Activated after V2 mutual authentication completes.
 mod v2_connection;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod v2_connector_authority;
@@ -67,9 +64,7 @@ mod v2_core_services;
 mod v2_data_plane;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod v2_declassification_policy;
-#[allow(dead_code)] // Activated by the V2 authenticated dispatch routes.
 mod v2_dispatch;
-#[allow(dead_code)] // Activated by the verified V2 listener startup path.
 mod v2_edge;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod v2_executor_client;
@@ -79,18 +74,14 @@ mod v2_ingress_authority;
 mod v2_input_owner;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod v2_kernel_owner;
-#[allow(dead_code)] // Activated by the final V2 daemon startup path.
 mod v2_listener;
 mod v2_managed_resource;
-#[allow(dead_code)] // Activated by the V2 authenticated dispatch routes.
 mod v2_runtime;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod v2_server;
 mod v2_startup;
-#[allow(dead_code)] // Activated by the V2 authenticated dispatch routes.
 mod v2_state_owner;
 mod v2_task_authority;
-#[allow(dead_code)] // Activated by the native V2 listener entry point.
 mod v2_transport_owner;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod v2_value_owner;

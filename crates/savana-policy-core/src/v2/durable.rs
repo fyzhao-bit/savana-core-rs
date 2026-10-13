@@ -56,16 +56,17 @@ use super::validator::{decision_record_digest, G5DecisionEntryV2};
 use super::{
     descriptor_digest_v2, ActionIntentRecordV2, ActionIntentResolutionV2, ActionIntentStateV2,
     AttemptKindV2, AuthenticatedEffectDispositionV2, BoundedConnectorRetryPolicyV2,
-    DispatchQuotaCounterV2, DispatchQuotaMutationKindV2, DispatchQuotaMutationV2,
-    DispatchQuotaReservationStateV2, DispatchQuotaReservationV2, DispatchQuotaSubjectV2,
-    FinalReleaseSemanticBindingV2, G4Error, G5DecisionBranchV2, G5DecisionIndexV2,
-    G5DecisionResolutionKindV2, G5DecisionResolutionV2, G5Error, G5PolicyDispositionV2,
-    IdentifierV2, PendingCallStateRecordV2, PendingCallStateV2, PublicTaskStateRecordV2,
-    PublicTaskStateV2, ResolvedStoredTokenV2, StableActionArgumentBindingV2,
-    ToolExecutionSemanticBindingV2, VerifiedActionIntentMaterialV2, VerifiedG5EvaluationInputV2,
-    VerifiedInternalValidatorRegistryV2, VerifiedProjectionOutputsV2, VerifiedQuotaLimitV2,
-    VerifiedStoredBindingsV2,
+    DispatchQuotaCounterV2, DispatchQuotaReservationStateV2, DispatchQuotaReservationV2,
+    DispatchQuotaSubjectV2, FinalReleaseSemanticBindingV2, G4Error, G5DecisionBranchV2,
+    G5DecisionIndexV2, G5DecisionResolutionKindV2, G5DecisionResolutionV2, G5Error,
+    G5PolicyDispositionV2, IdentifierV2, PendingCallStateRecordV2, PendingCallStateV2,
+    PublicTaskStateRecordV2, PublicTaskStateV2, ResolvedStoredTokenV2,
+    StableActionArgumentBindingV2, ToolExecutionSemanticBindingV2, VerifiedActionIntentMaterialV2,
+    VerifiedG5EvaluationInputV2, VerifiedInternalValidatorRegistryV2, VerifiedProjectionOutputsV2,
+    VerifiedQuotaLimitV2, VerifiedStoredBindingsV2,
 };
+#[cfg(test)]
+use super::{DispatchQuotaMutationKindV2, DispatchQuotaMutationV2};
 use super::{
     TaskAuthorizationStateV2, TaskDispatchAuthorizationV2, TaskDispatchBindingV2,
     VerifiedTaskAuthorizationV2, VerifiedTaskOutcomeV2,
@@ -1433,6 +1434,7 @@ impl DurableG4StateV2 {
         self.create_or_replay_intent(proposal, material)
     }
 
+    #[cfg(test)]
     pub(crate) fn reserve_quota(
         &mut self,
         verified_limit: VerifiedQuotaLimitV2,
@@ -1456,6 +1458,7 @@ impl DurableG4StateV2 {
         Ok(mutation)
     }
 
+    #[cfg(test)]
     pub(crate) fn transition_quota(
         &mut self,
         execution_nonce: Nonce32V2,

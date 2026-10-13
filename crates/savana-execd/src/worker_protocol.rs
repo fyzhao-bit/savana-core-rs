@@ -390,12 +390,10 @@ pub(crate) struct VerifiedConnectorWorkerJobV2 {
     worker_job_nonce: Nonce32V2,
     ephemeral_attestation_key_id: Ed25519KeyIdV2,
     ephemeral_attestation_verifying_key: Ed25519VerifyingKey,
-    parent_key_id: Ed25519KeyIdV2,
     parent_public_key: [u8; 32],
     retained_provider_response_digest: Option<Digest32V2>,
     retained_provider_response_length: Option<u32>,
     effect_started_receipt_digest: Option<Digest32V2>,
-    deadline: UnixMillisV2,
 }
 
 impl std::fmt::Debug for VerifiedConnectorWorkerJobV2 {
@@ -438,10 +436,6 @@ impl VerifiedConnectorWorkerJobV2 {
         self.bounded_material_digest
     }
 
-    pub(crate) const fn worker_job_nonce(&self) -> Nonce32V2 {
-        self.worker_job_nonce
-    }
-
     pub(crate) const fn retained_provider_response_digest(&self) -> Option<Digest32V2> {
         self.retained_provider_response_digest
     }
@@ -454,10 +448,6 @@ impl VerifiedConnectorWorkerJobV2 {
         self.effect_started_receipt_digest
     }
 
-    pub(crate) const fn deadline(&self) -> UnixMillisV2 {
-        self.deadline
-    }
-
     pub(crate) const fn worker_artifact_digest(&self) -> Digest32V2 {
         self.worker_artifact_digest
     }
@@ -466,24 +456,8 @@ impl VerifiedConnectorWorkerJobV2 {
         SigningKey::from_bytes(seed).verifying_key() == self.ephemeral_attestation_verifying_key
     }
 
-    pub(crate) const fn parent_key_id(&self) -> Ed25519KeyIdV2 {
-        self.parent_key_id
-    }
-
     pub(crate) const fn parent_public_key(&self) -> [u8; 32] {
         self.parent_public_key
-    }
-
-    pub(crate) const fn ephemeral_attestation_key_id(&self) -> Ed25519KeyIdV2 {
-        self.ephemeral_attestation_key_id
-    }
-
-    pub(crate) const fn external_attempt_ordinal(&self) -> u16 {
-        self.external_attempt_ordinal
-    }
-
-    pub(crate) const fn codec_job_ordinal(&self) -> u16 {
-        self.codec_job_ordinal
     }
 }
 
@@ -493,7 +467,6 @@ pub(crate) struct PreparedProviderRequestFrameV2 {
     credential_free_request_digest: Digest32V2,
     maximum_response_bytes: u32,
     transcript_digest: Digest32V2,
-    canonical_payload: Vec<u8>,
     transcript_material: Vec<u8>,
 }
 
@@ -512,10 +485,6 @@ impl PreparedProviderRequestFrameV2 {
 
     pub(crate) const fn transcript_digest(&self) -> Digest32V2 {
         self.transcript_digest
-    }
-
-    pub(crate) fn canonical_payload(&self) -> &[u8] {
-        &self.canonical_payload
     }
 
     pub(crate) fn transcript_material(&self) -> &[u8] {
@@ -537,7 +506,6 @@ pub(crate) struct ConnectorOutcomeFrameV2 {
     result: Option<Zeroizing<Vec<u8>>>,
     result_digest: Option<Digest32V2>,
     transcript_digest: Digest32V2,
-    canonical_payload: Vec<u8>,
     transcript_material: Vec<u8>,
 }
 
@@ -560,10 +528,6 @@ impl ConnectorOutcomeFrameV2 {
 
     pub(crate) const fn transcript_digest(&self) -> Digest32V2 {
         self.transcript_digest
-    }
-
-    pub(crate) fn canonical_payload(&self) -> &[u8] {
-        &self.canonical_payload
     }
 
     pub(crate) fn transcript_material(&self) -> &[u8] {
@@ -679,12 +643,10 @@ pub(crate) fn verify_connector_worker_job(
         worker_job_nonce: payload.worker_job_nonce,
         ephemeral_attestation_key_id: payload.ephemeral_attestation_key_id,
         ephemeral_attestation_verifying_key,
-        parent_key_id: trust.parent_key_id,
         parent_public_key: trust.parent_verifying_key.to_bytes(),
         retained_provider_response_digest: payload.retained_provider_response_digest,
         retained_provider_response_length: payload.retained_provider_response_length,
         effect_started_receipt_digest: payload.effect_started_receipt_digest,
-        deadline: payload.deadline,
     })
 }
 
@@ -1056,7 +1018,6 @@ fn decode_prepared_payload(
         credential_free_request_digest: request_digest,
         maximum_response_bytes,
         transcript_digest,
-        canonical_payload: bytes.to_vec(),
         transcript_material: encode_prepared_transcript_material(
             job,
             request,
@@ -1141,7 +1102,6 @@ fn decode_outcome_payload(
         result: result.map(Zeroizing::new),
         result_digest,
         transcript_digest,
-        canonical_payload: bytes.to_vec(),
         transcript_material,
     })
 }

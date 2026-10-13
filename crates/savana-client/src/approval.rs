@@ -19,7 +19,7 @@ use savana_kernel_protocol::v2::{
 };
 
 use crate::auth::{decode_capability_attribute, extract_main_data_attributes, form_transfer};
-use crate::session::{AuthenticatedApprovalTab, AuthenticatedIngressTab};
+use crate::session::AuthenticatedIngressTab;
 use crate::{
     ApprovalPurpose, ApprovalRequest, BrowserContentType, BrowserOrigin, BrowserRequest,
     BrowserRoute, BrowserService, SavanaError, Session,
@@ -172,12 +172,10 @@ impl Session {
     ) -> Result<ApprovalOutcome, SavanaError> {
         let nonces = self.nonces.clone();
         let webauthn = self.webauthn.clone();
-        let mut tab = None;
-        let result = ApprovalFlow {
+        ApprovalFlow {
             send: &mut |request| self.send_browser_request(request),
             nonces: nonces.as_ref(),
             webauthn: webauthn.as_ref(),
-            tab: &mut tab,
         }
         .run(
             transfer,
@@ -185,11 +183,7 @@ impl Session {
             expected_protocol_purpose,
             public_purpose,
             callback,
-        );
-        if let Some(tab) = tab {
-            self.approval = Some(AuthenticatedApprovalTab { tab });
-        }
-        result
+        )
     }
 }
 
@@ -200,7 +194,6 @@ pub(crate) struct ApprovalFlow<'a> {
         &'a mut dyn FnMut(BrowserRequest) -> Result<crate::BrowserResponse, SavanaError>,
     pub(crate) nonces: &'a dyn crate::NonceSource,
     pub(crate) webauthn: &'a dyn crate::WebAuthnProvider,
-    pub(crate) tab: &'a mut Option<savana_kernel_protocol::v2::ApprovalTabSessionCapabilityV2>,
 }
 
 impl ApprovalFlow<'_> {
@@ -282,7 +275,6 @@ impl ApprovalFlow<'_> {
             UiAuthenticationBrowserFinishResponseV2::ApprovalDisplayReady { tab } => tab,
             _ => return Err(SavanaError::InvalidResponse),
         };
-        *self.tab = Some(tab);
 
         let displayed = self.send_browser_request(BrowserRequest {
             service: BrowserService::Approval,

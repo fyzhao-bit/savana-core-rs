@@ -241,7 +241,6 @@ impl OwnerIngress {
             send: &mut |request| send(&self.client, request),
             nonces: self.client.nonces.as_ref(),
             webauthn: self.webauthn.as_ref(),
-            tab: &mut None,
         }
         .run(transfer, BrowserOrigin::Ingress, purpose, public, callback)
     }

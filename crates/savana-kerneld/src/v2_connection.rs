@@ -1,5 +1,3 @@
-use std::io::{Read, Write};
-use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::time::Instant;
 
@@ -15,35 +13,6 @@ use crate::v2_dispatch::{
     VerifiedKernelServicePeerV2,
 };
 use crate::v2_transport_owner::{KernelV2HandshakeError, KernelV2HandshakeOwner};
-
-const MAX_KERNEL_SERVICE_FRAME_BYTES: usize = 8 * 1024 * 1024 + 4 * 1024;
-
-/// Serves exactly one already-authenticated V2 application request.
-///
-/// Handshake and OS-peer authentication happen before this boundary. The
-/// stream is always consumed by value, emits at most one signed response, and
-/// is shut down before the function returns.
-pub(crate) fn serve_one_authenticated_v2_connection(
-    mut stream: UnixStream,
-    peer: VerifiedKernelServicePeerV2,
-    lease: V2GenerationLease,
-    dispatcher: &KernelServiceDispatcherV2,
-    now: UnixMillisV2,
-    deadline: Instant,
-) -> Result<(), KernelServiceDispatchErrorV2> {
-    let result = (|| {
-        set_deadline(&stream, deadline)?;
-        let request = read_one_frame(&mut stream)?;
-        let response = dispatcher.dispatch_one_signed(peer, lease, &request, now, deadline)?;
-        set_deadline(&stream, deadline)?;
-        write_one_frame(&mut stream, &response)?;
-        stream
-            .flush()
-            .map_err(|_| KernelServiceDispatchErrorV2::Unavailable)
-    })();
-    let _ = stream.shutdown(Shutdown::Both);
-    result
-}
 
 /// Serves one complete mutually authenticated Suite-1 connection.
 ///
@@ -166,54 +135,6 @@ pub(crate) fn serve_one_suite_one_v2_channel(
     })()
 }
 
-fn set_deadline(
-    stream: &UnixStream,
-    deadline: Instant,
-) -> Result<(), KernelServiceDispatchErrorV2> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        return Err(KernelServiceDispatchErrorV2::DeadlineExceeded);
-    }
-    stream
-        .set_read_timeout(Some(remaining))
-        .and_then(|_| stream.set_write_timeout(Some(remaining)))
-        .map_err(|_| KernelServiceDispatchErrorV2::Unavailable)
-}
-
-fn read_one_frame(stream: &mut UnixStream) -> Result<Vec<u8>, KernelServiceDispatchErrorV2> {
-    let mut header = [0_u8; 4];
-    stream
-        .read_exact(&mut header)
-        .map_err(|_| KernelServiceDispatchErrorV2::Malformed)?;
-    let length = u32::from_be_bytes(header) as usize;
-    if length == 0 || length > MAX_KERNEL_SERVICE_FRAME_BYTES {
-        return Err(KernelServiceDispatchErrorV2::Malformed);
-    }
-    let mut body = Vec::new();
-    body.try_reserve_exact(length)
-        .map_err(|_| KernelServiceDispatchErrorV2::Unavailable)?;
-    body.resize(length, 0);
-    stream
-        .read_exact(&mut body)
-        .map_err(|_| KernelServiceDispatchErrorV2::Malformed)?;
-    Ok(body)
-}
-
-fn write_one_frame(
-    stream: &mut UnixStream,
-    payload: &[u8],
-) -> Result<(), KernelServiceDispatchErrorV2> {
-    if payload.is_empty() || payload.len() > MAX_KERNEL_SERVICE_FRAME_BYTES {
-        return Err(KernelServiceDispatchErrorV2::Unavailable);
-    }
-    let length =
-        u32::try_from(payload.len()).map_err(|_| KernelServiceDispatchErrorV2::Unavailable)?;
-    stream
-        .write_all(&length.to_be_bytes())
-        .and_then(|_| stream.write_all(payload))
-        .map_err(|_| KernelServiceDispatchErrorV2::Unavailable)
-}
-
 const fn map_channel_error(error: ChannelErrorV2) -> KernelServiceDispatchErrorV2 {
     match error {
         ChannelErrorV2::Malformed => KernelServiceDispatchErrorV2::Malformed,
@@ -246,22 +167,21 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use savana_kernel_protocol::v2::{
         decode_kernel_service_application_response_v2, derive_ed25519_key_id_v2,
-        encode_kernel_service_application_request_v2, encode_kernel_service_request_envelope_v2,
-        verify_kernel_service_response_envelope_v2, BootIdV2, Digest32V2,
-        DispatchExecutionRequestV2, Ed25519KeyIdV2, EndpointRoleV2, ExecutionTicketHandleV2,
+        encode_kernel_service_application_request_v2, BootIdV2, Digest32V2,
+        DispatchExecutionRequestV2, EndpointRoleV2, ExecutionTicketHandleV2,
         KernelAgentOperationV2, KernelServiceApplicationRequestV2,
         KernelServiceApplicationResponseBodyV2, KernelServiceHandshakeEdgeV2,
-        KernelServiceOperationV2, KernelServiceRequestEnvelopeV2, Nonce32V2, PeerIdentityBindingV2,
-        RequestIdV2, ServiceIdentityV2, UnixMillisV2, V2ClientHandshake,
+        KernelServiceOperationV2, Nonce32V2, PeerIdentityBindingV2, RequestIdV2, ServiceIdentityV2,
+        UnixMillisV2, V2ClientHandshake,
     };
     use x25519_dalek::StaticSecret;
 
-    use super::{serve_one_authenticated_v2_connection, serve_one_suite_one_v2_connection};
+    use super::serve_one_suite_one_v2_connection;
     use crate::policy_runtime::V2GenerationLease;
     use crate::v2_channel::{UnixV2FrameChannel, V2FrameChannel};
     use crate::v2_dispatch::{
         KernelServiceDeploymentV2, KernelServiceDispatchErrorV2, KernelServiceDispatcherV2,
-        KernelServiceResponseBodyV2, VerifiedKernelServicePeerV2,
+        KernelServiceResponseBodyV2,
     };
     use crate::v2_kernel_owner::KernelRuntimeOwnerV2;
     use crate::v2_transport_owner::KernelV2HandshakeOwner;
@@ -272,96 +192,6 @@ mod tests {
                 ExecutionTicketHandleV2::from_authority_entropy([29; 32]).unwrap(),
             ),
         ))
-    }
-
-    #[test]
-    fn connection_processes_one_request_writes_one_signed_response_and_closes() {
-        let key_id = Ed25519KeyIdV2::new([8; 32]);
-        let key = SigningKey::from_bytes(&[9; 32]);
-        let public_key = key.verifying_key().to_bytes();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let handled = Arc::clone(&calls);
-        let owner = KernelRuntimeOwnerV2::spawn_for_test(4, move |_| {
-            handled.fetch_add(1, Ordering::SeqCst);
-            Ok(KernelServiceResponseBodyV2::from_typed_handler(vec![0x80]).unwrap())
-        })
-        .unwrap();
-        let dispatcher = Arc::new(
-            KernelServiceDispatcherV2::spawn(
-                KernelServiceDeploymentV2::from_verified_startup(
-                    BootIdV2::new([1; 32]),
-                    ServiceIdentityV2::new([2; 32]),
-                    Digest32V2::new([3; 32]),
-                    4,
-                )
-                .unwrap(),
-                key_id,
-                key,
-                owner,
-            )
-            .unwrap(),
-        );
-        let peer = VerifiedKernelServicePeerV2::from_test_mutual_authentication(
-            EndpointRoleV2::AgentKernel,
-            BootIdV2::new([5; 32]),
-            ServiceIdentityV2::new([6; 32]),
-            PeerIdentityBindingV2::linux(501, 502, 503, 504, Digest32V2::new([15; 32])).unwrap(),
-        )
-        .unwrap();
-        let request = encode_kernel_service_request_envelope_v2(
-            &KernelServiceRequestEnvelopeV2::from_authenticated_connection(
-                EndpointRoleV2::AgentKernel,
-                RequestIdV2::new([7; 16]),
-                BootIdV2::new([5; 32]),
-                BootIdV2::new([1; 32]),
-                ServiceIdentityV2::new([6; 32]),
-                ServiceIdentityV2::new([2; 32]),
-                Digest32V2::new([3; 32]),
-                4,
-                UnixMillisV2::new(1_000),
-                agent_dispatch_operation(),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let (mut client, server) = UnixStream::pair().unwrap();
-        let serving = Arc::clone(&dispatcher);
-        let server_thread = thread::spawn(move || {
-            serve_one_authenticated_v2_connection(
-                server,
-                peer,
-                V2GenerationLease::for_dispatch_test(Digest32V2::new([3; 32]), 4),
-                serving.as_ref(),
-                UnixMillisV2::new(100),
-                Instant::now() + Duration::from_secs(2),
-            )
-        });
-
-        for _ in 0..2 {
-            client
-                .write_all(&(request.len() as u32).to_be_bytes())
-                .unwrap();
-            client.write_all(&request).unwrap();
-        }
-        let mut header = [0_u8; 4];
-        client.read_exact(&mut header).unwrap();
-        let mut response = vec![0; u32::from_be_bytes(header) as usize];
-        client.read_exact(&mut response).unwrap();
-        let decoded =
-            verify_kernel_service_response_envelope_v2(&response, key_id, public_key).unwrap();
-        assert_eq!(decoded.operation_tag(), 29);
-        let mut eof = [0_u8; 1];
-        // The second request above is written deliberately and never read: the
-        // server answers exactly one and closes. Closing a stream socket that
-        // still holds unread data resets the connection on Linux and reports a
-        // clean EOF on macOS, so accept either. Both say the server closed
-        // after one response without consuming the second request.
-        match client.read(&mut eof) {
-            Ok(read) => assert_eq!(read, 0),
-            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset),
-        }
-        assert_eq!(server_thread.join().unwrap(), Ok(()));
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -416,8 +246,6 @@ mod tests {
                     7,
                 )
                 .unwrap(),
-                Ed25519KeyIdV2::new([16; 32]),
-                SigningKey::from_bytes(&[17; 32]),
                 owner,
             )
             .unwrap(),
@@ -550,8 +378,6 @@ mod tests {
                     7,
                 )
                 .unwrap(),
-                Ed25519KeyIdV2::new([16; 32]),
-                SigningKey::from_bytes(&[17; 32]),
                 owner,
             )
             .unwrap(),

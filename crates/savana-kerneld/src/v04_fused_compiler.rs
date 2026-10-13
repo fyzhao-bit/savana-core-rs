@@ -1,7 +1,6 @@
 //! Private, read-only candidate -> concrete G4 material compiler.
 //! No Agent RPC, public handle, signing authority, durable write or execution.
 //! Resolves signed result edges only from authenticated durable result snapshots.
-#![allow(dead_code)]
 use super::*;
 use savana_kernel_protocol::v2::RunHandleV2;
 use savana_policy_core::v2::{fused_execution_commitment_v04, lower_fused_plan_with_tools_v04};
@@ -18,15 +17,19 @@ pub(super) struct FusedLocalValueBindingV04 {
 pub(super) struct FusedPreparedActionV04 {
     pub step: PlanStepRecordV2,
     pub reference: savana_policy_core::v2::FusedOperationRefV04,
+    #[cfg_attr(not(test), allow(dead_code))] // asserted by the compiler tests
     pub internal_step_id: savana_kernel_protocol::v2::InternalStepIdV2,
     pub prepared: PreparedToolIntentV2,
     pub execution_commitment: [u8; 32],
     pub recipe: savana_policy_core::v2::FusedExecutionRecipeV04,
+    #[cfg_attr(not(test), allow(dead_code))] // asserted by the compiler tests
     pub matches_profile_approval: bool,
     pub matches_recipe_approval: bool,
 }
 pub(super) struct FusedPreparedCandidateV04 {
+    #[cfg_attr(not(test), allow(dead_code))] // asserted by the compiler tests
     pub task: DurableTaskIdV2,
+    #[cfg_attr(not(test), allow(dead_code))] // asserted by the compiler tests
     pub activation_revision: u64,
     pub profile_digest: [u8; 32],
     pub provenance: ProvenanceRecordV2,

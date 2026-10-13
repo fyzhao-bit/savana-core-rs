@@ -1043,6 +1043,7 @@ impl ProvenanceRecordV2 {
         )
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn policy_constant(
         value: &KernelValueV2,
@@ -1412,6 +1413,7 @@ impl ProvenanceRecordV2 {
         )
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn recovered_execution(
         value: &KernelValueV2,

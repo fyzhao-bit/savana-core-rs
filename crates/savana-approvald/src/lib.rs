@@ -109,7 +109,6 @@ impl ApprovalPurposeV2 {
             Self::TaskAuthorization => 5,
         }
     }
-
 }
 
 #[derive(Debug, Clone)]
@@ -750,5 +749,4 @@ mod tests {
             ApprovalErrorV2::InvalidSignature
         );
     }
-
 }

@@ -195,8 +195,7 @@ mod tests {
 
     use ed25519_dalek::SigningKey;
     use savana_kernel_protocol::v2::{
-        derive_ed25519_key_id_v2, BootIdV2, Digest32V2, Ed25519KeyIdV2,
-        KernelServiceHandshakeEdgeV2, UnixMillisV2,
+        derive_ed25519_key_id_v2, BootIdV2, Digest32V2, KernelServiceHandshakeEdgeV2, UnixMillisV2,
     };
     use savana_platform_identity::NativePeerMeasurementV2;
 
@@ -226,12 +225,14 @@ mod tests {
         }
     }
 
+    /// The edge, handshake owner and dispatcher are held for the test's
+    /// lifetime; the listener reaches them through the generation runtime.
     struct ListenerDependencies {
-        edge: Arc<VerifiedServiceEdgeV2>,
+        _edge: Arc<VerifiedServiceEdgeV2>,
         runtime: Arc<V2GenerationRuntime>,
         verifier: Arc<dyn NativeUnixPeerVerifierV2>,
-        handshake: Arc<KernelV2HandshakeOwner>,
-        dispatcher: Arc<KernelServiceDispatcherV2>,
+        _handshake: Arc<KernelV2HandshakeOwner>,
+        _dispatcher: Arc<KernelServiceDispatcherV2>,
         calls: Arc<AtomicUsize>,
     }
 
@@ -290,8 +291,6 @@ mod tests {
                     edge.deployment_generation(),
                 )
                 .unwrap(),
-                Ed25519KeyIdV2::new([16; 32]),
-                SigningKey::from_bytes(&[17; 32]),
                 owner,
             )
             .unwrap(),
@@ -300,11 +299,11 @@ mod tests {
             measurement: NativePeerMeasurementV2::linux(501, 20, 42, 99, [0x96; 32]).unwrap(),
         });
         ListenerDependencies {
-            edge,
+            _edge: edge,
             runtime,
             verifier,
-            handshake,
-            dispatcher,
+            _handshake: handshake,
+            _dispatcher: dispatcher,
             calls,
         }
     }

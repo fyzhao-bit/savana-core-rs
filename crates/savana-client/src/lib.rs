@@ -59,9 +59,7 @@ impl NonceSource for SystemNonceSource {
 
 pub struct Client {
     endpoints: ClientEndpoints,
-    #[allow(dead_code)] // Consumed by the authenticated workflow modules added after Task 2.
     transport: Arc<dyn BrowserTransport>,
-    #[allow(dead_code)] // Consumed by the authenticated workflow modules added after Task 2.
     nonces: Arc<dyn NonceSource>,
 }
 
@@ -93,12 +91,10 @@ impl Client {
         &self.endpoints
     }
 
-    #[allow(dead_code)] // Foundation seam for the subsequent workflow tasks.
     pub(crate) fn transport(&self) -> &dyn BrowserTransport {
         self.transport.as_ref()
     }
 
-    #[allow(dead_code)] // Foundation seam for the subsequent workflow tasks.
     pub(crate) fn next_nonce(&self) -> Result<Nonce32V2, SavanaError> {
         self.nonces.nonce()
     }

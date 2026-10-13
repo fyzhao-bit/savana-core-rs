@@ -1,5 +1,4 @@
 mod authenticated_anchor;
-#[allow(dead_code)] // Stored binding resolution is consumed by the G4 intent adapter.
 mod binding;
 mod commit_attestation;
 mod connector_registry;
@@ -98,7 +97,6 @@ mod deployment_manifest_claim;
 mod deployment_manifest_closure;
 mod deployment_manifest_compatibility;
 mod deployment_manifest_primitives;
-#[allow(dead_code)] // Consumed by the closed staging/install tree verifier.
 mod deployment_merkle;
 mod deployment_native_bootstrap;
 mod deployment_network;
@@ -117,32 +115,24 @@ mod deployment_transaction_intent;
 mod deployment_transaction_store;
 mod deployment_transition_store;
 mod deployment_trust;
-#[allow(dead_code)] // Descriptor activation remains private until registry verification is wired.
 mod descriptor;
-#[allow(dead_code)] // Closed until the G4 verified-state adapter consumes these primitives.
 mod digest;
-#[allow(dead_code)] // Consumed by the durable G7 transaction adapter.
 mod dispatch;
-#[allow(dead_code)] // Wired by the V2 kerneld transaction adapter.
 mod durable;
 mod evidence_gc_checkpoint;
 mod evidence_gc_checkpoint_store;
 mod filesystem_startup;
 mod installation_evidence;
 mod installation_evidence_store;
-#[allow(dead_code)] // Intent construction is consumed by the kerneld transaction adapter.
 mod intent;
 mod labels;
 mod leak_gate;
 mod model_masking;
 
 mod control_selection;
-#[allow(dead_code)] // Closed AST is activated only through the G4 verified-state adapter.
 mod ontology;
 mod production;
-#[allow(dead_code)] // Source minting remains private until verified G4/G6/G7 capabilities exist.
 mod provenance;
-#[allow(dead_code)] // Durable quota ledger is wired by the G7 transaction adapter.
 mod quota;
 mod recovery_rollback_readiness;
 mod rollback_verification_attestation;
@@ -157,7 +147,6 @@ pub use task_state::{
     VerifiedTaskOutcomeV2,
 };
 mod transition_audit;
-#[allow(dead_code)] // Activated by the G5 evaluation transaction.
 mod validator;
 mod value;
 mod verification_evidence;
@@ -346,7 +335,7 @@ pub use labels::{
 pub use leak_gate::LeakGateDutyV2;
 pub use ontology::{
     AttemptKindV2, ContextFieldV2, FieldPathV2, G4Error, OntologyExprV2, OntologyOperandV2,
-    OntologyScalarV2, VerifiedOntologySetV2,
+    OntologyScalarV2,
 };
 pub use production::{
     activate_internal_validator_registry, InternalValidatorBuildV2, KernelPreparedDispatchV2,

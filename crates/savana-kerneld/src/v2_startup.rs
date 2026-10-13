@@ -541,7 +541,6 @@ mod native {
                     keys.agent_server_signing_key,
                     keys.ingress_client_public_key,
                     keys.ingress_server_signing_key,
-                    keys.envelope_signing_key,
                     Arc::clone(&self.owner),
                 )
                 .map_err(|_| StableCode::KernelUnavailable)?,
@@ -1074,7 +1073,6 @@ mod native {
                 keys.agent_server_signing_key,
                 keys.ingress_client_public_key,
                 keys.ingress_server_signing_key,
-                keys.envelope_signing_key,
                 Arc::clone(&owner),
             )
             .map_err(|_| StableCode::KernelUnavailable)?,
@@ -1492,10 +1490,12 @@ mod native {
         incomplete: bool,
     ) -> Result<V2LiveEndpointRuntimeV2, savana_policy_core::v2::DeploymentControlErrorV2> {
         let keys = rollover_endpoint_keys();
-        let envelope = if incomplete {
+        // An endpoint whose ingress server key is not the deployment's cannot
+        // be built, so the successor runtime stays incomplete.
+        let ingress_server = if incomplete {
             SigningKey::from_bytes(&[0xee; 32])
         } else {
-            keys.envelope
+            keys.ingress_server
         };
         V2LiveEndpointRuntimeV2::from_verified_deployment(
             startup,
@@ -1503,8 +1503,7 @@ mod native {
             keys.agent_client.verifying_key().to_bytes(),
             keys.agent_server,
             keys.ingress_client.verifying_key().to_bytes(),
-            keys.ingress_server,
-            envelope,
+            ingress_server,
             owner,
         )
     }

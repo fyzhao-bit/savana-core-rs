@@ -1,15 +1,16 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use ed25519_dalek::SigningKey;
+#[cfg(test)]
 use savana_kernel_protocol::v2::{
-    decode_kernel_service_request_envelope_v2, encode_kernel_service_application_response_v2,
-    peer_identity_binding_digest_v2, sign_kernel_service_response_envelope_v2, BootIdV2,
-    Digest32V2, Ed25519KeyIdV2, EndpointRoleV2, KernelServiceApplicationRequestV2,
-    KernelServiceApplicationResponseV2, KernelServiceOperationV2, KernelServiceRequestEnvelopeV2,
-    KernelServiceResponseEnvelopeV2, KernelServiceResponseV2, PeerIdentityBindingV2,
-    PreparedV2ServerApplicationResponse, PublicStableCodeV2, RequestIdV2, ServiceIdentityV2,
-    UnixMillisV2, V2ServerTransportSession, VerifiedV2HandshakePeer,
+    decode_kernel_service_request_envelope_v2, KernelServiceRequestEnvelopeV2,
+};
+use savana_kernel_protocol::v2::{
+    encode_kernel_service_application_response_v2, peer_identity_binding_digest_v2, BootIdV2,
+    Digest32V2, EndpointRoleV2, KernelServiceApplicationRequestV2,
+    KernelServiceApplicationResponseV2, KernelServiceOperationV2, KernelServiceResponseV2,
+    PeerIdentityBindingV2, PreparedV2ServerApplicationResponse, PublicStableCodeV2, RequestIdV2,
+    ServiceIdentityV2, UnixMillisV2, V2ServerTransportSession, VerifiedV2HandshakePeer,
 };
 use savana_kernel_protocol::StableCode;
 
@@ -141,15 +142,17 @@ impl KernelServiceResponseBodyV2 {
         Ok(Self(canonical_body))
     }
 
+    #[cfg(test)]
     pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 }
 
 pub(crate) enum PreparedKernelServiceResponseV2 {
+    #[cfg(test)]
     Body(Result<KernelServiceResponseBodyV2, StableCode>),
+    #[cfg(test)]
     Application(KernelServiceApplicationResponseV2),
-    Signed(Vec<u8>),
     SuiteOne(Vec<u8>),
     StagedSuiteOne(StagedSuiteOneResponseV2),
 }
@@ -166,19 +169,13 @@ impl PreparedKernelServiceResponseV2 {
 }
 
 pub(crate) enum KernelRuntimeResponseBuilderV2 {
+    #[cfg(test)]
     Body,
+    #[cfg(test)]
     Application {
         role: EndpointRoleV2,
         request_id: RequestIdV2,
         operation_tag: u16,
-    },
-    Signed {
-        role: EndpointRoleV2,
-        request_id: RequestIdV2,
-        operation_tag: u16,
-        deployment: KernelServiceDeploymentV2,
-        signing_key_id: Ed25519KeyIdV2,
-        signing_key: Arc<SigningKey>,
     },
     SuiteOne {
         role: EndpointRoleV2,
@@ -243,54 +240,20 @@ impl KernelRuntimeResponseBuilderV2 {
                     KernelRuntimeResponseBuilderV2::Application { .. },
                 )
                 | (
-                    KernelResponseFailurePointV2::SignedEnvelope,
-                    KernelRuntimeResponseBuilderV2::Signed { .. },
-                )
-                | (
                     KernelResponseFailurePointV2::SuiteOneSeal,
                     KernelRuntimeResponseBuilderV2::SuiteOne { .. },
                 ) => Err(KernelRuntimeResponsePreparationErrorV2::Unavailable),
                 (_, inner) => inner.prepare_inner(outcome, stage_suite_one),
             },
+            #[cfg(test)]
             Self::Body => Ok(PreparedKernelServiceResponseV2::Body(outcome)),
+            #[cfg(test)]
             Self::Application {
                 role,
                 request_id,
                 operation_tag,
             } => build_application_response(role, request_id, operation_tag, outcome)
                 .map(PreparedKernelServiceResponseV2::Application),
-            Self::Signed {
-                role,
-                request_id,
-                operation_tag,
-                deployment,
-                signing_key_id,
-                signing_key,
-            } => {
-                let response = match outcome {
-                    Ok(body) => KernelServiceResponseV2::success(body.0)
-                        .map_err(|_| KernelRuntimeResponsePreparationErrorV2::Unavailable)?,
-                    Err(error) => KernelServiceResponseV2::error(error),
-                };
-                let envelope = KernelServiceResponseEnvelopeV2::from_authenticated_connection(
-                    role,
-                    request_id,
-                    deployment.kernel_boot_id,
-                    deployment.kernel_identity,
-                    deployment.active_state_manifest_digest,
-                    deployment.deployment_generation,
-                    operation_tag,
-                    response,
-                )
-                .map_err(|_| KernelRuntimeResponsePreparationErrorV2::Unavailable)?;
-                sign_kernel_service_response_envelope_v2(
-                    &envelope,
-                    signing_key_id,
-                    signing_key.as_ref(),
-                )
-                .map(PreparedKernelServiceResponseV2::Signed)
-                .map_err(|_| KernelRuntimeResponsePreparationErrorV2::Unavailable)
-            }
             Self::SuiteOne {
                 role,
                 request_id,
@@ -320,7 +283,6 @@ impl KernelRuntimeResponseBuilderV2 {
 pub(crate) enum KernelResponseFailurePointV2 {
     TypedWrapper,
     ApplicationWrapper,
-    SignedEnvelope,
     SuiteOneSeal,
 }
 
@@ -511,8 +473,6 @@ pub(crate) enum KernelServiceDispatchErrorV2 {
 
 pub(crate) struct KernelServiceDispatcherV2 {
     deployment: KernelServiceDeploymentV2,
-    signing_key_id: Ed25519KeyIdV2,
-    signing_key: Arc<SigningKey>,
     owner: Arc<KernelRuntimeOwnerV2>,
 }
 
@@ -531,17 +491,10 @@ impl std::fmt::Debug for KernelServiceDispatcherV2 {
 impl KernelServiceDispatcherV2 {
     pub(crate) fn spawn(
         deployment: KernelServiceDeploymentV2,
-        signing_key_id: Ed25519KeyIdV2,
-        signing_key: SigningKey,
         owner: impl Into<Arc<KernelRuntimeOwnerV2>>,
     ) -> Result<Self, KernelServiceDispatchErrorV2> {
-        if is_zero(signing_key_id.as_bytes()) {
-            return Err(KernelServiceDispatchErrorV2::Unavailable);
-        }
         Ok(Self {
             deployment,
-            signing_key_id,
-            signing_key: Arc::new(signing_key),
             owner: owner.into(),
         })
     }
@@ -560,6 +513,7 @@ impl KernelServiceDispatcherV2 {
         self.owner.queued_for_test()
     }
 
+    #[cfg(test)]
     pub(crate) fn dispatch_one(
         &self,
         peer: VerifiedKernelServicePeerV2,
@@ -598,6 +552,7 @@ impl KernelServiceDispatcherV2 {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn dispatch_one_application(
         &self,
         peer: VerifiedKernelServicePeerV2,
@@ -622,6 +577,7 @@ impl KernelServiceDispatcherV2 {
         self.dispatch_one_application_inner(peer, lease, request, now, deadline, Some(point))
     }
 
+    #[cfg(test)]
     fn dispatch_one_application_inner(
         &self,
         peer: VerifiedKernelServicePeerV2,
@@ -764,99 +720,6 @@ impl KernelServiceDispatcherV2 {
         }
     }
 
-    pub(crate) fn dispatch_one_signed(
-        &self,
-        peer: VerifiedKernelServicePeerV2,
-        lease: V2GenerationLease,
-        canonical_request: &[u8],
-        now: UnixMillisV2,
-        deadline: Instant,
-    ) -> Result<Vec<u8>, KernelServiceDispatchErrorV2> {
-        self.dispatch_one_signed_inner(peer, lease, canonical_request, now, deadline, None)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn dispatch_one_signed_with_failure_for_test(
-        &self,
-        peer: VerifiedKernelServicePeerV2,
-        lease: V2GenerationLease,
-        canonical_request: &[u8],
-        now: UnixMillisV2,
-        deadline: Instant,
-        point: KernelResponseFailurePointV2,
-    ) -> Result<Vec<u8>, KernelServiceDispatchErrorV2> {
-        self.dispatch_one_signed_inner(peer, lease, canonical_request, now, deadline, Some(point))
-    }
-
-    fn dispatch_one_signed_inner(
-        &self,
-        peer: VerifiedKernelServicePeerV2,
-        lease: V2GenerationLease,
-        canonical_request: &[u8],
-        now: UnixMillisV2,
-        deadline: Instant,
-        failure: KernelResponseFailureV2,
-    ) -> Result<Vec<u8>, KernelServiceDispatchErrorV2> {
-        if Instant::now() >= deadline {
-            return Err(KernelServiceDispatchErrorV2::DeadlineExceeded);
-        }
-        let request = decode_kernel_service_request_envelope_v2(canonical_request)
-            .map_err(|_| KernelServiceDispatchErrorV2::Malformed)?;
-        self.validate_connection_binding(&peer, &request, now)?;
-        self.validate_generation_lease(&lease)?;
-        self.dispatch_verified_request(peer, lease, request, now, deadline, failure)
-    }
-
-    fn dispatch_verified_request(
-        &self,
-        peer: VerifiedKernelServicePeerV2,
-        lease: V2GenerationLease,
-        request: KernelServiceRequestEnvelopeV2,
-        now: UnixMillisV2,
-        deadline: Instant,
-        failure: KernelResponseFailureV2,
-    ) -> Result<Vec<u8>, KernelServiceDispatchErrorV2> {
-        #[cfg(not(test))]
-        let _ = failure;
-        let role = request.role();
-        let request_id = request.request_id();
-        let logical_deadline = request.deadline();
-        let operation_tag = request.operation().tag();
-        let builder = KernelRuntimeResponseBuilderV2::Signed {
-            role,
-            request_id,
-            operation_tag,
-            deployment: self.deployment,
-            signing_key_id: self.signing_key_id,
-            signing_key: Arc::clone(&self.signing_key),
-        };
-        #[cfg(test)]
-        let builder = match failure {
-            Some(point) => KernelRuntimeResponseBuilderV2::InjectedFailure {
-                point,
-                inner: Box::new(builder),
-            },
-            None => builder,
-        };
-        let prepared = self
-            .owner
-            .dispatch(
-                peer,
-                lease,
-                request_id,
-                request.into_operation(),
-                logical_deadline,
-                now,
-                deadline,
-                builder,
-            )
-            .map_err(map_runtime_owner_error)?;
-        match prepared {
-            PreparedKernelServiceResponseV2::Signed(response) => Ok(response),
-            _ => Err(KernelServiceDispatchErrorV2::Unavailable),
-        }
-    }
-
     fn validate_generation_lease(
         &self,
         lease: &V2GenerationLease,
@@ -869,6 +732,7 @@ impl KernelServiceDispatcherV2 {
         Ok(())
     }
 
+    #[cfg(test)]
     fn validate_connection_binding(
         &self,
         peer: &VerifiedKernelServicePeerV2,
@@ -952,13 +816,12 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use ed25519_dalek::SigningKey;
     use savana_kernel_protocol::v2::{
-        encode_kernel_service_request_envelope_v2, verify_kernel_service_response_envelope_v2,
-        BootIdV2, Digest32V2, DispatchExecutionRequestV2, Ed25519KeyIdV2, EndpointRoleV2,
-        ExecutionTicketHandleV2, KernelAgentOperationV2, KernelExecutorOperationV2,
-        KernelServiceApplicationRequestV2, KernelServiceApplicationResponseBodyV2,
-        KernelServiceOperationV2, KernelServiceRequestEnvelopeV2, Nonce32V2, PeerIdentityBindingV2,
+        encode_kernel_service_request_envelope_v2, BootIdV2, Digest32V2,
+        DispatchExecutionRequestV2, EndpointRoleV2, ExecutionTicketHandleV2,
+        KernelAgentOperationV2, KernelExecutorOperationV2, KernelServiceApplicationRequestV2,
+        KernelServiceApplicationResponseBodyV2, KernelServiceOperationV2,
+        KernelServiceRequestEnvelopeV2, Nonce32V2, PeerIdentityBindingV2,
         QueryByExecutionNonceRequestV2, RequestIdV2, ServiceIdentityV2, UnixMillisV2,
     };
 
@@ -1029,13 +892,6 @@ mod tests {
         }
     }
 
-    fn signing() -> (Ed25519KeyIdV2, SigningKey) {
-        (
-            Ed25519KeyIdV2::new([8; 32]),
-            SigningKey::from_bytes(&[9; 32]),
-        )
-    }
-
     fn lease() -> V2GenerationLease {
         V2GenerationLease::for_dispatch_test(Digest32V2::new([3; 32]), 4)
     }
@@ -1044,7 +900,6 @@ mod tests {
     fn authenticated_role_binding_is_checked_before_state_owner_invocation() {
         let calls = Arc::new(AtomicUsize::new(0));
         let handled = Arc::clone(&calls);
-        let (key_id, key) = signing();
         let owner = KernelRuntimeOwnerV2::spawn_for_test(4, move |request| {
             handled.fetch_add(1, Ordering::SeqCst);
             assert_eq!(request.peer().role(), EndpointRoleV2::AgentKernel);
@@ -1054,8 +909,7 @@ mod tests {
                 .map_err(|_| savana_kernel_protocol::StableCode::KernelUnavailable)
         })
         .unwrap();
-        let dispatcher =
-            KernelServiceDispatcherV2::spawn(deployment(), key_id, key, owner).unwrap();
+        let dispatcher = KernelServiceDispatcherV2::spawn(deployment(), owner).unwrap();
 
         assert_eq!(
             dispatcher.dispatch_one(
@@ -1087,13 +941,11 @@ mod tests {
 
     #[test]
     fn handler_panic_permanently_fails_the_dispatch_owner() {
-        let (key_id, key) = signing();
         let owner = KernelRuntimeOwnerV2::spawn_for_test(1, |_| {
             panic!("state invariant");
         })
         .unwrap();
-        let dispatcher =
-            KernelServiceDispatcherV2::spawn(deployment(), key_id, key, owner).unwrap();
+        let dispatcher = KernelServiceDispatcherV2::spawn(deployment(), owner).unwrap();
         let first = dispatcher.dispatch_one(
             peer(EndpointRoleV2::AgentKernel),
             lease(),
@@ -1115,45 +967,12 @@ mod tests {
     }
 
     #[test]
-    fn signed_dispatch_binds_response_to_request_role_operation_and_deployment() {
-        let (key_id, key) = signing();
-        let public_key = key.verifying_key().to_bytes();
-        let owner = KernelRuntimeOwnerV2::spawn_for_test(2, |_| {
-            Ok(KernelServiceResponseBodyV2::from_typed_handler(vec![0x80]).unwrap())
-        })
-        .unwrap();
-        let dispatcher =
-            KernelServiceDispatcherV2::spawn(deployment(), key_id, key, owner).unwrap();
-
-        let signed = dispatcher
-            .dispatch_one_signed(
-                peer(EndpointRoleV2::AgentKernel),
-                lease(),
-                &request(EndpointRoleV2::AgentKernel, 29),
-                UnixMillisV2::new(100),
-                Instant::now() + Duration::from_secs(1),
-            )
-            .unwrap();
-        let response =
-            verify_kernel_service_response_envelope_v2(&signed, key_id, public_key).unwrap();
-        assert_eq!(response.role(), EndpointRoleV2::AgentKernel);
-        assert_eq!(response.operation_tag(), 29);
-        assert_eq!(response.request_id(), RequestIdV2::new([7; 16]));
-        assert_eq!(
-            response.response().canonical_body(),
-            Some([0x80].as_slice())
-        );
-    }
-
-    #[test]
     fn suite_one_dispatch_uses_authenticated_role_and_closed_public_response() {
-        let (key_id, key) = signing();
         let owner = KernelRuntimeOwnerV2::spawn_for_test(2, |_| {
             Ok(KernelServiceResponseBodyV2::from_typed_handler(vec![0x80]).unwrap())
         })
         .unwrap();
-        let dispatcher =
-            KernelServiceDispatcherV2::spawn(deployment(), key_id, key, owner).unwrap();
+        let dispatcher = KernelServiceDispatcherV2::spawn(deployment(), owner).unwrap();
         let wrong_request = KernelServiceApplicationRequestV2::new(
             EndpointRoleV2::AgentKernel,
             RequestIdV2::new([0x51; 16]),

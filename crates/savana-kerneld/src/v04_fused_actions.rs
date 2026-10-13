@@ -1,7 +1,6 @@
 //! Private G4/G5/G6/G7 orchestration. No Agent RPC or public status.
 //! Explicitly separate from the legacy entry route until exclusive publication
 //! and authenticated session/approval recovery are wired end to end.
-#![allow(dead_code)]
 use super::*;
 
 #[derive(Clone)]
@@ -15,9 +14,16 @@ pub(super) struct FusedPrivateActionV04 {
     pub(super) intent: ActionIntentHandleV2,
 }
 pub(super) struct FusedPrivateEvaluationV04(pub(super) EvaluateToolCallResponseV2);
-pub(super) struct FusedPrivateTicketV04(pub(super) ExecutionTicketHandleV2);
+// The ticket and status are what the fused tests assert on; the private
+// delivery and recovery drivers only need to know the step succeeded.
+pub(super) struct FusedPrivateTicketV04(
+    #[cfg_attr(not(test), allow(dead_code))] pub(super) ExecutionTicketHandleV2,
+);
 pub(super) struct FusedPrivateExecutionV04(pub(super) ExecutionHandleV2);
-pub(super) struct FusedPrivateStatusV04(pub(super) GetExecutionStatusResponseV2);
+pub(super) struct FusedPrivateStatusV04(
+    #[cfg_attr(not(all(test, feature = "test-support")), allow(dead_code))]
+    pub(super)  GetExecutionStatusResponseV2,
+);
 
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -31,6 +37,7 @@ pub(super) enum FusedRecoveryFaultV04 {
 impl KernelAgentAuthorityV2 {
     /// Recreate only private query identities from the authenticated G7 owner.
     /// This deliberately creates no session, action, approval, ticket or send.
+    #[cfg(all(test, feature = "test-support"))]
     pub(super) fn restore_fused_execution_queries_v04(
         &mut self,
         task: DurableTaskIdV2,

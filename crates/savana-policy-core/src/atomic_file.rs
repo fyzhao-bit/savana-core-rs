@@ -117,8 +117,7 @@ where
         &temporary,
         owner_uid,
         owner_gid,
-        u64::try_from(bytes.len())
-            .map_err(|_| ReplaceError::after_rename())?,
+        u64::try_from(bytes.len()).map_err(|_| ReplaceError::after_rename())?,
     )
     .map_err(|_| ReplaceError::after_rename())?;
     parent

@@ -2027,8 +2027,7 @@ mod tests {
         decode_finalize_input_response_v2, decode_kernel_agent_health_response_v2,
         decode_kernel_ingress_health_response_v2, derive_ed25519_key_id_v2,
         encode_kernel_ingress_operation_v2, encode_kernel_service_application_request_v2,
-        encode_kernel_service_request_envelope_v2, input_channel_begin_digest_v2,
-        input_channel_step_digest_v2, input_chunk_digest_v2,
+        input_channel_begin_digest_v2, input_channel_step_digest_v2, input_chunk_digest_v2,
         kernel_service_public_error_is_allowed_v2, AbortInputRequestV2, AppendInputChunkRequestV2,
         BeginInputRequestV2, BootIdV2, ContentKindV2, Digest32V2, DirectInputChannelV2,
         EndpointRoleV2, FinalizeInputRequestV2, IngressUiAuthorizationHandleV2,
@@ -2037,9 +2036,9 @@ mod tests {
         KernelAgentOperationV2, KernelIngressHealthRequestV2, KernelIngressOperationV2,
         KernelServiceApplicationRequestV2, KernelServiceApplicationResponseBodyV2,
         KernelServiceApplicationResponseV2, KernelServiceHandshakeEdgeV2, KernelServiceOperationV2,
-        KernelServiceRequestEnvelopeV2, Nonce32V2, PeerIdentityBindingV2, PublicServiceStateV2,
-        PublicStableCodeV2, RequestIdV2, ServiceIdentityV2, UnixMillisV2, V2ClientHandshake,
-        V2ClientTransportSession, V2ServerHandshake, VersionV2, ZeroizingBytesV2,
+        Nonce32V2, PeerIdentityBindingV2, PublicServiceStateV2, PublicStableCodeV2, RequestIdV2,
+        ServiceIdentityV2, UnixMillisV2, V2ClientHandshake, V2ClientTransportSession,
+        V2ServerHandshake, VersionV2, ZeroizingBytesV2,
     };
     use savana_policy_core::v2::{
         declassification_implementation_digest_v2, ClosedDeclassificationPurposeV2,
@@ -2567,7 +2566,6 @@ mod tests {
         let shared = Arc::new(Mutex::new(services));
         let owner =
             KernelRuntimeOwnerV2::spawn(4, SharedCoreServicesV2(Arc::clone(&shared))).unwrap();
-        let signing_key = SigningKey::from_bytes(&[0xb4; 32]);
         let dispatcher = KernelServiceDispatcherV2::spawn(
             KernelServiceDeploymentV2::from_verified_startup(
                 BootIdV2::new([0xe6; 32]),
@@ -2576,8 +2574,6 @@ mod tests {
                 7,
             )
             .unwrap(),
-            derive_ed25519_key_id_v2(signing_key.verifying_key().to_bytes()),
-            signing_key,
             owner,
         )
         .unwrap();
@@ -3438,7 +3434,6 @@ mod tests {
         for failure in [
             KernelResponseFailurePointV2::TypedWrapper,
             KernelResponseFailurePointV2::ApplicationWrapper,
-            KernelResponseFailurePointV2::SignedEnvelope,
             KernelResponseFailurePointV2::SuiteOneSeal,
         ] {
             let mut services = CoreKernelRuntimeServicesV2::new(4, 4096, 4, 32).unwrap();
@@ -3528,7 +3523,6 @@ mod tests {
             let shared = Arc::new(Mutex::new(services));
             let owner =
                 KernelRuntimeOwnerV2::spawn(4, SharedCoreServicesV2(Arc::clone(&shared))).unwrap();
-            let signing_key = SigningKey::from_bytes(&[0xe5; 32]);
             let dispatcher = KernelServiceDispatcherV2::spawn(
                 KernelServiceDeploymentV2::from_verified_startup(
                     BootIdV2::new([0xe6; 32]),
@@ -3537,8 +3531,6 @@ mod tests {
                     7,
                 )
                 .unwrap(),
-                derive_ed25519_key_id_v2(signing_key.verifying_key().to_bytes()),
-                signing_key,
                 owner,
             )
             .unwrap();
@@ -3562,36 +3554,7 @@ mod tests {
                 .unwrap()
             };
 
-            let failure_result = if failure == KernelResponseFailurePointV2::SignedEnvelope {
-                let canonical = encode_kernel_service_request_envelope_v2(
-                    &KernelServiceRequestEnvelopeV2::from_authenticated_connection(
-                        EndpointRoleV2::IngressKernel,
-                        RequestIdV2::new([0xe9; 16]),
-                        BootIdV2::new([0xe8; 32]),
-                        BootIdV2::new([0xe6; 32]),
-                        caller,
-                        ServiceIdentityV2::new([0xe7; 32]),
-                        manifest,
-                        7,
-                        UnixMillisV2::new(1_000),
-                        KernelServiceOperationV2::ingress(KernelIngressOperationV2::FinalizeInput(
-                            finalize_request.clone(),
-                        )),
-                    )
-                    .unwrap(),
-                )
-                .unwrap();
-                dispatcher
-                    .dispatch_one_signed_with_failure_for_test(
-                        peer.clone(),
-                        V2GenerationLease::for_dispatch_test(manifest, 7),
-                        &canonical,
-                        UnixMillisV2::new(120),
-                        Instant::now() + Duration::from_secs(1),
-                        failure,
-                    )
-                    .map(|_| ())
-            } else if failure == KernelResponseFailurePointV2::SuiteOneSeal {
+            let failure_result = if failure == KernelResponseFailurePointV2::SuiteOneSeal {
                 let request = application_request(RequestIdV2::new([0xe9; 16]));
                 let (response_session, mut client_session) = suite_one_response_session(&request);
                 let result = dispatcher
@@ -4192,7 +4155,6 @@ mod tests {
             Ok(KernelServiceResponseBodyV2::from_typed_handler(vec![0x80]).unwrap())
         })
         .unwrap();
-        let signing_key = SigningKey::from_bytes(&[0xb4; 32]);
         let dispatcher = Arc::new(
             KernelServiceDispatcherV2::spawn(
                 KernelServiceDeploymentV2::from_verified_startup(
@@ -4202,8 +4164,6 @@ mod tests {
                     7,
                 )
                 .unwrap(),
-                derive_ed25519_key_id_v2(signing_key.verifying_key().to_bytes()),
-                signing_key,
                 owner,
             )
             .unwrap(),
@@ -4902,7 +4862,6 @@ mod tests {
             )
             .unwrap();
         let owner = KernelRuntimeOwnerV2::spawn(4, services).unwrap();
-        let signing_key = SigningKey::from_bytes(&[0x52; 32]);
         let dispatcher = KernelServiceDispatcherV2::spawn(
             KernelServiceDeploymentV2::from_verified_startup(
                 BootIdV2::new([0x53; 32]),
@@ -4911,8 +4870,6 @@ mod tests {
                 7,
             )
             .unwrap(),
-            derive_ed25519_key_id_v2(signing_key.verifying_key().to_bytes()),
-            signing_key,
             owner,
         )
         .unwrap();

@@ -5,10 +5,7 @@ compile_error!("macos-development-authority is forbidden in release builds");
 #[cfg(all(feature = "test-support", not(debug_assertions)))]
 compile_error!("test-support cannot be enabled in a release build");
 
-#[allow(dead_code)] // Wired by the production agentd runtime owner.
 mod effect_gate;
-#[allow(dead_code)] // Wired by the production planner/kernel client.
-mod effect_gated_kernel;
 
 mod agent_control;
 mod browser_authority;

@@ -27,9 +27,7 @@ mod tests {
 }
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use savana_kernel_protocol::v2::{
-    AgentBrowserViewCursorCapabilityV2, AgentExecutionRefV2, AgentExecutionTicketRefV2,
-    AgentMaskedDocumentRefV2, AgentPendingConnectorRegistrationRefV2, AgentPendingToolCallRefV2,
-    AgentPlanStepRefV2, AgentReleaseRefV2, AgentReleaseTicketRefV2,
+    AgentBrowserViewCursorCapabilityV2, AgentMaskedDocumentRefV2, AgentPlanStepRefV2,
     AgentUiAuthenticationTransferCapabilityV2, Digest32V2, Nonce32V2,
 };
 use zeroize::Zeroize as _;
@@ -41,12 +39,6 @@ pub enum HandleKind {
     Document,
     ViewCursor,
     PlanStep,
-    PendingToolCall,
-    ExecutionTicket,
-    ReleaseTicket,
-    Execution,
-    Release,
-    PendingConnectorRegistration,
     Connector,
 }
 
@@ -56,12 +48,6 @@ impl HandleKind {
             Self::Document => "document",
             Self::ViewCursor => "view-cursor",
             Self::PlanStep => "plan-step",
-            Self::PendingToolCall => "pending-tool-call",
-            Self::ExecutionTicket => "execution-ticket",
-            Self::ReleaseTicket => "release-ticket",
-            Self::Execution => "execution",
-            Self::Release => "release",
-            Self::PendingConnectorRegistration => "pending-connector-registration",
             Self::Connector => "connector",
         }
     }
@@ -77,7 +63,6 @@ impl core::fmt::Display for HandleKind {
 pub(crate) struct SessionBinding(Nonce32V2);
 
 impl SessionBinding {
-    #[allow(dead_code)] // Session creation is implemented in Task 3.
     pub(crate) fn random() -> Result<Self, SavanaError> {
         for _ in 0..8 {
             let mut bytes = [0_u8; 32];
@@ -101,7 +86,6 @@ impl PartialEq for SessionBinding {
     }
 }
 
-#[allow(dead_code)] // Variants are consumed by the workflow modules added after Task 2.
 #[derive(Clone)]
 enum Capability {
     Document(AgentMaskedDocumentRefV2),
@@ -110,12 +94,6 @@ enum Capability {
         cursor: AgentBrowserViewCursorCapabilityV2,
     },
     PlanStep(AgentPlanStepRefV2),
-    PendingToolCall(AgentPendingToolCallRefV2),
-    ExecutionTicket(AgentExecutionTicketRefV2),
-    ReleaseTicket(AgentReleaseTicketRefV2),
-    Execution(AgentExecutionRefV2),
-    Release(AgentReleaseRefV2),
-    PendingConnectorRegistration(AgentPendingConnectorRegistrationRefV2),
     Connector(Digest32V2),
 }
 
@@ -125,12 +103,6 @@ impl Capability {
             Self::Document(_) => HandleKind::Document,
             Self::ViewCursor { .. } => HandleKind::ViewCursor,
             Self::PlanStep(_) => HandleKind::PlanStep,
-            Self::PendingToolCall(_) => HandleKind::PendingToolCall,
-            Self::ExecutionTicket(_) => HandleKind::ExecutionTicket,
-            Self::ReleaseTicket(_) => HandleKind::ReleaseTicket,
-            Self::Execution(_) => HandleKind::Execution,
-            Self::Release(_) => HandleKind::Release,
-            Self::PendingConnectorRegistration(_) => HandleKind::PendingConnectorRegistration,
             Self::Connector(_) => HandleKind::Connector,
         }
     }
@@ -138,7 +110,6 @@ impl Capability {
 
 #[derive(Clone)]
 pub struct Handle {
-    #[allow(dead_code)] // Read by kind-specific consumers added after Task 2.
     session: SessionBinding,
     capability: Capability,
 }
@@ -148,7 +119,6 @@ impl Handle {
         self.capability.kind()
     }
 
-    #[allow(dead_code)] // Constructed from decoded Agent responses after Task 2.
     pub(crate) fn document(session: &SessionBinding, capability: AgentMaskedDocumentRefV2) -> Self {
         Self {
             session: session.clone(),
@@ -156,7 +126,6 @@ impl Handle {
         }
     }
 
-    #[allow(dead_code)] // Constructed from decoded Agent responses after Task 2.
     pub(crate) fn plan_step(session: &SessionBinding, capability: AgentPlanStepRefV2) -> Self {
         Self {
             session: session.clone(),
@@ -196,7 +165,6 @@ impl Handle {
         }
     }
 
-    #[allow(dead_code)] // Consumed by planner execution after Task 2.
     pub(crate) fn expect_plan_step(
         &self,
         session: &SessionBinding,
@@ -239,7 +207,6 @@ impl Handle {
         }
     }
 
-    #[allow(dead_code)] // Shared by kind-specific consumers added after Task 2.
     fn require_session(&self, session: &SessionBinding) -> Result<(), SavanaError> {
         if &self.session == session {
             Ok(())

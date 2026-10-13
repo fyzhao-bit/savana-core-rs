@@ -18,7 +18,7 @@ use super::{
     ArgumentNameV2, AttemptKindV2, ConnectorRegistryStateV2, G3Error, G4Error, G5Error,
     G5PolicyDispositionV2, KernelValueV2, OntologyExprV2, ValidatorBuildManifestIdentityV2,
     VerifiedInternalValidatorImplementationV2, VerifiedInternalValidatorRegistryV2,
-    VerifiedOntologySetV2, VerifiedQuotaLimitV2,
+    VerifiedQuotaLimitV2,
 };
 
 /// Shared access to one verified connector chain and its current standing-policy
@@ -120,7 +120,6 @@ impl VerifiedOntologyEvaluationV2 {
         expression: &OntologyExprV2,
         arguments: Vec<(ArgumentNameV2, &KernelValueV2)>,
         ontology: Vec<((NamespaceIdV2, EntityIdV2), &KernelValueV2)>,
-        sets: Vec<VerifiedOntologySetV2>,
         role: RoleIdV2,
         tool: ToolClassIdV2,
         attempt_kind: AttemptKindV2,
@@ -130,7 +129,6 @@ impl VerifiedOntologyEvaluationV2 {
         let context = OntologyEvaluationContextV2::new(
             arguments,
             ontology,
-            sets,
             role,
             tool,
             attempt_kind,
