@@ -1343,6 +1343,15 @@ name = "savana-residual-contract"
 version = "0.1.0"
 
 [[package]]
+name = "savana-table-compute"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "savana-vault"
 version = "0.1.0"
 dependencies = [
