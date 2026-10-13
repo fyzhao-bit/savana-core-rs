@@ -1,6 +1,7 @@
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use savana_kernel_protocol::{StableCode, UnixMillis};
+use savana_kernel_protocol::v2::UnixMillisV2;
+use savana_kernel_protocol::StableCode;
 use savana_policy_core::{Clock, RandomSource};
 
 pub(crate) struct SystemClock {
@@ -16,13 +17,13 @@ impl SystemClock {
 }
 
 impl Clock for SystemClock {
-    fn wall_now(&self) -> Result<UnixMillis, StableCode> {
+    fn wall_now(&self) -> Result<UnixMillisV2, StableCode> {
         let elapsed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| StableCode::KernelUnavailable)?;
         let millis =
             u64::try_from(elapsed.as_millis()).map_err(|_| StableCode::KernelUnavailable)?;
-        Ok(UnixMillis::new(millis))
+        Ok(UnixMillisV2::new(millis))
     }
 
     fn monotonic_now_millis(&self) -> Result<u64, StableCode> {

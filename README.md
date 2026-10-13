@@ -689,10 +689,9 @@ are fixed deployment helpers, not service APIs.
 
 The authoritative V2 interface definitions are the closed types in
 [`crates/savana-kernel-protocol/src/v2`](crates/savana-kernel-protocol/src/v2).
-The frozen V1 compatibility contract is documented separately in
-[`docs/protocol-v1.md`](docs/protocol-v1.md). Cross-language fixtures and
-deterministic regeneration commands are in
-[`vectors/kerneld/README.md`](vectors/kerneld/README.md).
+The V1 protocol and its runtime were retired and removed from the tree;
+[`docs/protocol-v1.md`](docs/protocol-v1.md) remains as the historical record
+of the byte-level conventions V2 inherits.
 
 Run the kernel gates with Rust 1.82:
 

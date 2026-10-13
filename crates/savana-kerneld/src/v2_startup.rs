@@ -1453,9 +1453,9 @@ mod native {
     impl Clock for RolloverPublicationClockV2 {
         fn wall_now(
             &self,
-        ) -> Result<savana_kernel_protocol::UnixMillis, savana_kernel_protocol::StableCode>
+        ) -> Result<savana_kernel_protocol::v2::UnixMillisV2, savana_kernel_protocol::StableCode>
         {
-            Ok(savana_kernel_protocol::UnixMillis::new(
+            Ok(savana_kernel_protocol::v2::UnixMillisV2::new(
                 self.0.load(AtomicOrdering::Acquire),
             ))
         }
