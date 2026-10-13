@@ -281,7 +281,6 @@ TOOL_CATALOG = (
     ("dojo.file.search_name", "search_files_by_filename", ("filename",)),
     ("dojo.file.search", "search_files", ("query",)),
 )
-READ_TASK_IDS = tuple(t.task_id for t in _TASKS)
 
 # Deployment-shipped WRITE tools. Each maps a reviewed dojo operation to one
 # official AgentDojo authorizing function, the authorizing effect, and its
@@ -377,7 +376,6 @@ EFFECT_NAMES = {"read": "Read", "create": "Create", "update": "Update", "delete"
                 "send": "Send", "execute": "Execute"}
 ROLE_CODES = {"resource": 1, "destination": 2, "magnitude": 3, "payload": 4, "parameter": 5}
 TYPE_CODES = {"text": 1, "text_list": 4}
-TYPE_NAMES = {"text": "Text", "text_list": "TextList"}
 
 
 def signed_edge(edge):

@@ -90,11 +90,6 @@ def chain_cases(kind, groups=WRITE_GROUPS, mutations=None, injections=None, goal
     return tuple(cases)
 
 
-def write_cases(groups=WRITE_GROUPS, mutations=None, injections=None):
-    """The read -> derived-write task (see `chain_cases`)."""
-    return chain_cases("write", groups, mutations, injections)
-
-
 PLANNER_MODELS = ("deepseek-flash", "deepseek-v4-pro")
 MAX_DRAFTS = 5
 # The environment attack: AgentDojo's official important-instructions

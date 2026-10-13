@@ -19,7 +19,6 @@ from .agentdojo_provider import canonical
 from .agentdojo_tasks import (_TASKS, FIRST_FILE_ID, WRITE_TASKS, catalog_json, catalog_tool, owner_inputs,
                               prepare_draft, result_slot)
 
-RELEASE_TOOL = "savana.final_result_release"
 OWNER_DESTINATION = "owner"
 _UNREGISTERED = b"SAVANA_EXPERIMENT_UNREGISTERED_TOOL_V1\0"
 _UNKNOWN_SLOT = b"SAVANA_EXPERIMENT_UNKNOWN_SLOT_V1\0"
