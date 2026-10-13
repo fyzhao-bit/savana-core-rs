@@ -1,4 +1,3 @@
-import asyncio
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -6,7 +5,6 @@ import os
 import subprocess
 import sys
 import tempfile
-from types import SimpleNamespace
 import unittest
 
 from savana_bench.__main__ import parse
@@ -14,7 +12,6 @@ from savana_bench.manifest import bind_results, digest
 from savana_bench.metrics import Trial, paired_comparison, summarize
 from savana_bench.readiness import report, require_full_product
 from savana_bench.regressions import exactly_one_passed, selected_name, test_command as regression_test_command
-from savana_bench.sdk import run_v2_component
 
 
 def trial(**changes):
@@ -224,82 +221,6 @@ class CliTests(unittest.TestCase):
             results_path.write_text(json.dumps(rows[0].to_dict()))
             self.assertEqual(self.cli("summarize", "--manifest", str(manifest_path),
                                       "--results", str(results_path)).returncode, 2)
-
-
-class Refused(Exception):
-    pass
-
-
-class SdkAdapterTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        self.calls = []
-        self.failure = None
-        self.sdk = SimpleNamespace(ContentKind=SimpleNamespace(CHAT_TEXT="chat_text"),
-                                   IntentPrivacy=SimpleNamespace(PRIVATE="private"),
-                                   PolicyRefused=Refused, ApprovalDenied=Refused)
-        self.limits = SimpleNamespace(cancel=lambda: self.calls.append("cancel"))
-        owner = self
-
-        class Session:
-            async def ingest_text(self, text, kind):
-                owner.calls.append(("ingest", text, kind))
-
-            async def establish_task_authorization(self, draft):
-                owner.calls.append(("authorize", draft))
-                if owner.failure == "root":
-                    raise Refused("do not log this private text")
-
-            async def run_agent(self, privacy, limits, approval, events):
-                owner.calls.append(("agent", privacy, limits, approval, events))
-                if owner.failure == "agent":
-                    raise Refused("private")
-                if owner.failure == "cancel":
-                    raise asyncio.CancelledError()
-                if owner.failure == "timeout":
-                    raise TimeoutError("private")
-
-            async def close(self):
-                owner.calls.append("close")
-                if owner.failure == "close":
-                    raise OSError("private")
-
-        async def open_session():
-            return Session()
-        self.open_session = open_session
-
-    async def run_case(self, approval=lambda _: False):
-        return await run_v2_component(open_session=self.open_session, prompt="synthetic task",
-                                      draft="trusted fixture root", limits=self.limits,
-                                      approval=approval, sdk=self.sdk)
-
-    async def test_actual_sdk_method_order_and_no_autoapproval(self):
-        approval = lambda _: False
-        result = await self.run_case(approval)
-        self.assertEqual(result.status, "completed")
-        self.assertEqual([x[0] for x in self.calls[:-1]], ["ingest", "authorize", "agent"])
-        self.assertIs(self.calls[2][3], approval)
-        self.assertEqual(self.calls[2][1], "private")
-        self.assertIsNone(self.calls[2][4])
-        self.assertEqual(self.calls[-1], "close")
-
-    async def test_missing_callback_rejected_before_session(self):
-        with self.assertRaises(ValueError):
-            await self.run_case(None)
-        self.assertEqual(self.calls, [])
-
-    async def test_error_and_refusal_distinguished_without_details(self):
-        for failure, status in (("root", "error"), ("agent", "refused"), ("timeout", "timeout"), ("close", "error")):
-            self.failure = failure
-            result = await self.run_case()
-            self.assertEqual(result.status, status)
-            self.assertNotIn("private", repr(result))
-            self.assertEqual(self.calls[-1], "close")
-
-    async def test_cancel_flag_and_close_before_propagating(self):
-        self.failure = "cancel"
-        with self.assertRaises(asyncio.CancelledError):
-            await self.run_case()
-        self.assertEqual(self.calls[-2:], ["cancel", "close"])
 
 
 if __name__ == "__main__":

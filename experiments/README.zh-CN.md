@@ -281,6 +281,7 @@ PYTHONPATH=experiments python3 -m unittest discover -s experiments/tests -v
 配置/部署检查去注入模型。fixture 测试只验证调用序列，不证明在线 SDK 成功。
 超时控制必须遵循 SDK 的取消并等待 worker 退出语义，不能遗留仍在执行的
 后台任务却让 oracle 提前宣告安全。
+注：`savana_bench/sdk.py`（`run_v2_component`）在提交 `e155076` 中仍存在，之后已移除。
 
 评分文件每行是 `Trial` 的全部字段：
 

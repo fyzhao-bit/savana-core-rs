@@ -24,7 +24,7 @@ from savana_bench.protected_agentdojo import (CASES, ResearchAudit, official_cas
     run, score_outcome, load_config, safe_error_code, safe_worker_error)
 from savana_bench.protected_endpoint import EpisodeEndpoint, admit_owner_episode
 from savana_bench.protected_transport import (ProviderServer, read_frame, server_context,
-    certificate_spki_pin, _head, _blob, _hash)
+    certificate_spki_pin, _head, _hash)
 from savana_bench.official_verify import verify_chain
 from savana_bench.protected_verify import verify
 
@@ -32,6 +32,10 @@ ROOT = Path(__file__).resolve().parents[2]
 URL = "https://provider.example:9443/mcp"
 RELEASE_URL = "https://provider.example:9443/release"
 ALPN = "savana-provider-v2"
+
+
+def _blob(major, value):
+    return _head(major, len(value)) + value
 
 
 def wire(payload, *, url=URL, pin=b"p"*32, nonce=b"n"*32):
