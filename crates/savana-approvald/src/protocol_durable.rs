@@ -611,7 +611,7 @@ mod tests {
                 &path,
                 [0x48; 32],
                 namespace,
-                Box::new(anchor),
+                Box::new(anchor.clone()),
                 deployment(),
             )
             .unwrap();
@@ -628,6 +628,23 @@ mod tests {
                 ApprovalErrorV2::InvalidCredential
             );
         }
+        // The same bytes under another store of the same installation are
+        // refused even with the anchor at the current head.
+        let substituted = DurableApprovalNamespaceV2::from_verified_installation(
+            Digest32V2::new([0x43; 32]),
+            Digest32V2::new([0x4d; 32]),
+        )
+        .unwrap();
+        assert!(matches!(
+            DurableProtocolApprovalServiceV2::open(
+                &path,
+                [0x48; 32],
+                substituted,
+                Box::new(anchor),
+                deployment(),
+            ),
+            Err(ApprovalErrorV2::DurableAuthentication | ApprovalErrorV2::RollbackDetected)
+        ));
         let ahead_anchor = TestAnchor(Arc::new(Mutex::new(
             ApprovalStateHeadV2::new(2, Digest32V2::new([0x4c; 32])).unwrap(),
         )));

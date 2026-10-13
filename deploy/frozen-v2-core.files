@@ -18,7 +18,6 @@ crates/savana-approvald/src/protocol_approval_pair.rs
 crates/savana-approvald/src/protocol_durable.rs
 crates/savana-approvald/src/protocol_service.rs
 crates/savana-approvald/src/protocol_state_owner.rs
-crates/savana-approvald/src/state_owner.rs
 crates/savana-approvald/src/suite_one.rs
 crates/savana-approvald/src/ui_authority.rs
 crates/savana-approvald/src/webauthn_attestation.rs

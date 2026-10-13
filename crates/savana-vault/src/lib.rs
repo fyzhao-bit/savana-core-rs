@@ -4,7 +4,6 @@ use std::fmt;
 
 use hmac::{Hmac, Mac as _};
 use minicbor::Encode as _;
-use savana_approvald::{ApprovalPurposeV2, ConsumedApprovalSettlementV2};
 pub use savana_kernel_protocol::v2::MaskedDocumentHandleV2;
 use savana_kernel_protocol::v2::{
     AuthorityHandleKeyV2, BootIdV2, Digest32V2, DurableReleaseIdV2, DurableRunIdV2,
@@ -429,29 +428,6 @@ impl VerifiedFinalReleaseApprovalV2 {
         now: UnixMillisV2,
     ) -> Result<Self, VaultErrorV2> {
         if settlement.decision() != savana_kernel_protocol::v2::ApprovalDecisionV2::Approve
-            || is_zero(expected_binding_digest.as_bytes())
-            || is_zero(settlement.authenticated_principal().as_bytes())
-            || is_zero(settlement.settlement_digest().as_bytes())
-            || now.get() == 0
-            || now.get() >= settlement.expires_at().get()
-        {
-            return Err(VaultErrorV2::InvalidApproval);
-        }
-        Ok(Self {
-            binding_digest: expected_binding_digest,
-            authenticated_principal: settlement.authenticated_principal(),
-            settlement_digest: settlement.settlement_digest(),
-            expires_at: settlement.expires_at(),
-        })
-    }
-
-    pub fn from_consumed_settlement(
-        settlement: ConsumedApprovalSettlementV2,
-        expected_binding_digest: Digest32V2,
-        now: UnixMillisV2,
-    ) -> Result<Self, VaultErrorV2> {
-        if settlement.purpose() != ApprovalPurposeV2::FinalRelease
-            || settlement.binding_digest() != expected_binding_digest
             || is_zero(expected_binding_digest.as_bytes())
             || is_zero(settlement.authenticated_principal().as_bytes())
             || is_zero(settlement.settlement_digest().as_bytes())

@@ -1,5 +1,6 @@
 use crate::{protocol_service::tests::enrollment_service, *};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use p256::ecdsa::signature::Signer as _;
 use p256::ecdsa::{Signature, SigningKey as P256Key};
 use savana_kernel_protocol::v2::*;
 use sha2::Sha256;

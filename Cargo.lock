@@ -1362,7 +1362,6 @@ dependencies = [
  "minicbor",
  "nix",
  "rustix",
- "savana-approvald",
  "savana-kernel-protocol",
  "sha2",
  "tempfile",

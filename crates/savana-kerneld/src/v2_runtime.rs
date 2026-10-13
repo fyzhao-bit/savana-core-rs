@@ -624,63 +624,6 @@ pub(crate) fn prepare_vault_release_commit(
     .map_err(|_| v2_runtime_error())
 }
 
-pub(crate) fn verify_tool_approval_settlement(
-    settlement: savana_approvald::ConsumedApprovalSettlementV2,
-    action_intent_id: savana_kernel_protocol::v2::ActionIntentIdV2,
-    semantic_binding_digest: Digest32V2,
-    active_state_manifest_digest: Digest32V2,
-    now: UnixMillisV2,
-) -> Result<savana_policy_core::v2::VerifiedToolApprovalSettlementV2, DaemonError> {
-    let approval_binding_digest = savana_policy_core::v2::tool_approval_binding_digest_v2(
-        action_intent_id,
-        semantic_binding_digest,
-        active_state_manifest_digest,
-    )
-    .map_err(|_| v2_runtime_error())?;
-    if settlement.purpose() != savana_approvald::ApprovalPurposeV2::ToolExecution
-        || settlement.binding_digest() != approval_binding_digest
-        || settlement.expires_at().get() <= now.get()
-    {
-        return Err(v2_runtime_error());
-    }
-    savana_policy_core::v2::VerifiedToolApprovalSettlementV2::from_consumed_exact_settlement(
-        settlement.settlement_digest(),
-        action_intent_id,
-        approval_binding_digest,
-        active_state_manifest_digest,
-    )
-    .map_err(|_| v2_runtime_error())
-}
-
-pub(crate) fn verify_final_release_approval_settlement(
-    settlement: savana_approvald::ConsumedApprovalSettlementV2,
-    authorized_release: savana_vault::AuthorizedVaultReleaseV2,
-    active_state_manifest_digest: Digest32V2,
-    now: UnixMillisV2,
-) -> Result<savana_policy_core::v2::VerifiedFinalReleaseSettlementV2, DaemonError> {
-    let binding = authorized_release.binding();
-    let binding_digest = binding.semantic_digest().ok_or_else(v2_runtime_error)?;
-    if settlement.purpose() != savana_approvald::ApprovalPurposeV2::FinalRelease
-        || settlement.binding_digest() != binding_digest
-        || settlement.settlement_digest() != authorized_release.approval_settlement_digest()
-        || authorized_release.binding_digest() != binding_digest
-        || settlement.expires_at().get() <= now.get()
-    {
-        return Err(v2_runtime_error());
-    }
-    savana_policy_core::v2::VerifiedFinalReleaseSettlementV2::from_consumed_exact_settlement(
-        settlement.settlement_digest(),
-        binding.durable_release_id(),
-        binding_digest,
-        binding.destination_digest(),
-        binding.token_set_digest(),
-        active_state_manifest_digest,
-        settlement.issued_at(),
-        settlement.expires_at(),
-    )
-    .map_err(|_| v2_runtime_error())
-}
-
 fn is_zero(bytes: &[u8]) -> bool {
     bytes.iter().all(|byte| *byte == 0)
 }
