@@ -64,6 +64,3 @@ x25519-dalek.workspace = true
 p256.workspace = true
 savana-policy-core-test-support = { package = "savana-policy-core", path = ".", features = ["test-support"] }
 tempfile = "=3.23.0"
-# Linear RE2-style engine, used ONLY by the leak-gate differential to show that
-# an engine's own \b/\s diverge from CPython on the adversarial boundary cases.
-regex = "=1.13.1"

@@ -4784,11 +4784,8 @@ impl DurableAnchoredPathV2 {
                     .map_err(|_| crate::PolicyError::io("durable parent identity changed"))
             },
         )?;
-        self.recheck_parent().map_err(|_| {
-            atomic_file::ReplaceError::after_rename(crate::PolicyError::io(
-                "durable parent identity changed",
-            ))
-        })
+        self.recheck_parent()
+            .map_err(|_| atomic_file::ReplaceError::after_rename())
     }
 
     pub(crate) fn replace_observed<O>(
@@ -4811,11 +4808,8 @@ impl DurableAnchoredPathV2 {
             },
             observe,
         )?;
-        self.recheck_parent().map_err(|_| {
-            atomic_file::ReplaceError::after_rename(crate::PolicyError::io(
-                "durable parent identity changed",
-            ))
-        })
+        self.recheck_parent()
+            .map_err(|_| atomic_file::ReplaceError::after_rename())
     }
 
     pub(crate) const fn parent(&self) -> &File {

@@ -1303,7 +1303,6 @@ dependencies = [
  "minicbor",
  "nix",
  "p256",
- "regex",
  "rustix",
  "savana-continuation-core",
  "savana-kernel-protocol",

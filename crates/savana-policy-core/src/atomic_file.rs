@@ -1,8 +1,7 @@
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::File;
 use std::io::Write;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::MetadataExt;
 
 use rustix::fs::{fchmod, openat, renameat, statat, unlinkat, AtFlags, FileType, Mode, OFlags};
 
@@ -23,23 +22,22 @@ pub(crate) enum PersistencePhase {
     AfterRename,
 }
 
-#[derive(Debug)]
+/// Which side of the rename a failed replacement stopped on: callers only need
+/// to know whether the new bytes may already be visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ReplaceError {
-    error: PolicyError,
     phase: PersistencePhase,
 }
 
 impl ReplaceError {
-    pub(crate) fn before_rename(error: PolicyError) -> Self {
+    pub(crate) const fn before_rename() -> Self {
         Self {
-            error,
             phase: PersistencePhase::BeforeRename,
         }
     }
 
-    pub(crate) fn after_rename(error: PolicyError) -> Self {
+    pub(crate) const fn after_rename() -> Self {
         Self {
-            error,
             phase: PersistencePhase::AfterRename,
         }
     }
@@ -47,14 +45,6 @@ impl ReplaceError {
     pub(crate) const fn phase(&self) -> PersistencePhase {
         self.phase
     }
-
-    pub(crate) const fn into_policy_error(self) -> PolicyError {
-        self.error
-    }
-}
-
-pub(crate) fn replace(path: &Path, bytes: &[u8]) -> Result<(), ReplaceError> {
-    replace_with_parent_sync(path, bytes, sync_directory)
 }
 
 pub(crate) fn replace_at<F>(
@@ -94,8 +84,8 @@ where
 {
     let (temporary_leaf, mut temporary) =
         create_temporary_at(parent, final_leaf, owner_uid, owner_gid)
-            .map_err(ReplaceError::before_rename)?;
-    let before_rename = (|| {
+            .map_err(|_| ReplaceError::before_rename())?;
+    let before_rename = (|| -> Result<(), PolicyError> {
         temporary.write_all(bytes).map_err(PolicyError::io)?;
         temporary.sync_all().map_err(PolicyError::io)?;
         observe(AtomicReplaceBoundary::FileFlushed)?;
@@ -110,17 +100,17 @@ where
         pre_rename()?;
         Ok(())
     })();
-    if let Err(error) = before_rename {
+    if before_rename.is_err() {
         let _ = unlinkat(parent, &temporary_leaf, AtFlags::empty());
-        return Err(ReplaceError::before_rename(error));
+        return Err(ReplaceError::before_rename());
     }
 
-    if let Err(error) = renameat(parent, &temporary_leaf, parent, final_leaf) {
+    if renameat(parent, &temporary_leaf, parent, final_leaf).is_err() {
         let _ = unlinkat(parent, &temporary_leaf, AtFlags::empty());
-        return Err(ReplaceError::before_rename(PolicyError::io(error)));
+        return Err(ReplaceError::before_rename());
     }
     observe(AtomicReplaceBoundary::RenamedBeforeDirectoryFlush)
-        .map_err(ReplaceError::after_rename)?;
+        .map_err(|_| ReplaceError::after_rename())?;
     validate_at(
         parent,
         final_leaf,
@@ -128,76 +118,13 @@ where
         owner_uid,
         owner_gid,
         u64::try_from(bytes.len())
-            .map_err(|error| ReplaceError::after_rename(PolicyError::io(error)))?,
+            .map_err(|_| ReplaceError::after_rename())?,
     )
-    .map_err(ReplaceError::after_rename)?;
+    .map_err(|_| ReplaceError::after_rename())?;
     parent
         .sync_all()
-        .map_err(PolicyError::io)
-        .map_err(ReplaceError::after_rename)?;
-    observe(AtomicReplaceBoundary::DirectoryFlushed).map_err(ReplaceError::after_rename)
-}
-
-pub(crate) fn replace_with_parent_sync<F>(
-    path: &Path,
-    bytes: &[u8],
-    sync_parent: F,
-) -> Result<(), ReplaceError>
-where
-    F: FnOnce(&Path) -> Result<(), PolicyError>,
-{
-    let parent = normalized_parent(path).map_err(ReplaceError::before_rename)?;
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| ReplaceError::before_rename(PolicyError::io("missing name")))?;
-    let (temporary_path, mut temporary) =
-        create_temporary(parent, file_name).map_err(ReplaceError::before_rename)?;
-
-    if let Err(error) = temporary.write_all(bytes).map_err(PolicyError::io) {
-        let _cleanup_result = fs::remove_file(&temporary_path);
-        return Err(ReplaceError::before_rename(error));
-    }
-    if let Err(error) = temporary.sync_all().map_err(PolicyError::io) {
-        let _cleanup_result = fs::remove_file(&temporary_path);
-        return Err(ReplaceError::before_rename(error));
-    }
-    if let Err(error) = fs::rename(&temporary_path, path).map_err(PolicyError::io) {
-        let _cleanup_result = fs::remove_file(&temporary_path);
-        return Err(ReplaceError::before_rename(error));
-    }
-    sync_parent(parent).map_err(ReplaceError::after_rename)
-}
-
-fn create_temporary(
-    parent: &Path,
-    file_name: &std::ffi::OsStr,
-) -> Result<(PathBuf, File), PolicyError> {
-    for _ in 0..TEMP_ATTEMPTS {
-        let mut random = [0_u8; 16];
-        getrandom::getrandom(&mut random).map_err(PolicyError::io)?;
-        let mut temporary_name = OsString::from(".");
-        temporary_name.push(file_name);
-        temporary_name.push(".tmp-");
-        temporary_name.push(hex(&random));
-        let temporary_path = parent.join(temporary_name);
-        let opened = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary_path);
-        match opened {
-            Ok(file) => {
-                if let Err(error) = file.set_permissions(fs::Permissions::from_mode(0o600)) {
-                    let _cleanup_result = fs::remove_file(&temporary_path);
-                    return Err(PolicyError::io(error));
-                }
-                return Ok((temporary_path, file));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(PolicyError::io(error)),
-        }
-    }
-    Err(PolicyError::io("temporary name collisions"))
+        .map_err(|_| ReplaceError::after_rename())?;
+    observe(AtomicReplaceBoundary::DirectoryFlushed).map_err(|_| ReplaceError::after_rename())
 }
 
 fn create_temporary_at(
@@ -268,23 +195,6 @@ fn checked_u64<T: TryInto<u64>>(value: T) -> Result<u64, PolicyError> {
 
 fn checked_u32<T: TryInto<u32>>(value: T) -> Result<u32, PolicyError> {
     value.try_into().map_err(PolicyError::io)
-}
-
-pub(crate) fn normalized_parent(path: &Path) -> Result<&Path, PolicyError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| PolicyError::io("missing parent"))?;
-    if parent.as_os_str().is_empty() {
-        Ok(Path::new("."))
-    } else {
-        Ok(parent)
-    }
-}
-
-pub(crate) fn sync_directory(path: &Path) -> Result<(), PolicyError> {
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(PolicyError::io)
 }
 
 fn hex(bytes: &[u8]) -> String {
