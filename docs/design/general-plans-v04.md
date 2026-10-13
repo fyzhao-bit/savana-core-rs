@@ -116,22 +116,34 @@ planner cannot smuggle an attacker's address into a root the owner then approves
 because that string is not in the owner's words. Enforced at compile, next to the
 existing owner-view check (`v04_fused_input_admission.rs`).
 
-**As built (G3).** The rule lives on the owner's consented input document, not
-on the root encoding: a schema-2 `FusedInputDocumentV04` carries
-`origin = "owner_text"` and a short list of owner-declared `constants` (the
-deployment's fixed synthetic controls: `""`, `primary`, `private-result`, the
-generator model). When the kernel first pins a schema-2 document's inputs
-(`prepare_owner_execution_review_v04`, before any operation runs), every input
-text must be empty, one of those constants, or an NFC substring of the
-document's prompt; otherwise preparation fails and nothing executes. The planner
-never writes the document — the owner side composes it from the official prompt
-and the planner's proposed literals — so a literal the owner's words do not
-contain cannot become a control even if the owner's (automated) review accepts
-it. Schema-1 documents (the reviewed contracts, whose dates are owner-normalized,
-e.g. `May 26th` -> `2024-05-26`) are unchanged.
+**As built (G3, tightened 2026-10-13).** The rule lives on the owner's
+consented input document, not on the root encoding. The only accepted document
+is schema 3 (`FusedInputDocumentV04`): `origin = "owner_text"`, the prompt, the
+inputs, and `constants`, each a value with every `(operation, field)` it may
+fill. When the kernel first pins the inputs (`prepare_owner_execution_review_v04`,
+before any operation runs) it resolves every input's fields itself, from the
+compiled plan's bindings and the active descriptors' business profiles, and
+holds each input, for every field it fills, to one of:
 
-Owner-declared values beyond the deployment's synthetic controls, all fixed
-rules of the owner's review (`drafted_tasks.review_program`): its own dates and
+- request text: every `"; "`-separated item (every item of a list) is an NFC,
+  whitespace-folded substring of the prompt; in a destination-class field
+  (Destination or CopyDestination: recipients, cc, bcc, an address a read
+  fetches) the item must also be a whole token of the prompt, so
+  `bob@company.co` is not taken from `bob@company.com`;
+- a constant the owner bound to exactly that operation and field, never in a
+  destination-class field;
+- for a deployment-fixed field (`""`, `primary`, `private-result`), exactly its
+  fixed value, which the signed business profile now carries itself.
+
+Otherwise preparation fails and nothing executes. Schema 1 (no check at all)
+and schema 2 (a flat constant set that any field could take, destinations
+included) are refused. The planner never writes the document — the owner side
+composes it from the official prompt and the planner's proposed literals — so a
+literal the owner's words do not contain cannot become a control even if the
+owner's (automated) review accepts it, and a constant the review accepted for
+one field (a search term) cannot fill another (a recipient).
+
+Owner-declared values (constants), all fixed rules of the owner's review (`drafted_tasks.review_program`): its own dates and
 times restated as `YYYY-MM-DD[ HH:MM]` (year 2024 when the request states none,
 the same policy the reviewed contracts use); booleans and sharing permissions;
 and search terms or counts for READ tools other than a URL (a read has no
@@ -160,7 +172,7 @@ are bounded (at most 32, each a trimmed control text) and an empty list means
 exactly "no one" (an event without participants), never a default. A
 destination list commits to its canonical JSON array under its own digest
 domain (`..._LIST_V2_SCHEMA1`), so no list can collide with a single text. A
-literal list reaches the kernel as typed items in the schema-2 owner document
+literal list reaches the kernel as typed items in the schema-3 owner document
 (`{"slot", "text": "", "items": [...]}`); `check_owner_text_origin` holds every
 item to the owner-text rule by itself (an item is never split again), and the
 selected value is a kernel list, which G4 types against the field (a list never
@@ -211,6 +223,57 @@ owner value), conditionals and loops; those still fail honestly.
   least 256 bytes of overlap: same answers on the reference corpus and fuzz
   vectors, every hit still found, a window that exhausts the budget still
   blocks.
+
+## Design: what the executor answers itself (2026-10-13)
+
+Three things the experiment provider used to do now happen in the kernel's
+executor (`savana-execd`, `OwnerBackedProviderAttemptV2::execute_and_retain`),
+inside the TCB. Each is decided by the descriptor's signed business profile,
+not by the provider, and leaves the journal, receipts and completion path as
+they were: a local answer is retained like a provider reply.
+
+- **Condition gate.** A profile may carry one `Condition` field (role 6,
+  bound like a parameter, never an address). The executor performs the call
+  only when its value is `always` or a yes (`condition_holds_v2`); otherwise
+  it answers with the fixed no-effect text `CONDITION_SKIPPED_TEXT_V2` and
+  never contacts the provider. The owner's approval display shows the gate
+  (`condition`: field, value, whether it holds, what that means).
+- **Table computation.** A profile with codec `TableComputeV1` (a read, one
+  call, exactly the parameters `TABLE_COMPUTE_FIELDS_V2`, every other field
+  deployment-fixed) is evaluated by the executor with `savana-table-compute`,
+  byte-exact with the owner review's reference (`dojo_compute.py`); no
+  provider exists for it. A spec or input it cannot evaluate fails before
+  any provider attempt (signed no effect).
+- **Masked model calls.** A profile with codec `McpModelToolsCallJsonV1` is a
+  call to a model provider: the executor masks every argument text with the
+  leak gate's table (`savana_leak_gate::masking`, the same table the planner
+  view uses), sends only the masked request, and puts the call's own values
+  back into the reply before retaining it; any other placeholder becomes
+  "(a hidden value)". A text that cannot be masked (placeholder syntax
+  already present, residual spans) fails before any provider contact.
+
+A local answer is an MCP success reply echoing the kernel's request id
+(`step-` and the operation's internal step id), which only the kernel knows.
+So the owner review never lets a later operation read a local answer's
+envelope: an extraction of a computation takes its text by a signed
+`GENERATED_TEXT` edge (and is told, in its signed `source` "k:computed", to
+state the value as given), and a gated step's result is never used.
+
+**Deployment.** The reviewed catalog names each tool's codec (`codec`:
+`mcp`, `mcp_model`, `table_compute`) and each deployment-fixed control's
+value (`fixed`). `deploy/linux/integration/read-tool-catalog-v04-<suite>.json`
+ships the extractor on the plain codec (its provider receives the data, as
+any connector's does); `...-<suite>-masked.json` ships it on the model codec
+(the `+extract=masked` view). The provisioning profile records every tool's
+codec, and the runner refuses a batch whose extractor view the deployment
+does not ship.
+
+**Harness.** The researcher endpoint recomputes each local answer from the
+actual earlier results (`agentdojo_tasks.executor_local_text`) and accounts
+for it in order (`executor_local_result`) before the next call it receives;
+under the model codec it expects exactly the executor's masked call
+(`value_blind.mask_model_call`) and records the reply unmasked. The offline
+verifier replays both.
 
 ## Comparison with CaMeL
 

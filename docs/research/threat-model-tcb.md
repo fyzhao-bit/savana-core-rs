@@ -57,7 +57,12 @@ Corollaries, each checked, not assumed:
 The kernel re-runs the origin check independently of the review: the review is a
 **pre-filter** that lets an honest planner succeed and refuses obvious abuse
 early; the kernel is the **reference monitor** that actually enforces (I) at
-prepare and dispatch. A program that somehow passed a buggy review would still be
+prepare and dispatch. Since 2026-10-13 the kernel's check is per field: an
+input is request text (a whole token of it in a destination-class field), a
+constant the owner bound to exactly that operation and field (never a
+destination-class one), or a deployment-fixed value; which values the owner
+accepts as constants (restated dates, a planner's search term, a computation's
+numbers) remains the owner review's decision. A program that somehow passed a buggy review would still be
 caught by the kernel, because G7 recomputes provenance and compares it to the
 kernel's own extraction.
 
@@ -70,7 +75,9 @@ kernel's own extraction.
 | `savana-kerneld` | the kernel daemon: admission, G4/G7 | ~72k |
 | `savana-approvald` | owner settlement (G6), passkey | ~17k |
 | `savana-ingressd` | ingress / projection | ~8k |
-| `savana-leak-gate` | windowed blocklist scan before owner display | ~1.6k |
+| `savana-execd` | the executor: answers a call whose condition gate does not hold with a fixed no-effect result and never contacts the provider; evaluates `TableComputeV1` steps itself; masks every argument of a `McpModelToolsCallJsonV1` call (no residual PII) and unmasks the reply | ~18k |
+| `savana-table-compute` | the table/calc computation the executor evaluates, byte-exact with the review's reference (`dojo_compute.py`, differential tests) | ~3.5k |
+| `savana-leak-gate` | windowed blocklist scan before owner display; the PII spans, and the masking table (`masking`) the executor masks a model call with | ~2k |
 | owner review (Python, benchmark) | fixed-rule admission of a drafted program | `drafted_tasks.py` ~500 lines |
 | owner signing key | root of authority | — |
 

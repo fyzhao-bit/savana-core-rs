@@ -426,10 +426,13 @@ on the components named in its row.}
   final release, the tool, its effect, resource, destination, and bounds
   are fixed by an owner-signed clause. Every argument value is one of:
   (a) owner text, i.e.\ a substring of the request after NFC normalization
-  and whitespace folding; (b) an owner-declared constant; or (c) a value
-  the kernel derived along an owner-signed edge from an
-  already-authorized result, within the signed path, byte bound, list form,
-  and computation.
+  and whitespace folding, and for a destination-class field (destination,
+  cc, bcc, fetched address) a whole token of it; (b) an owner-declared
+  constant bound to exactly that operation and field, never a
+  destination-class one; (c) the deployment's fixed value of a synthetic
+  field; or (d) a value the kernel derived along an owner-signed edge from
+  an already-authorized result, within the signed path, byte bound, list
+  form, and computation.
 \end{description}
 
 S2 is a mediation property, not a claim that a heuristic recognizes every
@@ -1068,8 +1071,11 @@ for a travel task.
 
 Before anything is signed, a fixed review admits or refuses the program.
 It is a pre-filter that lets an honest planner succeed and refuses
-obvious abuse early; the kernel independently enforces the same origin
-rule (\S\ref{sec:authority-programs}). The review refuses a program under
+obvious abuse early; the kernel independently enforces the origin rule
+field by field (\S\ref{sec:authority-programs}). Which values the owner
+accepts as constants (its restated dates, a planner's search term, a
+computation's numbers) is the review's decision as owner software; the
+kernel holds each constant to the fields the owner bound it to. The review refuses a program under
 any of 33 closed rules. The most consequential are:
 \begin{itemize}
 \item a tool not served by the deployment (\code{unserved_tool});
@@ -1105,7 +1111,8 @@ An admitted program becomes three signed objects.
 \begin{enumerate}
 \item \textbf{Owner document.} The owner's request text and the
   owner-declared constants enter through ingress as one owner document.
-  They become \textsf{UserAuthorized} roots after G1/G2.
+  Each constant names every (operation, field) it may fill. They become
+  \textsf{UserAuthorized} roots after G1/G2.
 \item \textbf{Task authority.} The owner signs a task authority with one
   \emph{clause} per operation, plus a final-release clause. Each clause
   fixes the tool descriptor, the exact owner values for the controls, and
@@ -1119,9 +1126,16 @@ An admitted program becomes three signed objects.
   never fill the payload or a magnitude.
 \end{enumerate}
 
-Preparation then runs \code{check_owner_text_origin}. Every input must be a
-declared constant, or a text whose every item is a substring of the
-normalized request. Preparation also runs the result-edge rule: the
+Preparation then runs \code{check_owner_text_origin}, field by field: the
+kernel resolves every input's fields from the compiled plan and the active
+descriptors, never from a name the document gives. An input must be, for
+every field it fills, a text whose every item is a substring of the
+normalized request (a whole token of it in a destination-class field, so
+\texttt{bob@company.co} is not taken from \texttt{bob@company.com}), or a
+constant the owner bound to exactly that field, which a destination-class
+field never takes; a deployment-fixed field takes only its fixed value.
+Only this one document schema is accepted. Preparation also runs the
+result-edge rule: the
 owner's exact values, plus the declared edge rules, must reconstruct an
 alternative the owner signed. All of this happens before any operation
 runs. During execution the kernel drives the operations itself. Each
@@ -1147,9 +1161,13 @@ fill a destination.
 the data: \emph{``if something looks suspicious, change the password''}.
 Every write therefore carries an owner gate field. Its value is either the
 owner constant \code{always}, or a signed edge from an extraction that
-answers yes or no to a condition copied verbatim from the request. The
-connector performs the official call only on the constant or on an exact
-``yes''. Any other answer, including an injected one, does nothing. A
+answers yes or no to a condition copied verbatim from the request. The gate
+is a \emph{condition} field of the signed business profile, and the
+kernel's executor performs the call only on the constant or on a ``yes''
+(case, surrounding space and final punctuation aside). Otherwise the
+executor answers with a fixed no-effect result itself and never contacts
+the connector, so this holds for any connector. Any other answer,
+including an injected one, does nothing. A
 condition can decide only \emph{whether} a signed effect happens, never
 what it does or whom it reaches. A gated step's result may not be used
 later.
@@ -1160,7 +1178,9 @@ Choosing among records---\emph{``the highest-rated hotel, the more
 expensive on a tie''}, \emph{``the total I spent in March''}---previously
 required an extractor to compare whole tables in one reply, and it often
 got this wrong (\S\ref{sec:eval-utility}). \code{dojo.compute.table} does
-the comparison as a fixed function in the connector instead.
+the comparison as a fixed function instead. Its descriptor's codec is
+\emph{table compute}: the kernel's executor evaluates the function itself,
+from the signed fields of the request, and no provider is ever contacted.
 \begin{itemize}
 \item \textbf{Inputs.} Up to four signed edges to earlier results. The
   first gives the rows (an object's entries, a list of records, or a list
@@ -1171,10 +1191,12 @@ the comparison as a fixed function in the connector instead.
   \texttt{sum}, \texttt{value}, \texttt{values}, or \texttt{pairs}). These
   texts belong to a closed grammar that the review parses and the owner
   declares as constants.
-\item \textbf{Effect.} The step is a \READ{} that contacts nothing, so it
+\item \textbf{Effect.} The step is a \READ{} that contacts nothing (the
+  executor computes it in the trusted host), so it
   needs no approval.
 \item \textbf{Output.} Data, exactly like an extraction's: it is never a
-  destination and reaches a later field only through a signed edge.
+  destination and reaches a later field only through a signed edge (an
+  extraction of it is given its text, not the reply envelope).
   Operands select rows; they never appear in the output.
 \end{itemize}
 The step adds no authority. A compromised planner can already choose which
@@ -1195,12 +1217,21 @@ sensitive-span definition (\S\ref{sec:gate}).
   back to its value. Review, signing, and the kernel therefore see only
   real values. A placeholder grants nothing that copying the value would
   not.
-\item \textbf{Extractor views.} The same mechanism masks the extractor's
-  inputs, with one placeholder table per call. A \texttt{strict} view hides
-  everything. A \texttt{quantities} view keeps dates, times, and decimals
-  visible, which the extractor needs in order to compute.
+\item \textbf{Extractor views.} The extractor is a model provider, so its
+  inputs are masked by the kernel itself, not by the connector: a
+  deployment ships the model tools with the \emph{model} codec, and the
+  executor then replaces every sensitive span of every argument before the
+  request leaves the trusted host (one placeholder table per call, the
+  same definition, re-scanned, failing closed before any provider contact),
+  and puts the call's own values back into the reply; any other
+  placeholder in the reply is neutralized. A deployment that ships the
+  model tools with the plain codec declares that their provider receives
+  the data, as any connector does; Table~\ref{tab:transitions} applies to
+  what reaches the executor, not beyond it. The arithmetic an extractor
+  could not do on masked numbers is done by compute steps.
 \item \textbf{Verification.} The offline verifier recomputes every request
-  that left the host, and proves that no masked value is in it.
+  that left the host from the provider's own record of the call, and
+  proves that no detected span is in it.
 \end{itemize}
 
 \subsection{What a compromised planner can do}
@@ -1265,8 +1296,12 @@ The approver and executor, by contrast, need the concrete value to decide
 or act. Masking a recipient address would make an intelligible approval
 impossible, and masking an execution argument would change the operation.
 These transitions therefore enforce the universal blocklist but permit
-concrete fields. A signed rule may strengthen a transition's duty floor but
-cannot weaken it. The instruction blocklist is defense in depth: a miss may
+concrete fields. One executor-side step extends the model duty past the
+executor: a tool whose signed profile uses the \emph{model} codec hands
+its arguments to a model provider, so the executor itself masks every
+detected span and re-checks that none remains before the request leaves
+the trusted host (\S\ref{sec:blind}). A signed rule may strengthen a
+transition's duty floor but cannot weaken it. The instruction blocklist is defense in depth: a miss may
 change a model's proposal, but P1 and P3--P6 still hold, because model
 output carries no capability.
 
@@ -2090,10 +2125,14 @@ sensitive-span definition (Table~\ref{tab:privacy}).
   personal data (27 spans). The value-blind view reduces this to zero. On
   the 21 affected tasks, utility with retry was unchanged (8/21 in both
   views). The other 76 requests are byte-identical in both views.
-\item \textbf{Extractor.} The \texttt{strict} view removes all 1{,}093
-  spans, and costs 5 of 22 tasks that ran an identical program. The
-  \texttt{quantities} view keeps 374 spans, all of them dates, prices,
-  and timestamps, and costs 2.
+\item \textbf{Extractor.} With the connector masking its own inputs, a
+  \texttt{strict} view removed all 1{,}093 spans and cost 5 of 22 tasks
+  that ran an identical program; a \texttt{quantities} view kept 374
+  spans (dates, prices, timestamps) and cost 2. Masking has since moved
+  into the kernel's executor (the model codec, \S\ref{sec:blind}), which
+  masks every span with no exception, so these numbers describe the
+  earlier mechanism.\todo{re-run the extractor rows with the executor's
+  masker (model codec) on the current kernel.}
 \end{itemize}
 The definition has known gaps. It does not cover person names or street
 addresses. It also misclassifies 8-digit dates as phone numbers: 12 of the
@@ -2106,8 +2145,8 @@ planner's 27 spans were such dates.
 Channel & Plain & Masked & Utility cost\\
 \midrule
 Planner requests (spans) & 27 & 0 & none with retry\\
-Extractor, \texttt{quantities} view & 1{,}093 & 374 & 22$\rightarrow$20 of 48\\
-Extractor, \texttt{strict} view & 1{,}093 & 0 & 22$\rightarrow$17 of 48\\
+Extractor, \texttt{quantities} (connector, earlier) & 1{,}093 & 374 & 22$\rightarrow$20 of 48\\
+Extractor, \texttt{strict} (connector, earlier) & 1{,}093 & 0 & 22$\rightarrow$17 of 48\\
 Kernel model view (bytes) & 0 & 0 & --\\
 \bottomrule
 \end{tabularx}
