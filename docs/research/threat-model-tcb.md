@@ -70,15 +70,15 @@ kernel's own extraction.
 
 | Component | What it enforces | Size (approx, incl. inline tests) |
 |---|---|---|
-| `savana-policy-core` | compile/prepare/dispatch checks, provenance edges, release | ~90k src lines |
-| `savana-kernel-protocol` | typed business fields, controls, request shapes | ~41k |
-| `savana-kerneld` | the kernel daemon: admission, G4/G7 | ~72k |
-| `savana-approvald` | owner settlement (G6), passkey | ~17k |
-| `savana-ingressd` | ingress / projection | ~8k |
-| `savana-execd` | the executor: answers a call whose condition gate does not hold with a fixed no-effect result and never contacts the provider; evaluates `TableComputeV1` steps itself; masks every argument of a `McpModelToolsCallJsonV1` call (no residual PII) and unmasks the reply | ~18k |
+| `savana-policy-core` | compile/prepare/dispatch checks, provenance edges, release | ~86k src lines |
+| `savana-kernel-protocol` | typed business fields, controls, request shapes | ~40k |
+| `savana-kerneld` | the kernel daemon: admission, G4/G7 | ~60k |
+| `savana-approvald` | owner settlement (G6), passkey | ~16k |
+| `savana-ingressd` | ingress / projection | ~6k |
+| `savana-execd` | the executor: answers a call whose condition gate does not hold with a fixed no-effect result and never contacts the provider; evaluates `TableComputeV1` steps itself; masks every argument of a `McpModelToolsCallJsonV1` call (no residual PII) and unmasks the reply | ~19k |
 | `savana-table-compute` | the table/calc computation the executor evaluates, byte-exact with the review's reference (`dojo_compute.py`, differential tests) | ~3.5k |
 | `savana-leak-gate` | windowed blocklist scan before owner display; the PII spans, and the masking table (`masking`) the executor masks a model call with | ~2k |
-| owner review (Python, benchmark) | fixed-rule admission of a drafted program | `drafted_tasks.py` ~500 lines |
+| owner review (Python, benchmark) | fixed-rule admission of a drafted program | `drafted_tasks.py` ~900 lines, plus its computation reference `dojo_compute.py` ~590 |
 | owner signing key | root of authority | — |
 
 (A submission to-do: a `cloc`/`tokei` pass separating enforcement code from the

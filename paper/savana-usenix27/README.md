@@ -42,10 +42,11 @@ the code on `codex/intent-bound-execution`. The draft follows the audit.
 
 Changes from the skeleton:
 
-- **Sizes and counts** come from the current branch:
-  - 386,449 lines of Rust in 18 crates;
-  - 2,302 tests and 66 `compile_fail` doctests;
-  - 563 domain-separation strings and 8 inter-process edges;
+- **Sizes and counts** come from the current branch (recounted on
+  2026-10-13, after the v1 stack and other dead code were removed):
+  - 346,365 lines of Rust in 20 crates;
+  - 1,954 tests and 16 `compile_fail` doctests;
+  - 537 domain-separation strings and 8 inter-process edges;
   - 6 declassification transitions (with `BuildFusedModelEnvelope`) and
     8 provenance source kinds;
   - per role, 25 agent, 19 ingress, 6 executor, 4 control-shell and
@@ -98,7 +99,9 @@ gitignored and kept only in the experiment container. The reports are:
    (AgentDyn).
 3. **Confirm** v1.2 / v1.2.2 task equivalence for the CaMeL comparison.
 4. **Pin down** the ~60 s bound.
-5. **Refresh** the frozen-core manifest: 66 of its 331 entries have drifted.
+5. ~~Refresh the frozen-core manifest~~ — done on 2026-10-13 (339 files);
+   every changed entry is listed for review in
+   `docs/verification/frozen-manifest-review-20261012.zh-CN.md`.
 6. **Verify** every bibliography entry tagged `verify` / `TODO`; several
    were assembled from search snippets.
 7. **Cut about 4 pages** (candidates: §8 supply chain, §7.3 rules, parts of

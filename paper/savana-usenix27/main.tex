@@ -385,13 +385,13 @@ slice.
 \toprule
 \textbf{Trusted component group} & \textbf{LOC} & \textbf{Properties}\\
 \midrule
-Kernel policy path (Rust) & 261{,}848 & S1--S6; policy-core, kerneld, protocol, vault, leak gate, input runtime\\
-Approval service (Rust) & 18{,}235 & S1 for owner-endorsed actions\\
-Executor (Rust) & 19{,}525 & S1 and S4 at the external-byte boundary\\
-Platform identity (Rust) & 13{,}003 & service identity and process isolation\\
-Owner review (Python) & ${\approx}$950 & S6 pre-filter in the evaluated deployment\\
+Kernel policy path (Rust) & 217{,}276 & S1--S6; policy-core, kerneld, protocol, vault, leak gate, input runtime\\
+Approval service (Rust) & 15{,}936 & S1 for owner-endorsed actions\\
+Executor (Rust) & 23{,}708 & S1 and S4 at the external-byte boundary; execd, table compute\\
+Platform identity (Rust) & 13{,}006 & service identity and process isolation\\
+Owner review (Python) & ${\approx}$1{,}480 & S6 pre-filter in the evaluated deployment\\
 \midrule
-Conservative union & ${\approx}$313k & property-dependent distributed TCB\\
+Conservative union & ${\approx}$271k & property-dependent distributed TCB\\
 \bottomrule
 \end{tabularx}
 \caption{Conservative TCB accounting (physical lines, inline tests
@@ -1410,7 +1410,7 @@ Three implementation disciplines recur across every signed object.
   documentation tests.
 \item \textbf{Canonical re-encode equality.} Decode, re-encode, and compare
   with the input bytes; any non-canonical encoding is refused. The
-  workspace uses 563 distinct NUL-terminated domain-separation strings to
+  workspace uses 537 distinct NUL-terminated domain-separation strings to
   prevent cross-protocol signature reuse.
 \item \textbf{Chain, don't patch.} Revocation publishes a successor.
   Predecessor validation enforces sequence continuity, digest linkage, and
@@ -1501,10 +1501,8 @@ the executor at every journal boundary.
 \code{unsafe_code = "forbid"} at the workspace level. Only the platform
 crate downgrades this to \code{deny}, and it re-enables unsafe code in four
 audited native-boundary modules. Table~\ref{tab:impl} gives the breakdown
-at the evaluated commit. A SHA-256 manifest freezes the production core,
-and checking it is the first CI step. \todo{The manifest currently lists
-331 files, 66 of which have drifted from their recorded hashes; refresh it
-before artifact submission.}
+at the evaluated commit. A SHA-256 manifest freezes the production core
+(339 files), and checking it is the first CI step.
 
 \begin{table}[t]
 \centering\footnotesize
@@ -1512,22 +1510,23 @@ before artifact submission.}
 \toprule
 \textbf{Component} & \textbf{LOC} & \textbf{Role}\\
 \midrule
-policy-core & 114{,}887 & labels, provenance, task authority, rules, engine\\
-kerneld & 83{,}522 & kernel daemon, authorities, data plane, recovery\\
-kernel-protocol & 55{,}565 & closed wire vocabulary, Suite-1, CBOR\\
-agentd & 23{,}855 & agent sessions, planner privacy\\
-execd & 19{,}525 & connector runtime, journal, workers\\
-approvald & 18{,}235 & WebAuthn, settlements\\
-platform-identity & 13{,}003 & measurement, sandboxes\\
-client & 12{,}226 & Rust SDK state machine\\
-ingressd & 9{,}118 & framing, parser workers\\
-continuation core / private workflow & 7{,}278 & v0.4 planning, prototypes\\
-vault, leak-gate, input-runtime & 7{,}874 & custody, sensitive-span definition, G1/G2\\
-others & 21{,}361 & Python binding, release receiver, legacy NER, tooling\\
+policy-core & 97{,}647 & labels, provenance, task authority, rules, durable state\\
+kerneld & 63{,}327 & kernel daemon, authorities, data plane, recovery\\
+kernel-protocol & 47{,}942 & closed wire vocabulary, Suite-1, CBOR\\
+agentd & 24{,}551 & agent sessions, planner privacy\\
+execd & 20{,}108 & connector runtime, journal, workers\\
+approvald & 15{,}936 & WebAuthn, settlements\\
+platform-identity & 13{,}006 & measurement, sandboxes\\
+client & 12{,}157 & Rust SDK state machine\\
+ingressd & 6{,}317 & framing, parser workers\\
+continuation core / private workflow & 7{,}545 & v0.4 planning, prototypes\\
+vault, leak-gate, input-runtime & 8{,}360 & custody, sensitive-span definition and masking, G1/G2\\
+table compute & 3{,}600 & table and calc steps the executor evaluates\\
+others & 25{,}869 & Python binding, release receiver, legacy NER, residual-data checker, audit bridge\\
 \midrule
-\textbf{Rust total} & \textbf{386{,}449} & 18 crates plus tools\\
+\textbf{Rust total} & \textbf{346{,}365} & 20 crates\\
 \midrule
-Benchmark harness (Python) & 10{,}854 & catalog, review, connectors, runner, verifier\\
+Benchmark harness (Python) & 13{,}238 & catalog, review, connectors, runner, verifier\\
 \bottomrule
 \end{tabularx}
 \caption{Implementation size (physical lines, inline tests included). The
@@ -1567,8 +1566,8 @@ harness, and zero framework tools. Only bytes delivered by the executor
 over a pinned mutual-TLS receiver can become an assistant reply. We omit
 the framework's name from the anonymous draft.
 
-\paragraph{Testing assets.} The workspace contains 2{,}302 Rust test
-functions, including 66 \code{compile_fail} documentation tests, and 104
+\paragraph{Testing assets.} The workspace contains 1{,}954 Rust test
+functions, 16 \code{compile_fail} documentation tests, and 87
 integration-test files. It also includes:
 \begin{itemize}
 \item the 6{,}427-vector gate corpus;
@@ -1576,7 +1575,7 @@ integration-test files. It also includes:
 \item a crash matrix over the durable pipeline;
 \item an 821-line negative matrix for declassification rule sets.
 \end{itemize}
-The benchmark harness has 296 Python tests.
+The benchmark harness has 468 Python tests.
 
 % =====================================================================
 \section{Evaluation}
