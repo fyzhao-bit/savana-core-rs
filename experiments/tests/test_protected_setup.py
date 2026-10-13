@@ -2,11 +2,14 @@
 import asyncio
 import hashlib
 import json
+import importlib.util
 import unittest
 from unittest.mock import patch
 
 from savana_bench.protected_setup import authorize_and_prepare, reviewed_clauses, provision_owner_episode
 from tests.test_drafted_tasks import one_read_contract
+
+NEEDS_SDK = unittest.skipUnless(importlib.util.find_spec("savana"), "install the savana SDK (crates/savana-core-py)")
 
 
 class ContextFixture:
@@ -56,6 +59,7 @@ class PureArtifactFixture:
 
 
 class SetupTests(unittest.TestCase):
+    @NEEDS_SDK
     def test_pre_authentication_failure_records_stage_without_retry_or_secret(self):
         stages=[]
         class Broker:
@@ -124,6 +128,7 @@ class SetupTests(unittest.TestCase):
                 self.assertEqual(prepare.call_count,0)
                 raise
 
+    @NEEDS_SDK
     def test_untrusted_plan_author_draft_is_compiled_verbatim(self):
         seen={}
         def author(contract, ids):
@@ -139,6 +144,7 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(set(seen), {'contract','task','root','observer','application_turn','planner',
             'model_profile','not_before','expires_at','descriptors','release_descriptor'})
 
+    @NEEDS_SDK
     def test_actual_context_and_receipt_bind_the_unsigned_command(self):
         result, events, prepared=self.run_setup()
         self.assertEqual(events,['context','approve','user_callback','close'])
@@ -154,6 +160,7 @@ class SetupTests(unittest.TestCase):
         self.assertNotIn('run_id',vars(result))
         self.assertNotIn('Networking',repr(result))
 
+    @NEEDS_SDK
     def test_native_sdk_parses_the_authored_command_without_admitting_it(self):
         from savana.managed_admin import prepare_artifact
         result, _, _ = self.run_setup()
@@ -164,12 +171,14 @@ class SetupTests(unittest.TestCase):
                          artifact.signing_digest())
         self.assertIn('unsigned',repr(artifact))
 
+    @NEEDS_SDK
     def test_existing_root_or_pending_request_requires_recovery_not_reset(self):
         for name,value in [('authorization_identity',(b'x'*32,2)),('pending_requests',[b'x'*32])]:
             context=ContextFixture();setattr(context,name,value)
             with self.subTest(name=name),self.assertRaisesRegex(ValueError,'recovery'):
                 self.run_setup(context=context)
 
+    @NEEDS_SDK
     def test_denial_expiry_or_non_native_receipt_never_prepares_planning(self):
         with self.assertRaisesRegex(ValueError,'denied'):self.run_setup(deny=True)
         with self.assertRaisesRegex(ValueError,'expired'):self.run_setup(now=200001)

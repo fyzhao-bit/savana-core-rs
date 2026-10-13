@@ -7,7 +7,12 @@ import hashlib
 import json
 import unittest
 
-from agentdojo.task_suite.load_suites import get_suite
+try:
+    from agentdojo.task_suite.load_suites import get_suite
+except ModuleNotFoundError as missing:  # the explicit AgentDojo test extra
+    if missing.name != "agentdojo":
+        raise
+    raise unittest.SkipTest("install the explicit AgentDojo test extra") from None
 from savana_bench.adopted_instructions import (ACT_NOTE, MAX_INSTRUCTIONS_BYTES, READ_NOTE, act_turn_request,
                                                adoption, adoption_record, read_turn_request, report_text,
                                                requested_instructions)

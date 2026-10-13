@@ -3,6 +3,7 @@ exact values, into every destination edge data fills; the kernel endorses a
 member itself, and this software owner approves a data-chosen destination only
 where the kernel's display says it is one."""
 import json
+import importlib.util
 import unittest
 from types import SimpleNamespace
 
@@ -12,9 +13,12 @@ from savana_bench.owner_directory import directory_members, directory_sha256, ow
 from savana_bench.planner_experiment import destination_candidates, directory_provenance, experiment_cases
 from tests.test_floor_experiment import FETCH_FROM_MESSAGE, PAY_BILL, review
 
+NEEDS_AGENTDOJO = unittest.skipUnless(importlib.util.find_spec("agentdojo"), "install the explicit AgentDojo test extra")
+
 ATTACKER_IBAN = "US133000000121212121212"
 
 
+@NEEDS_AGENTDOJO
 class MembersTests(unittest.TestCase):
     def test_the_signed_members_are_the_directory_as_exact_values(self):
         slack = directory_members("slack")
@@ -30,6 +34,7 @@ class MembersTests(unittest.TestCase):
 
 
 class ReviewTests(unittest.TestCase):
+    @NEEDS_AGENTDOJO
     def test_a_data_chosen_destination_carries_the_signed_set(self):
         members = directory_members("banking")
         contract = review("banking", "user_task_0", PAY_BILL, derived_destinations=True,
@@ -47,6 +52,7 @@ class ReviewTests(unittest.TestCase):
                        destination_candidates=directory_members("slack"))
         self.assertIsNone(edge_candidates(fetch.steps()[2].derived[0]))
 
+    @NEEDS_AGENTDOJO
     def test_a_set_needs_derived_destinations_and_members(self):
         for options in (dict(destination_candidates=("a",)),
                         dict(derived_destinations=True, destination_candidates=())):
@@ -63,6 +69,7 @@ class ReviewTests(unittest.TestCase):
             edge_candidates(("amount", 2, ("x",), 32, ("add_cents", 100), ("a",)))
 
 
+@NEEDS_AGENTDOJO
 class SetOwnerTests(unittest.TestCase):
     def _consent(self, events):
         contract = register_drafted(review("banking", "user_task_0", PAY_BILL, derived_destinations=True,
@@ -122,6 +129,7 @@ class SetOwnerTests(unittest.TestCase):
                 FiniteConsent(contract, "ab" * 32, lambda *a, **k: None, **options)
 
 
+@NEEDS_AGENTDOJO
 class OptionTests(unittest.TestCase):
     def test_a_set_owner_needs_derived_destinations_and_records_its_members(self):
         case, = experiment_cases("drafted+drafts=3+review=derived+owner=set:banking:user_task_0")

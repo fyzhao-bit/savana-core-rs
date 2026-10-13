@@ -2,6 +2,7 @@
 destinations derived from data, a software owner who refuses to approve them,
 and approvals under a permit disposition."""
 import json
+import importlib.util
 import unittest
 from types import SimpleNamespace
 
@@ -11,6 +12,8 @@ from savana_bench.drafted_tasks import EXTRACT_TOOL, ProgramRefused, review_prog
 from savana_bench.planner_experiment import drafted_cases, experiment_cases
 from tests import test_benchmark_identity as identity_tests
 from tests.test_drafted_tasks import suite_and_task
+
+NEEDS_AGENTDOJO = unittest.skipUnless(importlib.util.find_spec("agentdojo"), "install the explicit AgentDojo test extra")
 
 
 def text(value):
@@ -38,6 +41,7 @@ def review(name, task_id, program, **options):
                           prompt=task.PROMPT, program=program, **options)
 
 
+@NEEDS_AGENTDOJO
 class DerivedDestinationReviewTests(unittest.TestCase):
     def test_the_owner_review_refuses_a_destination_chosen_by_data(self):
         for program, suite, task in ((PAY_BILL, "banking", "user_task_0"),
@@ -111,6 +115,7 @@ class PermitConsentTests(identity_tests.ConsentTests):
             FiniteConsent(self.contract, self.principal, lambda *a, **k: None, disposition="approve_all")
 
 
+@NEEDS_AGENTDOJO
 class StrictOwnerTests(unittest.TestCase):
     def test_a_strict_owner_refuses_the_step_whose_destination_data_chose(self):
         contract = register_drafted(review("banking", "user_task_0", PAY_BILL, derived_destinations=True))
@@ -140,6 +145,7 @@ class StrictOwnerTests(unittest.TestCase):
 
 
 class FixedProgramTests(unittest.TestCase):
+    @NEEDS_AGENTDOJO
     def test_each_fixed_program_needs_an_owner_who_signs_a_derived_destination(self):
         from savana_bench.drafted_tasks import parse_program_text
         from savana_bench.fixed_programs import FIXED_PROGRAMS, fixed_program_text

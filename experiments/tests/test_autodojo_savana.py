@@ -1,10 +1,13 @@
 """AutoDojo replay in Savana's drafted experiments."""
+import importlib.util
 import unittest
 
 import yaml
 
 from savana_bench import autodojo_cache as ad
 from savana_bench.planner_experiment import autodojo_provenance, experiment_attack, experiment_cases
+
+NEEDS_AGENTDOJO = unittest.skipUnless(importlib.util.find_spec("agentdojo"), "install the explicit AgentDojo test extra")
 
 
 class AutoDojoSavanaTests(unittest.TestCase):
@@ -27,6 +30,7 @@ class AutoDojoSavanaTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=spec):
                 experiment_cases(spec)
 
+    @NEEDS_AGENTDOJO
     def test_official_case_replays_the_cached_injections(self):
         from agentdojo.attacks.base_attacks import BaseAttack
         from savana_bench.protected_agentdojo import official_case
@@ -62,6 +66,7 @@ class PlannerExposureTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=spec):
                 experiment_cases(spec)
 
+    @NEEDS_AGENTDOJO
     def test_exposure_is_the_decoded_injected_data_and_reaches_only_the_request(self):
         import json
         from agentdojo.task_suite.load_suites import get_suite

@@ -45,5 +45,21 @@ jobs:
           SAVANA_REQUIRE_NATIVE_MACOS_SANDBOX_TEST: "1"
       - run: cargo doc --workspace --all-features --no-deps --locked
       - run: cargo build --workspace --release --locked
+      # Each drop-in is verified under its unit, where the installer places it;
+      # the executables the units name are stubbed so verify checks the units.
       - if: runner.os == 'Linux'
-        run: systemd-analyze verify deploy/systemd/*
+        run: |
+          units=$(mktemp -d)
+          cp deploy/systemd/*.service deploy/systemd/*.socket deploy/systemd/*.target "$units"/
+          for service in kerneld approvald execd; do
+            mkdir -p "$units/savana-$service.service.d"
+            cp deploy/systemd/savana-$service-*.conf "$units/savana-$service.service.d/"
+          done
+          for service in agentd approvald execd ingressd kerneld; do
+            mkdir -p "$units/savana-$service.service.d"
+            cp deploy/systemd/savana-identity-broker-client-v2.conf "$units/savana-$service.service.d/identity-broker.conf"
+          done
+          sed -nE 's/^Exec[A-Za-z]*=[-@:+!]*([^ ]+).*/\1/p' "$units"/*.service | sort -u | while read -r exe; do
+            test -x "$exe" || sudo install -D -m 0755 /bin/true "$exe"
+          done
+          systemd-analyze verify --man=no "$units"/*.service "$units"/*.socket "$units"/*.target

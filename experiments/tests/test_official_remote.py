@@ -6,9 +6,12 @@ import runpy
 import subprocess
 import sys
 import tempfile
+import importlib.util
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+NEEDS_AGENTDOJO = unittest.skipUnless(importlib.util.find_spec("agentdojo"), "install the explicit AgentDojo test extra")
 
 
 class FakeRelay:
@@ -47,6 +50,7 @@ class CoordinatorTests(unittest.TestCase):
         self.assertTrue(FakeRelay.instances[-1].closed)
         return dest,exit_.exception.code
 
+    @NEEDS_AGENTDOJO
     def test_actual_coordinator_and_runner_without_network(self):
         with tempfile.TemporaryDirectory(prefix='savana-coordinator-test-') as directory:
             dest,code=self.run_coordinator(directory)

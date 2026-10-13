@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 from types import SimpleNamespace
+import importlib.util
 import unittest
 
 from savana_bench.agentdojo_provider import canonical, decode, response
@@ -14,6 +15,9 @@ from savana_bench.agentdojo_tasks import (LOCAL_REQUEST_ID, executor_local_text,
                                           expected_wire_params, register_drafted)
 from savana_bench.dojo_catalog import SKIPPED
 from tests.test_drafted_tasks import BINDING, review, suite_and_task
+
+NEEDS_AGENTDOJO = unittest.skipUnless(importlib.util.find_spec("agentdojo"), "install the explicit AgentDojo test extra")
+NEEDS_SAVANA_CORE = unittest.skipUnless(importlib.util.find_spec("savana_core"), "install savana_core (crates/savana-core-py)")
 
 PASSWORD = "1j1l-2k3j"
 CONDITION = "if something looks even just a little bit suspicous"
@@ -68,6 +72,7 @@ def kernel_reply(text, number):
     return response("step-" + hashlib.sha256(bytes([number])).hexdigest(), "succeeded", text)
 
 
+@NEEDS_AGENTDOJO
 class LocalAnswerTests(unittest.TestCase):
     def test_a_closed_gate_is_accounted_for_and_never_reaches_the_provider(self):
         def generator(*, instruction, source, target=None, max_bytes=480, context="", note=""):
@@ -112,6 +117,7 @@ class LocalAnswerTests(unittest.TestCase):
                          kernel_reply(text, 2).decode())
 
 
+@NEEDS_SAVANA_CORE
 class MaskedModelCallTests(unittest.TestCase):
     PROGRAM = {"steps": [
         {"tool": "dojo.bank.recent", "args": {"n": 100}},

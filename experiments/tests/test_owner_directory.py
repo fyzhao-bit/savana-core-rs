@@ -5,7 +5,12 @@ import json
 import unittest
 from types import SimpleNamespace
 
-from agentdojo.task_suite.load_suites import get_suite
+try:
+    from agentdojo.task_suite.load_suites import get_suite
+except ModuleNotFoundError as missing:  # the explicit AgentDojo test extra
+    if missing.name != "agentdojo":
+        raise
+    raise unittest.SkipTest("install the explicit AgentDojo test extra") from None
 from savana_bench.agentdojo_tasks import BENCHMARK, register_drafted
 from savana_bench.benchmark_consent import FiniteConsent, _displayed_edges, _roles
 from savana_bench.dojo_catalog import CATALOG

@@ -1,10 +1,13 @@
 import hashlib
 import json
+import importlib.util
 import unittest
 from unittest.mock import patch, MagicMock
 from savana_bench.official_agentdojo import encode
 from savana_bench.official_verify import rates, verify_chain
 from savana_bench.official_relay import OfficialRelay
+
+NEEDS_AGENTDOJO = unittest.skipUnless(importlib.util.find_spec("agentdojo"), "install the explicit AgentDojo test extra")
 
 
 class OfficialAuditTests(unittest.TestCase):
@@ -34,6 +37,7 @@ class OfficialAuditTests(unittest.TestCase):
         request['model']='arbitrary'
         with self.assertRaises(ValueError): relay.call(request)
 
+    @NEEDS_AGENTDOJO
     def test_upstream_attack_template_equivalence(self):
         from types import SimpleNamespace
         from agentdojo.task_suite.load_suites import get_suite
@@ -80,6 +84,7 @@ class OfficialAuditTests(unittest.TestCase):
             with self.assertRaises(RuntimeError): relay.call(self.request())
             self.assertTrue(relay.failed)
 
+    @NEEDS_AGENTDOJO
     def test_replay_preserves_sent_mail_and_deleted_file(self):
         from agentdojo.task_suite.load_suites import get_suite
         from savana_bench.official_verify import restore_environment
@@ -107,6 +112,7 @@ class OfficialAuditTests(unittest.TestCase):
             self.assertEqual((factory.call_count,relay.calls,relay.failures),(2,2,2))
         with self.assertRaises(ValueError): OfficialRelay('synthetic-secret',max_calls=0)
 
+    @NEEDS_AGENTDOJO
     def test_replay_restores_every_suite_environment(self):
         from agentdojo.task_suite.load_suites import get_suite
         from savana_bench.official_verify import restore_environment
@@ -120,6 +126,7 @@ class OfficialAuditTests(unittest.TestCase):
             snapshot=json.loads(encode(env.model_dump(mode='json')))
             self.assertEqual(restore_environment(type(env),snapshot).model_dump(mode='json'),snapshot,name)
 
+    @NEEDS_AGENTDOJO
     def test_upstream_attack_template_equivalence_for_complete_banking(self):
         from types import SimpleNamespace
         from agentdojo.task_suite.load_suites import get_suite

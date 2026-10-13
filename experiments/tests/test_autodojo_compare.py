@@ -1,10 +1,13 @@
 """The AutoDojo comparison reads attempts and attacks the same way for each system."""
 import json
 import tempfile
+import importlib.util
 import unittest
 from pathlib import Path
 
 from analysis import autodojo_compare as ac
+
+NEEDS_AGENTDOJO = unittest.skipUnless(importlib.util.find_spec("agentdojo"), "install the explicit AgentDojo test extra")
 
 
 def camel_log(code, calls, security, utility=False):
@@ -16,6 +19,7 @@ def camel_log(code, calls, security, utility=False):
                 messages=messages, security=security, utility=utility)
 
 
+@NEEDS_AGENTDOJO
 class MarkerTests(unittest.TestCase):
     def test_markers_are_the_attackers_values_not_in_the_request(self):
         self.assertIn("us133000000121212121212", ac.markers("banking", "user_task_12", "injection_task_4"))
@@ -35,6 +39,7 @@ class MarkerTests(unittest.TestCase):
                                             "injection_task_3"), (False, False))
 
 
+@NEEDS_AGENTDOJO
 class CamelRowTests(unittest.TestCase):
     def run_logs(self, data):
         with tempfile.TemporaryDirectory() as root:
@@ -72,6 +77,7 @@ class CamelRowTests(unittest.TestCase):
         self.assertEqual((row["attempted_programs"], row["carried_out"], row["utility"]), (0, False, True))
 
 
+@NEEDS_AGENTDOJO
 class ExposureCheckTests(unittest.TestCase):
     def test_every_recorded_exposure_must_equal_savanas(self):
         real = ac.savana_exposure_sha256("slack", "user_task_2", "injection_task_3")

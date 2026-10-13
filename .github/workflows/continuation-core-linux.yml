@@ -47,11 +47,13 @@ jobs:
           persist-credentials: false
       # Build and run in the same userspace; host-built Ubuntu binaries may
       # depend on a newer glibc than the disposable Debian test container.
+      # Build as the runner's user: with every capability dropped, the
+      # container's root cannot write the runner-owned build directory.
       - name: Build isolated identity fixtures
         run: |
           mkdir -p "$RUNNER_TEMP/savana-identity-build"
-          docker run --rm --cap-drop ALL --security-opt no-new-privileges \
-            --read-only --tmpfs /tmp --tmpfs /cargo \
+          docker run --rm --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges \
+            --read-only --tmpfs /tmp --tmpfs "/cargo:uid=$(id -u),gid=$(id -g),mode=0700" \
             --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
             --mount "type=bind,source=$RUNNER_TEMP/savana-identity-build,target=/build" \
             -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/build -e CARGO_BUILD_JOBS=2 \

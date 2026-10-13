@@ -9,7 +9,12 @@ from pathlib import Path
 import random
 import unittest
 
-from agentdojo.task_suite.load_suites import get_suite
+try:
+    from agentdojo.task_suite.load_suites import get_suite
+except ModuleNotFoundError as missing:  # the explicit AgentDojo test extra
+    if missing.name != "agentdojo":
+        raise
+    raise unittest.SkipTest("install the explicit AgentDojo test extra") from None
 from savana_bench.agentdojo_provider import canonical
 from savana_bench.drafted_tasks import EXTRACT_TOOL, MAX_STEPS, ProgramRefused
 from savana_bench.structured_planning import (

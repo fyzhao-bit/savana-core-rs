@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import time
 from types import SimpleNamespace
+import importlib.util
 import unittest
 from unittest.mock import patch
 
@@ -16,6 +17,8 @@ from savana_bench.planner_experiment import (ProviderRelay, classify_provider_at
                                              plan_author_for, provisioning_outcome)
 from savana_bench.protected_operator import FiniteOperator, KernelNotConfirmed, OperatorNotConfirmed
 from tests.test_drafted_tasks import one_read_contract
+
+NEEDS_SDK = unittest.skipUnless(importlib.util.find_spec("savana"), "install the savana SDK (crates/savana-core-py)")
 
 
 def hexd(c):
@@ -162,6 +165,7 @@ class VerifierTests(unittest.TestCase):
             _submitted_draft(contract, lied)
 
 
+@NEEDS_SDK
 class ReplayTests(unittest.TestCase):
     def provision(self, failures):
         from savana_bench.protected_setup import provision_owner_episode

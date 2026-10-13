@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import importlib.util
 import unittest
 from pathlib import Path
 
@@ -11,7 +12,10 @@ from savana_bench.framed_channel import CLIENT_PREFIX, SERVER_PREFIX, Decoder, E
 from savana_bench.official_agentdojo import encode
 from savana_bench.official_verify import verify_chain
 
+NEEDS_AGENTDOJO = unittest.skipUnless(importlib.util.find_spec("agentdojo"), "install the explicit AgentDojo test extra")
 
+
+@NEEDS_AGENTDOJO
 class OfficialChannelIntegrationTests(unittest.TestCase):
     def test_actual_runner_completes_over_chunked_pipes(self):
         runner=Path(__file__).resolve().parents[1]/'savana_bench'/'official_agentdojo.py'

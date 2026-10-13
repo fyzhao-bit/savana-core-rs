@@ -14,6 +14,7 @@ from pathlib import Path
 import socket
 import ssl
 import tempfile
+import importlib.util
 import unittest
 from unittest.mock import patch
 
@@ -27,6 +28,8 @@ from savana_bench.protected_transport import (ProviderServer, read_frame, server
     certificate_spki_pin, _head, _hash)
 from savana_bench.official_verify import verify_chain
 from tests.test_drafted_tasks import one_read_contract
+
+NEEDS_AGENTDOJO = unittest.skipUnless(importlib.util.find_spec("agentdojo"), "install the explicit AgentDojo test extra")
 
 ROOT = Path(__file__).resolve().parents[2]
 URL = "https://provider.example:9443/mcp"
@@ -116,6 +119,7 @@ class FrameTests(unittest.TestCase):
             read_frame(io.BytesIO(wire(b"x"*49153)).read)
 
 
+@NEEDS_AGENTDOJO
 class EndpointTests(unittest.TestCase):
     def setup_episode(self, case=CASE, emit=None):
         from savana_bench.dojo_provider import dojo_provider

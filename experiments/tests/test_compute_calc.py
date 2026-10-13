@@ -7,11 +7,14 @@ extractor)."""
 import decimal
 import hashlib
 import json
+import importlib.util
 import unittest
 
 from savana_bench.dojo_compute import ComputeSpecError, calc_constants, compute, validate_spec
 from savana_bench.drafted_tasks import ProgramRefused, calc_numbers, review_program
 from tests.test_drafted_tasks import decode, suite_and_task
+
+NEEDS_AGENTDOJO = unittest.skipUnless(importlib.util.find_spec("agentdojo"), "install the explicit AgentDojo test extra")
 
 FRIEND = "GB29NWBK60161331926819"
 
@@ -83,6 +86,7 @@ class GrammarTests(unittest.TestCase):
                          {decimal.Decimal(2), decimal.Decimal(3), decimal.Decimal("2.5")})
 
 
+@NEEDS_AGENTDOJO
 class ReviewTests(unittest.TestCase):
     def test_a_share_of_a_stated_total_is_admitted_where_the_run_allows_it(self):
         contract = review(share_program())
@@ -101,6 +105,7 @@ class ReviewTests(unittest.TestCase):
             self.assertEqual(caught.exception.step, 3)
 
 
+@NEEDS_AGENTDOJO
 class TextTests(unittest.TestCase):
     def test_the_planner_is_told_only_in_a_calc_run(self):
         from savana_bench.root_drafter import CALC_RULES, EXACT_ANSWER, draft_request_body
@@ -138,6 +143,7 @@ class TextTests(unittest.TestCase):
                 source_step(bad)
 
 
+@NEEDS_AGENTDOJO
 class ComputedSourceTests(unittest.TestCase):
     def test_a_computation_is_marked_in_the_extractions_signed_source_and_passed_as_text(self):
         # Where the run allows exact arithmetic, an extraction of a compute
@@ -170,6 +176,7 @@ class SpecTests(unittest.TestCase):
                 experiment_cases(spec)
 
 
+@NEEDS_AGENTDOJO
 class EndToEndTests(unittest.TestCase):
     """The episode as the kernel runs it: the executor computes each compute
     step itself, and only the read, the extraction and the write reach the

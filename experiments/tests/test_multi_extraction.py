@@ -2,6 +2,7 @@
 review, the adapter's reply rule and the edge paths, end to end through the
 reviewed provider with a fake extractor in place of the model."""
 import hashlib
+import importlib.util
 import unittest
 from types import SimpleNamespace
 
@@ -10,6 +11,8 @@ from savana_bench.agentdojo_tasks import edge_parts, expected_step_call, registe
 from savana_bench.drafted_tasks import MULTI_PREFIX, ProgramRefused, extracted_fields
 from savana_bench.dojo_provider import ANSWER_BYTES, dojo_provider, target_description, target_kind
 from tests.test_drafted_tasks import BINDING, decode, review, suite_and_task
+
+NEEDS_AGENTDOJO = unittest.skipUnless(importlib.util.find_spec("agentdojo"), "install the explicit AgentDojo test extra")
 
 RECIPIENT = "GB29NWBK60161331926819"
 FIELDS = ["send_money.amount", "send_money.subject", "send_money.date"]
@@ -43,6 +46,7 @@ class self_check:
         return True
 
 
+@NEEDS_AGENTDOJO
 class ReviewTests(unittest.TestCase):
     def test_one_extraction_signs_three_named_edges(self):
         contract = review("banking", "user_task_4", refund())
@@ -84,6 +88,7 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(refused(program)[0], "compute_input")
 
 
+@NEEDS_AGENTDOJO
 class AdapterTests(unittest.TestCase):
     def test_the_reply_is_one_object_with_exactly_the_fields(self):
         target = "; ".join("dojo.bank." + f for f in FIELDS)

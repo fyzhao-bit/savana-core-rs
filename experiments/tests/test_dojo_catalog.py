@@ -1,11 +1,14 @@
 """The full reviewed AgentDojo catalog: coverage, profile shape, decoding, and
 real AgentDojo 0.1.35 environments behind the per-suite provider."""
 import hashlib
+import importlib.util
 import unittest
 
 from savana_bench.agentdojo_provider import canonical, decode
 from savana_bench.dojo_catalog import (CATALOG, KINDS, OMIT, SENTINELS, SUITE_TOOLS, SUITES, catalog_document,
                                        decode_argument, entry, official_call, suite_operations)
+
+NEEDS_AGENTDOJO = unittest.skipUnless(importlib.util.find_spec("agentdojo"), "install the explicit AgentDojo test extra")
 
 ORIGINAL = ("dojo.calendar.search", "dojo.calendar.day", "dojo.email.search", "dojo.email.unread",
             "dojo.file.list", "dojo.file.search_name", "dojo.file.search", "dojo.file.append")
@@ -27,6 +30,7 @@ def arguments_for(operation, **values):
 
 
 class CatalogShapeTests(unittest.TestCase):
+    @NEEDS_AGENTDOJO
     def test_every_agentdojo_tool_in_every_suite_is_reviewed(self):
         from agentdojo.task_suite.load_suites import get_suite
         covered = {t["upstream"] for t in CATALOG}
@@ -96,6 +100,7 @@ class CatalogShapeTests(unittest.TestCase):
                               not o.startswith(("dojo.model.", "dojo.compute."))}, set(SUITE_TOOLS[name]), name)
             self.assertIn("dojo.compute.table", operations, name)
 
+    @NEEDS_AGENTDOJO
     def test_every_adapter_decodes_to_valid_official_arguments(self):
         from agentdojo.task_suite.load_suites import get_suite
         functions = {}
@@ -143,6 +148,7 @@ class DecodingTests(unittest.TestCase):
             official_call("dojo.bank.wire_everything", arguments)
 
 
+@NEEDS_AGENTDOJO
 class ProviderTests(unittest.TestCase):
     def provider(self, name, task="user_task_0", max_calls=4):
         from agentdojo.task_suite.load_suites import get_suite

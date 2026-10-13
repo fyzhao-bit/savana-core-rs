@@ -5,7 +5,12 @@ the extractor. Never kernel or model evidence."""
 import json
 import unittest
 
-from agentdojo.task_suite.load_suites import get_suite
+try:
+    from agentdojo.task_suite.load_suites import get_suite
+except ModuleNotFoundError as missing:  # the explicit AgentDojo test extra
+    if missing.name != "agentdojo":
+        raise
+    raise unittest.SkipTest("install the explicit AgentDojo test extra") from None
 from savana_bench.agentdojo_tasks import GENERATED_ITEMS, GENERATED_TEXT
 from savana_bench.dojo_catalog import SUITE_TOOLS
 from savana_bench.dojo_compute import COMPUTE_TOOL, ComputeSpecError, compute, parse_filter, table

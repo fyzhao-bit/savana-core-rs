@@ -2,6 +2,7 @@
 import socket
 import threading
 import time
+import importlib.util
 import unittest
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
@@ -10,6 +11,8 @@ import stat
 from savana_bench.protected_auth import CeremonyQueue, serve_channel
 from savana_bench.protected_launch import wait_for_browser_start
 from savana_bench.protected_operator import receive, send
+
+NEEDS_SDK = unittest.skipUnless(importlib.util.find_spec("savana"), "install the savana SDK (crates/savana-core-py)")
 
 
 class ReadinessTests(unittest.TestCase):
@@ -122,6 +125,7 @@ class ReadinessTests(unittest.TestCase):
                 self.assertEqual(client.gettimeout(),2)
             finally:client.close();thread.join(2);server.close()
 
+    @NEEDS_SDK
     def test_launcher_does_not_open_model_key_or_enter_runner_before_start(self):
         from savana_bench import protected_launch as launch
         config=dict(schema=3,provisioning=dict(installation='ab'*32))

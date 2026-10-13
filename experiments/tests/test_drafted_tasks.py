@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 from types import SimpleNamespace
+import importlib.util
 import unittest
 
 from savana_bench.agentdojo_provider import canonical, decode
@@ -13,6 +14,8 @@ from savana_bench.agentdojo_tasks import (GENERATED_ITEMS, GENERATED_TEXT, LIST,
                                           register_drafted, signed_edge)
 from savana_bench.drafted_tasks import (EXTRACT_TOOL, MAX_STEPS, ProgramRefused, owner_amounts,
                                         owner_normalized, owner_text, parse_program_text, review_program)
+
+NEEDS_AGENTDOJO = unittest.skipUnless(importlib.util.find_spec("agentdojo"), "install the explicit AgentDojo test extra")
 
 IDS = dict(task=b"t" * 32, root=b"r" * 32, observer=b"o" * 32, application_turn=b"a" * 32,
            planner=b"p" * 32, model_profile=1, not_before=1000, expires_at=10000)
@@ -70,6 +73,7 @@ class ReviewTests(unittest.TestCase):
         self.assertFalse(owner_text("alice@x.com;bob@y.com", prompt))
         self.assertFalse(owner_text(None, prompt))
 
+    @NEEDS_AGENTDOJO
     def test_a_read_extract_write_program_becomes_signed_edges(self):
         contract = review("slack", "user_task_3", SUMMARY_PROGRAM)
         read, extract, post = contract.steps()
@@ -116,6 +120,7 @@ class ReviewTests(unittest.TestCase):
         # is fixed, and a request with an address could not be released anyway.
         self.assertEqual([r["public_view"] for r in d["rounds"]], [[]])
 
+    @NEEDS_AGENTDOJO
     def test_refusals(self):
         def refused(program, reason, name="slack", task_id="user_task_3"):
             with self.assertRaises(ProgramRefused) as caught:
@@ -166,6 +171,7 @@ class ReviewTests(unittest.TestCase):
                                                       "subject": {"from": 2}, "date": {"from": 2}}}]},
             "derived_destination", "banking", "user_task_0")
 
+    @NEEDS_AGENTDOJO
     def test_two_extractions_are_never_the_same_alternative(self):
         steps = SUMMARY_PROGRAM["steps"]
         program = {"steps": [steps[0], dict(steps[1], args={"target": text("answer")}),
@@ -174,6 +180,7 @@ class ReviewTests(unittest.TestCase):
         self.assertNotEqual(first.values, second.values)
         self.assertEqual((first.value_map()["source"], second.value_map()["source"]), ("1", "3"))
 
+    @NEEDS_AGENTDOJO
     def test_an_answer_may_combine_up_to_three_earlier_steps(self):
         steps = SUMMARY_PROGRAM["steps"]
         read = steps[0]
@@ -193,6 +200,7 @@ class ReviewTests(unittest.TestCase):
         single = review("slack", "user_task_3", SUMMARY_PROGRAM).steps()[1].value_map()
         self.assertEqual((single["context2"], single["context3"]), ("", ""))
 
+    @NEEDS_AGENTDOJO
     def test_context_from_the_source_itself_is_dropped(self):
         steps = SUMMARY_PROGRAM["steps"]
         same = {"steps": [steps[0], dict(steps[1], args=dict(steps[1]["args"], context={"from": 1})), steps[2]]}
@@ -263,6 +271,7 @@ FAMILY_REUNION = {"steps": [
 
 
 class TypedValueTests(unittest.TestCase):
+    @NEEDS_AGENTDOJO
     def test_a_list_literal_is_typed_items_each_owner_text(self):
         contract = register_drafted(review("workspace", "user_task_8", ADD_PARTICIPANTS))
         _search, add = contract.steps()
@@ -289,6 +298,7 @@ class TypedValueTests(unittest.TestCase):
         refused({"text": ["john.doe@clientcorp.com", ""]}, "literal_list")
         refused({"from": 1, "path": [0, "participants"]}, "derived_destination")
 
+    @NEEDS_AGENTDOJO
     def test_a_repeated_tool_runs_under_one_descriptor_per_operation(self):
         program = {"steps": [
             {"tool": "dojo.travel.hotels", "args": {"city": text("Paris")}},
@@ -303,6 +313,7 @@ class TypedValueTests(unittest.TestCase):
             prepare_draft(contract, tool_descriptor=b"h" * 32, step_descriptors=(b"h" * 32, b"h" * 32, b"f" * 32),
                           release_descriptor=b"f" * 32, **IDS)
 
+    @NEEDS_AGENTDOJO
     def test_a_derived_list_is_one_bounded_list_edge(self):
         program = {"steps": [
             {"tool": "dojo.travel.hotels", "args": {"city": text("Paris")}},
@@ -324,6 +335,7 @@ class TypedValueTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 edge_value([b"", raw], prices.derived[0])
 
+    @NEEDS_AGENTDOJO
     def test_a_computed_edge_has_an_owner_stated_amount(self):
         contract = review("workspace", "user_task_15", FAMILY_REUNION)
         create = contract.steps()[2]
@@ -345,6 +357,7 @@ class TypedValueTests(unittest.TestCase):
                       review("workspace", "user_task_15", with_end({"from": 2, "add_minutes": -240}))
                       .steps()[2].derived)
 
+    @NEEDS_AGENTDOJO
     def test_owner_amounts_and_restated_ends_follow_fixed_rules(self):
         amounts = owner_amounts("Book 5 hours, then a week later move it by 30 minutes; pay 12.50 and 100.")
         self.assertEqual(amounts["add_minutes"], {300, 30})
@@ -368,6 +381,7 @@ class TypedValueTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=(form, operand)):
                 apply_compute(form, operand)
 
+    @NEEDS_AGENTDOJO
     def test_cc_and_bcc_are_never_derived(self):
         program = {"steps": [
             {"tool": "dojo.email.search", "args": {"query": text("hiking trip")}},
@@ -379,6 +393,7 @@ class TypedValueTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), "derived_destination")
 
 
+@NEEDS_AGENTDOJO
 class EndToEndTests(unittest.TestCase):
     def test_summary_post_runs_through_the_endpoint_and_scores_officially(self):
         from savana_bench.dojo_provider import dojo_provider

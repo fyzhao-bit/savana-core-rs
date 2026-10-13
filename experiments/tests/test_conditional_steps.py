@@ -4,7 +4,12 @@ and the executor's own answer to one. A condition decides only WHETHER an
 owner-signed effect happens. Never kernel or model evidence."""
 import unittest
 
-from agentdojo.task_suite.load_suites import get_suite
+try:
+    from agentdojo.task_suite.load_suites import get_suite
+except ModuleNotFoundError as missing:  # the explicit AgentDojo test extra
+    if missing.name != "agentdojo":
+        raise
+    raise unittest.SkipTest("install the explicit AgentDojo test extra") from None
 from savana_bench.dojo_catalog import GUARD_ALWAYS, SUITE_TOOLS, guard_holds
 from savana_bench.drafted_tasks import ProgramRefused, review_program
 from savana_bench.agentdojo_tasks import GENERATED_TEXT

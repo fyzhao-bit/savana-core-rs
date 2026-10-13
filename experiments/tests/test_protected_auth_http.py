@@ -3,6 +3,7 @@ import http.client
 import http.server
 import json
 import threading
+import importlib.util
 import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -11,6 +12,8 @@ import time
 
 from savana_bench.protected_auth import CeremonyQueue,http_handler
 from savana_bench.auth_gateway import handler
+
+NEEDS_SDK = unittest.skipUnless(importlib.util.find_spec("savana"), "install the savana SDK (crates/savana-core-py)")
 
 
 class BridgeTests(unittest.TestCase):
@@ -28,6 +31,7 @@ class BridgeTests(unittest.TestCase):
             server.return_value.shutdown.assert_called_once()
             server.return_value.server_close.assert_called_once()
 
+    @NEEDS_SDK
     def test_activated_main_constructs_loopback_server_before_accept(self):
         from savana_bench import protected_auth
         # Synthetic activation only; never register or fabricate WebAuthn.

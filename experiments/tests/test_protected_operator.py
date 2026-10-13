@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import threading
 import time
+import importlib.util
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +14,8 @@ from savana_bench.agentdojo_tasks import owner_document, prepare_draft
 from savana_bench.protected_auth import CeremonyQueue
 from savana_bench.protected_operator import FiniteOperator, retain
 from tests.test_drafted_tasks import one_read_contract
+
+NEEDS_SDK = unittest.skipUnless(importlib.util.find_spec("savana"), "install the savana SDK (crates/savana-core-py)")
 
 
 class QueueTests(unittest.TestCase):
@@ -47,6 +50,7 @@ class QueueTests(unittest.TestCase):
 
 
 class OperatorTests(unittest.TestCase):
+    @NEEDS_SDK
     def test_async_sdk_is_awaited_and_identical_retry_is_retained(self):
         class Artifact:
             def canonical_bytes(self):return b'canonical-synthetic-command'
