@@ -92,10 +92,6 @@ COMPUTES = ("table", "calc")
 # owner's final answer appended where the program would end with data or with
 # an action after an answer (`drafted_tasks.with_final_answer`).
 ANSWERS = ("none", "final")
-# What the planner is told besides the rules: nothing more, or (`u9`) notes on
-# the mistakes drafted programs made most often and fuller refusal feedback
-# (`root_drafter.U9_NOTES`, `U9_REFUSAL_HINTS`).
-HINTS = ("none", "u9")
 
 
 class InstructionsNotAdopted(RuntimeError):
@@ -157,8 +153,7 @@ def drafted_options(kind):
     `+compute=calc` lets a compute step do exact arithmetic and has the answer
     state a computed number as given (see COMPUTES; needs a drafting planner).
     `+answer=final` appends the owner's final answer where a program would not
-    end with one (see ANSWERS) and `+hints=u9` gives the planner notes on
-    common mistakes (see HINTS); both need a drafting planner. `+owner=approve`
+    end with one (see ANSWERS; needs a drafting planner). `+owner=approve`
     (benign cases only) approves every destination shown (see OWNERS)."""
     from .drafted_tasks import EXTRACTOR_MODELS
     from .value_blind import EXTRACTOR_VIEWS, VIEWS
@@ -171,7 +166,7 @@ def drafted_options(kind):
         if not equals or key in parsed or key not in ("drafts", "planner", "view", "extract", "extractor",
                                                        "attack", "exposure", "review", "owner", "author",
                                                        "mapper", "actions", "instructions", "compute",
-                                                       "answer", "hints"):
+                                                       "answer"):
             raise ValueError("planner_experiment_spec")
         parsed[key] = value
     drafts = parsed.get("drafts", "1")
@@ -193,7 +188,7 @@ def drafted_options(kind):
             or parsed.get("actions", ACTIONS[0]) not in ACTIONS
             or parsed.get("instructions", INSTRUCTIONS[0]) not in INSTRUCTIONS
             or parsed.get("compute", COMPUTES[0]) not in COMPUTES
-            or parsed.get("answer", ANSWERS[0]) not in ANSWERS or parsed.get("hints", HINTS[0]) not in HINTS):
+            or parsed.get("answer", ANSWERS[0]) not in ANSWERS):
         raise ValueError("planner_experiment_spec")
     # Only a structured spec passes `mapper`, so every other spec's options are unchanged.
     mapper = {} if author != "structured" else dict(mapper=parsed.get("mapper", MAPPERS[0]))
@@ -203,13 +198,13 @@ def drafted_options(kind):
                       **({} if "actions" not in parsed else dict(actions=parsed["actions"])),
                       **({} if "instructions" not in parsed else dict(instructions=parsed["instructions"])),
                       **({} if "compute" not in parsed else dict(compute=parsed["compute"])),
-                      **{key: parsed[key] for key in ("answer", "hints") if key in parsed})
+                      **({} if "answer" not in parsed else dict(answer=parsed["answer"])))
 
 
 def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS[0], planner_view="request",
                   extractor_view="raw", extractor_model="deepseek-flash", attack=ATTACKS[0],
                   exposure=EXPOSURES[0], review=None, owner=None, author=None, mapper=None, actions=None,
-                  instructions=None, compute=None, answer=None, hints=None):
+                  instructions=None, compute=None, answer=None):
     """`<suite>:<item>[,<item>...]`, each item `user_task_N` (benign) or
     `user_task_N+injection_task_M` (the official important_instructions
     attack). The planner drafts each task's whole program from its request.
@@ -227,8 +222,8 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
     `instructions` "adopt" makes each item whose request delegates its action
     to instructions in data two consecutive cases, its read turn and its act
     turn (`adopted_instructions`); every other item stays one case. `answer`
-    and `hints` (ANSWERS, HINTS) need a planner that drafts; the `approve`
-    owner (OWNERS) runs benign items only."""
+    (ANSWERS) needs a planner that drafts; the `approve` owner (OWNERS) runs
+    benign items only."""
     from .autodojo_cache import SUITES as AUTODOJO_SUITES
     from .dojo_catalog import SUITES
     from .drafted_tasks import EXTRACTOR_MODELS
@@ -262,13 +257,12 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
             raise ValueError("planner_experiment_spec")
     if (author == "structured") != (mapper is not None) or (mapper is not None and mapper not in MAPPERS):
         raise ValueError("planner_experiment_spec")
-    # Exact arithmetic, the owner's final answer and the planner's notes are
-    # choices for a planner that drafts.
+    # Exact arithmetic and the owner's final answer are choices for a planner
+    # that drafts.
     drafting = author not in ("fixed", "registered") and mapper != "template"
     if compute not in (None, *COMPUTES) or (compute == "calc" and not drafting):
         raise ValueError("planner_experiment_spec")
-    if (answer not in (None, *ANSWERS) or hints not in (None, *HINTS)
-            or (answer == "final" or hints == "u9") and not drafting):
+    if answer not in (None, *ANSWERS) or (answer == "final" and not drafting):
         raise ValueError("planner_experiment_spec")
     # The human-owner upper bound approves what it is shown: benign runs only,
     # where every destination shown is one the task itself needs. Its planner
@@ -320,8 +314,7 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
                     **({} if mapper is None else dict(mapper=mapper)),
                     **({} if actions in (None, ACTIONS[0]) else dict(actions=actions)),
                     **({} if compute in (None, COMPUTES[0]) else dict(compute=compute)),
-                    **({} if answer in (None, ANSWERS[0]) else dict(answer=answer)),
-                    **({} if hints in (None, HINTS[0]) else dict(hints=hints)))
+                    **({} if answer in (None, ANSWERS[0]) else dict(answer=answer)))
         if instructions == "adopt" and _delegates_to_data(suite, user):
             cases += [dict(case, instructions="read"), dict(case, instructions="act")]
         else:
@@ -539,16 +532,6 @@ def directory_provenance(cases):
     return out
 
 
-def hints_provenance(cases):
-    """For a run whose planner gets notes (`+hints=u9`), the notes and the
-    fuller refusal feedback it was given. Every other manifest is unchanged."""
-    if not any(case.get("hints") == "u9" for case in cases):
-        return {}
-    from .root_drafter import U9_NOTES, U9_REFUSAL_HINTS
-    return dict(planner_hints=dict(u9=dict(notes_sha256=hashlib.sha256(U9_NOTES.encode()).hexdigest(),
-                                           refusal_hints=U9_REFUSAL_HINTS)))
-
-
 def destination_candidates(case):
     """What the owner signs into a data-filled destination edge: the set owner's members, else None."""
     from .owner_directory import directory_members
@@ -633,7 +616,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             human_authentication_evaluated=False, consent_mode=consent_mode(experiment),
             comparable_to_unrestricted_baseline=False, attack=experiment_attack(cases),
             **autodojo_provenance(cases), **structured_provenance(cases, structured_example),
-            **directory_provenance(cases), **hints_provenance(cases),
+            **directory_provenance(cases),
             platform=platform.platform(), package_sources=package_sources(),
             source_sha256={p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                            for p in sorted(Path(__file__).parent.glob("*.py"))})
@@ -765,8 +748,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                                                            view=case["planner_view"],
                                                                            exposure=planner_exposure(case),
                                                                            directory=planner_directory(case),
-                                                                           compute=case.get("compute", COMPUTES[0]),
-                                                                           hints=case.get("hints", HINTS[0]))
+                                                                           compute=case.get("compute", COMPUTES[0]))
                                 except RuntimeError:
                                     row["outcome"] = "author_failed"
                                     raise

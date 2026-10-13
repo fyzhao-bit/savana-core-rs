@@ -111,11 +111,12 @@ class TextTests(unittest.TestCase):
         from savana_bench.root_drafter import CALC_RULES, EXACT_ANSWER, draft_request_body
         suite, task = suite_and_task("slack", "user_task_3")
         plain = draft_request_body(suite, task.PROMPT, model="deepseek-flash", directory=True)
-        # This request's digest since the planner is told cc and bcc are
-        # destinations copied whole (U8S recorded fcb5964b... before): a calc
-        # run's prompt differs from it only by the calc text below.
+        # This request's digest since the prompt's examples were made neutral
+        # (U9; 29f4252f... with task-derived examples, and U8S recorded
+        # fcb5964b... before cc and bcc were destinations): a calc run's prompt
+        # differs from it only by the calc text below.
         self.assertEqual(hashlib.sha256(plain).hexdigest(),
-                         "29f4252ff93d4ce4c15412b22a823e47c3f54bcabdbd71a98611c023b32bed92")
+                         "169f4bee08e7d5a471ac4f99c7c4d8fd3b34493055dfe52e9caf2223993183ee")
         system = json.loads(draft_request_body(suite, task.PROMPT, model="deepseek-flash", directory=True,
                                                compute="calc"))["messages"][0]["content"]
         self.assertIn(CALC_RULES, system)

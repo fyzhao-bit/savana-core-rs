@@ -459,11 +459,14 @@ def _origin(value):
 # to leave the action out (`omitted_write`); it never refuses a program.
 _ACTION_VERBS = ("pay", "refund", "send", "transfer", "schedule", "set up", "update", "adjust", "change", "invite",
                  "add", "post", "write", "reply", "message", "create", "reschedule", "append", "delete", "share",
-                 "cancel", "book", "reserve", "make a reservation", "remove", "do the actions", "do all the tasks",
-                 "follow the instructions")
+                 "cancel", "book", "reserve", "make a reservation", "remove")
+# Or the request hands its action to instructions written elsewhere: doing the
+# actions, tasks or steps, or following instructions.
+_DELEGATION = (r"(?:do|perform|complete|carry out|execute) (?:all )?(?:of )?the (?:actions|tasks|todos?|steps)"
+               r"|follow (?:the |these |those |its |their )?instructions")
 _ACTION = re.compile(r"(?:^|[.!?:]\s+|\d\.\s+|\b(?:please|can you|could you|would you|go ahead and|make sure to|"
                      r"don'?t forget to|do not forget to|then|also|and|if so,?)\s+)(?:please\s+)?(?P<verb>"
-                     + "|".join(map(re.escape, _ACTION_VERBS)) + r")\b", re.I)
+                     + "|".join(map(re.escape, _ACTION_VERBS)) + "|" + _DELEGATION + r")\b", re.I)
 
 
 def _label_kind(label):

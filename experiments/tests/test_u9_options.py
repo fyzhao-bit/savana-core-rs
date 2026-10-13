@@ -1,7 +1,8 @@
 """U9 utility options, each off by default: the owner's final answer
-(`+answer=final`), the planner's notes on its common mistakes (`+hints=u9`),
-the human-owner upper bound (`+owner=approve`); and the catalog's calendar
-fields that are optional upstream. Every other run is unchanged."""
+(`+answer=final`) and the human-owner upper bound (`+owner=approve`); the
+catalog's calendar fields that are optional upstream; and a planner prompt
+that knows no more about the benchmark than CaMeL's (no example taken from a
+task, owner-side phrases by grammar, not copied from tasks)."""
 import hashlib
 import importlib.util
 import json
@@ -162,24 +163,81 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(str(refused.exception), "literal_not_owner_text")
 
 
+class DelegationGrammarTests(unittest.TestCase):
+    def test_a_request_that_hands_its_action_to_instructions_is_an_action_by_grammar(self):
+        from savana_bench.drafted_tasks import _ACTION_VERBS, requested_action
+        for request in ("Please do the actions specified in the email.", "Do all the tasks I have on my list.",
+                        "Follow the instructions in the file.", "Carry out the steps listed on the page.",
+                        "Could you complete the tasks in my notes?", "Then execute the actions it describes."):
+            self.assertIsNotNone(requested_action(request), request)
+        for request in ("Perform the following tasks in the order given: 1. What is on the list?",
+                        "What instructions did the page give?"):
+            self.assertIsNone(requested_action(request), request)
+        # The verbs are plain verbs; no phrase is copied from a task.
+        self.assertTrue(all(len(verb.split()) <= 3 and "the" not in verb.split() for verb in _ACTION_VERBS))
+
+
+@NEEDS_AGENTDOJO
+class BenchmarkKnowledgeTests(unittest.TestCase):
+    """The planner knows no more about the benchmark than CaMeL's planner: the
+    one suite note CaMeL also gives, and no example taken from a task."""
+
+    def test_no_planner_facing_example_comes_from_a_task(self):
+        import re
+        from agentdojo.task_suite.load_suites import get_suite
+        from savana_bench import root_drafter as drafter
+        tasks = []
+        for name in ("banking", "slack", "travel", "workspace"):
+            suite = get_suite("v1.2.2", name)
+            tasks += [task.PROMPT for task in suite.user_tasks.values()]
+            tasks += [task.GOAL for task in suite.injection_tasks.values()]
+        tasks = [" ".join(text.split()).lower() for text in tasks]
+        texts = [drafter.ROOT_SYSTEM, drafter.DIRECTORY_DESTINATIONS, drafter.CALC_RULES, drafter.EXACT_ANSWER,
+                 *drafter.REFUSAL_HINTS.values()]
+        examples = set()
+        for text in texts:
+            examples |= set(re.findall(r'"([^"]{3,80})"', text)) | set(re.findall(r"e\.g\. ([^;:)\n]{3,80})", text))
+        distinctive = set()
+        for example in examples:
+            normal = " ".join(example.strip(' ".').split()).lower()
+            # A format such as YYYY-MM-DD HH:MM is not content; one plain word
+            # (a field name, "from") says nothing about a task.
+            if re.fullmatch(r"[ymdh: -]+", normal) or not (" " in normal or re.search(r"[0-9]", normal)
+                                                          or re.search(r"[A-Z]", example)):
+                continue
+            distinctive.add(normal)
+        self.assertGreater(len(distinctive), 10)
+        leaked = sorted(example for example in distinctive if any(example in task for task in tasks))
+        self.assertEqual(leaked, [])
+        # The examples an earlier prompt took from tasks, reworded or not,
+        # are gone (Hawaii, vegan, under 210, March 2022, the most active user).
+        planner = " ".join(" ".join(texts).split()).lower()
+        for fragment in ("hawaii", "vegan", "<= 210", "2022-03", "spent in march", "most active", "the cheapest",
+                         "highest rated", "several channels", "same hotels", "\"1 hour\"", "\"a week\"",
+                         "in the minutes"):
+            self.assertNotIn(fragment, planner)
+        # The only suite note is CaMeL's own, word for word.
+        self.assertEqual(set(drafter.SUITE_NOTES), {"banking"})
+
+
 class SpecTests(unittest.TestCase):
     BASE = "drafted+drafts=3+actions=ask+review=derived+owner=directory+author=structured+mapper=deepseek"
 
-    def test_the_options_are_recorded_only_when_chosen(self):
+    def test_the_option_is_recorded_only_when_chosen(self):
         from savana_bench.planner_experiment import experiment_cases
         plain, = experiment_cases(f"{self.BASE}:slack:user_task_6")
-        self.assertFalse({"answer", "hints"} & set(plain))
-        chosen, = experiment_cases(f"{self.BASE}+compute=calc+answer=final+hints=u9:slack:user_task_6")
-        self.assertEqual((chosen["answer"], chosen["hints"], chosen["compute"]), ("final", "u9", "calc"))
-        self.assertEqual({k: v for k, v in chosen.items() if k not in ("answer", "hints", "compute")}, plain)
-        defaults, = experiment_cases(f"{self.BASE}+answer=none+hints=none:slack:user_task_6")
+        self.assertNotIn("answer", plain)
+        chosen, = experiment_cases(f"{self.BASE}+compute=calc+answer=final:slack:user_task_6")
+        self.assertEqual((chosen["answer"], chosen["compute"]), ("final", "calc"))
+        self.assertEqual({k: v for k, v in chosen.items() if k not in ("answer", "compute")}, plain)
+        defaults, = experiment_cases(f"{self.BASE}+answer=none:slack:user_task_6")
         self.assertEqual(defaults, plain)
 
-    def test_a_planner_that_does_not_draft_takes_neither_option(self):
+    def test_a_planner_that_does_not_draft_takes_no_final_answer(self):
         from savana_bench.planner_experiment import experiment_cases
         for spec in ("drafted+author=registered+answer=final:slack:user_task_6",
-                     "drafted+author=structured+mapper=template+hints=u9:slack:user_task_6",
-                     "drafted+answer=always:slack:user_task_6", "drafted+hints=v2:slack:user_task_6",
+                     "drafted+author=structured+mapper=template+answer=final:slack:user_task_6",
+                     "drafted+answer=always:slack:user_task_6", "drafted+hints=u9:slack:user_task_6",
                      "drafted+answer=final+answer=final:slack:user_task_6"):
             with self.assertRaises(ValueError, msg=spec):
                 experiment_cases(spec)
@@ -200,15 +258,11 @@ class SpecTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=spec):
                 experiment_cases(spec)
 
-    def test_manifests_pin_the_notes_and_the_limits_only_when_used(self):
-        from savana_bench.planner_experiment import experiment_cases, hints_provenance, structured_provenance
-        from savana_bench.root_drafter import U9_NOTES, U9_REFUSAL_HINTS
+    def test_manifests_pin_the_limits_the_job_used(self):
+        from savana_bench.planner_experiment import experiment_cases, structured_provenance
         from savana_bench.structured_planning import FINAL_ANSWER_LIMITS, LIMITS
         plain = experiment_cases(f"{self.BASE}:slack:user_task_6")
-        chosen = experiment_cases(f"{self.BASE}+answer=final+hints=u9:slack:user_task_6")
-        self.assertEqual(hints_provenance(plain), {})
-        self.assertEqual(hints_provenance(chosen), dict(planner_hints=dict(u9=dict(
-            notes_sha256=hashlib.sha256(U9_NOTES.encode()).hexdigest(), refusal_hints=U9_REFUSAL_HINTS))))
+        chosen = experiment_cases(f"{self.BASE}+answer=final:slack:user_task_6")
         self.assertEqual(structured_provenance(plain)["structured_limits"], list(LIMITS))
         self.assertEqual(structured_provenance(chosen)["structured_limits"], list(FINAL_ANSWER_LIMITS))
 
@@ -224,38 +278,6 @@ class ConsentTests(unittest.TestCase):
                         dict(shown=True, directory=frozenset({"alice"})), dict(shown=1)):
             with self.assertRaises(ValueError):
                 FiniteConsent(contract, "ab" * 32, lambda *a, **k: None, **options)
-
-
-class RefusalFeedbackTests(unittest.TestCase):
-    def test_fuller_feedback_only_under_the_notes(self):
-        from savana_bench.root_drafter import REFUSAL_HINTS, U9_REFUSAL_HINTS, refusal_message
-        for reason in U9_REFUSAL_HINTS:
-            self.assertIn(REFUSAL_HINTS[reason], refusal_message(reason, 3, "description"))
-            self.assertIn(U9_REFUSAL_HINTS[reason], refusal_message(reason, 3, "description", "u9"))
-            self.assertNotEqual(U9_REFUSAL_HINTS[reason], REFUSAL_HINTS[reason])
-        self.assertEqual(refusal_message("gate_shape", 2, None, "u9"), refusal_message("gate_shape", 2, None))
-        self.assertEqual(refusal_message("literal_not_owner_text", 3, "description"),
-                         refusal_message("literal_not_owner_text", 3, "description", "none"))
-
-
-@NEEDS_AGENTDOJO
-class PlannerNotesTests(unittest.TestCase):
-    def test_the_notes_are_added_only_under_the_option(self):
-        from agentdojo.task_suite.load_suites import get_suite
-        from savana_bench.root_drafter import U9_ANCHOR, U9_NOTES, draft_request_body
-        suite = get_suite("v1.2.2", "travel")
-        prompt = suite.get_user_task_by_id("user_task_1").PROMPT
-        history = (('{"steps": []}', "literal_not_owner_text", 7, "end_time"),)
-        plain = draft_request_body(suite, prompt, model="deepseek-flash", history=history)
-        self.assertEqual(plain, draft_request_body(suite, prompt, model="deepseek-flash", history=history,
-                                                   hints="none"))
-        noted = json.loads(draft_request_body(suite, prompt, model="deepseek-flash", history=history, hints="u9"))
-        system = noted["messages"][0]["content"]
-        self.assertTrue(system.endswith(U9_NOTES + U9_ANCHOR))
-        self.assertEqual(system.replace(U9_NOTES, ""), json.loads(plain)["messages"][0]["content"])
-        self.assertIn("for an end as well as a start", noted["messages"][-1]["content"])
-        with self.assertRaises(ValueError):
-            draft_request_body(suite, prompt, model="deepseek-flash", hints="more")
 
 
 @NEEDS_AGENTDOJO
@@ -306,8 +328,8 @@ class StructuredLimitsTests(unittest.TestCase):
 
 @NEEDS_AGENTDOJO
 class StructuredEpisodeTests(unittest.TestCase):
-    """A drafted structured episode under `+answer=final+hints=u9`, recorded as
-    the runner records it and re-derived by the offline verifier."""
+    """A drafted structured episode under `+answer=final`, recorded as the
+    runner records it and re-derived by the offline verifier."""
 
     def test_the_verifier_rederives_the_completed_program_through_agentd(self):
         from agentdojo.task_suite.load_suites import get_suite
@@ -318,8 +340,7 @@ class StructuredEpisodeTests(unittest.TestCase):
         from savana_bench.structured_planning import (ProgramMapper, eval_catalog, evidence, job_limits,
                                                       plan_program)
         from tests.test_structured_runner import FakeAgentd, forward, model
-        the_case, = experiment_cases("drafted+author=structured+mapper=deepseek+answer=final+hints=u9"
-                                     ":travel:user_task_10")
+        the_case, = experiment_cases("drafted+author=structured+mapper=deepseek+answer=final:travel:user_task_10")
         suite = get_suite("v1.2.2", "travel")
         prompt = suite.get_user_task_by_id("user_task_10").PROMPT
         program = {"steps": [
@@ -332,8 +353,7 @@ class StructuredEpisodeTests(unittest.TestCase):
                                                     "filter1": "1 contains Chinese", "order1": "max 2",
                                                     "output": "key"}}]}
         program_text = json.dumps(program)
-        body = draft_request_body(suite, prompt, model=the_case["planner_model"], directory=planner_directory(the_case),
-                                  hints="u9")
+        body = draft_request_body(suite, prompt, model=the_case["planner_model"], directory=planner_directory(the_case))
         drafted = dict(kind="root_drafted", episode=0, attempt=1, program_text=program_text,
                        request_sha256=hashlib.sha256(body).hexdigest(),
                        response_sha256=hashlib.sha256(program_text.encode()).hexdigest(), view="request",
@@ -353,12 +373,10 @@ class StructuredEpisodeTests(unittest.TestCase):
         self.assertEqual(contract.digest(), planned["contract"].digest())
         self.assertEqual(json.loads(contract.program)["steps"][-1]["args"]["target"], text(ANSWER))
         # Without the option on record the same evidence does not verify: the
-        # planner's request, the job's limits and the review all differ.
-        for other in ("drafted+author=structured+mapper=deepseek+hints=u9:travel:user_task_10",
-                      "drafted+author=structured+mapper=deepseek+answer=final:travel:user_task_10"):
-            plain, = experiment_cases(other)
-            with self.assertRaises(ValueError, msg=other):
-                _drafted_contract(plain, [drafted, event], row)
+        # job's limits and the review differ.
+        plain, = experiment_cases("drafted+author=structured+mapper=deepseek:travel:user_task_10")
+        with self.assertRaises(ValueError):
+            _drafted_contract(plain, [drafted, event], row)
 
 
 if __name__ == "__main__":

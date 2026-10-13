@@ -19,9 +19,9 @@ from .agentdojo_provider import canonical
 from .agentdojo_tasks import prepare_draft
 from .official_verify import restore_environment, verify_chain
 from .planner_experiment import (DEFINITIVE, IDS, OPERATOR_MODE, SCHEMA, STRUCTURED_REFUSALS,
-                                 classify_provider_attempt, directory_provenance, experiment_cases, hints_provenance,
-                                 planner_directory, planner_exposure, destination_candidates, structured_provenance,
-                                 summarize, turn_request)
+                                 classify_provider_attempt, directory_provenance, experiment_cases, planner_directory,
+                                 planner_exposure, destination_candidates, structured_provenance, summarize,
+                                 turn_request)
 from .protected_agentdojo import official_case, package_sources, score_outcome
 from .protected_verify import verify_published_episode
 
@@ -148,8 +148,7 @@ def _drafted_contract(case, local, row, prior=None):
         else:
             body = draft_request_body(official, request, model=case["planner_model"], goal=case.get("goal"),
                                       history=tuple(history), view=view, exposure=exposure,
-                                      directory=planner_directory(case), compute=case.get("compute", "table"),
-                                      hints=case.get("hints", "none"))
+                                      directory=planner_directory(case), compute=case.get("compute", "table"))
             if hashlib.sha256(body).hexdigest() != event["request_sha256"]:
                 raise ValueError("planner_input_mismatch")
             if event.get("view", "request") != view or event.get("placeholders", 0) != len(bindings):
@@ -550,8 +549,6 @@ def verify(directory):
         raise ValueError("structured_provenance_mismatch")
     if any(manifest.get(k) != v for k, v in directory_provenance(cases).items()):
         raise ValueError("owner_directory_mismatch")
-    if any(manifest.get(k) != v for k, v in hints_provenance(cases).items()):
-        raise ValueError("planner_hints_mismatch")
     current = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(Path(__file__).parent.glob("*.py"))}
     if manifest["source_sha256"] != current:
         raise ValueError("experiment_source_mismatch")
