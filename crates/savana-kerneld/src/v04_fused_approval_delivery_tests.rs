@@ -11,8 +11,12 @@ fn private_approval_delivery_case(case: u8) {
     let (action, _, envelope) = pending_private_approval(&mut f);
     let display = f.authority.tool_approvals[0].display_authentication.clone();
     let manifest = f.authority.sessions[0].active_state_manifest_digest;
-    let receipt =
-        signed_private_settlement(&f, &envelope, case != 1, if case == 4 { 205 } else { 340 });
+    let receipt = signed_private_settlement(
+        &f,
+        &envelope,
+        !matches!(case, 1 | 10),
+        if case == 4 { 205 } else { 340 },
+    );
     let edge = KernelServiceHandshakeEdgeV2::from_verified_deployment(
         if case == 6 {
             EndpointRoleV2::AgentApproval
@@ -123,7 +127,7 @@ fn private_approval_delivery_case(case: u8) {
         vec![204, 205, 206]
     }
     .into_iter();
-    if case == 9 {
+    if matches!(case, 9 | 10) {
         f.authority
             .policy
             .as_mut()
@@ -143,8 +147,29 @@ fn private_approval_delivery_case(case: u8) {
             })
             .unwrap();
         assert_eq!(*calls.lock().unwrap(), vec![20, 21]);
-        assert_eq!(f.authority.execution_tickets.len(), 1);
+        assert_eq!(f.authority.execution_tickets.len(), usize::from(case == 9));
         assert!(f.authority.executions.is_empty());
+        if case == 10 {
+            // The owner denied the only next operation: a later owner-clock
+            // slot does not select the task again (no re-proposal, no
+            // re-evaluation, no approvald traffic).
+            assert!(f.authority.intents[0].state == IntentRecordStateV2::Denied);
+            let policy = f.authority.policy.as_mut().unwrap();
+            policy.fused_action_last_task = None;
+            policy.fused_action_not_before = 0;
+            let before = f.authority.encode_recovery_snapshot().unwrap();
+            let mut now = 209;
+            f.authority
+                .tick_fused_actions_v04(&mut f.values, &mut || {
+                    now += 1;
+                    UnixMillisV2::new(now)
+                })
+                .unwrap();
+            assert_eq!(f.authority.policy.as_ref().unwrap().fused_action_last_task, None);
+            assert_eq!(*calls.lock().unwrap(), vec![20, 21]);
+            assert_eq!(f.authority.intents.len(), 1);
+            assert_eq!(f.authority.encode_recovery_snapshot().unwrap(), before);
+        }
         return;
     }
     let result = f.authority.deliver_fused_approval_v04(
@@ -219,6 +244,12 @@ fn fused_approval_delivery_checks_time_again_between_transport_stages() {
 #[test]
 fn fused_action_driver_polls_kernel_approval_before_any_dispatch() {
     private_approval_delivery_case(9);
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn fused_action_driver_skips_a_task_whose_next_operation_was_denied() {
+    private_approval_delivery_case(10);
 }
 
 #[test]

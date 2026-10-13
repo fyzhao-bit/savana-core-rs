@@ -52,7 +52,20 @@ impl KernelAgentAuthorityV2 {
             else {
                 continue;
             };
-            if plan.next_operation().is_none() {
+            let Some(next) = plan.next_operation() else {
+                continue;
+            };
+            // A denied intent is terminal for this plan revision: re-proposing
+            // replays the same record and re-evaluation answers Denied again.
+            // Do not spend another owner-clock slot on it.
+            if self.intents.iter().any(|i| {
+                i.durable_task_id == session.durable_task_id
+                    && i.state == IntentRecordStateV2::Denied
+                    && i.fused.as_ref().is_some_and(|b| {
+                        b.reference.plan_revision == plan.revision()
+                            && b.reference.operation == next
+                    })
+            }) {
                 continue;
             }
             // Deliberately serial within each task. Unknown or an uncheckpointed
