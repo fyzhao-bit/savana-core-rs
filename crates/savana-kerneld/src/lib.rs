@@ -239,7 +239,7 @@ mod socket;
 mod startup_identity_tests;
 #[allow(dead_code)]
 mod state;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "linux-file-backed-integration")))]
 mod tpm_anchor_v3;
 mod v04_managed_admin;
 #[cfg(unix)]

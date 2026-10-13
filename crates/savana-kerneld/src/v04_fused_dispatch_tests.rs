@@ -2245,7 +2245,6 @@ fn fused_private_loop_completes_after_second_step_exact_approval_and_next_owner_
 /// kernel's checks are real).
 #[cfg(feature = "test-support")]
 fn restart_kerneld_and_log_in_again(f: &mut PlannerAuthorityFixtureV2, at: u64) {
-    use super::super::*;
     let target = record_private_login_task(f, at);
     restart_kerneld_after_private_login(f, target, at);
 }

@@ -147,14 +147,6 @@ impl std::fmt::Debug for ExecdProtocolServiceV2 {
 }
 
 impl ExecdProtocolServiceV2 {
-    pub(crate) fn new(
-        deployment: ExecdProtocolDeploymentV2,
-        owner: ExecdStateOwnerV2,
-        processor: Box<dyn PreparedDispatchProcessorV2>,
-    ) -> Result<Self, ExecdProtocolServiceErrorV2> {
-        Self::new_inner(deployment, owner, processor, None)
-    }
-
     pub(crate) fn new_with_connector_registry(
         deployment: ExecdProtocolDeploymentV2,
         owner: ExecdStateOwnerV2,
@@ -215,16 +207,6 @@ impl ExecdProtocolServiceV2 {
     #[cfg(test)]
     pub(crate) fn active_effect_guard_count_for_test(&self) -> usize {
         self.owner.active_guard_count_for_test()
-    }
-
-    pub(crate) fn recover_prepared(
-        deployment: &ExecdProtocolDeploymentV2,
-        owner: &ExecdStateOwnerV2,
-        processor: &dyn PreparedDispatchProcessorV2,
-        now: UnixMillisV2,
-        deadline: Instant,
-    ) -> Result<(), ExecdProtocolServiceErrorV2> {
-        Self::recover_prepared_inner(deployment, owner, processor, None, now, deadline)
     }
 
     pub(crate) fn recover_prepared_with_connector_registry(

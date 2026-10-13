@@ -529,27 +529,6 @@ fn task_draft_aggregate_limits_refuse_instead_of_truncating() {
     assert!(draft(clauses, 1).is_err());
 }
 
-fn cbor_bytes(content: &[u8]) -> Vec<u8> {
-    let mut out = match content.len() {
-        n if n < 24 => vec![0x40 | n as u8],
-        n if n < 256 => vec![0x58, n as u8],
-        n => vec![0x59, (n >> 8) as u8, n as u8],
-    };
-    out.extend_from_slice(content);
-    out
-}
-
-fn splice(bytes: &[u8], old: &[u8], new: &[u8]) -> Vec<u8> {
-    let at = bytes
-        .windows(old.len())
-        .position(|w| w == old)
-        .expect("controls embedded in draft");
-    let mut out = bytes[..at].to_vec();
-    out.extend_from_slice(new);
-    out.extend_from_slice(&bytes[at + old.len()..]);
-    out
-}
-
 #[test]
 fn a_result_derived_edge_is_admitted_and_shown_to_the_owner() {
     // A derived control is admitted into a root draft; the approval text shows

@@ -729,6 +729,7 @@ impl KernelRuntimeOwnerV2 {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 const fn map_commit_preparation_error(
     error: StateOwnerErrorV2,
 ) -> KernelRuntimeResponsePreparationErrorV2 {

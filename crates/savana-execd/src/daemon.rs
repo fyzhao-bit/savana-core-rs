@@ -542,7 +542,11 @@ mod implementation {
         // Linux deployment artifacts are installer-owned, not writable by the
         // executor's isolated runtime UID. Keep the exact root:root check.
         #[cfg(target_os = "linux")]
-        let artifact_owner = (0, 0);
+        let artifact_owner = {
+            // The deployment must still name the executor's service lock.
+            let _ = &service;
+            (0, 0)
+        };
         #[cfg(not(target_os = "linux"))]
         let artifact_owner = (service.uid, service.gid);
         let launcher = VerifiedConnectorSandboxProgramV2::from_verified_manifest(

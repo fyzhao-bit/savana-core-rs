@@ -48,18 +48,17 @@ use savana_kernel_protocol::v2::{
     GetExecutionStatusRequestV2, GetExecutionStatusResponseV2, GetKernelTaskStatusRequestV2,
     GetKernelTaskStatusResponseV2, GetReleaseStatusRequestV2, GetReleaseStatusResponseV2,
     HpkeX25519KeyIdV2, KernelIngressBootstrapTransferCapabilityV2, MaskedDocumentHandleV2,
-    NewTaskPreparationHandleV2, Nonce32V2, PendingConnectorRegistrationHandleV2,
-    PendingReleaseHandleV2, PendingToolCallHandleV2, PlanRevisionDigestV2, PlanStepHandleV2,
-    PlannerAbstractSlotV2, PlannerEnvelopeV2, PlannerIntentKindV2, PlannerLimitsV2, PlannerPlanV2,
-    PlannerPurposeV2, PlannerRouteIdV2, PlannerSlotCardinalityV2, PlannerSlotConfidentialityV2,
-    PlannerSlotRefV2, PlannerTicketHandleV2, PrepareAgentUiAuthenticationRequestV2,
+    NewTaskPreparationHandleV2, Nonce32V2, PendingReleaseHandleV2, PendingToolCallHandleV2,
+    PlanRevisionDigestV2, PlanStepHandleV2, PlannerAbstractSlotV2, PlannerEnvelopeV2,
+    PlannerIntentKindV2, PlannerLimitsV2, PlannerPlanV2, PlannerPurposeV2, PlannerRouteIdV2,
+    PlannerSlotCardinalityV2, PlannerSlotConfidentialityV2, PlannerSlotRefV2,
+    PlannerTicketHandleV2, PrepareAgentUiAuthenticationRequestV2,
     PrepareAgentUiAuthenticationResponseV2, PrepareConnectorRegistrationRequestV2,
     PrepareConnectorRegistrationResponseV2, PrepareFollowupIngressRequestV2,
     PrepareFollowupIngressResponseV2, PrepareNewIngressRequestV2, PrepareNewIngressResponseV2,
     PreparePlannerCallRequestV2, PreparePlannerCallResponseV2, PrepareReleaseRequestV2,
     PrepareReleaseResponseV2, PrincipalIdV2, ProducerIdentityV2,
-    ProposeConnectorRegistrationRequestV2, ProposeConnectorRegistrationResponseV2,
-    ProposeToolCallRequestV2, ProposeToolCallResponseV2,
+    ProposeConnectorRegistrationRequestV2, ProposeToolCallRequestV2, ProposeToolCallResponseV2,
     PublicDecisionTraceV2 as ProtocolDecisionTraceV2, PublicDispatchAcceptedStateV2,
     PublicDispatchCompletionV2, PublicExecutionStatusV2, PublicFailureClassV2, PublicStableCodeV2,
     PublicTaskStatusV2, QueryByExecutionNonceRequestV2, ReadAgentViewRequestV2, ReleaseHandleV2,
@@ -7956,35 +7955,6 @@ impl KernelAgentAuthorityV2 {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn propose_connector_registration(
-        &mut self,
-        request: &ProposeConnectorRegistrationRequestV2,
-        values: &KernelValueOwnerV2,
-        caller_boot_id: BootIdV2,
-        caller_identity: ServiceIdentityV2,
-        active_state_manifest_digest: Digest32V2,
-        deployment_generation: u64,
-        now: UnixMillisV2,
-    ) -> Result<ProposeConnectorRegistrationResponseV2, KernelAgentAuthorityErrorV2> {
-        let prepared = self.prepare_connector_registration_proposal(
-            request,
-            values,
-            caller_boot_id,
-            caller_identity,
-            active_state_manifest_digest,
-            deployment_generation,
-            now,
-        )?;
-        self.consume_connector_registration_proposal(&prepared)?;
-        let pending = mint_handle(PendingConnectorRegistrationHandleV2::from_authority_entropy)?;
-        Ok(ProposeConnectorRegistrationResponseV2::new(
-            pending,
-            prepared.envelope,
-            prepared.display_authentication,
-        ))
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn connector_ui_session_context(
         &self,
         session_handle: AgentSessionHandleV2,
@@ -9438,15 +9408,17 @@ pub(crate) mod tests {
         FinalReleaseSemanticBindingV2, FixedOriginV2, GetKernelTaskStatusRequestV2,
         HpkeX25519KeyIdV2, ImplementationIdV2, KernelServiceHandshakeEdgeV2,
         MaskedDocumentHandleV2, NamedArgumentValueBindingV2, Nonce32V2, PeerIdentityBindingV2,
-        PlannerIntentKindV2, PlannerLimitsV2, PlannerPlanV2, PlannerPurposeV2, PlannerRouteIdV2,
-        PlannerSlotRefV2, PlannerStepV2, PrepareConnectorRegistrationRequestV2,
-        PrepareNewIngressRequestV2, PrepareNewIngressResponseV2, PreparePlannerCallRequestV2,
-        PrincipalIdV2, ProducerIdentityV2, ProjectionIdV2, ProposeConnectorRegistrationRequestV2,
-        ProposeToolCallRequestV2, PublicTaskStatusV2, RequestIdV2,
-        ResumeCommittedAgentAuthenticationRequestV2, ResumeCommittedAgentAuthenticationResponseV2,
-        RoleIdV2, RunRevisionDigestV2, RunRevisionObservationV2, ServiceIdentityV2,
-        StaticTemplateIdV2, ToolClassIdV2, ToolHandleV2, UiAuthenticationBindingV2,
-        UiAuthenticationPurposeV2, UnixMillisV2, VersionV2,
+        PendingConnectorRegistrationHandleV2, PlannerIntentKindV2, PlannerLimitsV2, PlannerPlanV2,
+        PlannerPurposeV2, PlannerRouteIdV2, PlannerSlotRefV2, PlannerStepV2,
+        PrepareConnectorRegistrationRequestV2, PrepareNewIngressRequestV2,
+        PrepareNewIngressResponseV2, PreparePlannerCallRequestV2, PrincipalIdV2,
+        ProducerIdentityV2, ProjectionIdV2, ProposeConnectorRegistrationRequestV2,
+        ProposeConnectorRegistrationResponseV2, ProposeToolCallRequestV2, PublicTaskStatusV2,
+        RequestIdV2, ResumeCommittedAgentAuthenticationRequestV2,
+        ResumeCommittedAgentAuthenticationResponseV2, RoleIdV2, RunRevisionDigestV2,
+        RunRevisionObservationV2, ServiceIdentityV2, StaticTemplateIdV2, ToolClassIdV2,
+        ToolHandleV2, UiAuthenticationBindingV2, UiAuthenticationPurposeV2, UnixMillisV2,
+        VersionV2,
     };
     use savana_policy_core::v2::{
         activate_internal_validator_registry, declassification_implementation_digest_v2,
@@ -9482,6 +9454,40 @@ pub(crate) mod tests {
     use crate::v2_executor_client::SuiteOneKernelExecutorClientV2;
     use crate::v2_ingress_authority::{KernelIngressAuthorityV2, KernelIngressSecurityConfigV2};
     use crate::v2_value_owner::KernelValueOwnerV2;
+
+    /// The agent-side half of a registration proposal without the connector
+    /// authority around it: production goes through `propose_add`.
+    impl KernelAgentAuthorityV2 {
+        #[allow(clippy::too_many_arguments)]
+        fn propose_connector_registration(
+            &mut self,
+            request: &ProposeConnectorRegistrationRequestV2,
+            values: &KernelValueOwnerV2,
+            caller_boot_id: BootIdV2,
+            caller_identity: ServiceIdentityV2,
+            active_state_manifest_digest: Digest32V2,
+            deployment_generation: u64,
+            now: UnixMillisV2,
+        ) -> Result<ProposeConnectorRegistrationResponseV2, KernelAgentAuthorityErrorV2> {
+            let prepared = self.prepare_connector_registration_proposal(
+                request,
+                values,
+                caller_boot_id,
+                caller_identity,
+                active_state_manifest_digest,
+                deployment_generation,
+                now,
+            )?;
+            self.consume_connector_registration_proposal(&prepared)?;
+            let pending =
+                super::mint_handle(PendingConnectorRegistrationHandleV2::from_authority_entropy)?;
+            Ok(ProposeConnectorRegistrationResponseV2::new(
+                pending,
+                prepared.envelope,
+                prepared.display_authentication,
+            ))
+        }
+    }
 
     #[derive(Clone, Default)]
     struct TestAgentStateAnchorV2(Arc<Mutex<KernelAgentAuthorityStateHeadV2>>);
