@@ -137,8 +137,11 @@ def _write(operation, upstream, effect, *fields, guarded=True):
 P = "parameter"
 C = "copy_destination"
 CATALOG = (
-    # --- the original workspace catalog, unchanged ---
-    _read("dojo.calendar.search", "search_calendar_events", ("date", "text"), ("query", "text")),
+    # --- the original workspace catalog, its descriptors unchanged ---
+    # (A search's date and a new event's description are optional, as they are
+    # upstream: None is every day, "" no description. A planner need not invent
+    # either; a deployment ships every text field alike.)
+    _read("dojo.calendar.search", "search_calendar_events", ("date", "opt_text"), ("query", "text")),
     _read("dojo.calendar.day", "get_day_calendar_events", ("day", "text")),
     _read("dojo.email.search", "search_emails", ("query", "text")),
     _read("dojo.email.unread", "get_unread_emails"),
@@ -165,7 +168,7 @@ CATALOG = (
     _write("dojo.email.delete", "delete_email", "delete", ("email_id", "resource", "email_id", "text")),
     _write("dojo.calendar.create", "create_calendar_event", "create",
            ("title", P, "title", "text"), ("start_time", P, "start_time", "text"),
-           ("end_time", P, "end_time", "text"), ("description", P, "description", "text"),
+           ("end_time", P, "end_time", "text"), ("description", P, "description", "opt_text"),
            ("participants", "destination", "participants", "opt_list"),
            ("location", P, "location", "opt_text")),
     _write("dojo.calendar.cancel", "cancel_calendar_event", "delete",
