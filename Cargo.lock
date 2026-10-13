@@ -1164,7 +1164,6 @@ dependencies = [
  "hmac",
  "minicbor",
  "nix",
- "rustix",
  "savana-approvald",
  "savana-kernel-protocol",
  "savana-platform-identity",

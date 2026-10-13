@@ -17,21 +17,11 @@ mod daemon;
 mod kernel_client;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod protocol_parser;
-#[allow(dead_code)] // Constructed only by verified production deployment state.
-mod sandbox_process;
-mod state_owner;
-#[allow(dead_code)] // Superseded by the protocol-native production worker; retained for ABI tests.
-mod worker_process;
-#[allow(dead_code)] // Activated by the production parser worker supervisor.
-mod worker_protocol;
-#[allow(dead_code)] // Activated by the production parser worker supervisor.
-mod worker_supervisor;
 pub use browser_authority::{
     IngressBrowserAuthorityErrorV2, IngressBrowserAuthorityV2, PreparedBrowserAuthenticationV2,
 };
 pub use daemon::{run, IngressdDaemonErrorV2};
 pub use kernel_client::{IngressKernelClientErrorV2, SuiteOneIngressKernelClientV2};
-pub use state_owner::{IngressStateOwnerErrorV2, IngressStateOwnerV2};
 
 /// Private executable entry point for the installed one-job parser worker.
 ///

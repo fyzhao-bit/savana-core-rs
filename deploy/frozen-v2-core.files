@@ -71,7 +71,6 @@ crates/savana-execd/src/worker_supervisor.rs
 crates/savana-ingressd/src/browser_authority.rs
 crates/savana-ingressd/src/daemon.rs
 crates/savana-ingressd/src/kernel_client.rs
-crates/savana-ingressd/src/state_owner.rs
 crates/savana-input-runtime/Cargo.toml
 crates/savana-input-runtime/src/lib.rs
 crates/savana-kernel-protocol/Cargo.toml
