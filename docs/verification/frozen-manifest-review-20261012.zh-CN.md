@@ -279,3 +279,9 @@ tools/check-frozen-v2-core.sh && sh tools/tests/check-frozen-v2-core.sh tools/ch
 | `crates/savana-policy-core/src/v2/validator.rs` | `5e9a6d8` |
 | `crates/savana-vault/Cargo.toml` | `87f24af` |
 | `crates/savana-vault/src/lib.rs` | `87f24af` |
+
+### 5.6 重新生成结果
+
+按第四节的步骤重新生成：移除已删除的 `crates/savana-kerneld/src/v2_recovery.rs`，按字典序加入 5.3 的 11 个文件，
+逐文件重算 SHA-256。清单现为 **339 个文件**；`tools/check-frozen-v2-core.sh` 逐项 OK，
+`tools/tests/check-frozen-v2-core.sh` 自测通过。此后改动任何清单文件都会让 CI 的第一步失败，需要再走一次本流程。

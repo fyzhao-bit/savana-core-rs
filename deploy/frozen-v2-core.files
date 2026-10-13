@@ -148,7 +148,6 @@ crates/savana-kerneld/src/v2_input_owner.rs
 crates/savana-kerneld/src/v2_kernel_owner.rs
 crates/savana-kerneld/src/v2_listener.rs
 crates/savana-kerneld/src/v2_managed_resource.rs
-crates/savana-kerneld/src/v2_recovery.rs
 crates/savana-kerneld/src/v2_runtime.rs
 crates/savana-kerneld/src/v2_server.rs
 crates/savana-kerneld/src/v2_startup.rs
@@ -159,6 +158,7 @@ crates/savana-kerneld/src/v2_value_owner.rs
 crates/savana-leak-gate/Cargo.toml
 crates/savana-leak-gate/src/fuzz_vectors.json
 crates/savana-leak-gate/src/lib.rs
+crates/savana-leak-gate/src/masking.rs
 crates/savana-leak-gate/src/scanner.rs
 crates/savana-leak-gate/src/tables.rs
 crates/savana-leak-gate/src/tests.rs
@@ -278,6 +278,7 @@ crates/savana-policy-core/src/v2/managed_admin.rs
 crates/savana-policy-core/src/v2/managed_execution.rs
 crates/savana-policy-core/src/v2/managed_resource.rs
 crates/savana-policy-core/src/v2/mod.rs
+crates/savana-policy-core/src/v2/model_masking.rs
 crates/savana-policy-core/src/v2/ontology.rs
 crates/savana-policy-core/src/v2/ontology_tests.rs
 crates/savana-policy-core/src/v2/production.rs
@@ -297,6 +298,15 @@ crates/savana-policy-core/src/v2/validator.rs
 crates/savana-policy-core/src/v2/validator_tests.rs
 crates/savana-policy-core/src/v2/value.rs
 crates/savana-policy-core/src/v2/verification_evidence.rs
+crates/savana-table-compute/Cargo.toml
+crates/savana-table-compute/src/calc.rs
+crates/savana-table-compute/src/decimal.rs
+crates/savana-table-compute/src/json.rs
+crates/savana-table-compute/src/lib.rs
+crates/savana-table-compute/src/pyfloat.rs
+crates/savana-table-compute/src/spec.rs
+crates/savana-table-compute/src/table.rs
+crates/savana-table-compute/src/tests.rs
 crates/savana-vault/Cargo.toml
 crates/savana-vault/src/durable.rs
 crates/savana-vault/src/lib.rs
