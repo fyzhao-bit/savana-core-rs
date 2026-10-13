@@ -227,6 +227,8 @@ REFUSAL_HINTS = {
                        'or {"text": [...]} with 2 to 4 non-list fields of one operation.'),
     "extract_context": (f'Context is {{"from": k}} or a list of up to {MAX_CONTEXTS} such, each naming a different '
                         'earlier step, never a literal and never with a path or computation.'),
+    "compute_source": ("A compute step is never an extraction's source: make the source an earlier tool result "
+                       "(e.g. the one it computed from) and give the compute step as context."),
     "source_on_tool": 'Only an extraction step takes "source"; remove it from tool steps.',
     "condition_text": ('A "condition" extraction needs args "condition": {"text": ...} copied exactly from the '
                        'request; no other extraction takes "condition".'),
@@ -314,9 +316,10 @@ CALC_RULES = ('  Or "calc <expression>" (no filter or order): exact arithmetic o
               '  values, the cheaper of two options) instead of asking an extraction to calculate; get each\n'
               '  number it uses with a compute "value" output or an extraction first.\n')
 EXACT_ANCHOR = f'or as context for the final "{ANSWER}".\n'
-EXACT_ANSWER = ("  A compute step's value is exact. When it is the number the user asked for, make it the final\n"
-                f'  "{ANSWER}" extraction\'s source, and give that extraction as context only results that hold\n'
-                "  other facts the answer must state, never the rows the number was computed from.\n")
+EXACT_ANSWER = ("  A compute step's value is exact. When it is the number the user asked for, give it to the final\n"
+                f'  "{ANSWER}" extraction as its first context (a compute step is never a source: the source can be\n'
+                "  the result the number was computed from), and as other context only results that hold other\n"
+                "  facts the answer must state.\n")
 assert ROOT_SYSTEM.count(CALC_ANCHOR) == 1 and ROOT_SYSTEM.count(EXACT_ANCHOR) == 1
 
 

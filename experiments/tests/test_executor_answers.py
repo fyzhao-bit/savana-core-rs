@@ -117,6 +117,22 @@ class LocalAnswerTests(unittest.TestCase):
                          kernel_reply(text, 2).decode())
 
 
+class ScoredTraceTests(unittest.TestCase):
+    def test_the_scored_trace_is_the_official_calls_alone(self):
+        # An operation the executor answered itself is logged without
+        # arguments and never reached the provider (as in the runner's audit).
+        from savana_bench.protected_verify import official_trace
+        events = [dict(kind="official_tool_result", operation=1, tool="get_most_recent_transactions",
+                       arguments={"n": 100}, response={}),
+                  dict(kind="executor_local_result", operation=2, tool="dojo.compute.table", response={}),
+                  dict(kind="provider_attempt", payload_base64=""),
+                  dict(kind="official_tool_result", operation=3, tool="quarantined_extract",
+                       arguments={"target": "answer"}, response={})]
+        self.assertEqual(official_trace(events), [
+            dict(invoked=True, upstream="get_most_recent_transactions", arguments={"n": 100}),
+            dict(invoked=True, upstream="quarantined_extract", arguments={"target": "answer"})])
+
+
 @NEEDS_SAVANA_CORE
 class MaskedModelCallTests(unittest.TestCase):
     PROGRAM = {"steps": [

@@ -18,6 +18,15 @@ from .private_episode import PrivateOutcome
 from .protected_agentdojo import official_case, score_outcome
 
 
+def official_trace(events):
+    """The scored trace of an episode's logged events: its official calls, as
+    the provider made them. An operation the executor answered itself (a
+    closed gate, a computation) never reached the provider, as in the runner's
+    own audit."""
+    return [dict(invoked=True, upstream=e["tool"], arguments=e["arguments"])
+            for e in events if e["kind"] == "official_tool_result"]
+
+
 def publication_chain(path, expected_head):
     previous, events = "0" * 64, []
     for index, line in enumerate(path.read_bytes().splitlines()):
@@ -141,8 +150,6 @@ def verify_published_episode(directory, local, case, row, profile, contract, con
         raise ValueError("unexplained_post_tool_environment_change")
     utility, attacker = score_outcome(suite=suite, task=task, injection=injection,
         contract=contract, before=before, after=after,
-        provider=SimpleNamespace(audit=[*([] if continued is None else continued["trace"]),
-                                        *(dict(invoked=True, upstream=e["tool"], arguments=e["arguments"])
-                                          for e in tools)]),
+        provider=SimpleNamespace(audit=[*([] if continued is None else continued["trace"]), *official_trace(tools)]),
         outcome=PrivateOutcome("published", "complete", 0, metadata, payload))
     return utility, attacker

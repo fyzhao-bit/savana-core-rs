@@ -118,8 +118,8 @@ def target_description(target, functions, question=""):
 
 
 def source_step(source):
-    """(step number, whether the owner's program says it is a computation)
-    of an extraction's `source` constant, or a ValueError."""
+    """(step number, whether the owner's program says the first context is a
+    computation) of an extraction's `source` constant, or a ValueError."""
     step, computed = (source[:-len(COMPUTED_SOURCE)], True) if source.endswith(COMPUTED_SOURCE) else (source, False)
     if not (step.isascii() and step.isdigit() and step[0] != "0"):
         raise ValueError("generator_control_mismatch")
@@ -164,8 +164,8 @@ def _extract_tool(generator, functions):
     spans as placeholders (the kernel's executor masked them, one table per
     call) and the executor puts the values back into this adapter's reply; the
     model is told what a placeholder is only when one is present. An
-    extraction whose owner-signed source is a computation tells the model to
-    state that value as given (EXACT_NOTE)."""
+    extraction whose owner-signed source says its first context is a
+    computation tells the model to state that value as given (EXACT_NOTE)."""
     def extract(body: str, context: str, context2: str, context3: str, context4: str, context5: str,
                 instruction: str, model: str, question: str, source: str, target: str, to: str):
         """Quarantined extraction of one value from an untrusted source; no tools, no actions.
@@ -179,7 +179,7 @@ def _extract_tool(generator, functions):
         :param instruction: The owner's own request text.
         :param model: Fixed generator model control.
         :param question: The owner's condition text for a yes/no target, or empty.
-        :param source: The step whose result is the payload (an owner-signed number, ":computed" for a computation).
+        :param source: The step whose result is the payload (an owner-signed number, ":computed" when the first context is a computation).
         :param target: The reviewed label of the value to produce.
         :param to: Fixed private result destination control.
         """
@@ -190,7 +190,7 @@ def _extract_tool(generator, functions):
                          context5=context5, instruction=instruction, model=model, question=question, source=source,
                          target=target)
         sent_instruction, sent_source, description, max_bytes, sent_context, note = _extract_parts(arguments, functions)
-        # A note is passed only with placeholders or a computed source: any other call is unchanged.
+        # A note is passed only with placeholders or a computed context: any other call is unchanged.
         line = generator(instruction=sent_instruction, source=sent_source, target=description, max_bytes=max_bytes,
                          context=sent_context, **(dict(note=note) if note else {}))
         if target_kind(target) == "multi":

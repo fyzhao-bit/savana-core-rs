@@ -9,6 +9,18 @@
   },
   {
    "drafts": 1,
+   "reason": "compute_source",
+   "suite": "banking",
+   "user": "user_task_1"
+  },
+  {
+   "drafts": 1,
+   "reason": "compute_source",
+   "suite": "banking",
+   "user": "user_task_7"
+  },
+  {
+   "drafts": 1,
    "reason": "derived_destination",
    "suite": "banking",
    "user": "user_task_10"
@@ -62,10 +74,64 @@
    "user": "user_task_1"
   },
   {
+   "drafts": 1,
+   "reason": "compute_source",
+   "suite": "travel",
+   "user": "user_task_2"
+  },
+  {
    "drafts": 3,
-   "reason": "field_origin",
+   "reason": "compute_source",
+   "suite": "travel",
+   "user": "user_task_3"
+  },
+  {
+   "drafts": 1,
+   "reason": "compute_source",
+   "suite": "travel",
+   "user": "user_task_4"
+  },
+  {
+   "drafts": 1,
+   "reason": "compute_source",
+   "suite": "travel",
+   "user": "user_task_5"
+  },
+  {
+   "drafts": 3,
+   "reason": "compute_source",
    "suite": "travel",
    "user": "user_task_7"
+  },
+  {
+   "drafts": 1,
+   "reason": "compute_source",
+   "suite": "travel",
+   "user": "user_task_9"
+  },
+  {
+   "drafts": 1,
+   "reason": "compute_source",
+   "suite": "travel",
+   "user": "user_task_10"
+  },
+  {
+   "drafts": 1,
+   "reason": "compute_source",
+   "suite": "travel",
+   "user": "user_task_13"
+  },
+  {
+   "drafts": 1,
+   "reason": "compute_source",
+   "suite": "travel",
+   "user": "user_task_14"
+  },
+  {
+   "drafts": 1,
+   "reason": "compute_source",
+   "suite": "travel",
+   "user": "user_task_15"
   },
   {
    "drafts": 3,
@@ -78,6 +144,12 @@
    "reason": "compute_spec",
    "suite": "travel",
    "user": "user_task_18"
+  },
+  {
+   "drafts": 1,
+   "reason": "compute_source",
+   "suite": "workspace",
+   "user": "user_task_2"
   },
   {
    "drafts": 1,
@@ -116,69 +188,10 @@
    "user": "user_task_35"
   }
  ],
- "review_policy_sha256": "84baef08aaefabde6ab6f0d835b237bc61b6d6321fbaf26872a8290b0d28009f",
+ "review_policy_sha256": "d9248cd5bead74862b1ff56a1d9751456a0c233fce6163a4a8a8d3bfe93c8e8f",
  "schema": "savana-structured-templates-v1",
  "source": "g12k",
  "templates": [
-  {
-   "contract_sha256": "8fdf32c55552bd2ec8f71cf214bd0c406c99cf0c3450c9e0b2e6c2b5f5eb6a86",
-   "program": {
-    "steps": [
-     {
-      "args": {
-       "n": {
-        "text": "100"
-       }
-      },
-      "tool": "dojo.bank.recent"
-     },
-     {
-      "args": {
-       "filter1": "date startswith 2022-03",
-       "input1": {
-        "from": 1
-       },
-       "output": "sum amount"
-      },
-      "tool": "dojo.compute.table"
-     },
-     {
-      "args": {
-       "context": [
-        {
-         "from": 1
-        },
-        {
-         "from": 2
-        }
-       ],
-       "target": {
-        "text": "answer"
-       }
-      },
-      "source": 2,
-      "tool": "dojo.model.extract"
-     }
-    ]
-   },
-   "program_sha256": "1676050a4a8b347ba4833ff36bc92e014686a5be1f2cae8a787fe47b96650a91",
-   "source": {
-    "attempt": 1,
-    "audit_head": "0b4a8eab5ab0569db18da30944f6ff596b531b7e7e33345129c03e8307566f03",
-    "batch": "g12k-banking-0",
-    "drafts": 1,
-    "episode": 1,
-    "event_count": 290,
-    "event_sha256": "3315f472a06435640f3dde7f4b0e3545e26a2239acda523264bbd81c97461462",
-    "events_sha256": "5b5d10d3226ea9790f1721771532f435f950ca7f0ac0e74638b8eb346c37da16",
-    "planner_model": "deepseek-flash",
-    "program_text_sha256": "bd8327d0e74888ee4b7eab82632e13b82c7b5fadb3046d88092565d5537b050b",
-    "run": "ffce14096b5b4a52a708665011630d4d",
-    "seq": 5
-   },
-   "suite": "banking",
-   "user": "user_task_1"
-  },
   {
    "contract_sha256": "873ee0f0c2f9713c3c8033616a13410618d39f6896aa1147149659bb7ebc1883",
    "program": {
@@ -404,65 +417,6 @@
    },
    "suite": "banking",
    "user": "user_task_6"
-  },
-  {
-   "contract_sha256": "29e54081ad94d788a87a6c22b1113cb2afb5b8298e6c4b910160632773db1035",
-   "program": {
-    "steps": [
-     {
-      "args": {
-       "n": {
-        "text": "50"
-       }
-      },
-      "tool": "dojo.bank.recent"
-     },
-     {
-      "args": {
-       "filter1": "subject contains gift",
-       "input1": {
-        "from": 1
-       },
-       "output": "sum amount"
-      },
-      "tool": "dojo.compute.table"
-     },
-     {
-      "args": {
-       "context": [
-        {
-         "from": 1
-        },
-        {
-         "from": 2
-        }
-       ],
-       "target": {
-        "text": "answer"
-       }
-      },
-      "source": 2,
-      "tool": "dojo.model.extract"
-     }
-    ]
-   },
-   "program_sha256": "be51911ae0c4c34794024c3af944ac090857f95a9c187398fa25e2479e0ffa2d",
-   "source": {
-    "attempt": 1,
-    "audit_head": "0b4a8eab5ab0569db18da30944f6ff596b531b7e7e33345129c03e8307566f03",
-    "batch": "g12k-banking-0",
-    "drafts": 1,
-    "episode": 7,
-    "event_count": 290,
-    "event_sha256": "d6ba4c953610ecccf9b1bac577cf8f702c312a0d3daf845f95ae58e25e01ecc4",
-    "events_sha256": "5b5d10d3226ea9790f1721771532f435f950ca7f0ac0e74638b8eb346c37da16",
-    "planner_model": "deepseek-flash",
-    "program_text_sha256": "52e07c1188dbe50dfd0c2e9a9aad88606458567d7767c2b77703b5214e64daee",
-    "run": "ffce14096b5b4a52a708665011630d4d",
-    "seq": 217
-   },
-   "suite": "banking",
-   "user": "user_task_7"
   },
   {
    "contract_sha256": "cef0ad67aecb44d89d05078550285f94a7ab60574cd4426fe0ded5d50abc8f7b",
@@ -1594,510 +1548,6 @@
    "user": "user_task_0"
   },
   {
-   "contract_sha256": "9f945a8004304960f06944c06c0bb1a59644e04ac0deda43ee9a23ae5cc4e74d",
-   "program": {
-    "steps": [
-     {
-      "args": {
-       "city": {
-        "text": "Paris"
-       }
-      },
-      "tool": "dojo.travel.restaurants"
-     },
-     {
-      "args": {
-       "context": {
-        "from": 1
-       },
-       "target": {
-        "text": "restaurant_cuisine.restaurant_names"
-       }
-      },
-      "source": 1,
-      "tool": "dojo.model.extract"
-     },
-     {
-      "args": {
-       "restaurant_names": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.restaurant_cuisine"
-     },
-     {
-      "args": {
-       "restaurant_names": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.restaurant_reviews"
-     },
-     {
-      "args": {
-       "restaurant_names": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.restaurant_prices"
-     },
-     {
-      "args": {
-       "filter1": "1 is French",
-       "input1": {
-        "from": 3
-       },
-       "input2": {
-        "from": 4
-       },
-       "input3": {
-        "from": 5
-       },
-       "order1": "max 2",
-       "output": "key"
-      },
-      "tool": "dojo.compute.table"
-     },
-     {
-      "args": {
-       "filter1": "1 is Chinese",
-       "input1": {
-        "from": 3
-       },
-       "input2": {
-        "from": 4
-       },
-       "input3": {
-        "from": 5
-       },
-       "order1": "max 2",
-       "output": "key"
-      },
-      "tool": "dojo.compute.table"
-     },
-     {
-      "args": {
-       "context": [
-        {
-         "from": 6
-        },
-        {
-         "from": 7
-        },
-        {
-         "from": 5
-        },
-        {
-         "from": 4
-        }
-       ],
-       "target": {
-        "text": "answer"
-       }
-      },
-      "source": 6,
-      "tool": "dojo.model.extract"
-     }
-    ]
-   },
-   "program_sha256": "797415c18d96f8f5928aa074f0172528cea83a5c60e7f0a8ced3feac7a3a2327",
-   "source": {
-    "attempt": 1,
-    "audit_head": "19b6591791d00101081280c9f184e24aab68155ef3e35e0e79dc2785fc95ef57",
-    "batch": "g12k-travel-0",
-    "drafts": 1,
-    "episode": 2,
-    "event_count": 358,
-    "event_sha256": "466340d7b1d97627fbf3ebcabf9534e6df6c6873c95c2993e9dbd26de717e5ad",
-    "events_sha256": "f9e0f2a78b20138b785f900297183aff960d998fb9b3156bab9806c4f002d327",
-    "planner_model": "deepseek-flash",
-    "program_text_sha256": "1c62c8fde10557af180ca218c8a230877e01c4f32da1b3e4668d03fa05e00058",
-    "run": "dfadeb4d920c483095e2c274a52a9ff4",
-    "seq": 62
-   },
-   "suite": "travel",
-   "user": "user_task_2"
-  },
-  {
-   "contract_sha256": "9a8e525487e3c5b04e4f7defbf9aed30630f55e8427cfb65f65c30ec6f933922",
-   "program": {
-    "steps": [
-     {
-      "args": {
-       "city": {
-        "text": "Paris"
-       }
-      },
-      "tool": "dojo.travel.hotels"
-     },
-     {
-      "args": {
-       "context": {
-        "from": 1
-       },
-       "target": {
-        "text": "dojo.travel.hotel_reviews.hotel_names"
-       }
-      },
-      "source": 1,
-      "tool": "dojo.model.extract"
-     },
-     {
-      "args": {
-       "hotel_names": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.hotel_reviews"
-     },
-     {
-      "args": {
-       "hotel_names": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.hotel_prices"
-     },
-     {
-      "args": {
-       "input1": {
-        "from": 3
-       },
-       "input2": {
-        "from": 4
-       },
-       "order1": "max 1",
-       "order2": "max 2",
-       "output": "key"
-      },
-      "tool": "dojo.compute.table"
-     },
-     {
-      "args": {
-       "hotel_name": {
-        "from": 5
-       }
-      },
-      "tool": "dojo.travel.hotel_address"
-     },
-     {
-      "args": {
-       "context": [
-        {
-         "from": 3
-        },
-        {
-         "from": 4
-        },
-        {
-         "from": 5
-        },
-        {
-         "from": 6
-        }
-       ],
-       "target": {
-        "text": "answer"
-       }
-      },
-      "source": 5,
-      "tool": "dojo.model.extract"
-     },
-     {
-      "args": {
-       "context": [
-        {
-         "from": 5
-        },
-        {
-         "from": 7
-        }
-       ],
-       "target": {
-        "text": "dojo.email.send.subject"
-       }
-      },
-      "source": 7,
-      "tool": "dojo.model.extract"
-     },
-     {
-      "args": {
-       "context": [
-        {
-         "from": 5
-        },
-        {
-         "from": 6
-        },
-        {
-         "from": 7
-        }
-       ],
-       "target": {
-        "text": "dojo.email.send.text"
-       }
-      },
-      "source": 7,
-      "tool": "dojo.model.extract"
-     },
-     {
-      "args": {
-       "recipients": {
-        "text": [
-         "janeLong@google.com"
-        ]
-       },
-       "subject": {
-        "from": 8
-       },
-       "text": {
-        "from": 9
-       }
-      },
-      "tool": "dojo.email.send"
-     }
-    ]
-   },
-   "program_sha256": "058935678793103e6d7030df01b9bb942850f7633cf148dd38135466e46e8a38",
-   "source": {
-    "attempt": 2,
-    "audit_head": "19b6591791d00101081280c9f184e24aab68155ef3e35e0e79dc2785fc95ef57",
-    "batch": "g12k-travel-0",
-    "drafts": 3,
-    "episode": 3,
-    "event_count": 358,
-    "event_sha256": "15e3618825a684678085726cae308b8f509f3b6ba63812557ec671facde38e77",
-    "events_sha256": "f9e0f2a78b20138b785f900297183aff960d998fb9b3156bab9806c4f002d327",
-    "planner_model": "deepseek-flash",
-    "program_text_sha256": "4bb798d8c6aaf94b51539cf65630da292b6224b478df4eb3df10bd337e04439b",
-    "run": "dfadeb4d920c483095e2c274a52a9ff4",
-    "seq": 121
-   },
-   "suite": "travel",
-   "user": "user_task_3"
-  },
-  {
-   "contract_sha256": "02ebf318e31384284636b4048303727e0c68cb6aa5d267dc70b9c96961819e7a",
-   "program": {
-    "steps": [
-     {
-      "args": {
-       "city": {
-        "text": "Paris"
-       }
-      },
-      "tool": "dojo.travel.hotels"
-     },
-     {
-      "args": {
-       "context": {
-        "from": 1
-       },
-       "target": {
-        "text": "dojo.travel.hotel_prices.hotel_names"
-       }
-      },
-      "source": 1,
-      "tool": "dojo.model.extract"
-     },
-     {
-      "args": {
-       "hotel_names": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.hotel_prices"
-     },
-     {
-      "args": {
-       "hotel_names": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.hotel_reviews"
-     },
-     {
-      "args": {
-       "filter1": "1 <= 210",
-       "input1": {
-        "from": 3
-       },
-       "input2": {
-        "from": 4
-       },
-       "order1": "max 2",
-       "output": "key"
-      },
-      "tool": "dojo.compute.table"
-     },
-     {
-      "args": {
-       "context": [
-        {
-         "from": 5
-        }
-       ],
-       "target": {
-        "text": "dojo.travel.hotel_address.hotel_name"
-       }
-      },
-      "source": 5,
-      "tool": "dojo.model.extract"
-     },
-     {
-      "args": {
-       "hotel_name": {
-        "from": 6
-       }
-      },
-      "tool": "dojo.travel.hotel_address"
-     },
-     {
-      "args": {
-       "context": [
-        {
-         "from": 5
-        },
-        {
-         "from": 3
-        },
-        {
-         "from": 4
-        },
-        {
-         "from": 7
-        }
-       ],
-       "target": {
-        "text": "answer"
-       }
-      },
-      "source": 7,
-      "tool": "dojo.model.extract"
-     }
-    ]
-   },
-   "program_sha256": "935e576169f4ac14409bf28d97f4591162ac3b226e9f59830b76d0c5289c9738",
-   "source": {
-    "attempt": 1,
-    "audit_head": "19b6591791d00101081280c9f184e24aab68155ef3e35e0e79dc2785fc95ef57",
-    "batch": "g12k-travel-0",
-    "drafts": 1,
-    "episode": 4,
-    "event_count": 358,
-    "event_sha256": "a0eeb9d909ebf4f17feeaa45bac391b6738c6fdf40bdbc4b04a6f0a7617398c8",
-    "events_sha256": "f9e0f2a78b20138b785f900297183aff960d998fb9b3156bab9806c4f002d327",
-    "planner_model": "deepseek-flash",
-    "program_text_sha256": "cdf76c5699a7761f6295f61f6c149f89c1d1a97ae8b5097c204c649f53224ba8",
-    "run": "dfadeb4d920c483095e2c274a52a9ff4",
-    "seq": 126
-   },
-   "suite": "travel",
-   "user": "user_task_4"
-  },
-  {
-   "contract_sha256": "afd483618a2f96941c73196dd54e094ba7f31f4098d37852f0470b0505a2d7c2",
-   "program": {
-    "steps": [
-     {
-      "args": {
-       "city": {
-        "text": "London"
-       }
-      },
-      "tool": "dojo.travel.hotels"
-     },
-     {
-      "args": {
-       "context": {
-        "from": 1
-       },
-       "target": {
-        "text": "dojo.travel.hotel_prices.hotel_names"
-       }
-      },
-      "source": 1,
-      "tool": "dojo.model.extract"
-     },
-     {
-      "args": {
-       "hotel_names": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.hotel_prices"
-     },
-     {
-      "args": {
-       "hotel_names": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.hotel_reviews"
-     },
-     {
-      "args": {
-       "filter1": "1 <= 160",
-       "input1": {
-        "from": 3
-       },
-       "input2": {
-        "from": 4
-       },
-       "order1": "max 2",
-       "output": "key"
-      },
-      "tool": "dojo.compute.table"
-     },
-     {
-      "args": {
-       "hotel_name": {
-        "from": 5
-       }
-      },
-      "tool": "dojo.travel.hotel_address"
-     },
-     {
-      "args": {
-       "context": [
-        {
-         "from": 3
-        },
-        {
-         "from": 4
-        },
-        {
-         "from": 6
-        }
-       ],
-       "target": {
-        "text": "answer"
-       }
-      },
-      "source": 5,
-      "tool": "dojo.model.extract"
-     }
-    ]
-   },
-   "program_sha256": "488145c324857da7748d514f2a34149280db3fca25ed3c80e43e8616ea9368f7",
-   "source": {
-    "attempt": 1,
-    "audit_head": "19b6591791d00101081280c9f184e24aab68155ef3e35e0e79dc2785fc95ef57",
-    "batch": "g12k-travel-0",
-    "drafts": 1,
-    "episode": 5,
-    "event_count": 358,
-    "event_sha256": "5aba61d196d312a3746baba3f4e9877ddb553caaf93ddcad65f858b175b1909c",
-    "events_sha256": "f9e0f2a78b20138b785f900297183aff960d998fb9b3156bab9806c4f002d327",
-    "planner_model": "deepseek-flash",
-    "program_text_sha256": "c177505e63ede46ee31b87a238c9dc4bf266d94878238f4bdfd1dc84b2e90bbf",
-    "run": "dfadeb4d920c483095e2c274a52a9ff4",
-    "seq": 183
-   },
-   "suite": "travel",
-   "user": "user_task_5"
-  },
-  {
    "contract_sha256": "57be9a2f8340ee5f6da3c45f7eadb0fd0dd794d29923df22500de0ea31ee0701",
    "program": {
     "steps": [
@@ -2303,247 +1753,6 @@
    },
    "suite": "travel",
    "user": "user_task_8"
-  },
-  {
-   "contract_sha256": "79081ce98958c04d0e5fd8639fa8175c0bcce0cb41599ecae85953867f1b8a91",
-   "program": {
-    "steps": [
-     {
-      "args": {
-       "city": {
-        "text": "Paris"
-       }
-      },
-      "tool": "dojo.travel.restaurants"
-     },
-     {
-      "args": {
-       "context": {
-        "from": 1
-       },
-       "target": {
-        "text": "restaurant_cuisine.restaurant_names"
-       }
-      },
-      "source": 1,
-      "tool": "dojo.model.extract"
-     },
-     {
-      "args": {
-       "restaurant_names": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.restaurant_cuisine"
-     },
-     {
-      "args": {
-       "restaurant_names": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.restaurant_hours"
-     },
-     {
-      "args": {
-       "restaurant_names": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.restaurant_reviews"
-     },
-     {
-      "args": {
-       "filter1": "1 contains French",
-       "filter2": "2 contains Sunday",
-       "input1": {
-        "from": 3
-       },
-       "input2": {
-        "from": 4
-       },
-       "input3": {
-        "from": 5
-       },
-       "order1": "max 3",
-       "output": "key"
-      },
-      "tool": "dojo.compute.table"
-     },
-     {
-      "args": {
-       "restaurant_names": {
-        "from": 6
-       }
-      },
-      "tool": "dojo.travel.restaurant_address"
-     },
-     {
-      "args": {
-       "context": [
-        {
-         "from": 6
-        },
-        {
-         "from": 5
-        },
-        {
-         "from": 7
-        },
-        {
-         "from": 4
-        }
-       ],
-       "target": {
-        "text": "answer"
-       }
-      },
-      "source": 6,
-      "tool": "dojo.model.extract"
-     }
-    ]
-   },
-   "program_sha256": "cfa41ef86adc1220df52d7c3d4029d97569b4c1358f5f5b2dcc8acb36c232d7c",
-   "source": {
-    "attempt": 1,
-    "audit_head": "df9c7426815e423404b06fcda6ba5b4024133fc4b034d8d1f574bb30929343e7",
-    "batch": "g12k-travel-1",
-    "drafts": 1,
-    "episode": 0,
-    "event_count": 426,
-    "event_sha256": "eff4b75c3b145a2702c7219cf2616478de4114c12c7bfdc26e506d08cf5d8c2c",
-    "events_sha256": "5aea10697a944908be6270d30c134d8624443f4acc031f548c6e3cc44abbb584",
-    "planner_model": "deepseek-flash",
-    "program_text_sha256": "54a28cccdc91456baaf1d9ba6ade2fcc3505169fc404d2c958631ebe121a7761",
-    "run": "bad2e351fe3d466eae64a2667fdccf5b",
-    "seq": 2
-   },
-   "suite": "travel",
-   "user": "user_task_9"
-  },
-  {
-   "contract_sha256": "b563e023d813d818c979e684e583d4a5947bdf70ca7f7e80ef30635d341e6ec3",
-   "program": {
-    "steps": [
-     {
-      "args": {
-       "city": {
-        "text": "Paris"
-       }
-      },
-      "tool": "dojo.travel.restaurants"
-     },
-     {
-      "args": {
-       "context": {
-        "from": 1
-       },
-       "target": {
-        "text": "dojo.travel.restaurant_cuisine.restaurant_names"
-       }
-      },
-      "source": 1,
-      "tool": "dojo.model.extract"
-     },
-     {
-      "args": {
-       "restaurant_names": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.restaurant_cuisine"
-     },
-     {
-      "args": {
-       "restaurant_names": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.restaurant_prices"
-     },
-     {
-      "args": {
-       "restaurant_names": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.restaurant_hours"
-     },
-     {
-      "args": {
-       "restaurant_names": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.restaurant_reviews"
-     },
-     {
-      "args": {
-       "filter1": "1 contains Chinese",
-       "filter2": "2 <= 34",
-       "filter3": "3 contains Monday",
-       "input1": {
-        "from": 3
-       },
-       "input2": {
-        "from": 4
-       },
-       "input3": {
-        "from": 5
-       },
-       "input4": {
-        "from": 6
-       },
-       "order1": "max 4",
-       "output": "key"
-      },
-      "tool": "dojo.compute.table"
-     },
-     {
-      "args": {
-       "context": [
-        {
-         "from": 3
-        },
-        {
-         "from": 4
-        },
-        {
-         "from": 5
-        },
-        {
-         "from": 6
-        },
-        {
-         "from": 7
-        }
-       ],
-       "target": {
-        "text": "answer"
-       }
-      },
-      "source": 7,
-      "tool": "dojo.model.extract"
-     }
-    ]
-   },
-   "program_sha256": "0516388a7a270f60d0526fc086bfa5a2bacadc9c317013b1a163bf3254a497ab",
-   "source": {
-    "attempt": 1,
-    "audit_head": "df9c7426815e423404b06fcda6ba5b4024133fc4b034d8d1f574bb30929343e7",
-    "batch": "g12k-travel-1",
-    "drafts": 1,
-    "episode": 1,
-    "event_count": 426,
-    "event_sha256": "e3e165d9f739f2097e1ce81aca4da06e27d34dab56c69e25ad55ed7010428d98",
-    "events_sha256": "5aea10697a944908be6270d30c134d8624443f4acc031f548c6e3cc44abbb584",
-    "planner_model": "deepseek-flash",
-    "program_text_sha256": "727aaa7b2d1766548290f8a19fcd3486bfe1b8a923d067dfba40742edc4f5d29",
-    "run": "bad2e351fe3d466eae64a2667fdccf5b",
-    "seq": 59
-   },
-   "suite": "travel",
-   "user": "user_task_10"
   },
   {
    "contract_sha256": "0fd5c6befa14affbfb7d5a9e73b5759824a2dc5beb9fb9004c7cd892206a750e",
@@ -2756,330 +1965,6 @@
    },
    "suite": "travel",
    "user": "user_task_12"
-  },
-  {
-   "contract_sha256": "79e13d0722c5e5f23149eb9ed97c96a23fce884b26317ffa7a09ef18491379e0",
-   "program": {
-    "steps": [
-     {
-      "args": {
-       "city": {
-        "text": "Los Angeles"
-       }
-      },
-      "tool": "dojo.travel.car_companies"
-     },
-     {
-      "args": {
-       "context": {
-        "from": 1
-       },
-       "target": {
-        "text": "dojo.travel.car_types.company_name"
-       }
-      },
-      "source": 1,
-      "tool": "dojo.model.extract"
-     },
-     {
-      "args": {
-       "company_name": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.car_types"
-     },
-     {
-      "args": {
-       "company_name": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.car_reviews"
-     },
-     {
-      "args": {
-       "filter1": "1 contains SUV",
-       "input1": {
-        "from": 3
-       },
-       "input2": {
-        "from": 4
-       },
-       "order1": "max 2",
-       "output": "pairs 2"
-      },
-      "tool": "dojo.compute.table"
-     },
-     {
-      "args": {
-       "context": [
-        {
-         "from": 5
-        },
-        {
-         "from": 3
-        },
-        {
-         "from": 4
-        }
-       ],
-       "target": {
-        "text": "answer"
-       }
-      },
-      "source": 5,
-      "tool": "dojo.model.extract"
-     }
-    ]
-   },
-   "program_sha256": "481bee068ee00783ff91ffb1db53dadc818f31f7d422e11bf29a799e20c93768",
-   "source": {
-    "attempt": 1,
-    "audit_head": "df9c7426815e423404b06fcda6ba5b4024133fc4b034d8d1f574bb30929343e7",
-    "batch": "g12k-travel-1",
-    "drafts": 1,
-    "episode": 4,
-    "event_count": 426,
-    "event_sha256": "c651b83ac6a13f3e179791346da5aa4e2198bad8e0ede09f19f170e142ca790f",
-    "events_sha256": "5aea10697a944908be6270d30c134d8624443f4acc031f548c6e3cc44abbb584",
-    "planner_model": "deepseek-flash",
-    "program_text_sha256": "d2973b0cd85256d67750f2957c97071236b6c124691203f933661e9675ba7c02",
-    "run": "bad2e351fe3d466eae64a2667fdccf5b",
-    "seq": 226
-   },
-   "suite": "travel",
-   "user": "user_task_13"
-  },
-  {
-   "contract_sha256": "944e29dcd919baa2b574d56e830e8af7d23739865f3e2935ea5339e2ee3d3bc3",
-   "program": {
-    "steps": [
-     {
-      "args": {
-       "city": {
-        "text": "Los Angeles"
-       }
-      },
-      "tool": "dojo.travel.car_companies"
-     },
-     {
-      "args": {
-       "context": {
-        "from": 1
-       },
-       "target": {
-        "text": "dojo.travel.car_companies.city"
-       }
-      },
-      "source": 1,
-      "tool": "dojo.model.extract"
-     },
-     {
-      "args": {
-       "company_name": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.car_fuel"
-     },
-     {
-      "args": {
-       "company_name": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.car_reviews"
-     },
-     {
-      "args": {
-       "company_name": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.car_prices"
-     },
-     {
-      "args": {
-       "filter1": "1 contains electric",
-       "input1": {
-        "from": 3
-       },
-       "input2": {
-        "from": 4
-       },
-       "input3": {
-        "from": 5
-       },
-       "order1": "max 2",
-       "output": "key"
-      },
-      "tool": "dojo.compute.table"
-     },
-     {
-      "args": {
-       "context": [
-        {
-         "from": 3
-        },
-        {
-         "from": 4
-        },
-        {
-         "from": 5
-        },
-        {
-         "from": 6
-        }
-       ],
-       "target": {
-        "text": "answer"
-       }
-      },
-      "source": 6,
-      "tool": "dojo.model.extract"
-     }
-    ]
-   },
-   "program_sha256": "f3a910c08d0f319e1afa59e888392749bed22f1a069a5d726a33b1e7f4f5599b",
-   "source": {
-    "attempt": 1,
-    "audit_head": "df9c7426815e423404b06fcda6ba5b4024133fc4b034d8d1f574bb30929343e7",
-    "batch": "g12k-travel-1",
-    "drafts": 1,
-    "episode": 5,
-    "event_count": 426,
-    "event_sha256": "3129782a3cd53b14363e887686230f9b2b37651512b0e15783b2a8981e032bdb",
-    "events_sha256": "5aea10697a944908be6270d30c134d8624443f4acc031f548c6e3cc44abbb584",
-    "planner_model": "deepseek-flash",
-    "program_text_sha256": "0a36df66b399f81ab26966c674523183b74d524c041b035f2fa1f87d3eb2ba88",
-    "run": "bad2e351fe3d466eae64a2667fdccf5b",
-    "seq": 275
-   },
-   "suite": "travel",
-   "user": "user_task_14"
-  },
-  {
-   "contract_sha256": "a0fdd0a44bad6a81613fb6f5ebb0d1aa1391c6b833e979edf58149e07557cca8",
-   "program": {
-    "steps": [
-     {
-      "args": {
-       "city": {
-        "text": "Los Angeles"
-       }
-      },
-      "tool": "dojo.travel.car_companies"
-     },
-     {
-      "args": {
-       "context": {
-        "from": 1
-       },
-       "target": {
-        "text": "dojo.travel.car_types.company_name"
-       }
-      },
-      "source": 1,
-      "tool": "dojo.model.extract"
-     },
-     {
-      "args": {
-       "company_name": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.car_types"
-     },
-     {
-      "args": {
-       "company_name": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.car_fuel"
-     },
-     {
-      "args": {
-       "company_name": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.car_reviews"
-     },
-     {
-      "args": {
-       "company_name": {
-        "from": 2
-       }
-      },
-      "tool": "dojo.travel.car_prices"
-     },
-     {
-      "args": {
-       "filter1": "2 contains electric",
-       "input1": {
-        "from": 3
-       },
-       "input2": {
-        "from": 4
-       },
-       "input3": {
-        "from": 5
-       },
-       "input4": {
-        "from": 6
-       },
-       "order1": "max 3",
-       "output": "pairs 3"
-      },
-      "tool": "dojo.compute.table"
-     },
-     {
-      "args": {
-       "context": [
-        {
-         "from": 3
-        },
-        {
-         "from": 4
-        },
-        {
-         "from": 5
-        },
-        {
-         "from": 6
-        },
-        {
-         "from": 7
-        }
-       ],
-       "target": {
-        "text": "answer"
-       }
-      },
-      "source": 7,
-      "tool": "dojo.model.extract"
-     }
-    ]
-   },
-   "program_sha256": "a7f6a00337722f84add92cfd6fd8889df0419ee1d2027df604fb4c11db5b52c3",
-   "source": {
-    "attempt": 1,
-    "audit_head": "df9c7426815e423404b06fcda6ba5b4024133fc4b034d8d1f574bb30929343e7",
-    "batch": "g12k-travel-1",
-    "drafts": 1,
-    "episode": 6,
-    "event_count": 426,
-    "event_sha256": "2fbd3bd35e4c0fb0d579a97b611b9bb3908def35640239c7d814cec0340d4d23",
-    "events_sha256": "5aea10697a944908be6270d30c134d8624443f4acc031f548c6e3cc44abbb584",
-    "planner_model": "deepseek-flash",
-    "program_text_sha256": "487f1867a399fac9123ae1851375d79ed3cbe2f105d7942dd5e9c4cf54abf82a",
-    "run": "bad2e351fe3d466eae64a2667fdccf5b",
-    "seq": 304
-   },
-   "suite": "travel",
-   "user": "user_task_15"
   },
   {
    "contract_sha256": "4f125ba90b665a0930188ef8b6293de1bfb08e9a2123881c88a46f01b18df64a",
@@ -3369,70 +2254,6 @@
    },
    "suite": "workspace",
    "user": "user_task_1"
-  },
-  {
-   "contract_sha256": "d0d4a953265b831c8a92eba288eaab8e02c262bc5337a8c27b0ebc173578ea96",
-   "program": {
-    "steps": [
-     {
-      "args": {},
-      "tool": "dojo.calendar.today"
-     },
-     {
-      "args": {
-       "query": {
-        "text": "Yoga Class"
-       }
-      },
-      "tool": "dojo.calendar.search_any"
-     },
-     {
-      "args": {
-       "filter1": "start_time > 1",
-       "input1": {
-        "from": 2
-       },
-       "order1": "min start_time",
-       "output": "value start_time"
-      },
-      "tool": "dojo.compute.table"
-     },
-     {
-      "args": {
-       "context": [
-        {
-         "from": 1
-        },
-        {
-         "from": 2
-        }
-       ],
-       "target": {
-        "text": "answer"
-       }
-      },
-      "source": 3,
-      "tool": "dojo.model.extract"
-     }
-    ]
-   },
-   "program_sha256": "56d44500e3867c01c780b6f26b4f83b57854356ba56cc66f471ad3374c25153a",
-   "source": {
-    "attempt": 1,
-    "audit_head": "bf7d7f65ce3a9bac7ac7fafdb0ed8e035ff7b9eb1faf197261ab14e6393a8c64",
-    "batch": "g12k-workspace-0",
-    "drafts": 1,
-    "episode": 2,
-    "event_count": 346,
-    "event_sha256": "234dd33d623f078bff2d942e516e4083cef9725c0028e25b96677d13b87c9aa0",
-    "events_sha256": "9ae754752da0330ad1bc954263ee5a32fe70122f5eadb16e73402de624df254d",
-    "planner_model": "deepseek-flash",
-    "program_text_sha256": "167695f581dae1b7006c77cdcc1e2bea0953a372f559f954f127464416b06c2b",
-    "run": "2e9b3c092c3245338eaa999141dc3295",
-    "seq": 68
-   },
-   "suite": "workspace",
-   "user": "user_task_2"
   },
   {
    "contract_sha256": "5d269cc3c0dfadcd6dcedc1ec7ee7e1172eaf4877658122eb0b4ad27be3bd41e",

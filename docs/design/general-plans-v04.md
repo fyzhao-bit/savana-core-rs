@@ -255,9 +255,12 @@ they were: a local answer is retained like a provider reply.
 A local answer is an MCP success reply echoing the kernel's request id
 (`step-` and the operation's internal step id), which only the kernel knows.
 So the owner review never lets a later operation read a local answer's
-envelope: an extraction of a computation takes its text by a signed
-`GENERATED_TEXT` edge (and is told, in its signed `source` "k:computed", to
-state the value as given), and a gated step's result is never used.
+envelope: a computation is never an extraction's source (the payload is a
+whole earlier result, and the kernel never admits a derived payload), only
+its context, by a signed `GENERATED_TEXT` edge. Where the run allows exact
+arithmetic the computations are the first contexts, and the extraction's
+signed `source` "k:computed" tells the extractor to state the first one's
+value as given. A gated step's result is never used.
 
 **Deployment.** The reviewed catalog names each tool's codec (`codec`:
 `mcp`, `mcp_model`, `table_compute`) and each deployment-fixed control's

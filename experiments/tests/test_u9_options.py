@@ -57,9 +57,11 @@ class FinalAnswerTests(unittest.TestCase):
         # A read last: the read results first (most recent first), then the extracted names.
         program = {"steps": [HOTELS, NAMES, REVIEWS]}
         self.assertEqual(with_final_answer(program)["steps"][3], answer(3, 1, 2))
-        # A computation last: the computation is the source.
+        # A computation last: never the source (the executor answers it, so its
+        # reply is no payload), but the first context; the read it came from
+        # is the source.
         program = {"steps": [HOTELS, NAMES, REVIEWS, BEST]}
-        self.assertEqual(with_final_answer(program)["steps"][4], answer(4, 3, 1, 2))
+        self.assertEqual(with_final_answer(program)["steps"][4], answer(3, 4, 1, 2))
         # An extracted field last.
         program = {"steps": [HOTELS, NAMES]}
         self.assertEqual(with_final_answer(program)["steps"][2], answer(1, 2))
@@ -98,6 +100,19 @@ class FinalAnswerTests(unittest.TestCase):
         listed = {"steps": [{"tool": "dojo.file.list", "args": {}}, {"tool": "dojo.file.list", "args": {}}, SEARCH]}
         self.assertEqual(with_final_answer(listed)["steps"][-1], answer(2, 3))
 
+    def test_a_computation_leads_the_answers_contexts_and_is_marked_where_exact(self):
+        from savana_bench.agentdojo_tasks import GENERATED_TEXT
+        from savana_bench.drafted_tasks import MAX_EDGE_BYTES
+        later = {"steps": [HOTELS, NAMES, REVIEWS, BEST, {"tool": "dojo.travel.hotel_address",
+                                                          "args": {"hotel_name": {"from": 4}}}]}
+        # Among the reads, the most recent leads; the computation is still the
+        # first context, before the reads it outranks.
+        self.assertEqual(with_final_answer(later)["steps"][5], answer(5, 4, 3, 1, 2))
+        exact = review(later, final_answer=True, calc=True).steps()[5]
+        self.assertEqual((exact.value_map()["source"], exact.payload_from), ("5:computed", 5))
+        self.assertEqual(exact.derived[0], ("context", 4, GENERATED_TEXT, MAX_EDGE_BYTES))
+        self.assertEqual(review(later, final_answer=True).steps()[5].value_map()["source"], "5")
+
     def test_the_review_signs_the_completed_program_with_one_more_step(self):
         program = {"steps": [HOTELS, NAMES, REVIEWS, BEST]}
         plain = review(program)
@@ -135,6 +150,24 @@ class FinalAnswerTests(unittest.TestCase):
             with self.assertRaises(ProgramRefused) as refused:
                 review(bad, **options)
             self.assertEqual((str(refused.exception), refused.exception.step), ("edge_source", 3))
+
+
+class KernelShapeTests(unittest.TestCase):
+    def test_no_reviewed_step_derives_a_payload(self):
+        # The kernel admits a derived control only on a field that is not the
+        # payload (business_controls::from_map): a payload is a whole earlier
+        # result, or nothing.
+        from savana_bench.agentdojo_tasks import catalog_tool
+        programs = ({"steps": [HOTELS, NAMES, REVIEWS, BEST]}, {"steps": [HOTELS, NAMES, REVIEWS]},
+                    {"steps": [HOTELS, NAMES, REVIEWS, BEST, answer(3, 4)]}, {"steps": [HOTELS, NAMES]})
+        for program in programs:
+            for options in ({}, dict(final_answer=True), dict(final_answer=True, calc=True)):
+                for step in review(program, **options).steps():
+                    payload = {f["name"] for f in catalog_tool(step.tool)["fields"] if f["role"] == "payload"}
+                    self.assertFalse(payload & {edge[0] for edge in step.derived}, (step.tool, options))
+        with self.assertRaises(ProgramRefused) as refused:
+            review({"steps": [HOTELS, NAMES, REVIEWS, BEST, answer(4, 3)]})
+        self.assertEqual((str(refused.exception), refused.exception.step), ("compute_source", 5))
 
 
 class CatalogTests(unittest.TestCase):
@@ -324,6 +357,20 @@ class StructuredLimitsTests(unittest.TestCase):
         self.assertEqual(lowered, eleven)
         user = "user_task_10"
         self.assertEqual(len(review(lowered, suite="travel", user=user, final_answer=True).steps()), MAX_STEPS + 1)
+
+
+    def test_a_null_gate_is_no_gate(self):
+        # The review reads "when": null on a write as no gate; the conversion
+        # draws no edge from it and the lowering keeps it as it was.
+        from savana_bench.structured_planning import eval_catalog, lower_plan, program_to_workflow
+        program = {"steps": [HOTELS, dict(EVENT, when=None)]}
+        self.assertEqual(review(program).steps(), review({"steps": [HOTELS, EVENT]}).steps())
+        conversion = program_to_workflow(program, eval_catalog("travel"), salt=self.SALT)
+        self.assertEqual(conversion.data_edges, frozenset())
+        steps = [SimpleNamespace(ordinal=n.ordinal, tool_class=n.tool_class, action=n.action, bindings=n.bindings,
+                                 dependencies=tuple(sorted(a for a, b in conversion.workflow.edges if b == n.ordinal)))
+                 for n in conversion.workflow.nodes]
+        self.assertEqual(lower_plan(conversion, steps), program)
 
 
 @NEEDS_AGENTDOJO

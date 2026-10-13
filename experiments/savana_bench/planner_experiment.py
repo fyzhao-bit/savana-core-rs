@@ -797,7 +797,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                             # lowered program must pass the same review again.
                             # Still nothing is signed.
                             from .structured_planning import (ProgramMapper, ServiceMapper, StructuredError,
-                                                              eval_catalog, evidence, job_limits, plan_program)
+                                                              conversion_refused, eval_catalog, evidence, job_limits,
+                                                              plan_program)
                             from .structured_templates import load_registry, template_number
                             from .structured_wire import WireError
                             catalog = eval_catalog(case["suite"])
@@ -808,12 +809,24 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                                        limits=limits)
                             else:
                                 row["stage"] = "structured_planning"
-                                mapper = ProgramMapper(json.loads(drafted.program), catalog,
-                                                       source="template" if case["mapper"] == "template" else "drafted",
-                                                       template=(template_number(load_registry(), case["suite"],
-                                                                                case["user"])
-                                                                 if case["mapper"] == "template" else None),
-                                                       limits=limits)
+                                salt = os.urandom(32)
+                                try:
+                                    mapper = ProgramMapper(json.loads(drafted.program), catalog,
+                                                           source="template" if case["mapper"] == "template"
+                                                           else "drafted",
+                                                           template=(template_number(load_registry(), case["suite"],
+                                                                                    case["user"])
+                                                                     if case["mapper"] == "template" else None),
+                                                           salt=salt, limits=limits)
+                                except (StructuredError, WireError) as error:
+                                    # The fixed conversion refused the accepted
+                                    # program: agentd got no job. The record
+                                    # says so, with the salt, so the verifier
+                                    # converts the same program again.
+                                    audit.emit("structured_planned", episode=index,
+                                               **evidence(conversion_refused(f"episode-{index}", error, salt)))
+                                    row.update(outcome="mapper_failed", structured_error=str(error))
+                                    raise StructuredError("mapper_failed") from None
                             calls = len(structural.log)
                             planned = plan_program(structured, mapper, job_id=f"episode-{index}",
                                                    suite=case["suite"], user=case["user"],

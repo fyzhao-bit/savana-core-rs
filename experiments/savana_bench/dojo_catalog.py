@@ -60,9 +60,9 @@ LIST_KINDS = frozenset({"list", "opt_list", "attachments"})
 GUARD_ALWAYS = "always"
 GUARD_FIELD = "when"
 SKIPPED = "Skipped: the owner's condition for this action does not hold."
-# An extraction whose source step is a computation names it "<step>:computed"
-# in its owner-signed `source` constant (the extractor then states that
-# value as given).
+# An extraction whose first context is a computation says so in its
+# owner-signed `source` constant, "<step>:computed" (the extractor then states
+# that value as given; a computation is never an extraction's source).
 COMPUTED_SOURCE = ":computed"
 SUITES = ("workspace", "banking", "slack", "travel")
 # The official AgentDojo v1.2.2 functions of each suite (pinned against the

@@ -127,17 +127,20 @@ def review_policy():
                           "a gated step's result is never used",
             "compute": {"tool": COMPUTE_TOOL, "inputs": "signed edges to earlier results",
                         "spec": "filter/order/output texts in a fixed grammar, declared as owner constants",
-                        "output": "data: never a destination, used only through a signed edge",
+                        "output": "data: never a destination, used only through a signed edge; never an "
+                                  "extraction's source (the executor answers it), only its context",
                         "calc": "only where the run allows it: exact arithmetic on the first number of each "
                                 "input (#1..#4) with + - * / ( ) min max, no filter or order; every number it "
-                                "writes is stated in the request, or is 2 or 100; an extraction of a computation "
-                                "names its source <step>:computed",
+                                "writes is stated in the request, or is 2 or 100; an extraction's computations "
+                                "are its first contexts, and its signed source is <step>:computed when there "
+                                "is one",
                         "evaluated_by": "the kernel's executor (codec TableComputeV1), never a provider"},
             "final_answer": "only where the run asks for it: a program whose last result is data (a read, a "
                             "computation, an extracted field), or an action after an earlier answer, ends with the "
                             "owner's own extraction of the final answer from up to 6 earlier results (never a "
-                            "condition or a write's result; a large result only as its source), so it may have "
-                            "max_steps + 1 steps; the completion never refuses a program"}
+                            "condition or a write's result; a large result only as its source, a computation "
+                            "only as context, first), so it may have max_steps + 1 steps; the completion never "
+                            "refuses a program"}
 
 
 class ProgramRefused(ValueError):
@@ -555,7 +558,10 @@ def with_final_answer(program):
     MAX_CONTEXTS + 1 earlier results, by FINAL_INPUTS and most recent first
     within each; never a condition or a write's result. A large result is read
     whole only as the payload (a context's edge is bounded), so at most one is
-    used, as the source. A pure function of the program, so the review,
+    used, as the source. A computation is never the source (the review
+    refuses it): the source is the best other input, and the computations
+    lead the contexts (where the run allows exact arithmetic, the first one's
+    value is stated as given). A pure function of the program, so the review,
     agentd's structured planning of the completed program and the verifier
     all see the same steps. Any other program, or one the review refuses
     anyway, is returned as it is."""
@@ -572,13 +578,15 @@ def with_final_answer(program):
         return program
     ranked = [number for kind in FINAL_INPUTS for number in range(len(steps), 0, -1) if classes[number - 1] == kind]
     large = [number for number in ranked if steps[number - 1]["tool"] in LARGE_RESULT_TOOLS]
-    inputs = (large[:1] + [number for number in ranked if number not in large])[:MAX_CONTEXTS + 1]
-    if not inputs:
+    sources = large[:1] + [number for number in ranked if number not in large and classes[number - 1] != "compute"]
+    if not sources:
         return program
+    contexts = [number for number in ranked if number != sources[0] and number not in large]
+    contexts.sort(key=lambda number: classes[number - 1] != "compute")
     args = {"target": {"text": ANSWER}}
-    if inputs[1:]:
-        args["context"] = [{"from": number} for number in inputs[1:]]
-    return {"steps": [*steps, {"tool": EXTRACT_TOOL, "source": inputs[0], "args": args}]}
+    if contexts:
+        args["context"] = [{"from": number} for number in contexts[:MAX_CONTEXTS]]
+    return {"steps": [*steps, {"tool": EXTRACT_TOOL, "source": sources[0], "args": args}]}
 
 
 def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(), extractor_model=GENERATOR_MODEL,
@@ -676,6 +684,13 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                     or "when" in raw):
                 _refuse("extract_shape")
             usable(source)
+            if kinds[source - 1] == "compute":
+                # The kernel's executor answers a computation itself, and its
+                # reply's envelope carries a request id only the kernel knows,
+                # so it is never a whole-result payload (and a payload is never
+                # derived): a computation reaches an extraction as context.
+                where["field"] = "source"
+                _refuse("compute_source")
             where["field"] = "target"
             target = _origin(args["target"])
             if target[0] not in ("text", "items"):
@@ -719,20 +734,9 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                 conditions.add(number)
             # The extractor's instruction is always the owner's whole request;
             # whatever the planner wrote there is not used.
-            # Where the run allows exact arithmetic, an extraction of a
-            # computation says so in its signed source (the extractor states
-            # that value as given).
-            computed = calc and kinds[source - 1] == "compute"
             values = {"instruction": folded(prompt), "target": target[1], "model": extractor_model,
-                      "to": SENTINELS["to"], "source": f"{source}{COMPUTED_SOURCE}" if computed else str(source),
-                      "question": question}
-            if kinds[source - 1] == "compute":
-                # A computation is answered by the kernel's executor itself; the
-                # payload is its text, by a signed edge (never the reply's
-                # envelope, whose request id only the kernel knows).
-                derived.append(("body", source, GENERATED_TEXT, MAX_ANSWER_BYTES))
-            else:
-                payload_from = source
+                      "to": SENTINELS["to"], "source": str(source), "question": question}
+            payload_from = source
             # Up to MAX_CONTEXTS other earlier steps as context, one signed edge
             # each, so one answer can combine several results.
             raw_contexts = args.get("context")
@@ -754,6 +758,13 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                 contexts.append(usable(context[1]))
             if len(contexts) > MAX_CONTEXTS:
                 _refuse("extract_context")
+            if calc:
+                # Where the run allows exact arithmetic, the computations come
+                # first, and the signed source says the first context is one
+                # (the extractor states that value as given).
+                contexts.sort(key=lambda earlier: kinds[earlier - 1] != "compute")
+                if contexts and kinds[contexts[0] - 1] == "compute":
+                    values["source"] += COMPUTED_SOURCE
             for field, earlier in zip(CONTEXT_FIELDS, contexts + [None] * MAX_CONTEXTS):
                 if earlier is None:
                     values[field] = ""

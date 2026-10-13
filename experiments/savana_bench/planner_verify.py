@@ -23,7 +23,7 @@ from .planner_experiment import (DEFINITIVE, IDS, OPERATOR_MODE, SCHEMA, STRUCTU
                                  planner_exposure, destination_candidates, structured_provenance, summarize,
                                  turn_request)
 from .protected_agentdojo import official_case, package_sources, score_outcome
-from .protected_verify import verify_published_episode
+from .protected_verify import official_trace, verify_published_episode
 
 META = ("seq", "previous", "kind", "time_ns", "sha256")
 LAST_STAGE = {"compile_rejected": "operator_compile_replay", "prepare_rejected": "operator_execution_prepare",
@@ -245,11 +245,12 @@ def _structured_contract(case, local, row, contract):
     from agentdojo.task_suite.load_suites import get_suite
     from .agentdojo_tasks import BENCHMARK, register_drafted
     from .drafted_tasks import ProgramRefused
-    from .structured_planning import (OP, PLANNER_CODES, ProgramMapper, ServiceMapper, StructuredError, eval_catalog,
-                                      exposure, job_limits, lower_plan, order_reply, planner_body, planner_view, review,
-                                      sentinels)
+    from .structured_planning import (EVIDENCE, OP, PLANNER_CODES, ProgramMapper, ServiceMapper, StructuredError,
+                                      eval_catalog, exposure, job_limits, lower_plan, order_reply, planner_body,
+                                      planner_view, review, sentinels)
     from .structured_templates import load_registry, template_number
-    from .structured_wire import decode_order, decode_ordered_plan, decode_plan, decode_structural_request, validate_order
+    from .structured_wire import (WireError, decode_order, decode_ordered_plan, decode_plan, decode_structural_request,
+                                  validate_order)
     event = _one(local, "structured_planned")
     outcome = event["outcome"]
     if (outcome not in ("planned", *STRUCTURED_REFUSALS)
@@ -272,10 +273,19 @@ def _structured_contract(case, local, row, contract):
                 raise ValueError("structured_service_evidence") from None
             return None
     else:
-        mapper = ProgramMapper(program, catalog, source="template" if template else "drafted",
-                               template=(template_number(load_registry(), case["suite"], case["user"])
-                                         if template else None),
-                               salt=bytes.fromhex(event["salt"]), limits=limits)
+        try:
+            mapper = ProgramMapper(program, catalog, source="template" if template else "drafted",
+                                   template=(template_number(load_registry(), case["suite"], case["user"])
+                                             if template else None),
+                                   salt=bytes.fromhex(event["salt"]), limits=limits)
+        except (StructuredError, WireError) as error:
+            # The fixed conversion refused the accepted program: agentd got no
+            # job, and the record says exactly that and nothing more.
+            if (outcome != "mapper_failed" or event["error"] != str(error) or event["planner_calls"]
+                    or any(event[key] is not None for key in EVIDENCE
+                           if key not in ("job", "outcome", "error", "salt"))):
+                raise ValueError("structured_mapper_evidence") from None
+            return None
     if (hashlib.sha256(mapper.request_bytes).hexdigest() != event["mapper_request_sha256"]
             or (event["intent"], event["template"]) != (mapper.intent, mapper.template)
             or event["mapper_response"] not in (None, mapper.response.hex())):
@@ -418,8 +428,7 @@ def verify_episode(directory, local, case, row, profile, turns, prior=None):
     continued = None
     if case.get("instructions") == "act":
         continued = dict(environment=_final_environment(prior), before=_one(prior, "episode_input")["environment"],
-                         trace=[dict(invoked=True, upstream=e["tool"], arguments=e["arguments"])
-                                for e in prior if e["kind"] == "official_tool_result"])
+                         trace=official_trace(prior))
     if initial["environment"] != (env.model_dump(mode="json") if continued is None else continued["environment"]):
         raise ValueError("initial_environment_mismatch")
     authored = [e for e in local if e["kind"] == "plan_authored"]
@@ -515,11 +524,9 @@ def verify_episode(directory, local, case, row, profile, turns, prior=None):
         final = finals[0]["environment"]
         before = restore_environment(type(env), initial["environment"] if continued is None else continued["before"])
         after = restore_environment(type(env), final)
-        tools = [e for e in local if e["kind"] == "official_tool_result"]
         observed = score_outcome(suite=suite, task=task, injection=injection, contract=contract,
             before=before, after=after, provider=SimpleNamespace(audit=[
-                *([] if continued is None else continued["trace"]),
-                *(dict(invoked=True, upstream=e["tool"], arguments=e["arguments"]) for e in tools)]),
+                *([] if continued is None else continued["trace"]), *official_trace(local)]),
             outcome=None)
         if (row["observed_utility"], row["observed_attacker_success"]) != observed:
             raise ValueError("official_oracle_replay_mismatch")

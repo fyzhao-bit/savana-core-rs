@@ -244,7 +244,9 @@ def program_to_workflow(program, catalog, *, salt=None, pool=None, limits=LIMITS
         named = [(name, value) for name, value in step["args"].items()]
         named += [(NOTE + key, value) for key, value in step.items() if key not in ("tool", "args", "source", "when")]
         for key in ("source", "when"):
-            if key in step:
+            # A null reference is no reference (the review reads "when": null
+            # as an ungated write).
+            if step.get(key) is not None:
                 if type(step[key]) is not int or isinstance(step[key], bool):
                     raise StructuredError("conversion_reference")
                 drawn.append(step[key])
@@ -587,12 +589,12 @@ def lower_plan(conversion, steps):
                 rebuilt["args"][name] = _renumber(value, new)
         for key in ("source", "when"):
             if key in original:
-                rebuilt[key] = new[original[key]]
+                rebuilt[key] = None if original[key] is None else new[original[key]]
         if canonical(sorted(rebuilt["args"])) != canonical(sorted(original["args"])) or set(rebuilt) != set(original):
             raise StructuredError("lowering_literal")
         lowered.append(rebuilt)
     for position, step in enumerate(lowered, 1):
-        drawn = [step.get(k) for k in ("source", "when") if k in step]
+        drawn = [step[k] for k in ("source", "when") if step.get(k) is not None]
         drawn += [s for value in step["args"].values() for s in (_references(value) or ())]
         if any(not 1 <= s < position for s in drawn):
             raise StructuredError("lowering_reference")
@@ -736,6 +738,13 @@ def plan_program(session, mapper, *, job_id, suite, user, extractor_model="deeps
 EVIDENCE = ("job", "status", "error", "outcome", "salt", "intent", "template", "mapper_request_sha256",
             "mapper_response", "planner_request", "planner_response", "plan", "order", "order_changed", "lowered",
             "lowering_error")
+
+
+def conversion_refused(job_id, error, salt):
+    """The `plan_program` record of a job agentd never got: the fixed
+    conversion refused the accepted program (`error`, its StructuredError or
+    WireError) under `salt`, so the verifier converts it again."""
+    return dict(job=job_id, outcome="mapper_failed", error=str(error), salt=salt.hex())
 
 
 def evidence(result, planner_calls=()):

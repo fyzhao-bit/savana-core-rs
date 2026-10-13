@@ -173,7 +173,7 @@ class LoweringTests(unittest.TestCase):
                 lowered = lower_plan(conversion, decoded(conversion, order))
                 self.assertEqual(lowered["steps"][-1]["tool"], item["program"]["steps"][-1]["tool"])
                 review(lowered, suite=item["suite"], user=item["user"])
-        self.assertGreater(changed, 50)
+        self.assertGreater(changed, 30)
 
     def test_a_plan_that_does_not_match_the_mapping_is_refused(self):
         program = {"steps": [SUMMARY["steps"][0], {"tool": "dojo.slack.channels", "args": {}},

@@ -211,6 +211,32 @@ class VerifierTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _drafted_contract(the_case, local, dict(outcome="published", drafts=1))
 
+    def test_a_program_the_conversion_refuses_is_converted_again(self):
+        # The runner's record when the fixed conversion refuses the accepted
+        # program (agentd got no job): the verifier converts it again, under
+        # the recorded salt, and requires the same refusal and nothing more.
+        from unittest import mock
+        from savana_bench import structured_planning
+        from savana_bench.structured_planning import StructuredError, conversion_refused
+        the_case, local, _planned = episode(model(forward))
+        refused = json.loads(canonical(dict(kind="structured_planned", episode=0, **evidence(
+            conversion_refused("episode-0", StructuredError("conversion_reference"), b"\x05" * 32)))))
+        self.assertEqual((refused["outcome"], refused["planner_calls"]), ("mapper_failed", []))
+        row = dict(outcome="mapper_failed", drafts=1)
+        with mock.patch.object(structured_planning, "program_to_workflow",
+                               side_effect=StructuredError("conversion_reference")):
+            self.assertIsNone(_drafted_contract(the_case, [local[0], refused], row))
+            for tampered in (dict(refused, error="conversion_step"), dict(refused, planner_request="00"),
+                             dict(refused, plan="00"), dict(refused, planner_calls=[{}])):
+                with self.assertRaisesRegex(ValueError, "structured_mapper_evidence"):
+                    _drafted_contract(the_case, [local[0], tampered], row)
+            with self.assertRaises(ValueError):
+                _drafted_contract(the_case, [local[0], dict(refused, outcome="planner_invalid")],
+                                  dict(outcome="planner_invalid", drafts=1))
+        # A program the conversion takes is never recorded as refused by it.
+        with self.assertRaisesRegex(ValueError, "structured_mapper_evidence"):
+            _drafted_contract(the_case, [local[0], refused], row)
+
 
 if __name__ == "__main__":
     unittest.main()
