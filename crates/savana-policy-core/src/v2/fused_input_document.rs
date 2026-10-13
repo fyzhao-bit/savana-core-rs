@@ -253,23 +253,34 @@ fn joins_address(c: char) -> bool {
 /// digit, and the text on either side does not continue it -- with a letter
 /// or digit, directly or after one joining character. So "bob@company.co" is
 /// not taken from "bob@company.com", nor "bob@x.com" from "alice.bob@x.com",
-/// while a sentence's final punctuation ("... to bob@x.com.") still ends it.
+/// while a sentence's final punctuation ("... to bob@x.com.") still ends it,
+/// also where the next sentence follows without a space: a period and then a
+/// capital letter ("... www.x.com.They ...") end a token, since host names
+/// and addresses are written in lower case.
 fn contains_whole_token(haystack: &str, needle: &str) -> bool {
     if !needle.chars().any(char::is_alphanumeric) {
         return false;
     }
     let continues =
-        |mut side: std::iter::Peekable<&mut dyn Iterator<Item = char>>| match side.next() {
+        |mut side: std::iter::Peekable<&mut dyn Iterator<Item = char>>, after: bool| match side
+            .next()
+        {
             None => false,
             Some(c) if c.is_alphanumeric() => true,
+            Some('.') if after && side.peek().is_some_and(|c| c.is_uppercase()) => false,
             Some(c) if joins_address(c) => side.peek().is_some_and(|c| c.is_alphanumeric()),
             Some(_) => false,
         };
     haystack.match_indices(needle).any(|(start, _)| {
         let mut before = haystack[..start].chars().rev();
         let mut after = haystack[start + needle.len()..].chars();
-        !continues((&mut before as &mut dyn Iterator<Item = char>).peekable())
-            && !continues((&mut after as &mut dyn Iterator<Item = char>).peekable())
+        !continues(
+            (&mut before as &mut dyn Iterator<Item = char>).peekable(),
+            false,
+        ) && !continues(
+            (&mut after as &mut dyn Iterator<Item = char>).peekable(),
+            true,
+        )
     })
 }
 
@@ -401,13 +412,15 @@ mod tests {
     #[test]
     fn whole_tokens_stop_at_separators_and_sentence_punctuation() {
         let request =
-            "mail alice.bob@x.com, carol@y.com (dave@z.com) and visit www.site.org/page. ok";
+            "mail alice.bob@x.com, carol@y.com (dave@z.com) and visit www.site.org/page. ok, \
+             post to www.our-company.com.They sent it; not www.a.com.evil";
         for token in [
             "alice.bob@x.com",
             "carol@y.com",
             "dave@z.com",
             "www.site.org/page",
             "ok",
+            "www.our-company.com",
         ] {
             assert!(contains_whole_token(request, token), "{token}");
         }
@@ -417,6 +430,7 @@ mod tests {
             "site.org/page",
             "www.site.org",
             "arol@y.com",
+            "www.a.com",
             "",
             ".",
         ] {
