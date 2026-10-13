@@ -120,7 +120,7 @@ class DirectoryOwnerTests(unittest.TestCase):
         contract, consent = self._consent(events)
         self.assertTrue(consent(self._pay(contract, "GB29NWBK60161331926819")))
         self.assertEqual(events[-1][1]["decision"], "approve")
-        self.assertEqual(events[-1][1]["policy"], "finite_write_preconsent_v1+directory_destination")
+        self.assertEqual(events[-1][1]["policy"], "finite_write_preconsent_v2+directory_destination")
 
     def test_an_unknown_recipient_chosen_by_data_is_refused(self):
         events = []

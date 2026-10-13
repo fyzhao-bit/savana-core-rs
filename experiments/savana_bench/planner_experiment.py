@@ -547,7 +547,7 @@ def planner_directory(case):
 
 def consent_mode(experiment):
     multi = str(experiment).partition(":")[0] == "drafted"
-    return "finite_write_preconsent_v1" if multi else "finite_calendar_preconsent_v1"
+    return "finite_write_preconsent_v2" if multi else "finite_calendar_preconsent_v1"
 
 
 def plan_author_for(contract, emit, facts):

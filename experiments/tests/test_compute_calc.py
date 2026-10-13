@@ -174,14 +174,24 @@ class ComputedSourceTests(unittest.TestCase):
         self.assertEqual(unmarked.value_map()["source"], "1")
         self.assertEqual([edge[:2] for edge in unmarked.derived], [("context", 2), ("context2", 3)])
 
-    def test_a_computation_is_never_an_extractions_source(self):
+    def test_a_computation_named_as_the_source_is_signed_as_the_first_context(self):
         # The executor answers a computation itself: its reply is never a
         # whole-result payload, and the kernel never admits a derived payload.
+        # The review reads the planner's program as what it says: the source is
+        # the result the computation was computed from.
         for calc_allowed in (True, False):
-            with self.subTest(calc_allowed=calc_allowed), self.assertRaises(ProgramRefused) as refused:
-                review(total_program(source=2, context=1), task_id="user_task_1", calc_allowed=calc_allowed)
-            self.assertEqual((str(refused.exception), refused.exception.step, refused.exception.field),
-                             ("compute_source", 3, "source"))
+            with self.subTest(calc_allowed=calc_allowed):
+                named = review(total_program(source=2, context=1), task_id="user_task_1", calc_allowed=calc_allowed)
+                plain = review(total_program(), task_id="user_task_1", calc_allowed=calc_allowed)
+                self.assertEqual(named.steps(), plain.steps())
+                self.assertEqual(named.steps()[2].payload_from, 1)
+        # Through a chain of computations, back to the first input's origin.
+        chained = total_program(source=3)
+        chained["steps"].insert(2, {"tool": "dojo.compute.table",
+                                    "args": {"input1": {"from": 2}, "output": "calc #1 * 2"}})
+        extraction = review(chained, task_id="user_task_1").steps()[3]
+        self.assertEqual((extraction.value_map()["source"], extraction.payload_from), ("1:computed", 1))
+        self.assertEqual([edge[:2] for edge in extraction.derived], [("context", 3), ("context2", 2)])
 
 
 class SpecTests(unittest.TestCase):

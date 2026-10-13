@@ -66,6 +66,15 @@ def _derived_value_ok(value, bound, form):
     return text(value, bound)
 
 
+def _data_only(step, field):
+    """Whether `field` of `step` only carries data: an extraction's context
+    (data for the quarantined model) or a computation's input."""
+    from .dojo_compute import COMPUTE_TOOL, INPUT_FIELDS
+    from .drafted_tasks import CONTEXT_FIELDS, EXTRACT_TOOL
+    return ((step.tool == EXTRACT_TOOL and field in CONTEXT_FIELDS)
+            or (step.tool == COMPUTE_TOOL and field in INPUT_FIELDS))
+
+
 DISPOSITIONS = ('require_approval', 'permit')
 
 
@@ -107,8 +116,9 @@ class FiniteConsent:
         self.steps=contract.steps();self.action=0
         self.permit=disposition=='permit';self.strict=strict_destinations;self.directory=directory
         self.candidates=candidates;self.shown=shown
-        # Read-only contracts keep their original policy label and behavior.
-        self.policy=('finite_calendar_preconsent_v1' if len(self.steps)==1 else 'finite_write_preconsent_v1')+(
+        # Read-only contracts keep their original policy label and behavior;
+        # v2 approves an empty value on a field that only carries data.
+        self.policy=('finite_calendar_preconsent_v1' if len(self.steps)==1 else 'finite_write_preconsent_v2')+(
             '+permit' if self.permit else '')+('+strict_destination' if self.strict else '')+(
             '+directory_destination' if directory is not None else '')+(
             '+candidate_destination' if candidates else '')+('+shown_destination' if shown else '')
@@ -295,9 +305,14 @@ class FiniteConsent:
                     raise ValueError('consent_payload_source')
             # A derived field is approved as the SOURCE the owner signed (the
             # kernel-extracted value at that path), never as a planner literal;
-            # it must still be a well-formed bounded text value.
+            # it must still be a well-formed bounded text value. On a field that
+            # only carries data (an extraction's context, a computation's input)
+            # an empty value is "nothing found", not a malformed control (v2).
             for field,_,_,bound,form in step.edges():
-                if not _derived_value_ok(arguments.pop(field,None),bound,form):
+                value=arguments.pop(field,None)
+                if value=='' and _data_only(step,field):
+                    continue
+                if not _derived_value_ok(value,bound,form):
                     raise ValueError('consent_derived_value')
             if (arguments!=step.value_map()
                 or d['resource']!=r['params']['arguments'][resource]

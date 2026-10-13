@@ -104,7 +104,7 @@ class SetOwnerTests(unittest.TestCase):
         events = []
         contract, consent = self._consent(events)
         self.assertTrue(consent(self._pay(contract, "GB29NWBK60161331926819", True)))
-        self.assertEqual(events[-1][1]["policy"], "finite_write_preconsent_v1+candidate_destination")
+        self.assertEqual(events[-1][1]["policy"], "finite_write_preconsent_v2+candidate_destination")
         events = []
         contract, consent = self._consent(events)
         with self.assertRaises(ValueError) as caught:

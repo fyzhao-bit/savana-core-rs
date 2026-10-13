@@ -89,6 +89,8 @@ MAX_ANSWER_BYTES = 2048
 CONTEXT_FIELDS = ("context", "context2", "context3", "context4", "context5")
 MAX_CONTEXTS = len(CONTEXT_FIELDS)
 MAX_DECLARED = 32
+# The longest owner constant (a restated value or an extraction label).
+MAX_CONSTANT_BYTES = 128
 # Models the owner may name for the quarantined extractor (a signed constant).
 EXTRACTOR_MODELS = (GENERATOR_MODEL, "deepseek-v4-pro")
 # Read parameters the planner may choose itself (a search term, a count): a read
@@ -128,7 +130,9 @@ def review_policy():
             "compute": {"tool": COMPUTE_TOOL, "inputs": "signed edges to earlier results",
                         "spec": "filter/order/output texts in a fixed grammar, declared as owner constants",
                         "output": "data: never a destination, used only through a signed edge; never an "
-                                  "extraction's source (the executor answers it), only its context",
+                                  "extraction's source (the executor answers it), only its context: a "
+                                  "computation named as the source becomes the first context, and the source "
+                                  "the result it was computed from",
                         "calc": "only where the run allows it: exact arithmetic on the first number of each "
                                 "input (#1..#4) with + - * / ( ) min max, no filter or order; every number it "
                                 "writes is stated in the request, or is 2 or 100; an extraction's computations "
@@ -648,6 +652,14 @@ def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(),
     return contract
 
 
+def _computed_from(chain, kinds, number):
+    """The step whose result computation `number` was computed from: its
+    first input, through any chain of computations (never a computation)."""
+    while kinds[number - 1] == "compute":
+        number = next(edge[1] for edge in chain[number - 1].derived if edge[0] == "input1")
+    return number
+
+
 def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extractor_model,
                     derived_destinations=False, destination_candidates=None, calc=False, max_steps=MAX_STEPS):
     if type(program) is not dict or set(program) != {"steps"} or type(program["steps"]) is not list:
@@ -684,13 +696,16 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                     or "when" in raw):
                 _refuse("extract_shape")
             usable(source)
+            computation = None
             if kinds[source - 1] == "compute":
                 # The kernel's executor answers a computation itself, and its
                 # reply's envelope carries a request id only the kernel knows,
                 # so it is never a whole-result payload (and a payload is never
-                # derived): a computation reaches an extraction as context.
-                where["field"] = "source"
-                _refuse("compute_source")
+                # derived). A computation named as the source is read as what
+                # it says: the computation becomes the first context, and the
+                # source is the result it was computed from (its first input,
+                # through any chain of computations).
+                computation, source = source, _computed_from(chain, kinds, source)
             where["field"] = "target"
             target = _origin(args["target"])
             if target[0] not in ("text", "items"):
@@ -716,6 +731,9 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                         or any(_label_kind(item) in LIST_KINDS for item in many)):
                     _refuse("extract_target")
                 label = LIST_SEPARATOR.join(many)
+                if len(label.encode()) > MAX_CONSTANT_BYTES:
+                    # The label is signed as one owner constant.
+                    _refuse("extract_target_length")
             else:
                 label = full_label(target[1])
             target = ("text", label)
@@ -756,6 +774,8 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                         or not 1 <= context[1] < number or context[1] in contexts):
                     _refuse("extract_context")
                 contexts.append(usable(context[1]))
+            if computation is not None:
+                contexts = [computation, *(earlier for earlier in contexts if earlier != computation)]
             if len(contexts) > MAX_CONTEXTS:
                 _refuse("extract_context")
             if calc:
@@ -980,7 +1000,8 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
     where["step"], where["field"] = None, None
     contract = DraftedContract(suite, task_id, prompt, tuple(chain), canonical(program).decode("utf-8"),
                                tuple(sorted(restated)))
-    if len(contract.constants()) > MAX_DECLARED or any(len(c.encode()) > 128 for c in contract.constants()):
+    if (len(contract.constants()) > MAX_DECLARED
+            or any(len(c.encode()) > MAX_CONSTANT_BYTES for c in contract.constants())):
         _refuse("too_many_declared_values")
     return contract
 

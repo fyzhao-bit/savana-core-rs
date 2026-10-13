@@ -1076,7 +1076,7 @@ field by field (\S\ref{sec:authority-programs}). Which values the owner
 accepts as constants (its restated dates, a planner's search term, a
 computation's numbers) is the review's decision as owner software; the
 kernel holds each constant to the fields the owner bound it to. The review refuses a program under
-any of 33 closed rules. The most consequential are:
+any of 37 closed rules. The most consequential are:
 \begin{itemize}
 \item a tool not served by the deployment (\code{unserved_tool});
 \item an edge to a later step;
@@ -2585,26 +2585,35 @@ evaluation date. Credentials and deployment secrets are excluded.
 \section{Owner Review Rules}
 \label{app:review}
 
-The review (\S\ref{sec:review}) refuses a program for exactly one of 33
+The review (\S\ref{sec:review}) refuses a program for exactly one of 37
 closed reasons. Each reason has a fixed retry message.
 \begin{description}[style=nextline,font=\bfseries]
 \item[Shape.] \code{program_text}, \code{program_json},
   \code{program_shape}, \code{program_length}, \code{step_shape}, and
   \code{unserved_tool}.
 \item[Fields.] \code{unknown_field}, \code{missing_field},
-  \code{field_origin}, \code{literal_kind}, and \code{literal_list}.
+  \code{missing_destination}, \code{field_origin}, \code{literal_kind},
+  and \code{literal_list}.
 \item[Origins.] \code{literal_not_owner_text}, \code{derived_destination},
   \code{too_many_declared_values}, \code{edge_source}, \code{edge_path},
   \code{edge_compute}, and \code{compute_amount}.
 \item[Extraction.] \code{extract_shape}, \code{extract_target},
-  \code{extract_context}, \code{source_on_tool},
-  \code{answer_used_as_value}, and \code{condition_used_as_value}.
+  \code{extract_target_length}, \code{extract_context},
+  \code{source_on_tool}, \code{answer_used_as_value}, and
+  \code{condition_used_as_value}.
 \item[Conditions.] \code{condition_text}, \code{gate_shape},
   \code{gate_source}, \code{gated_result_used}, and
   \code{unused_condition}.
 \item[Compute.] \code{compute_shape}, \code{compute_input},
-  \code{compute_spec}, and \code{compute_large_input}.
+  \code{compute_spec}, \code{compute_large_input}, and
+  \code{calc_constant}.
+\item[Adopted instructions.] \code{read_turn_writes}: the read turn of
+  instructions the owner has not adopted yet changes nothing.
 \end{description}
+A computation named as an extraction's source is not refused: the review
+signs it as the extraction's first context, and the source as the result
+it was computed from, because the executor answers a computation itself
+and a payload is always a whole earlier result.
 
 \section{Operational State Ownership}
 

@@ -97,11 +97,9 @@ class RegistryTests(unittest.TestCase):
         registry = load_registry()
         self.assertEqual(REGISTRY.read_bytes(), encode_registry(registry))
         counts = summary(registry)
-        # 66: since a computation is never an extraction's source (the
-        # executor answers it), the 12 tasks whose first accepted draft made
-        # one a source have no template (78 before).
-        self.assertEqual((counts["tasks"], counts["drafts"], counts["templates"]), (97, 137, 66))
-        self.assertEqual(summary(registry)["excluded"]["compute_source"], 13)
+        # A computation named as an extraction's source is signed as its first
+        # context, so the drafts that name one count like any other.
+        self.assertEqual((counts["tasks"], counts["drafts"], counts["templates"]), (97, 137, 78))
         suites = {}
         for item in registry["templates"]:
             official = suites.setdefault(item["suite"], get_suite("v1.2.2", item["suite"]))

@@ -76,7 +76,7 @@ def admitted_programs():
 class OwnerDocumentParityTests(unittest.TestCase):
     def test_every_admitted_program_is_admitted_by_the_kernel(self):
         programs = admitted_programs()
-        self.assertGreaterEqual(len(programs), 70)  # 66 registered templates and 4 fixed programs
+        self.assertGreaterEqual(len(programs), 80)  # 78 registered templates and 4 fixed programs
         results = verdicts([case(contract) for _suite, _user, contract in programs])
         refused = [(suite, user, verdict) for (suite, user, _c), verdict in zip(programs, results) if verdict != "ok"]
         self.assertEqual(refused, [])

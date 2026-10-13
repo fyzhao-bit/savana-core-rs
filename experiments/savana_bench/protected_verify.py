@@ -54,7 +54,7 @@ def verify_published_episode(directory, local, case, row, profile, contract, con
     steps = contract.steps()
     if profile is not None:
         votes=[e for e in local if e['kind']=='benchmark_consent']
-        base='finite_calendar_preconsent_v1' if len(steps)==1 else 'finite_write_preconsent_v1'
+        base='finite_calendar_preconsent_v1' if len(steps)==1 else 'finite_write_preconsent_v2'
         policy=votes[0].get('policy') if votes else None
         owner={'strict':'+strict_destination','directory':'+directory_destination','set':'+candidate_destination',
                'approve':'+shown_destination'}.get(case.get('owner'),'')

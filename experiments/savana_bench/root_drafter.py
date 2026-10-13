@@ -227,8 +227,8 @@ REFUSAL_HINTS = {
                        'or {"text": [...]} with 2 to 4 non-list fields of one operation.'),
     "extract_context": (f'Context is {{"from": k}} or a list of up to {MAX_CONTEXTS} such, each naming a different '
                         'earlier step, never a literal and never with a path or computation.'),
-    "compute_source": ("A compute step is never an extraction's source: make the source an earlier tool result "
-                       "(e.g. the one it computed from) and give the compute step as context."),
+    "extract_target_length": ("Those fields' full names, joined, are too long to sign (at most 128 bytes): extract "
+                              "fewer fields in one step, or split them into two extractions."),
     "source_on_tool": 'Only an extraction step takes "source"; remove it from tool steps.',
     "condition_text": ('A "condition" extraction needs args "condition": {"text": ...} copied exactly from the '
                        'request; no other extraction takes "condition".'),
