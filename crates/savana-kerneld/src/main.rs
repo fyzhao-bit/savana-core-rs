@@ -5,24 +5,15 @@ const PRODUCTION_CONFIG_PATH_V2: &str = "/etc/savana/kerneld-bootstrap-v2.json";
 #[cfg(all(target_os = "macos", feature = "macos-development-authority"))]
 const DEVELOPMENT_CONFIG_PATH_V2: &str =
     "/Library/Application Support/Savana/Development/config/kerneld-bootstrap-v2.json";
-#[cfg(all(feature = "test-support", debug_assertions))]
-const TEST_V1_RUNTIME_ENV: &str = "SAVANA_TEST_V1_RUNTIME";
-#[cfg(all(feature = "test-support", debug_assertions))]
-const TEST_V1_RUNTIME_VALUE: &str = "frozen-regression-v1";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CliError;
 
-fn parse_args(
-    mut arguments: impl Iterator<Item = OsString>,
-    allow_test_support_path: bool,
-) -> Result<PathBuf, CliError> {
+fn parse_args(mut arguments: impl Iterator<Item = OsString>) -> Result<PathBuf, CliError> {
     let _program = arguments.next().ok_or(CliError)?;
     let token = arguments.next().ok_or(CliError)?;
     let path = PathBuf::from(arguments.next().ok_or(CliError)?);
     if token != OsStr::new("--config")
-        || (path != Path::new(PRODUCTION_CONFIG_PATH_V2)
-            && !development_config_path(&path)
-            && !(allow_test_support_path && path.is_absolute()))
+        || (path != Path::new(PRODUCTION_CONFIG_PATH_V2) && !development_config_path(&path))
         || arguments.next().is_some()
     {
         return Err(CliError);
@@ -43,13 +34,7 @@ fn development_config_path(path: &Path) -> bool {
 }
 
 fn main() {
-    #[cfg(all(feature = "test-support", debug_assertions))]
-    let allow_test_support_path = std::env::var_os(TEST_V1_RUNTIME_ENV)
-        .as_deref()
-        .is_some_and(|value| value == OsStr::new(TEST_V1_RUNTIME_VALUE));
-    #[cfg(not(all(feature = "test-support", debug_assertions)))]
-    let allow_test_support_path = false;
-    let exit_code = match parse_args(std::env::args_os(), allow_test_support_path) {
+    let exit_code = match parse_args(std::env::args_os()) {
         Ok(path) => match savana_kerneld::run(&path) {
             Ok(()) => 0,
             Err(_) => 1,
@@ -76,7 +61,6 @@ mod tests {
                     OsString::from(PRODUCTION_CONFIG_PATH_V2),
                 ]
                 .into_iter(),
-                false,
             )
             .unwrap(),
             Path::new(PRODUCTION_CONFIG_PATH_V2)
@@ -90,7 +74,6 @@ mod tests {
                     OsString::from(DEVELOPMENT_CONFIG_PATH_V2),
                 ]
                 .into_iter(),
-                false,
             )
             .unwrap(),
             Path::new(DEVELOPMENT_CONFIG_PATH_V2)
@@ -116,17 +99,7 @@ mod tests {
                 OsString::from("extra"),
             ],
         ] {
-            assert_eq!(parse_args(arguments.into_iter(), false), Err(CliError));
+            assert_eq!(parse_args(arguments.into_iter()), Err(CliError));
         }
-        assert!(parse_args(
-            [
-                OsString::from("savana-kerneld"),
-                OsString::from("--config"),
-                OsString::from("/tmp/v1-test-support.json"),
-            ]
-            .into_iter(),
-            true,
-        )
-        .is_ok());
     }
 }

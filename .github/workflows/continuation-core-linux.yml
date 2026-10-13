@@ -105,9 +105,6 @@ jobs:
       - run: PYTHONPATH=experiments python3 -m savana_bench regressions
       - run: cargo test -p savana-kerneld --lib kernel_approval --locked
       - run: cargo test -p savana-kerneld --lib --features test-support fused_approval_delivery --locked
-      # The complete socket/startup suite needs a non-root runner with a second
-      # supplementary group (the GitHub-hosted Ubuntu runner has one). Do not
-      # bypass identity checks or run this suite as root to make it pass.
       - run: cargo test -p savana-kerneld --lib --features test-support --locked
       - run: cargo test -p savana-kerneld --test deployment_units --locked
       - run: cargo test -p savana-kerneld --lib managed_issuer --locked
