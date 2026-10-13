@@ -5,7 +5,7 @@ use std::{
     process::Command,
 };
 
-const FROZEN_CORE_MEMBERS: [&str; 11] = [
+const FROZEN_CORE_MEMBERS: [&str; 12] = [
     "savana-agentd",
     "savana-approvald",
     "savana-execd",
@@ -16,10 +16,12 @@ const FROZEN_CORE_MEMBERS: [&str; 11] = [
     "savana-leak-gate",
     "savana-platform-identity",
     "savana-policy-core",
+    // The table computation the executor evaluates itself (codec TableComputeV1).
+    "savana-table-compute",
     "savana-vault",
 ];
 
-const ALLOWED_WORKSPACE_MEMBERS: [&str; 18] = [
+const ALLOWED_WORKSPACE_MEMBERS: [&str; 19] = [
     "libsavana-ner",
     "savana-agentd",
     "savana-approvald",
@@ -39,6 +41,7 @@ const ALLOWED_WORKSPACE_MEMBERS: [&str; 18] = [
     // The residual data contract's bounded checker (F4): a model and its
     // proofs' checks, outside the production core.
     "savana-residual-contract",
+    "savana-table-compute",
     "savana-vault",
 ];
 
@@ -132,6 +135,7 @@ fn workspace_boundary_rejects_duplicate_package_names() {
         "savana-platform-identity",
         "savana-policy-core",
         "savana-private-workflow",
+        "savana-table-compute",
         "savana-vault",
     ];
     assert_exact_workspace_members(members);

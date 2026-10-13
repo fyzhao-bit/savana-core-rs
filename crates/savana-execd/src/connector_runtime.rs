@@ -218,11 +218,43 @@ impl VerifiedConnectorExecutionRuntimeV2 {
             // this production provider path without task/request authority.
             return Err(ExecdProtocolServiceErrorV2::Binding);
         };
+        // A model provider receives only the masked request (no residual PII),
+        // and its reply gets the values back before it is retained. Masking
+        // that cannot be done safely ends the attempt before any effect.
+        let masked = match &business {
+            Some(request)
+                if request.profile().codec()
+                    == savana_kernel_protocol::v2::ActionCodecProfileV2::McpModelToolsCallJsonV1
+                    && request.condition_holds() =>
+            {
+                match savana_policy_core::v2::mask_model_request_v2(request) {
+                    Ok(masked) => Some(masked),
+                    Err(_) => {
+                        owner
+                            .record_failed_no_effect(
+                                query.execution_nonce(),
+                                ExecutorFailureClassV2::EnvelopeRejectedBeforeEffect,
+                                domain_digest(
+                                    b"SAVANA_MODEL_CALL_NOT_MASKABLE_V2\0",
+                                    query.dispatch_core_digest().as_bytes(),
+                                ),
+                                now,
+                                deadline,
+                            )
+                            .map_err(ExecdProtocolServiceErrorV2::Owner)?;
+                        return Ok(());
+                    }
+                }
+            }
+            _ => None,
+        };
         // The worker receives only the fixed business request. It does not get
         // to construct or edit the kernel's content/authorization metadata.
-        let payload = match &business {
-            Some(request) => Zeroizing::new(request.canonical_json()),
-            None => payload,
+        let payload = match (&masked, &business) {
+            (Some((request, _)), _) | (None, Some(request)) => {
+                Zeroizing::new(request.canonical_json())
+            }
+            (None, None) => payload,
         };
         let descriptor_deadline = UnixMillisV2::new(
             now.get()
@@ -240,8 +272,16 @@ impl VerifiedConnectorExecutionRuntimeV2 {
             )
             .map_err(|_| ExecdProtocolServiceErrorV2::Binding)?;
         let mut provider = OwnerBackedProviderAttemptV2::new(owner, transport, &target, now);
-        if let Some(request) = &business {
-            provider = provider.with_business_request(request.clone());
+        match (masked, &business) {
+            (Some((request, table)), _) => {
+                provider = provider
+                    .with_business_request(request)
+                    .with_model_mask(table);
+            }
+            (None, Some(request)) => {
+                provider = provider.with_business_request(request.clone());
+            }
+            (None, None) => (),
         }
         let outcome = self.supervisor.prepare_and_decode(
             &descriptor,

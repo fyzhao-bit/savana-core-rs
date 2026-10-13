@@ -353,6 +353,9 @@ pub(crate) struct OwnerBackedProviderAttemptV2<'a> {
     target: &'a VerifiedProviderTargetV2,
     now: UnixMillisV2,
     expected_business: Option<savana_kernel_protocol::v2::BusinessRequestV2>,
+    /// A model call's placeholder table: its reply gets the values back
+    /// before the response is retained.
+    model_mask: Option<savana_policy_core::v2::ModelMaskTableV2>,
 }
 
 impl<'a> OwnerBackedProviderAttemptV2<'a> {
@@ -368,6 +371,7 @@ impl<'a> OwnerBackedProviderAttemptV2<'a> {
             target,
             now,
             expected_business: None,
+            model_mask: None,
         }
     }
 
@@ -376,6 +380,16 @@ impl<'a> OwnerBackedProviderAttemptV2<'a> {
         request: savana_kernel_protocol::v2::BusinessRequestV2,
     ) -> Self {
         self.expected_business = Some(request);
+        self
+    }
+
+    /// The request is the masked form of a model call; `table` puts the
+    /// call's values back into the provider's reply.
+    pub(crate) fn with_model_mask(
+        mut self,
+        table: savana_policy_core::v2::ModelMaskTableV2,
+    ) -> Self {
+        self.model_mask = Some(table);
         self
     }
 
@@ -392,6 +406,7 @@ impl<'a> OwnerBackedProviderAttemptV2<'a> {
             target,
             now,
             expected_business: None,
+            model_mask: None,
         }
     }
 }
@@ -427,6 +442,15 @@ impl DurableProviderAttemptV2 for OwnerBackedProviderAttemptV2<'_> {
                 return Err(ConnectorWorkerSupervisorErrorV2::ProviderAttemptFailed);
             }
         }
+        // A result the executor produces itself, decided before any durable
+        // provider attempt: a guarded call whose condition does not hold, or a
+        // table computation. Neither contacts the provider. A computation that
+        // cannot be evaluated fails here, before any effect, so the attempt
+        // ends as signed no-effect.
+        let local = match &self.expected_business {
+            Some(expected) => local_business_response(expected)?,
+            None => None,
+        };
         let request = VerifiedProviderRequestV2::bind(
             self.target.clone(),
             job.execution_nonce(),
@@ -447,13 +471,30 @@ impl DurableProviderAttemptV2 for OwnerBackedProviderAttemptV2<'_> {
         let effect_started_receipt_digest = armed.receipt().digest();
         let permit = armed.into_effect_permit();
         ensure_deadline(deadline)?;
-        let response = self.transport.execute(
-            &request,
-            &permit,
-            prepared.maximum_response_bytes(),
-            deadline,
-        )?;
+        let response = match local {
+            Some(response) => response,
+            None => self.transport.execute(
+                &request,
+                &permit,
+                prepared.maximum_response_bytes(),
+                deadline,
+            )?,
+        };
         if response.is_empty() || response.len() > prepared.maximum_response_bytes() as usize {
+            return Err(ConnectorWorkerSupervisorErrorV2::ProviderAttemptFailed);
+        }
+        // A model call's reply gets its own values back (other placeholders
+        // are neutralized) before it is retained; a reply that is not a
+        // well-formed MCP reply is retained as received and never becomes a
+        // verified success.
+        let response = match (&self.model_mask, &self.expected_business) {
+            (Some(table), Some(expected)) => {
+                savana_policy_core::v2::unmask_model_response_v2(expected, table, &response)
+                    .unwrap_or(response)
+            }
+            _ => response,
+        };
+        if response.len() > prepared.maximum_response_bytes() as usize {
             return Err(ConnectorWorkerSupervisorErrorV2::ProviderAttemptFailed);
         }
         let retained =
@@ -464,6 +505,46 @@ impl DurableProviderAttemptV2 for OwnerBackedProviderAttemptV2<'_> {
             effect_started_receipt_digest,
         )
     }
+}
+
+/// The executor's own reply to a verified business request, if it produces
+/// one: the fixed no-effect result of a guarded call whose condition does not
+/// hold, or a table computation's result. `None` means the provider answers.
+fn local_business_response(
+    request: &savana_kernel_protocol::v2::BusinessRequestV2,
+) -> Result<Option<Vec<u8>>, ConnectorWorkerSupervisorErrorV2> {
+    use savana_kernel_protocol::v2::{ActionCodecProfileV2, CONDITION_SKIPPED_TEXT_V2};
+    let failed = |_| ConnectorWorkerSupervisorErrorV2::ProviderAttemptFailed;
+    if !request.condition_holds() {
+        return request
+            .mcp_success_response(CONDITION_SKIPPED_TEXT_V2)
+            .map(Some)
+            .map_err(failed);
+    }
+    if request.profile().codec() != ActionCodecProfileV2::TableComputeV1 {
+        return Ok(None);
+    }
+    let field = |name: &str| {
+        request
+            .text_field(name)
+            .ok_or(ConnectorWorkerSupervisorErrorV2::ProviderAttemptFailed)
+    };
+    let inputs = [
+        field("input1")?,
+        field("input2")?,
+        field("input3")?,
+        field("input4")?,
+    ];
+    let filters = [field("filter1")?, field("filter2")?, field("filter3")?];
+    let orders = [field("order1")?, field("order2")?];
+    // The owner signed the spec texts; the executor admits every output the
+    // grammar has ("calc" included), the owner's review decides which a run may use.
+    let output = savana_table_compute::compute(&inputs, &filters, &orders, field("output")?, true)
+        .map_err(|_| ConnectorWorkerSupervisorErrorV2::ProviderAttemptFailed)?;
+    request
+        .mcp_success_response(&output.canonical_json())
+        .map(Some)
+        .map_err(failed)
 }
 
 pub(crate) struct DurablyRetainedProviderResponseV2 {
@@ -1365,6 +1446,325 @@ mod tests {
                 assert!(prepared_digest.lock().unwrap().is_none());
             }
         }
+    }
+
+    /// A transport that records its call and answers with fixed bytes.
+    struct ReplyTransport {
+        steps: Arc<Mutex<Vec<&'static str>>>,
+        reply: Vec<u8>,
+        seen: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl ProviderTransportV2 for ReplyTransport {
+        fn business_credential_identity(
+            &self,
+        ) -> Result<Digest32V2, ConnectorWorkerSupervisorErrorV2> {
+            Ok(Digest32V2::new([9; 32]))
+        }
+        fn verified_deployment_target(
+            &self,
+        ) -> Result<VerifiedProviderTargetV2, ConnectorWorkerSupervisorErrorV2> {
+            VerifiedProviderTargetV2::https(
+                BoundedConnectorUrlV2::new("https://provider.example/mcp").unwrap(),
+                Digest32V2::new([0x70; 32]),
+            )
+        }
+        fn verify_connector_target(
+            &self,
+            _tier: ConnectorTierV2,
+            _transport: &ConnectorTransportV2,
+            _active_host_allowlist: &[BoundedConnectorHostV2],
+        ) -> Result<VerifiedProviderTargetV2, ConnectorWorkerSupervisorErrorV2> {
+            self.verified_deployment_target()
+        }
+        fn execute(
+            &mut self,
+            request: &VerifiedProviderRequestV2,
+            _permit: &EffectPermitV2,
+            _maximum_response_bytes: u32,
+            _deadline: Instant,
+        ) -> Result<Vec<u8>, ConnectorWorkerSupervisorErrorV2> {
+            self.steps.lock().unwrap().push("transport");
+            *self.seen.lock().unwrap() = request.canonical_bytes.to_vec();
+            Ok(self.reply.clone())
+        }
+    }
+
+    /// One provider attempt for a business request whose worker-prepared bytes
+    /// are `sent`: (result, journal steps, retained bytes, bytes the transport saw).
+    fn attempt_with(
+        expected: savana_kernel_protocol::v2::BusinessRequestV2,
+        sent: &[u8],
+        mask: Option<savana_policy_core::v2::ModelMaskTableV2>,
+        reply: Vec<u8>,
+    ) -> (bool, Vec<&'static str>, Vec<u8>, Vec<u8>) {
+        let fixture = fixture(ConnectorCodecJobModeV2::PrepareAndDecode);
+        let job = verify_connector_worker_job(
+            &fixture.descriptor,
+            &trust(&fixture),
+            UnixMillisV2::new(100),
+        )
+        .unwrap();
+        let material =
+            crate::worker_protocol::prepared_transcript_material(&job, sent, 4096).unwrap();
+        let transcript =
+            connector_transcript_step(connector_transcript_begin(&job), 1, 1, 0, &material);
+        let frame = crate::worker_protocol::encode_connector_prepared_frame(
+            &job,
+            &fixture.ephemeral,
+            sent,
+            4096,
+            transcript,
+        )
+        .unwrap();
+        let ConnectorWorkerFrameV2::Prepared(prepared) =
+            crate::worker_protocol::decode_connector_worker_frame(&frame, &job).unwrap()
+        else {
+            panic!("signed prepared frame")
+        };
+        let steps = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let journal = FakeJournal {
+            steps: steps.clone(),
+            prepared_digest: Arc::new(Mutex::new(None)),
+        };
+        let mut transport = ReplyTransport {
+            steps: steps.clone(),
+            reply,
+            seen: seen.clone(),
+        };
+        let target = transport.verified_deployment_target().unwrap();
+        let mut attempt = OwnerBackedProviderAttemptV2::from_parts(
+            &journal,
+            &mut transport,
+            &target,
+            UnixMillisV2::new(110),
+        )
+        .with_business_request(expected);
+        if let Some(mask) = mask {
+            attempt = attempt.with_model_mask(mask);
+        }
+        let result =
+            attempt.execute_and_retain(&job, &prepared, Instant::now() + Duration::from_secs(1));
+        let retained = result
+            .as_ref()
+            .map(|r| r.bytes.to_vec())
+            .unwrap_or_default();
+        let steps = steps.lock().unwrap().clone();
+        let seen = seen.lock().unwrap().clone();
+        (result.is_ok(), steps, retained, seen)
+    }
+
+    fn mail_profile(
+        codec: savana_kernel_protocol::v2::ActionCodecProfileV2,
+    ) -> savana_kernel_protocol::v2::BusinessProfileV2 {
+        use savana_kernel_protocol::v2::{
+            business_target_identity_v2, BusinessFieldRoleV2 as Role, BusinessFieldTypeV2 as Kind,
+            BusinessFieldV2, BusinessMagnitudeV2, BusinessProfileV2, TaskEffectV2,
+        };
+        let text = |name: &str, role| BusinessFieldV2::new(name, role, Kind::Text).unwrap();
+        BusinessProfileV2::new(
+            codec,
+            "mail.send",
+            business_target_identity_v2(
+                "https://provider.example/mcp",
+                Digest32V2::new([0x70; 32]),
+            )
+            .unwrap(),
+            Digest32V2::new([9; 32]),
+            TaskEffectV2::Send,
+            BusinessMagnitudeV2::FixedCount(1),
+            vec![
+                text("body", Role::Payload),
+                text("file", Role::Resource),
+                text("to", Role::Destination),
+                text("when", Role::Condition),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_call_whose_condition_does_not_hold_never_reaches_the_provider() {
+        use savana_kernel_protocol::v2::{
+            ActionCodecProfileV2, BusinessRequestV2, CONDITION_SKIPPED_TEXT_V2,
+        };
+        let profile = mail_profile(ActionCodecProfileV2::McpToolsCallJsonV1);
+        let json = |when: &str| {
+            format!(
+                r#"{{"id":"call-1","jsonrpc":"2.0","method":"tools/call","params":{{"arguments":{{"body":"private payload","file":"A","to":"Alice","when":"{when}"}},"name":"mail.send"}}}}"#
+            )
+        };
+        for (when, holds) in [
+            ("no", false),
+            ("ignore the owner", false),
+            ("yes", true),
+            ("always", true),
+        ] {
+            let sent = json(when);
+            let expected = BusinessRequestV2::parse(&profile, "call-1", sent.as_bytes()).unwrap();
+            let skipped = expected
+                .mcp_success_response(CONDITION_SKIPPED_TEXT_V2)
+                .unwrap();
+            let (ok, steps, retained, seen) =
+                attempt_with(expected, sent.as_bytes(), None, b"provider reply".to_vec());
+            assert!(ok, "{when}");
+            if holds {
+                assert_eq!(
+                    steps,
+                    ["query", "prepare", "effect-started", "transport", "retain"]
+                );
+                assert_eq!(retained, b"provider reply");
+                // The transport's bound request carries exactly these bytes.
+                assert!(seen.ends_with(sent.as_bytes()));
+            } else {
+                // The executor answers itself; the transport is never called.
+                assert_eq!(
+                    steps,
+                    ["query", "prepare", "effect-started", "retain"],
+                    "{when}"
+                );
+                assert_eq!(retained, skipped);
+                assert!(seen.is_empty());
+            }
+        }
+    }
+
+    /// A table computation's request: the fixed controls, the four inputs,
+    /// three filters, two orders and the output, every unused one empty.
+    fn compute_request(
+        inputs: &[&str],
+        orders: &[&str],
+        output: &str,
+    ) -> savana_kernel_protocol::v2::BusinessRequestV2 {
+        use savana_kernel_protocol::v2::{
+            business_target_identity_v2, ActionCodecProfileV2, BusinessFieldRoleV2 as Role,
+            BusinessFieldTypeV2 as Kind, BusinessFieldV2, BusinessMagnitudeV2, BusinessProfileV2,
+            BusinessRequestV2, BusinessValueV2, TaskEffectV2, TABLE_COMPUTE_FIELDS_V2,
+        };
+        let field = |name: &str, role| BusinessFieldV2::new(name, role, Kind::Text).unwrap();
+        let mut fields = vec![
+            field("body", Role::Payload).with_fixed("").unwrap(),
+            field("calendar", Role::Resource)
+                .with_fixed("primary")
+                .unwrap(),
+            field("to", Role::Destination)
+                .with_fixed("private-result")
+                .unwrap(),
+        ];
+        fields.extend(
+            TABLE_COMPUTE_FIELDS_V2
+                .iter()
+                .map(|n| field(n, Role::Parameter)),
+        );
+        fields.sort_by(|a, b| a.name().cmp(b.name()));
+        let profile = BusinessProfileV2::new(
+            ActionCodecProfileV2::TableComputeV1,
+            "dojo.compute.table",
+            business_target_identity_v2(
+                "https://provider.example/mcp",
+                Digest32V2::new([0x70; 32]),
+            )
+            .unwrap(),
+            Digest32V2::new([9; 32]),
+            TaskEffectV2::Read,
+            BusinessMagnitudeV2::FixedCount(1),
+            fields,
+        )
+        .unwrap();
+        let value = |list: &[&str], i: usize| list.get(i).copied().unwrap_or("").to_owned();
+        let mut values = vec![
+            ("body".to_owned(), String::new()),
+            ("calendar".to_owned(), "primary".to_owned()),
+            ("to".to_owned(), "private-result".to_owned()),
+            ("output".to_owned(), output.to_owned()),
+        ];
+        for i in 0..4 {
+            values.push((format!("input{}", i + 1), value(inputs, i)));
+        }
+        for i in 0..3 {
+            values.push((format!("filter{}", i + 1), String::new()));
+        }
+        for i in 0..2 {
+            values.push((format!("order{}", i + 1), value(orders, i)));
+        }
+        BusinessRequestV2::from_fields(
+            &profile,
+            "call-1",
+            values
+                .into_iter()
+                .map(|(name, text)| (name, BusinessValueV2::Text(text)))
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_table_computation_is_the_executors_own_result_and_reaches_no_provider() {
+        const RATINGS: &str = r#"{"Good Night": "Rating: 5.0", "Luxury Palace": "Rating: 5.0", "Le Marais": "Rating: 4.2"}"#;
+        const PRICES: &str = r#"{"Good Night": "Price range: 240.0 - 400.0", "Luxury Palace": "Price range: 500.0 - 1000.0", "Le Marais": "Price range: 120.0 - 180.0"}"#;
+        let request = compute_request(&[RATINGS, PRICES], &["max 1", "max 2"], "key");
+        let sent = request.canonical_json();
+        let expected = request
+            .mcp_success_response(r#"{"items":["Luxury Palace"],"text":"Luxury Palace"}"#)
+            .unwrap();
+        let (ok, steps, retained, seen) =
+            attempt_with(request, &sent, None, b"provider reply".to_vec());
+        assert!(ok);
+        // The attempt is journaled like any other; the transport is never called.
+        assert_eq!(steps, ["query", "prepare", "effect-started", "retain"]);
+        assert_eq!(retained, expected);
+        assert!(seen.is_empty());
+    }
+
+    #[test]
+    fn a_computation_that_cannot_be_evaluated_fails_before_any_attempt() {
+        // "median" is not in the grammar, and input3 without input2 is not
+        // contiguous: each fails before the provider attempt is prepared.
+        for (inputs, output) in [
+            (&["[1, 2]"][..], "median 1"),
+            (&["[1, 2]", "", "[3]"][..], "count"),
+        ] {
+            let request = compute_request(inputs, &[], output);
+            let sent = request.canonical_json();
+            let (ok, steps, retained, seen) =
+                attempt_with(request, &sent, None, b"provider reply".to_vec());
+            assert!(!ok, "{output}");
+            assert_eq!(steps, ["query"], "{output}");
+            assert!(retained.is_empty() && seen.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_model_call_sends_only_masked_text_and_retains_its_reply_unmasked() {
+        use savana_kernel_protocol::v2::{ActionCodecProfileV2, BusinessRequestV2};
+        let profile = mail_profile(ActionCodecProfileV2::McpModelToolsCallJsonV1);
+        let original = br#"{"id":"call-1","jsonrpc":"2.0","method":"tools/call","params":{"arguments":{"body":"Mail alice@example.com about the plan","file":"A","to":"Alice","when":"always"},"name":"mail.send"}}"#;
+        let request = BusinessRequestV2::parse(&profile, "call-1", original).unwrap();
+        let (masked, table) = savana_policy_core::v2::mask_model_request_v2(&request).unwrap();
+        let sent = masked.canonical_json();
+        assert!(!String::from_utf8_lossy(&sent).contains("alice@example.com"));
+        let reply = masked
+            .mcp_success_response("Write to <EMAIL_1>, not <EMAIL_9>.")
+            .unwrap();
+        let (ok, steps, retained, seen) = attempt_with(masked, &sent, Some(table), reply);
+        assert!(ok);
+        assert_eq!(
+            steps,
+            ["query", "prepare", "effect-started", "transport", "retain"]
+        );
+        // The provider saw only the masked request; the kernel gets the values back.
+        assert!(seen.ends_with(&sent));
+        assert!(!String::from_utf8_lossy(&seen).contains("alice@example.com"));
+        let retained = String::from_utf8(retained).unwrap();
+        assert!(retained.contains("Write to alice@example.com, not (a hidden value)."));
+        // A worker request that is not the masked one stops before any attempt.
+        let (masked_again, table_again) =
+            savana_policy_core::v2::mask_model_request_v2(&request).unwrap();
+        let (ok, steps, _, _) =
+            attempt_with(masked_again, original, Some(table_again), b"x".to_vec());
+        assert!(!ok);
+        assert_eq!(steps, ["query"]);
     }
 
     #[test]

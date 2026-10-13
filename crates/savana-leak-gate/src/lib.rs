@@ -33,6 +33,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod masking;
 mod scanner;
 mod tables;
 
