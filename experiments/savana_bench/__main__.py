@@ -33,18 +33,11 @@ def read(path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Savana experiments; protected runs require explicit deployment and model credentials.")
+    parser = argparse.ArgumentParser(description="Savana experiments: component harness, regressions and scoring; "
+                                                 "protected runs start only through savana_bench.protected_launch.")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("preflight")
     sub.add_parser("matrix")
-    protected = sub.add_parser("agentdojo-protected", help="Official calendar subset through Python SDK; no fallback")
-    protected.add_argument("--output", required=True, type=Path)
-    protected.add_argument("--config", type=Path)
-    protected.add_argument("--auth-fd", type=int)
-    protected.add_argument("--model-key-fd", type=int)
-    protected.add_argument("--model-listener-fd", type=int)
-    protected_verify = sub.add_parser("verify-protected", help="Offline audit consistency and official-oracle replay")
-    protected_verify.add_argument("directory", type=Path)
     native = sub.add_parser("agentdojo-native-probe", help="Synthetic native kernel to AgentDojo provider conformance; no LLM")
     native.add_argument("--kernel-test", required=True, help="Explicit trusted debug kernel test executable")
     native.add_argument("--output", required=True)
@@ -77,14 +70,6 @@ def main():
             output, code = readiness.report(), 2
         elif args.command == "matrix":
             output = parse(read(Path(__file__).resolve().parents[1] / "model-matrix.json"))
-        elif args.command == "agentdojo-protected":
-            from .protected_agentdojo import load_config, run
-            output = run(output=args.output, config=load_config(args.config) if args.config else None,
-                auth_fd=args.auth_fd, model_key_fd=args.model_key_fd, model_listener_fd=args.model_listener_fd)
-            code = 0 if output["run_status"] == "complete" else 2
-        elif args.command == "verify-protected":
-            from .protected_verify import verify
-            output = verify(args.directory)
         elif args.command == "agentdojo-native-probe":
             from .agentdojo_native import run
             output = asyncio.run(run(kernel_test=args.kernel_test, output=args.output, timeout=args.timeout))

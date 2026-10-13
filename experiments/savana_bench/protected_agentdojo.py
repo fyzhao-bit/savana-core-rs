@@ -1,21 +1,16 @@
-"""Official-task subset, Python-SDK-only Savana v0.4 experiment entry point.
+"""Python-SDK-only Savana v0.4 experiment plumbing on official AgentDojo tasks.
 
-Fail closed: no ToolsExecutor, native test binaries, synthetic receipt,
-reference solution, or direct tool fallback. An explicitly armed software
-identity profile permits finite experimental preconsent (never human consent);
-without it all approvals remain interactive. Preflight failures are
-recorded as NOT RUN, never as protected successes. This is a finite read-only
-protocol, not the unrestricted agent used by the undefended baseline.
+The deployment config, preflight, private audit, model worker, official case
+setup and official oracle the untrusted-planner runner (`planner_experiment`)
+and its offline verifier use. Fail closed: no ToolsExecutor, native test
+binaries, synthetic receipt, reference solution, or direct tool fallback.
+Preflight failures are recorded as NOT RUN, never as protected successes.
 """
-import argparse
-import asyncio
 import hashlib
 import importlib.metadata
 import json
 import os
 from pathlib import Path
-import platform
-import select
 import socket
 import stat
 import sys
@@ -23,14 +18,9 @@ import threading
 import time
 
 from .agentdojo_provider import canonical, decode
-from .agentdojo_tasks import BENCHMARK, PACKAGE_VERSION, SUITE, reviewed_task
-from .official_agentdojo import TASKS, INJECTIONS
-from .official_verify import rates
-from .protected_endpoint import EpisodeEndpoint, admit_owner_episode, digest32
-from .protected_transport import ProviderServer, certificate_spki_pin, server_context
-
-CASES = tuple([dict(group="benign", user=t, injection=None) for t in TASKS]
-    + [dict(group="attack", user=t, injection=i) for t in TASKS for i in INJECTIONS])
+from .agentdojo_tasks import BENCHMARK, PACKAGE_VERSION, SUITE
+from .protected_endpoint import digest32
+from .protected_transport import server_context
 
 
 def safe_error_code(error):
@@ -174,30 +164,13 @@ def load_config(path):
             value[key] = item
         return value
     config = json.loads(raw, object_pairs_hook=pairs)
-    if type(config) is not dict or type(config.get('schema')) is not int or config['schema'] not in (2,3):
+    if type(config) is not dict or type(config.get('schema')) is not int or config['schema']!=3:
         raise ValueError("closed_deployment_config_required")
-    fields={'schema','provider','release_provider','model_worker'}
-    if config['schema']==3:
-        if set(config)!=fields|{'provisioning','operator_socket'}: raise ValueError('closed_deployment_config_required')
-        from .protected_operator import SOCKET
-        if config['operator_socket']!=SOCKET: raise ValueError('closed_provisioning_profile')
-        check_provisioning(config['provisioning'])
-    elif (set(config)!=fields|{'entries'} or type(config['entries']) is not list
-            or len(config['entries'])!=len(CASES)):
+    if set(config)!={'schema','provider','release_provider','model_worker','provisioning','operator_socket'}:
         raise ValueError('closed_deployment_config_required')
-    all_tasks, all_runs, all_turns = set(), set(), set()
-    for entry in config.get("entries",[]):
-        if type(entry) is not dict or set(entry) != {"task_id", "run_id", "root_digest", "destination_digest",
-                "application_turn", "resource", "authorization_id", "clauses"}:
-            raise ValueError("episode_binding_fields")
-        for key in set(entry) - {"clauses"}:
-            digest32(entry[key])
-        if type(entry["clauses"]) is not list or not entry["clauses"]:
-            raise ValueError("operator_root_clauses_required")
-        for key, seen in (("task_id", all_tasks), ("run_id", all_runs), ("application_turn", all_turns)):
-            if entry[key] in seen:
-                raise ValueError("episode_binding_reused")
-            seen.add(entry[key])
+    from .protected_operator import SOCKET
+    if config['operator_socket']!=SOCKET: raise ValueError('closed_provisioning_profile')
+    check_provisioning(config['provisioning'])
     common = {"certificate", "private_key", "client_ca", "client_certificate_sha256"}
     for name, extra in (("provider", {"address", "url", "alpn"}),
                         ("release_provider", {"address", "url", "alpn"}),
@@ -372,28 +345,18 @@ def attack_values(suite, task, injection, case):
     return attack.attack(task, injection)
 
 
-def official_case(case, contract=None):
+def official_case(case, contract):
     """Same upstream task init, fixed attack and environment as the baseline.
 
     Ground truth is available only to the OFFICIAL ATTACK, never authoring,
-    model views, authorization or the protected execution path. A
-    planner-drafted case passes its owner-reviewed contract explicitly.
+    model views, authorization or the protected execution path. The case's
+    planner-drafted contract is the one the owner's review admitted.
     """
     from agentdojo.task_suite.load_suites import get_suite
     suite = get_suite(BENCHMARK, case.get("suite", SUITE))
     task = suite.get_user_task_by_id(case["user"])
-    if contract is not None:
-        if contract.task_id != case["user"] or getattr(contract, "suite", SUITE) != case.get("suite", SUITE):
-            raise ValueError("contract_task_mismatch")
-    elif "contract" in case:
-        # A reviewed write variant: its own owner prompt, the official task's
-        # oracle, environment and attack.
-        from .agentdojo_tasks import contract_by_id
-        contract = contract_by_id(case["contract"])
-        if contract.task_id != case["user"]:
-            raise ValueError("contract_task_mismatch")
-    else:
-        contract = reviewed_task(case["user"], task.PROMPT)
+    if contract.task_id != case["user"] or getattr(contract, "suite", SUITE) != case.get("suite", SUITE):
+        raise ValueError("contract_task_mismatch")
     injection = suite.get_injection_task_by_id(case["injection"]) if case["injection"] else None
     values = attack_values(suite, task, injection, case)
     environment = task.init_environment(suite.load_and_inject_default_environment(values))
@@ -444,196 +407,3 @@ def score_outcome(*, suite, task, injection, contract, before, after, provider, 
     utility = bool(suite._check_task_result(task, output, before, after, trace))
     attacker = bool(suite._check_task_result(injection, output, before, after, trace)) if injection else None
     return utility, attacker
-
-
-def run(*, output, config=None, auth_fd=None, model_key_fd=None, model_listener_fd=None, identity_profile=None):
-    if identity_profile is not None:
-        from .benchmark_identity import load_profile
-        if identity_profile!=load_profile() or config is None or config['schema']!=3:
-            raise ValueError('explicit_benchmark_profile_required')
-    audit = ResearchAudit(output)
-    model = worker = broker = None
-    # Native WebAuthn callbacks retain this loop through owner -> private handoff.
-    # Creating a second asyncio.run loop would strand the live authentication bridge.
-    async_runner = asyncio.Runner()
-    rows, model_calls = [], 0
-    try:
-        blockers = preflight(config=config, auth_fd=auth_fd, model_key_fd=model_key_fd,
-                             model_listener_fd=model_listener_fd)
-        audit.emit("manifest", schema="savana-protected-agentdojo-v1", package_version=PACKAGE_VERSION,
-            benchmark_version=BENCHMARK, suite=SUITE, cases=CASES, full_benchmark=False,
-            requested_group="savana_protected_finite_calendar", kernel_interface="python_sdk_only",
-            model="deepseek-flash", immutable_model_revision=False, max_model_calls=32,
-            max_model_input_bytes=1048576, raw_tool_result_output=True,
-            comparable_to_unrestricted_baseline=False, adaptive_tool_output_model_loop=False,
-            identity_profile=identity_profile, human_authentication_evaluated=False,
-            consent_mode='finite_calendar_preconsent_v1' if identity_profile else 'interactive',
-            attack="important_instructions_no_names", platform=platform.platform(),
-            package_sources=package_sources(),
-            source_sha256={p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(Path(__file__).parent.glob("*.py"))})
-        audit.emit("preflight", blockers=blockers, deployment_attested=False)
-        if not blockers:
-            from savana.fused_deepseek import DeepSeekModel
-            from savana.openclaw_bridge.auth import WebAuthnBroker
-            # Secret arrives only via inherited private descriptor; never argv,
-            # environment discovery, files in evidence, or the model audit.
-            if not select.select([model_key_fd], [], [], 5)[0]:
-                raise TimeoutError("model_key_unavailable")
-            key = os.read(model_key_fd, 257).decode("ascii").strip()
-            if not 1 <= len(key) <= 256:
-                raise ValueError("bounded_model_key_required")
-            model = DeepSeekModel(api_key=key, profiles={config["model_worker"]["profile"]: "deepseek-flash"}, max_calls=32)
-            del key
-            broker = WebAuthnBroker(auth_fd, timeout_seconds=120)
-            worker = ModelWorker(config["model_worker"], model, audit, listener_fd=model_listener_fd)
-            worker.start()
-        stopped = bool(blockers)
-        for index, case in enumerate(CASES):
-            row = dict(episode=index, **case, status="unknown", utility=None, attacker_success=None,
-                attempted=False, stage="preflight" if blockers else "not_attempted_after_unknown")
-            if not stopped:
-                row["attempted"] = True
-                row["stage"] = "setup"
-                endpoint = observer = admitted_session = None
-                servers = []
-                start = time.monotonic()
-                try:
-                    from .agentdojo_calendar import calendar_provider
-                    from .private_episode import finish_private_episode
-                    from .publication_audit import PrivateEpisodeAudit
-                    suite, task, injection, contract, values, env = official_case(case)
-                    before = env.model_copy(deep=True)
-                    binding = config.get("entries",[None]*len(CASES))[index]
-                    def emit(kind, **data):
-                        audit.emit(kind, episode=index, **data)
-                    emit("episode_input", contract=contract.document(), injections=values,
-                        environment=before.model_dump(mode="json"))
-                    provider = calendar_provider(env, max_calls=len(contract.steps()))
-                    admitted_session = admitted_approval = None
-                    if config['schema']==3:
-                        from .protected_setup import provision_owner_episode
-                        from .protected_operator import OperatorClient
-                        row['stage']='owner_and_operator_admission'
-                        calls_before=model.calls
-                        def admission_progress(stage):
-                            row['stage']=stage
-                            emit('admission_stage_started',stage=stage)
-                        consent=None
-                        if identity_profile is not None:
-                            from .benchmark_consent import FiniteConsent
-                            consent=FiniteConsent(contract,identity_profile['principal'],emit)
-                        admitted_session,admitted_approval,binding,prepared=async_runner.run(provision_owner_episode(
-                            contract=contract,deployment=config['provisioning'],broker=broker,
-                            operator=OperatorClient(config['operator_socket']),model_profile=config['model_worker']['profile'],
-                            progress=admission_progress,consent=consent))
-                        emit('native_execution_prepared',**prepared)
-                    endpoint = EpisodeEndpoint(contract=contract, provider=provider, binding=binding,
-                        tool_url=config["provider"]["url"], release_url=config["release_provider"]["url"], emit=emit)
-                    for name in ("provider", "release_provider"):
-                        p = config[name]
-                        server = ProviderServer(address=tuple(p["address"]),
-                            context=server_context(certificate=p["certificate"], private_key=p["private_key"],
-                                client_ca=p["client_ca"], alpn=p["alpn"]),
-                            client_pin=digest32(p["client_certificate_sha256"]),
-                            server_pin=certificate_spki_pin(p["certificate"]),
-                            urls=(p["url"],), alpn=p["alpn"], exchange=endpoint.exchange)
-                        servers.append(server)
-                        server.start()
-                    observer = PrivateEpisodeAudit(output / f"publication-{index:02d}.jsonl")
-                    row["stage"] = "owner_admission"
-                    if config['schema']==2: calls_before = model.calls
-                    async def episode():
-                        if config['schema']==3:
-                            session,approval=admitted_session,admitted_approval
-                        else:
-                            session, approval = await admit_owner_episode(contract=contract, binding=binding, broker=broker)
-                        return await finish_private_episode(session=session,
-                            expected_task=digest32(binding["task_id"]), expected_run=digest32(binding["run_id"]),
-                            expected_root=digest32(binding["root_digest"]),
-                            expected_destination=digest32(binding["destination_digest"]), approval=approval,
-                            receive_publication=endpoint.receive_publication, emit=observer, timeout=120)
-                    outcome = async_runner.run(episode())
-                    after = endpoint.freeze()
-                    utility, attacker = score_outcome(suite=suite, task=task, injection=injection,
-                        contract=contract, before=before, after=after, provider=provider, outcome=outcome)
-                    row.update(stage=outcome.stage, observed_utility=utility, observed_attacker_success=attacker,
-                        model_calls=model.calls-calls_before, publication_audit_head=observer.final_digest)
-                    emit("episode_observation", environment=after.model_dump(mode="json"),
-                        publication=outcome.publication, output_base64=(None if outcome.payload is None else
-                            __import__("base64").b64encode(outcome.payload).decode("ascii")))
-                    if outcome.status == "published" and model.calls > calls_before:
-                        row.update(status="scored", utility=utility, attacker_success=attacker)
-                    elif outcome.status == "published":
-                        row["stage"] = "no_observed_model_call"
-                except Exception as error:
-                    row["error_type"] = type(error).__name__
-                    code = safe_error_code(error)
-                    if code is not None:
-                        row['error_code'] = code
-                    if endpoint is not None:
-                        # Preserve actual effects even if admission/publication failed.
-                        audit.emit("uncertain_environment", episode=index,
-                            environment=endpoint.freeze().model_dump(mode="json"))
-                        # The security oracle can still observe an effect even
-                        # when there is no confirmed final output. Keep this
-                        # diagnostic separate from a completed protected score.
-                        try:
-                            observed = score_outcome(suite=suite, task=task, injection=injection,
-                                contract=contract, before=before, after=endpoint.freeze(),
-                                provider=provider, outcome=None)
-                            row.update(observed_utility=observed[0], observed_attacker_success=observed[1])
-                        except Exception:
-                            row["oracle_status"] = "unknown"
-                finally:
-                    if admitted_session is not None:
-                        async_runner.run(admitted_session.close())
-                    for server in reversed(servers):
-                        server.close()
-                    if observer is not None:
-                        observer.close()
-                row["wall_seconds"] = time.monotonic() - start
-                stopped = row["status"] != "scored"
-            rows.append(row)
-            audit.emit("episode_score", **row)
-        if worker is not None:
-            worker.close()
-            worker = None
-        model_calls = 0 if model is None else model.calls
-        summary = dict(schema="savana-protected-agentdojo-v1", full_benchmark=False,
-            run_status="not_started" if blockers else ("complete" if not stopped else "incomplete"),
-            official_tasks_and_oracles=True, protected_episodes_scored=sum(r["status"] == "scored" for r in rows),
-            total_model_calls=model_calls, blockers=blockers, rows=rows, rates=rates(rows),
-            identity_profile=identity_profile, human_authentication_evaluated=False,
-            consent_mode='finite_calendar_preconsent_v1' if identity_profile else 'interactive',
-            comparable_to_unrestricted_baseline=False, production_acceptance=False)
-        audit.emit("summary", summary=summary)
-        audit.artifact("summary.json", summary)
-        audit.artifact("completion.json", dict(audit_head=audit.head, event_count=audit.count))
-        return summary
-    finally:
-        async_runner.close()
-        if worker is not None:
-            worker.close()
-        if broker is not None:
-            broker.close()
-        if model is not None:
-            model.close()
-        audit.close()
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--config", type=Path, help="owner-private operator deployment bindings; not an authorization")
-    parser.add_argument("--auth-fd", type=int, help="inherited trusted passkey broker Unix socket")
-    parser.add_argument("--model-key-fd", type=int, help="inherited private DeepSeek key descriptor")
-    parser.add_argument("--model-listener-fd", type=int, help="inherited deployment-owned Unix TLS listener")
-    args = parser.parse_args()
-    summary = run(output=args.output, config=load_config(args.config) if args.config else None,
-        auth_fd=args.auth_fd, model_key_fd=args.model_key_fd, model_listener_fd=args.model_listener_fd)
-    print(json.dumps({k: summary[k] for k in ("run_status", "protected_episodes_scored", "total_model_calls", "blockers")}, indent=2))
-    return 0 if summary["run_status"] == "complete" else 2
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

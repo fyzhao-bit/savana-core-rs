@@ -4,6 +4,9 @@
 3 个用户任务，每个 clean + 2 个攻击，共 9 个样本。不是完整 AgentDojo，
 也不是可直接与自由工具调用 Agent 对比的通用防护成绩。
 
+注：本页的默认 runner（上述 9 个样本）和 `verify-protected` 在提交 `e155076` 中仍存在，之后已移除；
+现在 runner 只运行 `--software-benchmark --planner-experiment <spec>`，用 `savana_bench.planner_verify` 复核。
+
 ## 一次性部署要求
 
 安装器使用 `--file-backed-integration --owner-control --protected-experiment`。

@@ -331,3 +331,5 @@ venv (maturin) before the owner-side path exercises it. Assemble the stage with
 `savana-development-build-inputs --protected-experiment-profile`, then run
 `protected_agentdojo` (schema 3) for honest / poisoned-planner / official-
 injection, and compare with CaMeL under the same DeepSeek + AgentDojo tasks.
+(That runner mode and these plan-author specs exist at commit `e155076` and
+were removed afterwards; runs now use `protected_launch --planner-experiment`.)

@@ -1,9 +1,11 @@
-"""Independent, root-owned finite-calendar provisioning through Python SDK.
+"""Independent, root-owned finite provisioning through Python SDK.
 
-Not a general signing oracle. Only the clean reviewed catalog may be compiled;
-the native kernel obtains inputs from consented ingress and supplies the recipe.
-This service never performs WebAuthn, supplies user consent, calls a model/tool,
-or reads kernel state. Unknown replies are retried with identical signed bytes.
+Not a general signing oracle. It compiles only a planner-drafted program's
+draft, labelled with its owner-side contract and signed unread, so every plan
+refusal is the kernel's own; the native kernel obtains inputs from consented
+ingress and supplies the recipe. This service never performs WebAuthn,
+supplies user consent, calls a model/tool, or reads kernel state. Unknown
+replies are retried with identical signed bytes.
 """
 import asyncio
 import hashlib
@@ -18,15 +20,13 @@ import struct
 import time
 
 from .agentdojo_provider import canonical
-from .agentdojo_tasks import all_contracts, prepare_draft
 from .protected_endpoint import digest32
 
 SOCKET = '/run/savana-experiment-operator/operator.sock'
 STATE = '/var/lib/savana-experiment-operator'
 MAX = 262144
-# reviewed: sign only the byte-identical reviewed plan (the finite subset).
 # forward_untrusted_plan: sign an untrusted planner's draft unread (experiment).
-MODES = ('reviewed', 'forward_untrusted_plan')
+MODES = ('forward_untrusted_plan',)
 # Closed failure stage in a not_confirmed reply. The kernel's own admin reply
 # carries no reason, so 'kernel' means only: these exact signed bytes were
 # submitted and the kernel did not confirm them (a refusal or an unknown).
@@ -152,16 +152,14 @@ class FiniteOperator:
             return document['result']
 
     def compile(self, request):
-        mode=request.get('mode','reviewed') if type(request) is dict else None
-        if (set(request)-{'mode'}!={'kind','contract','command'} or request['kind']!='compile'
-            or mode not in MODES):
+        if (type(request) is not dict or set(request)!={'kind','mode','contract','command'}
+            or request['kind']!='compile' or request['mode'] not in MODES):
             raise ValueError('closed_compile_request')
-        contract=next((c for c in all_contracts() if c.contract_id==request['contract']),None)
         # Forwarding signs an untrusted plan unread, so the contract is only a
-        # label there; a planner-drafted one exists only on the owner side.
-        drafted=(mode=='forward_untrusted_plan' and type(request['contract']) is str
-                 and re.fullmatch(r'user_task_[0-9]{1,3}:drafted:[0-9a-f]{16}',request['contract']))
-        if contract is None and not drafted: raise ValueError('unreviewed_contract')
+        # label; a planner-drafted one exists only on the owner side.
+        if (type(request['contract']) is not str
+            or not re.fullmatch(r'user_task_[0-9]{1,3}:drafted:[0-9a-f]{16}',request['contract'])):
+            raise ValueError('unreviewed_contract')
         command=request['command']
         if set(command)!={'schema','installation','store','request','not_before','expires_at','operation'}:
             raise ValueError('closed_command')
@@ -170,11 +168,7 @@ class FiniteOperator:
             or command['store']!=list(digest32(d['store']))): raise ValueError('deployment_mismatch')
         op=command['operation']
         if set(op)!={'kind','task','draft'} or op['kind']!='compile_planning': raise ValueError('compile_only')
-        draft=op['draft']
         task=bytes(op['task'])
-        if mode=='reviewed':
-            root=bytes(draft['root']);turn=bytes(draft['final_release']['turn'])
-            if turn!=digest32(d['application_turn']): raise ValueError('application_turn_mismatch')
         if len(task)!=32 or not any(task) or type(command['not_before']) is not int or type(command['expires_at']) is not int:
             raise ValueError('task_binding')
         directory=self.directory/task.hex()
@@ -187,16 +181,8 @@ class FiniteOperator:
             now=time.time_ns()//1_000_000
             if not now-300000<=command['not_before']<=now<command['expires_at']<=now+300000:
                 raise ValueError('bounded_fresh_task')
-        if mode=='reviewed':
-            steps=tuple(digest32(d['descriptors'][st.tool]) for st in contract.steps())
-            expected=prepare_draft(contract,task=task,root=root,observer=bytes(draft['observer_scope']),
-                tool_descriptor=steps[0],step_descriptors=steps,
-                release_descriptor=digest32(d['descriptors']['savana.final_result_release']),application_turn=turn,
-                planner=digest32(d['planner']),model_profile=1,
-                not_before=command['not_before'],expires_at=command['expires_at'])['planning_draft']
-            if draft!=expected: raise ValueError('not_the_reviewed_finite_plan')
-        # forward_untrusted_plan: an untrusted planner authored the draft and this
-        # operator signs it unread, so every plan refusal is the kernel's own.
+        # An untrusted planner authored the draft and this operator signs it
+        # unread, so every plan refusal is the kernel's own.
         retain(directory/'request.json',canonical(request))
         result=self._submit(directory,'compile',command)
         if result['kind']!='planning_enrolled' or result['task']!=list(task): raise ValueError('compile_receipt')
@@ -211,16 +197,10 @@ class FiniteOperator:
             'operation':dict(kind='prepare_planning_execution',task=list(task),root=root)}
         prepared=self._submit(directory,'prepare',command,wait=True)
         prior=json.loads(private_read(directory/'compile.receipt.json'))['result']
-        original=json.loads(private_read(directory/'request.json'))
-        forwarded=original.get('mode','reviewed')=='forward_untrusted_plan'
-        operations=None if forwarded else len(
-            next(c for c in all_contracts() if c.contract_id==original['contract']).steps())
         approval=prepared['approval']
         if (prepared['kind']!='planning_execution_prepared' or prepared['task']!=list(task)
             or approval['task']!=list(task) or approval['root']!=root or approval['profile']!=prior['profile']
-            or approval['recipe_schema']!=2 or not approval['inputs_digest']
-            or (not forwarded and [b['operation'] for b in approval['bindings']]
-                != list(range(1,operations+1)))):
+            or approval['recipe_schema']!=2 or not approval['inputs_digest']):
             raise ValueError('kernel_recipe_binding')
         from savana.managed_admin import prepare_artifact
         native=prepare_artifact('recipe_approval',canonical(approval))

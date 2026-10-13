@@ -1,5 +1,11 @@
 # Savana 实验：组件、官方任务基线与产品评测分开报告
 
+2026-10-13 代码清理：runner 现在只运行 `drafted` / `drafted-poison` 规格
+（`protected_launch --software-benchmark --planner-experiment <spec>`，`planner_verify` 复核）。
+默认 runner（`agentdojo-protected` / `verify-protected`）、预审合同目录与 `honest` / `poisoned` /
+`compromised` / `write` / `generate` 规格，以及 `sdk`、`deepseek_relay`、`remote_smoke`、
+`analysis.review_completeness`、`analysis.privacy_exposure`、`native_tests/` 在提交 `e155076` 中仍存在，之后已移除。
+
 2026-10-12 G5 失败即关闭底线，两类攻击端到端：
 - **设置：** Permit 处置（只有内核升级才问 owner），owner 签署数据派生的目的地，严格的软件 owner 拒绝数据选址；
   4 个任务的固定诚实程序 × AutoDojo 注入（24 对），每批新主机，有/无底线两种内核；
@@ -116,7 +122,8 @@ FinalRelease 读者、发布根、发布轮转、附加响应契约）。这是�
 独立可复核的公开原始数据。
 
 最新：新增 [Python-only 防护组驱动、mTLS 接收端、官方判分及审计复核](AGENTDOJO-PROTECTED-RUNNER.zh-CN.md)。
-命令为 `python -m savana_bench agentdojo-protected` / `verify-protected`。
+命令为 `python -m savana_bench agentdojo-protected` / `verify-protected`
+（这两个命令在提交 `e155076` 中仍存在，之后已移除）。
 Python 实验框架回归 **143/143**；这是组件验证，正式防护成绩仍未产生。
 新驱动要求真实 Linux 签名部署和通行密钥通道，缺失时保留所有计划样本并标为
 `not_started`，不直连工具兜底。3 个只读任务的有限协议也不是通用多步模型 agent。

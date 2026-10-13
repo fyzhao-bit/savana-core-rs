@@ -109,6 +109,9 @@ export PYTHONPATH=/opt/savana-protected/python:/opt/savana-protected/experiments
 `deploy/software-benchmark-launch.conf` 安装为对应两个**实验服务**的
 `90-software-benchmark.conf` drop-in。这些文件不在生产安装器中自动启用。
 重载 systemd，仅重启实验 auth broker，核对条件后启动一轮 runner。
+（注：默认 runner——交互模式，或只加这两个 drop-in 的软件身份模式——在提交 `e155076` 中仍存在，
+之后已移除；现在 runner 服务还需要一个在 `ExecStart` 里加 `--planner-experiment <spec>` 的 drop-in，
+否则拒绝启动。）
 
 批次有持久化已启动标记：重启 broker 也不能重放。过期或失败不会自动重新
 启用。恢复交互模式时撤下这两个特定 drop-in 并重启实验服务；不要删除原生登记、

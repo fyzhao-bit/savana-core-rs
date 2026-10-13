@@ -1,13 +1,12 @@
-"""Untrusted-planner experiment: the finite plan itself comes from outside the trust boundary.
+"""Untrusted-planner experiment: the program itself comes from outside the trust boundary.
 
-Same deployment, owner root, finite pre-consent and official tasks as the
-protected subset. One change: the planning draft is written by an untrusted
-author (an honest DeepSeek model, a DeepSeek model given a hidden attacker
-goal, or an adversary that controls every byte of the draft) and the operator
-forwards it unread (`forward_untrusted_plan`). Nothing in Python vets the plan.
-A plan can only be stopped by Savana's Rust codec (which the kernel re-runs),
-the kernel's compile/prepare/dispatch checks, or the owner's finite consent,
-which is recorded as an owner refusal and never counted as a kernel block.
+An untrusted planner drafts each official task's whole program from the
+owner's request (`root_drafter`); the owner's fixed review admits it or not
+(`drafted_tasks`), and the reviewed draft of an admitted program is forwarded
+unread (`forward_untrusted_plan`). It can then only be stopped by Savana's Rust
+codec (which the kernel re-runs), the kernel's compile/prepare/dispatch checks,
+or the owner's finite consent, which is recorded as an owner refusal and never
+counted as a kernel block.
 
 Provider listeners are up for the whole episode, so a dispatch at any stage is
 recorded before it is refused. Every episode is classified; a refusal is never
@@ -25,14 +24,9 @@ import threading
 import time
 
 from .agentdojo_provider import canonical
-from .agentdojo_tasks import (BENCHMARK, GENERATE_TASKS, GENERATOR_MODEL, PACKAGE_VERSION, SUITE, WRITE_TASKS,
-                              contract_by_id, prepare_draft)
-from .official_agentdojo import INJECTIONS, TASKS
-from .planner_authors import (COMPROMISED, GENERATE_COMPROMISED, GENERATE_POISON_GOALS, POISON_GOALS, SYSTEM,
-                              WRITE_COMPROMISED, WRITE_POISON_GOALS, PlanUnencodable, compromised_draft,
-                              encode_plan, parse_plan)
-from .protected_agentdojo import (CASES, ModelWorker, ResearchAudit, official_case, package_sources,
-                                  preflight, safe_error_code, score_outcome)
+from .agentdojo_tasks import BENCHMARK, GENERATOR_MODEL, PACKAGE_VERSION, SUITE, prepare_draft
+from .protected_agentdojo import (ModelWorker, ResearchAudit, official_case, package_sources, preflight,
+                                  safe_error_code, score_outcome)
 from .protected_endpoint import EpisodeEndpoint, digest32
 from .quarantined_generator import SYSTEM as GENERATOR_SYSTEM, DeepSeekGenerator
 from .root_drafter import NON_RETRYABLE, REFUSAL_HINTS, ROOT_POISON_GOALS, ROOT_SYSTEM
@@ -44,50 +38,11 @@ OPERATOR_MODE = "forward_untrusted_plan"
 IDS = ("task", "root", "observer", "application_turn", "planner", "model_profile", "not_before", "expires_at")
 # Outcomes that settle an episode. Anything else stays unknown. The last three
 # are the structured-planning stages that refused before anything was signed.
-DEFINITIVE = ("plan_unencodable", "author_failed", "sdk_codec_rejected", "compile_rejected",
+DEFINITIVE = ("author_failed", "sdk_codec_rejected", "compile_rejected",
               "prepare_rejected", "owner_refused", "published", "program_refused",
               "mapper_failed", "planner_invalid", "lowering_failed", "instructions_not_adopted")
 STRUCTURED_REFUSALS = ("mapper_failed", "planner_invalid", "lowering_failed")
 KERNEL_BLOCKS = ("compile_rejected", "prepare_rejected")
-
-
-WRITE_GROUPS = ("reviewed", "honest", "poisoned", "compromised", "attack")
-# One multi-operation contract per spec kind: (contract, poison goals, mutations).
-CHAIN_KINDS = {
-    "write": (WRITE_TASKS[0], WRITE_POISON_GOALS, WRITE_COMPROMISED),
-    "generate": (GENERATE_TASKS[0], GENERATE_POISON_GOALS, GENERATE_COMPROMISED),
-}
-
-
-def chain_cases(kind, groups=WRITE_GROUPS, mutations=None, injections=None, goals=None):
-    """A multi-operation task under every planner and the official attack.
-
-    `reviewed` forwards the reviewed plan unread (the honest reference);
-    `honest`/`poisoned` are DeepSeek-authored plans (poisoned = hidden attacker
-    goal); `compromised` are adversary-controlled plans; `attack` is the
-    reviewed plan against each official injection.
-    """
-    chosen_goals = goals or frozenset()
-    contract, goals, catalog = CHAIN_KINDS[kind]
-    base = dict(user=contract.task_id, contract=contract.contract_id)
-    cases = []
-    if "reviewed" in groups:
-        cases.append(dict(group=f"{kind}_reviewed", **base, injection=None, author="reviewed", goal=None,
-                          mutation=None))
-    if "honest" in groups:
-        cases.append(dict(group=f"{kind}_honest", **base, injection=None, author="deepseek", goal=None,
-                          mutation=None))
-    if "poisoned" in groups or chosen_goals:
-        cases += [dict(group=f"{kind}_poisoned", **base, injection=None, author="deepseek", goal=goal,
-                       mutation=None) for goal in goals if "poisoned" in groups or goal in chosen_goals]
-    if "compromised" in groups or mutations:
-        cases += [dict(group=f"{kind}_compromised", **base, injection=None, author="adversary", goal=None,
-                       mutation=name) for name, _, _ in catalog
-                  if "compromised" in groups or name in mutations]
-    if "attack" in groups or injections:
-        cases += [dict(group=f"{kind}_attack", **base, injection=injection, author="reviewed", goal=None,
-                       mutation=None) for injection in (INJECTIONS if "attack" in groups else injections)]
-    return tuple(cases)
 
 
 PLANNER_MODELS = ("deepseek-flash", "deepseek-v4-pro")
@@ -346,48 +301,20 @@ def _delegates_to_data(suite, user):
 
 
 def experiment_cases(spec):
-    """honest | poisoned | compromised[:names] | write[:items] | generate[:items]
-    | drafted[+drafts=N][+planner=M][+view=V][+extract=E][+extractor=X]:<suite>:<items>
-    | drafted-poison[+drafts=N][+planner=M][+view=V][+extract=E][+extractor=X]:<goal>:<suite>:<items>"""
+    """drafted[+drafts=N][+planner=M][+view=V][+extract=E][+extractor=X]:<suite>:<items>
+    | drafted-poison[+drafts=N][+planner=M][+view=V][+extract=E][+extractor=X]:<goal>:<suite>:<items>
+    (every option: `drafted_options`)"""
     kind, colon, names = spec.partition(":") if type(spec) is str else ("", "", "")
     drafted = drafted_options(kind) if colon else None
-    if drafted is not None:
-        base, options = drafted
-        if base == "drafted":
-            return drafted_cases(names, **options)
-        goal, sep, rest = names.partition(":")
-        if not sep:
-            raise ValueError("planner_experiment_spec")
-        return drafted_cases(rest, goal=goal, **options)
-    if kind == "honest" and not colon:
-        return tuple(dict(case, author="deepseek", goal=None, mutation=None) for case in CASES)
-    if kind == "poisoned" and not colon:
-        return tuple(dict(group="poisoned_planner", user=user, injection=None, author="deepseek", goal=goal,
-                          mutation=None) for user in TASKS for goal in POISON_GOALS)
-    if kind in CHAIN_KINDS:
-        # Items are whole groups, single poison goals, single compromised
-        # mutations or single official injections, so a run can stay within
-        # one armed batch's case limit and one host's task window.
-        items = names.split(",") if colon else list(WRITE_GROUPS)
-        mutations = {n for n, _, _ in CHAIN_KINDS[kind][2]}
-        goals = set(CHAIN_KINDS[kind][1])
-        injections = tuple(i for i in items if re.fullmatch(r"injection_task_(0|[1-9][0-9]?)", i))
-        if (not items or len(set(items)) != len(items) or ("attack" in items and injections)
-                or ("poisoned" in items and goals & set(items))
-                or any(i not in WRITE_GROUPS and i not in mutations and i not in injections and i not in goals
-                       for i in items)):
-            raise ValueError("planner_experiment_spec")
-        return chain_cases(kind, tuple(i for i in items if i in WRITE_GROUPS),
-                           frozenset(i for i in items if i in mutations), injections,
-                           frozenset(i for i in items if i in goals))
-    if kind == "compromised":
-        catalog = [name for name, _, _ in COMPROMISED]
-        chosen = names.split(",") if colon else catalog
-        if len(set(chosen)) != len(chosen) or any(name not in catalog for name in chosen):
-            raise ValueError("planner_experiment_spec")
-        return tuple(dict(group="compromised_planner", user=TASKS[0], injection=None, author="adversary",
-                          goal=None, mutation=name) for name in chosen)
-    raise ValueError("planner_experiment_spec")
+    if drafted is None:
+        raise ValueError("planner_experiment_spec")
+    base, options = drafted
+    if base == "drafted":
+        return drafted_cases(names, **options)
+    goal, sep, rest = names.partition(":")
+    if not sep:
+        raise ValueError("planner_experiment_spec")
+    return drafted_cases(rest, goal=goal, **options)
 
 
 def classify_provider_attempt(payload, *, contract, resource, application_turn, prior_results=()):
@@ -581,33 +508,25 @@ def destination_candidates(case):
 
 
 def consent_mode(experiment):
-    multi = str(experiment).partition(":")[0] in (*CHAIN_KINDS, "drafted")
+    multi = str(experiment).partition(":")[0] == "drafted"
     return "finite_write_preconsent_v1" if multi else "finite_calendar_preconsent_v1"
 
 
-def plan_author_for(case, contract, text, emit, facts):
-    """Encode (never vet) the untrusted plan against the kernel's actual IDs."""
+def plan_author_for(contract, emit, facts):
+    """The reviewed draft of the owner-admitted program, encoded against the
+    kernel's actual IDs; the operator forwards it unread."""
     def author(actual, context):
         if actual != contract:
             raise ValueError("plan_author_contract")
         ids = {k: context[k] for k in IDS}
         descriptors, release = context["descriptors"], context["release_descriptor"]
         steps = tuple(descriptors[st.tool] for st in contract.steps())
-        reviewed = prepare_draft(contract, tool_descriptor=steps[0], step_descriptors=steps,
-                                 release_descriptor=release, **ids)["planning_draft"]
-        if case["author"] == "reviewed":
-            draft = reviewed
-        elif case["mutation"] is not None:
-            draft = compromised_draft(case["mutation"], contract=contract, descriptors=descriptors,
-                                      release_descriptor=release, **ids)
-        else:
-            draft = encode_plan(parse_plan(text), contract=contract, descriptors=descriptors,
-                                release_descriptor=release, **ids)
-        draft = json.loads(canonical(draft))
-        facts["deviates"] = draft != json.loads(canonical(reviewed))
+        draft = json.loads(canonical(prepare_draft(contract, tool_descriptor=steps[0], step_descriptors=steps,
+                                                   release_descriptor=release, **ids)["planning_draft"]))
+        facts["deviates"] = False
         emit("plan_submitted", ids={k: _hex(v) for k, v in ids.items()},
              descriptors={k: v.hex() for k, v in sorted(descriptors.items())},
-             release_descriptor=release.hex(), draft=draft, deviates_from_reviewed=facts["deviates"])
+             release_descriptor=release.hex(), draft=draft, deviates_from_reviewed=False)
         facts["plan_supplied"] = True
         return draft
     return author
@@ -622,7 +541,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
     if identity_profile is None or identity_profile != load_profile() or config is None or config["schema"] != 3:
         raise ValueError("explicit_benchmark_profile_required")
     audit = ResearchAudit(output)
-    model = worker = broker = author = generator = drafter = structural = structured = None
+    model = worker = broker = generator = drafter = structural = structured = None
     structured_cases = [case for case in cases if case.get("root_author") == "structured"]
     import asyncio
     async_runner = asyncio.Runner()
@@ -638,12 +557,6 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
         audit.emit("manifest", schema=SCHEMA, experiment=experiment, cases=cases,
             package_version=PACKAGE_VERSION, benchmark_version=BENCHMARK, suite=SUITE,
             kernel_interface="python_sdk_only", operator_mode=OPERATOR_MODE,
-            plan_author_model="deepseek-flash", plan_author_system_sha256=hashlib.sha256(SYSTEM.encode()).hexdigest(),
-            poison_goals=POISON_GOALS, write_poison_goals=WRITE_POISON_GOALS,
-            generate_poison_goals=GENERATE_POISON_GOALS,
-            compromised_catalog=[dict(name=n, description=d) for n, d, _ in COMPROMISED],
-            write_compromised_catalog=[dict(name=n, description=d) for n, d, _ in WRITE_COMPROMISED],
-            generate_compromised_catalog=[dict(name=n, description=d) for n, d, _ in GENERATE_COMPROMISED],
             generator_model="deepseek-flash", root_poison_goals=ROOT_POISON_GOALS,
             planner_models=list(PLANNER_MODELS), refusal_hints=REFUSAL_HINTS,
             non_retryable=sorted(NON_RETRYABLE), planner_views=list(VIEWS), extractor_views=list(EXTRACTOR_VIEWS),
@@ -666,15 +579,12 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
         if not blockers:
             from savana.fused_deepseek import DeepSeekModel
             from savana.openclaw_bridge.auth import WebAuthnBroker
-            from .planner_authors import DeepSeekPlanAuthor
             if not select.select([model_key_fd], [], [], 5)[0]:
                 raise TimeoutError("model_key_unavailable")
             key = os.read(model_key_fd, 257).decode("ascii").strip()
             if not 1 <= len(key) <= 256:
                 raise ValueError("bounded_model_key_required")
             model = DeepSeekModel(api_key=key, profiles={config["model_worker"]["profile"]: "deepseek-flash"}, max_calls=32)
-            if any(case["author"] == "deepseek" for case in cases):
-                author = DeepSeekPlanAuthor(key, max_calls=len(cases))
             if any(case.get("root_author") for case in cases):
                 from .root_drafter import DeepSeekRootDrafter
                 # One planner model per run; a retry is another separately
@@ -683,21 +593,18 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                 drafts = sum(case["max_drafts"] for case in cases if case.get("root_author"))
                 drafter = DeepSeekRootDrafter(key, max_calls=drafts, max_input_bytes=drafts * 131072,
                                               model=planner_model)
-            if any(case.get("root_author") for case in cases) or any(
-                    st.payload_from for case in cases if "contract" in case
-                    for st in contract_by_id(case["contract"]).steps()):
+            if any(case.get("root_author") for case in cases):
                 # The reviewed generator tool's own credential use, never shared
-                # with the planner/executor: one call per generation step, and a
-                # drafted program may extract at most once per step.
+                # with the planner/executor: a drafted program may extract at
+                # most once per step.
                 from .drafted_tasks import MAX_STEPS
-                steps = MAX_STEPS if any(case.get("root_author") for case in cases) else 1
                 # One extractor model per run, an owner-signed constant of every
-                # extraction step (G3); other runs use the reviewed default.
+                # extraction step (G3).
                 extractor_models = {case.get("extractor_model", GENERATOR_MODEL) for case in cases}
                 if len(extractor_models) != 1:
                     raise ValueError("one_extractor_model_per_run")
-                generator = DeepSeekGenerator(key, max_calls=len(cases) * steps,
-                                              max_input_bytes=len(cases) * steps * 98304,
+                generator = DeepSeekGenerator(key, max_calls=len(cases) * MAX_STEPS,
+                                              max_input_bytes=len(cases) * MAX_STEPS * 98304,
                                               model=extractor_models.pop())
             if structured_cases:
                 from .structured_planning import DeepSeekStructuralPlanner, StructuredSession
@@ -738,7 +645,6 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         != {k: v for k, v in case.items() if k != "instructions"}):
                     raise ValueError("act_turn_without_its_read_turn")
                 try:
-                    from .agentdojo_calendar import calendar_provider
                     from .benchmark_consent import FiniteConsent
                     from .owner_directory import owner_directory
                     from .private_episode import finish_private_episode
@@ -904,33 +810,14 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         audit.emit(kind, episode=index, **data)
                     emit("episode_input", contract=contract.document(), injections=values,
                          environment=before.model_dump(mode="json"))
-                    if drafted is not None:
-                        from .dojo_provider import dojo_provider
-                        provider = dojo_provider(suite, env, max_calls=len(contract.steps()), generator=generator,
-                                                 extractor_view=case["extractor_view"],
-                                                 compute=case.get("compute", COMPUTES[0]))
-                    else:
-                        provider = calendar_provider(env, max_calls=len(contract.steps()), generator=generator)
+                    from .dojo_provider import dojo_provider
+                    provider = dojo_provider(suite, env, max_calls=len(contract.steps()), generator=generator,
+                                             extractor_view=case["extractor_view"],
+                                             compute=case.get("compute", COMPUTES[0]))
                     generated_before = 0 if generator is None else len(generator.log)
                     relay = ProviderRelay(emit)
                     servers = _servers(config, relay.exchange)
-                    text = None
-                    if case["author"] == "deepseek":
-                        row["stage"] = "plan_authoring"
-                        try:
-                            text, meta = author.author(contract, goal=case["goal"])
-                        except RuntimeError:
-                            row["outcome"] = "author_failed"
-                            raise
-                        emit("plan_authored", author="deepseek", goal=case["goal"], plan_text=text, **meta)
-                        try:
-                            parse_plan(text)
-                        except PlanUnencodable as error:
-                            emit("plan_unencodable", reason=str(error))
-                            row.update(outcome="plan_unencodable", plan_error=str(error))
-                            raise
-                    else:
-                        emit("plan_authored", author=case["author"], mutation=case["mutation"])
+                    emit("plan_authored", author=case["author"], mutation=case["mutation"])
                     consent = FiniteConsent(contract, identity_profile["principal"], emit,
                                             disposition=deployment["disposition"],
                                             strict_destinations=case.get("owner") == "strict",
@@ -946,7 +833,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                             contract=contract, deployment=deployment, broker=broker,
                             operator=OperatorClient(config["operator_socket"]),
                             model_profile=config["model_worker"]["profile"], progress=progress,
-                            consent=consent, plan_author=plan_author_for(case, contract, text, emit, facts),
+                            consent=consent, plan_author=plan_author_for(contract, emit, facts),
                             operator_mode=OPERATOR_MODE))
                     except Exception as error:
                         row.update(outcome=provisioning_outcome(row["stage"], error=error,
@@ -1061,15 +948,12 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             run_status="not_started" if blockers else ("complete" if settled else "incomplete"),
             episodes_attempted=sum(r["attempted"] for r in rows), blockers=blockers, rows=rows,
             groups=summarize(rows), total_model_calls=0 if model is None else model.calls,
-            plan_author_calls=0 if author is None else author.calls,
             root_drafter_calls=0 if drafter is None else drafter.calls,
             root_drafter_tokens=None if drafter is None else dict(prompt=drafter.prompt_tokens,
                                                                  completion=drafter.completion_tokens),
             generator_calls=0 if generator is None else generator.calls,
             generator_tokens=None if generator is None else dict(prompt=generator.prompt_tokens,
                                                                 completion=generator.completion_tokens),
-            plan_author_tokens=None if author is None else dict(prompt=author.prompt_tokens,
-                                                              completion=author.completion_tokens),
             operator_mode=OPERATOR_MODE, identity_profile=identity_profile,
             human_authentication_evaluated=False, consent_mode=consent_mode(experiment),
             comparable_to_unrestricted_baseline=False, production_acceptance=False,
@@ -1089,8 +973,6 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             broker.close()
         if model is not None:
             model.close()
-        if author is not None:
-            author.close()
         if generator is not None:
             generator.close()
         if drafter is not None:

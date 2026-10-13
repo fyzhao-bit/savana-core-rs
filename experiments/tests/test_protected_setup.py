@@ -5,8 +5,8 @@ import json
 import unittest
 from unittest.mock import patch
 
-from savana_bench.agentdojo_tasks import _TASKS
 from savana_bench.protected_setup import authorize_and_prepare, reviewed_clauses, provision_owner_episode
+from tests.test_drafted_tasks import one_read_contract
 
 
 class ContextFixture:
@@ -20,11 +20,11 @@ class ContextFixture:
             not_before=100, expires_at=200000))
 
     def tools_json(self):
-        contract = _TASKS[0]
+        step, = one_read_contract().steps()
         fields = [dict(name=k, role={'calendar':1, 'to':2}.get(k,5), type=1)
-            for k in contract.values() if k != 'body']
-        return json.dumps([dict(descriptor_digest=(b'd'*32).hex(),name=contract.tool,
-            effect=1, operation=contract.tool, fields=fields),
+            for k in step.value_map() if k != 'body']
+        return json.dumps([dict(descriptor_digest=(b'd'*32).hex(),name=step.tool,
+            effect=1, operation=step.tool, fields=fields),
             dict(descriptor_digest=(b'f'*32).hex(),name='result.release',effect=7,
             operation='/savana/final-result-release', fields=[dict(name='resource',role=1,type=1),
                 dict(name='destination',role=2,type=1)])])
@@ -72,18 +72,18 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(stages,['owner_bootstrap','owner_authentication'])
 
     def args(self):
-        return dict(contract=_TASKS[0], authorization_id=b'a'*32, tool_descriptor=b'd'*32,
+        return dict(contract=one_read_contract(), authorization_id=b'a'*32, tool_descriptor=b'd'*32,
             release_descriptor=b'f'*32, application_turn=b'u'*32, observer=b'o'*32,
             planner=b'p'*32, model_profile=1, store=b'v'*32, request_id=b'c'*32,
             clock_ms=lambda: 1000)
 
     def test_root_has_exact_clean_controls_and_separate_counted_release(self):
         args = self.args()
-        clauses, resource = reviewed_clauses(_TASKS[0], ContextFixture(),
+        clauses, resource = reviewed_clauses(args['contract'], ContextFixture(),
             **{k: args[k] for k in ('tool_descriptor','release_descriptor','application_turn')})
         self.assertEqual(resource,b'z'*32)
         self.assertEqual(dict(clauses[0]['alternatives'][0]['controls']), {
-            k:v for k,v in _TASKS[0].values().items() if k != 'body'})
+            k:v for k,v in args['contract'].steps()[0].value_map().items() if k != 'body'})
         self.assertEqual(clauses[1]['predecessor_clause_ids'],[1])
         self.assertTrue(all(c['maximum_attempts']==1 and c['total_magnitude_budget']==1
             and not c['retry_after_proven_no_effect'] for c in clauses))
@@ -129,7 +129,7 @@ class SetupTests(unittest.TestCase):
             descriptors={'dojo.calendar.search': b'd'*32}))
         draft=json.loads(result.command)['operation']['draft']
         self.assertEqual(draft, {'schema': 3, 'untrusted': 'anything the planner wrote'})
-        self.assertEqual(seen['contract'], _TASKS[0].task_id)
+        self.assertEqual(seen['contract'], 'user_task_0')
         self.assertEqual(seen['root'], b'r'*32)
         self.assertEqual(seen['release_descriptor'], b'f'*32)
         self.assertEqual(set(seen), {'contract','task','root','observer','application_turn','planner',
@@ -181,7 +181,7 @@ class SetupTests(unittest.TestCase):
             else:value[1]['operation']='/savana/final-release'
             context.tools_json=lambda:json.dumps(value)
             with self.subTest(kind=kind),self.assertRaises(ValueError):
-                reviewed_clauses(_TASKS[0],context,
+                reviewed_clauses(args['contract'],context,
                     **{k:args[k] for k in ('tool_descriptor','release_descriptor','application_turn')})
 
 

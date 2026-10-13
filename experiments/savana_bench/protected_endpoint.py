@@ -4,7 +4,6 @@ This object is NOT an authorization gate. Its only production caller must be
 ProviderServer after mTLS. A restart cannot resume it; ambiguous effects stay
 Unknown. Neither model proposals nor the score runner invoke the tool runtime.
 """
-import asyncio
 import base64
 import hashlib
 import json
@@ -151,28 +150,3 @@ class EpisodeEndpoint:
         with self._lock:
             self._closed = True
             return self.provider.env.model_copy(deep=True)
-
-
-async def admit_owner_episode(*, contract, binding, broker):
-    """Only public Python SDK calls enter the kernel. No key or direct IPC.
-
-    Requires a real bootstrap from the trusted broker, the independently
-    installed signed plan/registry, and distinct input/root user approvals.
-    An operator-supplied draft is never treated as an admitted authorization.
-    """
-    from savana.owner_ingress import connect
-
-    async def approval(request):
-        import time
-        return await asyncio.to_thread(broker.decide_approval, request.display,
-            request.purpose, int(time.time() * 1000) + 120000)
-
-    ingress = await connect(bootstrap=await broker.next(), webauthn=broker)
-    async with ingress:
-        await ingress.commit_text(contract.prompt, approval)
-        context = await ingress.task_authorization_context()
-        draft = context.draft(digest32(binding["authorization_id"]), canonical(binding["clauses"]))
-        receipt = await ingress.approve_task_authorization(draft, approval)
-        if receipt.authorization_digest != digest32(binding["root_digest"]):
-            raise ValueError("admitted_root_not_the_installed_plan_root")
-        return await ingress.into_private_session(), approval
