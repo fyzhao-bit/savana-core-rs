@@ -46,7 +46,7 @@ pub struct FusedTaskOperationV04 {
 
 impl FusedTaskDraftV04 {
     pub fn signing_digest(&self) -> Result<[u8; 32], G4Error> {
-        if !matches!(self.schema, 1 | 2 | 3)
+        if !matches!(self.schema, 1..=3)
             || (self.final_result_source.is_some() && !matches!(self.schema, 2 | 3))
             || self.final_release.as_ref().is_some_and(|r| {
                 self.schema != 3

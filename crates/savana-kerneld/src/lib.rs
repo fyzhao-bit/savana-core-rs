@@ -123,6 +123,7 @@ pub mod test_support {
     }
 
     impl V2DeclassificationRolloverProbe {
+        #[allow(clippy::too_many_arguments)]
         pub(crate) const fn new(
             result: Result<(), savana_kernel_protocol::StableCode>,
             old_digest: savana_kernel_protocol::v2::Digest32V2,

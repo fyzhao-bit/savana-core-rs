@@ -240,7 +240,7 @@ fn task_execution_payload_is_closed_content_bound_and_redacts_debug() {
     )
     .unwrap();
     assert!(payload.check_core(&core).is_err());
-    let bound = core.clone().with_task_binding(
+    let bound = core.with_task_binding(
         DispatchTaskBindingV2::new(action_content_digest_v2(&content).unwrap(), d(46), d(47))
             .unwrap(),
     );
@@ -521,7 +521,10 @@ fn business_request_golden_commitments_are_independent_literal_vectors() {
     );
     let a = BusinessRequestV2::parse(&p, "request-1", &input(1)).unwrap();
     fn hex(d: Digest32V2) -> String {
-        d.as_bytes().iter().map(|b| format!("{b:02x}")).collect()
+        d.as_bytes().iter().fold(String::new(), |mut out, b| {
+            let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{b:02x}"));
+            out
+        })
     }
     assert_eq!(
         hex(p.digest()),

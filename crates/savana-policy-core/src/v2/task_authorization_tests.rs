@@ -460,12 +460,12 @@ fn task_authorization_approval_is_content_bound_and_cannot_expand_contract() {
         &m,
         &s,
         ControlEvidenceV2::ExplicitAlternative,
-        &current(&m.authorization()),
+        &current(m.authorization()),
     )
     .unwrap();
     mixed[0] = explicit[0].clone();
     assert!(
-        authorization_digest_v2(&m, &mixed, d(50), d(51), &current(&m.authorization())).is_err()
+        authorization_digest_v2(&m, &mixed, d(50), d(51), &current(m.authorization())).is_err()
     );
 }
 #[test]
@@ -522,7 +522,10 @@ fn task_authorization_generation_change_invalidates_existing_match_and_approval(
 }
 
 fn hex(d: Digest32V2) -> String {
-    d.as_bytes().iter().map(|b| format!("{b:02x}")).collect()
+    d.as_bytes().iter().fold(String::new(), |mut out, b| {
+        let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{b:02x}"));
+        out
+    })
 }
 // Independent Python hashlib + hand-encoded CBOR/framing vectors, not production helpers.
 #[test]

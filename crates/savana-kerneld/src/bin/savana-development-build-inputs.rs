@@ -62,7 +62,7 @@ fn run() -> Result<(), String> {
         }
         return protected_experiment_profile::materialize(&stage);
     }
-    let output = Some(first).map(PathBuf::from).ok_or_else(|| {
+    let output = Some(PathBuf::from(first)).ok_or_else(|| {
         "usage: savana-development-build-inputs <absolute-empty-directory>".to_owned()
     })?;
     if arguments.next().is_some() || !output.is_absolute() {

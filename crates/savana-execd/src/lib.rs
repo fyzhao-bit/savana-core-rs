@@ -2088,22 +2088,17 @@ mod tests {
                 .unwrap(),
         );
         let authorization = Digest32V2::new([12; 32]);
-        let core = request
-            .envelope()
-            .payload()
-            .core()
-            .clone()
-            .with_task_binding(
-                DispatchTaskBindingV2::new(
-                    Digest32V2::new([13; 32]),
-                    authorization,
-                    Digest32V2::new([14; 32]),
-                )
-                .unwrap(),
-            );
+        let core = request.envelope().payload().core().with_task_binding(
+            DispatchTaskBindingV2::new(
+                Digest32V2::new([13; 32]),
+                authorization,
+                Digest32V2::new([14; 32]),
+            )
+            .unwrap(),
+        );
         let envelope = SignedSealedExecutionEnvelopeV2::sign(
             SealedExecutionEnvelopePayloadV2::new(
-                core.clone(),
+                core,
                 Digest32V2::new([15; 32]),
                 FixedBytes32V2::new([16; 32]),
                 BoundedCiphertextV2::new(vec![17; 64]).unwrap(),

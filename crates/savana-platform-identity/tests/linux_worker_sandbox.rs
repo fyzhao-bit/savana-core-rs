@@ -1,7 +1,7 @@
 #![cfg(target_os = "linux")]
 
 use std::fs;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[test]
 fn native_wrapper_executes_only_after_landlock_seccomp_and_limits_are_available() {
@@ -58,6 +58,9 @@ fn native_wrapper_denies_unlisted_files_inside_the_worker() {
         .arg("/bin/bash")
         .arg("-c")
         .arg("if exec 3</etc/passwd; then exit 90; else exit 0; fi")
+        // The worker's file-size limit is zero: bash's refusal message must not
+        // land in a regular file (SIGXFSZ) when the harness's stderr is one.
+        .stderr(Stdio::null())
         .status()
         .unwrap();
     assert!(status.success());

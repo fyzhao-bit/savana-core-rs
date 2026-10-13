@@ -200,9 +200,9 @@ impl FusedPlanningProfileV04 {
         }) {
             return Err(G4Error::StateConflict);
         }
-        if !matches!(self.schema, 1 | 2 | 3 | 4)
+        if !matches!(self.schema, 1..=4)
             || (dynamic
-                && (!matches!(self.schema, 2 | 3 | 4)
+                && (!matches!(self.schema, 2..=4)
                     || !self.release_model_views
                     || self.delivery_schedule.is_empty()))
             || [self.installation, self.task].contains(&[0; 32])

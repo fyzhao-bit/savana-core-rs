@@ -385,7 +385,7 @@ impl Input {
             let candidates = savana_kernel_protocol::v2::ResultCandidatesV2::new(members.to_vec())
                 .map_err(|_| G4Error::StateConflict)?;
             if let Ok(endorsed) = ProvenanceRecordV2::result_candidate_member_v04(
-                context.clone(),
+                context,
                 path.to_vec(),
                 max_bytes,
                 list,

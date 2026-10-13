@@ -555,7 +555,10 @@ fn task_authorization_signed_and_content_wire_reject_noncanonical_inputs() {
 #[test]
 fn task_authorization_digest_literal_mutation_vectors() {
     fn hex(d: Digest32V2) -> String {
-        d.as_bytes().iter().map(|b| format!("{b:02x}")).collect()
+        d.as_bytes().iter().fold(String::new(), |mut out, b| {
+            let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{b:02x}"));
+            out
+        })
     }
     let t = decode_task_authorization_v2(&wire(&contract())).unwrap();
     assert_eq!(

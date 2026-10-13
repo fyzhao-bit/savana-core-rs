@@ -1338,7 +1338,7 @@ mod tests {
         )
         .unwrap();
         let tampered_settlement = SignedApprovalSettlementV2::from_parts(
-            approval_settlement_unsigned.clone(),
+            approval_settlement_unsigned,
             derive_ed25519_key_id_v2(approval_key.verifying_key().to_bytes()),
             Ed25519SignatureV2::new([0x7a; 64]),
         )

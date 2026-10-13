@@ -625,7 +625,7 @@ impl TaskLedgerV2 {
         if r.status == status && r.evidence == Some(proof.evidence_digest) {
             return Ok(());
         }
-        if matches!(r.status, 2 | 3 | 4) {
+        if matches!(r.status, 2..=4) {
             return Err(G4Error::StateConflict);
         }
         if status == 3 {

@@ -147,6 +147,7 @@ pub enum ControlEvidenceV2<'a> {
         expected_context: &'a TaskActionApprovalContextV2,
     },
 }
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CheckedEvidence {
     ExplicitAlternative,

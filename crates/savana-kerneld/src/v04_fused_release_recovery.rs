@@ -435,9 +435,8 @@ impl KernelAgentAuthorityV2 {
     pub(super) fn persist_fused_release_archive_v04(
         &mut self,
     ) -> Result<(), KernelAgentAuthorityErrorV2> {
-        self.persist_recovery_snapshot().map_err(|e| {
+        self.persist_recovery_snapshot().inspect_err(|_| {
             self.durable_poisoned = true;
-            e
         })
     }
 }

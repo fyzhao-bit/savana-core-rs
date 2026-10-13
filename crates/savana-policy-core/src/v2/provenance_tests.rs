@@ -1747,8 +1747,5 @@ fn result_json_path_decodes_a_nested_tool_output_string_with_json_step() {
     )
     .is_err());
     let long = path(&["result", "content", "0", "text", "$json", "0", "filename"]);
-    assert!(matches!(
-        select_scalar(response.as_bytes(), &long, 4),
-        Err(_)
-    ));
+    assert!(select_scalar(response.as_bytes(), &long, 4).is_err());
 }

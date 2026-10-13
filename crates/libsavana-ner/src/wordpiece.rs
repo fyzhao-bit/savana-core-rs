@@ -22,7 +22,7 @@ pub struct WordPiece {
 
 impl WordPiece {
     /// Mirrors Python `_WordPiece.__init__` defaults:
-    /// unk="[UNK]", cls="[CLS]", sep="[SEP]", max_chars=200.
+    /// `unk="[UNK]"`, `cls="[CLS]"`, `sep="[SEP]"`, `max_chars=200`.
     pub fn new(vocab: HashMap<String, i64>) -> Self {
         let unk = "[UNK]".to_string();
         let unk_id = *vocab.get(unk.as_str()).unwrap_or(&100);

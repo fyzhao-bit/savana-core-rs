@@ -126,7 +126,7 @@ fn ordered(values: &[u16]) -> bool {
 
 impl Policy {
     pub fn validate(&self) -> Result<(), Error> {
-        if !matches!(self.schema, 1 | 2 | 3)
+        if !matches!(self.schema, 1..=3)
             || [self.root, self.observer_scope].contains(&[0; 32])
             || self.operations.is_empty()
             || self.operations.len() > MAX_OPERATIONS

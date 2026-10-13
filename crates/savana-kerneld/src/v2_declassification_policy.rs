@@ -467,6 +467,7 @@ impl ActiveDeclassificationRuleSetV2 {
         }));
     }
 
+    #[allow(clippy::type_complexity)]
     pub(crate) fn endpoint_snapshot(
         &self,
         role: EndpointRoleV2,

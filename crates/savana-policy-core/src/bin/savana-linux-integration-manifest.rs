@@ -510,7 +510,10 @@ fn text_digest(domain: &[u8], value: &str) -> [u8; 32] {
     .into()
 }
 fn hex(value: &[u8]) -> String {
-    value.iter().map(|v| format!("{v:02x}")).collect()
+    value.iter().fold(String::new(), |mut out, v| {
+        let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{v:02x}"));
+        out
+    })
 }
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let mut file = OpenOptions::new()

@@ -1889,8 +1889,10 @@ mod tests {
         let actual = request
             .canonical_bytes()
             .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+            .fold(String::new(), |mut out, byte| {
+                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{byte:02x}"));
+                out
+            });
 
         assert_eq!(
             actual,

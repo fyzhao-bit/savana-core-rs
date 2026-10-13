@@ -280,8 +280,12 @@ fn wait_timeout_unpoisoned<'a, T>(
         .0
 }
 
+/// The owner thread's request queue; `None` once the owner has stopped.
+type AdmissionV2<Command, Response> =
+    Arc<Mutex<Option<SyncSender<OwnerMessageV2<Command, Response>>>>>;
+
 pub(crate) struct StateOwnerV2<Command, Response> {
-    admission: Arc<Mutex<Option<SyncSender<OwnerMessageV2<Command, Response>>>>>,
+    admission: AdmissionV2<Command, Response>,
     lifecycle: Arc<AtomicU8>,
     queued: Arc<AtomicUsize>,
     owner: Option<JoinHandle<()>>,
@@ -454,7 +458,7 @@ impl<Command, Response> Drop for StateOwnerV2<Command, Response> {
 
 fn owner_loop<Command, Response>(
     receiver: Receiver<OwnerMessageV2<Command, Response>>,
-    admission: Arc<Mutex<Option<SyncSender<OwnerMessageV2<Command, Response>>>>>,
+    admission: AdmissionV2<Command, Response>,
     lifecycle: Arc<AtomicU8>,
     queued: Arc<AtomicUsize>,
     mut handler: impl FnMut(Command, StateOwnerCommitV2) -> Result<Response, StateOwnerErrorV2>,

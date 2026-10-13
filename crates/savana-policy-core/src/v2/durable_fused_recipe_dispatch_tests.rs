@@ -570,14 +570,11 @@ fn fused_execution_recovery_scope_corruption_and_schema_downgrade_fail_closed() 
             _ => *scope = serde_json::Value::Null,
         }
         let mut snapshot = f.store.snapshot.clone();
-        match crate::v2::continuation_state::ContinuationTableV04::decode(
+        if let Ok(table) = crate::v2::continuation_state::ContinuationTableV04::decode(
             &serde_json::to_vec(&json).unwrap(),
         ) {
-            Ok(table) => {
-                snapshot.continuations = table;
-                assert!(validate_snapshot(&snapshot).is_err(), "{field}");
-            }
-            Err(_) => {}
+            snapshot.continuations = table;
+            assert!(validate_snapshot(&snapshot).is_err(), "{field}");
         }
     }
     let mut snapshot = f.store.snapshot.clone();

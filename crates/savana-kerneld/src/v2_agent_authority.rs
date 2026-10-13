@@ -12544,11 +12544,10 @@ pub(crate) mod tests {
                     "resource".into(),
                     BusinessValueV2::Text(format!(
                         "input:{}",
-                        source
-                            .as_bytes()
-                            .iter()
-                            .map(|b| format!("{b:02x}"))
-                            .collect::<String>()
+                        source.as_bytes().iter().fold(String::new(), |mut out, b| {
+                            let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{b:02x}"));
+                            out
+                        })
                     )),
                 ),
                 (
@@ -13127,7 +13126,7 @@ pub(crate) mod tests {
             .authority
             .dispatch_release(
                 RequestIdV2::new([0x61; 16]),
-                dispatch.clone(),
+                dispatch,
                 &mut data,
                 agent,
                 manifest,
@@ -13157,7 +13156,7 @@ pub(crate) mod tests {
             planner_declassification_rules_with_handoffs(true, None, Some(destination));
         let dispatched = f.authority.dispatch_release(
             RequestIdV2::new([0x62; 16]),
-            dispatch.clone(),
+            dispatch,
             &mut data,
             agent,
             manifest,
@@ -13444,8 +13443,13 @@ pub(crate) mod tests {
                             resource
                                 .as_bytes()
                                 .iter()
-                                .map(|b| format!("{b:02x}"))
-                                .collect::<String>()
+                                .fold(String::new(), |mut out, b| {
+                                    let _ = std::fmt::Write::write_fmt(
+                                        &mut out,
+                                        format_args!("{b:02x}"),
+                                    );
+                                    out
+                                })
                         )),
                     ),
                     (

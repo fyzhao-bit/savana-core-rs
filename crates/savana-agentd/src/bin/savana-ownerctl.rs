@@ -1,6 +1,8 @@
 //! Measured, non-root Linux task-entry client. No interpreter is trusted as
 //! this peer. This does not register credentials, issue roots or execute tools.
 #![forbid(unsafe_code)]
+// Only the Linux client speaks the control protocol; elsewhere `run` refuses.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use savana_kernel_protocol::v2::*;
 use std::io::{Read, Write};

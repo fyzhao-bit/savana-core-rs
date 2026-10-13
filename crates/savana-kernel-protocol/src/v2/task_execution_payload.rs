@@ -265,10 +265,10 @@ mod preseal_tests {
         let tool = presealed_tool_payload_digest_v2(b"exact plaintext", node);
         let release = presealed_release_payload_digest_v2(b"exact plaintext", node);
         let hex = |d: Digest32V2| {
-            d.as_bytes()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
+            d.as_bytes().iter().fold(String::new(), |mut out, b| {
+                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{b:02x}"));
+                out
+            })
         };
         assert_eq!(
             hex(tool),

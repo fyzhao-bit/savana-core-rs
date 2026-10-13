@@ -57,7 +57,10 @@ fn replace_json(root: &Path, name: &str, v: &Value) -> Result<(), String> {
     )
 }
 fn hex_bytes(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes.iter().fold(String::new(), |mut out, b| {
+        let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{b:02x}"));
+        out
+    })
 }
 fn field_role(s: &str) -> Result<R, String> {
     match s {

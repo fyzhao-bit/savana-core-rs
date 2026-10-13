@@ -700,6 +700,7 @@ impl CoreKernelRuntimeServicesV2 {
         typed_body(canonical)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_finalize_input_prepared(
         &mut self,
         request: savana_kernel_protocol::v2::FinalizeInputRequestV2,

@@ -1337,7 +1337,7 @@ impl ProtocolApprovalServiceV2 {
     }
 
     fn encode_mutable_state_schema(&self, schema: u16) -> Result<Vec<u8>, ApprovalErrorV2> {
-        if !matches!(schema, 4 | 5 | 6) {
+        if !matches!(schema, 4..=6) {
             return Err(ApprovalErrorV2::DurableState);
         }
         if schema < 6
@@ -1481,7 +1481,7 @@ impl ProtocolApprovalServiceV2 {
             .map_err(|_| ApprovalErrorV2::DurableState)?
             .ok_or(ApprovalErrorV2::DurableState)?;
         let schema = decoder.u16().map_err(|_| ApprovalErrorV2::DurableState)?;
-        if !matches!(schema, 4 | 5 | 6) || top_level != 8 {
+        if !matches!(schema, 4..=6) || top_level != 8 {
             return Err(ApprovalErrorV2::DurableState);
         }
         let credential_count = decode_bounded_count(&mut decoder, deployment.maximum_records)?;

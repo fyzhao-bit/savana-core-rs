@@ -34,6 +34,13 @@ fn private_kernel_approval_is_explicitly_opt_in_and_has_no_agent_credentials() {
     assert!(!unit("savana-approvald.service").contains("savana-approvald-kernel-v04.socket"));
 }
 
+/// The benchmark harness units shipped beside the production daemons.
+const EXPERIMENT_SERVICES: [&str; 3] = [
+    "savana-protected-experiment.service",
+    "savana-experiment-auth.service",
+    "savana-experiment-operator.service",
+];
+
 #[test]
 fn production_units_fix_every_listener_and_required_hardening_control() {
     let directory = Path::new(UNIT_DIRECTORY);
@@ -64,6 +71,8 @@ fn production_units_fix_every_listener_and_required_hardening_control() {
     let mut identity_brokers = 0;
     let mut tpm_authorities = 0;
     let mut tpm_first_installers = 0;
+    let mut experiment_services = 0;
+    let mut experiment_descriptors = BTreeSet::new();
     for entry in fs::read_dir(directory).unwrap() {
         let path = entry.unwrap().path();
         let body = fs::read_to_string(&path).unwrap();
@@ -258,6 +267,32 @@ fn production_units_fix_every_listener_and_required_hardening_control() {
                     assert!(!body.contains("LoadCredential"));
                     continue;
                 }
+                if EXPERIMENT_SERVICES.contains(&path.file_name().and_then(|v| v.to_str()).unwrap())
+                {
+                    // Benchmark harness units: never started by the kernel
+                    // target, never restarted, and holding only encrypted
+                    // credentials. They are not production daemons.
+                    experiment_services += 1;
+                    for required in [
+                        "Type=exec",
+                        "UMask=0077",
+                        "NoNewPrivileges=yes",
+                        "PrivateTmp=yes",
+                        "PrivateDevices=yes",
+                        "ProtectSystem=strict",
+                        "ProtectHome=yes",
+                        "Restart=no",
+                    ] {
+                        assert!(
+                            body.lines().any(|line| line == required),
+                            "{} omits {required}",
+                            path.display()
+                        );
+                    }
+                    assert!(!body.contains("LoadCredential="));
+                    assert!(!body.contains("[Install]"));
+                    continue;
+                }
                 services += 1;
                 for required in [
                     "UMask=0077",
@@ -316,6 +351,15 @@ fn production_units_fix_every_listener_and_required_hardening_control() {
                     .lines()
                     .find_map(|line| line.strip_prefix("FileDescriptorName="))
                     .unwrap();
+                let socket_name = path.file_name().and_then(|v| v.to_str()).unwrap();
+                if EXPERIMENT_SERVICES
+                    .contains(&socket_name.replace(".socket", ".service").as_str())
+                {
+                    assert!(experiment_descriptors.insert(descriptor.to_owned()));
+                    assert!(body.lines().all(|line| !line.starts_with("ListenStream=")
+                        || line.starts_with("ListenStream=/run/")));
+                    continue;
+                }
                 assert!(observed_descriptors.insert(descriptor.to_owned()));
                 if let Some(port) = body.lines().find_map(|line| {
                     line.strip_prefix("ListenStream=127.0.0.1:")
@@ -330,6 +374,15 @@ fn production_units_fix_every_listener_and_required_hardening_control() {
         }
     }
     assert_eq!(services, 5);
+    assert_eq!(experiment_services, 3);
+    assert_eq!(
+        experiment_descriptors,
+        BTreeSet::from([
+            "savana-fused-model-v04".to_owned(),
+            "savana-experiment-auth".to_owned(),
+            "savana-experiment-operator".to_owned(),
+        ])
+    );
     assert_eq!(deployment_services, 2);
     assert_eq!(identity_brokers, 1);
     assert_eq!(tpm_authorities, 1);

@@ -428,7 +428,7 @@ fn swtpm_interoperability() {
     let wrong =
         TpmSigningBindingV3::new(public(&key()), q, b.handle, b.installation, b.epoch).unwrap();
     assert!(Signer::open(connect(), wrong, Zeroizing::new([6; 32])).is_err());
-    crate::tpm_nv::tests::interoperability(&connect);
+    crate::tpm_nv::tests::interoperability(connect);
     let policy_public = TpmSigningPublicV3::from_tpm2b_public(
         &std::fs::read(root.join("policy-public.bin")).unwrap(),
     )

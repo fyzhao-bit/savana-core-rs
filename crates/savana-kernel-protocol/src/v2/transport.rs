@@ -952,6 +952,7 @@ impl V2ServerTransportSession {
         Ok(record)
     }
 
+    #[allow(clippy::result_large_err)]
     /// Stages the endpoint-fixed response while consuming the live session.
     /// The resulting capability can be committed once or rolled back to the
     /// session; callers cannot prepare multiple records under the same nonce.

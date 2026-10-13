@@ -85,7 +85,7 @@ impl ResultCandidatesV2 {
 pub enum ResultComputeOpV2 {
     /// "YYYY-MM-DD HH:MM" plus `amount` minutes.
     AddMinutes = 1,
-    /// "YYYY-MM-DD[ HH:MM]" plus `amount` days.
+    /// "YYYY-MM-DD\[ HH:MM\]" plus `amount` days.
     AddDays = 2,
     /// A two-decimal amount plus `amount` hundredths, never negative.
     AddCents = 3,
@@ -462,10 +462,7 @@ fn text_role<'a>(
         .expect("validated role");
     values[&field.name].text().expect("validated text")
 }
-fn role_field<'profile>(
-    profile: &'profile BusinessProfileV2,
-    role: BusinessFieldRoleV2,
-) -> &'profile BusinessFieldV2 {
+fn role_field(profile: &BusinessProfileV2, role: BusinessFieldRoleV2) -> &BusinessFieldV2 {
     profile
         .fields
         .iter()

@@ -66,7 +66,7 @@ pub enum EncryptionError {
 
 /// `_derive_key(master_password, salt=b"")` (encryption.py:27-33). PBKDF2-HMAC-
 /// SHA256, `100_000` iterations, 32-byte output. An empty `salt` resolves to the
-/// fixed [`DEFAULT_SALT`] (Python's `if not salt:` branch), so
+/// fixed `DEFAULT_SALT` (Python's `if not salt:` branch), so
 /// `derive_key(pw, b"")` == `derive_key(pw, b"jarvis_secure_layer_v1")`.
 pub fn derive_key(master_password: &str, salt: &[u8]) -> [u8; 32] {
     let salt = if salt.is_empty() { DEFAULT_SALT } else { salt };

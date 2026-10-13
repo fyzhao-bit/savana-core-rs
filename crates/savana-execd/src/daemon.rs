@@ -519,9 +519,8 @@ mod implementation {
         stage: &'static str,
         result: Result<T, ExecdDaemonErrorV2>,
     ) -> Result<T, ExecdDaemonErrorV2> {
-        result.map_err(|error| {
+        result.inspect_err(|_| {
             eprintln!("executor startup stage failed: {stage}");
-            error
         })
     }
 

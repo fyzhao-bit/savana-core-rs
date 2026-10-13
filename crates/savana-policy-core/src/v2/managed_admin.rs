@@ -118,6 +118,7 @@ impl VerifiedManagedAdminCommandV04 {
     pub fn validity(&self) -> (u64, u64) {
         (self.command.not_before, self.command.expires_at)
     }
+    #[allow(clippy::type_complexity)]
     /// Authenticated operator instruction, not a model or Agent request.
     pub fn planning_execution_request(
         &self,

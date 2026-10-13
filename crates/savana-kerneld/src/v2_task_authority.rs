@@ -136,6 +136,7 @@ impl KernelTaskAuthorizationIssuerV2 {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare(
         &self,
         owner: &mut DurableG4StateV2,
@@ -207,6 +208,7 @@ impl KernelTaskAuthorizationIssuerV2 {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn attach_approval(
         &self,
         owner: &mut DurableG4StateV2,
@@ -248,6 +250,7 @@ impl KernelTaskAuthorizationIssuerV2 {
             .map_err(state)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn settle_approved(
         &self,
         owner: &mut DurableG4StateV2,

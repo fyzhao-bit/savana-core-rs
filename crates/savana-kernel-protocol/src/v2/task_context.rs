@@ -91,7 +91,7 @@ impl core::fmt::Debug for TaskAuthorizationContextV2 {
 }
 impl TaskAuthorizationContextV2 {
     /// Closed JSON convenience grammar for SDKs: clauses contain exact named
-    /// alternatives and flat [name,value] control pairs, never wildcard lists.
+    /// alternatives and flat `[name, value]` control pairs, never wildcard lists.
     /// Identity/source/profile fields cannot be supplied through this grammar.
     pub fn draft_from_json(
         &self,
@@ -492,5 +492,8 @@ pub fn decode_task_authorization_context_v2(
     decode(bytes, 1024 * 1024)
 }
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes.iter().fold(String::new(), |mut out, b| {
+        let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{b:02x}"));
+        out
+    })
 }

@@ -424,14 +424,42 @@ mod tests {
 
     #[test]
     fn metadata_contract_requires_root_owned_exact_modes_and_single_link() {
+        use std::fs::{self, Permissions};
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        // The verdict for an exact mode depends only on ownership, so the
+        // contract is checked the same way whether the test runs as root.
         let fixture = tempfile::tempdir().unwrap();
-        let parent = fixture.path().metadata().unwrap();
-        assert!(!valid_parent_metadata(&parent));
+        let owned_by_root = {
+            let metadata = fixture.path().metadata().unwrap();
+            metadata.uid() == 0 && metadata.gid() == 0
+        };
+        fs::set_permissions(fixture.path(), Permissions::from_mode(0o775)).unwrap();
+        assert!(!valid_parent_metadata(&fixture.path().metadata().unwrap()));
+        fs::set_permissions(fixture.path(), Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            valid_parent_metadata(&fixture.path().metadata().unwrap()),
+            owned_by_root
+        );
+
         let file_path = fixture.path().join("drop-in");
-        std::fs::write(&file_path, b"x").unwrap();
-        let file = file_path.metadata().unwrap();
-        assert!(!valid_open_file_metadata(&file, 1));
-        let stat = rustix::fs::stat(&file_path).unwrap();
-        assert!(!valid_file_stat(&stat, 1));
+        fs::write(&file_path, b"x").unwrap();
+        fs::set_permissions(&file_path, Permissions::from_mode(0o644)).unwrap();
+        assert!(!valid_open_file_metadata(&file_path.metadata().unwrap(), 1));
+        assert!(!valid_file_stat(&rustix::fs::stat(&file_path).unwrap(), 1));
+        fs::set_permissions(&file_path, Permissions::from_mode(0o444)).unwrap();
+        assert_eq!(
+            valid_open_file_metadata(&file_path.metadata().unwrap(), 1),
+            owned_by_root
+        );
+        assert_eq!(
+            valid_file_stat(&rustix::fs::stat(&file_path).unwrap(), 1),
+            owned_by_root
+        );
+        assert!(!valid_open_file_metadata(&file_path.metadata().unwrap(), 2));
+
+        fs::hard_link(&file_path, fixture.path().join("second-link")).unwrap();
+        assert!(!valid_open_file_metadata(&file_path.metadata().unwrap(), 1));
+        assert!(!valid_file_stat(&rustix::fs::stat(&file_path).unwrap(), 1));
     }
 }

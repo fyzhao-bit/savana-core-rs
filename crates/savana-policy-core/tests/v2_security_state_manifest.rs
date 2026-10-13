@@ -1571,8 +1571,10 @@ fn assert_measured_manifest_binding(
     let leaf: String = selector
         .as_bytes()
         .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+        .fold(String::new(), |mut out, b| {
+            let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{b:02x}"));
+            out
+        });
     let selector = DeploymentApplySelectorV2::parse_arguments(
         ["deploy".into(), "apply".into(), leaf.clone().into()].into_iter(),
     )

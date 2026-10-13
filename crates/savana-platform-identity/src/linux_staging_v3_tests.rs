@@ -121,7 +121,7 @@ fn staging_rejects_unknown_missing_duplicate_alias_and_special_files() {
             }
             6 => {
                 fs::remove_file(&artifact).unwrap();
-                rustix::fs::mkfifoat(&rustix::fs::CWD, &artifact, Mode::RUSR | Mode::WUSR).unwrap();
+                rustix::fs::mkfifoat(rustix::fs::CWD, &artifact, Mode::RUSR | Mode::WUSR).unwrap();
             }
             7 => {
                 fs::remove_file(&artifact).unwrap();

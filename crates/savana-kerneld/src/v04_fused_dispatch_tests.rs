@@ -1858,7 +1858,7 @@ fn assert_fused_final_release(
         .authority
         .dispatch_release(
             RequestIdV2::new([90; 16]),
-            dispatch.clone(),
+            dispatch,
             vault,
             f.caller_identity,
             manifest,
@@ -1872,7 +1872,7 @@ fn assert_fused_final_release(
         .authority
         .dispatch_release_for(
             RequestIdV2::new([91; 16]),
-            dispatch.clone(),
+            dispatch,
             vault,
             true,
             manifest,
@@ -1904,7 +1904,7 @@ fn assert_fused_final_release(
         .authority
         .dispatch_release_for(
             RequestIdV2::new([92; 16]),
-            dispatch.clone(),
+            dispatch,
             vault,
             true,
             manifest,
@@ -1933,7 +1933,7 @@ fn assert_fused_final_release(
         .authority
         .release_status(
             RequestIdV2::new([94; 16]),
-            status_request.clone(),
+            status_request,
             vault,
             f.caller_identity,
             UnixMillisV2::new(at + 3)
@@ -2542,7 +2542,6 @@ fn fused_private_g7_recovers_queries_and_results_without_session_intent_or_ticke
     private_dispatch_fixture(8);
 }
 
-#[cfg(feature = "test-support")]
 /// The G4 owner as kerneld reopens it: from its encrypted file, checked
 /// against the rollback anchor's head. Nothing in memory is carried over.
 #[cfg(feature = "test-support")]

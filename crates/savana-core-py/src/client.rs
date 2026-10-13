@@ -542,6 +542,7 @@ impl PyOwnerIngress {
             .map_err(map_client_error)
     }
 
+    #[allow(clippy::wrong_self_convention)]
     fn into_private_session(&self, py: Python<'_>) -> PyResult<PyPrivateSessionV04> {
         let inner = self.inner.clone();
         let result = py.allow_threads(move || {

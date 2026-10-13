@@ -1838,6 +1838,7 @@ impl DurableG4StateV2 {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_final_release_dispatch(
         &mut self,
         release: &VerifiedFinalReleaseDispatchV2,

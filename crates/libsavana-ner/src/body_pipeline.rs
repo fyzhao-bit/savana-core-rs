@@ -24,7 +24,7 @@
 //!
 //!   - `_RESIDUAL_PII_RE` is a `re.VERBOSE` pattern; its de-sugared form (verbose
 //!     whitespace + `#` comments stripped, char classes preserved) is vendored as
-//!     [`RESIDUAL_PII`] and asserted byte-equivalent to the live pattern in the
+//!     `RESIDUAL_PII` and asserted byte-equivalent to the live pattern in the
 //!     differential. No lookaround/backref, so fancy-regex is a strict superset.
 //!   - The per-value vault regex `(?<![\w<])<re.escape(raw)>(?![\w>])` uses BOTH a
 //!     negative lookbehind and lookahead → fancy-regex is required; `re.escape`

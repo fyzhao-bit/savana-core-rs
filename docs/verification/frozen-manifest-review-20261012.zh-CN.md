@@ -157,3 +157,125 @@ tools/check-frozen-v2-core.sh && sh tools/tests/check-frozen-v2-core.sh tools/ch
 ```
 
 若决定把新文件纳入冻结范围（例如 F5 的 agentd 示例），先按字典序加入 `.files` 再执行第 2 步。
+
+## 五、2026-10-13 第二轮：内核修复（K1–K6）、死代码清除（K7）、门禁修复（K8）
+
+用户在 10-13 授权"解除冻结内核、全部修好"。从上一节写成时的 `8e4a6e8` 到本轮结束，
+清单中有 **78 个文件**被改动，另删除 2 个清单文件，新增 11 个应纳入清单的核心文件。
+清单将在本节之后按第四节的步骤重新生成（这次一并认可第二节的 45 处旧漂移）。
+
+### 5.1 改动按主题
+
+| 主题 | 提交 | 冻结文件里改了什么 | 为什么 | 测试 |
+| --- | --- | --- | --- | --- |
+| K1 跳过已被拒绝的任务 | `e155076` | `v04_fused_action_driver.rs`：下一步被 owner 拒绝的任务不再反复驱动 | 被拒任务会占住 60 s 窗口拖慢后续 episode | 驱动测试 |
+| K2–K4 条件门、抄送目的地、固定字段、owner 常量绑定、计算步骤 | `5e9a6d8` | kernel-protocol 业务控制/请求/任务上下文/授权/动作显示；policy-core 控制选择、描述符、校验器、fused 任务编译与输入；kerneld agent authority | 内核在派发前强制 `when` 门；cc/bcc 作为目的地受审；owner 常量逐字段绑定；计算步骤成为内核派生 | 各 crate 新增测试 |
+| K5 执行器自答与模型调用遮蔽 | `21517c0` | execd 连接器运行时与 worker 监督（关门直接回 `CONDITION_SKIPPED`、表计算由执行器本地算）；leak-gate 新 `masking` 模块；core-py `ModelMask` | 不需要提供方的步骤不出执行器；模型调用经内核侧遮蔽，满足"无残余 PII"义务 | execd 59、leak-gate 遮蔽测试 |
+| K7 编译器报告的死代码 | `ea9fe0f` | execd 未用构造器和恢复路径；kerneld 连接器授权未用访问器、测试专用注册提案移入测试；TPM 锚点只在用它的构建里编译 | 无调用者 | kerneld connector 30、execd 59 |
+| K7 ingressd 旧 worker 栈 | `636a727` | 删除 `ingressd/src/state_owner.rs`（清单移除该项） | 已被协议原生 worker 取代 | ingressd 全部 |
+| K7 approvald 第一代审批服务 | `87f24af` | approvald `lib.rs`、`protocol_durable.rs`；vault `lib.rs`、`Cargo.toml`（不再依赖 approvald）；kerneld `v2_runtime.rs`；删除 `approvald/src/state_owner.rs`（清单移除） | 生产只用协议原生服务；命名空间替换检查移植到协议持久化存储的测试 | approvald 53、vault 10 |
+| K7 kerneld v1 运行时 | `a6e2463` | kerneld `lib.rs`、`Cargo.toml` 等（被删的 v1 文件不在清单） | v1 只能经测试环境变量到达，生产只跑 V2 | kerneld 275 + 集成 |
+| K7 policy-core v1 引擎 | `5f9e1f6` | policy-core `Cargo.toml`、`v2/durable.rs`（原子替换失败只报阶段） | v1 引擎只服务已删的 v1 内核 | policy-core 391 |
+| K7 kernel-protocol v1 线协议 | `931dd64` | kernel-protocol `Cargo.toml`；kerneld `v2_startup.rs`（测试时钟改报 `UnixMillisV2`） | 无 v1 使用者；`Clock` 改报 V2 时间类型 | kernel-protocol 全部 |
+| K7 被 `allow(dead_code)` 掩盖的死代码 | `15baa88` | 见提交说明：删除 Suite-1 之前的签名帧派发模式、内核派发签名身份、本体集合成员谓词（解码器从不产生、内核调用时集合恒空）、agentd 门控客户端、client 未建句柄种类等；测试专用部分改 `cfg(test)` | 生产与线路都不可达 | 9 个 crate 110 个测试二进制 |
+| K8 门禁 | K8（本节提交） | clippy `-D warnings` 归零（十六进制拼接改 `fold`、少量 `allow` 与类型别名）；`deployment_units` 识别三个实验单元；网络策略元数据测试与运行身份无关；Linux 沙箱拒读测试不再受测试输出重定向到普通文件的影响（清单外测试文件） | CI 门禁与全量测试必须通过 | 全工作区 `--all-targets --all-features` |
+
+### 5.2 被删除的清单文件
+
+- `crates/savana-ingressd/src/state_owner.rs`（`636a727`）
+- `crates/savana-approvald/src/state_owner.rs`（`87f24af`）
+
+两项已在各自提交里从 `.files` / `.sha256` 移除。
+
+### 5.3 新纳入清单的核心文件
+
+- `crates/savana-leak-gate/src/masking.rs`（模型调用遮蔽表，K5）
+- `crates/savana-policy-core/src/v2/model_masking.rs`（遮蔽的策略包装，K5）
+- `crates/savana-table-compute/` 的 `Cargo.toml` 与 `src/*.rs`（执行器本地计算，K4/K5；已在 `workspace_boundary` 的冻结核心成员里）
+
+### 5.4 仍未接线、需要设计决定的部分（未改动语义）
+
+- agentd 的内核签名任务声明校验器（`kernel_authority.rs`）：部署时校验密钥、线程里传递，但派发从不调用；内核侧签名者只在测试里存在。保留原状，待决定是接线还是整体移除。
+
+### 5.5 逐文件提交对照（自动生成）
+
+| 文件 | 提交 |
+| --- | --- |
+| `crates/savana-agentd/src/lib.rs` | `15baa88` |
+| `crates/savana-agentd/src/mapper_client.rs` | `15baa88` |
+| `crates/savana-approvald/src/lib.rs` | `15baa88`、`87f24af` |
+| `crates/savana-approvald/src/protocol_durable.rs` | `87f24af` |
+| `crates/savana-approvald/src/protocol_service.rs` | K8（本节提交） |
+| `crates/savana-client/src/approval.rs` | `15baa88` |
+| `crates/savana-client/src/lib.rs` | `15baa88` |
+| `crates/savana-client/src/types.rs` | `15baa88` |
+| `crates/savana-continuation-core/src/planning.rs` | K8（本节提交） |
+| `crates/savana-core-py/src/client.rs` | K8（本节提交） |
+| `crates/savana-core-py/src/lib.rs` | `21517c0` |
+| `crates/savana-execd/Cargo.toml` | `21517c0` |
+| `crates/savana-execd/src/connector_runtime.rs` | `21517c0` |
+| `crates/savana-execd/src/daemon.rs` | `ea9fe0f`、K8（本节提交） |
+| `crates/savana-execd/src/lib.rs` | `15baa88`、K8（本节提交） |
+| `crates/savana-execd/src/protocol_service.rs` | `ea9fe0f` |
+| `crates/savana-execd/src/provider_transport.rs` | `15baa88` |
+| `crates/savana-execd/src/worker_protocol.rs` | `15baa88` |
+| `crates/savana-execd/src/worker_supervisor.rs` | `15baa88`、`21517c0`、K8（本节提交） |
+| `crates/savana-kernel-protocol/Cargo.toml` | `931dd64` |
+| `crates/savana-kernel-protocol/src/v2/business_controls.rs` | `5e9a6d8`、K8（本节提交） |
+| `crates/savana-kernel-protocol/src/v2/business_request.rs` | `5e9a6d8` |
+| `crates/savana-kernel-protocol/src/v2/kernel_ingress.rs` | K8（本节提交） |
+| `crates/savana-kernel-protocol/src/v2/mod.rs` | `5e9a6d8` |
+| `crates/savana-kernel-protocol/src/v2/task_action_display.rs` | `5e9a6d8` |
+| `crates/savana-kernel-protocol/src/v2/task_authorization.rs` | `5e9a6d8` |
+| `crates/savana-kernel-protocol/src/v2/task_context.rs` | `5e9a6d8`、K8（本节提交） |
+| `crates/savana-kernel-protocol/src/v2/task_execution_payload.rs` | K8（本节提交） |
+| `crates/savana-kernel-protocol/src/v2/transport.rs` | K8（本节提交） |
+| `crates/savana-kerneld/Cargo.toml` | `a6e2463` |
+| `crates/savana-kerneld/src/bin/savana-development-build-inputs.rs` | K8（本节提交） |
+| `crates/savana-kerneld/src/lib.rs` | `15baa88`、`a6e2463`、`ea9fe0f`、K8（本节提交） |
+| `crates/savana-kerneld/src/v04_fused_action_driver.rs` | `e155076` |
+| `crates/savana-kerneld/src/v04_fused_actions.rs` | `15baa88` |
+| `crates/savana-kerneld/src/v04_fused_compiler.rs` | `15baa88` |
+| `crates/savana-kerneld/src/v04_fused_release_recovery.rs` | K8（本节提交） |
+| `crates/savana-kerneld/src/v2_agent_authority.rs` | `15baa88`、`ea9fe0f`、`5e9a6d8`、K8（本节提交） |
+| `crates/savana-kerneld/src/v2_connection.rs` | `15baa88` |
+| `crates/savana-kerneld/src/v2_connector_authority.rs` | `ea9fe0f` |
+| `crates/savana-kerneld/src/v2_core_services.rs` | `15baa88`、K8（本节提交） |
+| `crates/savana-kerneld/src/v2_declassification_policy.rs` | `15baa88`、K8（本节提交） |
+| `crates/savana-kerneld/src/v2_dispatch.rs` | `15baa88` |
+| `crates/savana-kerneld/src/v2_edge.rs` | `15baa88` |
+| `crates/savana-kerneld/src/v2_ingress_authority.rs` | K8（本节提交） |
+| `crates/savana-kerneld/src/v2_kernel_owner.rs` | `ea9fe0f` |
+| `crates/savana-kerneld/src/v2_listener.rs` | `15baa88` |
+| `crates/savana-kerneld/src/v2_runtime.rs` | `15baa88`、`87f24af` |
+| `crates/savana-kerneld/src/v2_startup.rs` | `15baa88`、`931dd64` |
+| `crates/savana-kerneld/src/v2_state_owner.rs` | K8（本节提交） |
+| `crates/savana-kerneld/src/v2_task_authority.rs` | K8（本节提交） |
+| `crates/savana-kerneld/src/v2_transport_owner.rs` | `15baa88` |
+| `crates/savana-kerneld/src/v2_value_owner.rs` | `15baa88` |
+| `crates/savana-leak-gate/Cargo.toml` | `21517c0` |
+| `crates/savana-leak-gate/src/lib.rs` | `21517c0` |
+| `crates/savana-policy-core/Cargo.toml` | `5f9e1f6` |
+| `crates/savana-policy-core/src/bin/savana-linux-integration-manifest.rs` | K8（本节提交） |
+| `crates/savana-policy-core/src/bin/savana-systemd-agentd-network-policy-v2.rs` | K8（本节提交） |
+| `crates/savana-policy-core/src/v2/control_selection.rs` | `5e9a6d8`、K8（本节提交） |
+| `crates/savana-policy-core/src/v2/descriptor.rs` | `5e9a6d8` |
+| `crates/savana-policy-core/src/v2/dispatch.rs` | `15baa88` |
+| `crates/savana-policy-core/src/v2/durable.rs` | `15baa88`、`5f9e1f6`、K8（本节提交） |
+| `crates/savana-policy-core/src/v2/durable_tests.rs` | `15baa88` |
+| `crates/savana-policy-core/src/v2/fused_inputs.rs` | K8（本节提交） |
+| `crates/savana-policy-core/src/v2/fused_planning.rs` | K8（本节提交） |
+| `crates/savana-policy-core/src/v2/fused_task_compiler.rs` | K8（本节提交） |
+| `crates/savana-policy-core/src/v2/intent.rs` | `15baa88` |
+| `crates/savana-policy-core/src/v2/managed_admin.rs` | K8（本节提交） |
+| `crates/savana-policy-core/src/v2/mod.rs` | `15baa88`、`5e9a6d8` |
+| `crates/savana-policy-core/src/v2/ontology.rs` | `15baa88` |
+| `crates/savana-policy-core/src/v2/ontology_tests.rs` | `15baa88` |
+| `crates/savana-policy-core/src/v2/production.rs` | `15baa88` |
+| `crates/savana-policy-core/src/v2/provenance.rs` | `15baa88` |
+| `crates/savana-policy-core/src/v2/provenance_tests.rs` | K8（本节提交） |
+| `crates/savana-policy-core/src/v2/quota.rs` | `15baa88` |
+| `crates/savana-policy-core/src/v2/task_state.rs` | K8（本节提交） |
+| `crates/savana-policy-core/src/v2/validator.rs` | `5e9a6d8` |
+| `crates/savana-vault/Cargo.toml` | `87f24af` |
+| `crates/savana-vault/src/lib.rs` | `87f24af` |

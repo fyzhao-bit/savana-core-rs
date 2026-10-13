@@ -1427,6 +1427,7 @@ impl RecoverTaskAuthorizationRequestV2 {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum RecoverTaskAuthorizationResponseV2 {
     Installed(EstablishTaskAuthorizationResponseV2),
