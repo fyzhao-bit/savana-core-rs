@@ -25,6 +25,7 @@ The driver tests are skipped unless the driver is built:
 fuzz cases (default 20000) and SAVANA_COMPUTE_SEED the seed. ReferenceRuleTests
 always run: they check this interpreter's facts that the port hardcodes.
 """
+import importlib.util
 import json
 import os
 import random
@@ -60,6 +61,7 @@ def _driver():
 
 
 DRIVER = _driver()
+NEEDS_AGENTDOJO = unittest.skipUnless(importlib.util.find_spec("agentdojo"), "install the explicit AgentDojo test extra")
 
 
 def _plain(number):
@@ -877,6 +879,7 @@ class RustParityTests(unittest.TestCase):
         self.assertGreater(len(cases), 100)
         self.assert_parity("recorded", cases)
 
+    @NEEDS_AGENTDOJO
     def test_real_agentdojo_results(self):
         rng = random.Random(SEED)
         cases = []
