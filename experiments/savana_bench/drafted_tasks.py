@@ -132,7 +132,12 @@ def review_policy():
                                 "input (#1..#4) with + - * / ( ) min max, no filter or order; every number it "
                                 "writes is stated in the request, or is 2 or 100; an extraction of a computation "
                                 "names its source <step>:computed",
-                        "evaluated_by": "the kernel's executor (codec TableComputeV1), never a provider"}}
+                        "evaluated_by": "the kernel's executor (codec TableComputeV1), never a provider"},
+            "final_answer": "only where the run asks for it: a program whose last result is data (a read, a "
+                            "computation, an extracted field), or an action after an earlier answer, ends with the "
+                            "owner's own extraction of the final answer from up to 6 earlier results (never a "
+                            "condition or a write's result; a large result only as its source), so it may have "
+                            "max_steps + 1 steps; the completion never refuses a program"}
 
 
 class ProgramRefused(ValueError):
@@ -502,8 +507,80 @@ def performs_action(contract):
     return any(_writes(step) for step in contract.steps())
 
 
+# The owner's final answer (`+answer=final`): what its inputs may be, in order
+# of preference. An earlier answer, a computation and a tool read carry what
+# the request asked; an extracted field is mostly an argument for a later call.
+FINAL_INPUTS = ("answer", "compute", "read", "fields", "extract")
+
+
+def _answer_input(raw):
+    """A raw step's class for the owner's final answer: a FINAL_INPUTS
+    member, "write" (never an input), or None for a condition (decides a
+    gate, says nothing the request asked). Raises ValueError (or KeyError for
+    an unreviewed tool) on a step the review refuses anyway."""
+    if type(raw) is not dict or type(raw.get("args")) is not dict:
+        raise ValueError("step_shape")
+    if raw.get("tool") == EXTRACT_TOOL:
+        try:
+            target = _origin(raw["args"].get("target"))
+        except ProgramRefused:
+            raise ValueError("extract_target") from None
+        if target[0] not in ("text", "items"):
+            raise ValueError("extract_target")
+        if target[0] == "items":
+            return "fields"
+        return "answer" if target[1] == ANSWER else None if target[1] in CONDITIONS else "extract"
+    if raw.get("tool") == COMPUTE_TOOL:
+        return "compute"
+    return "read" if catalog_tool(raw.get("tool"))["effect"] == "read" else "write"
+
+
+def ends_with_answer(program):
+    """Whether a program's last step extracts the final answer."""
+    try:
+        return _answer_input(program["steps"][-1]) == "answer"
+    except (KeyError, IndexError, TypeError, ValueError):
+        return False
+
+
+def with_final_answer(program):
+    """`+answer=final`: the planner's program completed by the owner's own
+    last step, the final answer, where the program's last result would not be
+    one: it ends in a read, a computation or an extracted field (data, not an
+    answer), or in a write after an earlier answer (a question asked before the
+    request's action). The step extracts the final answer from up to
+    MAX_CONTEXTS + 1 earlier results, by FINAL_INPUTS and most recent first
+    within each; never a condition or a write's result. A large result is read
+    whole only as the payload (a context's edge is bounded), so at most one is
+    used, as the source. A pure function of the program, so the review,
+    agentd's structured planning of the completed program and the verifier
+    all see the same steps. Any other program, or one the review refuses
+    anyway, is returned as it is."""
+    if type(program) is not dict or set(program) != {"steps"} or type(program["steps"]) is not list:
+        return program
+    steps = program["steps"]
+    if not 1 <= len(steps) <= MAX_STEPS:
+        return program
+    try:
+        classes = [_answer_input(raw) for raw in steps]
+    except (KeyError, TypeError, ValueError):
+        return program
+    if classes[-1] in ("answer", None) or (classes[-1] == "write" and "answer" not in classes):
+        return program
+    ranked = [number for kind in FINAL_INPUTS for number in range(len(steps), 0, -1) if classes[number - 1] == kind]
+    large = [number for number in ranked if steps[number - 1]["tool"] in LARGE_RESULT_TOOLS]
+    inputs = (large[:1] + [number for number in ranked if number not in large])[:MAX_CONTEXTS + 1]
+    if not inputs:
+        return program
+    args = {"target": {"text": ANSWER}}
+    if inputs[1:]:
+        args["context"] = [{"from": number} for number in inputs[1:]]
+    return {"steps": [*steps, {"tool": EXTRACT_TOOL, "source": inputs[0], "args": args}]}
+
+
 def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(), extractor_model=GENERATOR_MODEL,
-                   derived_destinations=False, read_only=False, destination_candidates=None, calc=False):
+                   derived_destinations=False, read_only=False, destination_candidates=None, calc=False,
+                   final_answer=False):
     """The owner's fixed review of a planner program -> DraftedContract, or
     ProgramRefused. `suite_tools` are the official function names this
     episode's suite serves. A refusal carries the step number and field name
@@ -522,20 +599,34 @@ def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(),
     the one destination included (a trusted-set origin): the kernel endorses
     a derived destination only if it is a member, byte for byte. `calc`
     admits a compute step's "calc" output (`dojo_compute`), whose numbers must
-    be stated in the request (`calc_numbers`)."""
+    be stated in the request (`calc_numbers`). `final_answer` completes the
+    program with the owner's final answer (`with_final_answer`) and admits one
+    more step when the last is the final answer; a program the completion
+    would get refused is reviewed as the planner wrote it (the owner's own
+    step never refuses a program)."""
     if extractor_model not in EXTRACTOR_MODELS:
         raise ValueError("extractor_model")
     where = {"step": None, "field": None}
     if bindings:
         from .value_blind import bind_program
         program = bind_program(program, bindings)
+
+    def review(program):
+        return _review_program(where, suite=suite, suite_tools=suite_tools, task_id=task_id, prompt=prompt,
+                               program=program, extractor_model=extractor_model,
+                               derived_destinations=derived_destinations,
+                               destination_candidates=destination_candidates, calc=calc,
+                               max_steps=MAX_STEPS + 1 if final_answer and ends_with_answer(program) else MAX_STEPS)
     try:
         if destination_candidates is not None and (not derived_destinations or not destination_candidates):
             raise ValueError("destination_candidates")
-        contract = _review_program(where, suite=suite, suite_tools=suite_tools, task_id=task_id, prompt=prompt,
-                                   program=program, extractor_model=extractor_model,
-                                   derived_destinations=derived_destinations,
-                                   destination_candidates=destination_candidates, calc=calc)
+        completed = with_final_answer(program) if final_answer else program
+        try:
+            contract = review(completed)
+        except ProgramRefused:
+            if completed is program:
+                raise
+            contract = review(program)
     except ProgramRefused as error:
         error.step, error.field = where["step"], where["field"]
         raise
@@ -547,11 +638,11 @@ def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(),
 
 
 def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extractor_model,
-                    derived_destinations=False, destination_candidates=None, calc=False):
+                    derived_destinations=False, destination_candidates=None, calc=False, max_steps=MAX_STEPS):
     if type(program) is not dict or set(program) != {"steps"} or type(program["steps"]) is not list:
         _refuse("program_shape")
     raw_steps = program["steps"]
-    if not 1 <= len(raw_steps) <= MAX_STEPS:
+    if not 1 <= len(raw_steps) <= max_steps:
         _refuse("program_length")
     served = set(suite_operations(suite_tools)) | {EXTRACT_TOOL, COMPUTE_TOOL}
     labels = set(extract_targets())

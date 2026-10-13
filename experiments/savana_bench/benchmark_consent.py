@@ -89,25 +89,29 @@ class FiniteConsent:
     of trimmed, case-folded values, see `owner_directory`) approves such a step
     only if every value data chose for it is in that directory. `candidates`
     (the set owner) approves it only where the kernel's display says every
-    value data chose is a member of the set signed into that edge."""
+    value data chose is a member of the set signed into that edge. `shown`
+    (benign experiments only: the upper bound of a human owner who reads each
+    destination and finds it right) screens no destination data chose, as
+    the default owner does, and labels its votes so."""
     def __init__(self, contract, principal, emit, *, disposition='require_approval', strict_destinations=False,
-                 directory=None, candidates=False):
+                 directory=None, candidates=False, shown=False):
         if (contract not in all_contracts() or type(principal) is not str
             or not re.fullmatch('[0-9a-f]{64}',principal) or principal=='0'*64
             or disposition not in DISPOSITIONS or type(strict_destinations) is not bool
             or type(candidates) is not bool or (candidates and (strict_destinations or directory is not None))
+            or type(shown) is not bool or (shown and (strict_destinations or directory is not None or candidates))
             or (directory is not None and (type(directory) is not frozenset or strict_destinations
                                            or any(type(v) is not str for v in directory)))):
             raise ValueError('finite_consent_catalog')
         self.contract,self.principal,self.emit=contract,principal,emit
         self.steps=contract.steps();self.action=0
         self.permit=disposition=='permit';self.strict=strict_destinations;self.directory=directory
-        self.candidates=candidates
+        self.candidates=candidates;self.shown=shown
         # Read-only contracts keep their original policy label and behavior.
         self.policy=('finite_calendar_preconsent_v1' if len(self.steps)==1 else 'finite_write_preconsent_v1')+(
             '+permit' if self.permit else '')+('+strict_destination' if self.strict else '')+(
             '+directory_destination' if directory is not None else '')+(
-            '+candidate_destination' if candidates else '')
+            '+candidate_destination' if candidates else '')+('+shown_destination' if shown else '')
         self.stage='ingress';self.task=self.binding=self.clauses=self.authorization=None
         self.profiles=None;self.failed=False;self.results=None
 
@@ -177,7 +181,7 @@ class FiniteConsent:
         except BaseException as error:
             self.failed=True
             reason=(dict(reason=str(error)) if self.permit or self.strict or self.directory is not None
-                    or self.candidates else {})
+                    or self.candidates or self.shown else {})
             if reason and purpose=='tool_execution' and getattr(self,'_asked',None) is not None:
                 reason['clause']=self._asked
             self.emit('benchmark_consent',purpose=purpose,decision='refuse',

@@ -66,6 +66,14 @@ SLOT_DOMAIN = b"SAVANA_STRUCTURED_SLOT_V1\0"
 # Steps, dependencies per step, arguments per step, plan bytes. A program the
 # review accepts is never too long here: the step bound is the review's own.
 LIMITS = (MAX_STEPS, MAX_STEPS, 16, 65536)
+# With the owner's final answer (`+answer=final`) a program has at most one
+# step more: the review's bound then (dependencies stay within MAX_STEPS).
+FINAL_ANSWER_LIMITS = (MAX_STEPS + 1, *LIMITS[1:])
+
+
+def job_limits(final_answer=False):
+    """agentd's limits for one job of a run with or without the owner's final answer."""
+    return FINAL_ANSWER_LIMITS if final_answer else LIMITS
 EXCHANGE_MS = 30000  # agentd caps every model exchange at 30 s anyway
 MAPPER_HOST, PLANNER_HOST = "mapper.structured.test", "planner.structured.test"
 # Where a host deployment installs the debug (test-support) agentd example.
@@ -165,17 +173,18 @@ class Conversion(NamedTuple):
     state_edges: frozenset  # the edges that keep each write in place among calls on live state
 
 
-def slot_pool(salt, literals=LITERAL_SLOTS):
-    """One job's slots, from its salt alone: (an op slot per possible step,
-    `literals` literal slots). Nothing about the program goes into them."""
+def slot_pool(salt, literals=LITERAL_SLOTS, limits=LIMITS):
+    """One job's slots, from its salt alone: (an op slot per possible step
+    under `limits`, `literals` literal slots). Nothing about the program goes
+    into them."""
     if type(salt) is not bytes or len(salt) != 32 or type(literals) is not int or not 1 <= literals <= 128:
         raise StructuredError("pool_salt")
 
     def ref(label):
         return hashlib.sha256(SLOT_DOMAIN + salt + label.encode()).digest()[:16]
-    pool = (tuple(ref(f"pool/op/{n}") for n in range(1, LIMITS[0] + 1)),
+    pool = (tuple(ref(f"pool/op/{n}") for n in range(1, limits[0] + 1)),
             tuple(ref(f"pool/literal/{n}") for n in range(1, literals + 1)))
-    if len({*pool[0], *pool[1]}) != LIMITS[0] + literals:
+    if len({*pool[0], *pool[1]}) != limits[0] + literals:
         raise StructuredError("pool_salt")
     return pool
 
@@ -190,12 +199,13 @@ def pool_slots(pool):
                         key=lambda slot: slot.ref))
 
 
-def program_to_workflow(program, catalog, *, salt=None, pool=None):
+def program_to_workflow(program, catalog, *, salt=None, pool=None, limits=LIMITS):
     """The owner's program as agentd's mapped workflow. Slot references are
     keyed hashes of their place in the program (`salt` is per job), so the
     whole conversion is recomputable from the program, the catalog and the
-    salt. With `pool` (a `slot_pool`) instead, step n binds the n-th op slot
-    and the literals take the pool's literal slots in program order."""
+    salt. With `pool` (a `slot_pool` under the same `limits`) instead, step n
+    binds the n-th op slot and the literals take the pool's literal slots in
+    program order."""
     if (salt is None) == (pool is None):
         raise StructuredError("conversion_salt")
     if pool is None and (type(salt) is not bytes or len(salt) != 32):
@@ -203,7 +213,8 @@ def program_to_workflow(program, catalog, *, salt=None, pool=None):
     program = json.loads(canonical(program))
     by_operation = {tool.operation: tool for tool in catalog}
     steps = program.get("steps") if type(program) is dict else None
-    if type(steps) is not list or not 1 <= len(steps) <= LIMITS[0]:
+    if (type(steps) is not list or not 1 <= len(steps) <= limits[0]
+            or (pool is not None and len(steps) > len(pool[0]))):
         raise StructuredError("conversion_shape")
 
     if pool is None:
@@ -279,18 +290,18 @@ class ProgramMapper:
     exactly one mapper request, and only the one agentd must send for this
     job; anything else gets no reply."""
 
-    def __init__(self, program, catalog, *, source, template=DRAFTED_TEMPLATE, salt=None):
+    def __init__(self, program, catalog, *, source, template=DRAFTED_TEMPLATE, salt=None, limits=LIMITS):
         if source not in SOURCES:
             raise ValueError("mapper_source")
-        self.source, self.catalog = source, tuple(catalog)
+        self.source, self.catalog, self.limits = source, tuple(catalog), limits
         self.salt = os.urandom(32) if salt is None else salt
-        self.conversion = program_to_workflow(program, catalog, salt=self.salt)
+        self.conversion = program_to_workflow(program, catalog, salt=self.salt, limits=limits)
         self.intent = template_intent(self.conversion.program) if source == "template" else DRAFTED_INTENT
         self.template = template if source == "template" else DRAFTED_TEMPLATE
         tools = [tool.wire() for tool in self.catalog]
         self.request = mapper_request(template=self.template, intent=INTENTS[self.intent],
                                       actions=sorted({t.action for t in tools}), slots=self.conversion.slots,
-                                      relations=(), limits=LIMITS, active=[(t.tool_class, t.action) for t in tools],
+                                      relations=(), limits=limits, active=[(t.tool_class, t.action) for t in tools],
                                       tools=tools)
         validate_workflow(self.request, self.conversion.workflow)
         self.request_bytes = encode_mapper_request(self.request)
@@ -300,7 +311,7 @@ class ProgramMapper:
     def job(self, job_id, *, boundary="private", exchange_ms=EXCHANGE_MS):
         """The example's job line: what a kernel's prepare would put in the envelope."""
         return job_line(job_id, template=self.template, intent=self.intent, slots=self.conversion.slots,
-                        catalog=self.catalog, boundary=boundary, exchange_ms=exchange_ms)
+                        catalog=self.catalog, boundary=boundary, exchange_ms=exchange_ms, limits=self.limits)
 
     def __call__(self, body):
         self.calls += 1
@@ -309,14 +320,14 @@ class ProgramMapper:
         return self.response
 
 
-def job_line(job_id, *, template, intent, slots, catalog, boundary="private", exchange_ms=EXCHANGE_MS):
+def job_line(job_id, *, template, intent, slots, catalog, boundary="private", exchange_ms=EXCHANGE_MS, limits=LIMITS):
     """The example's job line: what a kernel's prepare would put in the envelope."""
     names = {table: {v: k for k, v in values.items()} for table, values in
              (("cardinality", CARDINALITIES), ("confidentiality", CONFIDENTIALITIES), ("role", ROLES))}
     return dict(job=job_id, template=template, intent=intent,
                 slots=[dict(ref=s.ref.hex(), kind=s.kind, cardinality=names["cardinality"][s.cardinality],
                             confidentiality=names["confidentiality"][s.confidentiality]) for s in slots],
-                relations=[], limits=list(LIMITS),
+                relations=[], limits=list(limits),
                 catalog=[{"class": t.tool_class, "action": t.action, "role": names["role"][t.role],
                           "effects": t.effects, "name": t.operation, "description": t.description}
                          for t in catalog],
@@ -333,17 +344,17 @@ class ServiceMapper:
     in `failure` and gets no reply. Until a reply, `conversion` and
     `response` are None."""
 
-    def __init__(self, catalog, plan, *, salt=None, literals=LITERAL_SLOTS):
+    def __init__(self, catalog, plan, *, salt=None, literals=LITERAL_SLOTS, limits=LIMITS):
         if plan is not None and not callable(plan):
             raise ValueError("mapper_plan")
-        self.source, self.catalog, self.plan = "service", tuple(catalog), plan
+        self.source, self.catalog, self.plan, self.limits = "service", tuple(catalog), plan, limits
         self.salt = os.urandom(32) if salt is None else salt
-        self.pool = slot_pool(self.salt, literals)
+        self.pool = slot_pool(self.salt, literals, limits)
         self.intent, self.template = DRAFTED_INTENT, DRAFTED_TEMPLATE
         tools = [tool.wire() for tool in self.catalog]
         self.request = mapper_request(template=self.template, intent=INTENTS[self.intent],
                                       actions=sorted({t.action for t in tools}), slots=pool_slots(self.pool),
-                                      relations=(), limits=LIMITS, active=[(t.tool_class, t.action) for t in tools],
+                                      relations=(), limits=limits, active=[(t.tool_class, t.action) for t in tools],
                                       tools=tools)
         self.request_bytes = encode_mapper_request(self.request)
         self.conversion = self.response = self.failure = None
@@ -351,11 +362,11 @@ class ServiceMapper:
 
     def job(self, job_id, *, boundary="private", exchange_ms=EXCHANGE_MS):
         return job_line(job_id, template=self.template, intent=self.intent, slots=pool_slots(self.pool),
-                        catalog=self.catalog, boundary=boundary, exchange_ms=exchange_ms)
+                        catalog=self.catalog, boundary=boundary, exchange_ms=exchange_ms, limits=self.limits)
 
     def convert(self, program):
         """The accepted program on this job's slots, checked as agentd checks it."""
-        conversion = program_to_workflow(program, self.catalog, pool=self.pool)
+        conversion = program_to_workflow(program, self.catalog, pool=self.pool, limits=self.limits)
         validate_workflow(self.request, conversion.workflow)
         return conversion
 
@@ -377,10 +388,10 @@ class ServiceMapper:
         return self.response
 
     @classmethod
-    def replay(cls, catalog, program, *, salt, literals=LITERAL_SLOTS):
+    def replay(cls, catalog, program, *, salt, literals=LITERAL_SLOTS, limits=LIMITS):
         """Offline: the request a job with this salt makes agentd send, and the
         workflow it answers for this accepted program."""
-        mapper = cls(catalog, None, salt=salt, literals=literals)
+        mapper = cls(catalog, None, salt=salt, literals=literals, limits=limits)
         mapper.conversion = mapper.convert(program)
         mapper.response = encode_workflow(mapper.conversion.workflow)
         return mapper
@@ -588,7 +599,8 @@ def lower_plan(conversion, steps):
     return {"steps": lowered}
 
 
-def review(program, *, suite, user, extractor_model="deepseek-flash", derived_destinations=False, calc=False):
+def review(program, *, suite, user, extractor_model="deepseek-flash", derived_destinations=False, calc=False,
+           final_answer=False):
     """The owner's fixed review of a (lowered) program -> DraftedContract."""
     from agentdojo.task_suite.load_suites import get_suite
     from .agentdojo_tasks import BENCHMARK
@@ -596,7 +608,8 @@ def review(program, *, suite, user, extractor_model="deepseek-flash", derived_de
     official = get_suite(BENCHMARK, suite)
     return review_program(suite=suite, suite_tools={t.name for t in official.tools}, task_id=user,
                           prompt=official.get_user_task_by_id(user).PROMPT, program=program,
-                          extractor_model=extractor_model, derived_destinations=derived_destinations, calc=calc)
+                          extractor_model=extractor_model, derived_destinations=derived_destinations, calc=calc,
+                          final_answer=final_answer)
 
 
 def sentinels(program, prompt, catalog):
@@ -687,7 +700,7 @@ class StructuredSession:
 
 
 def plan_program(session, mapper, *, job_id, suite, user, extractor_model="deepseek-flash",
-                 derived_destinations=False, calc=False):
+                 derived_destinations=False, calc=False, final_answer=False):
     """mapper -> agentd -> planner -> lowering -> the owner's review, as one
     record. `outcome` is "planned" (with the lowered program and its
     contract), or the stage that refused: "mapper_failed", "planner_invalid"
@@ -714,7 +727,7 @@ def plan_program(session, mapper, *, job_id, suite, user, extractor_model="deeps
     record.update(order=order, order_changed=order != sorted(order), lowered=lowered)
     try:
         contract = review(lowered, suite=suite, user=user, extractor_model=extractor_model,
-                          derived_destinations=derived_destinations, calc=calc)
+                          derived_destinations=derived_destinations, calc=calc, final_answer=final_answer)
     except ProgramRefused as error:
         return dict(record, outcome="lowering_failed", lowering_error="review_" + str(error))
     return dict(record, outcome="planned", contract=contract)

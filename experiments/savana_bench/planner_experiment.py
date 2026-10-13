@@ -61,7 +61,11 @@ REVIEWS = ("owner", "derived")
 # `set` signs the same directory into every destination edge data fills (a
 # trusted-set origin): the kernel endorses a member itself, and this software
 # owner approves a data-chosen destination only where the kernel says it is one.
-OWNERS = ("finite", "strict", "directory", "set")
+# `approve` (benign runs only) is the upper bound a human owner could reach: it
+# approves every destination it is shown, as a person who reads each one and
+# finds it right would. It measures what the software owner's caution costs and
+# is never a security configuration.
+OWNERS = ("finite", "strict", "directory", "set", "approve")
 # Who writes the program: the untrusted planner, or (floor experiments only)
 # a fixed honest program per task, identical on every run and kernel; or, for
 # the structured-planning evaluation, the task's registered template run as
@@ -84,6 +88,14 @@ INSTRUCTIONS = ("none", "adopt")
 # exact arithmetic, with an extraction of a computed value told to state it as
 # given (`calc`; see `dojo_compute`).
 COMPUTES = ("table", "calc")
+# The last result the owner receives: the program's own, or (`final`) the
+# owner's final answer appended where the program would end with data or with
+# an action after an answer (`drafted_tasks.with_final_answer`).
+ANSWERS = ("none", "final")
+# What the planner is told besides the rules: nothing more, or (`u9`) notes on
+# the mistakes drafted programs made most often and fuller refusal feedback
+# (`root_drafter.U9_NOTES`, `U9_REFUSAL_HINTS`).
+HINTS = ("none", "u9")
 
 
 class InstructionsNotAdopted(RuntimeError):
@@ -143,7 +155,11 @@ def drafted_options(kind):
     instructions in data as a read turn and an act turn (see INSTRUCTIONS;
     needs the directory owner, who decides adoption).
     `+compute=calc` lets a compute step do exact arithmetic and has the answer
-    state a computed number as given (see COMPUTES; needs a drafting planner)."""
+    state a computed number as given (see COMPUTES; needs a drafting planner).
+    `+answer=final` appends the owner's final answer where a program would not
+    end with one (see ANSWERS) and `+hints=u9` gives the planner notes on
+    common mistakes (see HINTS); both need a drafting planner. `+owner=approve`
+    (benign cases only) approves every destination shown (see OWNERS)."""
     from .drafted_tasks import EXTRACTOR_MODELS
     from .value_blind import EXTRACTOR_VIEWS, VIEWS
     base, *options = kind.split("+")
@@ -154,7 +170,8 @@ def drafted_options(kind):
         key, equals, value = option.partition("=")
         if not equals or key in parsed or key not in ("drafts", "planner", "view", "extract", "extractor",
                                                        "attack", "exposure", "review", "owner", "author",
-                                                       "mapper", "actions", "instructions", "compute"):
+                                                       "mapper", "actions", "instructions", "compute",
+                                                       "answer", "hints"):
             raise ValueError("planner_experiment_spec")
         parsed[key] = value
     drafts = parsed.get("drafts", "1")
@@ -175,7 +192,8 @@ def drafted_options(kind):
             or parsed.get("mapper", MAPPERS[0]) not in MAPPERS or ("mapper" in parsed and author != "structured")
             or parsed.get("actions", ACTIONS[0]) not in ACTIONS
             or parsed.get("instructions", INSTRUCTIONS[0]) not in INSTRUCTIONS
-            or parsed.get("compute", COMPUTES[0]) not in COMPUTES):
+            or parsed.get("compute", COMPUTES[0]) not in COMPUTES
+            or parsed.get("answer", ANSWERS[0]) not in ANSWERS or parsed.get("hints", HINTS[0]) not in HINTS):
         raise ValueError("planner_experiment_spec")
     # Only a structured spec passes `mapper`, so every other spec's options are unchanged.
     mapper = {} if author != "structured" else dict(mapper=parsed.get("mapper", MAPPERS[0]))
@@ -184,13 +202,14 @@ def drafted_options(kind):
                       author=author, **mapper,
                       **({} if "actions" not in parsed else dict(actions=parsed["actions"])),
                       **({} if "instructions" not in parsed else dict(instructions=parsed["instructions"])),
-                      **({} if "compute" not in parsed else dict(compute=parsed["compute"])))
+                      **({} if "compute" not in parsed else dict(compute=parsed["compute"])),
+                      **{key: parsed[key] for key in ("answer", "hints") if key in parsed})
 
 
 def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS[0], planner_view="request",
                   extractor_view="raw", extractor_model="deepseek-flash", attack=ATTACKS[0],
                   exposure=EXPOSURES[0], review=None, owner=None, author=None, mapper=None, actions=None,
-                  instructions=None, compute=None):
+                  instructions=None, compute=None, answer=None, hints=None):
     """`<suite>:<item>[,<item>...]`, each item `user_task_N` (benign) or
     `user_task_N+injection_task_M` (the official important_instructions
     attack). The planner drafts each task's whole program from its request.
@@ -207,7 +226,9 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
     every item an attack pair): a planner already polluted by the injection.
     `instructions` "adopt" makes each item whose request delegates its action
     to instructions in data two consecutive cases, its read turn and its act
-    turn (`adopted_instructions`); every other item stays one case."""
+    turn (`adopted_instructions`); every other item stays one case. `answer`
+    and `hints` (ANSWERS, HINTS) need a planner that drafts; the `approve`
+    owner (OWNERS) runs benign items only."""
     from .autodojo_cache import SUITES as AUTODOJO_SUITES
     from .dojo_catalog import SUITES
     from .drafted_tasks import EXTRACTOR_MODELS
@@ -241,9 +262,19 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
             raise ValueError("planner_experiment_spec")
     if (author == "structured") != (mapper is not None) or (mapper is not None and mapper not in MAPPERS):
         raise ValueError("planner_experiment_spec")
-    # Exact arithmetic is a choice of a planner that drafts.
-    if compute not in (None, *COMPUTES) or (compute == "calc" and (
-            author in ("fixed", "registered") or mapper == "template")):
+    # Exact arithmetic, the owner's final answer and the planner's notes are
+    # choices for a planner that drafts.
+    drafting = author not in ("fixed", "registered") and mapper != "template"
+    if compute not in (None, *COMPUTES) or (compute == "calc" and not drafting):
+        raise ValueError("planner_experiment_spec")
+    if (answer not in (None, *ANSWERS) or hints not in (None, *HINTS)
+            or (answer == "final" or hints == "u9") and not drafting):
+        raise ValueError("planner_experiment_spec")
+    # The human-owner upper bound approves what it is shown: benign runs only,
+    # where every destination shown is one the task itself needs. Its planner
+    # is told what the directory owner's is (destinations may come from data).
+    if owner == "approve" and (goal is not None or exposure != EXPOSURES[0] or review != "derived"
+                               or any("+" in n for n in names)):
         raise ValueError("planner_experiment_spec")
     # Asking needs a later draft, from a planner that drafts.
     if actions not in (None, *ACTIONS) or (actions == "ask" and (
@@ -288,7 +319,9 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
                     extractor_model=extractor_model, **attack_key,
                     **({} if mapper is None else dict(mapper=mapper)),
                     **({} if actions in (None, ACTIONS[0]) else dict(actions=actions)),
-                    **({} if compute in (None, COMPUTES[0]) else dict(compute=compute)))
+                    **({} if compute in (None, COMPUTES[0]) else dict(compute=compute)),
+                    **({} if answer in (None, ANSWERS[0]) else dict(answer=answer)),
+                    **({} if hints in (None, HINTS[0]) else dict(hints=hints)))
         if instructions == "adopt" and _delegates_to_data(suite, user):
             cases += [dict(case, instructions="read"), dict(case, instructions="act")]
         else:
@@ -482,10 +515,10 @@ def structured_provenance(cases, example=None):
     from .structured_templates import registry_sha256
     record = dict(structured_templates_sha256=registry_sha256())
     if any(case.get("root_author") == "structured" for case in cases):
-        from .structured_planning import LIMITS, PLANNER_SYSTEM
+        from .structured_planning import PLANNER_SYSTEM, job_limits
         executable = Path(example) if example is not None else None
         record.update(structured_planner_system_sha256=hashlib.sha256(PLANNER_SYSTEM.encode()).hexdigest(),
-                      structured_limits=list(LIMITS),
+                      structured_limits=list(job_limits(any(case.get("answer") == "final" for case in cases))),
                       structured_example_sha256=(hashlib.sha256(executable.read_bytes()).hexdigest()
                                                  if executable is not None and executable.is_file() else None))
     return record
@@ -506,10 +539,27 @@ def directory_provenance(cases):
     return out
 
 
+def hints_provenance(cases):
+    """For a run whose planner gets notes (`+hints=u9`), the notes and the
+    fuller refusal feedback it was given. Every other manifest is unchanged."""
+    if not any(case.get("hints") == "u9" for case in cases):
+        return {}
+    from .root_drafter import U9_NOTES, U9_REFUSAL_HINTS
+    return dict(planner_hints=dict(u9=dict(notes_sha256=hashlib.sha256(U9_NOTES.encode()).hexdigest(),
+                                           refusal_hints=U9_REFUSAL_HINTS)))
+
+
 def destination_candidates(case):
     """What the owner signs into a data-filled destination edge: the set owner's members, else None."""
     from .owner_directory import directory_members
     return directory_members(case["suite"]) if case.get("owner") == "set" else None
+
+
+def planner_directory(case):
+    """Whether the planner is told a destination may come from data
+    (`root_drafter.DIRECTORY_DESTINATIONS`): for every owner that judges such
+    destinations, the human-owner upper bound included (same planner input)."""
+    return case.get("owner") in ("directory", "set", "approve")
 
 
 def consent_mode(experiment):
@@ -583,7 +633,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             human_authentication_evaluated=False, consent_mode=consent_mode(experiment),
             comparable_to_unrestricted_baseline=False, attack=experiment_attack(cases),
             **autodojo_provenance(cases), **structured_provenance(cases, structured_example),
-            **directory_provenance(cases),
+            **directory_provenance(cases), **hints_provenance(cases),
             platform=platform.platform(), package_sources=package_sources(),
             source_sha256={p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                            for p in sorted(Path(__file__).parent.glob("*.py"))})
@@ -608,15 +658,16 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
             if any(case.get("root_author") for case in cases):
                 # The reviewed generator tool's own credential use, never shared
                 # with the planner/executor: a drafted program may extract at
-                # most once per step.
+                # most once per step (one more step with the owner's final answer).
                 from .drafted_tasks import MAX_STEPS
+                max_steps = MAX_STEPS + (1 if any(case.get("answer") == "final" for case in cases) else 0)
                 # One extractor model per run, an owner-signed constant of every
                 # extraction step (G3).
                 extractor_models = {case.get("extractor_model", GENERATOR_MODEL) for case in cases}
                 if len(extractor_models) != 1:
                     raise ValueError("one_extractor_model_per_run")
-                generator = DeepSeekGenerator(key, max_calls=len(cases) * MAX_STEPS,
-                                              max_input_bytes=len(cases) * MAX_STEPS * 98304,
+                generator = DeepSeekGenerator(key, max_calls=len(cases) * max_steps,
+                                              max_input_bytes=len(cases) * max_steps * 98304,
                                               model=extractor_models.pop())
             if structured_cases:
                 from .structured_planning import DeepSeekStructuralPlanner, StructuredSession
@@ -713,9 +764,9 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                                                            history=tuple(history),
                                                                            view=case["planner_view"],
                                                                            exposure=planner_exposure(case),
-                                                                           directory=case.get("owner") in ("directory",
-                                                                                                           "set"),
-                                                                           compute=case.get("compute", COMPUTES[0]))
+                                                                           directory=planner_directory(case),
+                                                                           compute=case.get("compute", COMPUTES[0]),
+                                                                           hints=case.get("hints", HINTS[0]))
                                 except RuntimeError:
                                     row["outcome"] = "author_failed"
                                     raise
@@ -730,7 +781,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                         derived_destinations=case.get("review") == "derived",
                                         read_only=instructions_turn == "read",
                                         destination_candidates=destination_candidates(case),
-                                        calc=case.get("compute") == "calc"))
+                                        calc=case.get("compute") == "calc",
+                                        final_answer=case.get("answer") == "final"))
                                 except ProgramRefused as error:
                                     audit.emit("program_refused", episode=index, attempt=attempt, reason=str(error),
                                                step=error.step, field=error.field)
@@ -763,26 +815,30 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                             # lowered program must pass the same review again.
                             # Still nothing is signed.
                             from .structured_planning import (ProgramMapper, ServiceMapper, StructuredError,
-                                                              eval_catalog, evidence, plan_program)
+                                                              eval_catalog, evidence, job_limits, plan_program)
                             from .structured_templates import load_registry, template_number
                             from .structured_wire import WireError
                             catalog = eval_catalog(case["suite"])
+                            limits = job_limits(case.get("answer") == "final")
                             if case["mapper"] == "service":
                                 row.update(drafts=0, stage="structured_planning")
-                                mapper = ServiceMapper(catalog, lambda: json.loads(draft_program().program))
+                                mapper = ServiceMapper(catalog, lambda: json.loads(draft_program().program),
+                                                       limits=limits)
                             else:
                                 row["stage"] = "structured_planning"
                                 mapper = ProgramMapper(json.loads(drafted.program), catalog,
                                                        source="template" if case["mapper"] == "template" else "drafted",
                                                        template=(template_number(load_registry(), case["suite"],
                                                                                 case["user"])
-                                                                 if case["mapper"] == "template" else None))
+                                                                 if case["mapper"] == "template" else None),
+                                                       limits=limits)
                             calls = len(structural.log)
                             planned = plan_program(structured, mapper, job_id=f"episode-{index}",
                                                    suite=case["suite"], user=case["user"],
                                                    extractor_model=case["extractor_model"],
                                                    derived_destinations=case.get("review") == "derived",
-                                                   calc=case.get("compute") == "calc")
+                                                   calc=case.get("compute") == "calc",
+                                                   final_answer=case.get("answer") == "final")
                             audit.emit("structured_planned", episode=index,
                                        **evidence(planned, structural.log[calls:]))
                             failure = getattr(mapper, "failure", None)
@@ -833,7 +889,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                             strict_destinations=case.get("owner") == "strict",
                                             directory=(owner_directory(case["suite"])
                                                        if case.get("owner") == "directory" else None),
-                                            candidates=case.get("owner") == "set")
+                                            candidates=case.get("owner") == "set",
+                                            shown=case.get("owner") == "approve")
 
                     def progress(stage):
                         row["stage"] = stage

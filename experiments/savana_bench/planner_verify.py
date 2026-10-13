@@ -19,8 +19,9 @@ from .agentdojo_provider import canonical
 from .agentdojo_tasks import prepare_draft
 from .official_verify import restore_environment, verify_chain
 from .planner_experiment import (DEFINITIVE, IDS, OPERATOR_MODE, SCHEMA, STRUCTURED_REFUSALS,
-                                 classify_provider_attempt, directory_provenance, experiment_cases, planner_exposure,
-                                 destination_candidates, structured_provenance, summarize, turn_request)
+                                 classify_provider_attempt, directory_provenance, experiment_cases, hints_provenance,
+                                 planner_directory, planner_exposure, destination_candidates, structured_provenance,
+                                 summarize, turn_request)
 from .protected_agentdojo import official_case, package_sources, score_outcome
 from .protected_verify import verify_published_episode
 
@@ -147,8 +148,8 @@ def _drafted_contract(case, local, row, prior=None):
         else:
             body = draft_request_body(official, request, model=case["planner_model"], goal=case.get("goal"),
                                       history=tuple(history), view=view, exposure=exposure,
-                                      directory=case.get("owner") in ("directory", "set"),
-                                      compute=case.get("compute", "table"))
+                                      directory=planner_directory(case), compute=case.get("compute", "table"),
+                                      hints=case.get("hints", "none"))
             if hashlib.sha256(body).hexdigest() != event["request_sha256"]:
                 raise ValueError("planner_input_mismatch")
             if event.get("view", "request") != view or event.get("placeholders", 0) != len(bindings):
@@ -165,7 +166,7 @@ def _drafted_contract(case, local, row, prior=None):
                                       extractor_model=case.get("extractor_model", "deepseek-flash"),
                                       derived_destinations=case.get("review") == "derived",
                                       read_only=turn == "read", destination_candidates=destination_candidates(case),
-                                      calc=case.get("compute") == "calc")
+                                      calc=case.get("compute") == "calc", final_answer=case.get("answer") == "final")
             refusal = None
         except ProgramRefused as error:
             contract, refusal = None, error
@@ -219,9 +220,10 @@ def _service_unanswered(case, local):
     asked. Any other mapper has nothing to check here."""
     if case.get("mapper") != "service":
         return
-    from .structured_planning import DRAFTED_INTENT, DRAFTED_TEMPLATE, ServiceMapper, eval_catalog
+    from .structured_planning import DRAFTED_INTENT, DRAFTED_TEMPLATE, ServiceMapper, eval_catalog, job_limits
     event = _one(local, "structured_planned")
-    request = ServiceMapper(eval_catalog(case["suite"]), None, salt=bytes.fromhex(event["salt"])).request_bytes
+    request = ServiceMapper(eval_catalog(case["suite"]), None, salt=bytes.fromhex(event["salt"]),
+                            limits=job_limits(case.get("answer") == "final")).request_bytes
     if (event["outcome"] != "mapper_failed" or event["status"] == "accepted"
             or hashlib.sha256(request).hexdigest() != event["mapper_request_sha256"]
             or (event["intent"], event["template"]) != (DRAFTED_INTENT, DRAFTED_TEMPLATE)
@@ -245,7 +247,8 @@ def _structured_contract(case, local, row, contract):
     from .agentdojo_tasks import BENCHMARK, register_drafted
     from .drafted_tasks import ProgramRefused
     from .structured_planning import (OP, PLANNER_CODES, ProgramMapper, ServiceMapper, StructuredError, eval_catalog,
-                                      exposure, lower_plan, order_reply, planner_body, planner_view, review, sentinels)
+                                      exposure, job_limits, lower_plan, order_reply, planner_body, planner_view, review,
+                                      sentinels)
     from .structured_templates import load_registry, template_number
     from .structured_wire import decode_order, decode_ordered_plan, decode_plan, decode_structural_request, validate_order
     event = _one(local, "structured_planned")
@@ -257,11 +260,12 @@ def _structured_contract(case, local, row, contract):
     catalog = eval_catalog(case["suite"])
     program = json.loads(contract.program)
     template = case["mapper"] == "template"
+    limits = job_limits(case.get("answer") == "final")
     if case["mapper"] == "service":
         # The job was fixed before the program existed; the workflow is the
         # accepted program on that job's slots.
         try:
-            mapper = ServiceMapper.replay(catalog, program, salt=bytes.fromhex(event["salt"]))
+            mapper = ServiceMapper.replay(catalog, program, salt=bytes.fromhex(event["salt"]), limits=limits)
         except (StructuredError, ValueError):
             # The accepted program did not fit the job: agentd got no workflow.
             _service_unanswered(case, local)
@@ -272,7 +276,7 @@ def _structured_contract(case, local, row, contract):
         mapper = ProgramMapper(program, catalog, source="template" if template else "drafted",
                                template=(template_number(load_registry(), case["suite"], case["user"])
                                          if template else None),
-                               salt=bytes.fromhex(event["salt"]))
+                               salt=bytes.fromhex(event["salt"]), limits=limits)
     if (hashlib.sha256(mapper.request_bytes).hexdigest() != event["mapper_request_sha256"]
             or (event["intent"], event["template"]) != (mapper.intent, mapper.template)
             or event["mapper_response"] not in (None, mapper.response.hex())):
@@ -350,7 +354,8 @@ def _structured_contract(case, local, row, contract):
         raise ValueError("structured_lowering")
     try:
         reviewed = review(lowered, suite=case["suite"], user=case["user"], extractor_model=case["extractor_model"],
-                          derived_destinations=case.get("review") == "derived", calc=case.get("compute") == "calc")
+                          derived_destinations=case.get("review") == "derived", calc=case.get("compute") == "calc",
+                          final_answer=case.get("answer") == "final")
     except ProgramRefused as error:
         if outcome != "lowering_failed" or event["lowering_error"] != "review_" + str(error):
             raise ValueError("structured_review") from None
@@ -545,6 +550,8 @@ def verify(directory):
         raise ValueError("structured_provenance_mismatch")
     if any(manifest.get(k) != v for k, v in directory_provenance(cases).items()):
         raise ValueError("owner_directory_mismatch")
+    if any(manifest.get(k) != v for k, v in hints_provenance(cases).items()):
+        raise ValueError("planner_hints_mismatch")
     current = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(Path(__file__).parent.glob("*.py"))}
     if manifest["source_sha256"] != current:
         raise ValueError("experiment_source_mismatch")
