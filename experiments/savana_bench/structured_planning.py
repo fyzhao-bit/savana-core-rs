@@ -52,6 +52,7 @@ import time
 from typing import NamedTuple
 
 from .agentdojo_provider import canonical
+from .dojo_catalog import STATE_CHANGING_READS
 from .drafted_tasks import MAX_STEPS
 from .structured_wire import (
     CARDINALITIES, CONFIDENTIALITIES, EFFECTS, INTENTS, MAPPER_PATH, PLANNER_PATH, ROLES, CatalogTool,
@@ -199,6 +200,13 @@ def pool_slots(pool):
                         key=lambda slot: slot.ref))
 
 
+def _changing(tools):
+    """The steps (1-based) whose call changes live state: every write, and
+    every read in STATE_CHANGING_READS."""
+    return {n for n, tool in enumerate(tools, 1)
+            if tool.role == ROLES["sink"] or tool.operation in STATE_CHANGING_READS}
+
+
 def program_to_workflow(program, catalog, *, salt=None, pool=None, limits=LIMITS):
     """The owner's program as agentd's mapped workflow. Slot references are
     keyed hashes of their place in the program (`salt` is per job), so the
@@ -268,14 +276,16 @@ def program_to_workflow(program, catalog, *, salt=None, pool=None, limits=LIMITS
     last = len(steps)
     feeding = {a for a, _b in edges}
     edges |= {(number, last) for number in range(1, last) if number not in feeding}
-    # State order: a write keeps its place relative to every other call on
-    # live state (a read or a write). A reference gives each value's producer
-    # an edge, but an effect on shared state (a write, then a read of what it
-    # changed) has none. Extraction and computation read recorded results
-    # only, so they stay free to move; reads stay free among themselves.
+    # State order: a call that changes live state (a write, or a read whose
+    # official function changes it: STATE_CHANGING_READS) keeps its place
+    # relative to every other call on live state (a read or a write). A
+    # reference gives each value's producer an edge, but an effect on shared
+    # state (a write, then a read of what it changed) has none. Extraction and
+    # computation read recorded results only, so they stay free to move; reads
+    # that change nothing stay free among themselves.
     live = [n for n, tool in enumerate(tools, 1) if tool.role != ROLES["transform"]]
-    writes = {n for n, tool in enumerate(tools, 1) if tool.role == ROLES["sink"]}
-    state_edges = frozenset((a, b) for a in live for b in live if a < b and writes & {a, b})
+    changing = _changing(tools)
+    state_edges = frozenset((a, b) for a in live for b in live if a < b and changing & {a, b})
     edges |= state_edges
     slots.sort(key=lambda s: s.ref)
     if len({s.ref for s in slots}) != len(slots) or any(s.ref == bytes(16) for s in slots):
@@ -756,10 +766,11 @@ def evidence(result, planner_calls=()):
 
 
 def write_reordered(conversion, order):
-    """Whether the new order moves a write across another tool call on live
-    state (a read or a write) that no edge path ties it to: data edges keep
-    every value's producer first, but an effect on shared state (a write, then
-    a read of what it changed) has no reference to give it an edge. Since the
+    """Whether the new order moves a call that changes live state (a write, or
+    a read in STATE_CHANGING_READS) across another tool call on live state (a
+    read or a write) that no edge path ties it to: data edges keep every
+    value's producer first, but an effect on shared state (a write, then a
+    read of what it changed) has no reference to give it an edge. Since the
     conversion's state edges, no order agentd accepts can do this; the check
     stays as an independent one. Extraction and computation read recorded
     results only, so moving them is never flagged."""
@@ -769,7 +780,8 @@ def write_reordered(conversion, order):
     position = {old: p for p, old in enumerate(order)}
     roles = {n.ordinal: n.role for n in conversion.workflow.nodes}
     live = {o for o, role in roles.items() if role != ROLES["transform"]}
-    return any(a in live and b in live and ROLES["sink"] in (roles[a], roles[b])
+    changing = _changing(conversion.tools)
+    return any(a in live and b in live and changing & {a, b}
                and b not in closure[a] and a not in closure[b] and position[a] > position[b]
                for a in closure for b in closure if a < b)
 

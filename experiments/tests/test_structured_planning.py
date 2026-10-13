@@ -111,12 +111,14 @@ class CatalogAndConversionTests(unittest.TestCase):
                          [(1, "url", text("www.informations.com")), (2, "target", text("dojo.slack.send_channel.text")),
                           (3, "channel", text("general"))])
         self.assertEqual(list(conversion.slots), sorted(conversion.slots, key=lambda s: s.ref))
-        # A step that feeds nothing gets an edge into the last step.
+        # A step that feeds nothing gets an edge into the last step; the fetch
+        # logs the address it fetched (STATE_CHANGING_READS), so the other read
+        # keeps its side of it too.
         lone = {"steps": [SUMMARY["steps"][0], {"tool": "dojo.slack.channels", "args": {}}, *SUMMARY["steps"][1:]]}
         lone["steps"][2] = dict(lone["steps"][2], source=1)
         lone["steps"][3] = {"tool": "dojo.slack.send_channel", "args": {"channel": text("general"), "text": {"from": 3}}}
         edges = program_to_workflow(lone, catalog("slack"), salt=SALT).workflow.edges
-        self.assertEqual(edges, ((1, 3), (1, 4), (2, 4), (3, 4)))
+        self.assertEqual(edges, ((1, 2), (1, 3), (1, 4), (2, 4), (3, 4)))
 
     def test_slots_are_keyed_by_the_salt_and_bad_programs_are_refused(self):
         same = program_to_workflow(SUMMARY, catalog("slack"), salt=SALT)
@@ -176,19 +178,21 @@ class LoweringTests(unittest.TestCase):
         self.assertGreater(changed, 30)
 
     def test_a_plan_that_does_not_match_the_mapping_is_refused(self):
-        program = {"steps": [SUMMARY["steps"][0], {"tool": "dojo.slack.channels", "args": {}},
+        # Two reads that change nothing, so agentd may swap them.
+        first = {"tool": "dojo.slack.read_channel", "args": {"channel": text("general")}}
+        program = {"steps": [first, {"tool": "dojo.slack.channels", "args": {}},
                              dict(SUMMARY["steps"][1], args=dict(SUMMARY["steps"][1]["args"], context={"from": 2})),
                              dict(SUMMARY["steps"][2], args=dict(SUMMARY["steps"][2]["args"], text={"from": 3}))]}
         conversion = program_to_workflow(program, catalog("slack"), salt=SALT)
         steps = decoded(conversion, [2, 1, 3, 4])
         lowered = lower_plan(conversion, steps)
         self.assertEqual([s["tool"] for s in lowered["steps"]],
-                         ["dojo.slack.channels", "dojo.web.get", EXTRACT_TOOL, "dojo.slack.send_channel"])
+                         ["dojo.slack.channels", "dojo.slack.read_channel", EXTRACT_TOOL, "dojo.slack.send_channel"])
         self.assertEqual((lowered["steps"][2]["source"], lowered["steps"][2]["args"]["context"]), (2, {"from": 1}))
         self.assertEqual(lowered["steps"][3]["args"]["text"], {"from": 3})
-        literal = conversion.workflow.nodes[0].bindings
+        literal = dict(conversion.workflow.nodes[0].bindings)["channel"]
         stolen = steps[2]._replace(bindings=tuple(sorted((name, ref) for name, ref in steps[2].bindings
-                                                         if name == OP) + [("target", literal[1][1])]))
+                                                         if name == OP) + [("target", literal)]))
         for bad in (steps[:3], [steps[0]] * 4, [steps[0]._replace(tool_class=999)] + list(steps[1:]),
                     [steps[0], steps[1], stolen, steps[3]],
                     [steps[0], steps[1], steps[2]._replace(dependencies=(1,)), steps[3]],
@@ -233,6 +237,28 @@ class LoweringTests(unittest.TestCase):
         self.assertEqual(conversion.state_edges, {(1, 3), (2, 3)})
         self.assertEqual(valid_orders(conversion), 2)
 
+    def test_a_read_that_changes_state_is_ordered_like_a_write(self):
+        # get_unread_emails marks what it returns as read: a read of the inbox
+        # before it, or after it, keeps its side; two plain reads stay free.
+        program = {"steps": [{"tool": "dojo.email.received", "args": {}},
+                             {"tool": "dojo.email.unread", "args": {}},
+                             {"tool": "dojo.email.received", "args": {}},
+                             {"tool": EXTRACT_TOOL, "source": 3, "args": {
+                                 "target": text("answer"), "context": [{"from": 1}, {"from": 2}]}}]}
+        conversion = program_to_workflow(program, catalog("workspace"), salt=SALT)
+        self.assertEqual(conversion.state_edges, {(1, 2), (2, 3)})
+        self.assertEqual(valid_orders(conversion), 1)
+        unordered = conversion._replace(workflow=conversion.workflow._replace(
+            edges=tuple(sorted(set(conversion.workflow.edges) - conversion.state_edges))))
+        self.assertTrue(write_reordered(unordered, [2, 1, 3, 4]))
+        self.assertTrue(write_reordered(unordered, [1, 3, 2, 4]))
+        # get_webpage logs every address it fetches: two fetches keep their order.
+        fetches = {"steps": [{"tool": "dojo.web.get", "args": {"url": text("www.example.com")}},
+                             {"tool": "dojo.web.get", "args": {"url": text("www.example.org")}},
+                             {"tool": EXTRACT_TOOL, "source": 2, "args": {
+                                 "target": text("answer"), "context": {"from": 1}}}]}
+        self.assertEqual(program_to_workflow(fetches, catalog("slack"), salt=SALT).state_edges, {(1, 2)})
+
     def test_valid_orders_counts_every_edge_respecting_order(self):
         program = {"steps": [{"tool": "dojo.slack.send_channel", "args": {"channel": text("general"),
                                                                         "text": text("hi")}},
@@ -245,6 +271,44 @@ class LoweringTests(unittest.TestCase):
         for item in load_registry()["templates"]:
             conversion = program_to_workflow(item["program"], catalog(item["suite"]), salt=SALT)
             self.assertGreaterEqual(valid_orders(conversion), 1)
+
+
+class StateChangingReadTests(unittest.TestCase):
+    """Which read operations change the environment, by running each one on a
+    fresh default environment of its suite: the arguments of the first
+    official ground-truth call that runs, else a fixed call."""
+    FALLBACK = {"get_file_by_id": {"file_id": "0"}, "search_contacts_by_email": {"query": "john"},
+                "get_car_rental_address": {"company_name": ["SunSet Rent-A-Car"]},
+                "get_contact_information_for_restaurants": {"restaurant_names": ["Le Baratin"]}}
+
+    def test_only_the_listed_reads_change_the_environment(self):
+        from agentdojo.functions_runtime import FunctionsRuntime
+        from savana_bench.dojo_catalog import CATALOG, STATE_CHANGING_READS
+        reads = {t["upstream"]: t["operation"] for t in CATALOG if t["effect"] == "read"}
+        ran, changing = set(), set()
+        for name in ("workspace", "banking", "slack", "travel"):
+            suite = get_suite("v1.2.2", name)
+            runtime = FunctionsRuntime(suite.tools)
+            served = {t.name for t in suite.tools}
+            calls = []
+            for task in (*suite.user_tasks.values(), *suite.injection_tasks.values()):
+                env = suite.load_and_inject_default_environment({})
+                env = task.init_environment(env) if hasattr(task, "init_environment") else env
+                calls += [(c.function, dict(c.args)) for c in task.ground_truth(env)]
+            calls += [(f, dict(self.FALLBACK.get(f, {}))) for f in sorted(served & set(reads))]
+            for function, args in calls:
+                if function not in reads or reads[function] in ran:
+                    continue
+                env = suite.load_and_inject_default_environment({})
+                before = env.model_dump(mode="json")
+                _result, error = runtime.run_function(env, function, args)
+                if error is not None:
+                    continue
+                ran.add(reads[function])
+                if env.model_dump(mode="json") != before:
+                    changing.add(reads[function])
+        self.assertEqual(ran, set(reads.values()))
+        self.assertEqual(changing, STATE_CHANGING_READS)
 
 
 class PlannerPromptTests(unittest.TestCase):

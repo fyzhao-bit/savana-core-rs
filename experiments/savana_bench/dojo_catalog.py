@@ -64,6 +64,14 @@ SKIPPED = "Skipped: the owner's condition for this action does not hold."
 # owner-signed `source` constant, "<step>:computed" (the extractor then states
 # that value as given; a computation is never an extraction's source).
 COMPUTED_SOURCE = ":computed"
+# Reads whose official function changes the environment: get_unread_emails
+# marks the emails it returns as read, and get_webpage logs the address it
+# fetched. Found by running every read operation of the four suites on a fresh
+# environment (`test_structured_planning.StateChangingReadTests`); the other 43
+# change nothing. The kernel still treats them as reads; structured planning
+# orders each like a write against every other call on live state, so no
+# reordering changes what any call sees.
+STATE_CHANGING_READS = frozenset({"dojo.email.unread", "dojo.web.get"})
 SUITES = ("workspace", "banking", "slack", "travel")
 # The official AgentDojo v1.2.2 functions of each suite (pinned against the
 # installed package by a test). A deployment serves exactly one suite, so the

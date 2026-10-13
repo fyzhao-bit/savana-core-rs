@@ -2655,13 +2655,66 @@ does not replace the owner's review: the pipeline accepted the shape of
 56 of the 60 recorded drafts the review refused.
 The graph's edges were at first only data flow, so a write and a later
 read of the state it changed had no edge between them and could be
-swapped. The mapper now adds an edge between every write and every other
-call on live state, in program order; extraction and computation, which
-read recorded results only, and reads among themselves stay free to move.
+swapped. The mapper now adds an edge between every call that changes live
+state and every other call on live state, in program order; extraction and
+computation, which read recorded results only, and reads that change
+nothing stay free to move among themselves.
 In the extended configuration (\S\ref{sec:eval-utility}), every accepted
 draft went through this pipeline: 89 of 90 were reordered and reviewed
 again, 30 in a new order, and one was refused because the planner's order
 broke an edge. No failure traced to a reordering.
+
+\paragraph{What the ordering stage can and cannot do.}
+Write $P$ for an owner-reviewed program, $G(P)$ for its graph, $S(P)$ for
+its \emph{shape} (the number of steps, each step's role and effect
+classes, and the edges), and $L(P,\pi)$ for $P$ reordered by $\pi$ with its
+references renumbered. Three properties hold. Like P1--P6, they are
+implementation arguments, not mechanized proofs.
+\begin{description}[style=nextline,font=\bfseries]
+\item[S1 The view is the shape.] The ordering model's input is a function
+  of $S(P)$ and of identifiers drawn independently of $P$'s content. Two
+  programs with the same shape but different literals, owner values, tool
+  names, or data give it identically distributed inputs, so it learns
+  nothing about $P$ beyond $S(P)$.
+\item[S2 It chooses only an order, and every order it may choose is
+  equivalent.] Every execution a possibly malicious ordering model can
+  cause is $L(P,\pi)$ for a topological order $\pi$ of $G(P)$, or none.
+  Suppose (i) every call that changes live state is a write or is listed
+  as a state-changing read, (ii) extraction and computation read only the
+  recorded results their edges name, and (iii) each step's result depends
+  only on its arguments and the state it runs in (for a model call, its
+  distribution does). Then all topological orders of $G(P)$ produce the
+  same effects and the same final answer, or for model steps the same
+  distribution of them. The worst an ordering model can do is make the
+  task fail.
+\item[S3 No utility gain.] Under the assumptions of S2, the ordering stage
+  either keeps the outcome of the reviewed program in its own order or
+  fails, so it cannot raise task success.
+\end{description}
+S1 holds because $G(P)$ carries only roles, effect classes, degrees, and
+edges, and agentd draws the planner-visible node identifiers from a keyed
+pseudorandom permutation with a fresh salt per call, then sorts the view
+by identifier.
+For S2, lowering accepts only a permutation of the signed steps with
+unchanged bindings and the last step last; the permuted program passes the
+owner's review again, and the kernel enforces the signed root
+(\S\ref{sec:authority-programs}). Any two topological orders are connected
+by swaps of adjacent steps that no edge relates. By construction of
+$G(P)$, such a pair is either two reads that change nothing, or an
+extraction or computation and a step it neither feeds nor reads from.
+Swapping either pair leaves every step's inputs and state unchanged.
+S3 follows from S2.
+Assumption (i) is measured, not assumed. We ran all 45 read operations of
+the four suites on fresh environments, and two change state:
+\code{get_unread_emails} marks what it returns as read, and
+\code{get_webpage} logs the address it fetches. The mapper orders both
+like writes. Before that change, the ordering model had swapped two
+fetches in 11 of 514 recorded orderings; AgentDojo's checks test only
+which addresses were fetched, so no verdict depended on it.
+The measurements agree with S2 and S3: the 23 reordered episodes matched
+their pairs, and reordering never raised task success. S1 bounds the
+ordering model only. In our runs the drafting model was a third-party
+model as well and saw the request, or its masked view (\S\ref{sec:blind}).
 
 \paragraph{Connector registration.} The connector registry is a
 hash-chained state whose genesis and update authority are pinned by the
