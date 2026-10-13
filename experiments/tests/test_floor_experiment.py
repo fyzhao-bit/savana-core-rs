@@ -5,7 +5,7 @@ import json
 import unittest
 from types import SimpleNamespace
 
-from savana_bench.agentdojo_tasks import _TASKS, register_drafted
+from savana_bench.agentdojo_tasks import register_drafted
 from savana_bench.benchmark_consent import FiniteConsent, _chosen_by_data
 from savana_bench.drafted_tasks import EXTRACT_TOOL, ProgramRefused, review_program
 from savana_bench.planner_experiment import drafted_cases, experiment_cases
@@ -108,7 +108,7 @@ class PermitConsentTests(identity_tests.ConsentTests):
 
     def test_the_disposition_is_closed(self):
         with self.assertRaises(ValueError):
-            FiniteConsent(_TASKS[0], self.principal, lambda *a, **k: None, disposition="approve_all")
+            FiniteConsent(self.contract, self.principal, lambda *a, **k: None, disposition="approve_all")
 
 
 class StrictOwnerTests(unittest.TestCase):

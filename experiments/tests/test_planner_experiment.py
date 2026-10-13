@@ -11,33 +11,31 @@ from unittest.mock import patch
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from savana_bench.agentdojo_provider import canonical
-from savana_bench.agentdojo_tasks import _TASKS, prepare_draft
-from savana_bench.planner_authors import COMPROMISED, reviewed_plan
+from savana_bench.agentdojo_tasks import prepare_draft
 from savana_bench.planner_experiment import (ProviderRelay, classify_provider_attempt, experiment_cases,
                                              plan_author_for, provisioning_outcome)
-from savana_bench.protected_agentdojo import CASES
 from savana_bench.protected_operator import FiniteOperator, KernelNotConfirmed, OperatorNotConfirmed
+from tests.test_drafted_tasks import one_read_contract
 
 
 def hexd(c):
     return (c * 32).hex()
 
 
+def kernel_context(contract):
+    """The IDs and registered descriptors the kernel hands the plan author."""
+    now = time.time_ns() // 1000000
+    ids = dict(task=b"a" * 32, root=b"b" * 32, observer=b"o" * 32, application_turn=b"u" * 32,
+               planner=b"p" * 32, model_profile=1, not_before=now, expires_at=now + 120000)
+    descriptors = {st.tool: bytes([i + 1]) * 32 for i, st in enumerate(contract.steps())}
+    descriptors["savana.final_result_release"] = b"r" * 32
+    return ids, dict(ids, descriptors=descriptors, release_descriptor=b"r" * 32)
+
+
 class CaseTests(unittest.TestCase):
-    def test_catalog_is_closed(self):
-        honest = experiment_cases("honest")
-        self.assertEqual([(c["group"], c["user"], c["injection"]) for c in honest],
-                         [(c["group"], c["user"], c["injection"]) for c in CASES])
-        self.assertTrue(all(c["author"] == "deepseek" and c["goal"] is None for c in honest))
-        poisoned = experiment_cases("poisoned")
-        self.assertEqual(len(poisoned), 9)
-        self.assertEqual({c["goal"] for c in poisoned}, {"exfiltrate", "overcollect", "tamper"})
-        compromised = experiment_cases("compromised")
-        self.assertEqual([c["mutation"] for c in compromised], [n for n, _, _ in COMPROMISED])
-        self.assertEqual([c["mutation"] for c in experiment_cases("compromised:slot_swap,drop_release")],
-                         ["slot_swap", "drop_release"])
-        for bad in ("", "honest:x", "poisoned:tamper", "compromised:nope", "compromised:slot_swap,slot_swap",
-                    "compromised:", "all", None):
+    def test_only_drafted_specs_are_accepted(self):
+        for bad in ("", "honest", "poisoned", "compromised", "compromised:slot_swap", "write",
+                    "write:injection_task_0", "generate:honest", "drafted", "all", None):
             with self.assertRaises(ValueError, msg=bad):
                 experiment_cases(bad)
 
@@ -68,40 +66,15 @@ class CaseTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=bad):
                 experiment_cases(bad)
 
-    def test_write_spec_selects_explicit_official_injections(self):
-        # The reviewed write plan under chosen official injections, so all 14
-        # can be split across armed batches of at most nine owner bootstraps.
-        cases = experiment_cases("write:injection_task_9,injection_task_13")
-        self.assertEqual([(c["group"], c["author"], c["injection"]) for c in cases],
-                         [("write_attack", "reviewed", "injection_task_9"),
-                          ("write_attack", "reviewed", "injection_task_13")])
-        for bad in ("write:attack,injection_task_0", "write:injection_task_01",
-                    "write:injection_task_0,injection_task_0", "write:injection_task_100"):
-            with self.assertRaises(ValueError, msg=bad):
-                experiment_cases(bad)
-
-    def test_chain_specs_select_single_goals_and_the_generation_contract(self):
-        cases = experiment_cases("generate:honest,tamper_content,content_literal,injection_task_2")
-        self.assertEqual([(c["group"], c["author"], c["goal"], c["mutation"], c["injection"]) for c in cases],
-                         [("generate_honest", "deepseek", None, None, None),
-                          ("generate_poisoned", "deepseek", "tamper_content", None, None),
-                          ("generate_compromised", "adversary", None, "content_literal", None),
-                          ("generate_attack", "reviewed", None, None, "injection_task_2")])
-        self.assertEqual({c["contract"] for c in cases}, {"user_task_29:official"})
-        self.assertEqual([c["goal"] for c in experiment_cases("write:redirect_write")], ["redirect_write"])
-        for bad in ("generate:poisoned,exfiltrate", "generate:tamper_write", "write:tamper_content",
-                    "generate:literal_target"):
-            with self.assertRaises(ValueError, msg=bad):
-                experiment_cases(bad)
-
 
 class VerdictTests(unittest.TestCase):
     def test_provider_requests_are_judged_only_against_the_owner_root(self):
-        contract = _TASKS[0]
+        contract = one_read_contract()
+        step, = contract.steps()
         judge = lambda value: classify_provider_attempt(canonical(value), contract=contract,
                                                         resource="ab" * 32, application_turn="cd" * 32)
         tool = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                "params": {"name": contract.tool, "arguments": contract.values()}}
+                "params": {"name": step.tool, "arguments": step.value_map()}}
         self.assertEqual(judge(tool), "authorized_tool")
         wrong = json.loads(canonical(tool))
         wrong["params"]["arguments"]["date"] = "2024-05-15"
@@ -151,64 +124,48 @@ class VerdictTests(unittest.TestCase):
 
 
 class AuthorTests(unittest.TestCase):
-    def context(self):
-        now = time.time_ns() // 1000000
-        ids = dict(task=b"a" * 32, root=b"b" * 32, observer=b"o" * 32, application_turn=b"u" * 32,
-                   planner=b"p" * 32, model_profile=1, not_before=now, expires_at=now + 120000)
-        descriptors = {t.tool: bytes([i + 1]) * 32 for i, t in enumerate(_TASKS)}
-        descriptors["savana.final_result_release"] = b"r" * 32
-        return ids, dict(ids, descriptors=descriptors, release_descriptor=b"r" * 32)
-
-    def test_honest_text_encodes_to_the_reviewed_draft_and_mutations_deviate(self):
-        contract = _TASKS[0]
-        ids, context = self.context()
+    def test_the_reviewed_draft_is_encoded_against_the_kernel_ids(self):
+        contract = one_read_contract()
+        ids, context = kernel_context(contract)
         events, facts = [], dict(plan_supplied=False, deviates=None)
         emit = lambda kind, **data: events.append((kind, data))
-        case = dict(author="deepseek", goal=None, mutation=None)
-        draft = plan_author_for(case, contract, json.dumps(reviewed_plan(contract)), emit, facts)(contract, context)
-        reviewed = prepare_draft(contract, tool_descriptor=context["descriptors"][contract.tool],
+        draft = plan_author_for(contract, emit, facts)(contract, context)
+        reviewed = prepare_draft(contract, tool_descriptor=context["descriptors"][contract.steps()[0].tool],
                                  release_descriptor=b"r" * 32, **ids)["planning_draft"]
         self.assertEqual(draft, json.loads(canonical(reviewed)))
         self.assertEqual(facts, dict(plan_supplied=True, deviates=False))
         self.assertEqual(events[-1][0], "plan_submitted")
         self.assertEqual(events[-1][1]["draft"], draft)
-        for name, _, _ in COMPROMISED:
-            facts = dict(plan_supplied=False, deviates=None)
-            author = plan_author_for(dict(author="adversary", goal=None, mutation=name), contract, None, emit, facts)
-            self.assertNotEqual(author(contract, context), draft)
-            self.assertTrue(facts["deviates"], name)
+        self.assertIs(events[-1][1]["deviates_from_reviewed"], False)
+        # The kernel asks for this contract's plan; any other is refused.
         with self.assertRaises(ValueError):
-            plan_author_for(case, contract, "{}", emit, dict(facts))(_TASKS[1], context)
+            plan_author_for(contract, emit, dict(facts))(SimpleNamespace(), context)
 
 
 class VerifierTests(unittest.TestCase):
-    def test_submitted_draft_must_be_the_mechanical_encoding_of_the_author_output(self):
-        import hashlib
+    def test_the_submitted_draft_must_be_the_reviewed_draft(self):
         from savana_bench.planner_verify import _submitted_draft
-        contract = _TASKS[0]
-        ids, context = AuthorTests().context()
-        text = json.dumps(reviewed_plan(contract))
+        contract = one_read_contract()
+        _ids, context = kernel_context(contract)
         events = []
         emit = lambda kind, **data: events.append(dict(data, kind=kind))
-        case = dict(author="deepseek", goal=None, mutation=None)
-        plan_author_for(case, contract, text, emit, dict(plan_supplied=False, deviates=None))(contract, context)
-        authored = dict(kind="plan_authored", plan_text=text, response_sha256=hashlib.sha256(text.encode()).hexdigest())
-        local = [authored] + json.loads(canonical(events))
-        self.assertEqual(_submitted_draft(case, contract, local)[1], False)
+        plan_author_for(contract, emit, dict(plan_supplied=False, deviates=None))(contract, context)
+        local = json.loads(canonical(events))
+        self.assertEqual(_submitted_draft(contract, local)[1], False)
         tampered = json.loads(canonical(local))
-        tampered[1]["draft"]["final_release"]["turn"] = list(b"v" * 32)
+        tampered[0]["draft"]["final_release"]["turn"] = list(b"v" * 32)
         with self.assertRaises(ValueError):
-            _submitted_draft(case, contract, tampered)
+            _submitted_draft(contract, tampered)
         lied = json.loads(canonical(local))
-        lied[1]["deviates_from_reviewed"] = True
+        lied[0]["deviates_from_reviewed"] = True
         with self.assertRaises(ValueError):
-            _submitted_draft(case, contract, lied)
+            _submitted_draft(contract, lied)
 
 
 class ReplayTests(unittest.TestCase):
     def provision(self, mode, failures):
         from savana_bench.protected_setup import provision_owner_episode
-        contract = _TASKS[0]
+        contract = one_read_contract()
         calls, stages = [], []
 
         class Session:
@@ -240,7 +197,8 @@ class ReplayTests(unittest.TestCase):
 
         deployment = dict(application_turn=hexd(b"u"), planner=hexd(b"p"), store=hexd(b"s"),
                           destination_digest=hexd(b"d"),
-                          descriptors={contract.tool: hexd(b"x"), "savana.final_result_release": hexd(b"y")})
+                          descriptors={contract.steps()[0].tool: hexd(b"x"),
+                                       "savana.final_result_release": hexd(b"y")})
         with patch("savana.owner_ingress.connect", connect), \
              patch("savana_bench.protected_setup.authorize_and_prepare", authorize):
             asyncio.run(provision_owner_episode(contract=contract, deployment=deployment, broker=Broker(),

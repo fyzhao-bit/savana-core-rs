@@ -1,21 +1,20 @@
-"""Offline audit consistency / official-oracle replay; NOT remote attestation.
+"""Offline replay of one published episode and its official oracle; NOT remote attestation.
 
-No model requests, tools, kernel calls or reconstructed grants. A researcher
-who can replace the entire evidence directory can also replace its hash chain;
-retain completion.json independently. Native receipt metadata is not a portable
+Used by the untrusted-planner verifier (`planner_verify`). No model requests,
+tools, kernel calls or reconstructed grants. A researcher who can replace the
+entire evidence directory can also replace its hash chain; retain
+completion.json independently. Native receipt metadata is not a portable
 signature and cannot independently prove a deployment was honest.
 """
-import argparse
 import base64
 import hashlib
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 from .agentdojo_provider import canonical
-from .official_verify import rates, restore_environment, verify_chain
+from .official_verify import restore_environment
 from .private_episode import PrivateOutcome
-from .protected_agentdojo import CASES, official_case, package_sources, score_outcome
+from .protected_agentdojo import official_case, score_outcome
 
 
 def publication_chain(path, expected_head):
@@ -35,9 +34,9 @@ def publication_chain(path, expected_head):
     return events
 
 
-def verify_published_episode(directory, local, case, row, profile, contract=None, continued=None):
+def verify_published_episode(directory, local, case, row, profile, contract, continued=None):
     """Offline checks for one published episode; returns the official (utility, attacker).
-    A planner-drafted episode passes the contract its replayed owner review gave.
+    `contract` is the planner-drafted contract its replayed owner review gave.
     An act turn (`adopted_instructions`) passes `continued`: the environment it
     started from (its read turn's final one), the environment the task started
     from, and the read turn's official calls, which head the scored trace."""
@@ -125,66 +124,3 @@ def verify_published_episode(directory, local, case, row, profile, contract=None
                                           for e in tools)]),
         outcome=PrivateOutcome("published", "complete", 0, metadata, payload))
     return utility, attacker
-
-
-def verify(directory):
-    events, head = verify_chain((directory/"events.jsonl").read_bytes().splitlines())
-    completion = json.loads((directory/"completion.json").read_bytes())
-    if completion != dict(audit_head=head, event_count=len(events)):
-        raise ValueError("completion_digest_mismatch")
-    manifest = events[0]
-    if (manifest.get("schema") != "savana-protected-agentdojo-v1"
-        or manifest.get("kernel_interface") != "python_sdk_only"
-        or manifest.get("cases") != list(CASES) or manifest.get("full_benchmark") is not False
-        or manifest.get("adaptive_tool_output_model_loop") is not False):
-        raise ValueError("protected_subset_scope_mismatch")
-    if manifest["package_sources"] != package_sources():
-        raise ValueError("official_package_source_mismatch")
-    current = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(Path(__file__).parent.glob("*.py"))}
-    if manifest["source_sha256"] != current:
-        raise ValueError("experiment_source_mismatch")
-    summaries = [e["summary"] for e in events if e["kind"] == "summary"]
-    if len(summaries) != 1 or summaries[0] != json.loads((directory/"summary.json").read_bytes()):
-        raise ValueError("summary_artifact_mismatch")
-    summary, rows = summaries[0], []
-    profile=manifest.get('identity_profile')
-    if profile is not None:
-        from .benchmark_identity import validate_profile
-        validate_profile(profile)
-        if (manifest.get('consent_mode')!='finite_calendar_preconsent_v1'
-            or manifest.get('human_authentication_evaluated') is not False):
-            raise ValueError('benchmark_authentication_claim_mismatch')
-    elif (manifest.get('consent_mode') not in (None,'interactive')
-          or any(e['kind']=='benchmark_consent' for e in events)):
-        raise ValueError('missing_benchmark_identity_profile')
-    if any(summary.get(k)!=manifest.get(k) for k in ('identity_profile','consent_mode','human_authentication_evaluated')):
-        raise ValueError('benchmark_identity_summary_mismatch')
-    for index, case in enumerate(CASES):
-        local = [e for e in events if e.get("episode") == index]
-        scores = [e for e in local if e["kind"] == "episode_score"]
-        if len(scores) != 1:
-            raise ValueError("missing_or_duplicate_score")
-        row = {k: v for k, v in scores[0].items() if k not in ("seq", "previous", "kind", "time_ns", "sha256")}
-        if any(row[k] != value for k, value in case.items()) or row["status"] not in ("scored", "unknown"):
-            raise ValueError("episode_identity_or_status")
-        if row["status"] == "unknown":
-            if row["utility"] is not None or row["attacker_success"] is not None:
-                raise ValueError("unknown_is_not_safety")
-        else:
-            utility, attacker = verify_published_episode(directory, local, case, row, profile)
-            if row["utility"] != utility or row["attacker_success"] != attacker:
-                raise ValueError("official_oracle_replay_mismatch")
-        rows.append(row)
-    if (summary["rows"] != rows or summary["rates"] != rates(rows)
-        or summary["protected_episodes_scored"] != sum(r["status"] == "scored" for r in rows)):
-        raise ValueError("summary_counts_mismatch")
-    return dict(audit_consistent=True, audit_head=head,
-        identity_profile=profile,human_authentication_evaluated=False,
-        official_episodes_rescored=sum(r["status"] == "scored" for r in rows),
-        portable_kernel_attestation=False, production_acceptance=False, rates=rates(rows))
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("directory", type=Path)
-    print(json.dumps(verify(parser.parse_args().directory), indent=2))

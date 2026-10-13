@@ -2,9 +2,10 @@
 
 No command-line/env secret, root signing key, enrollment, direct kernel socket,
 automatic restart or model fallback. The auth broker is a separate root-owned
-local service. Default operation requires interactive passkey responses.
-The explicit --software-benchmark mode requires a root-armed, single-use profile
-and records that software identity/preconsent replaces human authentication.
+local service. A run is one untrusted-planner experiment (--planner-experiment)
+in the explicit --software-benchmark mode, which requires a root-armed,
+single-use profile and records that software identity/preconsent replaces
+human authentication.
 """
 import json
 import os
@@ -16,7 +17,7 @@ import struct
 import sys
 import uuid
 
-from .protected_agentdojo import load_config, run
+from .protected_agentdojo import load_config
 
 AUTH_SOCKET = '/run/savana-experiment-auth/owner.sock'
 CONFIG = '/var/lib/savana-benchmark/operator-bindings.json'
@@ -121,23 +122,20 @@ def main(argv=()):
     import argparse
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--software-benchmark',action='store_true')
-    # Untrusted-planner experiment: honest | poisoned | compromised[:names].
+    # Untrusted-planner experiment spec (planner_experiment.experiment_cases).
     parser.add_argument('--planner-experiment')
     args=parser.parse_args(argv)
-    identity_profile=None
-    if args.planner_experiment is not None:
-        from .planner_experiment import experiment_cases
-        experiment_cases(args.planner_experiment)
-        if not args.software_benchmark: raise ValueError('planner_experiment_requires_software_benchmark')
-    if args.software_benchmark:
-        from .benchmark_identity import load_profile
-        identity_profile=load_profile()
+    if args.planner_experiment is None: raise ValueError('planner_experiment_required')
+    from .planner_experiment import experiment_cases
+    experiment_cases(args.planner_experiment)
+    if not args.software_benchmark: raise ValueError('planner_experiment_requires_software_benchmark')
+    from .benchmark_identity import load_profile
+    identity_profile=load_profile()
     fd = activation_fd(os.environ, os.getpid())
     if os.geteuid() == 0:
         raise ValueError('unprivileged_experiment_identity_required')
     config = load_config(CONFIG)
-    if identity_profile is not None and (config['schema']!=3
-            or identity_profile['installation']!=config['provisioning']['installation']):
+    if config['schema']!=3 or identity_profile['installation']!=config['provisioning']['installation']:
         raise ValueError('benchmark_deployment_binding')
     # Configuration cannot redirect systemd's narrowly loaded TLS credentials.
     expected = {'provider':'provider', 'release_provider':'final-release', 'model_worker':'model'}
@@ -156,23 +154,17 @@ def main(argv=()):
         raise ValueError('private_output_directory_required')
     output = root / uuid.uuid4().hex
     with open_auth_broker() as broker:
-        print('Using explicitly armed software-identity benchmark; no human authentication claims.'
-            if identity_profile else 'Waiting for explicit browser start; no authentication challenge or model call yet.',flush=True)
+        print('Using explicitly armed software-identity benchmark; no human authentication claims.',flush=True)
         wait_for_browser_start(broker,identity_profile)
         key_fd = open_model_credential()
         try:
-            if args.planner_experiment is not None:
-                from .planner_experiment import run as run_planner
-                summary = run_planner(output=output, config=config, auth_fd=broker.fileno(),
-                    model_key_fd=key_fd, model_listener_fd=fd, identity_profile=identity_profile,
-                    experiment=args.planner_experiment)
-            else:
-                summary = run(output=output, config=config, auth_fd=broker.fileno(),
-                    model_key_fd=key_fd, model_listener_fd=fd, identity_profile=identity_profile)
+            from .planner_experiment import run as run_planner
+            summary = run_planner(output=output, config=config, auth_fd=broker.fileno(),
+                model_key_fd=key_fd, model_listener_fd=fd, identity_profile=identity_profile,
+                experiment=args.planner_experiment)
         finally:
             os.close(key_fd)
-    print(json.dumps({k:summary[k] for k in ('run_status','protected_episodes_scored','episodes_attempted',
-                                             'total_model_calls','blockers') if k in summary}))
+    print(json.dumps({k:summary[k] for k in ('run_status','episodes_attempted','total_model_calls','blockers')}))
     return 0 if summary['run_status']=='complete' else 2
 
 

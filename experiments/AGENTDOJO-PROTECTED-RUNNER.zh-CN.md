@@ -142,6 +142,10 @@ provider 接收端先校验 TLS 客户端证书链、指定客户端证书哈希
 
 ## 启动方式
 
+注：本节的 `agentdojo-protected` / `verify-protected` 命令（3 个日历任务的固定矩阵）在提交
+`e155076` 中仍存在，之后已移除；现在只有 `protected_launch --software-benchmark --planner-experiment <spec>`
+一种运行方式，用 `python -m savana_bench.planner_verify <目录>` 离线复核。
+
 仅检查当前环境并保存启动记录（不会花模型费用）：
 
 ```sh

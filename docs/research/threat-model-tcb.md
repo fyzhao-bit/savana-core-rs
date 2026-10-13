@@ -92,7 +92,8 @@ benchmark harness other than the fixed review.
   admits are owner-namespace-only (an extra owner-addressed write; a different
   record of the same read), which carry no exfiltration or injected authority.
   Reproduce: `python -m analysis.review_completeness --results <evidence-tree>`
-  (exit 0 iff zero non-owner-destination admits).
+  (exit 0 iff zero non-owner-destination admits; the script exists at commit
+  `e155076` and was removed afterwards).
 - **Kernel enforcement (live, prior run).** The PLANNER-UNTRUSTED experiment
   (32 cases): of 17 programs deviating from the pre-audited plan, 16 refused by
   the kernel and 1 by the codec; 0 unauthorized requests reached a tool.

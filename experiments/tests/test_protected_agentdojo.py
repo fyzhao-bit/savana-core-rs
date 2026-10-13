@@ -1,7 +1,8 @@
 """Experiment plumbing tests. NO native protection/model score is asserted.
 
 Synthetic frames test only the provider transport; published fixtures test only
-the official oracle adapter. The actual runner requires a native SDK receipt.
+the official oracle adapter. The actual runner requires a native SDK receipt;
+here it only ever stops at preflight.
 """
 import asyncio
 import base64
@@ -17,21 +18,29 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from savana_bench.agentdojo_calendar import calendar_provider
 from savana_bench.agentdojo_provider import canonical
+from savana_bench.agentdojo_tasks import expected_step_call
 from savana_bench.private_episode import PrivateOutcome
-from savana_bench.protected_agentdojo import (CASES, ResearchAudit, official_case, preflight,
-    run, score_outcome, load_config, safe_error_code, safe_worker_error)
-from savana_bench.protected_endpoint import EpisodeEndpoint, admit_owner_episode
+from savana_bench.protected_agentdojo import (ResearchAudit, official_case, score_outcome, load_config,
+    safe_error_code, safe_worker_error)
+from savana_bench.protected_endpoint import EpisodeEndpoint
 from savana_bench.protected_transport import (ProviderServer, read_frame, server_context,
-    certificate_spki_pin, _head, _blob, _hash)
+    certificate_spki_pin, _head, _hash)
 from savana_bench.official_verify import verify_chain
-from savana_bench.protected_verify import verify
+from tests.test_drafted_tasks import one_read_contract
 
 ROOT = Path(__file__).resolve().parents[2]
 URL = "https://provider.example:9443/mcp"
 RELEASE_URL = "https://provider.example:9443/release"
 ALPN = "savana-provider-v2"
+# The one-read drafted contract's official task, benign; an attack case adds an injection.
+CASE = dict(suite="workspace", user="user_task_0", injection=None)
+# A not-started untrusted-planner run: one benign and one attack episode.
+SPEC = "drafted:workspace:user_task_0,user_task_0+injection_task_0"
+
+
+def _blob(major, value):
+    return _head(major, len(value)) + value
 
 
 def wire(payload, *, url=URL, pin=b"p"*32, nonce=b"n"*32):
@@ -109,9 +118,10 @@ class FrameTests(unittest.TestCase):
 
 
 class EndpointTests(unittest.TestCase):
-    def setup_episode(self, case=CASES[0], emit=None):
-        suite, task, injection, contract, values, env = official_case(case)
-        provider = calendar_provider(env)
+    def setup_episode(self, case=CASE, emit=None):
+        from savana_bench.dojo_provider import dojo_provider
+        suite, task, injection, contract, values, env = official_case(case, one_read_contract())
+        provider = dojo_provider(suite, env)
         events = []
         endpoint = EpisodeEndpoint(contract=contract, provider=provider, binding=binding(),
             tool_url=URL, release_url=RELEASE_URL,
@@ -120,7 +130,7 @@ class EndpointTests(unittest.TestCase):
 
     def request(self, contract):
         return canonical(dict(jsonrpc="2.0", id="test-read", method="tools/call",
-            params=dict(name=contract.tool, arguments=contract.values())))
+            params=expected_step_call(contract, 0, [])))
 
     def release(self, payload):
         b = binding()
@@ -185,12 +195,12 @@ class EndpointTests(unittest.TestCase):
             endpoint.exchange(frame(self.request(parts[3])))
         self.assertEqual(provider.audit, [])
 
-    def test_all_official_attack_cases_setup_without_executing_tools(self):
-        for case in CASES:
-            endpoint, provider, _, parts = self.setup_episode(case)
+    def test_official_attack_cases_setup_without_executing_tools(self):
+        for injection in (None, "injection_task_0", "injection_task_1"):
+            endpoint, provider, _, parts = self.setup_episode(dict(CASE, injection=injection))
             self.assertEqual(provider.audit, [])
             self.assertIsNone(endpoint._payload)
-            if case["injection"]:
+            if injection:
                 self.assertIsNotNone(parts[2])
 
 
@@ -264,17 +274,17 @@ class RunnerTests(unittest.TestCase):
                 activation_fd(dict(values, **{name:bad}),321)
 
     def config_fixture(self):
+        from savana_bench.agentdojo_tasks import catalog_operations
+        from savana_bench.protected_operator import SOCKET
         common = dict(certificate='/run/credentials/test/cert.pem',
             private_key='/run/credentials/test/key.pem', client_ca='/run/credentials/test/ca.pem',
             client_certificate_sha256='01'*32)
-        entries = []
-        for i in range(len(CASES)):
-            b = binding()
-            for key in ('task_id', 'run_id', 'application_turn'):
-                b[key] = bytes([i+10]).hex()*32
-            b['clauses'] = [{'synthetic': True}]
-            entries.append(b)
-        return dict(schema=2, entries=entries,
+        # One suite's reviewed catalog, a closed disposition and no task grants.
+        operations = catalog_operations('workspace') | {'savana.final_result_release'}
+        provisioning = dict(schema=1, descriptors={op: 'ab'*32 for op in operations}, planner='cd'*32,
+            destination_digest='cd'*32, application_turn='cd'*32, store='cd'*32, installation='cd'*32,
+            disposition='require_approval', scope='finite_workspace_read_subset', task_grants_installed=False)
+        return dict(schema=3, provisioning=provisioning, operator_socket=SOCKET,
             provider=dict(common, address=['127.0.0.1',9444],url='https://tools.example:9444/mcp',alpn=ALPN),
             release_provider=dict(common, client_certificate_sha256='02'*32,
                 address=['127.0.0.1',43191],url='https://release.example:43191/release',alpn=ALPN),
@@ -304,24 +314,36 @@ class RunnerTests(unittest.TestCase):
             with self.assertRaises(ValueError):read(old)
             old=copy.deepcopy(value);old['model_worker']['address']=['127.0.0.1',9445]
             with self.assertRaises(ValueError):read(old)
+            # The retired per-episode operator bindings are refused.
+            old={k:v for k,v in value.items() if k not in ('provisioning','operator_socket')}
+            old.update(schema=2,entries=[])
+            with self.assertRaises(ValueError):read(old)
+
+    def planner_run(self, output, profile):
+        # This fixture stops at preflight: no identity, kernel or score is fabricated.
+        from savana_bench.planner_experiment import run
+        with patch('savana_bench.benchmark_identity.load_profile',return_value=profile), \
+             patch('savana_bench.planner_experiment.preflight',return_value=['synthetic_preflight_stop']):
+            return run(output=output, config=self.config_fixture(), auth_fd=None, model_key_fd=None,
+                       model_listener_fd=None, identity_profile=profile, experiment=SPEC)
 
     def test_preflight_does_not_create_model_or_request_approval(self):
+        from tests.test_benchmark_identity import public_profile
         with tempfile.TemporaryDirectory() as parent:
             output = Path(parent)/"trial"
-            summary = run(output=output)
+            summary = self.planner_run(output, public_profile())
             self.assertEqual(summary["run_status"], "not_started")
             self.assertEqual(summary["total_model_calls"], 0)
-            self.assertEqual(summary["protected_episodes_scored"], 0)
-            self.assertEqual(len(summary["rows"]), 9)
-            self.assertTrue(all(not r["attempted"] for r in summary["rows"]))
-            attack = summary["rates"]["attack"]
-            self.assertEqual(attack["asr_all_planned_upper"], 1)
-            self.assertIsNone(attack["asr_scored"])
+            self.assertEqual(summary["episodes_attempted"], 0)
+            self.assertEqual(len(summary["rows"]), 2)
+            self.assertTrue(all(not r["attempted"] and r["outcome"] == "preflight" for r in summary["rows"]))
+            # Not run is never safety: the attack episode stays unknown.
+            self.assertEqual(summary["groups"]["drafted_attack"]["unknown"], 1)
             events, head = verify_chain((output/"events.jsonl").read_bytes().splitlines())
             completion = json.loads((output/"completion.json").read_bytes())
             self.assertEqual(completion, dict(audit_head=head, event_count=len(events)))
             self.assertEqual((output/"events.jsonl").stat().st_mode & 0o777, 0o600)
-            with self.assertRaises(FileExistsError): run(output=output)
+            with self.assertRaises(FileExistsError): self.planner_run(output, public_profile())
 
     def test_audit_fsync_error_stops_followup(self):
         with tempfile.TemporaryDirectory() as parent:
@@ -345,34 +367,33 @@ class RunnerTests(unittest.TestCase):
             with self.assertRaises(OSError): load_config(link)
 
     def test_offline_verifier_rejects_changed_summary(self):
+        from savana_bench.planner_verify import verify
+        from tests.test_benchmark_identity import public_profile
         with tempfile.TemporaryDirectory() as parent:
             output = Path(parent)/"trial"
-            run(output=output)
+            self.planner_run(output, public_profile())
             report = verify(output)
             self.assertTrue(report["audit_consistent"])
-            self.assertEqual(report["official_episodes_rescored"], 0)
+            self.assertEqual(report["episodes_verified"], 0)
             self.assertFalse(report["portable_kernel_attestation"])
             summary = json.loads((output/"summary.json").read_bytes())
-            summary["protected_episodes_scored"] = 9
+            summary["episodes_attempted"] = 2
             (output/"summary.json").write_bytes(canonical(summary))
             with self.assertRaises(ValueError): verify(output)
 
     def test_offline_verifier_keeps_explicit_software_identity_limits(self):
-        from test_benchmark_identity import public_profile
-        # This fixture stops at preflight: no identity, kernel or score is fabricated.
+        from savana_bench.planner_verify import verify
+        from tests.test_benchmark_identity import public_profile
         with tempfile.TemporaryDirectory() as parent:
             output=Path(parent)/'trial';profile=public_profile()
-            with patch('savana_bench.benchmark_identity.load_profile',return_value=profile), \
-                 patch('savana_bench.protected_agentdojo.preflight',return_value=['synthetic_preflight_stop']):
-                result=run(output=output,config={'schema':3},identity_profile=profile)
-            self.assertEqual(result['protected_episodes_scored'],0)
+            result=self.planner_run(output,profile)
+            self.assertEqual(result['episodes_attempted'],0)
             self.assertEqual(verify(output)['identity_profile'],profile)
             original,_=verify_chain((output/'events.jsonl').read_bytes().splitlines())
-            for index,change in enumerate(('human','omit','consent')):
+            for index,change in enumerate(('human','omit')):
                 rows=copy.deepcopy(original)
                 if change=='human':rows[0]['identity_profile']['human_verification']=True
-                elif change=='omit':rows[0]['identity_profile']=None
-                else:rows[0]['consent_mode']='interactive'
+                else:rows[0]['identity_profile']=None
                 altered=Path(parent)/('altered-'+str(index));audit=ResearchAudit(altered)
                 try:
                     for row in rows:

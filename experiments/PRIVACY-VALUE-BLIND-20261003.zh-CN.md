@@ -117,4 +117,6 @@ python -m analysis.privacy_exposure --results results/local-container-20260930 \
     --scan ../target/release/examples/pii_scan pv-control pv-masked pv-maskedretry
 ```
 
+注：`analysis.privacy_exposure` 在提交 `e155076` 中仍存在，之后已从仓库移除。
+
 spec 写法：`drafted+view=masked:<suite>:<items>`，可与 `+drafts=N`、`+planner=M` 组合。

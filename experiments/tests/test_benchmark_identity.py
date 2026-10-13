@@ -11,13 +11,13 @@ from unittest.mock import Mock, patch
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from savana_bench.agentdojo_tasks import _TASKS
 from savana_bench import benchmark_identity as identity_module
 from savana_bench.benchmark_identity import (SoftwareIdentity, SoftwareCeremonyQueue,
     MODE, b64, strict_json, cbor, catalog_digest, validate_profile)
 from savana_bench.agentdojo_provider import canonical
 from savana_bench.benchmark_consent import FiniteConsent
 from savana_bench.protected_operator import retain
+from tests.test_drafted_tasks import one_read_contract
 
 
 class SoftwareTests(unittest.TestCase):
@@ -79,9 +79,9 @@ class SoftwareTests(unittest.TestCase):
 class ConsentTests(unittest.TestCase):
     def setUp(self):
         self.events=[];self.task=(b't'*32).hex();self.principal=(b'p'*32).hex()
-        self.contract=_TASKS[0]
+        self.contract=one_read_contract();self.step,=self.contract.steps()
         self.policy=FiniteConsent(self.contract,self.principal,lambda kind,**kw:self.events.append((kind,kw)))
-        self.controls=[{k:v for k,v in self.contract.values().items() if k!='body'},
+        self.controls=[{k:v for k,v in self.step.value_map().items() if k!='body'},
             {'resource':'result:'+'f'*64,'destination':'application-turn:'+'d'*64}]
         self.clauses=[dict(clause_id=n,alternatives=[dict(descriptor_digest=str(n)*64,
             controls=sorted(self.controls[n-1].items()))],maximum_single_magnitude=1,total_magnitude_budget=1,
@@ -89,7 +89,7 @@ class ConsentTests(unittest.TestCase):
         now=time.time_ns()//1000000
         self.binding=dict(task=self.task,source='e'*64,installation='1'*64,manifest='2'*64,generation=1,
             not_before=now-1000,expires_at=now+120000)
-        self.profiles=[dict(descriptor_digest=str(n)*64,operation=self.contract.tool if n==1 else '/savana/final-result-release') for n in (1,2)]
+        self.profiles=[dict(descriptor_digest=str(n)*64,operation=self.step.tool if n==1 else '/savana/final-result-release') for n in (1,2)]
         self.context=SimpleNamespace(private_binding_json=lambda:json.dumps(self.binding),
             source_input_digest=bytes.fromhex('e'*64),tools_json=lambda:json.dumps(self.profiles))
 
@@ -126,7 +126,7 @@ class ConsentTests(unittest.TestCase):
             no_effect_magnitude_refund_permitted=False)
         if n==1:
             value.update(resource='primary',destination='private-result',exact_business_request=dict(jsonrpc='2.0',id='x',
-                method='tools/call',params=dict(name=self.contract.tool,arguments=self.contract.values())))
+                method='tools/call',params=dict(name=self.step.tool,arguments=self.step.value_map())))
         else:
             value.update(**self.controls[1],exact_business_request=dict(method='POST',path='/savana/final-result-release',
                 request_id='y',body={**self.controls[1],'payload':'aGVsbG8'}))

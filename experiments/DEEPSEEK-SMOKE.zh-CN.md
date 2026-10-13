@@ -16,6 +16,9 @@
   在服务器运行两条固定合成任务，通过 stdio 的带编号请求/回复接模型。
   该进程不读取 API key。远端请求必须由可信本地 relay 验证后才能外发。
 
+注：`DeepSeekRelay`（`savana_bench/deepseek_relay.py`）和 `savana_bench.remote_smoke`
+在提交 `e155076` 中仍存在，之后已移除；`one_trial(..., propose=...)` 仍在。
+
 stdio 帧以 `SAVANA_RELAY_V1 ` 开头，后跟 base64 编码 JSON。`proposal` 帧只
 包含 `call_id` 和封闭 payload。客户端回复一行 JSON，字段精确为
 `call_id, decision, usage, model`。不允许把远端字符串当 shell 命令或 endpoint。

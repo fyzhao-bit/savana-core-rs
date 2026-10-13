@@ -1,6 +1,5 @@
 """Synthetic operator/broker tests, never native acceptance or benchmark scores."""
 import asyncio
-import copy
 import json
 from pathlib import Path
 import tempfile
@@ -10,10 +9,10 @@ import unittest
 from unittest.mock import patch
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from savana_bench.agentdojo_provider import canonical
-from savana_bench.agentdojo_tasks import _TASKS, owner_document, prepare_draft
+from savana_bench.agentdojo_tasks import owner_document, prepare_draft
 from savana_bench.protected_auth import CeremonyQueue
 from savana_bench.protected_operator import FiniteOperator, retain
+from tests.test_drafted_tasks import one_read_contract
 
 
 class QueueTests(unittest.TestCase):
@@ -40,11 +39,11 @@ class QueueTests(unittest.TestCase):
         self.assertIsNone(queue.poll())
 
     def test_input_is_closed_and_complete(self):
-        for contract in _TASKS:
-            value=json.loads(owner_document(contract))
-            self.assertEqual(value['prompt'],contract.prompt)
-            self.assertEqual(sorted(value['inputs'],key=lambda x:x['slot']),value['inputs'])
-            self.assertEqual(len(value['inputs']),len(contract.values()))
+        contract=one_read_contract()
+        value=json.loads(owner_document(contract))
+        self.assertEqual(value['prompt'],contract.prompt)
+        self.assertEqual(sorted(value['inputs'],key=lambda x:x['slot']),value['inputs'])
+        self.assertEqual(len(value['inputs']),len(contract.steps()[0].value_map()))
 
 
 class OperatorTests(unittest.TestCase):
@@ -72,50 +71,26 @@ class OperatorTests(unittest.TestCase):
             with self.assertRaises(ValueError):retain(path,b'replacement')
             self.assertEqual(path.read_bytes(),b'original')
 
-    def test_compile_rejects_model_selected_plan(self):
-        contract=_TASKS[0];d=dict(installation=(b'i'*32).hex(),store=(b's'*32).hex(),planner=(b'p'*32).hex(),
-            application_turn=(b'u'*32).hex(),
-            descriptors={contract.tool:(b't'*32).hex(),'savana.final_result_release':(b'r'*32).hex()})
+    def test_only_a_forwarded_drafted_plan_is_signed_and_it_is_signed_unread(self):
+        contract=one_read_contract()
+        d=dict(installation=(b'i'*32).hex(),store=(b's'*32).hex())
         now=time.time_ns()//1000000
+        # Whatever the untrusted planner wrote, here a plan that drops the
+        # owner's final release: every decision on it is the kernel's.
         draft=prepare_draft(contract,task=b'a'*32,root=b'b'*32,observer=b'o'*32,tool_descriptor=b't'*32,
             release_descriptor=b'r'*32,application_turn=b'u'*32,planner=b'p'*32,model_profile=1,
             not_before=now,expires_at=now+120000)['planning_draft']
+        draft.update(final_release=None,final_result_source=None)
         command=dict(schema=1,installation=list(b'i'*32),store=list(b's'*32),request=list(b'q'*32),
             not_before=now,expires_at=now+120000,operation=dict(kind='compile_planning',task=list(b'a'*32),draft=draft))
-        request=dict(kind='compile',contract=contract.task_id,command=command)
+        request=dict(kind='compile',contract=contract.contract_id,command=command)
         with tempfile.TemporaryDirectory() as tmp:
             op=FiniteOperator(d,Ed25519PrivateKey.generate(),tmp)
             with patch.object(op,'_submit',return_value=dict(kind='planning_enrolled',task=list(b'a'*32),profile=list(b'f'*32))) as submit:
-                self.assertEqual(op.compile(request)['profile'],(b'f'*32).hex())
-                for mutation in ('public_view','tool','slot','turn'):
-                    changed=copy.deepcopy(request);plan=changed['command']['operation']['draft']
-                    if mutation=='public_view':plan['rounds'][0]['public_view']=[42]
-                    elif mutation=='tool':plan['operations'][0]['tool']='send_email'
-                    elif mutation=='turn':plan['final_release']['turn']=list(b'v'*32)
-                    else:plan['operations'][0]['bindings'][0]['slot']=[0]*16
-                    with self.assertRaises(ValueError):op.compile(changed)
-                self.assertEqual(submit.call_count,1)
-
-
-    def test_forward_mode_leaves_every_plan_decision_to_the_kernel(self):
-        from savana_bench.planner_authors import compromised_draft
-        contract=_TASKS[0];d=dict(installation=(b'i'*32).hex(),store=(b's'*32).hex(),planner=(b'p'*32).hex(),
-            application_turn=(b'u'*32).hex(),
-            descriptors={contract.tool:(b't'*32).hex(),'dojo.calendar.day':(b'y'*32).hex(),
-                         'savana.final_result_release':(b'r'*32).hex()})
-        now=time.time_ns()//1000000
-        ids=dict(task=b'a'*32,root=b'b'*32,observer=b'o'*32,application_turn=b'u'*32,planner=b'p'*32,
-            model_profile=1,not_before=now,expires_at=now+120000)
-        draft=compromised_draft('drop_release',contract=contract,release_descriptor=b'r'*32,
-            descriptors={contract.tool:b't'*32,'dojo.calendar.day':b'y'*32},**ids)
-        command=dict(schema=1,installation=list(b'i'*32),store=list(b's'*32),request=list(b'q'*32),
-            not_before=now,expires_at=now+120000,operation=dict(kind='compile_planning',task=list(b'a'*32),draft=draft))
-        request=dict(kind='compile',contract=contract.task_id,command=command)
-        with tempfile.TemporaryDirectory() as tmp:
-            op=FiniteOperator(d,Ed25519PrivateKey.generate(),tmp)
-            with patch.object(op,'_submit',return_value=dict(kind='planning_enrolled',task=list(b'a'*32),profile=list(b'f'*32))) as submit:
-                with self.assertRaises(Exception):op.compile(request)
-                with self.assertRaises(ValueError):op.compile(dict(request,mode='sign_anything'))
+                # No reviewed mode, no other mode, and only a planner-drafted contract label.
+                for refused in (request,dict(request,mode='reviewed'),dict(request,mode='sign_anything'),
+                                dict(request,mode='forward_untrusted_plan',contract='user_task_0')):
+                    with self.assertRaises(ValueError):op.compile(refused)
                 self.assertEqual(submit.call_count,0)
                 forwarded=dict(request,mode='forward_untrusted_plan')
                 self.assertEqual(op.compile(forwarded)['profile'],(b'f'*32).hex())

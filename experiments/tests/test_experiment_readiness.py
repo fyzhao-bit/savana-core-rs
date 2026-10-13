@@ -124,22 +124,28 @@ class ReadinessTests(unittest.TestCase):
 
     def test_launcher_does_not_open_model_key_or_enter_runner_before_start(self):
         from savana_bench import protected_launch as launch
-        config={}
+        config=dict(schema=3,provisioning=dict(installation='ab'*32))
         for role,prefix in {'provider':'provider','release_provider':'final-release','model_worker':'model'}.items():
             config[role]={field:launch.CREDENTIALS+'/'+prefix+suffix for field,suffix in (
                 ('certificate','-server.pem'),('private_key','-server.pk8.pem'),('client_ca','-client-ca.pem'))}
         config['model_worker']['socket']='synthetic-socket'
-        with patch.object(launch,'activation_fd',return_value=3), \
+        with patch.object(launch,'activation_fd',return_value=3) as activation, \
              patch.object(launch.os,'geteuid',return_value=993), \
              patch.object(launch,'load_config',return_value=config), \
+             patch('savana_bench.benchmark_identity.load_profile',return_value=dict(installation='ab'*32)), \
              patch('savana.fused_worker.inherited_listener'), \
              patch.object(launch.Path,'lstat',return_value=SimpleNamespace(st_mode=stat.S_IFDIR|0o700,st_uid=993)), \
              patch.object(launch,'open_auth_broker'), \
-             patch.object(launch,'wait_for_browser_start',side_effect=ValueError('not started')), \
+             patch.object(launch,'wait_for_browser_start',side_effect=ValueError('not started')) as start, \
              patch.object(launch,'open_model_credential') as key, \
-             patch.object(launch,'run') as run:
-            with self.assertRaises(ValueError):launch.main()
-            key.assert_not_called();run.assert_not_called()
+             patch('savana_bench.planner_experiment.run') as run:
+            # A run is one planner experiment: without one nothing is started.
+            for argv in ((),('--software-benchmark',),('--planner-experiment','drafted:banking:user_task_0')):
+                with self.assertRaises(ValueError):launch.main(argv)
+            activation.assert_not_called();start.assert_not_called()
+            with self.assertRaises(ValueError):
+                launch.main(('--software-benchmark','--planner-experiment','drafted:banking:user_task_0'))
+            start.assert_called_once();key.assert_not_called();run.assert_not_called()
 
     def test_model_credential_accepts_only_private_systemd_delivery_shapes(self):
         import struct

@@ -25,10 +25,6 @@ def _head(major, size):
     raise ValueError("frame_integer_bound")
 
 
-def _blob(major, value):
-    return _head(major, len(value)) + value
-
-
 def _hash(domain, value, *, length=False):
     return hashlib.sha256(domain + (len(value).to_bytes(8, "big") if length else b"") + value).digest()
 

@@ -111,4 +111,5 @@ python -m analysis.privacy_exposure --results results/local-container-20260930 \
 ```
 
 `privacy_exposure` 需要用运行时固定的源码版本（`d7be4da`）的 `savana_bench` 来重算。
+注：`analysis.privacy_exposure` 在提交 `e155076` 中仍存在，之后已从仓库移除。
 spec 写法：`drafted+view=masked+extract=quantities:<suite>:<items>`。

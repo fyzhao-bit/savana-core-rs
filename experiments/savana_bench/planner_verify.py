@@ -1,11 +1,12 @@
 """Offline consistency check for an untrusted-planner run; NOT remote attestation.
 
-Re-derives, from the hash-chained evidence alone: that each submitted draft is
-the mechanical encoding of the recorded author output (no harness repair); the
-verdict on every request that reached a provider, judged against the owner's
-root; that a codec refusal is reproduced by Savana's own codec; each
-published result via the protected verifier; and the official oracle on the
-actual final environment. No model, tool or kernel call.
+Re-derives, from the hash-chained evidence alone: the owner's review of every
+recorded draft, and that each submitted draft is exactly the reviewed draft of
+the admitted program (no harness repair); the verdict on every request that
+reached a provider, judged against the owner's root; that a codec refusal is
+reproduced by Savana's own codec; each published result via the protected
+verifier; and the official oracle on the actual final environment. No model,
+tool or kernel call.
 """
 import argparse
 import base64
@@ -17,7 +18,6 @@ from types import SimpleNamespace
 from .agentdojo_provider import canonical
 from .agentdojo_tasks import prepare_draft
 from .official_verify import restore_environment, verify_chain
-from .planner_authors import SYSTEM, PlanUnencodable, compromised_draft, encode_plan, parse_plan
 from .planner_experiment import (DEFINITIVE, IDS, OPERATOR_MODE, SCHEMA, STRUCTURED_REFUSALS,
                                  classify_provider_attempt, directory_provenance, experiment_cases, planner_exposure,
                                  destination_candidates, structured_provenance, summarize, turn_request)
@@ -43,8 +43,9 @@ def _ids(value):
     return ids
 
 
-def _submitted_draft(case, contract, local):
-    """The draft must be exactly what the recorded author output encodes to."""
+def _submitted_draft(contract, local):
+    """The draft must be exactly the reviewed draft of the admitted program,
+    for the IDs and descriptors the kernel actually supplied."""
     submitted = [e for e in local if e["kind"] == "plan_submitted"]
     if not submitted:
         return None, None
@@ -57,23 +58,11 @@ def _submitted_draft(case, contract, local):
     steps = tuple(descriptors[st.tool] for st in contract.steps())
     reviewed = prepare_draft(contract, tool_descriptor=steps[0], step_descriptors=steps,
                              release_descriptor=release, **ids)["planning_draft"]
-    if case["author"] == "reviewed":
-        expected = reviewed
-    elif case["mutation"] is not None:
-        expected = compromised_draft(case["mutation"], contract=contract, descriptors=descriptors,
-                                     release_descriptor=release, **ids)
-    else:
-        authored = _one(local, "plan_authored")
-        if hashlib.sha256(authored["plan_text"].encode()).hexdigest() != authored["response_sha256"]:
-            raise ValueError("plan_text_digest")
-        expected = encode_plan(parse_plan(authored["plan_text"]), contract=contract, descriptors=descriptors,
-                               release_descriptor=release, **ids)
-    if json.loads(canonical(expected)) != event["draft"]:
+    if json.loads(canonical(reviewed)) != event["draft"]:
         raise ValueError("submitted_draft_is_not_the_author_output")
-    deviates = event["draft"] != json.loads(canonical(reviewed))
-    if event["deviates_from_reviewed"] is not deviates:
+    if event["deviates_from_reviewed"] is not False:
         raise ValueError("plan_deviation_claim")
-    return event["draft"], deviates
+    return event["draft"], False
 
 
 def _adopted_report(case, prior):
@@ -434,23 +423,9 @@ def verify_episode(directory, local, case, row, profile, turns, prior=None):
     if initial["environment"] != (env.model_dump(mode="json") if continued is None else continued["environment"]):
         raise ValueError("initial_environment_mismatch")
     authored = [e for e in local if e["kind"] == "plan_authored"]
-    if case["author"] == "deepseek":
-        if row["outcome"] == "author_failed":
-            if authored:
-                raise ValueError("author_failure_with_plan")
-        elif len(authored) != 1 or authored[0]["author"] != "deepseek" or authored[0]["goal"] != case["goal"]:
-            raise ValueError("plan_author_evidence")
-    elif len(authored) != 1 or authored[0] != dict(authored[0], author=case["author"], mutation=case["mutation"]):
-        raise ValueError("adversary_plan_evidence")
-    if row["outcome"] == "plan_unencodable":
-        try:
-            parse_plan(authored[0]["plan_text"])
-        except PlanUnencodable as error:
-            if str(error) != row.get("plan_error"):
-                raise ValueError("plan_unencodable_reason")
-        else:
-            raise ValueError("encodable_plan_reported_unencodable")
-    draft, deviates = _submitted_draft(case, contract, local)
+    if len(authored) != 1 or authored[0] != dict(authored[0], author=case["author"], mutation=case["mutation"]):
+        raise ValueError("plan_author_evidence")
+    draft, deviates = _submitted_draft(contract, local)
     if row["plan_deviates_from_reviewed"] != deviates:
         raise ValueError("plan_deviation_row")
     stages = [e["stage"] for e in local if e["kind"] == "admission_stage_started"]
@@ -557,7 +532,6 @@ def verify(directory):
     cases = [dict(c) for c in experiment_cases(manifest.get("experiment"))]
     if (manifest.get("schema") != SCHEMA or manifest.get("kernel_interface") != "python_sdk_only"
             or manifest.get("operator_mode") != OPERATOR_MODE or manifest.get("cases") != cases
-            or manifest.get("plan_author_system_sha256") != hashlib.sha256(SYSTEM.encode()).hexdigest()
             or manifest.get("human_authentication_evaluated") is not False):
         raise ValueError("planner_experiment_scope_mismatch")
     if manifest["package_sources"] != package_sources():

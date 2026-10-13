@@ -2,16 +2,15 @@
 
 These checks need no agentdojo install: they pin the committed deployment
 artifact and the descriptor generator's expectations to the authoring catalog,
-so the provider (agentdojo_calendar), the Rust profile generator (which reads
+so the provider (dojo_provider), the Rust profile generator (which reads
 the committed JSON) and the task contracts can never silently drift apart.
 """
-import json
 import unittest
 from pathlib import Path
 
 from savana_bench.agentdojo_provider import canonical
 from savana_bench.agentdojo_tasks import (
-    MODEL_CATALOG, TOOL_CATALOG, WRITE_CATALOG, WRITE_VALIDATORS, _TASKS, catalog_json, upstream_for)
+    MODEL_CATALOG, TOOL_CATALOG, WRITE_CATALOG, WRITE_VALIDATORS, catalog_json, upstream_for)
 
 # The artifact assemble.py copies verbatim into etc/savana/read-tool-catalog-v04.json.
 COMMITTED = (Path(__file__).resolve().parents[2]
@@ -77,15 +76,6 @@ class ReadToolCatalogTests(unittest.TestCase):
             if field["type"] == "text_list":
                 self.assertIn(field["role"], {"destination", "parameter"})
             self.assertIn(field["role"], {"payload", "resource", "destination", "parameter"})
-
-    def test_every_contract_argument_set_matches_its_tool_catalog_params(self):
-        params = {name: set(p) for name, _, p in TOOL_CATALOG}
-        for contract in _TASKS:
-            self.assertIn(contract.tool, params, contract.task_id)
-            self.assertEqual({k for k, _ in contract.arguments}, params[contract.tool],
-                             contract.task_id)
-            self.assertEqual(contract.upstream_tool, upstream_for(contract.tool),
-                             contract.task_id)
 
     def test_the_generator_is_a_confined_send_tool_with_fixed_controls(self):
         # Sending an earlier result to a model provider is an outbound effect:
