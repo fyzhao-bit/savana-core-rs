@@ -72,10 +72,10 @@ def reviewed_clauses(contract, context, *, tool_descriptor, release_descriptor,
             raise ValueError("registered_descriptor_required")
         return selected[0]
     def fields(profile):
-        return sorted((f["name"], f["role"], f["type"]) for f in profile["fields"])
+        return sorted((f["name"], f["role"], f["type"], f.get("fixed")) for f in profile["fields"])
     release = registered(release_descriptor)
     if (release["effect"] != 7 or release["operation"] != "/savana/final-result-release"
-            or fields(release) != [("destination", 2, 1), ("resource", 1, 1)]):
+            or fields(release) != [("destination", 2, 1, None), ("resource", 1, 1, None)]):
         raise ValueError("reviewed_descriptor_profile_mismatch")
     def clause(number, descriptor, controls, after, derived=()):
         alternative = dict(descriptor_digest=descriptor.hex(),
@@ -89,8 +89,8 @@ def reviewed_clauses(contract, context, *, tool_descriptor, release_descriptor,
     for number, (step, descriptor) in enumerate(zip(steps, descriptors), 1):
         tool, reviewed = registered(descriptor), catalog_tool(step.tool)
         payload = [f["name"] for f in reviewed["fields"] if f["role"] == "payload"]
-        expected = sorted((f["name"], ROLE_CODES[f["role"]], TYPE_CODES[f["type"]]) for f in reviewed["fields"]
-                          if f["role"] != "payload")
+        expected = sorted((f["name"], ROLE_CODES[f["role"]], TYPE_CODES[f["type"]], f.get("fixed"))
+                          for f in reviewed["fields"] if f["role"] != "payload")
         if (tool["name"] != step.tool or tool["operation"] != step.tool
                 or tool["effect"] != EFFECT_CODES[reviewed["effect"]] or fields(tool) != expected):
             raise ValueError("reviewed_descriptor_profile_mismatch")
@@ -116,13 +116,14 @@ class PlanningRequest:
     authoring: bytes = field(repr=False)
 
 
-async def provision_owner_episode(*, contract, deployment, broker, operator, model_profile=1,
-                                  progress=lambda stage: None, consent=None, plan_author=None,
-                                  operator_mode='reviewed'):
+async def provision_owner_episode(*, contract, deployment, broker, operator, plan_author, model_profile=1,
+                                  progress=lambda stage: None, consent=None):
     """One actual task from authenticated ingress through native recipe admission.
 
     Random values below are request/scope IDs, never task/run/root identities.
-    Default user decisions go to the real broker. An explicit experimental
+    The operator signs the planner's draft unread (`forward_untrusted_plan`);
+    the kernel compiles it against the owner's root. Default user decisions
+    go to the real broker. An explicit experimental
     consent policy can approve only its finite catalog; it is not human consent.
     An exception closes
     local capabilities only, leaving the original task/receipt for recovery.
@@ -163,16 +164,15 @@ async def provision_owner_episode(*, contract, deployment, broker, operator, mod
                 consent=consent,plan_author=plan_author,
                 descriptors={k:digest32(v) for k,v in deployment['descriptors'].items()})
             progress('operator_compile')
-            compile_request=dict(kind='compile',contract=contract.contract_id,command=json.loads(request.command))
-            if operator_mode!='reviewed':
-                compile_request['mode']=operator_mode
+            compile_request=dict(kind='compile',mode='forward_untrusted_plan',contract=contract.contract_id,
+                                 command=json.loads(request.command))
             try:
                 compiled=await asyncio.to_thread(operator.exchange,compile_request)
             except RuntimeError as error:
                 # An untrusted plan gets one EXACT replay of the retained signed
                 # bytes, so a refusal is told apart from a lost reply. Never a
                 # new request, root or task.
-                if operator_mode=='reviewed' or getattr(error,'stage',None)!='kernel': raise
+                if getattr(error,'stage',None)!='kernel': raise
                 progress('operator_compile_replay')
                 compiled=await asyncio.to_thread(operator.exchange,compile_request)
             if compiled['task_id']!=request.task_id.hex(): raise ValueError('operator_task_mismatch')

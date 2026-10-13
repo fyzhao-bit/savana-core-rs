@@ -8,10 +8,10 @@ from types import SimpleNamespace
 import unittest
 
 from savana_bench.agentdojo_provider import canonical, decode
-from savana_bench.agentdojo_tasks import (GENERATED_ITEMS, GENERATED_TEXT, LIST, apply_compute, edge_value,
-                                          expected_step_call, owner_document, owner_inputs, prepare_draft,
+from savana_bench.agentdojo_tasks import (GENERATED_ITEMS, GENERATED_TEXT, LIST, apply_compute, catalog_tool, edge_value,
+                                          expected_step_call, owner_document, prepare_draft,
                                           register_drafted, signed_edge)
-from savana_bench.drafted_tasks import (EXTRACT_TOOL, MAX_STEPS, ProgramRefused, RESULT_PREFIX, owner_amounts,
+from savana_bench.drafted_tasks import (EXTRACT_TOOL, MAX_STEPS, ProgramRefused, owner_amounts,
                                         owner_normalized, owner_text, parse_program_text, review_program)
 
 IDS = dict(task=b"t" * 32, root=b"r" * 32, observer=b"o" * 32, application_turn=b"a" * 32,
@@ -26,10 +26,10 @@ def suite_and_task(name, task_id):
     return suite, suite.get_user_task_by_id(task_id)
 
 
-def review(name, task_id, program):
+def review(name, task_id, program, calc=False):
     suite, task = suite_and_task(name, task_id)
     return review_program(suite=name, suite_tools={t.name for t in suite.tools}, task_id=task_id,
-                          prompt=task.PROMPT, program=program)
+                          prompt=task.PROMPT, program=program, calc=calc)
 
 
 def text(value):
@@ -90,14 +90,24 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(contract.document()["origin"], "owner_text")
         register_drafted(contract)
         document = json.loads(owner_document(contract))
-        self.assertEqual(document["schema"], 2)
+        self.assertEqual(document["schema"], 3)
         self.assertEqual(document["origin"], "owner_text")
-        self.assertEqual(set(document["constants"]), {"primary", "private-result", "deepseek-flash",
-                                                      "dojo.slack.send_channel.text", "1", "always"})
+        # Each declared constant is bound to exactly the fields it fills; a
+        # deployment-fixed control ("primary", "private-result") is not one.
+        self.assertEqual(document["constants"], [
+            {"value": "1", "fields": [{"operation": EXTRACT_TOOL, "field": "source"}]},
+            {"value": "always", "fields": [{"operation": "dojo.slack.send_channel", "field": "when"}]},
+            {"value": "deepseek-flash", "fields": [{"operation": EXTRACT_TOOL, "field": "model"}]},
+            {"value": "dojo.slack.send_channel.text", "fields": [{"operation": EXTRACT_TOOL, "field": "target"}]}])
         self.assertEqual(extract.value_map()["source"], "1")
-        # Every committed input is owner text or a declared constant.
-        for row in owner_inputs(contract):
-            self.assertTrue(owner_text(row["text"], contract.prompt) or row["text"] in document["constants"])
+        # Every committed input is owner text, a constant bound to its field,
+        # or the field's deployment-fixed value.
+        bound = {(c["value"], f["operation"], f["field"]) for c in document["constants"] for f in c["fields"]}
+        for number, step in enumerate(contract.steps(), 1):
+            fixed = {f["name"]: f.get("fixed") for f in catalog_tool(step.tool)["fields"]}
+            for name, value in step.values:
+                self.assertTrue(value == "" or owner_text(value, contract.prompt)
+                                or (value, step.tool, name) in bound or fixed[name] == value, (number, name))
         d = prepare_draft(contract, tool_descriptor=b"d" * 32, step_descriptors=(b"d" * 32, b"x" * 32, b"s" * 32),
                           release_descriptor=b"f" * 32, **IDS)["planning_draft"]
         self.assertEqual([o["clause"] for o in d["operations"]], [1, 2, 3])
@@ -425,29 +435,44 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual([r["invoked"] for r in provider.audit], [True, True, True])
         self.assertEqual(decode(results[1])["result"]["structuredContent"]["savana_status"], "succeeded")
 
-    def run_program(self, name, task_id, program, generator):
+    def run_program(self, name, task_id, program, generator, model_codec="mcp", calc=False):
+        """The episode as the kernel and its executor run it against the
+        researcher endpoint: an operation the executor answers itself (a
+        closed gate, a computation) never reaches the endpoint; a model call
+        under the model codec goes out masked and is retained unmasked."""
+        from savana_bench.agentdojo_provider import response
+        from savana_bench.agentdojo_tasks import LOCAL_REQUEST_ID, executor_local_text, expected_wire_params
         from savana_bench.dojo_provider import dojo_provider
         from savana_bench.planner_experiment import classify_provider_attempt
         from savana_bench.protected_endpoint import EpisodeEndpoint
+        from savana_bench.value_blind import unmask_model_reply
         suite, task = suite_and_task(name, task_id)
-        contract = register_drafted(review(name, task_id, program))
+        contract = register_drafted(review(name, task_id, program, calc=calc))
         env = task.init_environment(suite.load_and_inject_default_environment({}))
         provider = dojo_provider(suite, env, max_calls=len(contract.steps()), generator=generator)
         endpoint = EpisodeEndpoint(contract=contract, provider=provider, binding=BINDING,
                                    tool_url="https://tool/", release_url="https://release/",
-                                   emit=lambda kind, **data: None)
-        results = []
+                                   emit=lambda kind, **data: None, model_codec=model_codec)
+        results = []  # every operation's result as the kernel retains it
         for number in range(len(contract.steps())):
-            params = expected_step_call(contract, number, results)
+            text = executor_local_text(contract, number, results)
+            if text is not None:
+                results.append(response(LOCAL_REQUEST_ID, "succeeded", text))
+                continue
+            params, masker = expected_wire_params(contract, number, results, model_codec)
             payload = canonical({"jsonrpc": "2.0", "id": f"s{number}", "method": "tools/call", "params": params})
             self.assertEqual(classify_provider_attempt(payload, contract=contract, resource="66" * 32,
-                                                       application_turn="55" * 32, prior_results=tuple(results)),
+                                                       application_turn="55" * 32, prior_results=tuple(results),
+                                                       model_codec=model_codec),
                              "authorized_tool")
             frame = SimpleNamespace(nonce=bytes([number + 1]) * 32, wire_digest=hashlib.sha256(payload).digest(),
                                     core=b"c" * 32, subject=b"s" * 32, url="https://tool/", pin=b"p" * 32,
                                     payload=payload)
-            results.append(endpoint.exchange(frame))
-            self.assertEqual(decode(results[-1])["result"]["structuredContent"]["savana_status"], "succeeded")
+            reply = endpoint.exchange(frame)
+            self.assertEqual(decode(reply)["result"]["structuredContent"]["savana_status"], "succeeded")
+            results.append(reply if masker is None else unmask_model_reply(masker, reply))
+        retained = endpoint.completed_results()
+        self.assertEqual(results[:len(retained)], retained)
         return env, results
 
     def test_a_forged_derived_value_never_reaches_the_provider(self):

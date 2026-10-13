@@ -1,7 +1,5 @@
 import concurrent.futures
-import copy
 import importlib.util
-import json
 import unittest
 
 from savana_bench.agentdojo_provider import AgentDojoProvider, canonical, decode, synthetic_mail_provider

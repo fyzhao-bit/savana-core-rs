@@ -2,7 +2,6 @@
 review, the adapter's reply rule and the edge paths, end to end through the
 reviewed provider with a fake extractor in place of the model."""
 import hashlib
-import json
 import unittest
 from types import SimpleNamespace
 

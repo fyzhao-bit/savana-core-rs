@@ -27,6 +27,10 @@ class ReadToolCatalogTests(unittest.TestCase):
         for suite in SUITES:
             path = COMMITTED.with_name(f"read-tool-catalog-v04-{suite}.json")
             self.assertEqual(path.read_bytes(), canonical(catalog_json(suite)), suite)
+            # The same suite with the model tools on the model codec (the
+            # executor masks their arguments): the `masked` extractor view.
+            masked = COMMITTED.with_name(f"read-tool-catalog-v04-{suite}-masked.json")
+            self.assertEqual(masked.read_bytes(), canonical(catalog_json(suite, "mcp_model")), suite)
 
     def test_catalog_json_structure_is_closed(self):
         doc = catalog_json()
@@ -35,7 +39,12 @@ class ReadToolCatalogTests(unittest.TestCase):
         self.assertEqual([t["operation"] for t in doc["read_tools"]][:len(TOOL_CATALOG)],
                          [name for name, _, _ in TOOL_CATALOG])
         for tool in doc["read_tools"]:
-            self.assertEqual(set(tool), {"operation", "effect", "fixed_magnitude", "fields"})
+            # The compute step is the executor's own evaluation; every other
+            # read goes to the provider on the plain codec.
+            compute = tool["operation"] == "dojo.compute.table"
+            self.assertEqual(set(tool), {"operation", "effect", "fixed_magnitude", "fields"} | (
+                {"codec"} if compute else set()))
+            self.assertEqual(tool.get("codec"), "table_compute" if compute else None)
             self.assertEqual(tool["effect"], "read")
             self.assertEqual(tool["fixed_magnitude"], 1)
             self._check_fields(tool["fields"])
@@ -50,6 +59,7 @@ class ReadToolCatalogTests(unittest.TestCase):
         for tool in doc["write_tools"]:
             self.assertEqual(set(tool),
                              {"operation", "effect", "fixed_magnitude", "validators", "fields"})
+            # The plain catalog ships the model tools on the plain codec.
             # A write tool is authorizing (never "read") and must require the
             # intent-flow-confinement validator so an untrusted-derived argument
             # escalates to owner approval at G5.
@@ -69,28 +79,38 @@ class ReadToolCatalogTests(unittest.TestCase):
         if synthetic:
             self.assertEqual(roles["body"], "payload")
             self.assertEqual(roles["to"], "destination")
+        if synthetic:
+            # A synthetic control carries its deployment-fixed value.
+            self.assertEqual({f["name"]: f.get("fixed") for f in fields if f["name"] in ("body", "to")},
+                             {"body": "", "to": "private-result"})
         for field in fields:
-            self.assertEqual(set(field), {"name", "role", "type"})
+            self.assertLessEqual({"name", "role", "type"}, set(field))
+            self.assertLessEqual(set(field), {"name", "role", "type", "fixed"})
             # A text list only where the reviewed kind is a list.
             self.assertIn(field["type"], {"text", "text_list"})
             if field["type"] == "text_list":
-                self.assertIn(field["role"], {"destination", "parameter"})
-            self.assertIn(field["role"], {"payload", "resource", "destination", "parameter"})
+                self.assertIn(field["role"], {"destination", "copy_destination", "parameter"})
+                self.assertNotIn("fixed", field)
+            self.assertIn(field["role"], {"payload", "resource", "destination", "copy_destination", "parameter",
+                                          "condition"})
 
-    def test_the_generator_is_a_confined_send_tool_with_fixed_controls(self):
+    def test_the_extractor_is_a_confined_send_tool_with_fixed_controls(self):
         # Sending an earlier result to a model provider is an outbound effect:
         # it ships as SEND with confinement, never as a silent read.
-        (name, upstream, effect, fields), (xname, xupstream, xeffect, xfields) = MODEL_CATALOG
-        self.assertEqual((name, upstream, effect), ("dojo.model.generate", "quarantined_generate", "send"))
-        self.assertEqual(dict(fields), {"body": "payload", "instruction": "parameter",
-                                        "model": "resource", "to": "destination"})
-        self.assertEqual(upstream_for(name), "quarantined_generate")
-        # The extractor for planner-drafted programs: same model, one more
-        # inert label naming the value it must produce, and the payload's step.
-        self.assertEqual((xname, xupstream, xeffect), ("dojo.model.extract", "quarantined_extract", "send"))
-        self.assertEqual(dict(xfields), dict(fields, target="parameter", context="parameter", context2="parameter",
-                                             context3="parameter", context4="parameter", context5="parameter",
-                                             question="parameter", source="parameter"))
+        (name, upstream, effect, fields), = MODEL_CATALOG
+        self.assertEqual((name, upstream, effect), ("dojo.model.extract", "quarantined_extract", "send"))
+        self.assertEqual(upstream_for(name), "quarantined_extract")
+        # The owner's instruction, an inert label naming the value it must
+        # produce, the payload's step, up to five contexts and a condition.
+        self.assertEqual(dict(fields), dict(body="payload", instruction="parameter", model="resource",
+                                            to="destination", target="parameter", context="parameter",
+                                            context2="parameter", context3="parameter", context4="parameter",
+                                            context5="parameter", question="parameter", source="parameter"))
+        for codec in ("mcp", "mcp_model"):
+            tool, = [t for t in catalog_json("banking", codec)["write_tools"] if t["operation"] == name]
+            self.assertEqual(tool.get("codec"), None if codec == "mcp" else "mcp_model")
+            self.assertEqual({f["name"]: f.get("fixed") for f in tool["fields"] if "fixed" in f},
+                             {"to": "private-result"})
 
     def test_upstream_functions_are_the_reviewed_read_set(self):
         # Exactly the official AgentDojo workspace read functions we serve.

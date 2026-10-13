@@ -20,9 +20,13 @@ class ContextFixture:
             not_before=100, expires_at=200000))
 
     def tools_json(self):
+        from savana_bench.agentdojo_tasks import ROLE_CODES, TYPE_CODES, catalog_tool
         step, = one_read_contract().steps()
-        fields = [dict(name=k, role={'calendar':1, 'to':2}.get(k,5), type=1)
-            for k in step.value_map() if k != 'body']
+        # The registered profile's non-payload fields, each deployment-fixed
+        # control with its value, as the native context lists them.
+        fields = [dict(name=f['name'], role=ROLE_CODES[f['role']], type=TYPE_CODES[f['type']],
+                       **({'fixed': f['fixed']} if 'fixed' in f else {}))
+                  for f in catalog_tool(step.tool)['fields'] if f['role'] != 'payload']
         return json.dumps([dict(descriptor_digest=(b'd'*32).hex(),name=step.tool,
             effect=1, operation=step.tool, fields=fields),
             dict(descriptor_digest=(b'f'*32).hex(),name='result.release',effect=7,
@@ -67,7 +71,7 @@ class SetupTests(unittest.TestCase):
         with patch('savana.owner_ingress.connect',fail_connect):
             with self.assertRaises(RuntimeError):
                 asyncio.run(provision_owner_episode(contract=None,deployment={},broker=broker,
-                    operator=None,progress=stages.append))
+                    operator=None,plan_author=None,progress=stages.append))
         self.assertEqual(broker.calls,1)
         self.assertEqual(stages,['owner_bootstrap','owner_authentication'])
 

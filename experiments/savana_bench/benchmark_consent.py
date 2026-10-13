@@ -70,12 +70,14 @@ DISPOSITIONS = ('require_approval', 'permit')
 
 
 def _chosen_by_data(step):
-    """The derived fields of a step that choose where its call goes: the
-    destination of its tool, or an owner-only address (a fetched URL, cc, bcc)."""
+    """The derived fields of a step that choose where its call goes: a
+    destination-class field of its tool (the destination, cc, bcc), or an
+    owner-only address (a fetched URL)."""
     from .drafted_tasks import OWNER_ONLY_READ_FIELDS, OWNER_ONLY_WRITE_FIELDS
-    destination = _roles(step)[2]
+    addressing = {f["name"] for f in catalog_tool(step.tool)["fields"]
+                  if f["role"] in ("destination", "copy_destination")}
     return [field for field, *_ in step.edges()
-            if field == destination or (step.tool, field) in OWNER_ONLY_READ_FIELDS | OWNER_ONLY_WRITE_FIELDS]
+            if field in addressing or (step.tool, field) in OWNER_ONLY_READ_FIELDS | OWNER_ONLY_WRITE_FIELDS]
 
 
 class FiniteConsent:

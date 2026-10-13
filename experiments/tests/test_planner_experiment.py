@@ -163,7 +163,7 @@ class VerifierTests(unittest.TestCase):
 
 
 class ReplayTests(unittest.TestCase):
-    def provision(self, mode, failures):
+    def provision(self, failures):
         from savana_bench.protected_setup import provision_owner_episode
         contract = one_read_contract()
         calls, stages = [], []
@@ -202,25 +202,25 @@ class ReplayTests(unittest.TestCase):
         with patch("savana.owner_ingress.connect", connect), \
              patch("savana_bench.protected_setup.authorize_and_prepare", authorize):
             asyncio.run(provision_owner_episode(contract=contract, deployment=deployment, broker=Broker(),
-                operator=Operator(), progress=stages.append, consent=lambda r: True, operator_mode=mode))
+                operator=Operator(), plan_author=lambda contract, ids: {}, progress=stages.append,
+                consent=lambda r: True))
         return calls, stages
 
     def test_untrusted_plan_gets_one_exact_replay_of_a_kernel_non_confirmation(self):
-        calls, stages = self.provision("forward_untrusted_plan", [OperatorNotConfirmed("kernel")])
+        calls, stages = self.provision([OperatorNotConfirmed("kernel")])
         compiles = [c for c in calls if c["kind"] == "compile"]
         self.assertEqual(len(compiles), 2)
         self.assertEqual(compiles[0], compiles[1])
         self.assertEqual(compiles[0]["mode"], "forward_untrusted_plan")
         self.assertIn("operator_compile_replay", stages)
         with self.assertRaises(OperatorNotConfirmed):
-            self.provision("forward_untrusted_plan", [OperatorNotConfirmed("kernel"), OperatorNotConfirmed("kernel")])
+            self.provision([OperatorNotConfirmed("kernel"), OperatorNotConfirmed("kernel")])
 
-    def test_no_replay_for_reviewed_plans_or_operator_failures(self):
-        for mode, stage in (("reviewed", "kernel"), ("forward_untrusted_plan", "operator"),
-                            ("forward_untrusted_plan", None)):
+    def test_no_replay_for_operator_failures(self):
+        for stage in ("operator", None):
             failures = [OperatorNotConfirmed(stage)]
             with self.assertRaises(OperatorNotConfirmed):
-                self.provision(mode, failures)
+                self.provision(failures)
             self.assertEqual(failures, [])
 
     def test_operator_reports_kernel_non_confirmation_as_its_own_stage(self):

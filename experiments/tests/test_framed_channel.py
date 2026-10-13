@@ -6,7 +6,7 @@ import sys
 import unittest
 
 from savana_bench.framed_channel import (
-    CLIENT_PREFIX, SERVER_PREFIX, CHUNK_BYTES, MAX_LINE_BYTES,
+    CLIENT_PREFIX, SERVER_PREFIX, MAX_LINE_BYTES,
     MAX_MESSAGE_BYTES, Encoder, Decoder, canonical,
 )
 

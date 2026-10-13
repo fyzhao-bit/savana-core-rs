@@ -31,9 +31,11 @@ declares itself: its own dates and times restated as YYYY-MM-DD[ HH:MM], a
 boolean or a sharing permission, or a search term / count for a READ tool (never
 a URL, which is itself an outbound channel). The extractor's instruction is
 always the owner's whole request. The kernel enforces the rule itself on the
-schema-2 owner document (a value outside the request and the owner's declared
-constants fails before any operation runs) and every signed edge at prepare and
-dispatch.
+schema-3 owner document before any operation runs: every input is request
+text for every field it fills (a destination, cc or bcc only as a whole token
+of the request), or a constant the owner bound to exactly that operation and
+field (never a destination); a deployment-fixed field takes only its fixed
+value. Every signed edge is enforced again at prepare and dispatch.
 """
 from dataclasses import dataclass
 import decimal
@@ -43,10 +45,11 @@ import re
 import unicodedata
 
 from .agentdojo_provider import canonical
-from .agentdojo_tasks import (BENCHMARK, CALENDAR_YEAR, GENERATED_ITEMS, GENERATED_MAX_BYTES, GENERATED_TEXT,
+from .agentdojo_tasks import (BENCHMARK, CALENDAR_YEAR, GENERATED_ITEMS, GENERATED_TEXT,
                               GENERATOR_MODEL, LIST, PACKAGE_VERSION, Step, catalog_tool, edge_document,
                               upstream_for)
-from .dojo_catalog import (GUARD_ALWAYS, GUARD_FIELD, LIST_KINDS, LIST_SEPARATOR, SENTINELS, decode_argument, entry,
+from .dojo_catalog import (COMPUTED_SOURCE, GUARD_ALWAYS, GUARD_FIELD, LIST_KINDS, LIST_SEPARATOR, SENTINELS,
+                           decode_argument, entry,
                            suite_operations)
 from .dojo_compute import (CALC, COMPUTE_TOOL, FIELDS as COMPUTE_FIELDS, INPUT_FIELDS, ComputeSpecError,
                            calc_constants, validate_spec)
@@ -104,8 +107,11 @@ MAX_LIST_ITEMS = 32
 def review_policy():
     """What the owner's fixed review admits, as a document an armed benchmark
     batch binds (the programs themselves are drafted per episode)."""
-    return {"schema": "savana-drafted-review-v1", "max_steps": MAX_STEPS, "literals": "owner_text",
-            "destinations": "owner_text_only", "write_destination": "always named, even where optional",
+    return {"schema": "savana-drafted-review-v2", "max_steps": MAX_STEPS, "literals": "owner_text",
+            "destinations": "owner text, each item a whole token of the request (cc and bcc too); never a constant",
+            "constants": "each bound to the (operation, field) it fills; fixed synthetic fields are the "
+                         "deployment's, not constants",
+            "write_destination": "always named, even where optional",
             "edges": "earlier_steps_only", "extract_tool": EXTRACT_TOOL,
             "multi_field_extraction": f"{MULTI_FIELDS[0]}-{MULTI_FIELDS[1]} non-list fields of one operation, "
                                       "each used through its own edge by name",
@@ -124,7 +130,9 @@ def review_policy():
                         "output": "data: never a destination, used only through a signed edge",
                         "calc": "only where the run allows it: exact arithmetic on the first number of each "
                                 "input (#1..#4) with + - * / ( ) min max, no filter or order; every number it "
-                                "writes is stated in the request, or is 2 or 100"}}
+                                "writes is stated in the request, or is 2 or 100; an extraction of a computation "
+                                "names its source <step>:computed",
+                        "evaluated_by": "the kernel's executor (codec TableComputeV1), never a provider"}}
 
 
 class ProgramRefused(ValueError):
@@ -160,6 +168,57 @@ def owner_text(text, prompt):
         return True
     request = folded(prompt)
     return all(folded(item) and folded(item) in request for item in text.split(LIST_SEPARATOR))
+
+
+# Characters that join the parts of one address ("alice.bob@x.com",
+# "www.x.com/page"); any other non-alphanumeric character separates tokens.
+_JOINS = frozenset(".@-_/:+%#~=&?")
+
+
+def _continues(side, after=False):
+    """Whether the characters on one side of a match (nearest first) continue
+    it: a letter or digit, directly or after one joining character. After the
+    match, a period and then a capital letter end a sentence written without a
+    space ("... www.x.com.They ..."): host names and addresses are lower case."""
+    first = next(side, None)
+    if first is None:
+        return False
+    if first.isalnum():
+        return True
+    if first in _JOINS:
+        second = next(side, None)
+        if after and first == "." and second is not None and second.isupper():
+            return False
+        return second is not None and second.isalnum()
+    return False
+
+
+def owner_token(item, prompt):
+    """One destination item as the kernel accepts it: request text that is a
+    whole token of the request (it cannot be extended by a letter or digit on
+    either side, directly or after a joining character), compared NFC with
+    whitespace folded. So "bob@company.co" is not taken from "bob@company.com"
+    (the kernel's `contains_whole_token`)."""
+    if type(item) is not str:
+        return False
+    request, needle = folded(prompt), folded(item)
+    if not any(ch.isalnum() for ch in needle):
+        return False
+    start = request.find(needle)
+    while start != -1:
+        if (not _continues(iter(reversed(request[:start])))
+                and not _continues(iter(request[start + len(needle):]), after=True)):
+            return True
+        start = request.find(needle, start + len(needle))
+    return False
+
+
+def owner_destination(text, prompt):
+    """A destination text as the kernel accepts it: empty, a whole-token
+    item, or every "; "-separated item a whole-token item."""
+    if type(text) is not str:
+        return False
+    return text == "" or owner_token(text, prompt) or all(owner_token(i, prompt) for i in text.split(LIST_SEPARATOR))
 
 
 _MONTHS = {m: i for i, m in enumerate(("january", "february", "march", "april", "may", "june", "july", "august",
@@ -297,15 +356,38 @@ class DraftedContract:
         return self.chain
 
     def constants(self):
-        """Owner-declared non-request values: the deployment's fixed synthetic
-        controls and the extraction labels this program names."""
-        values = {SENTINELS["calendar"], SENTINELS["to"], *self.restated}
+        """Owner-declared non-request values: the values the review restated
+        or accepted, the extraction labels this program names, and the
+        `always` gate. The deployment's fixed synthetic controls are not
+        constants: the kernel holds each fixed field to its own value."""
+        values = set(self.restated)
         for step in self.chain:
             if step.tool == EXTRACT_TOOL:
                 values |= {step.value_map()[k] for k in ("model", "target", "source")}
             elif step.value_map().get(GUARD_FIELD) == GUARD_ALWAYS:
                 values.add(GUARD_ALWAYS)
         return sorted(values)
+
+    def bound_constants(self):
+        """`constants()` as the owner document declares them: each value with
+        every (operation, field) of this program it fills, so the kernel
+        accepts it there and nowhere else. A destination-class field never
+        takes a constant (the kernel refuses one even if bound), so none is
+        bound to one."""
+        values = set(self.constants())
+        places = {}
+        for step in self.chain:
+            fields = {field["name"]: field for field in catalog_tool(step.tool)["fields"]}
+            for name, value in step.values:
+                field = fields[name]
+                if "fixed" in field or field["role"] in ("destination", "copy_destination"):
+                    continue
+                for item in (value if type(value) is tuple else (value,)):
+                    if item in values:
+                        places.setdefault(item, set()).add((step.tool, name))
+        return [{"value": value, "fields": [{"operation": operation, "field": field}
+                                            for operation, field in sorted(places[value])]}
+                for value in sorted(places)]
 
     def document(self):
         return {"schema": "savana-agentdojo-drafted-chain-v1", "benchmark": BENCHMARK, "suite": self.suite,
@@ -543,9 +625,20 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                 conditions.add(number)
             # The extractor's instruction is always the owner's whole request;
             # whatever the planner wrote there is not used.
+            # Where the run allows exact arithmetic, an extraction of a
+            # computation says so in its signed source (the extractor states
+            # that value as given).
+            computed = calc and kinds[source - 1] == "compute"
             values = {"instruction": folded(prompt), "target": target[1], "model": extractor_model,
-                      "to": SENTINELS["to"], "source": str(source), "question": question}
-            payload_from = source
+                      "to": SENTINELS["to"], "source": f"{source}{COMPUTED_SOURCE}" if computed else str(source),
+                      "question": question}
+            if kinds[source - 1] == "compute":
+                # A computation is answered by the kernel's executor itself; the
+                # payload is its text, by a signed edge (never the reply's
+                # envelope, whose request id only the kernel knows).
+                derived.append(("body", source, GENERATED_TEXT, MAX_ANSWER_BYTES))
+            else:
+                payload_from = source
             # Up to MAX_CONTEXTS other earlier steps as context, one signed edge
             # each, so one answer can combine several results.
             raw_contexts = args.get("context")
@@ -697,11 +790,14 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                     values[name] = () if listed else ""
                     continue
                 origin = _origin(args[name])
+                # A destination (cc and bcc too) is the owner's own words, a
+                # whole token of the request; never a declared constant.
+                addressing = role in ("destination", "copy_destination")
                 if origin[0] in ("text", "items"):
                     if not listed:
                         if origin[0] == "items":
                             _refuse("field_origin")
-                        if not owned(origin[1]):
+                        if not (owner_destination(origin[1], prompt) if addressing else owned(origin[1])):
                             _refuse("literal_not_owner_text")
                         if not decodable(origin[1]):
                             _refuse("literal_kind")
@@ -714,14 +810,15 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                     if (len(items) > MAX_LIST_ITEMS or any(type(i) is not str or not i or i != i.strip()
                                                            for i in items)):
                         _refuse("literal_list")
-                    if not all(owner_item(i, prompt) or (owned(i) and LIST_SEPARATOR not in i) for i in items):
+                    if not all(owner_token(i, prompt) if addressing
+                               else owner_item(i, prompt) or (owned(i) and LIST_SEPARATOR not in i) for i in items):
                         _refuse("literal_not_owner_text")
                     if items and not decodable(tuple(items)):
                         _refuse("literal_kind")
                     values[name] = tuple(items)
                     continue
                 if (not derived_destinations
-                        and (role == "destination" or (tool, name) in OWNER_ONLY_READ_FIELDS | OWNER_ONLY_WRITE_FIELDS)):
+                        and (addressing or (tool, name) in OWNER_ONLY_READ_FIELDS | OWNER_ONLY_WRITE_FIELDS)):
                     # Whom a write reaches, or which address a fetch contacts,
                     # is never chosen by data an injection could control.
                     _refuse("derived_destination")

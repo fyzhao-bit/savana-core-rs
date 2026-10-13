@@ -48,7 +48,14 @@ class CatalogShapeTests(unittest.TestCase):
             for role in ("resource", "destination", "payload"):
                 self.assertEqual(roles.count(role), 1, (tool["operation"], role))
             for name, role, upstream, kind in tool["fields"]:
-                self.assertIn(role, ("resource", "destination", "payload", "parameter"))
+                self.assertIn(role, ("resource", "destination", "payload", "parameter", "condition",
+                                     "copy_destination"))
+                # The kernel's own roles: the one condition gate, and a cc/bcc
+                # list (an addressing field, held to the destination rules).
+                self.assertEqual(role == "condition", kind == "guard", (tool["operation"], name))
+                if role == "copy_destination":
+                    self.assertIn(name, ("cc", "bcc"))
+                    self.assertIn(kind, ("list", "opt_list"))
                 self.assertTrue(kind == "fixed" or kind in KINDS)
                 # Fixed controls and the condition gate are never forwarded.
                 self.assertEqual(kind in ("fixed", "guard"), upstream is None)

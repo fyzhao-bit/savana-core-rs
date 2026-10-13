@@ -34,15 +34,22 @@ the recipients, channel, user, URL or account a write discloses to or acts on.
 The eight tools of the original workspace catalog keep their exact names and
 fields; everything else is added beside them.
 
-Every other write carries one more field, `when` (kind `guard`): the owner's
-condition gate. It is the owner constant GUARD_ALWAYS, or an owner-signed edge
-from an extraction that answered yes or no to a condition the owner's request
-states. The adapter performs the official call only when the gate is
-GUARD_ALWAYS or exactly "yes" (case and final punctuation aside); otherwise it
-does nothing and says so. The kernel binds the gate like every other field, so
-a condition can only decide WHETHER an owner-signed effect happens, never what
-it does or whom it reaches. The gate is never forwarded to the official
-function.
+Every other write carries one more field, `when` (kind `guard`, kernel role
+`condition`): the owner's condition gate. It is the owner constant
+GUARD_ALWAYS, or an owner-signed edge from an extraction that answered yes or
+no to a condition the owner's request states. The kernel's executor performs
+the call only when the gate is GUARD_ALWAYS or a yes (`guard_holds`, the
+kernel's `condition_holds_v2`); otherwise it answers SKIPPED itself and never
+contacts this provider. The kernel binds the gate like every other field, so a
+condition can only decide WHETHER an owner-signed effect happens, never what it
+does or whom it reaches. The gate is never forwarded to the official function;
+an adapter that receives a gate that does not hold refuses the call (the
+executor never sends one).
+
+A write's further addresses (an e-mail's cc and bcc) have the kernel role
+`copy_destination`: bound like a parameter, held to every destination rule. The
+fixed synthetic fields carry their sentinel as a deployment-fixed value, so the
+kernel itself refuses any other value.
 """
 import re
 
@@ -53,6 +60,10 @@ LIST_KINDS = frozenset({"list", "opt_list", "attachments"})
 GUARD_ALWAYS = "always"
 GUARD_FIELD = "when"
 SKIPPED = "Skipped: the owner's condition for this action does not hold."
+# An extraction whose source step is a computation names it "<step>:computed"
+# in its owner-signed `source` constant (the extractor then states that
+# value as given).
+COMPUTED_SOURCE = ":computed"
 SUITES = ("workspace", "banking", "slack", "travel")
 # The official AgentDojo v1.2.2 functions of each suite (pinned against the
 # installed package by a test). A deployment serves exactly one suite, so the
@@ -114,7 +125,7 @@ def _write(operation, upstream, effect, *fields, guarded=True):
     if guarded:
         if any(f[0] == GUARD_FIELD for f in fields):
             raise ValueError("guard_field_collision")
-        fields.append((GUARD_FIELD, "parameter", None, "guard"))
+        fields.append((GUARD_FIELD, "condition", None, "guard"))
     for name, role in READ_SYNTHETIC:
         if not any(f[1] == role for f in fields):
             if any(f[0] == name for f in fields):
@@ -124,6 +135,7 @@ def _write(operation, upstream, effect, *fields, guarded=True):
 
 
 P = "parameter"
+C = "copy_destination"
 CATALOG = (
     # --- the original workspace catalog, unchanged ---
     _read("dojo.calendar.search", "search_calendar_events", ("date", "text"), ("query", "text")),
@@ -148,7 +160,7 @@ CATALOG = (
     # --- workspace writes (calendar and email also serve travel) ---
     _write("dojo.email.send", "send_email", "send",
            ("recipients", "destination", "recipients", "list"), ("subject", P, "subject", "text"),
-           ("text", P, "body", "text"), ("cc", P, "cc", "opt_list"), ("bcc", P, "bcc", "opt_list"),
+           ("text", P, "body", "text"), ("cc", C, "cc", "opt_list"), ("bcc", C, "bcc", "opt_list"),
            ("attachments", P, "attachments", "attachments")),
     _write("dojo.email.delete", "delete_email", "delete", ("email_id", "resource", "email_id", "text")),
     _write("dojo.calendar.create", "create_calendar_event", "create",
@@ -295,13 +307,23 @@ def decode_argument(kind, text):
     raise ValueError("adapter_argument")
 
 
+# The whitespace the kernel trims (Rust `char::is_whitespace`, Unicode
+# White_Space), so `guard_holds` decides exactly as the kernel does.
+_WHITESPACE = "".join(map(chr, (*range(0x09, 0x0e), 0x20, 0x85, 0xa0, 0x1680, *range(0x2000, 0x200b),
+                                0x2028, 0x2029, 0x202f, 0x205f, 0x3000)))
+
+
 def guard_holds(text):
-    """Whether a `when` gate lets the write happen: the owner constant, or an
-    answer that is exactly yes (case, surrounding space and one final mark
-    aside). Anything else, including an unexpected answer, means no."""
+    """Whether a `when` gate lets the write happen, exactly as the kernel's
+    `condition_holds_v2` decides: the owner constant, or a yes (surrounding
+    whitespace, any number of final "." or "!", and ASCII case aside).
+    Anything else, including an unexpected answer, means no."""
     if text == GUARD_ALWAYS:
         return True
-    return type(text) is str and text.strip().rstrip(".!").strip().lower() == "yes"
+    if type(text) is not str:
+        return False
+    answer = text.strip(_WHITESPACE).rstrip(".!").strip(_WHITESPACE)
+    return answer.isascii() and answer.lower() == "yes"
 
 
 class _Omit:
@@ -344,15 +366,16 @@ def suite_operations(suite_tools):
 
 def catalog_document(suite, extra_write_tools=(), extra_read_tools=()):
     """Schema-2 catalog of one suite for the deployment generator: every field
-    is text (a list kind: text list) with an explicit role; authorizing tools
-    carry intent-flow confinement. Catalog order is kept, so the original
-    workspace tools lead."""
+    is text (a list kind: text list) with an explicit role, a synthetic field
+    with its deployment-fixed sentinel; authorizing tools carry intent-flow
+    confinement. Catalog order is kept, so the original workspace tools lead."""
     served = set(suite_operations(SUITE_TOOLS[suite]))
     reads, writes = [], []
     for tool in CATALOG:
         if tool["operation"] not in served:
             continue
-        fields = sorted(({"name": n, "role": r, "type": "text_list" if k in LIST_KINDS else "text"}
+        fields = sorted((dict({"name": n, "role": r, "type": "text_list" if k in LIST_KINDS else "text"},
+                              **({"fixed": SENTINELS[n]} if k == "fixed" else {}))
                          for n, r, _u, k in tool["fields"]), key=lambda f: f["name"])
         item = {"operation": tool["operation"], "effect": tool["effect"], "fixed_magnitude": 1,
                 "fields": fields}

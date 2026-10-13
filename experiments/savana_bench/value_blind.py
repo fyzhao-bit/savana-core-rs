@@ -16,26 +16,26 @@ real owner text and enforce exactly what they did before: a placeholder grants
 nothing a copied value would not. A placeholder the request does not define
 stays as written and fails the owner-text rule.
 
-Only the planner's view changes. The quarantined extractor still receives the
-whole request as its instruction (minimizing that channel is a separate step).
+The masking table is the leak gate's own (`savana_leak_gate::masking`,
+through the `savana_core` binding). The quarantined extractor's inputs are
+masked by the kernel's executor itself, with that same table, when the
+deployment ships the model tools with the model codec
+(`McpModelToolsCallJsonV1`, the `masked` extractor view): one table per call,
+and the reply unmasked by the executor
+(`savana_policy_core::v2::model_masking`). `mask_model_call` and
+`unmask_model_reply` mirror that step exactly, so the researcher endpoint and
+the offline verifier check what left the host byte for byte.
 """
 from dataclasses import dataclass
 import hashlib
 import re
 
 VIEWS = ("request", "masked")
-CLASSES = {"credential": "CREDENTIAL", "personal_data": "PERSONAL_DATA",
-           "protected_reference": "PROTECTED_REFERENCE"}
 # A placeholder names the kernel class, or for personal data its shape (an
 # email address, a calendar date), which tells the planner where it fits
 # without telling it the value.
 KINDS = ("CREDENTIAL", "PERSONAL_DATA", "PROTECTED_REFERENCE", "EMAIL", "DATE")
 PLACEHOLDER = re.compile(r"<(?:" + "|".join(KINDS) + r")_[1-9][0-9]*>")
-_RANK = {"credential": 0, "personal_data": 1, "protected_reference": 2}
-# Punctuation a span may carry at its edges ("'name@x.com", "2024-05-15.")
-# stays in the text; the value bound to a placeholder is the token itself.
-_EDGE = "\"'\u2018\u2019\u201c\u201d()[]{}<>.,;:!?"
-MAX_PASSES = 4
 # Told to the planner only when its request actually carries a placeholder, so
 # a request with nothing to mask is sent byte for byte as in the plain view.
 BLIND_NOTE = ("\nSome values in the request are hidden as placeholders such as <PERSONAL_DATA_1>. A placeholder "
@@ -44,7 +44,7 @@ BLIND_NOTE = ("\nSome values in the request are hidden as placeholders such as <
 
 
 class MaskError(ValueError):
-    """The request cannot be masked safely; the case is not drafted."""
+    """The text cannot be masked safely; the case is not drafted."""
 
 
 def _spans(text):
@@ -71,100 +71,35 @@ class MaskedRequest:
         return hashlib.sha256(self.text.encode()).hexdigest()
 
 
-def _kind(cls, value):
-    if cls == "personal_data":
-        if "@" in value:
-            return "EMAIL"
-        if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
-            return "DATE"
-    return CLASSES[cls]
-
-
-def _units(text):
-    """The leak gate's spans in `text`, a span that is one alphanumeric run
-    widened to the whole word it lies in (a match inside an account number
-    masks the whole number; a date inside "2024-05-15T10:00" stays a date),
-    trimmed of edge punctuation, overlapping ones merged (the stronger class
-    wins)."""
-    widened = []
-    for start, end, cls in _spans(text):
-        if not 0 <= start < end <= len(text) or cls not in CLASSES:
-            raise MaskError("mask_span")
-        while start < end and text[start] in _EDGE:
-            start += 1
-        while end > start and text[end - 1] in _EDGE:
-            end -= 1
-        if start == end:
-            raise MaskError("mask_span")
-        if text[start:end].isalnum():
-            while start > 0 and text[start - 1].isalnum():
-                start -= 1
-            while end < len(text) and text[end].isalnum():
-                end += 1
-        widened.append((start, end, cls))
-    units = []
-    for start, end, cls in sorted(widened):
-        if units and start < units[-1][1]:
-            last = units.pop()
-            start, end = last[0], max(end, last[1])
-            cls = min(cls, last[2], key=_RANK.get)
-        units.append((start, end, cls))
-    return units
-
-
-def keep_quantity(cls, value):
-    """A date, a clock time or a decimal quantity (no letter, no "@"): the
-    leak gate's telephone rules match these too, and an extractor that cannot
-    see them cannot compare dates or prices. Kept visible by the `quantities`
-    extractor view only."""
-    if cls != "personal_data" or "@" in value or re.search(r"[A-Za-z]", value):
-        return False
-    return bool(re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value)) or ":" in value or "." in value
-
-
 class Masker:
-    """One placeholder table over several texts (equal values share one
-    placeholder, numbered per kind in order of first appearance), so the
-    masked texts are a pure function of the texts and their order. `keep`
-    names leak-gate spans left visible; every other span is masked."""
+    """One placeholder table over several texts: the leak gate's own
+    (`savana_leak_gate::masking::MaskTable`, through the `savana_core`
+    binding), the table the kernel's executor masks a model call with. Equal
+    values share one placeholder, numbered per kind in order of first
+    appearance; a span inside a word masks the whole word, edge punctuation
+    stays, and a text that already carries placeholder syntax, or keeps a
+    sensitive span after masking, fails closed."""
 
-    def __init__(self, keep=None):
-        self._keep = keep
-        self._counters, self._by_value, self.bindings = {}, {}, []
+    def __init__(self):
+        import savana_core
+        self._table = savana_core.ModelMask()
 
     def mask(self, text):
-        """`text` with every span replaced, repeated until the same definition
-        finds no span left but kept ones. Fails closed if the text already
-        contains placeholder syntax (a binding would be ambiguous), if a later
-        span touches a placeholder, or if spans remain after MAX_PASSES."""
         if type(text) is not str:
             raise MaskError("mask_input")
-        if PLACEHOLDER.search(text):
-            raise MaskError("mask_placeholder_collision")
-        for _pass in range(MAX_PASSES):
-            units = [u for u in _units(text) if not (self._keep and self._keep(u[2], text[u[0]:u[1]]))]
-            if not units:
-                return text
-            placed = [m.span() for m in PLACEHOLDER.finditer(text)]
-            parts, at = [], 0
-            for start, end, cls in units:
-                if any(start < b and a < end for a, b in placed):
-                    raise MaskError("mask_overlap")
-                parts += [text[at:start], self._placeholder(cls, text[start:end])]
-                at = end
-            parts.append(text[at:])
-            text = "".join(parts)
-        raise MaskError("mask_residual")
+        try:
+            return self._table.mask(text)
+        except ValueError as error:
+            raise MaskError(str(error)) from None
 
-    def _placeholder(self, cls, value):
-        kind = _kind(cls, value)
-        placeholder = self._by_value.get((kind, value))
-        if placeholder is None:
-            self._counters[kind] = self._counters.get(kind, 0) + 1
-            placeholder = f"<{kind}_{self._counters[kind]}>"
-            self._by_value[(kind, value)] = placeholder
-            self.bindings.append((placeholder, value))
-        return placeholder
+    def unmask(self, text):
+        """A reply with this table's placeholders put back; any other
+        placeholder becomes the kernel's neutral "(a hidden value)"."""
+        return self._table.unmask(text)
+
+    @property
+    def bindings(self):
+        return tuple(self._table.bindings())
 
 
 def mask_request(prompt):
@@ -174,26 +109,52 @@ def mask_request(prompt):
     return MaskedRequest(text, tuple(masker.bindings))
 
 
-EXTRACTOR_VIEWS = ("raw", "strict", "quantities")
+# The extractor's input as the deployment ships the model tools: "raw" with
+# the plain MCP codec (the provider receives the values, as any connector
+# does), "masked" with the model codec (the kernel's executor masks them).
+EXTRACTOR_VIEWS = ("raw", "masked")
+# The catalog codec each view needs the model tools shipped with
+# (`agentdojo_tasks.MODEL_CODECS`).
+EXTRACTOR_CODECS = {"raw": "mcp", "masked": "mcp_model"}
 # Told to the extractor only when its input actually carries a placeholder.
 EXTRACT_NOTE = (" Some values in INSTRUCTION, SOURCE and CONTEXT are hidden as placeholders such as <EMAIL_1>; "
                 "equal values share one placeholder. Where the value you must produce is, or contains, such a "
                 "hidden value, write its placeholder exactly; it is replaced by the real value afterwards.")
 
 
-def extractor_inputs(instruction, source, context, view, question=""):
-    """(instruction, source, context, question, bindings) as the quarantined
-    extractor's model is sent them: "raw" as given; "strict" with every
-    leak-gate span of all four masked by one placeholder table; "quantities"
-    the same but with dates, clock times and decimal quantities left visible
-    (`keep_quantity`). `question` is the owner's condition text, if any."""
-    if view == "raw":
-        return instruction, source, context, question, ()
-    if view not in EXTRACTOR_VIEWS:
-        raise ValueError("extractor_view")
-    masker = Masker(keep=keep_quantity if view == "quantities" else None)
-    masked = tuple(masker.mask(text) for text in (instruction, source, context, question))
-    return (*masked, tuple(masker.bindings))
+def mask_model_call(fields, arguments):
+    """The kernel executor's masking of one model-codec call, mirrored for the
+    researcher endpoint and the offline verifier
+    (`savana_policy_core::v2::mask_model_request_v2`): `arguments` with every
+    text masked by ONE table, field names in canonical order, list items in
+    order, deployment-fixed fields (`fields`, catalog field dicts) untouched
+    -> (the masked arguments, the Masker that puts the reply back)."""
+    fixed = {f["name"] for f in fields if f.get("fixed") is not None}
+    masker = Masker()
+    masked = {}
+    for name in sorted(arguments):
+        value = arguments[name]
+        if type(value) is str and name not in fixed:
+            value = masker.mask(value)
+        elif type(value) is list:
+            value = [masker.mask(item) for item in value]
+        masked[name] = value
+    return masked, masker
+
+
+def unmask_model_reply(masker, response):
+    """A provider's reply (canonical JSON-RPC bytes) with the call's values put
+    back into every content text, as the executor retains it
+    (`unmask_model_response_v2`); every other byte keeps its canonical form."""
+    from .agentdojo_provider import canonical
+    import json
+    reply = json.loads(response)
+    result = reply.get("result") if type(reply) is dict else None
+    content = result.get("content") if type(result) is dict else None
+    for part in content if type(content) is list else ():
+        if type(part) is dict and type(part.get("text")) is str:
+            part["text"] = masker.unmask(part["text"])
+    return canonical(reply)
 
 
 def planner_request(prompt, view):
@@ -211,18 +172,6 @@ def bind_text(text, bindings):
         return text
     table = dict(bindings)
     return PLACEHOLDER.sub(lambda m: table.get(m.group(0), m.group(0)), text)
-
-
-# What an extractor's reply says in place of a placeholder that is not in its
-# own call's table (it never saw that value): plain text, so the reply can be
-# a later call's input without looking like a placeholder.
-UNKNOWN_VALUE = "(a hidden value)"
-
-
-def unmask_reply(text, bindings):
-    """An extractor's reply with its own call's placeholders put back and any
-    other placeholder-shaped text neutralized (`UNKNOWN_VALUE`)."""
-    return PLACEHOLDER.sub(UNKNOWN_VALUE, bind_text(text, bindings))
 
 
 def bind_program(program, bindings):

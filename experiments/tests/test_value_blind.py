@@ -158,8 +158,52 @@ class VerifierTests(unittest.TestCase):
             _drafted_contract(self._case("masked"), relabeled, dict(outcome="published", drafts=1))
 
 
-if __name__ == "__main__":
-    unittest.main()
+# The vector `the_masked_request_bytes_are_pinned` pins in
+# crates/savana-policy-core/src/v2/model_masking.rs: the executor's masking of
+# one model-codec call, which the researcher endpoint and the verifier mirror.
+PINNED_FIELDS = [dict(name="body"), dict(name="instruction"), dict(name="model"), dict(name="target"),
+                 dict(name="to", fixed="private-result")]
+PINNED_ARGUMENTS = dict(
+    body=("From alice@example.com on 2024-05-26: IBAN DE89370400440532013000, ref "
+          "step-2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258716a5c5b1b9."),
+    instruction="Who wrote to me? Reply to alice@example.com.", model="deepseek-flash", target="answer",
+    to="private-result")
+PINNED_REQUEST = (
+    '{"id":"step-1","jsonrpc":"2.0","method":"tools/call","params":{"arguments":{'
+    '"body":"From <EMAIL_1> on <DATE_1>: IBAN <PERSONAL_DATA_1>, ref step-<PERSONAL_DATA_2>.",'
+    '"instruction":"Who wrote to me? Reply to <EMAIL_1>.","model":"deepseek-flash",'
+    '"target":"answer","to":"private-result"},"name":"dojo.model.extract"}}')
+
+
+@unittest.skipUnless(HAVE_GATE, "savana_core with the pii_spans binding")
+class ModelCallMaskTests(unittest.TestCase):
+    def test_the_executor_masking_is_mirrored_byte_for_byte(self):
+        from savana_bench.agentdojo_provider import canonical
+        from savana_bench.value_blind import mask_model_call
+        masked, masker = mask_model_call(PINNED_FIELDS, PINNED_ARGUMENTS)
+        request = canonical({"jsonrpc": "2.0", "id": "step-1", "method": "tools/call",
+                             "params": {"name": "dojo.model.extract", "arguments": masked}})
+        self.assertEqual(request.decode(), PINNED_REQUEST)
+        self.assertEqual(len(masker.bindings), 4)
+        for text in masked.values():
+            self.assertEqual(savana_core.pii_spans(text), [])
+
+    def test_a_reply_gets_its_own_values_back_and_nothing_else(self):
+        from savana_bench.agentdojo_provider import canonical
+        from savana_bench.value_blind import mask_model_call, unmask_model_reply
+        _masked, masker = mask_model_call(PINNED_FIELDS, PINNED_ARGUMENTS)
+        reply = canonical({"id": "step-1", "jsonrpc": "2.0", "result": {
+            "content": [{"text": '{"text":"It was <EMAIL_1>, not <EMAIL_7>."}', "type": "text"}],
+            "isError": False, "structuredContent": {"savana_status": "succeeded"}}})
+        back = json.loads(unmask_model_reply(masker, reply))
+        self.assertEqual(json.loads(back["result"]["content"][0]["text"]),
+                         {"text": "It was alice@example.com, not (a hidden value)."})
+        self.assertEqual(back["result"]["structuredContent"], {"savana_status": "succeeded"})
+
+    def test_placeholder_syntax_in_an_argument_fails_closed(self):
+        from savana_bench.value_blind import mask_model_call
+        with self.assertRaisesRegex(MaskError, "mask_collision"):
+            mask_model_call(PINNED_FIELDS, dict(PINNED_ARGUMENTS, body="Reply with <EMAIL_1>"))
 
 
 SOURCE = ('[{"id_": "7", "sender": "mark.black-2134@gmail.com", "body": "Meet on 2024-05-19T11:00:00, '
@@ -168,93 +212,53 @@ REQUEST = "Reply to mark.black-2134@gmail.com about the meeting."
 
 
 @unittest.skipUnless(HAVE_GATE, "savana_core with the pii_spans binding")
-class ExtractorViewTests(unittest.TestCase):
-    def test_one_table_over_instruction_source_and_context(self):
-        from savana_bench.value_blind import extractor_inputs
-        instruction, source, _context, _question, bindings = extractor_inputs(REQUEST, SOURCE, "", "strict")
-        self.assertEqual(instruction, "Reply to <EMAIL_1> about the meeting.")
-        self.assertIn('"sender": "<EMAIL_1>"', source)
-        self.assertIn("<DATE_1>T11:00:00", source)  # a date inside a timestamp stays a date
-        self.assertNotIn("240.0", source)
-        self.assertEqual(dict(bindings)["<EMAIL_1>"], "mark.black-2134@gmail.com")
-        for text in (instruction, source):
-            self.assertEqual(savana_core.pii_spans(text), [])
-        self.assertEqual(extractor_inputs(REQUEST, SOURCE, "", "raw"), (REQUEST, SOURCE, "", "", ()))
-
-    def test_quantities_stay_visible_and_contacts_do_not(self):
-        from savana_bench.value_blind import extractor_inputs
-        _instruction, source, _context, _question, bindings = extractor_inputs(REQUEST, SOURCE, "", "quantities")
-        self.assertIn("2024-05-19T11:00:00", source)
-        self.assertIn("240.0 - 400.0", source)
-        self.assertNotIn("mark.black", source)
-        self.assertEqual([p for p, _v in bindings], ["<EMAIL_1>"])
-
-    def test_the_connector_masks_the_call_and_puts_values_back(self):
-        from savana_bench.dojo_provider import _extract_tool, extract_request
+class ExtractorVerifierTests(unittest.TestCase):
+    """The offline verifier recomputes what left the host for the extractor
+    from the provider's own record of each call."""
+    def _arguments(self):
         from savana_bench.agentdojo_tasks import GENERATOR_MODEL
         from savana_bench.dojo_catalog import SENTINELS
-        from savana_bench.quarantined_generator import generator_request_body
-        sent = []
+        return dict(body=SOURCE, context="", context2="", context3="", context4="", context5="",
+                    instruction=REQUEST, model=GENERATOR_MODEL, question="", source="1", target="answer",
+                    to=SENTINELS["to"])
 
-        def generator(*, instruction, source, target=None, max_bytes=480, context="", note=""):
-            sent.append(generator_request_body(model="deepseek-flash", instruction=instruction, source=source,
-                                               target=target, max_bytes=max_bytes, context=context, note=note))
-            return "Write back to <EMAIL_1> before <DATE_1>."
-
+    def _local(self, arguments, logged_body=None):
+        import base64
+        from savana_bench.agentdojo_provider import canonical
+        from savana_bench.dojo_provider import extract_request
+        payload = canonical(dict(jsonrpc="2.0", id="x", method="tools/call",
+                                 params=dict(name="dojo.model.extract", arguments=arguments)))
         tools = {t.name: t for t in get_suite("v1.2.2", "workspace").tools}
-        arguments = dict(body=SOURCE, context="", context2="", context3="", context4="", context5="",
-                         instruction=REQUEST, model=GENERATOR_MODEL, question="", source="1", target="answer",
-                         to=SENTINELS["to"])
-        result = _extract_tool(generator, tools, "strict")(**arguments)
-        self.assertEqual(result, {"text": "Write back to mark.black-2134@gmail.com before 2024-05-19."})
-        self.assertNotIn("mark.black", sent[0].decode())
-        body, bindings, _bound = extract_request(arguments, tools, "strict")
-        self.assertEqual(body, sent[0])  # what left the host is recomputable
-        self.assertTrue(bindings)
+        body = logged_body or extract_request(arguments, tools)[0]
+        return [dict(kind="provider_attempt", payload_base64=base64.b64encode(payload).decode()),
+                dict(kind="generator_calls", calls=[dict(request_sha256=_sha(body))])]
 
-
-@unittest.skipUnless(HAVE_GATE, "savana_core with the pii_spans binding")
-class ReplyTests(unittest.TestCase):
-    def test_an_unknown_placeholder_in_a_reply_is_neutralized(self):
-        from savana_bench.value_blind import UNKNOWN_VALUE, mask_request, unmask_reply
-        bindings = (("<EMAIL_1>", "ann@x.org"),)
-        reply = unmask_reply("Mail <EMAIL_1> and <EMAIL_7> on <DATE_2>.", bindings)
-        self.assertEqual(reply, f"Mail ann@x.org and {UNKNOWN_VALUE} on {UNKNOWN_VALUE}.")
-        mask_request(reply)  # a later call can take it as input
+    def test_sent_bodies_are_recomputed_and_a_masked_run_sent_no_span(self):
+        from savana_bench.agentdojo_tasks import catalog_tool
+        from savana_bench.planner_verify import _extractor_inputs
+        from savana_bench.value_blind import mask_model_call
+        raw, plain = self._arguments(), dict(suite="workspace", extractor_view="raw")
+        _extractor_inputs(plain, self._local(raw))
+        with self.assertRaisesRegex(ValueError, "extractor_input_mismatch"):
+            _extractor_inputs(plain, self._local(raw, logged_body=b"something else"))
+        masked, _masker = mask_model_call(catalog_tool("dojo.model.extract", "mcp_model")["fields"], raw)
+        self.assertNotIn("mark.black", json.dumps(masked))
+        hidden = dict(suite="workspace", extractor_view="masked")
+        _extractor_inputs(hidden, self._local(masked))
+        with self.assertRaisesRegex(ValueError, "extractor_saw_hidden_value"):  # sent raw, claimed masked
+            _extractor_inputs(hidden, self._local(raw))
 
 
 class ExtractorSpecTests(unittest.TestCase):
     def test_extract_option(self):
         default, = experiment_cases("drafted:workspace:user_task_0")
         self.assertEqual(default["extractor_view"], "raw")
-        both, = experiment_cases("drafted+view=masked+extract=quantities:workspace:user_task_0")
-        self.assertEqual((both["planner_view"], both["extractor_view"]), ("masked", "quantities"))
-        with self.assertRaises(ValueError):
-            experiment_cases("drafted+extract=masked:workspace:user_task_0")
+        both, = experiment_cases("drafted+view=masked+extract=masked:workspace:user_task_0")
+        self.assertEqual((both["planner_view"], both["extractor_view"]), ("masked", "masked"))
+        for retired in ("strict", "quantities"):
+            with self.assertRaises(ValueError):
+                experiment_cases(f"drafted+extract={retired}:workspace:user_task_0")
 
 
-@unittest.skipUnless(HAVE_GATE, "savana_core with the pii_spans binding")
-class ExtractorVerifierTests(unittest.TestCase):
-    def _local(self, view, logged_body=None):
-        import base64
-        from savana_bench.agentdojo_tasks import GENERATOR_MODEL
-        from savana_bench.dojo_catalog import SENTINELS
-        from savana_bench.dojo_provider import extract_request
-        arguments = dict(body=SOURCE, context="", context2="", context3="", context4="", context5="",
-                         instruction=REQUEST, model=GENERATOR_MODEL, question="", source="1", target="answer",
-                         to=SENTINELS["to"])
-        payload = json.dumps(dict(jsonrpc="2.0", id="x", method="tools/call",
-                                  params=dict(name="dojo.model.extract", arguments=arguments))).encode()
-        tools = {t.name: t for t in get_suite("v1.2.2", "workspace").tools}
-        body = logged_body or extract_request(arguments, tools, view)[0]
-        return [dict(kind="provider_attempt", payload_base64=base64.b64encode(payload).decode()),
-                dict(kind="generator_calls", calls=[dict(request_sha256=_sha(body))])]
-
-    def test_sent_bodies_are_recomputed(self):
-        from savana_bench.planner_verify import _extractor_inputs
-        case = dict(suite="workspace", extractor_view="strict")
-        _extractor_inputs(case, self._local("strict"))
-        with self.assertRaisesRegex(ValueError, "extractor_input_mismatch"):
-            _extractor_inputs(case, self._local("strict", logged_body=b"something else"))
-        with self.assertRaisesRegex(ValueError, "extractor_input_mismatch"):  # sent raw, claimed masked
-            _extractor_inputs(case, self._local("raw"))
+if __name__ == "__main__":
+    unittest.main()

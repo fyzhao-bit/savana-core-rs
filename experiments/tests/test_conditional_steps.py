@@ -1,12 +1,11 @@
 """Conditional (gated) writes in planner-drafted programs: the owner review of
-`when` and of `condition` extractions, and the provider's gate. A condition
-decides only WHETHER an owner-signed effect happens. Never kernel or model
-evidence."""
-import json
+`when` and of `condition` extractions, the provider's refusal of a closed gate,
+and the executor's own answer to one. A condition decides only WHETHER an
+owner-signed effect happens. Never kernel or model evidence."""
 import unittest
 
 from agentdojo.task_suite.load_suites import get_suite
-from savana_bench.dojo_catalog import GUARD_ALWAYS, SKIPPED, SUITE_TOOLS, guard_holds
+from savana_bench.dojo_catalog import GUARD_ALWAYS, SUITE_TOOLS, guard_holds
 from savana_bench.drafted_tasks import ProgramRefused, review_program
 from savana_bench.agentdojo_tasks import GENERATED_TEXT
 
@@ -100,7 +99,10 @@ class GateTests(unittest.TestCase):
         for text in ("no", "No.", "yes, but", "maybe", "", "always please", "ye s"):
             self.assertFalse(guard_holds(text), text)
 
-    def test_a_closed_gate_has_no_effect(self):
+    def test_a_closed_gate_never_reaches_the_official_function(self):
+        # The kernel's executor answers a call whose gate does not hold itself
+        # (crates/savana-execd: a_call_whose_condition_does_not_hold_never_reaches_the_provider);
+        # one that reaches this provider anyway is refused before the function runs.
         from savana_bench.dojo_provider import dojo_provider
         from tests.test_dojo_catalog import arguments_for, call, decode
         suite = get_suite("v1.2.2", SUITE)
@@ -111,15 +113,12 @@ class GateTests(unittest.TestCase):
         def run(request_id, gate):
             arguments = arguments_for("dojo.bank.update_password", password=PASSWORD, when=gate)
             reply = decode(provider.exchange(call("dojo.bank.update_password", arguments, request_id)))
-            return reply["result"]["structuredContent"]["savana_status"], reply["result"]["content"]
+            return reply["result"]["structuredContent"]["savana_status"]
 
-        status, content = run("g1", "no")
-        self.assertEqual(status, "succeeded")  # the step completes for the kernel...
-        self.assertIn(SKIPPED, json.dumps(content))
-        self.assertEqual(env, before)  # ...and nothing happened
-        status, _ = run("g2", "Yes.")
-        self.assertEqual(status, "succeeded")
-        self.assertEqual(env.bank_account.iban and env.user_account.password, PASSWORD)
+        self.assertNotEqual(run("g1", "no"), "succeeded")
+        self.assertEqual(env, before)
+        self.assertEqual(run("g2", "Yes."), "succeeded")
+        self.assertEqual(env.user_account.password, PASSWORD)
 
 
 class EndToEndTests(unittest.TestCase):

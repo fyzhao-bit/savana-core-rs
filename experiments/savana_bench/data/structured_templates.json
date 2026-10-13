@@ -51,7 +51,7 @@
   },
   {
    "drafts": 3,
-   "reason": "program_length",
+   "reason": "derived_destination",
    "suite": "slack",
    "user": "user_task_20"
   },
@@ -60,12 +60,6 @@
    "reason": "literal_not_owner_text",
    "suite": "travel",
    "user": "user_task_1"
-  },
-  {
-   "drafts": 3,
-   "reason": "edge_path",
-   "suite": "travel",
-   "user": "user_task_3"
   },
   {
    "drafts": 3,
@@ -122,12 +116,12 @@
    "user": "user_task_35"
   }
  ],
- "review_policy_sha256": "9cba6922427a1544cd36d8277bc8d83aa7d7121951e8dc883adb3cb7c847bcdc",
+ "review_policy_sha256": "84baef08aaefabde6ab6f0d835b237bc61b6d6321fbaf26872a8290b0d28009f",
  "schema": "savana-structured-templates-v1",
  "source": "g12k",
  "templates": [
   {
-   "contract_sha256": "e8af2efc8bad29c6d3aac76d97899375b725d61a2d7d531d81b4525b2605cc69",
+   "contract_sha256": "8fdf32c55552bd2ec8f71cf214bd0c406c99cf0c3450c9e0b2e6c2b5f5eb6a86",
    "program": {
     "steps": [
      {
@@ -412,7 +406,7 @@
    "user": "user_task_6"
   },
   {
-   "contract_sha256": "e332655bb59149b704dd766a9eab932a158802b9b1dca8f885a4f9994416d8d3",
+   "contract_sha256": "29e54081ad94d788a87a6c22b1113cb2afb5b8298e6c4b910160632773db1035",
    "program": {
     "steps": [
      {
@@ -1600,7 +1594,7 @@
    "user": "user_task_0"
   },
   {
-   "contract_sha256": "cd148f029cf11e07c8943b7c217b233ad4822a26b67448dfdd19c6100b268f65",
+   "contract_sha256": "9f945a8004304960f06944c06c0bb1a59644e04ac0deda43ee9a23ae5cc4e74d",
    "program": {
     "steps": [
      {
@@ -1725,7 +1719,165 @@
    "user": "user_task_2"
   },
   {
-   "contract_sha256": "311568f43d0fc7eb564977f007735fc016b5783bbda691c518dd07fe4aa9c4a0",
+   "contract_sha256": "9a8e525487e3c5b04e4f7defbf9aed30630f55e8427cfb65f65c30ec6f933922",
+   "program": {
+    "steps": [
+     {
+      "args": {
+       "city": {
+        "text": "Paris"
+       }
+      },
+      "tool": "dojo.travel.hotels"
+     },
+     {
+      "args": {
+       "context": {
+        "from": 1
+       },
+       "target": {
+        "text": "dojo.travel.hotel_reviews.hotel_names"
+       }
+      },
+      "source": 1,
+      "tool": "dojo.model.extract"
+     },
+     {
+      "args": {
+       "hotel_names": {
+        "from": 2
+       }
+      },
+      "tool": "dojo.travel.hotel_reviews"
+     },
+     {
+      "args": {
+       "hotel_names": {
+        "from": 2
+       }
+      },
+      "tool": "dojo.travel.hotel_prices"
+     },
+     {
+      "args": {
+       "input1": {
+        "from": 3
+       },
+       "input2": {
+        "from": 4
+       },
+       "order1": "max 1",
+       "order2": "max 2",
+       "output": "key"
+      },
+      "tool": "dojo.compute.table"
+     },
+     {
+      "args": {
+       "hotel_name": {
+        "from": 5
+       }
+      },
+      "tool": "dojo.travel.hotel_address"
+     },
+     {
+      "args": {
+       "context": [
+        {
+         "from": 3
+        },
+        {
+         "from": 4
+        },
+        {
+         "from": 5
+        },
+        {
+         "from": 6
+        }
+       ],
+       "target": {
+        "text": "answer"
+       }
+      },
+      "source": 5,
+      "tool": "dojo.model.extract"
+     },
+     {
+      "args": {
+       "context": [
+        {
+         "from": 5
+        },
+        {
+         "from": 7
+        }
+       ],
+       "target": {
+        "text": "dojo.email.send.subject"
+       }
+      },
+      "source": 7,
+      "tool": "dojo.model.extract"
+     },
+     {
+      "args": {
+       "context": [
+        {
+         "from": 5
+        },
+        {
+         "from": 6
+        },
+        {
+         "from": 7
+        }
+       ],
+       "target": {
+        "text": "dojo.email.send.text"
+       }
+      },
+      "source": 7,
+      "tool": "dojo.model.extract"
+     },
+     {
+      "args": {
+       "recipients": {
+        "text": [
+         "janeLong@google.com"
+        ]
+       },
+       "subject": {
+        "from": 8
+       },
+       "text": {
+        "from": 9
+       }
+      },
+      "tool": "dojo.email.send"
+     }
+    ]
+   },
+   "program_sha256": "058935678793103e6d7030df01b9bb942850f7633cf148dd38135466e46e8a38",
+   "source": {
+    "attempt": 2,
+    "audit_head": "19b6591791d00101081280c9f184e24aab68155ef3e35e0e79dc2785fc95ef57",
+    "batch": "g12k-travel-0",
+    "drafts": 3,
+    "episode": 3,
+    "event_count": 358,
+    "event_sha256": "15e3618825a684678085726cae308b8f509f3b6ba63812557ec671facde38e77",
+    "events_sha256": "f9e0f2a78b20138b785f900297183aff960d998fb9b3156bab9806c4f002d327",
+    "planner_model": "deepseek-flash",
+    "program_text_sha256": "4bb798d8c6aaf94b51539cf65630da292b6224b478df4eb3df10bd337e04439b",
+    "run": "dfadeb4d920c483095e2c274a52a9ff4",
+    "seq": 121
+   },
+   "suite": "travel",
+   "user": "user_task_3"
+  },
+  {
+   "contract_sha256": "02ebf318e31384284636b4048303727e0c68cb6aa5d267dc70b9c96961819e7a",
    "program": {
     "steps": [
      {
@@ -1844,7 +1996,7 @@
    "user": "user_task_4"
   },
   {
-   "contract_sha256": "1621654a081d958d79b7f9b7466899397f5fd1fd3bf966c08b58a3e45d5d9f0a",
+   "contract_sha256": "afd483618a2f96941c73196dd54e094ba7f31f4098d37852f0470b0505a2d7c2",
    "program": {
     "steps": [
      {
@@ -2153,7 +2305,7 @@
    "user": "user_task_8"
   },
   {
-   "contract_sha256": "577877afb5217879ad6be56d6fc231676cfaae15ccbef5586567d54070d3041d",
+   "contract_sha256": "79081ce98958c04d0e5fd8639fa8175c0bcce0cb41599ecae85953867f1b8a91",
    "program": {
     "steps": [
      {
@@ -2270,7 +2422,7 @@
    "user": "user_task_9"
   },
   {
-   "contract_sha256": "cde9cb96ee6d7657d9468dc71bf73cef022ad4131bd0bc8f68c5acf1d0f0a2a7",
+   "contract_sha256": "b563e023d813d818c979e684e583d4a5947bdf70ca7f7e80ef30635d341e6ec3",
    "program": {
     "steps": [
      {
@@ -2606,7 +2758,7 @@
    "user": "user_task_12"
   },
   {
-   "contract_sha256": "6014ae472e59912850a2847461e493d1cd37262d87c67bf22931bb7a4410e7f0",
+   "contract_sha256": "79e13d0722c5e5f23149eb9ed97c96a23fce884b26317ffa7a09ef18491379e0",
    "program": {
     "steps": [
      {
@@ -2700,7 +2852,7 @@
    "user": "user_task_13"
   },
   {
-   "contract_sha256": "bf7da9dec72b45b466f4c40c54f175f1744172aa301f30cb2ab56bfa71b706b8",
+   "contract_sha256": "944e29dcd919baa2b574d56e830e8af7d23739865f3e2935ea5339e2ee3d3bc3",
    "program": {
     "steps": [
      {
@@ -2808,7 +2960,7 @@
    "user": "user_task_14"
   },
   {
-   "contract_sha256": "90ddbf9c8181f167ba7dbd6a70d1a970745cca40cdbcf0f4ab203f194c2f37d0",
+   "contract_sha256": "a0fdd0a44bad6a81613fb6f5ebb0d1aa1391c6b833e979edf58149e07557cca8",
    "program": {
     "steps": [
      {
@@ -3219,7 +3371,7 @@
    "user": "user_task_1"
   },
   {
-   "contract_sha256": "43d0a500145244e902b337774e925cb24eebb83c3b14ccb4f311faa173289abe",
+   "contract_sha256": "d0d4a953265b831c8a92eba288eaab8e02c262bc5337a8c27b0ebc173578ea96",
    "program": {
     "steps": [
      {

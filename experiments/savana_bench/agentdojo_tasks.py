@@ -8,6 +8,7 @@ output must pass native compilation against an independently signed root and
 tool registry before it can run.
 """
 from dataclasses import dataclass
+import functools
 import hashlib
 import json
 
@@ -215,9 +216,6 @@ WRITE_CATALOG = (
 # owner-approved action, never a silent step.
 GENERATOR_MODEL = "deepseek-flash"
 MODEL_CATALOG = (
-    ("dojo.model.generate", "quarantined_generate", "send",
-     (("body", "payload"), ("instruction", "parameter"),
-      ("model", "resource"), ("to", "destination"))),
     # Planner-drafted programs (G3): the same quarantined model, asked for the
     # one value a named target field (or the owner's final answer) needs. The
     # target is an inert catalog label; the instruction is the owner's text;
@@ -253,20 +251,35 @@ def upstream_for(tool):
     return entry(tool)["upstream"]
 
 
-def catalog_json(suite=SUITE):
+# How a deployment ships the model tools: "mcp" (their provider receives the
+# arguments, as any connector's does) or "mcp_model" (the kernel's executor
+# masks every argument with the leak gate's table before the request leaves
+# the host and unmasks the reply; the `masked` extractor view).
+MODEL_CODECS = ("mcp", "mcp_model")
+MODEL_OPERATIONS = frozenset(name for name, *_ in MODEL_CATALOG)
+
+
+def catalog_json(suite=SUITE, model_codec=MODEL_CODECS[0]):
     """Reviewed tool catalog of one suite for the deployment generator: every
     AgentDojo tool of that suite (`dojo_catalog`; for workspace the original
-    tools first and unchanged) plus the quarantined generator. Reads carry the
-    synthetic body/calendar/to controls; authorizing tools carry explicit roles
-    and the intent-flow-confinement validator."""
-    from .dojo_catalog import catalog_document
-    model_tools = []
-    for name, _, effect, spec in MODEL_CATALOG:
-        fields = [{"name": n, "role": r, "type": "text"} for n, r in sorted(spec)]
-        model_tools.append({"operation": name, "effect": effect, "fixed_magnitude": 1,
-                            "fields": fields, "validators": list(WRITE_VALIDATORS)})
-    compute_tools = [{"operation": name, "effect": effect, "fixed_magnitude": 1,
-                      "fields": [{"name": n, "role": r, "type": "text"} for n, r in sorted(spec)]}
+    tools first and unchanged), the quarantined extractor (`model_codec`) and
+    the compute step, which the executor evaluates itself (codec
+    "table_compute"). Every synthetic control carries its deployment-fixed
+    value; authorizing tools carry explicit roles and the
+    intent-flow-confinement validator."""
+    from .dojo_catalog import SENTINELS, catalog_document
+    if model_codec not in MODEL_CODECS:
+        raise ValueError("model_codec")
+
+    def fields(spec, fixed):
+        return [dict({"name": n, "role": r, "type": "text"}, **({"fixed": SENTINELS[n]} if n in fixed else {}))
+                for n, r in sorted(spec)]
+    model_tools = [dict({"operation": name, "effect": effect, "fixed_magnitude": 1,
+                         "fields": fields(spec, {"to"}), "validators": list(WRITE_VALIDATORS)},
+                        **({} if model_codec == "mcp" else {"codec": model_codec}))
+                   for name, _, effect, spec in MODEL_CATALOG]
+    compute_tools = [{"operation": name, "effect": effect, "fixed_magnitude": 1, "codec": "table_compute",
+                      "fields": fields(spec, {"body", "calendar", "to"})}
                      for name, _, effect, spec in _compute_catalog()]
     return catalog_document(suite, extra_write_tools=model_tools, extra_read_tools=compute_tools)
 
@@ -280,7 +293,8 @@ def catalog_operations(suite=SUITE):
 EFFECT_CODES = {"read": 1, "create": 2, "update": 3, "delete": 4, "send": 5, "execute": 6}
 EFFECT_NAMES = {"read": "Read", "create": "Create", "update": "Update", "delete": "Delete",
                 "send": "Send", "execute": "Execute"}
-ROLE_CODES = {"resource": 1, "destination": 2, "magnitude": 3, "payload": 4, "parameter": 5}
+ROLE_CODES = {"resource": 1, "destination": 2, "magnitude": 3, "payload": 4, "parameter": 5, "condition": 6,
+              "copy_destination": 7}
 TYPE_CODES = {"text": 1, "text_list": 4}
 
 
@@ -296,15 +310,24 @@ def signed_edge(edge):
     return rule
 
 
-def catalog_tool(tool):
-    """The reviewed catalog entry (operation, effect, fields) for one tool."""
+@functools.lru_cache(maxsize=None)
+def _catalog_index(model_codec):
     from .dojo_catalog import SUITES
+    index = {}
     for suite in SUITES:
-        doc = catalog_json(suite)
+        doc = catalog_json(suite, model_codec)
         for entry in (*doc["read_tools"], *doc["write_tools"]):
-            if entry["operation"] == tool:
-                return entry
-    raise ValueError("unreviewed_tool")
+            index.setdefault(entry["operation"], canonical(entry))
+    return index
+
+
+def catalog_tool(tool, model_codec=MODEL_CODECS[0]):
+    """The reviewed catalog entry (operation, effect, fields, codec) for one
+    tool, as a deployment shipping the model tools with `model_codec` has it."""
+    entry = _catalog_index(model_codec).get(tool)
+    if entry is None:
+        raise ValueError("unreviewed_tool")
+    return json.loads(entry)
 
 
 def select_result_path(response_bytes, path, *, node_only=False):
@@ -401,6 +424,47 @@ def expected_step_call(contract, number, prior_results):
     return {"name": step.tool, "arguments": arguments}
 
 
+def expected_wire_params(contract, number, prior_results, model_codec=MODEL_CODECS[0]):
+    """(the tools/call params operation `number` reaches its provider with,
+    the Masker that puts the reply back or None): `expected_step_call`, and
+    for a model tool shipped with the model codec, the kernel executor's
+    masking of it (`value_blind.mask_model_call`)."""
+    params = expected_step_call(contract, number, prior_results)
+    if model_codec == "mcp" or params["name"] not in MODEL_OPERATIONS:
+        return params, None
+    from .value_blind import mask_model_call
+    arguments, masker = mask_model_call(catalog_tool(params["name"], model_codec)["fields"], params["arguments"])
+    return dict(params, arguments=arguments), masker
+
+
+# The request id a local reply is recorded with here. The executor's own reply
+# echoes the kernel's id (`step-` and a digest only the kernel knows); a review
+# never lets a later operation read a local reply's envelope, only its text.
+LOCAL_REQUEST_ID = "local"
+
+
+def executor_local_text(contract, number, prior_results):
+    """The text the kernel's executor answers operation `number` with itself,
+    contacting no provider (crates/savana-execd `local_business_response`),
+    or None: a guarded call whose condition does not hold answers SKIPPED; the
+    compute step answers its evaluation (`dojo_compute.compute`, the
+    reference the executor's evaluator is byte-exact with)."""
+    from .dojo_catalog import SKIPPED, guard_holds
+    from .dojo_compute import COMPUTE_TOOL, FILTER_FIELDS, INPUT_FIELDS, ORDER_FIELDS, OUTPUT_FIELD, compute
+    step = contract.steps()[number]
+    conditions = [f["name"] for f in catalog_tool(step.tool)["fields"] if f["role"] == "condition"]
+    if not conditions and step.tool != COMPUTE_TOOL:
+        return None
+    arguments = expected_step_call(contract, number, prior_results)["arguments"]
+    if conditions and not guard_holds(arguments[conditions[0]]):
+        return SKIPPED
+    if step.tool != COMPUTE_TOOL:
+        return None
+    output = compute([arguments[name] for name in INPUT_FIELDS], [arguments[name] for name in FILTER_FIELDS],
+                     [arguments[name] for name in ORDER_FIELDS], arguments[OUTPUT_FIELD], calc=True)
+    return canonical(output).decode("utf-8")
+
+
 def result_slot(contract, operation, field):
     """Opaque slot naming a result edge; distinct from every owner input slot."""
     return list(hashlib.sha256(b"SAVANA_DOJO_RESULT_SLOT_V1\0" + bytes.fromhex(contract.digest())
@@ -441,12 +505,17 @@ def owner_inputs(contract):
 
 
 def owner_document(contract):
+    """The owner's consented input document in the one schema the kernel
+    accepts (schema 3): the request, every owner input by slot, and the
+    owner-declared constants, each with every (operation, field) it fills.
+    The kernel holds each input to request text for every field it fills (a
+    whole token of it in a destination-class field), a constant bound to
+    exactly that field (never a destination-class one), or the field's
+    deployment-fixed value."""
     inputs = sorted([dict(slot=i["slot"], text=i["text"], **({"items": i["items"]} if "items" in i else {}))
                      for i in owner_inputs(contract)], key=lambda i: i["slot"])
-    # Schema 2: the kernel requires every input to be empty, an owner-text
-    # constant of this prompt, or one of these owner-declared constants.
-    return canonical(dict(schema=2, prompt=contract.prompt, inputs=inputs, origin="owner_text",
-                          constants=contract.constants())).decode("utf-8")
+    return canonical(dict(schema=3, prompt=contract.prompt, inputs=inputs, origin="owner_text",
+                          constants=contract.bound_constants())).decode("utf-8")
 
 
 def prepare_draft(contract, *, task, root, observer, tool_descriptor,
@@ -527,9 +596,6 @@ def prepare_draft(contract, *, task, root, observer, tool_descriptor,
         "final_result_source": operations[-1]["id"],
         "final_release": {"clause": release_clause, "descriptor": ids["release"],
                           "turn": ids["turn"]}}
-    requirements = [dict(codec="mcp_tools_call_json_v1", operation=st.tool, **{
-        k: v for k, v in catalog_tool(st.tool).items() if k != "operation"}) for st in steps]
     return {"contract": contract.document(), "contract_sha256": contract.digest(),
             "task": ids["task"], "planning_draft": draft, "private_inputs": inputs,
-            "descriptor_requirements": requirements,
             "admitted": False, "production_acceptance": False}

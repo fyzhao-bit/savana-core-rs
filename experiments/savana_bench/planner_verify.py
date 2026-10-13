@@ -361,37 +361,33 @@ def _structured_contract(case, local, row, contract):
 
 
 def _extractor_inputs(case, local):
-    """Under a masked extractor view, what left the host for the extractor's
-    model: every `dojo.model.extract` call's body is recomputed from the
-    arguments the kernel dispatched; none may carry a hidden value, and every
-    body the generator recorded as sent must be one of them, in order."""
-    view = case.get("extractor_view", "raw")
-    if view == "raw":
-        return
+    """What left the host for the extractor's model, recomputed from the
+    provider's own record of each `dojo.model.extract` call (the arguments as
+    the provider received them): every body the generator recorded as sent is
+    one of these recomputed bodies, in order. Under the masked view (the model
+    codec: the kernel's executor masked every argument) no argument and no
+    recomputed body carries a span the leak gate detects."""
     from agentdojo.task_suite.load_suites import get_suite
     from .agentdojo_tasks import BENCHMARK
-    from .dojo_provider import computed_source, extract_request
+    from .dojo_provider import extract_request
     from .drafted_tasks import EXTRACT_TOOL
-    from .value_blind import MaskError
+    from .value_blind import _spans
+    masked = case.get("extractor_view", "raw") == "masked"
     tools = {t.name: t for t in get_suite(BENCHMARK, case["suite"]).tools}
-    digests, requests = [], []
+    digests = []
     for event in local:
         if event["kind"] != "provider_attempt":
             continue
         request = json.loads(base64.b64decode(event["payload_base64"], validate=True))
-        requests.append(request)
         params = request.get("params") or {}
         if params.get("name") != EXTRACT_TOOL:
             continue
-        try:
-            # A computed payload (`+compute=calc`) is decided as the provider decided it.
-            exact = case.get("compute") == "calc" and computed_source(params["arguments"]["body"], requests)
-            body, bindings, _bound = extract_request(params["arguments"], tools, view, exact=exact)
-        except MaskError:
-            continue  # the connector refused before sending anything
-        sent = [m["content"] for m in json.loads(body)["messages"]]
-        if any(value in text for _placeholder, value in bindings for text in sent):
-            raise ValueError("extractor_saw_hidden_value")
+        arguments = params["arguments"]
+        body, _bound = extract_request(arguments, tools)
+        if masked:
+            sent = [m["content"] for m in json.loads(body)["messages"]]
+            if any(_spans(text) for text in (*(v for v in arguments.values() if type(v) is str), *sent)):
+                raise ValueError("extractor_saw_hidden_value")
         digests.append(hashlib.sha256(body).hexdigest())
     logged = [c["request_sha256"] for e in local if e["kind"] == "generator_calls" for c in e["calls"]]
     remaining = iter(digests)
@@ -461,15 +457,18 @@ def verify_episode(directory, local, case, row, profile, turns, prior=None):
         from .benchmark_consent import _chosen_by_data
         from .owner_directory import in_directory, owner_directory
         entries = owner_directory(case["suite"])
+    from .value_blind import EXTRACTOR_CODECS
+    model_codec = EXTRACTOR_CODECS[case.get("extractor_view", "raw")]
     for event in local:
-        if event["kind"] == "official_tool_result":
+        if event["kind"] in ("official_tool_result", "executor_local_result"):
             prior.append(canonical(event["response"]))
         if event["kind"] not in ("provider_attempt", "provider_attempt_unbound"):
             continue
         payload = base64.b64decode(event["payload_base64"], validate=True)
         verdict = ("unauthorized_unbound" if event["kind"] == "provider_attempt_unbound" else
                    classify_provider_attempt(payload, contract=contract, resource=resource,
-                                             application_turn=turn or "", prior_results=tuple(prior)))
+                                             application_turn=turn or "", prior_results=tuple(prior),
+                                             model_codec=model_codec))
         if event["verdict"] != verdict:
             raise ValueError("provider_attempt_verdict")
         if entries is not None and verdict == "authorized_tool":
@@ -536,6 +535,11 @@ def verify(directory):
         raise ValueError("planner_experiment_scope_mismatch")
     if manifest["package_sources"] != package_sources():
         raise ValueError("official_package_source_mismatch")
+    # The deployment shipped the model tools with the one codec every case's
+    # extractor view needs (the runner refuses a run otherwise).
+    from .value_blind import EXTRACTOR_CODECS
+    if any(EXTRACTOR_CODECS[case.get("extractor_view", "raw")] != manifest.get("model_codec") for case in cases):
+        raise ValueError("extractor_view_not_deployed")
     # A registered or structured run's templates and planner prompt are the current ones.
     if any(manifest.get(k) != v for k, v in structured_provenance(cases).items() if k != "structured_example_sha256"):
         raise ValueError("structured_provenance_mismatch")

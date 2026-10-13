@@ -169,26 +169,37 @@ class UnconfinedWriteProvisioningTests(unittest.TestCase):
     """The materializer's counterfactual (one write shipped without the
     intent-flow validator) is recorded in the provisioning profile, and the
     runner accepts it only under permit and only for a shipped write."""
-    def profile(self, **extra):
-        from savana_bench.agentdojo_tasks import catalog_operations
+    def profile(self, model_codec="mcp", **extra):
+        from savana_bench.agentdojo_tasks import catalog_json, catalog_operations
         ops = catalog_operations("banking") | {"savana.final_result_release"}
-        return dict(dict(schema=1, descriptors={op: "ab" * 32 for op in ops}, planner="cd" * 32,
+        doc = catalog_json("banking", model_codec)
+        codecs = {t["operation"]: t.get("codec", "mcp") for t in (*doc["read_tools"], *doc["write_tools"])}
+        return dict(dict(schema=1, descriptors={op: "ab" * 32 for op in ops}, codecs=codecs, planner="cd" * 32,
                          destination_digest="cd" * 32, application_turn="cd" * 32, store="cd" * 32,
                          installation="cd" * 32, disposition="permit", scope="finite_workspace_read_subset",
                          task_grants_installed=False), **extra)
 
     def test_one_shipped_write_under_permit(self):
         from savana_bench.protected_agentdojo import check_provisioning
-        check_provisioning(self.profile())
-        check_provisioning(self.profile(unconfined_write="dojo.bank.send_money"))
+        self.assertEqual(check_provisioning(self.profile()), "mcp")
+        self.assertEqual(check_provisioning(self.profile(unconfined_write="dojo.bank.send_money")), "mcp")
         for bad in (self.profile(unconfined_write="dojo.bank.send_money", disposition="require_approval"),
                     self.profile(unconfined_write="dojo.bank.read_file"),
                     self.profile(unconfined_write="savana.final_result_release"),
                     self.profile(unconfined_write="dojo.slack.send_dm"),
-                    self.profile(unconfined_write=["dojo.bank.send_money"])):
+                    self.profile(unconfined_write=["dojo.bank.send_money"]),
+                    self.profile(codecs={}),
+                    dict(self.profile(), codecs=dict(self.profile()["codecs"], **{"dojo.compute.table": "mcp"}))):
             with self.assertRaises(ValueError) as caught:
                 check_provisioning(bad)
             self.assertEqual(str(caught.exception), "closed_provisioning_profile")
+
+    def test_the_profile_names_how_the_model_tools_ship(self):
+        from savana_bench.protected_agentdojo import check_provisioning
+        masked = self.profile("mcp_model")
+        self.assertEqual(masked["codecs"]["dojo.model.extract"], "mcp_model")
+        self.assertEqual(masked["codecs"]["dojo.compute.table"], "table_compute")
+        self.assertEqual(check_provisioning(masked), "mcp_model")
 
 
 if __name__ == "__main__":

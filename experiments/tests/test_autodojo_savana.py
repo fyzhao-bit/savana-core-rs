@@ -29,7 +29,6 @@ class AutoDojoSavanaTests(unittest.TestCase):
 
     def test_official_case_replays_the_cached_injections(self):
         from agentdojo.attacks.base_attacks import BaseAttack
-        from agentdojo.task_suite.load_suites import get_suite
         from savana_bench.protected_agentdojo import official_case
         from types import SimpleNamespace
         drafted = SimpleNamespace(task_id="user_task_1", suite="slack")  # the reviewed program's identity

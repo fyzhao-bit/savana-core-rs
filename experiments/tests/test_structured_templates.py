@@ -92,7 +92,7 @@ class RegistryTests(unittest.TestCase):
         registry = load_registry()
         self.assertEqual(REGISTRY.read_bytes(), encode_registry(registry))
         counts = summary(registry)
-        self.assertEqual((counts["tasks"], counts["drafts"], counts["templates"]), (97, 137, 77))
+        self.assertEqual((counts["tasks"], counts["drafts"], counts["templates"]), (97, 137, 78))
         suites = {}
         for item in registry["templates"]:
             official = suites.setdefault(item["suite"], get_suite("v1.2.2", item["suite"]))

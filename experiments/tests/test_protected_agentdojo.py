@@ -10,7 +10,6 @@ import copy
 import hashlib
 import io
 import json
-import os
 from pathlib import Path
 import socket
 import ssl
@@ -281,7 +280,10 @@ class RunnerTests(unittest.TestCase):
             client_certificate_sha256='01'*32)
         # One suite's reviewed catalog, a closed disposition and no task grants.
         operations = catalog_operations('workspace') | {'savana.final_result_release'}
-        provisioning = dict(schema=1, descriptors={op: 'ab'*32 for op in operations}, planner='cd'*32,
+        from savana_bench.agentdojo_tasks import catalog_json
+        doc = catalog_json('workspace')
+        codecs = {t['operation']: t.get('codec', 'mcp') for t in (*doc['read_tools'], *doc['write_tools'])}
+        provisioning = dict(schema=1, descriptors={op: 'ab'*32 for op in operations}, codecs=codecs, planner='cd'*32,
             destination_digest='cd'*32, application_turn='cd'*32, store='cd'*32, installation='cd'*32,
             disposition='require_approval', scope='finite_workspace_read_subset', task_grants_installed=False)
         return dict(schema=3, provisioning=provisioning, operator_socket=SOCKET,

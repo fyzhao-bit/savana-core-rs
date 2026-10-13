@@ -9,9 +9,10 @@ signature and cannot independently prove a deployment was honest.
 import base64
 import hashlib
 import json
+import re
 from types import SimpleNamespace
 
-from .agentdojo_provider import canonical
+from .agentdojo_provider import canonical, decode
 from .official_verify import restore_environment
 from .private_episode import PrivateOutcome
 from .protected_agentdojo import official_case, score_outcome
@@ -67,33 +68,53 @@ def verify_published_episode(directory, local, case, row, profile, contract, con
         raise ValueError("unattempted_episode_scored")
     initial = [e for e in local if e["kind"] == "episode_input"]
     final = [e for e in local if e["kind"] == "episode_observation"]
-    tools = [e for e in local if e["kind"] == "official_tool_result"]
+    tools = [e for e in local if e["kind"] in ("official_tool_result", "executor_local_result")]
     received = [e for e in local if e["kind"] == "result_received"]
-    if any(len(v) != 1 for v in (initial, final, received)) or len(tools) != len(steps):
+    if (any(len(v) != 1 for v in (initial, final, received)) or len(tools) != len(steps)
+            or [e["operation"] for e in tools] != list(range(1, len(steps) + 1))):
         raise ValueError("missing_episode_evidence")
     initial, final, tool, received = initial[0], final[0], tools[-1], received[0]
     if initial["contract"] != contract.document() or initial["injections"] != values:
         raise ValueError("task_or_attack_mismatch")
     if initial["environment"] != (env.model_dump(mode="json") if continued is None else continued["environment"]):
         raise ValueError("initial_environment_mismatch")
-    # Each official call, in order, is the reviewed operation with its derived
-    # fields recomputed here from the earlier logged results at the signed path.
-    from .agentdojo_calendar import SENTINELS
-    from .agentdojo_tasks import expected_step_call
-    from .dojo_catalog import CATALOG, official_call
+    # Each operation, in order: one the kernel's executor answers itself is
+    # recomputed here and never reached the provider; every other is the
+    # reviewed call with its derived fields recomputed here from the earlier
+    # logged results at the signed path, as it reached the provider.
+    from .agentdojo_provider import response as mcp_response
+    from .agentdojo_tasks import LOCAL_REQUEST_ID, executor_local_text, expected_wire_params
+    from .dojo_catalog import CATALOG, SENTINELS, official_call
+    from .value_blind import EXTRACTOR_CODECS
+    model_codec = EXTRACTOR_CODECS[case.get("extractor_view", "raw")]
     prior = []
     for number, event in enumerate(tools):
-        expected = expected_step_call(contract, number, prior)
-        if any(t["operation"] == steps[number].tool for t in CATALOG):
-            _, official = official_call(steps[number].tool, expected["arguments"])
+        local_text = executor_local_text(contract, number, prior)
+        if event["kind"] == "executor_local_result":
+            if (local_text is None or event["tool"] != steps[number].tool
+                    or event["response"] != decode(mcp_response(LOCAL_REQUEST_ID, "succeeded", local_text))):
+                raise ValueError("executor_local_result_mismatch")
         else:
-            official = {k: v for k, v in expected["arguments"].items() if k not in SENTINELS}
-        if event["tool"] != steps[number].upstream_tool or event["arguments"] != official:
-            raise ValueError("official_function_trace_mismatch")
+            if local_text is not None:
+                raise ValueError("local_operation_reached_provider")
+            expected, _masker = expected_wire_params(contract, number, prior, model_codec)
+            if any(t["operation"] == steps[number].tool for t in CATALOG):
+                _, official = official_call(steps[number].tool, expected["arguments"])
+            else:
+                official = {k: v for k, v in expected["arguments"].items() if k not in SENTINELS}
+            if event["tool"] != steps[number].upstream_tool or event["arguments"] != official:
+                raise ValueError("official_function_trace_mismatch")
         prior.append(canonical(event["response"]))
     payload = base64.b64decode(final["output_base64"], validate=True)
     received_bytes = base64.urlsafe_b64decode(received["payload_base64"] + "="*(-len(received["payload_base64"]) % 4))
-    if payload != received_bytes or payload != canonical(tool["response"]):
+    released = tool["response"]
+    if tool["kind"] == "executor_local_result":
+        # A local answer's envelope echoes the kernel's own request id.
+        echoed = decode(payload).get("id") if payload.startswith(b"{") else None
+        if type(echoed) is not str or not re.fullmatch(r"step-[0-9a-f]{64}", echoed):
+            raise ValueError("output_not_the_received_tool_result")
+        released = dict(released, id=echoed)
+    if payload != received_bytes or payload != canonical(released):
         raise ValueError("output_not_the_received_tool_result")
     if hashlib.sha256(payload).hexdigest() != received["payload_sha256"]:
         raise ValueError("received_payload_digest")
