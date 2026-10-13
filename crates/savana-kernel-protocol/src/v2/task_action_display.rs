@@ -97,11 +97,40 @@ pub fn render_task_action_display_v2(
         "plan_revision_digest":hex(content.plan_revision_digest().as_bytes()),
         "exact_business_request":exact,
     });
+    let values: std::collections::BTreeMap<String, BusinessValueV2> =
+        request.field_values().into_iter().collect();
+    // Further addresses (cc, bcc) are shown as destinations, not parameters.
+    let copies: serde_json::Map<String, serde_json::Value> = p
+        .fields()
+        .iter()
+        .filter(|f| f.role() == BusinessFieldRoleV2::CopyDestination)
+        .filter_map(|f| {
+            let value = match values.get(f.name())? {
+                BusinessValueV2::Text(text) => serde_json::json!(text),
+                BusinessValueV2::TextList(items) => serde_json::json!(items),
+                _ => return None,
+            };
+            Some((f.name().to_owned(), value))
+        })
+        .collect();
+    if !copies.is_empty() {
+        rendering["copy_destinations"] = serde_json::Value::Object(copies);
+    }
+    if let Some(field) = p
+        .fields()
+        .iter()
+        .find(|f| f.role() == BusinessFieldRoleV2::Condition)
+    {
+        if let Some(BusinessValueV2::Text(value)) = values.get(field.name()) {
+            rendering["condition"] = serde_json::json!({
+                "field": field.name(), "value": value, "holds": condition_holds_v2(value),
+                "meaning": "The executor performs this call only if the condition holds (always, or a yes); otherwise it records a fixed no-effect result and contacts nothing",
+            });
+        }
+    }
     if !derived.is_empty() {
         // The concrete extracted value is in exact_business_request; this shows
         // where the owner's signed root says it must come from.
-        let values: std::collections::BTreeMap<String, BusinessValueV2> =
-            request.field_values().into_iter().collect();
         let fields: serde_json::Map<String, serde_json::Value> = derived
             .iter()
             .map(|(name, r)| {

@@ -12,7 +12,14 @@ pub use fused_final_result::FusedFinalResultCandidateV04;
 mod fused_input_document;
 mod fused_inputs;
 pub use fused_execution_recovery::{FusedResultScopeV04, RecoveredFusedExecutionV04};
-pub use fused_input_document::{FusedInputDocumentV04, FusedInputTextV04};
+pub use fused_input_document::{
+    FusedFieldRefV04, FusedInputDocumentV04, FusedInputTextV04, FusedOwnerConstantV04,
+    OwnerInputUseV04, OWNER_DOCUMENT_SCHEMA_V04,
+};
+pub use model_masking::{
+    mask_model_request_v2, unmask_model_response_v2, ModelMaskErrorV2, ModelMaskTableV2,
+    UNKNOWN_VALUE_V2,
+};
 mod fused_model_exchange;
 mod fused_plan_adapter;
 mod fused_planning;
@@ -127,6 +134,7 @@ mod installation_evidence_store;
 mod intent;
 mod labels;
 mod leak_gate;
+mod model_masking;
 
 mod control_selection;
 #[allow(dead_code)] // Closed AST is activated only through the G4 verified-state adapter.

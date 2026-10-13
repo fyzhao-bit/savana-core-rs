@@ -317,7 +317,8 @@ fn task_authorization_action_content_validates_and_binds_all_fields() {
     }
     for (i, v) in [
         (0, b(0)),
-        (1, u(3)),
+        // Codecs 1-4 exist (MCP, fixed POST, model MCP, table compute).
+        (1, u(5)),
         (2, u(8)),
         (3, b(0)),
         (4, b(0)),

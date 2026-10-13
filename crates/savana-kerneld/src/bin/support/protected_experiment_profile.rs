@@ -65,7 +65,20 @@ fn field_role(s: &str) -> Result<R, String> {
         "resource" => Ok(R::Resource),
         "destination" => Ok(R::Destination),
         "parameter" => Ok(R::Parameter),
+        "condition" => Ok(R::Condition),
+        "copy_destination" => Ok(R::CopyDestination),
         _ => Err("field role".into()),
+    }
+}
+/// How the executor carries out a catalog tool's call: MCP to the provider
+/// (the default), MCP to a model provider with every argument masked, or the
+/// executor's own table computation (no provider at all).
+fn tool_codec(tool: &Value) -> Result<ActionCodecProfileV2, String> {
+    match tool.get("codec").map(|c| c.as_str()) {
+        None | Some(Some("mcp")) => Ok(ActionCodecProfileV2::McpToolsCallJsonV1),
+        Some(Some("mcp_model")) => Ok(ActionCodecProfileV2::McpModelToolsCallJsonV1),
+        Some(Some("table_compute")) => Ok(ActionCodecProfileV2::TableComputeV1),
+        _ => Err("catalog codec".into()),
     }
 }
 fn field_type(s: &str) -> Result<T, String> {
@@ -134,20 +147,35 @@ fn tool_effect(effect: &str) -> Result<(TaskEffectV2, EffectSetV2, AttemptKindV2
 /// fields, effect, and required internal validators.
 struct CatalogToolV04 {
     operation: String,
-    fields: Vec<(String, R, T)>,
+    codec: ActionCodecProfileV2,
+    fields: Vec<CatalogFieldV04>,
     effect: TaskEffectV2,
     effect_set: EffectSetV2,
     attempt: AttemptKindV2,
     validators: Vec<InternalValidatorDeclarationV2>,
 }
-fn parse_catalog_fields(tool: &Value) -> Result<Vec<(String, R, T)>, String> {
+/// (name, role, type, deployment-fixed text if any).
+type CatalogFieldV04 = (String, R, T, Option<String>);
+fn parse_catalog_fields(tool: &Value) -> Result<Vec<CatalogFieldV04>, String> {
     let raw = tool["fields"].as_array().ok_or("catalog fields")?;
     let mut fields = Vec::new();
     for field in raw {
+        if field
+            .as_object()
+            .ok_or("catalog field")?
+            .keys()
+            .any(|k| !matches!(k.as_str(), "name" | "role" | "type" | "fixed"))
+        {
+            return Err("catalog field key".into());
+        }
         fields.push((
             field["name"].as_str().ok_or("field name")?.to_owned(),
             field_role(field["role"].as_str().ok_or("field role")?)?,
             field_type(field["type"].as_str().ok_or("field type")?)?,
+            match field.get("fixed") {
+                None => None,
+                Some(fixed) => Some(fixed.as_str().ok_or("field fixed")?.to_owned()),
+            },
         ));
     }
     Ok(fields)
@@ -178,6 +206,7 @@ fn tool_catalog(stage: &Path, unconfined: Option<&str>) -> Result<Vec<CatalogToo
                 .as_str()
                 .ok_or("catalog operation name")?
                 .to_owned(),
+            codec: tool_codec(tool)?,
             fields: parse_catalog_fields(tool)?,
             effect,
             effect_set,
@@ -220,6 +249,7 @@ fn tool_catalog(stage: &Path, unconfined: Option<&str>) -> Result<Vec<CatalogToo
         };
         out.push(CatalogToolV04 {
             operation,
+            codec: tool_codec(tool)?,
             fields: parse_catalog_fields(tool)?,
             effect,
             effect_set,
@@ -378,9 +408,10 @@ pub(super) fn materialize(stage: &Path) -> Result<(), String> {
     for (index, spec) in specs.into_iter().enumerate() {
         let ordinal = u32::try_from(index).map_err(|_| "tool index")?;
         let release = matches!(spec, Spec::Release);
-        let (operation, fields, effect, effect_set, attempt, validators) = match spec {
+        let (operation, codec, fields, effect, effect_set, attempt, validators) = match spec {
             Spec::Tool(t) => (
                 t.operation,
+                t.codec,
                 t.fields,
                 t.effect,
                 t.effect_set,
@@ -389,6 +420,7 @@ pub(super) fn materialize(stage: &Path) -> Result<(), String> {
             ),
             Spec::Release => (
                 "savana.final_result_release".to_owned(),
+                ActionCodecProfileV2::FixedJsonPostV1,
                 Vec::new(),
                 TaskEffectV2::FinalRelease,
                 EffectSetV2::FINAL_RELEASE,
@@ -420,7 +452,7 @@ pub(super) fn materialize(stage: &Path) -> Result<(), String> {
             let mut fields = fields;
             fields.sort_by(|a, b| a.0.cmp(&b.0));
             BusinessProfileV2::new(
-                ActionCodecProfileV2::McpToolsCallJsonV1,
+                codec,
                 operation.as_str(),
                 target,
                 credential,
@@ -428,7 +460,13 @@ pub(super) fn materialize(stage: &Path) -> Result<(), String> {
                 BusinessMagnitudeV2::FixedCount(1),
                 fields
                     .into_iter()
-                    .map(|(n, r, t)| BusinessFieldV2::new(n.as_str(), r, t))
+                    .map(|(n, r, t, fixed)| {
+                        let field = BusinessFieldV2::new(n.as_str(), r, t)?;
+                        match fixed {
+                            Some(fixed) => field.with_fixed(&fixed),
+                            None => Ok(field),
+                        }
+                    })
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|_| "business fields")?,
             )

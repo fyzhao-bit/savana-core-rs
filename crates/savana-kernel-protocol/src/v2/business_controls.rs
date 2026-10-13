@@ -303,8 +303,9 @@ impl BusinessControlsV2 {
         for field in &controlled {
             if let Some(rule) = derived.get(&field.name) {
                 // A derived control may not choose the payload (handled as the
-                // whole prior result) and its type must match the field.
-                if rule.kind != field.kind {
+                // whole prior result) or a deployment-fixed field, and its type
+                // must match the field.
+                if rule.kind != field.kind || field.fixed.is_some() {
                     return Err(BusinessCodecErrorV2::Malformed);
                 }
             } else {
@@ -370,6 +371,14 @@ pub(super) fn validate_field(
     field: &BusinessFieldV2,
     value: &Json,
 ) -> Result<(), BusinessCodecErrorV2> {
+    // A deployment-fixed field admits exactly its fixed text (validated
+    // against the field's own rules when the profile was built).
+    if let Some(fixed) = &field.fixed {
+        return match value {
+            Json::Text(s) if s == fixed => Ok(()),
+            _ => Err(BusinessCodecErrorV2::Binding),
+        };
+    }
     match (field.kind, value) {
         // An empty parameter is an argument left unset: it carries no data.
         // A resource or destination text is never empty and at most 1 KB; a
@@ -535,18 +544,19 @@ pub(super) fn parameters_digest(
     values: &BTreeMap<String, Json>,
     derived: &BTreeMap<String, ResultDerivedControlV2>,
 ) -> Digest32V2 {
-    // profile.fields are strictly name-sorted, so Parameter fields visit in
-    // canonical (name) order for both the exact map and the derived rules.
+    // profile.fields are strictly name-sorted, so parameter-bound fields
+    // (parameters, the condition gate, copy destinations) visit in canonical
+    // (name) order for both the exact map and the derived rules.
     let exact: BTreeMap<String, Json> = profile
         .fields
         .iter()
-        .filter(|f| f.role == BusinessFieldRoleV2::Parameter && !derived.contains_key(&f.name))
+        .filter(|f| f.role.bound_as_parameter() && !derived.contains_key(&f.name))
         .map(|f| (f.name.clone(), values[&f.name].clone()))
         .collect();
     let derived_params: Vec<(&String, &ResultDerivedControlV2)> = profile
         .fields
         .iter()
-        .filter(|f| f.role == BusinessFieldRoleV2::Parameter)
+        .filter(|f| f.role.bound_as_parameter())
         .filter_map(|f| derived.get(&f.name).map(|rule| (&f.name, rule)))
         .collect();
     let exact_json = Json::Object(exact).canonical();

@@ -104,6 +104,8 @@ fn facet_digest(m: &VerifiedTaskMatchV2, facet: ControlFacetV2) -> Digest32V2 {
             let codec: u8 = match a.codec_profile() {
                 ActionCodecProfileV2::McpToolsCallJsonV1 => 1,
                 ActionCodecProfileV2::FixedJsonPostV1 => 2,
+                ActionCodecProfileV2::McpModelToolsCallJsonV1 => 3,
+                ActionCodecProfileV2::TableComputeV1 => 4,
             };
             [a.tool_descriptor_digest().as_bytes().as_slice(), &[codec]].concat()
         }

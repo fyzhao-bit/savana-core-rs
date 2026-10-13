@@ -736,12 +736,12 @@ pub(crate) fn address_flow_is_confined<'a>(
     profile: Option<&savana_kernel_protocol::v2::BusinessProfileV2>,
     mut arguments: impl Iterator<Item = (&'a str, IntegrityV2)>,
 ) -> bool {
-    use savana_kernel_protocol::v2::BusinessFieldRoleV2;
     arguments.all(|(name, integrity)| {
         integrity != IntegrityV2::ExternalUntrusted
             || profile.is_some_and(|profile| {
                 profile.fields().iter().any(|field| {
-                    field.name() == name && field.role() != BusinessFieldRoleV2::Destination
+                    // cc/bcc (CopyDestination) are addresses too.
+                    field.name() == name && !field.role().is_destination_class()
                 })
             })
     })

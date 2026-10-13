@@ -315,8 +315,12 @@ impl UnsignedToolDescriptorV2 {
             if !self
                 .effects
                 .contains(super::task_effect_set_v2(profile.effect()))
-                || (profile.codec() == ActionCodecProfileV2::McpToolsCallJsonV1
-                    && profile.operation() != self.provider_tool_id.as_str())
+                || (matches!(
+                    profile.codec(),
+                    ActionCodecProfileV2::McpToolsCallJsonV1
+                        | ActionCodecProfileV2::McpModelToolsCallJsonV1
+                        | ActionCodecProfileV2::TableComputeV1
+                ) && profile.operation() != self.provider_tool_id.as_str())
             {
                 return Err(G4Error::InvalidDescriptor);
             }

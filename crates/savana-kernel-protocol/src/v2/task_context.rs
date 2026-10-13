@@ -264,7 +264,13 @@ impl TaskAuthorizationContextV2 {
     pub fn tools_json(&self) -> Result<String, ProtocolError> {
         let tools: Vec<_> = self.tools().iter().map(|t| {
             let p = t.profile();
-            let fields: Vec<_> = p.fields().iter().filter(|f| matches!(f.role(), super::super::BusinessFieldRoleV2::Resource | super::super::BusinessFieldRoleV2::Destination | super::super::BusinessFieldRoleV2::Parameter)).map(|f| serde_json::json!({"name": f.name(), "role": f.role() as u8, "type": f.kind() as u8})).collect();
+            let fields: Vec<_> = p.fields().iter().filter(|f| matches!(f.role(), super::super::BusinessFieldRoleV2::Resource | super::super::BusinessFieldRoleV2::Destination | super::super::BusinessFieldRoleV2::Parameter | super::super::BusinessFieldRoleV2::Condition | super::super::BusinessFieldRoleV2::CopyDestination)).map(|f| {
+                let mut field = serde_json::json!({"name": f.name(), "role": f.role() as u8, "type": f.kind() as u8});
+                if let Some(fixed) = f.fixed() {
+                    field["fixed"] = serde_json::Value::String(fixed.to_owned());
+                }
+                field
+            }).collect();
             serde_json::json!({"descriptor_digest": hex(t.descriptor_digest.as_bytes()), "name": t.name(), "effect": p.effect() as u8, "operation": p.operation(), "fields": fields})
         }).collect();
         serde_json::to_string(&tools).map_err(|_| malformed())

@@ -3,7 +3,7 @@
 use super::*;
 use savana_policy_core::v2::{
     check_fused_owner_views_v04, FusedInputDocumentV04, FusedRecipeApprovalV04,
-    FusedRecipeBindingV04, FusedTaskDraftV04, G4Error, ManagedAdminReceiptV04,
+    FusedRecipeBindingV04, FusedTaskDraftV04, G4Error, ManagedAdminReceiptV04, OwnerInputUseV04,
     VerifiedManagedAdminCommandV04,
 };
 
@@ -32,12 +32,13 @@ impl KernelAgentAuthorityV2 {
         self.require_current_session_task_authorization(s, now)?;
         // The session's initial value is the masked agent view. Fixed inputs
         // come only from the separately retained, consented owner document.
-        let (run, run_id, owner_input, manifest, session_expiry) = (
+        let (run, run_id, owner_input, manifest, session_expiry, role) = (
             s.run,
             s.durable_run_id,
             s.owner_input_value,
             s.active_state_manifest_digest,
             s.expires_at,
+            s.role,
         );
         let task_id = DurableTaskIdV2::new(task);
         let p = self
@@ -76,10 +77,42 @@ impl KernelAgentAuthorityV2 {
                 .map_err(map_value_error)?;
             let document = FusedInputDocumentV04::from_owned_value(input.value())
                 .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
-            // A planner-drafted task's owner declared every input owner text:
+            // Where the plan puts each owner input: a field of an operation's
+            // active signed business profile (never a name the document gives).
+            let mut placed = Vec::new();
+            for operation in active.compiled().operations() {
+                let profile = p
+                    .active_tools
+                    .resolve_class(
+                        savana_kernel_protocol::v2::ToolClassIdV2::new(u32::from(
+                            operation.tool_class,
+                        )),
+                        role,
+                        now,
+                    )
+                    .ok_or(KernelAgentAuthorityErrorV2::InvalidReference)?
+                    .descriptor()
+                    .unsigned()
+                    .require_business_profile()
+                    .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
+                for binding in operation.bindings.iter().filter(|b| b.result_of.is_none()) {
+                    let field = profile
+                        .fields()
+                        .iter()
+                        .find(|f| f.name() == binding.argument)
+                        .ok_or(KernelAgentAuthorityErrorV2::BindingMismatch)?;
+                    placed.push(OwnerInputUseV04 {
+                        slot: binding.slot,
+                        operation: profile.operation(),
+                        field,
+                    });
+                }
+            }
+            // Every input is the owner's own text for every field it fills, or
+            // a constant the owner bound to that field (never a destination):
             // hold that before any input is pinned or any operation runs.
             document
-                .check_owner_text_origin()
+                .check_owner_text_origin(&placed)
                 .map_err(|_| KernelAgentAuthorityErrorV2::BindingMismatch)?;
             let expected = active
                 .compiled()
@@ -217,7 +250,8 @@ mod tests {
 
     fn owner(prompt: &str) -> KernelValueV2 {
         KernelValueV2::text(
-            serde_json::json!({"schema":1,"prompt":prompt,
+            serde_json::json!({"schema":3,"prompt":prompt,"origin":"owner_text",
+            "constants":[{"value":"2024-05-26","fields":[{"operation":"calendar.day","field":"day"}]}],
             "inputs":[{"slot":vec![1u8;16],"text":"2024-05-26"}]})
             .to_string(),
         )

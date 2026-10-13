@@ -89,7 +89,13 @@ macro_rules! closed_enum {
     };
 }
 closed_enum!(TaskEvidenceKindV2 { AuthenticatedStructuredInput = 1, ApprovedDraft = 2 });
-closed_enum!(ActionCodecProfileV2 { McpToolsCallJsonV1 = 1, FixedJsonPostV1 = 2 });
+// McpModelToolsCallJsonV1 is the MCP tools/call wire format for a provider that
+// hands its arguments to a model: the executor masks every sensitive span of
+// every text argument before the request leaves the trusted host (no residual
+// PII), and puts the values back into the reply. TableComputeV1 has the same
+// request and reply shape but is never sent anywhere: the executor evaluates
+// the fixed table-compute function itself.
+closed_enum!(ActionCodecProfileV2 { McpToolsCallJsonV1 = 1, FixedJsonPostV1 = 2, McpModelToolsCallJsonV1 = 3, TableComputeV1 = 4 });
 closed_enum!(TaskEffectV2 { Read = 1, Create = 2, Update = 3, Delete = 4, Send = 5, Execute = 6, FinalRelease = 7 });
 closed_enum!(MagnitudeUnitV2 { Count = 1, Bytes = 2 });
 

@@ -8271,7 +8271,6 @@ fn push_tool_meaning(
     index: usize,
     tool: &savana_policy_core::v2::UnsignedToolDescriptorV2,
 ) -> Result<(), KernelAgentAuthorityErrorV2> {
-    use savana_kernel_protocol::v2::BusinessFieldRoleV2;
     use savana_policy_core::v2::{
         ExecutorIdempotencyContractV2, InternalValidatorImplementationKindV2,
     };
@@ -8294,10 +8293,11 @@ fn push_tool_meaning(
             )
             .map_err(unavailable)?;
             push_lower_hex(display, profile.target_identity().as_bytes())?;
+            // Every field that chooses where the call goes (cc and bcc too).
             let destinations = profile
                 .fields()
                 .iter()
-                .filter(|field| field.role() == BusinessFieldRoleV2::Destination)
+                .filter(|field| field.role().is_destination_class())
                 .map(|field| field.name())
                 .collect::<Vec<_>>();
             write!(
@@ -8313,13 +8313,23 @@ fn push_tool_meaning(
             for (position, field) in profile.fields().iter().enumerate() {
                 write!(
                     display,
-                    "{}{} ({:?}, {:?})",
+                    "{}{} ({:?}, {:?}",
                     if position == 0 { "" } else { ", " },
                     field.name(),
                     field.role(),
                     field.kind(),
                 )
                 .map_err(unavailable)?;
+                if let Some(fixed) = field.fixed() {
+                    write!(display, ", fixed {fixed:?}").map_err(unavailable)?;
+                }
+                display.push(')');
+            }
+            if profile.codec()
+                != savana_kernel_protocol::v2::ActionCodecProfileV2::McpToolsCallJsonV1
+            {
+                write!(display, "; tool[{index}].codec: {:?}", profile.codec())
+                    .map_err(unavailable)?;
             }
             display.push_str("; ");
         }

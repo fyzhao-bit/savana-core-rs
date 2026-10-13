@@ -2,7 +2,8 @@
 fn owner_document_fixture(extra: bool, wrong_control: bool, untrusted: bool)
     -> PlannerAuthorityFixtureV2 {
     owner_document_fixture_with(extra,wrong_control,untrusted,
-        |inputs| serde_json::json!({"schema":1,"prompt":"send the reports","inputs":inputs}))
+        |inputs| serde_json::json!({"schema":3,"prompt":"send the private payload to A or B for Alice",
+            "origin":"owner_text","constants":[],"inputs":inputs}))
 }
 
 fn owner_document_fixture_with(extra: bool, wrong_control: bool, untrusted: bool,
@@ -164,26 +165,47 @@ fn claim_material_retains_only_a_matching_gated_owner_document_across_snapshots(
 }
 
 #[test]
-fn planner_drafted_inputs_must_be_owner_text_before_anything_is_pinned() {
-    // Schema 2: the owner declared every input owner text. A literal the
-    // request does not contain fails before any input is pinned.
-    let drafted=|prompt:&'static str| move |inputs| serde_json::json!({"schema":2,"prompt":prompt,
-        "inputs":inputs,"origin":"owner_text","constants":["private-result"]});
-    let mut f=owner_document_fixture_with(false,false,false,drafted("send the private payload to A for Alice"));
-    let task=f.authority.sessions[0].durable_task_id;
-    let root=f.authority.sessions[0].task_authorization_digest.unwrap();
-    f.authority.prepare_owner_execution_review_v04(&review_proof(&f,78),*task.as_bytes(),*root.as_bytes(),
-        &mut f.values,UnixMillisV2::new(203)).unwrap();
-    assert!(f.authority.policy.as_ref().unwrap().durable.fused_inputs_pinned_v04(task).unwrap());
-
-    for prompt in ["send the private payload to A", "send the private payload to a for alice"] {
-        let mut f=owner_document_fixture_with(false,false,false,drafted(prompt));
+fn owner_inputs_must_be_owner_text_or_a_bound_constant_before_anything_is_pinned() {
+    // Every input is the owner's request text for every field it fills, or a
+    // constant the owner bound to exactly that field -- never a destination.
+    let operation=|f:&PlannerAuthorityFixtureV2| f.authority.policy.as_ref().unwrap().active_tools.records()[0]
+        .descriptor().unsigned().require_business_profile().unwrap().operation().to_owned();
+    let document=|prompt:&'static str,constants:Vec<(&'static str,&'static str)>,op:String| move |inputs|
+        serde_json::json!({"schema":3,"prompt":prompt,"inputs":inputs,"origin":"owner_text",
+            "constants":constants.iter().map(|(value,field)| serde_json::json!({"value":value,
+                "fields":[{"operation":op,"field":field}]})).collect::<Vec<_>>()});
+    let op=operation(&owner_document_fixture(false,false,false));
+    let accepted=[
+        document("send the private payload to A for Alice",vec![],op.clone()),
+        document("send it to A for Alice",vec![("private payload","body")],op.clone()),
+    ];
+    for (n,doc) in accepted.into_iter().enumerate() {
+        let mut f=owner_document_fixture_with(false,false,false,doc);
+        let task=f.authority.sessions[0].durable_task_id;
+        let root=f.authority.sessions[0].task_authorization_digest.unwrap();
+        f.authority.prepare_owner_execution_review_v04(&review_proof(&f,78),*task.as_bytes(),*root.as_bytes(),
+            &mut f.values,UnixMillisV2::new(203)).unwrap_or_else(|e| panic!("accepted {n}: {e:?}"));
+        assert!(f.authority.policy.as_ref().unwrap().durable.fused_inputs_pinned_v04(task).unwrap());
+    }
+    let refused=[
+        // The destination is not in the request, or not as written.
+        document("send the private payload to A",vec![],op.clone()),
+        document("send the private payload to a for alice",vec![],op.clone()),
+        document("send the private payload to A for Alicette",vec![],op.clone()),
+        // A constant never fills a destination, even bound to it.
+        document("send the private payload to A",vec![("Alice","to")],op.clone()),
+        // A constant fills only the field it is bound to.
+        document("send it to A for Alice",vec![("private payload","file")],op.clone()),
+        document("send it to A for Alice",vec![("private payload","body")],"other.tool".into()),
+    ];
+    for (n,doc) in refused.into_iter().enumerate() {
+        let mut f=owner_document_fixture_with(false,false,false,doc);
         let task=f.authority.sessions[0].durable_task_id;
         let root=f.authority.sessions[0].task_authorization_digest.unwrap();
         let before=disk(&f);
         assert!(matches!(f.authority.prepare_owner_execution_review_v04(&review_proof(&f,79),*task.as_bytes(),
             *root.as_bytes(),&mut f.values,UnixMillisV2::new(203)),Err(KernelAgentAuthorityErrorV2::BindingMismatch)),
-            "{prompt}");
+            "refused {n}");
         assert_eq!(disk(&f),before);
         assert!(!f.authority.policy.as_ref().unwrap().durable.fused_inputs_pinned_v04(task).unwrap());
     }
