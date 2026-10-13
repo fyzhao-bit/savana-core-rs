@@ -48,7 +48,8 @@ from .agentdojo_tasks import (BENCHMARK, CALENDAR_YEAR, GENERATED_ITEMS, GENERAT
                               upstream_for)
 from .dojo_catalog import (GUARD_ALWAYS, GUARD_FIELD, LIST_KINDS, LIST_SEPARATOR, SENTINELS, decode_argument, entry,
                            suite_operations)
-from .dojo_compute import COMPUTE_TOOL, FIELDS as COMPUTE_FIELDS, INPUT_FIELDS, ComputeSpecError, validate_spec
+from .dojo_compute import (CALC, COMPUTE_TOOL, FIELDS as COMPUTE_FIELDS, INPUT_FIELDS, ComputeSpecError,
+                           calc_constants, validate_spec)
 
 # Reads whose whole result exceeds a compute input's signed bound
 # (MAX_CONTEXT_BYTES) in the benchmark environments (list_files: about 29 KB
@@ -120,7 +121,10 @@ def review_policy():
                           "a gated step's result is never used",
             "compute": {"tool": COMPUTE_TOOL, "inputs": "signed edges to earlier results",
                         "spec": "filter/order/output texts in a fixed grammar, declared as owner constants",
-                        "output": "data: never a destination, used only through a signed edge"}}
+                        "output": "data: never a destination, used only through a signed edge",
+                        "calc": "only where the run allows it: exact arithmetic on the first number of each "
+                                "input (#1..#4) with + - * / ( ) min max, no filter or order; every number it "
+                                "writes is stated in the request, or is 2 or 100"}}
 
 
 class ProgramRefused(ValueError):
@@ -216,6 +220,22 @@ _NUMBER_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "fi
 _COUNT = r"(?P<count>[0-9]+(?:\.[0-9]+)?|" + "|".join(sorted(map(re.escape, _NUMBER_WORDS), key=len, reverse=True)) + r")"
 _DURATION = re.compile(r"\b" + _COUNT + r"[\s-]*(?P<unit>hours?|hrs?|minutes?|mins?|days?|weeks?)\b", re.I)
 _MONEY = re.compile(r"(?<![0-9.])(?P<amount>[0-9]{1,9}(?:\.[0-9]{1,2})?)(?![0-9])")
+
+
+# The numbers a "calc" output may write besides the request's own: 2 (a half)
+# and 100 (a percentage).
+CALC_STRUCTURAL = (decimal.Decimal(2), decimal.Decimal(100))
+
+
+def calc_numbers(prompt):
+    """The numbers a "calc" output may write, by a fixed rule: every plain
+    number the owner's request states, every number word it uses (not "a" or
+    "an"), and CALC_STRUCTURAL."""
+    text = nfc(prompt)
+    numbers = {decimal.Decimal(m.group("amount")) for m in _MONEY.finditer(text)}
+    numbers |= {decimal.Decimal(str(value)) for word, value in _NUMBER_WORDS.items()
+                if word not in ("a", "an", "half a", "half an") and re.search(rf"\b{re.escape(word)}\b", text, re.I)}
+    return numbers | set(CALC_STRUCTURAL)
 
 
 def owner_amounts(prompt):
@@ -401,7 +421,7 @@ def performs_action(contract):
 
 
 def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(), extractor_model=GENERATOR_MODEL,
-                   derived_destinations=False, read_only=False, destination_candidates=None):
+                   derived_destinations=False, read_only=False, destination_candidates=None, calc=False):
     """The owner's fixed review of a planner program -> DraftedContract, or
     ProgramRefused. `suite_tools` are the official function names this
     episode's suite serves. A refusal carries the step number and field name
@@ -418,7 +438,9 @@ def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(),
     `destination_candidates` (with `derived_destinations`) is the closed set
     the owner signs into every destination edge data fills, recipients beyond
     the one destination included (a trusted-set origin): the kernel endorses
-    a derived destination only if it is a member, byte for byte."""
+    a derived destination only if it is a member, byte for byte. `calc`
+    admits a compute step's "calc" output (`dojo_compute`), whose numbers must
+    be stated in the request (`calc_numbers`)."""
     if extractor_model not in EXTRACTOR_MODELS:
         raise ValueError("extractor_model")
     where = {"step": None, "field": None}
@@ -431,7 +453,7 @@ def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(),
         contract = _review_program(where, suite=suite, suite_tools=suite_tools, task_id=task_id, prompt=prompt,
                                    program=program, extractor_model=extractor_model,
                                    derived_destinations=derived_destinations,
-                                   destination_candidates=destination_candidates)
+                                   destination_candidates=destination_candidates, calc=calc)
     except ProgramRefused as error:
         error.step, error.field = where["step"], where["field"]
         raise
@@ -443,7 +465,7 @@ def review_program(*, suite, suite_tools, task_id, prompt, program, bindings=(),
 
 
 def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extractor_model,
-                    derived_destinations=False, destination_candidates=None):
+                    derived_destinations=False, destination_candidates=None, calc=False):
     if type(program) is not dict or set(program) != {"steps"} or type(program["steps"]) is not list:
         _refuse("program_shape")
     raw_steps = program["steps"]
@@ -596,7 +618,11 @@ def _review_program(where, *, suite, suite_tools, task_id, prompt, program, extr
                     derived.append((name, earlier, RESULT_TEXT, MAX_CONTEXT_BYTES))
             where["field"] = "output"
             try:
-                spec = validate_spec(args, len(given))
+                spec = validate_spec(args, len(given), calc=calc)
+                # Arithmetic writes numbers of its own: each one the owner stated.
+                if spec["output"].startswith(CALC + " ") and not calc_constants(spec["output"], len(given)) <= (
+                        calc_numbers(prompt)):
+                    _refuse("calc_constant")
             except ComputeSpecError as error:
                 _refuse(str(error))
             values = {**{name: "" for name in INPUT_FIELDS[len(given):]}, **spec,

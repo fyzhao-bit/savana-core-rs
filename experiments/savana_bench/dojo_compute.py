@@ -23,6 +23,14 @@ comparison as a fixed function instead:
 (e.g. the senders of messages read from several channels), with no filter or
 order.
 
+Where the run allows it (`calc=True`), the output may also be
+"calc <expression>", with no filter or order: exact decimal arithmetic on the
+first number in each input, written #1..#4, with numbers, + - * / ( ) and
+min(a, b, ...), max(a, b, ...), rounded to 2 decimal places. An input with no
+number, a division by zero or a value beyond CALC_LIMIT gives an empty output:
+nothing is guessed. Which numbers an expression may use is the owner's
+review's rule (`calc_constants`), not this function's.
+
 input1 gives the rows: an object's entries (key -> value), a list of records
 (key = its "id", "id_", "name", "title" or "filename", else its position), a list of texts, or a
 text (lines, or items separated by "; "). Every other input is an object or
@@ -35,6 +43,7 @@ nothing leaves the connector. Its output is data exactly like an extraction's
 (`{"text": ..., "items": [...]}`), so the owner's review keeps every rule for
 it: never a destination, reaching a later field only through a signed edge.
 """
+import decimal
 import json
 import re
 import unicodedata
@@ -60,6 +69,13 @@ _REF = re.compile(r"^(?:key|[1-4](?:\.[A-Za-z_][A-Za-z0-9_]{0,31})?)$")
 _FIELD = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,31}$")
 _NUMBER = re.compile(r"-?[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?")
 _LABEL = re.compile(r"^[A-Za-z][A-Za-z ]{0,39}:\s*(\S.*)$")
+CALC = "calc"
+CALC_LIMIT = decimal.Decimal("1e12")
+MAX_CALC_TOKENS = 64
+MAX_CALC_DEPTH = 8
+_CALC_TOKEN = re.compile(r"\s*(?:(?P<number>[0-9]+(?:\.[0-9]+)?)|(?P<ref>#[1-4])|(?P<function>min|max)"
+                         r"|(?P<symbol>[-+*/(),]))")
+_CENT = decimal.Decimal("0.01")
 
 
 class ComputeSpecError(ValueError):
@@ -104,10 +120,114 @@ def parse_order(text, inputs=4):
     return parts[0], _ref(parts[1], inputs)
 
 
-def parse_output(text, inputs=4):
-    """-> (kind, ref or None, limit or None)."""
+def _calc_tokens(text):
+    tokens, at = [], 0
+    while at < len(text):
+        match = _CALC_TOKEN.match(text, at)
+        if match is None or match.end() == at:
+            raise ComputeSpecError("compute_spec")
+        at = match.end()
+        tokens.append((match.lastgroup, match.group(match.lastgroup)))
+        if len(tokens) > MAX_CALC_TOKENS:
+            raise ComputeSpecError("compute_spec")
+    return tokens
+
+
+def parse_calc(text, inputs=4):
+    """An expression -> its tree: ("number", Decimal) | ("ref", n) |
+    ("neg", tree) | (op, tree, tree) for + - * / | ("min" | "max", [tree, ...])."""
+    tokens = _calc_tokens(text)
+    at = 0
+
+    def peek():
+        return tokens[at][1] if at < len(tokens) else None
+
+    def take(symbol=None):
+        nonlocal at
+        if at == len(tokens) or (symbol is not None and tokens[at][1] != symbol):
+            raise ComputeSpecError("compute_spec")
+        at += 1
+        return tokens[at - 1]
+
+    def expression(depth):
+        if depth > MAX_CALC_DEPTH:
+            raise ComputeSpecError("compute_spec")
+        tree = term(depth)
+        while peek() in ("+", "-"):
+            tree = (take()[1], tree, term(depth))
+        return tree
+
+    def term(depth):
+        tree = unary(depth)
+        while peek() in ("*", "/"):
+            tree = (take()[1], tree, unary(depth))
+        return tree
+
+    def unary(depth):
+        if peek() == "-":
+            take()
+            if depth + 1 > MAX_CALC_DEPTH:
+                raise ComputeSpecError("compute_spec")
+            return ("neg", unary(depth + 1))
+        return atom(depth)
+
+    def atom(depth):
+        kind, value = take()
+        if kind == "number":
+            return ("number", decimal.Decimal(value))
+        if kind == "ref":
+            if int(value[1]) > inputs:
+                raise ComputeSpecError("compute_input")
+            return ("ref", int(value[1]))
+        if kind == "function":
+            take("(")
+            arguments = [expression(depth + 1)]
+            while peek() == ",":
+                take()
+                arguments.append(expression(depth + 1))
+            take(")")
+            if len(arguments) < 2:
+                raise ComputeSpecError("compute_spec")
+            return (value, arguments)
+        if value == "(":
+            tree = expression(depth + 1)
+            take(")")
+            return tree
+        raise ComputeSpecError("compute_spec")
+
+    tree = expression(0)
+    if at != len(tokens):
+        raise ComputeSpecError("compute_spec")
+    return tree
+
+
+def calc_constants(output, inputs=4):
+    """The numbers a "calc" output writes itself, for the owner's review."""
+    found = set()
+
+    def walk(tree):
+        if tree[0] == "number":
+            found.add(tree[1])
+        elif tree[0] in ("min", "max"):
+            for argument in tree[1]:
+                walk(argument)
+        elif tree[0] == "neg":
+            walk(tree[1])
+        elif tree[0] != "ref":
+            walk(tree[1])
+            walk(tree[2])
+    walk(parse_output(output, inputs, calc=True)[1])
+    return found
+
+
+def parse_output(text, inputs=4, calc=False):
+    """-> (kind, ref or None, limit or None); for "calc", (kind, tree, None)."""
     parts = _spec_text(text).split(" ")
     kind = parts[0]
+    if kind == CALC and calc:
+        if len(parts) < 2:
+            raise ComputeSpecError("compute_spec")
+        return kind, parse_calc(text[len(CALC) + 1:], inputs), None
     if kind not in OUTPUTS:
         raise ComputeSpecError("compute_spec")
     if kind in ("key", "count"):
@@ -242,6 +362,57 @@ def _bounded(items):
     return {"text": SEPARATOR.join(kept), "items": kept}
 
 
+def _calc_value(text):
+    """The first number in one input, exactly: an extraction's or a
+    computation's value ({"text": ...}), a JSON number, or plain text."""
+    try:
+        value = json.loads(text)
+    except ValueError:
+        value = text
+    if type(value) is dict:
+        value = value.get("text")
+    if type(value) in (int, float) and type(value) is not bool:
+        number = decimal.Decimal(repr(value))
+        return number if number.is_finite() and abs(number) <= CALC_LIMIT else None
+    if type(value) is not str:
+        return None
+    match = _NUMBER.search(value)
+    if match is None:
+        return None
+    number = decimal.Decimal(match.group(0).replace(",", ""))
+    return number if abs(number) <= CALC_LIMIT else None
+
+
+def _calc_eval(tree, values):
+    """The tree's value over the inputs' numbers, or None when an input has
+    none, a divisor is zero or a value leaves [-CALC_LIMIT, CALC_LIMIT]."""
+    kind = tree[0]
+    if kind == "number":
+        result = tree[1]
+    elif kind == "ref":
+        result = values[tree[1] - 1]
+    elif kind == "neg":
+        result = _calc_eval(tree[1], values)
+        result = None if result is None else -result
+    elif kind in ("min", "max"):
+        found = [_calc_eval(argument, values) for argument in tree[1]]
+        result = None if None in found else (min(found) if kind == "min" else max(found))
+    else:
+        left, right = _calc_eval(tree[1], values), _calc_eval(tree[2], values)
+        if left is None or right is None or (kind == "/" and right == 0):
+            return None
+        result = (left + right if kind == "+" else left - right if kind == "-"
+                  else left * right if kind == "*" else left / right)
+    return None if result is None or abs(result) > CALC_LIMIT else result
+
+
+def _calc_format(value):
+    value = value.quantize(_CENT, rounding=decimal.ROUND_HALF_EVEN)
+    if value == value.to_integral_value():
+        return str(int(value))
+    return format(value, "f").rstrip("0").rstrip(".")
+
+
 def _mode(values):
     """The most frequent non-empty value; ties go to the alphabetically first."""
     counts = {}
@@ -254,17 +425,25 @@ def _mode(values):
     return _bounded([min(value for value, n in counts.items() if n == best)])
 
 
-def compute(inputs, filters=(), orders=(), output="key"):
+def compute(inputs, filters=(), orders=(), output="key", calc=False):
     """The step's whole function: input texts (input1 first; "" = absent) and
     spec texts -> {"text": ..., "items": [...]}. Raises only on a malformed spec
-    (which the owner's review already refused)."""
+    (which the owner's review already refused). `calc` allows a "calc" output."""
     count = next((i for i, text in enumerate(inputs) if text == ""), len(inputs))
     if count == 0 or any(text != "" for text in inputs[count:]):
         raise ComputeSpecError("compute_input")
     present = list(inputs[:count])
     filters = [parse_filter(f, count) for f in filters if f]
     orders = [parse_order(o, count) for o in orders if o]
-    kind, ref, limit = parse_output(output, count)
+    kind, ref, limit = parse_output(output, count, calc)
+    if kind == CALC:
+        # Arithmetic on one number per input: rows, filters and orders do not apply.
+        if filters or orders:
+            raise ComputeSpecError("compute_spec")
+        with decimal.localcontext() as context:
+            context.prec = 34
+            result = _calc_eval(ref, [_calc_value(text) for text in present])
+        return {"text": "", "items": []} if result is None else _bounded([_calc_format(result)])
     if kind == "mode" and ref.startswith("*."):
         # One field over the records of every input together.
         if filters or orders:
@@ -307,9 +486,10 @@ def compute(inputs, filters=(), orders=(), output="key"):
     return _bounded([f"{k}: {_text(_resolve(ref, k, c)) or ''}" for k, c in rows])
 
 
-def validate_spec(args, inputs):
+def validate_spec(args, inputs, calc=False):
     """The owner's review of one step's spec texts -> {field: text} (absent
-    fields as ""). Raises ComputeSpecError."""
+    fields as ""). Raises ComputeSpecError. `calc` allows a "calc" output
+    (whose numbers the review checks separately, `calc_constants`)."""
     values = {}
     for name in SPEC_FIELDS:
         raw = args.get(name)
@@ -324,8 +504,9 @@ def validate_spec(args, inputs):
         elif name in ORDER_FIELDS:
             parse_order(text, inputs)
         else:
-            parse_output(text, inputs)
+            parse_output(text, inputs, calc)
         values[name] = text
-    if values[OUTPUT_FIELD].startswith("mode *.") and any(values[name] for name in (*FILTER_FIELDS, *ORDER_FIELDS)):
+    if (values[OUTPUT_FIELD].startswith(("mode *.", CALC + " "))
+            and any(values[name] for name in (*FILTER_FIELDS, *ORDER_FIELDS))):
         raise ComputeSpecError("compute_spec")
     return values

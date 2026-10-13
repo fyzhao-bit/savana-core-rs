@@ -107,12 +107,14 @@ def target_description(target, functions, question=""):
             f"Format: {_FORMATS[kind]}.", FIELD_BYTES)
 
 
-def extract_request(arguments, functions, view):
+def extract_request(arguments, functions, view, exact=False):
     """(the exact body the extractor's model is sent, the placeholder
     bindings, the byte bound) for one `dojo.model.extract` call's kernel
     arguments under an extractor view (`value_blind.extractor_inputs`). Pure,
-    so the offline verifier recomputes what left the host."""
-    from .quarantined_generator import generator_request_body
+    so the offline verifier recomputes what left the host. `exact` says that
+    SOURCE is the result of this episode's own compute step (`+compute=calc`;
+    see `computed_source`)."""
+    from .quarantined_generator import EXACT_NOTE, generator_request_body
     from .value_blind import EXTRACT_NOTE, extractor_inputs
     contexts = [arguments.get(c, "") for c in ("context", "context2", "context3", "context4", "context5")]
     instruction, source, context, question, bindings = extractor_inputs(
@@ -121,11 +123,25 @@ def extract_request(arguments, functions, view):
     description, max_bytes = target_description(arguments["target"], functions, question)
     body = generator_request_body(model=arguments["model"], instruction=instruction, source=source,
                                   target=description, max_bytes=max_bytes, context=context,
-                                  note=EXTRACT_NOTE if bindings else "")
+                                  note=(EXTRACT_NOTE if bindings else "") + (EXACT_NOTE if exact else ""))
     return body, bindings, max_bytes
 
 
-def _extract_tool(generator, functions, view="raw"):
+def computed_source(body, requests):
+    """Whether an extraction's payload is the result of one of `requests` (the
+    JSON-RPC calls this episode made so far) that called the compute step: the
+    result's id is the call's own, set by the provider, never by data."""
+    from .dojo_compute import COMPUTE_TOOL
+    try:
+        result = json.loads(body)
+    except ValueError:
+        return False
+    return type(result) is dict and any(
+        request.get("id") == result.get("id") and (request.get("params") or {}).get("name") == COMPUTE_TOOL
+        for request in requests)
+
+
+def _extract_tool(generator, functions, view="raw", exact=None):
     """The reviewed `dojo.model.extract` adapter: the payload is the earlier
     result the kernel passed (data), the instruction is the owner's text, the
     target an inert catalog label; model/destination controls are fixed.
@@ -135,7 +151,11 @@ def _extract_tool(generator, functions, view="raw"):
     per call) and puts the values back into the model's reply. A value put
     back is one of this call's own inputs, so the reply can carry nothing the
     unmasked model could not have copied; it still reaches a later operation
-    only through an owner-signed edge, and the kernel bounds it there."""
+    only through an owner-signed edge, and the kernel bounds it there.
+
+    `exact` (`+compute=calc`) returns the calls this episode made so far; when
+    the payload is a compute step's result, the model is told to state it as
+    given (EXACT_NOTE)."""
     def extract(body: str, context: str, context2: str, context3: str, context4: str, context5: str,
                 instruction: str, model: str, question: str, source: str, target: str, to: str):
         """Quarantined extraction of one value from an untrusted source; no tools, no actions.
@@ -163,9 +183,12 @@ def _extract_tool(generator, functions, view="raw"):
         sent_instruction, sent_source, sent_context, sent_question, bindings = extractor_inputs(
             instruction, body, "\n\n".join(contexts), view, question)
         description, max_bytes = target_description(target, functions, sent_question)
-        # The note is passed only with placeholders: a raw call is unchanged.
+        # A note is passed only with placeholders or a computed payload: any other call is unchanged.
+        from .quarantined_generator import EXACT_NOTE
+        computed = exact is not None and computed_source(body, exact())
+        note = (EXTRACT_NOTE if bindings else "") + (EXACT_NOTE if computed else "")
         line = generator(instruction=sent_instruction, source=sent_source, target=description, max_bytes=max_bytes,
-                         context=sent_context, **(dict(note=EXTRACT_NOTE) if bindings else {}))
+                         context=sent_context, **(dict(note=note) if note else {}))
         from .quarantined_generator import bounded_line
         if bindings:
             line = bounded_line(unmask_reply(line, bindings), max_bytes)
@@ -192,10 +215,11 @@ def _extract_tool(generator, functions, view="raw"):
     return extract
 
 
-def _compute_tool():
+def _compute_tool(calc=False):
     """The reviewed `dojo.compute.table` adapter: a fixed deterministic function
     of the owner-signed inputs and spec texts (`dojo_compute.compute`). It calls
-    no model and no AgentDojo function and contacts nothing."""
+    no model and no AgentDojo function and contacts nothing. `calc` admits the
+    "calc" output."""
     from .dojo_compute import compute
 
     def table(body: str, calendar: str, to: str, input1: str, input2: str, input3: str, input4: str,
@@ -218,18 +242,21 @@ def _compute_tool():
         """
         if (body != SENTINELS["body"] or calendar != SENTINELS["calendar"] or to != SENTINELS["to"]):
             raise ValueError("compute_control_mismatch")
-        return compute([input1, input2, input3, input4], [filter1, filter2, filter3], [order1, order2], output)
+        return compute([input1, input2, input3, input4], [filter1, filter2, filter3], [order1, order2], output,
+                       calc=calc)
 
     table.__name__ = "dojo.compute.table"
     return table
 
 
-def dojo_provider(suite, environment, *, max_calls=1, generator=None, extractor_view="raw"):
+def dojo_provider(suite, environment, *, max_calls=1, generator=None, extractor_view="raw", compute="table"):
     """The provider for one episode of `suite` (an AgentDojo TaskSuite).
 
     Only the original functions of that suite back an operation; an operation
     of another suite, or the generator when none is supplied, is not served
-    (a call to it fails before any effect)."""
+    (a call to it fails before any effect). `compute` "calc" serves the
+    compute step's exact arithmetic, and an extraction of a compute step's
+    result is told to state its value as given."""
     from agentdojo.functions_runtime import FunctionsRuntime, make_function
 
     if importlib.metadata.version("agentdojo") != PACKAGE_VERSION:
@@ -248,8 +275,15 @@ def dojo_provider(suite, environment, *, max_calls=1, generator=None, extractor_
         adapter = namespace.pop(pyname)
         adapter.__name__ = operation
         functions.append(make_function(adapter))
-    functions.append(make_function(_compute_tool()))
+    if compute not in ("table", "calc"):
+        raise ValueError("provider_compute")
+    functions.append(make_function(_compute_tool(calc=compute == "calc")))
+    calls = []  # the provider's own record of this episode's calls, for an extraction's payload
     if generator is not None:
         functions.append(make_function(_generator_tool(generator)))
-        functions.append(make_function(_extract_tool(generator, tools, extractor_view)))
-    return AgentDojoProvider(FunctionsRuntime(functions), environment, max_calls=max_calls)
+        functions.append(make_function(_extract_tool(
+            generator, tools, extractor_view,
+            exact=(lambda: [row["request"] for row in calls]) if compute == "calc" else None)))
+    provider = AgentDojoProvider(FunctionsRuntime(functions), environment, max_calls=max_calls)
+    calls = provider.audit
+    return provider

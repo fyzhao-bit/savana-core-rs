@@ -130,6 +130,10 @@ ACTIONS = ("accept", "ask")
 # act on them (none), or run a read turn whose report the owner may adopt as
 # its own words for an act turn (`adopted_instructions`).
 INSTRUCTIONS = ("none", "adopt")
+# What a compute step may do: filter, order and aggregate (`table`), or also
+# exact arithmetic, with an extraction of a computed value told to state it as
+# given (`calc`; see `dojo_compute`).
+COMPUTES = ("table", "calc")
 
 
 class InstructionsNotAdopted(RuntimeError):
@@ -185,7 +189,9 @@ def drafted_options(kind):
     but the request asks for an action (see ACTIONS; needs a later draft).
     `+instructions=adopt` runs a request that delegates its action to
     instructions in data as a read turn and an act turn (see INSTRUCTIONS;
-    needs the directory owner, who decides adoption)."""
+    needs the directory owner, who decides adoption).
+    `+compute=calc` lets a compute step do exact arithmetic and has the answer
+    state a computed number as given (see COMPUTES; needs a drafting planner)."""
     from .drafted_tasks import EXTRACTOR_MODELS
     from .value_blind import EXTRACTOR_VIEWS, VIEWS
     base, *options = kind.split("+")
@@ -196,7 +202,7 @@ def drafted_options(kind):
         key, equals, value = option.partition("=")
         if not equals or key in parsed or key not in ("drafts", "planner", "view", "extract", "extractor",
                                                        "attack", "exposure", "review", "owner", "author",
-                                                       "mapper", "actions", "instructions"):
+                                                       "mapper", "actions", "instructions", "compute"):
             raise ValueError("planner_experiment_spec")
         parsed[key] = value
     drafts = parsed.get("drafts", "1")
@@ -216,7 +222,8 @@ def drafted_options(kind):
             or review not in REVIEWS or owner not in OWNERS or author not in AUTHORS
             or parsed.get("mapper", MAPPERS[0]) not in MAPPERS or ("mapper" in parsed and author != "structured")
             or parsed.get("actions", ACTIONS[0]) not in ACTIONS
-            or parsed.get("instructions", INSTRUCTIONS[0]) not in INSTRUCTIONS):
+            or parsed.get("instructions", INSTRUCTIONS[0]) not in INSTRUCTIONS
+            or parsed.get("compute", COMPUTES[0]) not in COMPUTES):
         raise ValueError("planner_experiment_spec")
     # Only a structured spec passes `mapper`, so every other spec's options are unchanged.
     mapper = {} if author != "structured" else dict(mapper=parsed.get("mapper", MAPPERS[0]))
@@ -224,13 +231,14 @@ def drafted_options(kind):
                       extractor_model=extractor, attack=attack, exposure=exposure, review=review, owner=owner,
                       author=author, **mapper,
                       **({} if "actions" not in parsed else dict(actions=parsed["actions"])),
-                      **({} if "instructions" not in parsed else dict(instructions=parsed["instructions"])))
+                      **({} if "instructions" not in parsed else dict(instructions=parsed["instructions"])),
+                      **({} if "compute" not in parsed else dict(compute=parsed["compute"])))
 
 
 def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS[0], planner_view="request",
                   extractor_view="raw", extractor_model="deepseek-flash", attack=ATTACKS[0],
                   exposure=EXPOSURES[0], review=None, owner=None, author=None, mapper=None, actions=None,
-                  instructions=None):
+                  instructions=None, compute=None):
     """`<suite>:<item>[,<item>...]`, each item `user_task_N` (benign) or
     `user_task_N+injection_task_M` (the official important_instructions
     attack). The planner drafts each task's whole program from its request.
@@ -281,6 +289,10 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
             raise ValueError("planner_experiment_spec")
     if (author == "structured") != (mapper is not None) or (mapper is not None and mapper not in MAPPERS):
         raise ValueError("planner_experiment_spec")
+    # Exact arithmetic is a choice of a planner that drafts.
+    if compute not in (None, *COMPUTES) or (compute == "calc" and (
+            author in ("fixed", "registered") or mapper == "template")):
+        raise ValueError("planner_experiment_spec")
     # Asking needs a later draft, from a planner that drafts.
     if actions not in (None, *ACTIONS) or (actions == "ask" and (
             max_drafts < 2 or author in ("fixed", "registered") or mapper == "template")):
@@ -323,7 +335,8 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
                     planner_model=planner_model, planner_view=planner_view, extractor_view=extractor_view,
                     extractor_model=extractor_model, **attack_key,
                     **({} if mapper is None else dict(mapper=mapper)),
-                    **({} if actions in (None, ACTIONS[0]) else dict(actions=actions)))
+                    **({} if actions in (None, ACTIONS[0]) else dict(actions=actions)),
+                    **({} if compute in (None, COMPUTES[0]) else dict(compute=compute)))
         if instructions == "adopt" and _delegates_to_data(suite, user):
             cases += [dict(case, instructions="read"), dict(case, instructions="act")]
         else:
@@ -788,7 +801,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                                                            view=case["planner_view"],
                                                                            exposure=planner_exposure(case),
                                                                            directory=case.get("owner") in ("directory",
-                                                                                                           "set"))
+                                                                                                           "set"),
+                                                                           compute=case.get("compute", COMPUTES[0]))
                                 except RuntimeError:
                                     row["outcome"] = "author_failed"
                                     raise
@@ -802,7 +816,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                         extractor_model=case["extractor_model"],
                                         derived_destinations=case.get("review") == "derived",
                                         read_only=instructions_turn == "read",
-                                        destination_candidates=destination_candidates(case)))
+                                        destination_candidates=destination_candidates(case),
+                                        calc=case.get("compute") == "calc"))
                                 except ProgramRefused as error:
                                     audit.emit("program_refused", episode=index, attempt=attempt, reason=str(error),
                                                step=error.step, field=error.field)
@@ -853,7 +868,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                             planned = plan_program(structured, mapper, job_id=f"episode-{index}",
                                                    suite=case["suite"], user=case["user"],
                                                    extractor_model=case["extractor_model"],
-                                                   derived_destinations=case.get("review") == "derived")
+                                                   derived_destinations=case.get("review") == "derived",
+                                                   calc=case.get("compute") == "calc")
                             audit.emit("structured_planned", episode=index,
                                        **evidence(planned, structural.log[calls:]))
                             failure = getattr(mapper, "failure", None)
@@ -896,7 +912,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                     if drafted is not None:
                         from .dojo_provider import dojo_provider
                         provider = dojo_provider(suite, env, max_calls=len(contract.steps()), generator=generator,
-                                                 extractor_view=case["extractor_view"])
+                                                 extractor_view=case["extractor_view"],
+                                                 compute=case.get("compute", COMPUTES[0]))
                     else:
                         provider = calendar_provider(env, max_calls=len(contract.steps()), generator=generator)
                     generated_before = 0 if generator is None else len(generator.log)

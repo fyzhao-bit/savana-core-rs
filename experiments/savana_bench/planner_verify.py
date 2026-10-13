@@ -158,7 +158,8 @@ def _drafted_contract(case, local, row, prior=None):
         else:
             body = draft_request_body(official, request, model=case["planner_model"], goal=case.get("goal"),
                                       history=tuple(history), view=view, exposure=exposure,
-                                      directory=case.get("owner") in ("directory", "set"))
+                                      directory=case.get("owner") in ("directory", "set"),
+                                      compute=case.get("compute", "table"))
             if hashlib.sha256(body).hexdigest() != event["request_sha256"]:
                 raise ValueError("planner_input_mismatch")
             if event.get("view", "request") != view or event.get("placeholders", 0) != len(bindings):
@@ -174,7 +175,8 @@ def _drafted_contract(case, local, row, prior=None):
                                       bindings=bindings,
                                       extractor_model=case.get("extractor_model", "deepseek-flash"),
                                       derived_destinations=case.get("review") == "derived",
-                                      read_only=turn == "read", destination_candidates=destination_candidates(case))
+                                      read_only=turn == "read", destination_candidates=destination_candidates(case),
+                                      calc=case.get("compute") == "calc")
             refusal = None
         except ProgramRefused as error:
             contract, refusal = None, error
@@ -359,7 +361,7 @@ def _structured_contract(case, local, row, contract):
         raise ValueError("structured_lowering")
     try:
         reviewed = review(lowered, suite=case["suite"], user=case["user"], extractor_model=case["extractor_model"],
-                          derived_destinations=case.get("review") == "derived")
+                          derived_destinations=case.get("review") == "derived", calc=case.get("compute") == "calc")
     except ProgramRefused as error:
         if outcome != "lowering_failed" or event["lowering_error"] != "review_" + str(error):
             raise ValueError("structured_review") from None
@@ -379,19 +381,23 @@ def _extractor_inputs(case, local):
         return
     from agentdojo.task_suite.load_suites import get_suite
     from .agentdojo_tasks import BENCHMARK
-    from .dojo_provider import extract_request
+    from .dojo_provider import computed_source, extract_request
     from .drafted_tasks import EXTRACT_TOOL
     from .value_blind import MaskError
     tools = {t.name: t for t in get_suite(BENCHMARK, case["suite"]).tools}
-    digests = []
+    digests, requests = [], []
     for event in local:
         if event["kind"] != "provider_attempt":
             continue
-        params = json.loads(base64.b64decode(event["payload_base64"], validate=True)).get("params") or {}
+        request = json.loads(base64.b64decode(event["payload_base64"], validate=True))
+        requests.append(request)
+        params = request.get("params") or {}
         if params.get("name") != EXTRACT_TOOL:
             continue
         try:
-            body, bindings, _bound = extract_request(params["arguments"], tools, view)
+            # A computed payload (`+compute=calc`) is decided as the provider decided it.
+            exact = case.get("compute") == "calc" and computed_source(params["arguments"]["body"], requests)
+            body, bindings, _bound = extract_request(params["arguments"], tools, view, exact=exact)
         except MaskError:
             continue  # the connector refused before sending anything
         sent = [m["content"] for m in json.loads(body)["messages"]]

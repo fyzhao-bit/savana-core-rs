@@ -588,7 +588,7 @@ def lower_plan(conversion, steps):
     return {"steps": lowered}
 
 
-def review(program, *, suite, user, extractor_model="deepseek-flash", derived_destinations=False):
+def review(program, *, suite, user, extractor_model="deepseek-flash", derived_destinations=False, calc=False):
     """The owner's fixed review of a (lowered) program -> DraftedContract."""
     from agentdojo.task_suite.load_suites import get_suite
     from .agentdojo_tasks import BENCHMARK
@@ -596,7 +596,7 @@ def review(program, *, suite, user, extractor_model="deepseek-flash", derived_de
     official = get_suite(BENCHMARK, suite)
     return review_program(suite=suite, suite_tools={t.name for t in official.tools}, task_id=user,
                           prompt=official.get_user_task_by_id(user).PROMPT, program=program,
-                          extractor_model=extractor_model, derived_destinations=derived_destinations)
+                          extractor_model=extractor_model, derived_destinations=derived_destinations, calc=calc)
 
 
 def sentinels(program, prompt, catalog):
@@ -687,7 +687,7 @@ class StructuredSession:
 
 
 def plan_program(session, mapper, *, job_id, suite, user, extractor_model="deepseek-flash",
-                 derived_destinations=False):
+                 derived_destinations=False, calc=False):
     """mapper -> agentd -> planner -> lowering -> the owner's review, as one
     record. `outcome` is "planned" (with the lowered program and its
     contract), or the stage that refused: "mapper_failed", "planner_invalid"
@@ -714,7 +714,7 @@ def plan_program(session, mapper, *, job_id, suite, user, extractor_model="deeps
     record.update(order=order, order_changed=order != sorted(order), lowered=lowered)
     try:
         contract = review(lowered, suite=suite, user=user, extractor_model=extractor_model,
-                          derived_destinations=derived_destinations)
+                          derived_destinations=derived_destinations, calc=calc)
     except ProgramRefused as error:
         return dict(record, outcome="lowering_failed", lowering_error="review_" + str(error))
     return dict(record, outcome="planned", contract=contract)

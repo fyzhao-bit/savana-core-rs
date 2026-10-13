@@ -30,6 +30,11 @@ EXTRACT_SYSTEM = ("You are a quarantined extractor inside an agent kernel. You h
                   "untrusted results, if present) to serve that request. Reply with that value "
                   "only, in the format TARGET states, on a single line, with no preamble or explanation. "
                   "If SOURCE does not contain what is needed, reply with your best value anyway.")
+# Exact arithmetic (`+compute=calc`): an extraction whose SOURCE is a compute
+# step's result states that value as given. The provider decides this from its
+# own record of the call that produced SOURCE, never from anything in data.
+EXACT_NOTE = (" Here SOURCE is the result of an exact computation over the data: state its value exactly as "
+              "given, and never recompute it from CONTEXT or anything else.")
 
 
 # Unicode Cf / Default_Ignorable ranges the kernel's business codec rejects
