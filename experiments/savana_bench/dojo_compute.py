@@ -42,9 +42,29 @@ give the same output, no data can choose an operation, a tool or a field, and
 nothing leaves the connector. Its output is data exactly like an extraction's
 (`{"text": ..., "items": [...]}`), so the owner's review keeps every rule for
 it: never a destination, reaching a later field only through a signed edge.
+
+The trusted executor computes the same function in Rust
+(`crates/savana-table-compute`), byte for byte
+(`tests/test_compute_rust_parity.py`). Where Python's result rested on
+interpreter internals, or raised, this module states the rule instead:
+
+* JSON (`_json`): a text nested more than MAX_JSON_DEPTH arrays/objects deep
+  (where `json.loads` would hit the recursion limit), one using the
+  constants NaN, Infinity or -Infinity, or one whose strings hold a lone
+  surrogate escape is plain text, as is (by Python's default
+  `int_max_str_digits`) an integer literal of more than 4300 digits.
+* Numbers: an int beyond the float range counts as infinite (`_float`), and
+  an infinite number has no text (`_format`), so a sum past the float range
+  is the empty item "".
+* Folding (`_fold`) is NFKC then `str.lower()` (full lowercase, final
+  sigma), not `casefold()`; "keys N" takes ASCII digits.
+* "calc" runs in an explicit decimal context (`_CALC_CONTEXT`: precision 34,
+  ROUND_HALF_EVEN, unbounded exponents), and `calc_constants` of any other
+  output is empty.
 """
 import decimal
 import json
+import math
 import re
 import unicodedata
 
@@ -76,6 +96,14 @@ MAX_CALC_DEPTH = 8
 _CALC_TOKEN = re.compile(r"\s*(?:(?P<number>[0-9]+(?:\.[0-9]+)?)|(?P<ref>#[1-4])|(?P<function>min|max)"
                          r"|(?P<symbol>[-+*/(),]))")
 _CENT = decimal.Decimal("0.01")
+# Exponents unbounded, so a value never overflows or underflows: rounding to
+# 34 significant digits is the only inexact step.
+_CALC_CONTEXT = decimal.Context(prec=34, rounding=decimal.ROUND_HALF_EVEN,
+                                Emax=decimal.MAX_EMAX, Emin=decimal.MIN_EMIN)
+MAX_JSON_DEPTH = 128
+_JSON_SCAN = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"?|[][{}]', re.S)
+_SURROGATE = re.compile("[\ud800-\udfff]")
+_NOT_JSON = object()
 
 
 class ComputeSpecError(ValueError):
@@ -202,7 +230,8 @@ def parse_calc(text, inputs=4):
 
 
 def calc_constants(output, inputs=4):
-    """The numbers a "calc" output writes itself, for the owner's review."""
+    """The numbers a "calc" output writes itself, for the owner's review
+    (none for any other output)."""
     found = set()
 
     def walk(tree):
@@ -216,7 +245,9 @@ def calc_constants(output, inputs=4):
         elif tree[0] != "ref":
             walk(tree[1])
             walk(tree[2])
-    walk(parse_output(output, inputs, calc=True)[1])
+    kind, tree, _limit = parse_output(output, inputs, calc=True)
+    if kind == CALC:
+        walk(tree)
     return found
 
 
@@ -237,7 +268,8 @@ def parse_output(text, inputs=4, calc=False):
     if kind == "keys":
         if len(parts) == 1:
             return kind, None, None
-        if len(parts) != 2 or not parts[1].isdigit() or not 1 <= int(parts[1]) <= MAX_ITEMS:
+        if (len(parts) != 2 or not (parts[1].isascii() and parts[1].isdigit())
+                or not 1 <= int(parts[1]) <= MAX_ITEMS):
             raise ComputeSpecError("compute_spec")
         return kind, None, int(parts[1])
     if len(parts) != 2:
@@ -250,14 +282,23 @@ def parse_output(text, inputs=4, calc=False):
 
 
 def _fold(text):
-    return unicodedata.normalize("NFKC", text).casefold().strip()
+    return unicodedata.normalize("NFKC", text).lower().strip()
+
+
+def _float(value):
+    """float(value), where an int beyond the float range is infinite (as
+    float() of its digits is) rather than an error."""
+    try:
+        return float(value)
+    except OverflowError:
+        return math.inf if value > 0 else -math.inf
 
 
 def _number(value):
     if type(value) is bool or value is None:
         return None
     if type(value) in (int, float):
-        return float(value)
+        return _float(value)
     if type(value) is not str:
         return None
     match = _NUMBER.search(value)
@@ -270,7 +311,7 @@ def _text(value):
     if type(value) is bool:
         return "true" if value else "false"
     if type(value) in (int, float):
-        return _format(float(value))
+        return _format(_float(value))
     if type(value) is list:
         return SEPARATOR.join(t for t in (_text(v) for v in value) if t)
     if type(value) is dict:
@@ -279,9 +320,47 @@ def _text(value):
 
 
 def _format(number):
+    if not math.isfinite(number):
+        return ""  # a number past the float range has no text
     if number == int(number) and abs(number) < 1e15:
         return str(int(number))
     return f"{number:.2f}".rstrip("0").rstrip(".")
+
+
+def _not_json(_constant):
+    raise ValueError("compute_json_constant")
+
+
+def _json(text):
+    """`text` as JSON, or _NOT_JSON where it is plain text: not JSON, nested
+    more than MAX_JSON_DEPTH deep, using NaN/Infinity, or holding a lone
+    surrogate escape."""
+    if text.count("[") + text.count("{") > MAX_JSON_DEPTH:
+        depth = 0
+        for token in _JSON_SCAN.finditer(text):
+            mark = token.group(0)
+            if mark in ("[", "{"):
+                depth += 1
+                if depth > MAX_JSON_DEPTH:
+                    return _NOT_JSON
+            elif mark in ("]", "}"):
+                depth -= 1
+    try:
+        value = json.loads(text, parse_constant=_not_json)
+    except ValueError:
+        return _NOT_JSON
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if type(item) is str:
+            if _SURROGATE.search(item):
+                return _NOT_JSON
+        elif type(item) is list:
+            pending.extend(item)
+        elif type(item) is dict:
+            pending.extend(item)
+            pending.extend(item.values())
+    return value
 
 
 def _record_key(record, index):
@@ -293,9 +372,8 @@ def _record_key(record, index):
 
 def table(text):
     """One input's text -> ordered [(key, value)] rows (at most MAX_ROWS)."""
-    try:
-        value = json.loads(text)
-    except ValueError:
+    value = _json(text)
+    if value is _NOT_JSON:
         value = text
     rows = []
     if type(value) is dict:
@@ -365,9 +443,8 @@ def _bounded(items):
 def _calc_value(text):
     """The first number in one input, exactly: an extraction's or a
     computation's value ({"text": ...}), a JSON number, or plain text."""
-    try:
-        value = json.loads(text)
-    except ValueError:
+    value = _json(text)
+    if value is _NOT_JSON:
         value = text
     if type(value) is dict:
         value = value.get("text")
@@ -440,8 +517,7 @@ def compute(inputs, filters=(), orders=(), output="key", calc=False):
         # Arithmetic on one number per input: rows, filters and orders do not apply.
         if filters or orders:
             raise ComputeSpecError("compute_spec")
-        with decimal.localcontext() as context:
-            context.prec = 34
+        with decimal.localcontext(_CALC_CONTEXT):
             result = _calc_eval(ref, [_calc_value(text) for text in present])
         return {"text": "", "items": []} if result is None else _bounded([_calc_format(result)])
     if kind == "mode" and ref.startswith("*."):
