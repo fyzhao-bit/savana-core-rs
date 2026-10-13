@@ -81,6 +81,16 @@ fn tool_codec(tool: &Value) -> Result<ActionCodecProfileV2, String> {
         _ => Err("catalog codec".into()),
     }
 }
+/// The catalog's name for a tool codec, recorded in the provisioning profile
+/// so the runner checks which codec this deployment ships each tool with.
+fn codec_name(codec: ActionCodecProfileV2) -> &'static str {
+    match codec {
+        ActionCodecProfileV2::McpToolsCallJsonV1 => "mcp",
+        ActionCodecProfileV2::McpModelToolsCallJsonV1 => "mcp_model",
+        ActionCodecProfileV2::TableComputeV1 => "table_compute",
+        ActionCodecProfileV2::FixedJsonPostV1 => "fixed_json_post",
+    }
+}
 fn field_type(s: &str) -> Result<T, String> {
     match s {
         "text" => Ok(T::Text),
@@ -179,6 +189,38 @@ fn parse_catalog_fields(tool: &Value) -> Result<Vec<CatalogFieldV04>, String> {
         ));
     }
     Ok(fields)
+}
+/// The business profile a catalog tool ships with: its codec, its sorted
+/// fields with their roles and deployment-fixed values, one call per action.
+fn catalog_profile(
+    codec: ActionCodecProfileV2,
+    operation: &str,
+    target: Digest32V2,
+    credential: Digest32V2,
+    effect: TaskEffectV2,
+    mut fields: Vec<CatalogFieldV04>,
+) -> Result<BusinessProfileV2, String> {
+    fields.sort_by(|a, b| a.0.cmp(&b.0));
+    BusinessProfileV2::new(
+        codec,
+        operation,
+        target,
+        credential,
+        effect,
+        BusinessMagnitudeV2::FixedCount(1),
+        fields
+            .into_iter()
+            .map(|(n, r, t, fixed)| {
+                let field = BusinessFieldV2::new(n.as_str(), r, t)?;
+                match fixed {
+                    Some(fixed) => field.with_fixed(&fixed),
+                    None => Ok(field),
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "business fields")?,
+    )
+    .map_err(|_| "business profile".into())
 }
 /// Parse the reviewed tool catalog the staging step copied in. Only operation
 /// names, business field roles/types, effects and required validators are read;
@@ -383,6 +425,7 @@ pub(super) fn materialize(stage: &Path) -> Result<(), String> {
     let mut activations = Vec::new();
     let mut constraints = Vec::new();
     let mut descriptors = serde_json::Map::new();
+    let mut codecs = serde_json::Map::new();
     let mut catalog = Vec::new();
     // One shipped connector carries every reviewed read tool (the single native
     // workspace provider endpoint); a separate connector carries final release.
@@ -449,28 +492,7 @@ pub(super) fn materialize(stage: &Path) -> Result<(), String> {
             final_result_release_business_profile_v04(target, credential)
                 .map_err(|_| "release profile")?
         } else {
-            let mut fields = fields;
-            fields.sort_by(|a, b| a.0.cmp(&b.0));
-            BusinessProfileV2::new(
-                codec,
-                operation.as_str(),
-                target,
-                credential,
-                effect,
-                BusinessMagnitudeV2::FixedCount(1),
-                fields
-                    .into_iter()
-                    .map(|(n, r, t, fixed)| {
-                        let field = BusinessFieldV2::new(n.as_str(), r, t)?;
-                        match fixed {
-                            Some(fixed) => field.with_fixed(&fixed),
-                            None => Ok(field),
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|_| "business fields")?,
-            )
-            .map_err(|_| "business profile")?
+            catalog_profile(codec, &operation, target, credential, effect, fields)?
         };
         let contract = ExecutorIdempotencyContractV2::ConnectorNonIdempotentSingleAttempt;
         let provider = if release {
@@ -541,6 +563,9 @@ pub(super) fn materialize(stage: &Path) -> Result<(), String> {
             "policy_activation_digest":hex(domain_digest(b"SAVANA_PROTECTED_ACTIVATION_V04\0",digest.as_bytes()))}));
         constraints.push(json!({"descriptor_digest":hex(*digest.as_bytes()),"maximum_attempts":1,"maximum_elapsed_ns":0,"internal_validators":constraint_validators}));
         descriptors.insert(operation.clone(), json!(hex(*digest.as_bytes())));
+        if !release {
+            codecs.insert(operation.clone(), json!(codec_name(codec)));
+        }
         catalog.push(json!({"tool_class":202+ordinal,"action_template":102+ordinal,
             "structural_role":savana_policy_core::v2::ConnectorStructuralRoleV2::Sink.tag(),
             "effects":effect_set.bits(),
@@ -768,7 +793,7 @@ pub(super) fn materialize(stage: &Path) -> Result<(), String> {
         "etc/savana/experiment-endpoints-v04.json",
         &endpoints,
     )?;
-    let mut binding = json!({"schema":1,"descriptors":descriptors,"planner":hex(recipient),
+    let mut binding = json!({"schema":1,"descriptors":descriptors,"codecs":codecs,"planner":hex(recipient),
         "destination_digest":hex(destination),"application_turn":hex(*turn.as_bytes()),
         "store":kernel["g4_store_id"],
         "installation":manifest["installation_id"],"disposition":disposition,
@@ -790,8 +815,56 @@ pub(super) fn materialize(stage: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{experiment_disposition, experiment_unconfined_write};
+    use super::{
+        catalog_profile, experiment_disposition, experiment_unconfined_write, tool_catalog,
+    };
+    use savana_kernel_protocol::v2::{ActionCodecProfileV2, Digest32V2};
     use std::env::VarError;
+    use std::path::Path;
+
+    /// Every committed deployment catalog (each suite, plain and masked
+    /// model tools) parses, and every tool in it gives a valid business
+    /// profile: what a host's materializer will build from it.
+    #[test]
+    fn every_committed_catalog_builds_every_business_profile() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/linux/integration");
+        let mut catalogs = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+            if !(name.starts_with("read-tool-catalog-v04") && name.ends_with(".json")) {
+                continue;
+            }
+            let stage = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(stage.path().join("etc/savana")).unwrap();
+            std::fs::copy(
+                &path,
+                stage.path().join("etc/savana/read-tool-catalog-v04.json"),
+            )
+            .unwrap();
+            let tools = tool_catalog(stage.path(), None).unwrap();
+            let masked = name.ends_with("-masked.json");
+            for tool in tools {
+                let expected = match tool.operation.as_str() {
+                    "dojo.compute.table" => ActionCodecProfileV2::TableComputeV1,
+                    "dojo.model.extract" if masked => ActionCodecProfileV2::McpModelToolsCallJsonV1,
+                    _ => ActionCodecProfileV2::McpToolsCallJsonV1,
+                };
+                assert_eq!(tool.codec, expected, "{name} {}", tool.operation);
+                catalog_profile(
+                    tool.codec,
+                    &tool.operation,
+                    Digest32V2::new([1; 32]),
+                    Digest32V2::new([2; 32]),
+                    tool.effect,
+                    tool.fields,
+                )
+                .unwrap_or_else(|error| panic!("{name} {}: {error}", tool.operation));
+            }
+            catalogs += 1;
+        }
+        assert_eq!(catalogs, 9);
+    }
 
     #[test]
     fn only_the_two_closed_dispositions_are_accepted() {
