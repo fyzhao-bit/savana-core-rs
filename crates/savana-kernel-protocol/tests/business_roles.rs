@@ -316,3 +316,67 @@ fn the_executor_reply_for_a_local_result_is_the_canonical_mcp_success() {
         .mcp_success_response(CONDITION_SKIPPED_TEXT_V2)
         .is_ok());
 }
+
+#[test]
+fn the_approval_display_shows_the_condition_and_every_copy_destination() {
+    let profile = mail(ActionCodecProfileV2::McpToolsCallJsonV1);
+    let display = |cc: &[&str], when: &str| {
+        let request =
+            BusinessRequestV2::from_fields(&profile, "r-1", send(cc, when, "primary")).unwrap();
+        let action = request.action_alternative(d(21)).unwrap();
+        let root = TaskAuthorizationV2::new(
+            d(20),
+            PrincipalIdV2::new([30; 32]),
+            DurableTaskIdV2::new([31; 32]),
+            1,
+            d(32),
+            d(33),
+            UnixMillisV2::new(1),
+            UnixMillisV2::new(1000),
+            TaskEvidenceKindV2::AuthenticatedStructuredInput,
+            d(34),
+            d(35),
+            vec![
+                TaskAuthorizationClauseV2::new(1, vec![action.clone()], 1, 1, 1, vec![], false)
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let content = ActionContentV2::new(
+            d(20),
+            1,
+            1,
+            0,
+            action,
+            request.magnitude(),
+            request.payload_digest(),
+            d(22),
+            d(23),
+            d(24),
+            d(25),
+            1,
+        )
+        .unwrap();
+        let text = render_task_action_display_v2(
+            &content,
+            &root,
+            &request,
+            &std::collections::BTreeMap::new(),
+            0,
+            0,
+        )
+        .unwrap();
+        serde_json::from_str::<serde_json::Value>(text.as_str()).unwrap()
+    };
+    let shown = display(&["carol@x.com"], "no");
+    assert_eq!(shown["destination"], serde_json::json!(["alice@x.com"]));
+    assert_eq!(
+        shown["copy_destinations"],
+        serde_json::json!({"bcc": [], "cc": ["carol@x.com"]})
+    );
+    assert_eq!(shown["condition"]["field"], "when");
+    assert_eq!(shown["condition"]["value"], "no");
+    assert_eq!(shown["condition"]["holds"], false);
+    let shown = display(&[], "Yes.");
+    assert_eq!(shown["condition"]["holds"], true);
+}
