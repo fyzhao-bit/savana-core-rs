@@ -9,7 +9,11 @@ mod handle;
 mod http;
 mod identity;
 mod ingress;
+pub mod managed_admin;
+pub mod owner_ingress;
+pub mod private_v04;
 mod session;
+mod task_authorization;
 mod types;
 
 use std::sync::Arc;
@@ -26,7 +30,9 @@ pub use http::{
     BrowserRoute, BrowserService, BrowserTransport, ClientEndpoints, LocalFixedHttpTransport,
 };
 pub use identity::Identity;
+pub use savana_kernel_protocol::v2::TaskAuthorizationContextV2 as TaskAuthorizationContext;
 pub use session::Session;
+pub use task_authorization::{TaskAuthorizationDraft, TaskAuthorizationReceipt};
 pub use types::{
     AgentEvent, ApprovalPurpose, ApprovalRequest, ConnectorDescriptor, ContentKind,
     ExecutionResult, ExecutionStatus, IntentPrivacy, MaskedView, Plan, PlanStep, RunLimits,
@@ -53,9 +59,7 @@ impl NonceSource for SystemNonceSource {
 
 pub struct Client {
     endpoints: ClientEndpoints,
-    #[allow(dead_code)] // Consumed by the authenticated workflow modules added after Task 2.
     transport: Arc<dyn BrowserTransport>,
-    #[allow(dead_code)] // Consumed by the authenticated workflow modules added after Task 2.
     nonces: Arc<dyn NonceSource>,
 }
 
@@ -87,12 +91,10 @@ impl Client {
         &self.endpoints
     }
 
-    #[allow(dead_code)] // Foundation seam for the subsequent workflow tasks.
     pub(crate) fn transport(&self) -> &dyn BrowserTransport {
         self.transport.as_ref()
     }
 
-    #[allow(dead_code)] // Foundation seam for the subsequent workflow tasks.
     pub(crate) fn next_nonce(&self) -> Result<Nonce32V2, SavanaError> {
         self.nonces.nonce()
     }

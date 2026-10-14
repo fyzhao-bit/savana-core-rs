@@ -1,0 +1,61 @@
+[Unit]
+Description=Savana PCR-gated signing and monotonic state authority V3
+Requires=savana-tpm-authority-v3.socket
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/libexec/savana/savana-tpm-authority
+UMask=0077
+Restart=on-failure
+RestartSec=2s
+StateDirectory=savana/tpm-v3
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/savana/tpm-v3
+ReadOnlyPaths=/etc/savana
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SYS_PTRACE
+AmbientCapabilities=
+ProtectProc=default
+ProcSubset=pid
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# Keep only the checked kernel resource-manager device available, not /dev/tpm0.
+PrivateDevices=no
+DevicePolicy=closed
+DeviceAllow=/dev/tpmrm0 rw
+InaccessiblePaths=-/dev/tpm0 -/var/lib/savana/kerneld -/var/lib/savana/approvald -/var/lib/savana/agentd -/var/lib/savana/execd
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+SocketBindDeny=any
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@clock @debug @module @mount @obsolete @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM
+LimitNOFILE=64
+TasksMax=1
+MemoryMax=128M
+TimeoutStopSec=5s
+LoadCredentialEncrypted=signing-auth:/etc/savana/credentials/tpm-v3/signing-auth.cred
+LoadCredentialEncrypted=enrollment-auth:/etc/savana/credentials/tpm-v3/enrollment-auth.cred
+LoadCredentialEncrypted=deployment-auth:/etc/savana/credentials/tpm-v3/deployment-auth.cred
+LoadCredentialEncrypted=vault-auth:/etc/savana/credentials/tpm-v3/vault-auth.cred
+LoadCredentialEncrypted=agent-auth:/etc/savana/credentials/tpm-v3/agent-auth.cred
+LoadCredentialEncrypted=g4-auth:/etc/savana/credentials/tpm-v3/g4-auth.cred
+LoadCredentialEncrypted=connector-auth:/etc/savana/credentials/tpm-v3/connector-auth.cred
+
+[Install]
+WantedBy=savana-kernel.target

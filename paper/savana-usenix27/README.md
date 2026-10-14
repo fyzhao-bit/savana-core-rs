@@ -1,0 +1,108 @@
+# Savana — USENIX Security '27 first full draft (2026-10-07)
+
+`main.tex` is a complete first draft built on the owner's IFC skeleton
+("Savana: Confining Disclosure and Effects in LLM Agents"). It keeps that
+skeleton's structure and core design text, rewrites the framing around an
+**untrusted planner**, and replaces the empty evaluation with measured results.
+The earlier "task authority / private continuations" working paper in
+`../usenix-sec27/` is left unchanged.
+
+**This is not submission-ready.** It is 24 pages with the fallback style, and
+the body runs to page 19 against a 13-page limit. G12 is filled in (41/97,
+`experiments/AGENTDOJO-G12-20261007.zh-CN.md`), and ten `\todo{}` markers remain (`grep -n todo main.tex`).
+
+## Revision 1 (2026-10-07): reviewer design holes
+
+| Reviewer point | Code | Paper |
+| --- | --- | --- |
+| Planner-output readers undefined | Already defined in `provenance.rs`: (ExternalUntrusted, PlannerAbstract ⊔ parents, {kernel}, ≤READ) | §5.4 source-label table and ℓ_P with four consequences; §5.5 "effects are releases"; P2 split into reveals (a) and effect releases (b) |
+| Singleton has no completeness bound | Domain = whole signed clause (no runtime subsets); result-derived alternatives are *rule*-closed. Singleton is never selected in production | §5.7 owner-closed domains, value- vs rule-closed alternatives, the bound |
+| No robust declassification positioning | — | §4.4 P3 as robustness against an untrusted decider; related work |
+| Descriptor soundness assumed | **Fixed** (commit after `2b41335`): G5 intent-flow fact is a floor, not a declared validator; untrusted values in a destination (or unnamed) field escalate for every effect; `dojo.web.get` url is the read's destination | Discussion "Fail-closed descriptors" (5 rules + residue) |
+
+Also corrected: the benchmark's software owner checks displayed structure but
+accepts any well-formed derived value; the evaluated G5 disposition is
+`require_approval` for every tool (so the measured approval-free fraction is 0;
+§7.6 gives a counterfactual 54.8% under `permit`).
+
+## Build
+
+pdfLaTeX + BibTeX:
+
+    pdflatex main && bibtex main && pdflatex main && pdflatex main
+
+If `usenix-2020-09.sty` sits next to `main.tex`, it is used. Otherwise
+`usenix-fallback.sty` approximates the layout; the fallback is **not** for
+submission. Built cleanly on 2026-10-07 with TeX Live (Ubuntu noble).
+
+## How the draft was checked against the code
+
+A read-only audit compared every concrete claim in the original skeleton with
+the code on `codex/intent-bound-execution`. The draft follows the audit.
+
+Changes from the skeleton:
+
+- **Sizes and counts** come from the current branch (recounted on
+  2026-10-13, after the v1 stack and other dead code were removed):
+  - 346,365 lines of Rust in 20 crates;
+  - 1,954 tests and 16 `compile_fail` doctests;
+  - 537 domain-separation strings and 8 inter-process edges;
+  - 6 declassification transitions (with `BuildFusedModelEnvelope`) and
+    8 provenance source kinds;
+  - per role, 25 agent, 19 ingress, 6 executor, 4 control-shell and
+    7 connector-control operations.
+- **Skeleton names that are not implemented** were removed. These are
+  `EndorseControl`, `SourceKindV2::ControlEndorsement`, `candidate_epoch`,
+  `ControlNodeNotDerivable` and `Tool×OutsideIntent`; they exist only in a
+  "proposed" design document. The draft describes what is implemented:
+  - `ControlFacetV2` (with `Scope`, not `ResourceScope`);
+  - `ControlSelectionV2` digest records;
+  - `checked_control_endorsements_v2`, with evidence
+    `ExplicitAlternative` / `CompleteContractSingleton` / `ActionApproval`
+    and re-check → `StateConflict`;
+  - G5 `IntentFlowConfinement` (RequireApproval).
+- **Code names** were corrected to `UNTRUSTED_EFFECT_CEILING_V2`,
+  `confined_effects` and `derive_normal`.
+- **Approval:** one settlement key, with purposes separated by signature
+  domains. The tool display is now JSON rendered from the exact business
+  request.
+- **The benchmark path** (fused v0.4) is described as audited:
+  - owner document;
+  - task authority (one clause per operation, plus final release);
+  - `compile_planning` / `prepare` (`check_owner_text_origin`,
+    `check_result_operation_rule_v04`);
+  - per-operation G4–G7, then execd.
+- **The ~60 s bound** is reported as an observed end-to-end bound. Its exact
+  source is a TODO; the approval settlement expiry is the leading candidate.
+
+## Where the numbers come from
+
+All evaluation numbers come from offline-verified fresh-host batches under
+`experiments/results/local-container-20260930/`. That directory is
+gitignored and kept only in the experiment container. The reports are:
+
+| Section | Source reports |
+| --- | --- |
+| RQ1 injection matrix | `experiments/AGENTDOJO-INJECTION-MATRIX-20261003.zh-CN.md`; adaptive injections: `AGENTDOJO-AUTODOJO-{BASE-20261007,SAVANA-20261008,CAMEL-20261011}.zh-CN.md` |
+| RQ2 compromised planner | `experiments/AGENTDOJO-POISONED-PLANNER-20261003.zh-CN.md`, `…-CAMEL-20261004.zh-CN.md`, `AGENTDOJO-AUTODOJO-POLLUTED-PLANNER-20261008.zh-CN.md`, `docs/research/threat-model-tcb.md` (offline sweep); kernel attacks end to end (Table 10): `KERNEL-FLOOR-END-TO-END-20261012.zh-CN.md` |
+| RQ3 utility | `experiments/AGENTDOJO-RETRY-MODEL-20261003.zh-CN.md`, `AGENTDOJO-G11-20261003.zh-CN.md`, `CAMEL-V4PRO-20261005.zh-CN.md` |
+| RQ4 privacy | `experiments/PRIVACY-VALUE-BLIND-20261003.zh-CN.md`, `PRIVACY-EXTRACTOR-20261003.zh-CN.md` |
+| RQ5 cost | `experiments/KERNEL-PERF-20261001.zh-CN.md`, plus per-step timing measured from the evidence timestamps of the G11 and G12-smoke runs; mediation latency: `KERNEL-CRASH-LATENCY-20261011.zh-CN.md` |
+| RQ6 crash consistency | `experiments/KERNEL-CRASH-LATENCY-20261011.zh-CN.md` |
+
+## Open items before submission
+
+1. ~~Insert the G12 run~~ — done at `f796517` (41/97; 37/92 without the five
+   no-op banking tasks).
+2. **Run a forced-attempt compromised-planner variant** live on both systems,
+   and at least one adaptive attack (AutoDojo) and one more benchmark
+   (AgentDyn).
+3. **Confirm** v1.2 / v1.2.2 task equivalence for the CaMeL comparison.
+4. **Pin down** the ~60 s bound.
+5. ~~Refresh the frozen-core manifest~~ — done on 2026-10-13 (339 files);
+   every changed entry is listed for review in
+   `docs/verification/frozen-manifest-review-20261012.zh-CN.md`.
+6. **Verify** every bibliography entry tagged `verify` / `TODO`; several
+   were assembled from search snippets.
+7. **Cut about 4 pages** (candidates: §8 supply chain, §7.3 rules, parts of
+   §5) and confirm against the official style file.

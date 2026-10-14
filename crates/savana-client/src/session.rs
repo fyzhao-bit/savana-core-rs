@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use savana_kernel_protocol::v2::{
-    AgentMaskedDocumentRefV2, AgentReleaseTicketRefV2, AgentTabSessionCapabilityV2,
-    ApprovalTabSessionCapabilityV2, Digest32V2, IngressTabSessionCapabilityV2,
+    AgentMaskedDocumentRefV2, AgentReleaseTicketRefV2, AgentTabSessionCapabilityV2, Digest32V2,
+    IngressTabSessionCapabilityV2,
 };
 
 use crate::handle::SessionBinding;
@@ -12,19 +12,12 @@ use crate::{
     ApprovalCallback, BrowserTransport, Handle, NonceSource, SavanaError, WebAuthnProvider,
 };
 
-#[allow(dead_code)] // Read by authenticated Agent workflows added in Task 4.
 pub(crate) struct AuthenticatedAgentTab {
     pub(crate) tab: AgentTabSessionCapabilityV2,
 }
 
-#[allow(dead_code)] // Populated and read by authenticated ingress workflows added in Task 4.
 pub(crate) struct AuthenticatedIngressTab {
     pub(crate) tab: IngressTabSessionCapabilityV2,
-}
-
-#[allow(dead_code)] // Populated and read by authenticated approval workflows added in Task 4.
-pub(crate) struct AuthenticatedApprovalTab {
-    pub(crate) tab: ApprovalTabSessionCapabilityV2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,18 +51,11 @@ impl AgentRunGuard {
 }
 
 pub struct Session {
-    #[allow(dead_code)] // Shared transport for workflows added in Task 4.
     pub(crate) transport: Arc<dyn BrowserTransport>,
-    #[allow(dead_code)] // Shared nonce source for workflows added in Task 4.
     pub(crate) nonces: Arc<dyn NonceSource>,
-    #[allow(dead_code)] // Enforces private capability binding in subsequent workflows.
     pub(crate) binding: SessionBinding,
-    #[allow(dead_code)] // Read by authenticated Agent workflows added in Task 4.
     pub(crate) agent: AuthenticatedAgentTab,
-    #[allow(dead_code)] // Populated by authenticated ingress workflows added in Task 4.
     pub(crate) ingress: Option<AuthenticatedIngressTab>,
-    #[allow(dead_code)] // Populated by authenticated approval workflows added in Task 4.
-    pub(crate) approval: Option<AuthenticatedApprovalTab>,
     pub(crate) webauthn: Arc<dyn WebAuthnProvider>,
     pub(crate) ingress_approval: Arc<dyn ApprovalCallback>,
     pub(crate) state: LocalSessionState,
@@ -98,7 +84,6 @@ impl Session {
             binding,
             agent: AuthenticatedAgentTab { tab },
             ingress: None,
-            approval: None,
             webauthn,
             ingress_approval,
             state: LocalSessionState::Open,
@@ -158,11 +143,5 @@ impl core::fmt::Debug for AuthenticatedAgentTab {
 impl core::fmt::Debug for AuthenticatedIngressTab {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter.write_str("AuthenticatedIngressTab(<opaque>)")
-    }
-}
-
-impl core::fmt::Debug for AuthenticatedApprovalTab {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.write_str("AuthenticatedApprovalTab(<opaque>)")
     }
 }

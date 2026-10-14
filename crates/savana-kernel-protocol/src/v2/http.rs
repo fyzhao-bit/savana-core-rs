@@ -64,6 +64,14 @@ pub enum FixedHttpRouteV2 {
     },
     JarvisBootstrapContinue,
     ApprovalEnrollmentBootstrap,
+    PrivateApprovalLandingV04,
+    PrivateSessionLandingV04,
+    PrivateSessionAcceptV04,
+    PrivateSessionBeginV04,
+    PrivateSessionFinishV04,
+    PrivateSessionPollV04,
+    PrivateSessionPublicationV04,
+    PrivateApprovalAcceptV04,
     ApprovalUiAuthenticationAccept,
     ApprovalUiAuthenticationBegin,
     ApprovalUiAuthenticationFinish,
@@ -82,6 +90,13 @@ pub enum FixedHttpRouteV2 {
     IngressInputChunk,
     IngressInputFinalize,
     IngressInputAbort,
+    IngressTaskEstablish,
+    IngressTaskApprovalPrepare,
+    IngressTaskApprovalCommit,
+    IngressTaskRevoke,
+    IngressTaskRecover,
+    IngressTaskContext,
+    IngressPrivateSessionV04,
     AgentUiAuthenticationComplete,
     AgentView,
     AgentAction,
@@ -197,6 +212,12 @@ pub fn render_approval_display_authentication_form_v2(
         "http://localhost:8766/v2/ui-auth/accept",
         transfer.transfer_bytes(),
     )
+}
+
+/// Static entry, never a list of private tasks or approval status. The transfer
+/// is supplied by the trusted local host/user, not a planner or Agent response.
+pub fn render_private_approval_landing_v04() -> Vec<u8> {
+    br#"<!doctype html><html><head><meta charset="utf-8"><title>Savana private approval</title></head><body><main><h1>Private kernel approval</h1><p>Enter the private handoff from your trusted Savana session. Hardware authentication is still required before any approval details are shown.</p><form method="post" action="/v04/private-approval/accept" autocomplete="off"><label for="transfer">Private handoff</label><input id="transfer" name="transfer" type="password" minlength="43" maxlength="43" pattern="[A-Za-z0-9_-]{43}" autocomplete="off" required><button type="submit">Authenticate privately</button></form></main></body></html>"#.to_vec()
 }
 
 fn render_transfer_form(title: &str, action: &str, transfer: &[u8; 32]) -> Vec<u8> {
@@ -405,6 +426,15 @@ fn route(
     service: FixedHttpServiceV2,
 ) -> Result<FixedHttpRouteV2, FixedHttpErrorV2> {
     let route = match (service, method, path) {
+        (FixedHttpServiceV2::Approval, "GET", "/v04/session") => {
+            FixedHttpRouteV2::PrivateSessionLandingV04
+        }
+        (FixedHttpServiceV2::Approval, "POST", "/v04/session/begin") => {
+            FixedHttpRouteV2::PrivateSessionBeginV04
+        }
+        (FixedHttpServiceV2::Approval, "POST", "/v04/session/finish") => {
+            FixedHttpRouteV2::PrivateSessionFinishV04
+        }
         (_, "GET", "/v2/savana-ui.js") => FixedHttpRouteV2::BrowserScript,
         (FixedHttpServiceV2::Jarvis, "GET", "/v2/shell") => FixedHttpRouteV2::JarvisShell,
         (FixedHttpServiceV2::Jarvis, "POST", "/v2/bootstrap/continue") => {
@@ -412,6 +442,12 @@ fn route(
         }
         (FixedHttpServiceV2::Approval, "GET", "/v2/enrollment/bootstrap") => {
             FixedHttpRouteV2::ApprovalEnrollmentBootstrap
+        }
+        (FixedHttpServiceV2::Approval, "GET", "/v04/private-approval") => {
+            FixedHttpRouteV2::PrivateApprovalLandingV04
+        }
+        (FixedHttpServiceV2::Approval, "POST", "/v04/private-approval/accept") => {
+            FixedHttpRouteV2::PrivateApprovalAcceptV04
         }
         (FixedHttpServiceV2::Approval, "POST", "/v2/ui-auth/accept") => {
             FixedHttpRouteV2::ApprovalUiAuthenticationAccept
@@ -467,6 +503,36 @@ fn route(
         (FixedHttpServiceV2::Ingress, "POST", "/v2/input/abort") => {
             FixedHttpRouteV2::IngressInputAbort
         }
+        (FixedHttpServiceV2::Ingress, "POST", "/v2/task/establish") => {
+            FixedHttpRouteV2::IngressTaskEstablish
+        }
+        (FixedHttpServiceV2::Ingress, "POST", "/v2/task/revoke") => {
+            FixedHttpRouteV2::IngressTaskRevoke
+        }
+        (FixedHttpServiceV2::Ingress, "POST", "/v2/task/recover") => {
+            FixedHttpRouteV2::IngressTaskRecover
+        }
+        (FixedHttpServiceV2::Ingress, "POST", "/v04/session/open") => {
+            FixedHttpRouteV2::IngressPrivateSessionV04
+        }
+        (FixedHttpServiceV2::Approval, "POST", "/v04/session/accept") => {
+            FixedHttpRouteV2::PrivateSessionAcceptV04
+        }
+        (FixedHttpServiceV2::Approval, "POST", "/v04/session/poll") => {
+            FixedHttpRouteV2::PrivateSessionPollV04
+        }
+        (FixedHttpServiceV2::Approval, "POST", "/v04/session/publication") => {
+            FixedHttpRouteV2::PrivateSessionPublicationV04
+        }
+        (FixedHttpServiceV2::Ingress, "POST", "/v2/task/context") => {
+            FixedHttpRouteV2::IngressTaskContext
+        }
+        (FixedHttpServiceV2::Ingress, "POST", "/v2/task/approval/prepare") => {
+            FixedHttpRouteV2::IngressTaskApprovalPrepare
+        }
+        (FixedHttpServiceV2::Ingress, "POST", "/v2/task/approval/commit") => {
+            FixedHttpRouteV2::IngressTaskApprovalCommit
+        }
         (FixedHttpServiceV2::Agent, "POST", "/v2/ui-auth/complete") => {
             FixedHttpRouteV2::AgentUiAuthenticationComplete
         }
@@ -506,12 +572,16 @@ fn route_content_type(route: FixedHttpRouteV2) -> Option<&'static str> {
     match route {
         FixedHttpRouteV2::BrowserScript => None,
         FixedHttpRouteV2::IngressBootstrapAccept
+        | FixedHttpRouteV2::PrivateSessionAcceptV04
+        | FixedHttpRouteV2::PrivateApprovalAcceptV04
         | FixedHttpRouteV2::ApprovalUiAuthenticationAccept
         | FixedHttpRouteV2::IngressUiAuthenticationComplete
         | FixedHttpRouteV2::AgentUiAuthenticationComplete => {
             Some("application/x-www-form-urlencoded")
         }
         FixedHttpRouteV2::JarvisShell
+        | FixedHttpRouteV2::PrivateSessionLandingV04
+        | FixedHttpRouteV2::PrivateApprovalLandingV04
         | FixedHttpRouteV2::JarvisBootstrap { .. }
         | FixedHttpRouteV2::ApprovalEnrollmentBootstrap => None,
         _ => Some("application/cbor"),
@@ -524,10 +594,13 @@ fn validate_origin(
 ) -> Result<(), FixedHttpErrorV2> {
     let valid = match route {
         FixedHttpRouteV2::BrowserScript
+        | FixedHttpRouteV2::PrivateSessionLandingV04
+        | FixedHttpRouteV2::PrivateApprovalLandingV04
         | FixedHttpRouteV2::JarvisShell
         | FixedHttpRouteV2::JarvisBootstrap { .. }
         | FixedHttpRouteV2::ApprovalEnrollmentBootstrap => origin.is_none(),
         FixedHttpRouteV2::JarvisBootstrapContinue => origin == Some(FixedOriginV2::Jarvis8765),
+        FixedHttpRouteV2::PrivateSessionAcceptV04 => origin == Some(FixedOriginV2::Ingress8767),
         FixedHttpRouteV2::ApprovalUiAuthenticationAccept => matches!(
             origin,
             Some(FixedOriginV2::Jarvis8765 | FixedOriginV2::Ingress8767 | FixedOriginV2::Agent8768)
@@ -541,6 +614,11 @@ fn validate_origin(
             origin == Some(FixedOriginV2::Approval8766)
         }
         FixedHttpRouteV2::ApprovalUiAuthenticationBegin
+        | FixedHttpRouteV2::PrivateSessionBeginV04
+        | FixedHttpRouteV2::PrivateSessionFinishV04
+        | FixedHttpRouteV2::PrivateSessionPollV04
+        | FixedHttpRouteV2::PrivateSessionPublicationV04
+        | FixedHttpRouteV2::PrivateApprovalAcceptV04
         | FixedHttpRouteV2::ApprovalUiAuthenticationFinish
         | FixedHttpRouteV2::ApprovalUiAuthenticationPlatformBegin
         | FixedHttpRouteV2::ApprovalUiAuthenticationPlatformStatus
@@ -552,8 +630,15 @@ fn validate_origin(
         | FixedHttpRouteV2::ApprovalEnrollmentBegin
         | FixedHttpRouteV2::ApprovalEnrollmentFinish => origin == Some(FixedOriginV2::Approval8766),
         FixedHttpRouteV2::IngressInputBegin
+        | FixedHttpRouteV2::IngressPrivateSessionV04
         | FixedHttpRouteV2::IngressInputChunk
         | FixedHttpRouteV2::IngressInputFinalize
+        | FixedHttpRouteV2::IngressTaskEstablish
+        | FixedHttpRouteV2::IngressTaskRevoke
+        | FixedHttpRouteV2::IngressTaskRecover
+        | FixedHttpRouteV2::IngressTaskContext
+        | FixedHttpRouteV2::IngressTaskApprovalPrepare
+        | FixedHttpRouteV2::IngressTaskApprovalCommit
         | FixedHttpRouteV2::IngressInputAbort => origin == Some(FixedOriginV2::Ingress8767),
         FixedHttpRouteV2::AgentView | FixedHttpRouteV2::AgentAction => {
             origin == Some(FixedOriginV2::Agent8768)
@@ -587,6 +672,133 @@ fn set_once<T>(slot: &mut Option<T>, value: T) -> Result<(), FixedHttpErrorV2> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn private_publication_http_is_owner_post_only() {
+        use super::*;
+        let request = |origin: &str, path: &str, method: &str| {
+            format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost:8766\r\nOrigin: {origin}\r\nContent-Type: application/cbor\r\nContent-Length: 1\r\n\r\nx")
+        };
+        let path = "/v04/session/publication";
+        let parsed = read_fixed_http_request_v2(
+            &mut request("http://localhost:8766", path, "POST").as_bytes(),
+            FixedHttpServiceV2::Approval,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.route(),
+            FixedHttpRouteV2::PrivateSessionPublicationV04
+        );
+        for origin in [
+            "http://localhost:8765",
+            "http://localhost:8767",
+            "http://localhost:8768",
+            "null",
+            "https://example.invalid",
+        ] {
+            assert!(read_fixed_http_request_v2(
+                &mut request(origin, path, "POST").as_bytes(),
+                FixedHttpServiceV2::Approval
+            )
+            .is_err());
+        }
+        for invalid_path in [
+            "/v04/session/publication?cap=x",
+            "/v04/session/publication#x",
+        ] {
+            assert!(read_fixed_http_request_v2(
+                &mut request("http://localhost:8766", invalid_path, "POST").as_bytes(),
+                FixedHttpServiceV2::Approval
+            )
+            .is_err());
+        }
+        for service in [
+            FixedHttpServiceV2::Agent,
+            FixedHttpServiceV2::Ingress,
+            FixedHttpServiceV2::Jarvis,
+        ] {
+            assert!(read_fixed_http_request_v2(
+                &mut request("http://localhost:8766", path, "POST").as_bytes(),
+                service
+            )
+            .is_err());
+        }
+        assert!(read_fixed_http_request_v2(
+            &mut request("http://localhost:8766", path, "GET").as_bytes(),
+            FixedHttpServiceV2::Approval
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn private_approval_http_is_same_origin_post_without_query_tokens() {
+        use super::*;
+        let request = |origin: &str, path: &str| {
+            format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost:8766\r\nOrigin: {origin}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 10\r\n\r\ntransfer=x"
+        )
+        };
+        let path = "/v04/private-approval/accept";
+        let parsed = read_fixed_http_request_v2(
+            &mut request("http://localhost:8766", path).as_bytes(),
+            FixedHttpServiceV2::Approval,
+        )
+        .unwrap();
+        assert_eq!(parsed.route(), FixedHttpRouteV2::PrivateApprovalAcceptV04);
+        for origin in [
+            "http://localhost:8765",
+            "http://localhost:8767",
+            "http://localhost:8768",
+            "null",
+            "https://example.invalid",
+        ] {
+            assert!(read_fixed_http_request_v2(
+                &mut request(origin, path).as_bytes(),
+                FixedHttpServiceV2::Approval,
+            )
+            .is_err());
+        }
+        for path in [
+            "/v04/private-approval/accept?transfer=x",
+            "/v04/private-approval/accept#x",
+        ] {
+            assert!(read_fixed_http_request_v2(
+                &mut request("http://localhost:8766", path).as_bytes(),
+                FixedHttpServiceV2::Approval,
+            )
+            .is_err());
+        }
+        for service in [
+            FixedHttpServiceV2::Agent,
+            FixedHttpServiceV2::Ingress,
+            FixedHttpServiceV2::Jarvis,
+        ] {
+            assert!(read_fixed_http_request_v2(
+                &mut request("http://localhost:8766", path).as_bytes(),
+                service,
+            )
+            .is_err());
+        }
+        assert!(read_fixed_http_request_v2(
+            &mut b"GET /v04/private-approval/accept HTTP/1.1\r\nHost: localhost:8766\r\n\r\n"
+                .as_slice(),
+            FixedHttpServiceV2::Approval,
+        )
+        .is_err());
+        let landing = read_fixed_http_request_v2(
+            &mut b"GET /v04/private-approval HTTP/1.1\r\nHost: localhost:8766\r\n\r\n".as_slice(),
+            FixedHttpServiceV2::Approval,
+        )
+        .unwrap();
+        assert_eq!(landing.route(), FixedHttpRouteV2::PrivateApprovalLandingV04);
+        let html = String::from_utf8(render_private_approval_landing_v04()).unwrap();
+        assert!(html.contains("method=\"post\""));
+        assert!(html.contains("type=\"password\""));
+        assert!(!html.contains("<script"));
+        assert!(!html.contains("8765"));
+        assert!(!html.contains("8768"));
+    }
+
     use super::*;
 
     #[test]
@@ -676,6 +888,34 @@ mod tests {
             read_fixed_http_request_v2(&mut bytes.as_slice(), FixedHttpServiceV2::Ingress).unwrap();
         assert_eq!(decoded.route(), FixedHttpRouteV2::IngressInputBegin);
         assert_eq!(decoded.body(), body);
+    }
+
+    #[test]
+    fn task_mutations_require_exact_ingress_origin() {
+        for path in [
+            "/v2/task/establish",
+            "/v2/task/revoke",
+            "/v2/task/recover",
+            "/v2/task/context",
+            "/v2/task/approval/prepare",
+            "/v2/task/approval/commit",
+        ] {
+            for origin in [
+                "http://localhost:8767",
+                "http://localhost:8768",
+                "http://localhost:8765",
+                "https://attacker.example",
+                "null",
+            ] {
+                let mut bytes = format!("POST {path} HTTP/1.1\r\nHost: localhost:8767\r\nOrigin: {origin}\r\nContent-Type: application/cbor\r\nContent-Length: 1\r\n\r\n").into_bytes();
+                bytes.push(0x80);
+                assert_eq!(
+                    read_fixed_http_request_v2(&mut bytes.as_slice(), FixedHttpServiceV2::Ingress)
+                        .is_ok(),
+                    origin == "http://localhost:8767"
+                );
+            }
+        }
     }
 
     #[test]

@@ -19,7 +19,7 @@ use savana_kernel_protocol::v2::{
 };
 
 use crate::auth::{decode_capability_attribute, extract_main_data_attributes, form_transfer};
-use crate::session::{AuthenticatedApprovalTab, AuthenticatedIngressTab};
+use crate::session::AuthenticatedIngressTab;
 use crate::{
     ApprovalPurpose, ApprovalRequest, BrowserContentType, BrowserOrigin, BrowserRequest,
     BrowserRoute, BrowserService, SavanaError, Session,
@@ -162,7 +162,49 @@ impl Session {
         )
     }
 
-    fn run_approval(
+    pub(crate) fn run_approval(
+        &mut self,
+        transfer: ApprovalDisplayAuthenticationTransferCapabilityV2,
+        source_origin: BrowserOrigin,
+        expected_protocol_purpose: ApprovalPurposeV2,
+        public_purpose: ApprovalPurpose,
+        callback: &dyn ApprovalCallback,
+    ) -> Result<ApprovalOutcome, SavanaError> {
+        let nonces = self.nonces.clone();
+        let webauthn = self.webauthn.clone();
+        ApprovalFlow {
+            send: &mut |request| self.send_browser_request(request),
+            nonces: nonces.as_ref(),
+            webauthn: webauthn.as_ref(),
+        }
+        .run(
+            transfer,
+            source_origin,
+            expected_protocol_purpose,
+            public_purpose,
+            callback,
+        )
+    }
+}
+
+/// Shared approval protocol, independent of an Agent session. The caller owns
+/// the transport guard and closes its session on an uncertain result.
+pub(crate) struct ApprovalFlow<'a> {
+    pub(crate) send:
+        &'a mut dyn FnMut(BrowserRequest) -> Result<crate::BrowserResponse, SavanaError>,
+    pub(crate) nonces: &'a dyn crate::NonceSource,
+    pub(crate) webauthn: &'a dyn crate::WebAuthnProvider,
+}
+
+impl ApprovalFlow<'_> {
+    fn send_browser_request(
+        &mut self,
+        request: BrowserRequest,
+    ) -> Result<crate::BrowserResponse, SavanaError> {
+        (self.send)(request)
+    }
+
+    pub(crate) fn run(
         &mut self,
         transfer: ApprovalDisplayAuthenticationTransferCapabilityV2,
         source_origin: BrowserOrigin,
@@ -233,7 +275,6 @@ impl Session {
             UiAuthenticationBrowserFinishResponseV2::ApprovalDisplayReady { tab } => tab,
             _ => return Err(SavanaError::InvalidResponse),
         };
-        self.approval = Some(AuthenticatedApprovalTab { tab });
 
         let displayed = self.send_browser_request(BrowserRequest {
             service: BrowserService::Approval,
@@ -306,7 +347,7 @@ impl Session {
     }
 }
 
-fn parse_ingress_authentication_form(
+pub(crate) fn parse_ingress_authentication_form(
     html: &[u8],
 ) -> Result<IngressUiAuthenticationTransferCapabilityV2, SavanaError> {
     if html.is_empty() || html.len() > MAX_TRANSFER_FORM_BYTES {
@@ -335,7 +376,9 @@ fn parse_ingress_authentication_form(
     Ok(transfer)
 }
 
-fn parse_ingress_workspace(html: &[u8]) -> Result<IngressTabSessionCapabilityV2, SavanaError> {
+pub(crate) fn parse_ingress_workspace(
+    html: &[u8],
+) -> Result<IngressTabSessionCapabilityV2, SavanaError> {
     if html.is_empty() || html.len() > MAX_WORKSPACE_BYTES {
         return Err(SavanaError::InvalidResponse);
     }

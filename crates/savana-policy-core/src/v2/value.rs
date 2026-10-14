@@ -92,6 +92,12 @@ pub(crate) enum KernelScalarRefV2<'value> {
 }
 
 impl KernelValueV2 {
+    pub(crate) fn as_bytes_value(&self) -> Option<&[u8]> {
+        match &self.0 {
+            KernelValueKindV2::Bytes(v) => Some(v),
+            _ => None,
+        }
+    }
     pub const fn null() -> Self {
         Self(KernelValueKindV2::Null)
     }
@@ -114,6 +120,37 @@ impl KernelValueV2 {
         let value = Self(KernelValueKindV2::Bytes(Zeroizing::new(value.into())));
         value.validate_complete()?;
         Ok(value)
+    }
+
+    /// The items of a list whose every item is text (an empty list included).
+    pub(crate) fn text_list(&self) -> Option<Vec<&str>> {
+        match &self.0 {
+            KernelValueKindV2::List(items) => items
+                .iter()
+                .map(|item| match &item.0 {
+                    KernelValueKindV2::Text(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect(),
+            _ => None,
+        }
+    }
+
+    /// This value as a business control value: a bounded text, a non-negative
+    /// integer, a boolean, or a list of texts. Anything else has no business form.
+    pub(crate) fn business_value(&self) -> Option<savana_kernel_protocol::v2::BusinessValueV2> {
+        use savana_kernel_protocol::v2::{BusinessValueV2, MAX_BUSINESS_JSON_BYTES_V2};
+        match self.scalar_ref() {
+            Some(KernelScalarRefV2::Text(s)) if s.len() <= MAX_BUSINESS_JSON_BYTES_V2 => {
+                Some(BusinessValueV2::Text(s.to_owned()))
+            }
+            Some(KernelScalarRefV2::I64(n)) if n >= 0 => Some(BusinessValueV2::Unsigned(n as u64)),
+            Some(KernelScalarRefV2::Bool(b)) => Some(BusinessValueV2::Boolean(b)),
+            Some(_) => None,
+            None => self.text_list().map(|items| {
+                BusinessValueV2::TextList(items.into_iter().map(str::to_owned).collect())
+            }),
+        }
     }
 
     pub fn list(values: Vec<Self>) -> Result<Self, G3Error> {

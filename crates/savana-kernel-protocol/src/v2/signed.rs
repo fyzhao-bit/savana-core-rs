@@ -22,10 +22,16 @@ const TOOL_APPROVAL_ENVELOPE_DOMAIN_V2: &[u8] = b"SAVANA_TOOL_APPROVAL_ENVELOPE_
 const RELEASE_APPROVAL_ENVELOPE_DOMAIN_V2: &[u8] = b"SAVANA_RELEASE_APPROVAL_ENVELOPE_V2\0";
 const CONNECTOR_REGISTRATION_APPROVAL_ENVELOPE_DOMAIN_V2: &[u8] =
     b"SAVANA_CONNECTOR_REGISTRATION_APPROVAL_ENVELOPE_V2\0";
+const TASK_AUTHORIZATION_APPROVAL_ENVELOPE_DOMAIN_V2: &[u8] =
+    b"SAVANA_TASK_AUTHORIZATION_APPROVAL_ENVELOPE_V2_SCHEMA1\0";
 const UI_AUTH_INGRESS_ENVELOPE_DOMAIN_V2: &[u8] = b"SAVANA_UI_AUTH_INGRESS_ENVELOPE_V2\0";
 const UI_AUTH_APPROVAL_DISPLAY_ENVELOPE_DOMAIN_V2: &[u8] =
     b"SAVANA_UI_AUTH_APPROVAL_DISPLAY_ENVELOPE_V2\0";
 const UI_AUTH_AGENT_ENVELOPE_DOMAIN_V2: &[u8] = b"SAVANA_UI_AUTH_AGENT_ENVELOPE_V2\0";
+const UI_AUTH_PRIVATE_SESSION_ENVELOPE_DOMAIN_V04: &[u8] =
+    b"SAVANA_UI_AUTH_PRIVATE_SESSION_ENVELOPE_V04\0";
+const UI_AUTH_PRIVATE_SESSION_SETTLEMENT_DOMAIN_V04: &[u8] =
+    b"SAVANA_UI_AUTH_PRIVATE_SESSION_SETTLEMENT_V04\0";
 const UI_AUTH_BINDING_DOMAIN_V2: &[u8] = b"SAVANA_UI_AUTH_BINDING_V2\0";
 const APPROVAL_BINDING_DOMAIN_V2: &[u8] = b"SAVANA_APPROVAL_BINDING_V2\0";
 const UI_AUTH_INGRESS_SETTLEMENT_DOMAIN_V2: &[u8] = b"SAVANA_UI_AUTH_INGRESS_SETTLEMENT_V2\0";
@@ -37,6 +43,8 @@ const TOOL_APPROVAL_SETTLEMENT_DOMAIN_V2: &[u8] = b"SAVANA_TOOL_APPROVAL_SETTLEM
 const RELEASE_APPROVAL_SETTLEMENT_DOMAIN_V2: &[u8] = b"SAVANA_RELEASE_APPROVAL_SETTLEMENT_V2\0";
 const CONNECTOR_REGISTRATION_APPROVAL_SETTLEMENT_DOMAIN_V2: &[u8] =
     b"SAVANA_CONNECTOR_REGISTRATION_APPROVAL_SETTLEMENT_V2\0";
+const TASK_AUTHORIZATION_APPROVAL_SETTLEMENT_DOMAIN_V2: &[u8] =
+    b"SAVANA_TASK_AUTHORIZATION_APPROVAL_SETTLEMENT_V2_SCHEMA1\0";
 const AGENT_AUTHENTICATION_CLOSURE_DESCRIPTOR_DOMAIN_V2: &[u8] =
     b"SAVANA_AGENT_AUTH_CLOSURE_DESCRIPTOR_V2\0";
 const AGENT_AUTHENTICATION_CLOSURE_DESCRIPTOR_DIGEST_DOMAIN_V2: &[u8] =
@@ -263,6 +271,15 @@ closed_unit_enum_v2! {
         ToolExecution = 2,
         FinalRelease = 3,
         ConnectorRegistration = 4,
+        TaskAuthorization = 5,
+    }
+}
+
+closed_unit_enum_v2! {
+    TaskAuthorizationChangeV2 {
+        Create = 1,
+        Amend = 2,
+        Revoke = 3,
     }
 }
 
@@ -1026,11 +1043,22 @@ closed_unit_enum_v2! {
         IngressInput = 1,
         ApprovalDisplay = 2,
         AgentContent = 3,
+        PrivateSessionV04 = 4,
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalBindingV2 {
+    /// Independent task-root consent, never interchangeable with action approval.
+    /// The trusted owner binds the exact pending draft (or revocation projection)
+    /// and checks the current authorization revision before any durable change.
+    TaskAuthorization {
+        authorization_id: Digest32V2,
+        task: DurableTaskIdV2,
+        revision: u64,
+        change: TaskAuthorizationChangeV2,
+        draft_digest: Digest32V2,
+    },
     Ingress {
         pending_ingress_id: Digest32V2,
         ingress_subject_digest: Digest32V2,
@@ -1057,6 +1085,7 @@ impl ApprovalBindingV2 {
             Self::ToolExecution { .. } => ApprovalPurposeV2::ToolExecution,
             Self::FinalRelease { .. } => ApprovalPurposeV2::FinalRelease,
             Self::ConnectorRegistration { .. } => ApprovalPurposeV2::ConnectorRegistration,
+            Self::TaskAuthorization { .. } => ApprovalPurposeV2::TaskAuthorization,
         }
     }
 
@@ -1087,9 +1116,62 @@ pub struct UnsignedApprovalEnvelopeV2 {
     approvald_endpoint_identity: ServiceIdentityV2,
     issued_at: UnixMillisV2,
     expires_at: UnixMillisV2,
+    task_action: Option<super::TaskActionApprovalBindingV2>,
 }
 
 impl UnsignedApprovalEnvelopeV2 {
+    pub fn with_task_action_binding(
+        mut self,
+        binding: super::TaskActionApprovalBindingV2,
+    ) -> Result<Self, ProtocolError> {
+        if !matches!(
+            self.purpose,
+            ApprovalPurposeV2::ToolExecution | ApprovalPurposeV2::FinalRelease
+        ) {
+            return Err(malformed());
+        }
+        self.task_action = Some(binding);
+        Ok(self)
+    }
+
+    pub fn task_action_binding(&self) -> Option<super::TaskActionApprovalBindingV2> {
+        self.task_action
+    }
+
+    /// Derive expected material from the retained envelope and actual ceremony.
+    /// This structural check is not signature or user-authentication evidence.
+    pub fn task_action_context(
+        &self,
+        settlement: &UnsignedApprovalSettlementV2,
+    ) -> Result<super::TaskActionApprovalContextV2, ProtocolError> {
+        let binding = self.task_action.ok_or_else(malformed)?;
+        if settlement.installation_id != self.installation_id
+            || settlement.active_state_manifest_digest != self.active_state_manifest_digest
+            || settlement.deployment_generation != self.deployment_generation
+            || settlement.purpose != self.purpose
+            || settlement.authenticated_principal != self.expected_principal
+            || settlement.challenge != self.decision_challenge
+            || settlement.issued_at.get() < self.issued_at.get()
+            || settlement.expires_at.get() > self.expires_at.get()
+        {
+            return Err(malformed());
+        }
+        Ok(super::TaskActionApprovalContextV2 {
+            content_digest: binding.content_digest,
+            authorization_id: binding.authorization_id,
+            authorization_revision: binding.authorization_revision,
+            task: binding.task,
+            principal: settlement.authenticated_principal,
+            installation_digest: self.installation_id,
+            manifest_digest: self.active_state_manifest_digest,
+            deployment_generation: self.deployment_generation,
+            challenge_nonce: Digest32V2::new(*self.decision_challenge.as_bytes()),
+            settlement_nonce: Digest32V2::new(*settlement.settlement_nonce.as_bytes()),
+            authentication_context_digest: settlement.authentication_context_digest,
+            display_digest: self.display_digest,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         installation_id: Digest32V2,
@@ -1145,6 +1227,7 @@ impl UnsignedApprovalEnvelopeV2 {
             approvald_endpoint_identity,
             issued_at,
             expires_at,
+            task_action: None,
         })
     }
 
@@ -1211,6 +1294,14 @@ impl UnsignedApprovalEnvelopeV2 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiAuthenticationBindingV2 {
+    /// A task-scoped login to the trusted private consumer, not consent to an
+    /// action, disclosure, changed root, or a session from another kernel boot.
+    PrivateSessionV04 {
+        durable_task_id: DurableTaskIdV2,
+        durable_run_id: DurableRunIdV2,
+        task_authorization_digest: Digest32V2,
+        kerneld_boot_id: BootIdV2,
+    },
     IngressNewTask {
         durable_task_id: DurableTaskIdV2,
         pending_task_digest: Digest32V2,
@@ -1239,6 +1330,7 @@ pub enum UiAuthenticationBindingV2 {
 impl UiAuthenticationBindingV2 {
     pub const fn purpose(self) -> UiAuthenticationPurposeV2 {
         match self {
+            Self::PrivateSessionV04 { .. } => UiAuthenticationPurposeV2::PrivateSessionV04,
             Self::IngressNewTask { .. } | Self::IngressExistingRun { .. } => {
                 UiAuthenticationPurposeV2::IngressInput
             }
@@ -1301,6 +1393,10 @@ impl UnsignedUiAuthenticationEnvelopeV2 {
                 UiAuthenticationPurposeV2::AgentContent,
                 FixedOriginV2::Approval8766,
                 FixedOriginV2::Agent8768
+            ) | (
+                UiAuthenticationPurposeV2::PrivateSessionV04,
+                FixedOriginV2::Approval8766,
+                FixedOriginV2::Approval8766
             )
         );
         let principal_valid = match binding {
@@ -1387,6 +1483,12 @@ impl UnsignedUiAuthenticationEnvelopeV2 {
 }
 
 impl SignedApprovalEnvelopeV2 {
+    /// Decode for storage/structural comparisons only. This does not authenticate
+    /// the signer, caller, deployment, principal, purpose, or validity interval.
+    pub fn unverified_material(&self) -> Result<UnsignedApprovalEnvelopeV2, ProtocolError> {
+        decode_unsigned_approval_envelope_v2(&self.canonical_payload)
+    }
+
     pub fn sign(
         unsigned: UnsignedApprovalEnvelopeV2,
         signing_key: &SigningKey,
@@ -1500,6 +1602,11 @@ impl SignedApprovalEnvelopeV2 {
 }
 
 impl SignedUiAuthenticationEnvelopeV2 {
+    /// Structural material only; callers must use `verify` for authority.
+    pub fn unverified_material(&self) -> Result<UnsignedUiAuthenticationEnvelopeV2, ProtocolError> {
+        decode_unsigned_ui_authentication_envelope_v2(&self.canonical_payload)
+    }
+
     pub fn sign(
         unsigned: UnsignedUiAuthenticationEnvelopeV2,
         signing_key: &SigningKey,
@@ -1576,6 +1683,7 @@ impl SignedUiAuthenticationEnvelopeV2 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnsignedApprovalSettlementV2 {
+    assurance: super::AuthenticationAssuranceV04,
     installation_id: Digest32V2,
     active_state_manifest_digest: Digest32V2,
     deployment_generation: u64,
@@ -1618,6 +1726,51 @@ impl UnsignedApprovalSettlementV2 {
         issued_at: UnixMillisV2,
         expires_at: UnixMillisV2,
     ) -> Result<Self, ProtocolError> {
+        Self::new_with_assurance(
+            super::AuthenticationAssuranceV04::AttestedHardware,
+            installation_id,
+            active_state_manifest_digest,
+            deployment_generation,
+            purpose,
+            envelope_digest,
+            decision,
+            authenticated_principal,
+            authentication_context_digest,
+            credential_digest,
+            user_present,
+            user_verified,
+            backup_eligible,
+            backup_state,
+            signature_counter,
+            challenge,
+            settlement_nonce,
+            issued_at,
+            expires_at,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_assurance(
+        assurance: super::AuthenticationAssuranceV04,
+        installation_id: Digest32V2,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        purpose: ApprovalPurposeV2,
+        envelope_digest: Digest32V2,
+        decision: ApprovalDecisionV2,
+        authenticated_principal: PrincipalIdV2,
+        authentication_context_digest: Digest32V2,
+        credential_digest: Digest32V2,
+        user_present: bool,
+        user_verified: bool,
+        backup_eligible: bool,
+        backup_state: bool,
+        signature_counter: u32,
+        challenge: Nonce32V2,
+        settlement_nonce: Nonce32V2,
+        issued_at: UnixMillisV2,
+        expires_at: UnixMillisV2,
+    ) -> Result<Self, ProtocolError> {
         if is_zero(installation_id.as_bytes())
             || is_zero(active_state_manifest_digest.as_bytes())
             || deployment_generation == 0
@@ -1625,11 +1778,13 @@ impl UnsignedApprovalSettlementV2 {
             || is_zero(authenticated_principal.as_bytes())
             || is_zero(authentication_context_digest.as_bytes())
             || is_zero(credential_digest.as_bytes())
-            || !user_present
-            || !user_verified
-            || backup_eligible
-            || backup_state
-            || signature_counter == 0
+            || !assurance.accepts_evidence(
+                user_present,
+                user_verified,
+                backup_eligible,
+                backup_state,
+                signature_counter,
+            )
             || is_zero(challenge.as_bytes())
             || is_zero(settlement_nonce.as_bytes())
             || issued_at.get() >= expires_at.get()
@@ -1637,6 +1792,7 @@ impl UnsignedApprovalSettlementV2 {
             return Err(malformed());
         }
         Ok(Self {
+            assurance,
             installation_id,
             active_state_manifest_digest,
             deployment_generation,
@@ -1656,6 +1812,18 @@ impl UnsignedApprovalSettlementV2 {
             issued_at,
             expires_at,
         })
+    }
+
+    pub const fn assurance(self) -> super::AuthenticationAssuranceV04 {
+        self.assurance
+    }
+
+    pub const fn backup_eligible(self) -> bool {
+        self.backup_eligible
+    }
+
+    pub const fn backup_state(self) -> bool {
+        self.backup_state
     }
 
     pub const fn purpose(self) -> ApprovalPurposeV2 {
@@ -1704,9 +1872,44 @@ pub struct SignedApprovalSettlementV2 {
     unsigned: UnsignedApprovalSettlementV2,
     key_id: Ed25519KeyIdV2,
     signature: Ed25519SignatureV2,
+    task_action: Option<super::SignedTaskActionApprovalV2>,
 }
 
 impl SignedApprovalSettlementV2 {
+    pub fn task_action_approval(&self) -> Option<&super::SignedTaskActionApprovalV2> {
+        self.task_action.as_ref()
+    }
+
+    /// Attach separately signed content-bound evidence. This checks consistency,
+    /// not authenticity; consumers must verify both signatures against their key.
+    pub fn with_task_action_approval(
+        mut self,
+        approval: super::SignedTaskActionApprovalV2,
+    ) -> Result<Self, ProtocolError> {
+        let material = super::decode_task_action_approval_v2(approval.canonical_payload())?;
+        let context = material.context();
+        let u = self.unsigned;
+        if !matches!(
+            u.purpose,
+            ApprovalPurposeV2::ToolExecution | ApprovalPurposeV2::FinalRelease
+        ) || u.decision != ApprovalDecisionV2::Approve
+            || material.decision() != super::TaskActionApprovalDecisionV2::Approve
+            || context.installation_digest != u.installation_id
+            || context.manifest_digest != u.active_state_manifest_digest
+            || context.deployment_generation != u.deployment_generation
+            || context.principal != u.authenticated_principal
+            || context.authentication_context_digest != u.authentication_context_digest
+            || context.challenge_nonce.as_bytes() != u.challenge.as_bytes()
+            || context.settlement_nonce.as_bytes() != u.settlement_nonce.as_bytes()
+            || material.issued_at() != u.issued_at
+            || material.expires_at() != u.expires_at
+        {
+            return Err(malformed());
+        }
+        self.task_action = Some(approval);
+        Ok(self)
+    }
+
     pub fn sign(
         unsigned: UnsignedApprovalSettlementV2,
         signing_key: &SigningKey,
@@ -1731,6 +1934,7 @@ impl SignedApprovalSettlementV2 {
             unsigned,
             key_id,
             signature,
+            task_action: None,
         })
     }
 
@@ -1867,6 +2071,33 @@ impl SignedApprovalSettlementV2 {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn verify_task_authorization(
+        &self,
+        expected_key_id: Ed25519KeyIdV2,
+        verifying_key: [u8; 32],
+        expected_installation_id: Digest32V2,
+        expected_active_state_manifest_digest: Digest32V2,
+        expected_deployment_generation: u64,
+        expected_envelope_digest: Digest32V2,
+        expected_principal: PrincipalIdV2,
+        expected_challenge: Nonce32V2,
+        now: UnixMillisV2,
+    ) -> Result<VerifiedApprovalSettlementV2, ProtocolError> {
+        self.verify_for_purpose(
+            expected_key_id,
+            verifying_key,
+            expected_installation_id,
+            expected_active_state_manifest_digest,
+            expected_deployment_generation,
+            ApprovalPurposeV2::TaskAuthorization,
+            expected_envelope_digest,
+            expected_principal,
+            expected_challenge,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn verify_for_purpose(
         &self,
         expected_key_id: Ed25519KeyIdV2,
@@ -1915,6 +2146,7 @@ impl SignedApprovalSettlementV2 {
         .map_err(|_| ProtocolError::stable(StableCode::ApprovalInvalidSignature))?;
 
         Ok(VerifiedApprovalSettlementV2 {
+            assurance: unsigned.assurance,
             decision: unsigned.decision,
             authenticated_principal: unsigned.authenticated_principal,
             authentication_context_digest: unsigned.authentication_context_digest,
@@ -1929,6 +2161,7 @@ impl SignedApprovalSettlementV2 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifiedApprovalSettlementV2 {
+    assurance: super::AuthenticationAssuranceV04,
     decision: ApprovalDecisionV2,
     authenticated_principal: PrincipalIdV2,
     authentication_context_digest: Digest32V2,
@@ -1940,6 +2173,9 @@ pub struct VerifiedApprovalSettlementV2 {
 }
 
 impl VerifiedApprovalSettlementV2 {
+    pub const fn assurance(self) -> super::AuthenticationAssuranceV04 {
+        self.assurance
+    }
     pub const fn decision(self) -> ApprovalDecisionV2 {
         self.decision
     }
@@ -1975,6 +2211,7 @@ impl VerifiedApprovalSettlementV2 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnsignedUiAuthenticationSettlementV2 {
+    assurance: super::AuthenticationAssuranceV04,
     installation_id: Digest32V2,
     active_state_manifest_digest: Digest32V2,
     deployment_generation: u64,
@@ -2021,6 +2258,55 @@ impl UnsignedUiAuthenticationSettlementV2 {
         issued_at: UnixMillisV2,
         expires_at: UnixMillisV2,
     ) -> Result<Self, ProtocolError> {
+        Self::new_with_assurance(
+            super::AuthenticationAssuranceV04::AttestedHardware,
+            installation_id,
+            active_state_manifest_digest,
+            deployment_generation,
+            purpose,
+            envelope_digest,
+            binding_digest,
+            authentication_origin,
+            return_origin,
+            authenticated_principal,
+            authentication_context_digest,
+            credential_digest,
+            user_present,
+            user_verified,
+            backup_eligible,
+            backup_state,
+            signature_counter,
+            challenge,
+            settlement_nonce,
+            issued_at,
+            expires_at,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_assurance(
+        assurance: super::AuthenticationAssuranceV04,
+        installation_id: Digest32V2,
+        active_state_manifest_digest: Digest32V2,
+        deployment_generation: u64,
+        purpose: UiAuthenticationPurposeV2,
+        envelope_digest: Digest32V2,
+        binding_digest: Digest32V2,
+        authentication_origin: FixedOriginV2,
+        return_origin: FixedOriginV2,
+        authenticated_principal: PrincipalIdV2,
+        authentication_context_digest: Digest32V2,
+        credential_digest: Digest32V2,
+        user_present: bool,
+        user_verified: bool,
+        backup_eligible: bool,
+        backup_state: bool,
+        signature_counter: u32,
+        challenge: Nonce32V2,
+        settlement_nonce: Nonce32V2,
+        issued_at: UnixMillisV2,
+        expires_at: UnixMillisV2,
+    ) -> Result<Self, ProtocolError> {
         let origins_match = matches!(
             (purpose, authentication_origin, return_origin),
             (
@@ -2035,6 +2321,10 @@ impl UnsignedUiAuthenticationSettlementV2 {
                 UiAuthenticationPurposeV2::AgentContent,
                 FixedOriginV2::Approval8766,
                 FixedOriginV2::Agent8768
+            ) | (
+                UiAuthenticationPurposeV2::PrivateSessionV04,
+                FixedOriginV2::Approval8766,
+                FixedOriginV2::Approval8766
             )
         );
         if is_zero(installation_id.as_bytes())
@@ -2046,11 +2336,13 @@ impl UnsignedUiAuthenticationSettlementV2 {
             || is_zero(authenticated_principal.as_bytes())
             || is_zero(authentication_context_digest.as_bytes())
             || is_zero(credential_digest.as_bytes())
-            || !user_present
-            || !user_verified
-            || backup_eligible
-            || backup_state
-            || signature_counter == 0
+            || !assurance.accepts_evidence(
+                user_present,
+                user_verified,
+                backup_eligible,
+                backup_state,
+                signature_counter,
+            )
             || is_zero(challenge.as_bytes())
             || is_zero(settlement_nonce.as_bytes())
             || issued_at.get() >= expires_at.get()
@@ -2058,6 +2350,7 @@ impl UnsignedUiAuthenticationSettlementV2 {
             return Err(malformed());
         }
         Ok(Self {
+            assurance,
             installation_id,
             active_state_manifest_digest,
             deployment_generation,
@@ -2079,6 +2372,18 @@ impl UnsignedUiAuthenticationSettlementV2 {
             issued_at,
             expires_at,
         })
+    }
+
+    pub const fn assurance(self) -> super::AuthenticationAssuranceV04 {
+        self.assurance
+    }
+
+    pub const fn backup_eligible(self) -> bool {
+        self.backup_eligible
+    }
+
+    pub const fn backup_state(self) -> bool {
+        self.backup_state
     }
 
     pub const fn purpose(self) -> UiAuthenticationPurposeV2 {
@@ -2226,6 +2531,28 @@ impl SignedUiAuthenticationSettlementV2 {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn verify_private_session_v04(
+        &self,
+        expected_key_id: Ed25519KeyIdV2,
+        verifying_key: [u8; 32],
+        expected_installation_id: Digest32V2,
+        expected_active_state_manifest_digest: Digest32V2,
+        expected_deployment_generation: u64,
+        now: UnixMillisV2,
+    ) -> Result<VerifiedUiAuthenticationSettlementV2, ProtocolError> {
+        self.verify_for_purpose(
+            expected_key_id,
+            verifying_key,
+            expected_installation_id,
+            expected_active_state_manifest_digest,
+            expected_deployment_generation,
+            UiAuthenticationPurposeV2::PrivateSessionV04,
+            FixedOriginV2::Approval8766,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn verify_approval_display(
         &self,
         expected_key_id: Ed25519KeyIdV2,
@@ -2293,6 +2620,7 @@ impl SignedUiAuthenticationSettlementV2 {
         .map_err(|_| ProtocolError::stable(StableCode::ApprovalInvalidSignature))?;
 
         Ok(VerifiedUiAuthenticationSettlementV2 {
+            assurance: unsigned.assurance,
             installation_id: unsigned.installation_id,
             active_state_manifest_digest: unsigned.active_state_manifest_digest,
             deployment_generation: unsigned.deployment_generation,
@@ -2311,6 +2639,7 @@ impl SignedUiAuthenticationSettlementV2 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifiedUiAuthenticationSettlementV2 {
+    assurance: super::AuthenticationAssuranceV04,
     installation_id: Digest32V2,
     active_state_manifest_digest: Digest32V2,
     deployment_generation: u64,
@@ -2326,6 +2655,9 @@ pub struct VerifiedUiAuthenticationSettlementV2 {
 }
 
 impl VerifiedUiAuthenticationSettlementV2 {
+    pub const fn assurance(self) -> super::AuthenticationAssuranceV04 {
+        self.assurance
+    }
     pub const fn installation_id(self) -> Digest32V2 {
         self.installation_id
     }
@@ -2415,12 +2747,57 @@ macro_rules! signed_object_v2 {
     };
 }
 
-signed_object_v2!(
-    SignedApprovalSettlementV2,
-    UnsignedApprovalSettlementV2,
-    encode_unsigned_approval_settlement_v2,
-    decode_unsigned_approval_settlement_v2
-);
+impl<C> minicbor::Encode<C> for SignedApprovalSettlementV2 {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut minicbor::Encoder<W>,
+        _: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        let payload = encode_unsigned_approval_settlement_v2(&self.unsigned)
+            .map_err(|_| minicbor::encode::Error::message("invalid approval settlement"))?;
+        e.array(if self.task_action.is_some() { 4 } else { 3 })?
+            .bytes(&payload)?;
+        minicbor::Encode::encode(&self.key_id, e, &mut ())?;
+        minicbor::Encode::encode(&self.signature, e, &mut ())?;
+        if let Some(approval) = &self.task_action {
+            let bytes = super::encode_signed_task_action_approval_v2(approval)
+                .map_err(|_| minicbor::encode::Error::message("invalid task action approval"))?;
+            e.bytes(&bytes)?;
+        }
+        Ok(())
+    }
+}
+impl<'b> minicbor::Decode<'b, V2DecodeContext> for SignedApprovalSettlementV2 {
+    fn decode(
+        d: &mut minicbor::Decoder<'b>,
+        context: &mut V2DecodeContext,
+    ) -> Result<Self, minicbor::decode::Error> {
+        let position = d.position();
+        let length = d.array()?;
+        if !matches!(length, Some(3) | Some(4)) {
+            return Err(decode_error(position));
+        }
+        let payload = d.bytes()?;
+        if payload.len() > MAX_SIGNED_PAYLOAD_BYTES_V2 {
+            return Err(decode_error(position));
+        }
+        let unsigned =
+            decode_unsigned_approval_settlement_v2(payload).map_err(|_| decode_error(position))?;
+        let key = minicbor::Decode::decode(d, context)?;
+        let signature = minicbor::Decode::decode(d, context)?;
+        let receipt =
+            Self::from_parts(unsigned, key, signature).map_err(|_| decode_error(position))?;
+        if length == Some(4) {
+            let approval = super::decode_signed_task_action_approval_v2(d.bytes()?)
+                .map_err(|_| decode_error(position))?;
+            receipt
+                .with_task_action_approval(approval)
+                .map_err(|_| decode_error(position))
+        } else {
+            Ok(receipt)
+        }
+    }
+}
 signed_object_v2!(
     SignedUiAuthenticationSettlementV2,
     UnsignedUiAuthenticationSettlementV2,
@@ -2542,8 +2919,8 @@ fn encode_unsigned_approval_envelope_v2(
 ) -> Result<Vec<u8>, ProtocolError> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
     encoder
-        .array(16)
-        .and_then(|encoder| encoder.u16(2))
+        .array(if value.task_action.is_some() { 17 } else { 16 })
+        .and_then(|encoder| encoder.u16(if value.task_action.is_some() { 3 } else { 2 }))
         .map_err(ProtocolError::malformed)?;
     encode_fixed(&mut encoder, &value.installation_id)?;
     encode_fixed(&mut encoder, &value.active_state_manifest_digest)?;
@@ -2567,6 +2944,9 @@ fn encode_unsigned_approval_envelope_v2(
     encode_fixed(&mut encoder, &value.approvald_endpoint_identity)?;
     encode_fixed(&mut encoder, &value.issued_at)?;
     encode_fixed(&mut encoder, &value.expires_at)?;
+    if let Some(binding) = &value.task_action {
+        encode_fixed(&mut encoder, binding)?;
+    }
     Ok(encoder.into_writer())
 }
 
@@ -2575,10 +2955,13 @@ fn decode_unsigned_approval_envelope_v2(
 ) -> Result<UnsignedApprovalEnvelopeV2, ProtocolError> {
     scan_single(bytes)?;
     let mut decoder = minicbor::Decoder::new(bytes);
-    expect_array(&mut decoder, 16)?;
-    expect_schema_two(&mut decoder)?;
+    let length = decoder.array().map_err(ProtocolError::malformed)?;
+    let schema = decoder.u16().map_err(ProtocolError::malformed)?;
+    if !matches!((length, schema), (Some(16), 2) | (Some(17), 3)) {
+        return Err(malformed());
+    }
     let mut context = V2DecodeContext;
-    let value = UnsignedApprovalEnvelopeV2::new(
+    let mut value = UnsignedApprovalEnvelopeV2::new(
         decode_fixed(&mut decoder, &mut context)?,
         decode_fixed(&mut decoder, &mut context)?,
         decoder.u64().map_err(ProtocolError::malformed)?,
@@ -2597,6 +2980,9 @@ fn decode_unsigned_approval_envelope_v2(
         decode_fixed(&mut decoder, &mut context)?,
         decode_fixed(&mut decoder, &mut context)?,
     )?;
+    if schema == 3 {
+        value = value.with_task_action_binding(decode_fixed(&mut decoder, &mut context)?)?;
+    }
     require_canonical_end(
         &decoder,
         bytes,
@@ -2663,6 +3049,23 @@ fn encode_approval_binding(
     value: ApprovalBindingV2,
 ) -> Result<(), ProtocolError> {
     match value {
+        ApprovalBindingV2::TaskAuthorization {
+            authorization_id,
+            task,
+            revision,
+            change,
+            draft_digest,
+        } => {
+            encoder
+                .array(6)
+                .and_then(|e| e.u16(5))
+                .map_err(ProtocolError::malformed)?;
+            encode_fixed(encoder, &authorization_id)?;
+            encode_fixed(encoder, &task)?;
+            encoder.u64(revision).map_err(ProtocolError::malformed)?;
+            encode_fixed(encoder, &change)?;
+            encode_fixed(encoder, &draft_digest)?;
+        }
         ApprovalBindingV2::Ingress {
             pending_ingress_id,
             ingress_subject_digest,
@@ -2718,6 +3121,13 @@ fn decode_approval_binding(
     let length = decoder.array().map_err(ProtocolError::malformed)?;
     let tag = decoder.u16().map_err(ProtocolError::malformed)?;
     match (tag, length) {
+        (5, Some(6)) => Ok(ApprovalBindingV2::TaskAuthorization {
+            authorization_id: decode_fixed(decoder, context)?,
+            task: decode_fixed(decoder, context)?,
+            revision: decoder.u64().map_err(ProtocolError::malformed)?,
+            change: decode_fixed(decoder, context)?,
+            draft_digest: decode_fixed(decoder, context)?,
+        }),
         (1, Some(5)) => Ok(ApprovalBindingV2::Ingress {
             pending_ingress_id: decode_fixed(decoder, context)?,
             ingress_subject_digest: decode_fixed(decoder, context)?,
@@ -2744,6 +3154,21 @@ fn encode_ui_authentication_binding(
     value: UiAuthenticationBindingV2,
 ) -> Result<(), ProtocolError> {
     match value {
+        UiAuthenticationBindingV2::PrivateSessionV04 {
+            durable_task_id,
+            durable_run_id,
+            task_authorization_digest,
+            kerneld_boot_id,
+        } => {
+            encoder
+                .array(5)
+                .and_then(|encoder| encoder.u16(5))
+                .map_err(ProtocolError::malformed)?;
+            encode_fixed(encoder, &durable_task_id)?;
+            encode_fixed(encoder, &durable_run_id)?;
+            encode_fixed(encoder, &task_authorization_digest)?;
+            encode_fixed(encoder, &kerneld_boot_id)?;
+        }
         UiAuthenticationBindingV2::IngressNewTask {
             durable_task_id,
             pending_task_digest,
@@ -2813,6 +3238,12 @@ fn decode_ui_authentication_binding(
     let length = decoder.array().map_err(ProtocolError::malformed)?;
     let tag = decoder.u16().map_err(ProtocolError::malformed)?;
     match (tag, length) {
+        (5, Some(5)) => Ok(UiAuthenticationBindingV2::PrivateSessionV04 {
+            durable_task_id: decode_fixed(decoder, context)?,
+            durable_run_id: decode_fixed(decoder, context)?,
+            task_authorization_digest: decode_fixed(decoder, context)?,
+            kerneld_boot_id: decode_fixed(decoder, context)?,
+        }),
         (1, Some(4)) => Ok(UiAuthenticationBindingV2::IngressNewTask {
             durable_task_id: decode_fixed(decoder, context)?,
             pending_task_digest: decode_fixed(decoder, context)?,
@@ -2845,9 +3276,28 @@ fn encode_unsigned_approval_settlement_v2(
 ) -> Result<Vec<u8>, ProtocolError> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
     encoder
-        .array(19)
-        .and_then(|encoder| encoder.u16(2))
+        .array(
+            if value.assurance == super::AuthenticationAssuranceV04::AttestedHardware {
+                19
+            } else {
+                20
+            },
+        )
+        .and_then(|encoder| {
+            encoder.u16(
+                if value.assurance == super::AuthenticationAssuranceV04::AttestedHardware {
+                    2
+                } else {
+                    3
+                },
+            )
+        })
         .map_err(ProtocolError::malformed)?;
+    if value.assurance != super::AuthenticationAssuranceV04::AttestedHardware {
+        encoder
+            .u16(value.assurance.tag())
+            .map_err(ProtocolError::malformed)?;
+    }
     encode_fixed(&mut encoder, &value.installation_id)?;
     encode_fixed(&mut encoder, &value.active_state_manifest_digest)?;
     encoder
@@ -2878,10 +3328,18 @@ fn decode_unsigned_approval_settlement_v2(
 ) -> Result<UnsignedApprovalSettlementV2, ProtocolError> {
     scan_single(bytes)?;
     let mut decoder = minicbor::Decoder::new(bytes);
-    expect_array(&mut decoder, 19)?;
-    expect_schema_two(&mut decoder)?;
+    let count = decoder.array().map_err(ProtocolError::malformed)?;
+    let schema = decoder.u16().map_err(ProtocolError::malformed)?;
+    let assurance = match (count, schema) {
+        (Some(19), 2) => super::AuthenticationAssuranceV04::AttestedHardware,
+        (Some(20), 3) if decoder.u16().map_err(ProtocolError::malformed)? == 2 => {
+            super::AuthenticationAssuranceV04::UserVerifiedPasskey
+        }
+        _ => return Err(malformed()),
+    };
     let mut context = V2DecodeContext;
-    let value = UnsignedApprovalSettlementV2::new(
+    let value = UnsignedApprovalSettlementV2::new_with_assurance(
+        assurance,
         decode_fixed(&mut decoder, &mut context)?,
         decode_fixed(&mut decoder, &mut context)?,
         decoder.u64().map_err(ProtocolError::malformed)?,
@@ -2914,9 +3372,28 @@ fn encode_unsigned_ui_authentication_settlement_v2(
 ) -> Result<Vec<u8>, ProtocolError> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
     encoder
-        .array(21)
-        .and_then(|encoder| encoder.u16(2))
+        .array(
+            if value.assurance == super::AuthenticationAssuranceV04::AttestedHardware {
+                21
+            } else {
+                22
+            },
+        )
+        .and_then(|encoder| {
+            encoder.u16(
+                if value.assurance == super::AuthenticationAssuranceV04::AttestedHardware {
+                    2
+                } else {
+                    3
+                },
+            )
+        })
         .map_err(ProtocolError::malformed)?;
+    if value.assurance != super::AuthenticationAssuranceV04::AttestedHardware {
+        encoder
+            .u16(value.assurance.tag())
+            .map_err(ProtocolError::malformed)?;
+    }
     encode_fixed(&mut encoder, &value.installation_id)?;
     encode_fixed(&mut encoder, &value.active_state_manifest_digest)?;
     encoder
@@ -2949,10 +3426,18 @@ fn decode_unsigned_ui_authentication_settlement_v2(
 ) -> Result<UnsignedUiAuthenticationSettlementV2, ProtocolError> {
     scan_single(bytes)?;
     let mut decoder = minicbor::Decoder::new(bytes);
-    expect_array(&mut decoder, 21)?;
-    expect_schema_two(&mut decoder)?;
+    let count = decoder.array().map_err(ProtocolError::malformed)?;
+    let schema = decoder.u16().map_err(ProtocolError::malformed)?;
+    let assurance = match (count, schema) {
+        (Some(21), 2) => super::AuthenticationAssuranceV04::AttestedHardware,
+        (Some(22), 3) if decoder.u16().map_err(ProtocolError::malformed)? == 2 => {
+            super::AuthenticationAssuranceV04::UserVerifiedPasskey
+        }
+        _ => return Err(malformed()),
+    };
     let mut context = V2DecodeContext;
-    let value = UnsignedUiAuthenticationSettlementV2::new(
+    let value = UnsignedUiAuthenticationSettlementV2::new_with_assurance(
+        assurance,
         decode_fixed(&mut decoder, &mut context)?,
         decode_fixed(&mut decoder, &mut context)?,
         decoder.u64().map_err(ProtocolError::malformed)?,
@@ -3439,6 +3924,23 @@ fn validate_signature_parts(
 
 fn approval_binding_is_nonzero(binding: ApprovalBindingV2) -> bool {
     match binding {
+        ApprovalBindingV2::TaskAuthorization {
+            authorization_id,
+            task,
+            revision,
+            change,
+            draft_digest,
+        } => {
+            !is_zero(authorization_id.as_bytes())
+                && !is_zero(task.as_bytes())
+                && !is_zero(draft_digest.as_bytes())
+                && revision != 0
+                && match change {
+                    TaskAuthorizationChangeV2::Create => revision == 1,
+                    TaskAuthorizationChangeV2::Amend => revision > 1,
+                    TaskAuthorizationChangeV2::Revoke => true,
+                }
+        }
         ApprovalBindingV2::Ingress {
             pending_ingress_id,
             ingress_subject_digest,
@@ -3465,6 +3967,17 @@ fn approval_binding_is_nonzero(binding: ApprovalBindingV2) -> bool {
 
 fn ui_authentication_binding_is_nonzero(binding: UiAuthenticationBindingV2) -> bool {
     match binding {
+        UiAuthenticationBindingV2::PrivateSessionV04 {
+            durable_task_id,
+            durable_run_id,
+            task_authorization_digest,
+            kerneld_boot_id,
+        } => {
+            !is_zero(durable_task_id.as_bytes())
+                && !is_zero(durable_run_id.as_bytes())
+                && !is_zero(task_authorization_digest.as_bytes())
+                && !is_zero(kerneld_boot_id.as_bytes())
+        }
         UiAuthenticationBindingV2::IngressNewTask {
             durable_task_id,
             pending_task_digest,
@@ -3511,6 +4024,7 @@ fn ui_authentication_binding_is_nonzero(binding: UiAuthenticationBindingV2) -> b
 
 const fn approval_envelope_domain(purpose: ApprovalPurposeV2) -> &'static [u8] {
     match purpose {
+        ApprovalPurposeV2::TaskAuthorization => TASK_AUTHORIZATION_APPROVAL_ENVELOPE_DOMAIN_V2,
         ApprovalPurposeV2::Ingress => INGRESS_APPROVAL_ENVELOPE_DOMAIN_V2,
         ApprovalPurposeV2::ToolExecution => TOOL_APPROVAL_ENVELOPE_DOMAIN_V2,
         ApprovalPurposeV2::FinalRelease => RELEASE_APPROVAL_ENVELOPE_DOMAIN_V2,
@@ -3522,6 +4036,7 @@ const fn approval_envelope_domain(purpose: ApprovalPurposeV2) -> &'static [u8] {
 
 const fn ui_authentication_envelope_domain(purpose: UiAuthenticationPurposeV2) -> &'static [u8] {
     match purpose {
+        UiAuthenticationPurposeV2::PrivateSessionV04 => UI_AUTH_PRIVATE_SESSION_ENVELOPE_DOMAIN_V04,
         UiAuthenticationPurposeV2::IngressInput => UI_AUTH_INGRESS_ENVELOPE_DOMAIN_V2,
         UiAuthenticationPurposeV2::ApprovalDisplay => UI_AUTH_APPROVAL_DISPLAY_ENVELOPE_DOMAIN_V2,
         UiAuthenticationPurposeV2::AgentContent => UI_AUTH_AGENT_ENVELOPE_DOMAIN_V2,
@@ -3530,6 +4045,9 @@ const fn ui_authentication_envelope_domain(purpose: UiAuthenticationPurposeV2) -
 
 const fn ui_authentication_settlement_domain(purpose: UiAuthenticationPurposeV2) -> &'static [u8] {
     match purpose {
+        UiAuthenticationPurposeV2::PrivateSessionV04 => {
+            UI_AUTH_PRIVATE_SESSION_SETTLEMENT_DOMAIN_V04
+        }
         UiAuthenticationPurposeV2::IngressInput => UI_AUTH_INGRESS_SETTLEMENT_DOMAIN_V2,
         UiAuthenticationPurposeV2::ApprovalDisplay => UI_AUTH_APPROVAL_DISPLAY_SETTLEMENT_DOMAIN_V2,
         UiAuthenticationPurposeV2::AgentContent => UI_AUTH_AGENT_SETTLEMENT_DOMAIN_V2,
@@ -3538,6 +4056,7 @@ const fn ui_authentication_settlement_domain(purpose: UiAuthenticationPurposeV2)
 
 const fn approval_settlement_domain(purpose: ApprovalPurposeV2) -> &'static [u8] {
     match purpose {
+        ApprovalPurposeV2::TaskAuthorization => TASK_AUTHORIZATION_APPROVAL_SETTLEMENT_DOMAIN_V2,
         ApprovalPurposeV2::Ingress => INGRESS_APPROVAL_SETTLEMENT_DOMAIN_V2,
         ApprovalPurposeV2::ToolExecution => TOOL_APPROVAL_SETTLEMENT_DOMAIN_V2,
         ApprovalPurposeV2::FinalRelease => RELEASE_APPROVAL_SETTLEMENT_DOMAIN_V2,

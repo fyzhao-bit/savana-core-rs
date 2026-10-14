@@ -205,6 +205,14 @@ macro_rules! browser_reference_v2 {
 }
 
 kernel_handle_v2!(AgentSessionHandleV2, b"SAVANA_AGENT_SESSION_HANDLE_V2\0");
+kernel_handle_v2!(
+    PrivateSessionTransferV04,
+    b"SAVANA_PRIVATE_SESSION_TRANSFER_V04\0"
+);
+kernel_handle_v2!(
+    PrivateSessionBrowserCapabilityV04,
+    b"SAVANA_PRIVATE_SESSION_BROWSER_V04\0"
+);
 kernel_handle_v2!(RunHandleV2, b"SAVANA_RUN_HANDLE_V2\0");
 kernel_handle_v2!(ValueHandleV2, b"SAVANA_VALUE_HANDLE_V2\0");
 kernel_handle_v2!(
@@ -318,6 +326,10 @@ kernel_handle_v2!(
 kernel_handle_v2!(
     ConnectorApprovalRecordHandleV2,
     b"SAVANA_CONNECTOR_APPROVAL_RECORD_HANDLE_V2\0"
+);
+kernel_handle_v2!(
+    TaskAuthorizationApprovalRecordHandleV2,
+    b"SAVANA_TASK_AUTHORIZATION_APPROVAL_RECORD_HANDLE_V2_SCHEMA1\0"
 );
 kernel_handle_v2!(
     IngressUiAuthenticationTransferCapabilityV2,

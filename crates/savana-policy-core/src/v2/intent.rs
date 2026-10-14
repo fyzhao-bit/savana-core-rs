@@ -1016,6 +1016,7 @@ pub(crate) struct ActionIntentIndexV2 {
 }
 
 impl ActionIntentIndexV2 {
+    #[cfg(test)]
     pub const fn new() -> Self {
         Self {
             intents: Vec::new(),
@@ -1205,10 +1206,12 @@ impl ActionIntentIndexV2 {
             .map(|entry| &entry.record)
     }
 
+    #[cfg(test)]
     pub fn intent_count(&self) -> usize {
         self.intents.len()
     }
 
+    #[cfg(test)]
     pub fn replay_count(&self) -> usize {
         self.replay.len()
     }

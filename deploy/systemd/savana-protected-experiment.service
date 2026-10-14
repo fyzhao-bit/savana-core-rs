@@ -1,0 +1,51 @@
+# NOT enabled by default. All episode bindings, passkey broker and secret
+# credentials must exist before an explicit start. Failure must not auto-replay.
+[Unit]
+Description=Savana protected AgentDojo Python experiment
+Requires=savana-protected-experiment.socket savana-experiment-auth.socket savana-experiment-operator.socket
+After=savana-protected-experiment.socket savana-kerneld.service savana-experiment-auth.socket savana-experiment-operator.socket
+ConditionPathExists=/var/lib/savana-benchmark/operator-bindings.json
+ConditionPathExists=/run/savana-experiment-auth/owner.sock
+ConditionPathExists=/etc/savana/credentials/experiment/deepseek-api-key.cred
+
+[Service]
+Type=exec
+User=savana-experiment
+Group=savana-experiment
+Sockets=savana-protected-experiment.socket
+WorkingDirectory=/opt/savana-protected
+Environment=PYTHONPATH=/opt/savana-protected/python:/opt/savana-protected/experiments
+Environment=PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1
+ExecStart=/opt/savana-bench-venv/bin/python -m savana_bench.protected_launch
+LoadCredentialEncrypted=model-server.pem:/etc/savana/credentials/experiment/model-server.pem.cred
+LoadCredentialEncrypted=model-server.pk8.pem:/etc/savana/credentials/experiment/model-server.pk8.pem.cred
+LoadCredentialEncrypted=model-client-ca.pem:/etc/savana/credentials/experiment/model-client-ca.pem.cred
+LoadCredentialEncrypted=provider-server.pem:/etc/savana/credentials/experiment/provider-server.pem.cred
+LoadCredentialEncrypted=provider-server.pk8.pem:/etc/savana/credentials/experiment/provider-server.pk8.pem.cred
+LoadCredentialEncrypted=provider-client-ca.pem:/etc/savana/credentials/experiment/provider-client-ca.pem.cred
+LoadCredentialEncrypted=final-release-server.pem:/etc/savana/credentials/experiment/final-release-server.pem.cred
+LoadCredentialEncrypted=final-release-server.pk8.pem:/etc/savana/credentials/experiment/final-release-server.pk8.pem.cred
+LoadCredentialEncrypted=final-release-client-ca.pem:/etc/savana/credentials/experiment/final-release-client-ca.pem.cred
+LoadCredentialEncrypted=deepseek-api-key:/etc/savana/credentials/experiment/deepseek-api-key.cred
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=link-local
+InaccessiblePaths=-/var/lib/savana -/etc/savana/credentials/experiment-operator
+ReadWritePaths=/var/lib/savana-benchmark
+UMask=0077
+MemoryMax=2G
+TasksMax=64
+RuntimeMaxSec=1800
+Restart=no
+StandardOutput=journal
+StandardError=journal

@@ -42,6 +42,8 @@ pub(crate) struct SuiteOneKernelExecutorClientV2 {
     client_signing_key: SigningKey,
     server_public_key: [u8; 32],
     socket_path: PathBuf,
+    #[cfg(test)]
+    fixture_clock: bool,
 }
 
 impl std::fmt::Debug for SuiteOneKernelExecutorClientV2 {
@@ -71,16 +73,99 @@ impl SuiteOneKernelExecutorClientV2 {
             client_signing_key,
             server_public_key,
             socket_path: PathBuf::from(KERNEL_EXECUTOR_SOCKET_PATH_V2),
+            #[cfg(test)]
+            fixture_clock: false,
         })
     }
 
-    // Retained for tests that need to redirect the fixed production socket
-    // path; no current test exercises it.
+    // Test-only redirection prevents component fixtures from touching a live
+    // deployment. Production always uses its fixed authenticated endpoint.
     #[cfg(test)]
-    #[allow(dead_code)]
-    fn with_socket_path_for_test(mut self, socket_path: PathBuf) -> Self {
+    pub(crate) fn with_socket_path_for_test(mut self, socket_path: PathBuf) -> Self {
         self.socket_path = socket_path;
+        self.fixture_clock = true;
         self
+    }
+
+    /// Real Suite-1 frames with fixture keys and bounded I/O. Only the remote
+    /// application response is scripted; no production signature check is skipped.
+    #[cfg(test)]
+    pub(crate) fn fixture_server(
+        &self,
+        server_key: SigningKey,
+        count: usize,
+        respond: impl Fn(
+                &KernelServiceApplicationRequestV2,
+            ) -> savana_kernel_protocol::v2::KernelServiceApplicationResponseV2
+            + Send
+            + 'static,
+    ) -> std::thread::JoinHandle<Vec<KernelServiceApplicationRequestV2>> {
+        use savana_kernel_protocol::v2::{
+            decode_kernel_service_application_request_v2,
+            encode_kernel_service_application_response_v2, V2ServerHandshake,
+        };
+        assert!(self.fixture_clock);
+        assert_eq!(
+            server_key.verifying_key().to_bytes(),
+            self.server_public_key
+        );
+        let listener = std::os::unix::net::UnixListener::bind(&self.socket_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let edge = self.edge;
+        let observed = self.expected_observed_peer.clone();
+        let client_key = self.client_signing_key.verifying_key().to_bytes();
+        std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..count {
+                let deadline = Instant::now() + MAX_CONNECTION_DURATION_V2;
+                let stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(2))
+                        }
+                        Err(error) => panic!("fixture accept: {error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                let mut channel = UnixV2FrameChannel::new(stream);
+                let hello = channel.read_handshake_frame(deadline).unwrap();
+                let (pending, hello) = V2ServerHandshake::accept_client_hello(
+                    edge,
+                    observed.clone(),
+                    &hello,
+                    Nonce32V2::new(draw_nonzero().unwrap()),
+                    StaticSecret::from(draw_nonzero().unwrap()),
+                    client_key,
+                    &server_key,
+                )
+                .unwrap();
+                channel.write_handshake_frame(&hello, deadline).unwrap();
+                let finish = channel.read_handshake_frame(deadline).unwrap();
+                let (confirmation, mut session, _) = pending.accept_client_finish(&finish).unwrap();
+                channel.write_record_frame(&confirmation, deadline).unwrap();
+                let frame = channel.read_record_frame(deadline).unwrap();
+                let opened = session.open_application_request(&frame).unwrap();
+                let request =
+                    decode_kernel_service_application_request_v2(opened.plaintext()).unwrap();
+                let response = respond(&request);
+                let encoded = encode_kernel_service_application_response_v2(&response).unwrap();
+                let sealed = session
+                    .seal_application_response(
+                        request.request_id(),
+                        request.operation().tag(),
+                        &encoded,
+                    )
+                    .unwrap();
+                channel.write_record_frame(&sealed, deadline).unwrap();
+                channel.close();
+                requests.push(request);
+            }
+            requests
+        })
     }
 
     pub(crate) fn dispatch(
@@ -183,7 +268,14 @@ impl SuiteOneKernelExecutorClientV2 {
         deadline: UnixMillisV2,
         operation: KernelExecutorOperationV2,
     ) -> Result<Vec<u8>, KernelExecutorClientErrorV2> {
+        #[cfg(not(test))]
         let io_deadline = io_deadline(deadline)?;
+        #[cfg(test)]
+        let io_deadline = if self.fixture_clock {
+            Instant::now() + MAX_CONNECTION_DURATION_V2
+        } else {
+            io_deadline(deadline)?
+        };
         let stream = UnixStream::connect(&self.socket_path)
             .map_err(|_| KernelExecutorClientErrorV2::Unavailable)?;
         self.exchange_over_stream(stream, request_id, deadline, io_deadline, operation)

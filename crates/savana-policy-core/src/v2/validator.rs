@@ -101,6 +101,40 @@ pub const EFFECT_AUTHORIZING_V2: EffectSetV2 = EffectSetV2::CREATE
     .union(EffectSetV2::EXECUTE)
     .union(EffectSetV2::FINAL_RELEASE);
 
+/// Authorizing effects that change state outside the kernel. This is
+/// [`EFFECT_AUTHORIZING_V2`] without `FINAL_RELEASE`: releasing a result is
+/// governed by the G3 declassification path, not by a per-descriptor validator,
+/// and the deployment's single final-release tool deliberately ships no
+/// validator. A CREATE/UPDATE/DELETE/SEND/EXECUTE tool has no such separate
+/// control, so a deployment that ships one must bind `IntentFlowConfinement`.
+pub const EFFECT_STATE_CHANGING_V2: EffectSetV2 = EffectSetV2::CREATE
+    .union(EffectSetV2::UPDATE)
+    .union(EffectSetV2::DELETE)
+    .union(EffectSetV2::SEND)
+    .union(EffectSetV2::EXECUTE);
+
+/// Deployment admission rule: a descriptor that carries a state-changing effect
+/// must declare the `IntentFlowConfinement` validator, so that a call binding an
+/// `ExternalUntrusted` argument (planner output, or a value the kernel lifted
+/// out of a tool result) escalates to owner approval at G5 instead of executing
+/// silently. Returns `true` when the descriptor is allowed to ship. Reads and
+/// the final-release tool need no validator and always pass. This is not the
+/// core [`crate::v2::UnsignedToolDescriptorV2`] shape check (which stays
+/// permissive so existing write descriptors keep their own validators); it is a
+/// stricter rule a deployment generator applies to every write tool it ships.
+pub fn deployment_requires_intent_flow_confinement(
+    effects: EffectSetV2,
+    validators: &[InternalValidatorDeclarationV2],
+) -> bool {
+    if effects.intersection(EFFECT_STATE_CHANGING_V2) == EffectSetV2::EMPTY {
+        return true;
+    }
+    let required = InternalValidatorImplementationKindV2::IntentFlowConfinement.implementation_id();
+    validators
+        .iter()
+        .any(|declaration| declaration.implementation_id() == required)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ValidatorBuildManifestIdentityV2 {
     implementation_id: ImplementationIdV2,
@@ -416,6 +450,14 @@ impl VerifiedG5EvaluationInputV2 {
                 .arguments()
                 .iter()
                 .map(|argument| argument.label().integrity()),
+        ) && address_flow_is_confined(
+            descriptor.business_profile(),
+            stored.arguments().iter().map(|argument| {
+                (
+                    argument.argument_name().as_str(),
+                    argument.label().integrity(),
+                )
+            }),
         );
         let validator_facts = ClosedValidatorFactsV2 {
             argument_binding_integrity,
@@ -609,7 +651,20 @@ impl G5DecisionIndexV2 {
             G5PolicyDispositionKindV2::RequireApproval => G5DecisionBranchV2::RequireApproval,
             G5PolicyDispositionKindV2::Deny => G5DecisionBranchV2::Deny,
         };
-        let branch = ontology_branch.meet(validator_branch).meet(policy_branch);
+        // Fail-closed floor: intent-flow confinement does not depend on a
+        // descriptor declaring it. A descriptor that omits the validator (a
+        // policy defect) still cannot let an `ExternalUntrusted` argument
+        // steer a state-changing effect without owner approval. The fact is
+        // computed for every call; reads are always confined.
+        let flow_floor = if input.validator_facts.intent_flow_confinement {
+            G5DecisionBranchV2::Permit
+        } else {
+            G5DecisionBranchV2::RequireApproval
+        };
+        let branch = ontology_branch
+            .meet(validator_branch)
+            .meet(policy_branch)
+            .meet(flow_floor);
         let decision_record_digest = decision_record_digest(
             input.action_intent_id,
             input.evaluation_input_digest,
@@ -667,6 +722,29 @@ pub(crate) fn intent_flow_is_confined(
 ) -> bool {
     descriptor_effects.intersection(EFFECT_AUTHORIZING_V2) == EffectSetV2::EMPTY
         || !argument_integrities.any(|integrity| integrity == IntegrityV2::ExternalUntrusted)
+}
+
+/// Address confinement, the fail-closed descriptor default. An argument that
+/// chooses *where* a call goes must not be `ExternalUntrusted`, whatever the
+/// call's effect: a read whose address came from fetched content discloses to
+/// whoever chose that address. An argument counts as an address unless the
+/// signed business profile names it as a field with a non-destination role, so
+/// a descriptor without a profile, or an argument the profile does not name,
+/// is treated as an address. Combined into the intent-flow fact, a violation
+/// escalates to owner approval rather than denying.
+pub(crate) fn address_flow_is_confined<'a>(
+    profile: Option<&savana_kernel_protocol::v2::BusinessProfileV2>,
+    mut arguments: impl Iterator<Item = (&'a str, IntegrityV2)>,
+) -> bool {
+    arguments.all(|(name, integrity)| {
+        integrity != IntegrityV2::ExternalUntrusted
+            || profile.is_some_and(|profile| {
+                profile.fields().iter().any(|field| {
+                    // cc/bcc (CopyDestination) are addresses too.
+                    field.name() == name && !field.role().is_destination_class()
+                })
+            })
+    })
 }
 
 fn evaluate_internal_validator(

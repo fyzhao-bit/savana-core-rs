@@ -366,6 +366,16 @@ impl ExecdConnectorRegistryGuardV2<'_> {
     pub fn contains_registered_connector(&self, connector_id: Digest32V2) -> bool {
         self.guard.contains_registered_connector(connector_id)
     }
+
+    pub(crate) fn resolve_task_tool_connector(
+        &self,
+        tool: Digest32V2,
+    ) -> Result<ConnectorDescriptorV2, ExecdConnectorRegistryErrorV2> {
+        self.guard
+            .resolve_task_tool_connector(tool)
+            .cloned()
+            .map_err(|_| ExecdConnectorRegistryErrorV2::ConnectorInactive)
+    }
 }
 
 fn sync_response(

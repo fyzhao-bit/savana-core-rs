@@ -421,6 +421,24 @@ act through the deployment channel. That asymmetry is the point.
 R1–R2 are inert without a deployment opting in (C6), so they can land
 ahead of any product decision to enable the feature.
 
+**R4 status (2026-10-12).** Implemented. `ActiveToolRegistryV2::with_user_registered`
+adds the tools of every active tier-2 connector to G4, walking the chain in
+registration order. A tool enters only if it routes exactly as dispatch will
+route it (`resolve_task_tool_connector`: one descriptor, pinned connector
+identity, HTTPS target), carries no `FINAL_RELEASE`, and takes neither a
+digest nor a tool class already active (deployment tools first, then earlier
+registrations, so a later registration cannot take over a class). Its record
+carries `tier = UserRegistered`, the connector-authority key as publisher,
+a registry ordinal outside the deployment registry and a single attempt.
+kerneld keeps the deployment's tools as the base and recomputes G4 when G7 is
+installed (the chain is already replayed) and after every approved add or
+removal, before execd is synchronized; on any error only the deployment's
+tools stay active. G5 evaluates every call to a user-registered tool with the
+require-approval disposition, whatever the deployment's disposition. The
+tightened quota class is not implemented: per O3 it is a future
+policy-authored quota subject, and an owner-signed task root already bounds
+how often any tool, user-registered or not, can be used.
+
 ## 13. Decisions
 
 All questions this document raised are resolved; numbering kept stable.

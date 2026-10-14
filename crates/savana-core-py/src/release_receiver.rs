@@ -348,6 +348,7 @@ fn map_reservation_error(error: ReservationError) -> PyErr {
         ReservationError::Sealed => "release_sealed",
         ReservationError::Expired => "release_deadline",
         ReservationError::CrossTurn => "release_cross_turn",
+        ReservationError::InvalidBusinessRequest => "release_invalid_request",
         ReservationError::DuplicateDelivery => "release_duplicate",
         ReservationError::NoReservation => "release_not_reserved",
         ReservationError::AlreadyClaimed => "release_already_claimed",

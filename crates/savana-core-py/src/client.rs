@@ -140,6 +140,7 @@ fn purpose_name(purpose: ApprovalPurpose) -> &'static str {
         ApprovalPurpose::ToolExecution => "tool_execution",
         ApprovalPurpose::FinalRelease => "final_release",
         ApprovalPurpose::ConnectorRegistration => "connector_registration",
+        ApprovalPurpose::TaskAuthorization => "task_authorization",
     }
 }
 
@@ -326,6 +327,86 @@ impl PyClient {
         })
     }
 
+    fn owner_ingress(
+        &self,
+        py: Python<'_>,
+        bootstrap: String,
+        webauthn: Py<PyAny>,
+    ) -> PyResult<PyOwnerIngress> {
+        let errors = Arc::new(CallbackErrors::default());
+        let provider = Arc::new(PythonWebAuthn {
+            provider: webauthn,
+            errors: errors.clone(),
+        });
+        let client = self.inner.clone();
+        let result = py.allow_threads(move || client.owner_ingress(&bootstrap, provider));
+        if let Some(error) = errors.take() {
+            return Err(error);
+        }
+        result
+            .map(|inner| PyOwnerIngress {
+                inner: Arc::new(Mutex::new(inner)),
+                errors,
+            })
+            .map_err(map_client_error)
+    }
+
+    fn private_session_v04(
+        &self,
+        py: Python<'_>,
+        identity: &PyIdentity,
+        transfer: String,
+        webauthn: Py<PyAny>,
+    ) -> PyResult<PyPrivateSessionV04> {
+        let errors = Arc::new(CallbackErrors::default());
+        let provider = Arc::new(PythonWebAuthn {
+            provider: webauthn,
+            errors: errors.clone(),
+        });
+        let client = self.inner.clone();
+        let identity = identity.inner.clone();
+        let result = py.allow_threads(move || {
+            client.private_session_v04(identity.as_ref(), &transfer, provider)
+        });
+        if let Some(error) = errors.take() {
+            return Err(error);
+        }
+        result
+            .map(|inner| PyPrivateSessionV04 {
+                inner: Arc::new(Mutex::new(inner)),
+                errors,
+            })
+            .map_err(map_client_error)
+    }
+
+    fn private_session_from_ingress_v04(
+        &self,
+        py: Python<'_>,
+        identity: &PyIdentity,
+        ingress_tab: String,
+        webauthn: Py<PyAny>,
+    ) -> PyResult<PyPrivateSessionV04> {
+        let errors = Arc::new(CallbackErrors::default());
+        let provider = Arc::new(PythonWebAuthn {
+            provider: webauthn,
+            errors: errors.clone(),
+        });
+        let client = self.inner.clone();
+        let identity = identity.inner.clone();
+        let result = py.allow_threads(move || {
+            client.private_session_from_ingress_v04(identity.as_ref(), &ingress_tab, provider)
+        });
+        if let Some(error) = errors.take() {
+            return Err(error);
+        }
+        result
+            .map(|inner| PyPrivateSessionV04 {
+                inner: Arc::new(Mutex::new(inner)),
+                errors,
+            })
+            .map_err(map_client_error)
+    }
+
     fn session(
         &self,
         py: Python<'_>,
@@ -393,6 +474,224 @@ impl PyClient {
 
     fn __repr__(&self) -> &'static str {
         "Client(<fixed-loopback>)"
+    }
+}
+
+#[pyclass(name = "_OwnerIngress", module = "savana_core", frozen)]
+struct PyOwnerIngress {
+    inner: Arc<Mutex<savana_client::owner_ingress::OwnerIngress>>,
+    errors: Arc<CallbackErrors>,
+}
+
+#[pymethods]
+impl PyOwnerIngress {
+    fn task_authorization_context(&self, py: Python<'_>) -> PyResult<PyTaskAuthorizationContext> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || {
+            inner
+                .try_lock()
+                .map_err(|_| ClientError::InvalidState)?
+                .task_authorization_context()
+        })
+        .map(|inner| PyTaskAuthorizationContext { inner })
+        .map_err(map_client_error)
+    }
+
+    fn commit_text(&self, py: Python<'_>, text: String, approval: Py<PyAny>) -> PyResult<()> {
+        let inner = self.inner.clone();
+        let callback = PythonApproval {
+            callback: approval,
+            errors: self.errors.clone(),
+        };
+        let text = zeroize::Zeroizing::new(text);
+        let result = py.allow_threads(move || {
+            inner
+                .try_lock()
+                .map_err(|_| ClientError::InvalidState)?
+                .commit_text(&text, &callback)
+        });
+        if let Some(error) = self.errors.take() {
+            return Err(error);
+        }
+        result.map_err(map_client_error)
+    }
+
+    fn approve_task_authorization(
+        &self,
+        py: Python<'_>,
+        draft: &PyTaskAuthorizationDraft,
+        approval: Py<PyAny>,
+    ) -> PyResult<PyTaskAuthorizationReceipt> {
+        let inner = self.inner.clone();
+        let draft = draft.inner.clone();
+        let callback = PythonApproval {
+            callback: approval,
+            errors: self.errors.clone(),
+        };
+        let result = py.allow_threads(move || {
+            inner
+                .try_lock()
+                .map_err(|_| ClientError::InvalidState)?
+                .approve_task_authorization(&draft, &callback)
+        });
+        if let Some(error) = self.errors.take() {
+            return Err(error);
+        }
+        result
+            .map(|inner| PyTaskAuthorizationReceipt { inner })
+            .map_err(map_client_error)
+    }
+
+    #[allow(clippy::wrong_self_convention)]
+    fn into_private_session(&self, py: Python<'_>) -> PyResult<PyPrivateSessionV04> {
+        let inner = self.inner.clone();
+        let result = py.allow_threads(move || {
+            inner
+                .try_lock()
+                .map_err(|_| ClientError::InvalidState)?
+                .into_private_session()
+        });
+        if let Some(error) = self.errors.take() {
+            return Err(error);
+        }
+        result
+            .map(|inner| PyPrivateSessionV04 {
+                inner: Arc::new(Mutex::new(inner)),
+                errors: self.errors.clone(),
+            })
+            .map_err(map_client_error)
+    }
+
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || {
+            inner
+                .try_lock()
+                .map_err(|_| ClientError::InvalidState)?
+                .close();
+            Ok::<(), ClientError>(())
+        })
+        .map_err(map_client_error)
+    }
+
+    fn __repr__(&self) -> &'static str {
+        "OwnerIngress(<private-owner>)"
+    }
+}
+
+#[pyclass(name = "_PrivateSessionV04", module = "savana_core", frozen)]
+struct PyPrivateSessionV04 {
+    inner: Arc<Mutex<savana_client::private_v04::PrivateSession>>,
+    errors: Arc<CallbackErrors>,
+}
+
+#[pymethods]
+impl PyPrivateSessionV04 {
+    fn poll_publication(&self, py: Python<'_>) -> PyResult<Option<PyPrivatePublicationV04>> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || {
+            inner
+                .lock()
+                .map_err(|_| ClientError::InvalidState)?
+                .poll_publication()
+        })
+        .map(|p| p.map(|inner| PyPrivatePublicationV04 { inner }))
+        .map_err(map_client_error)
+    }
+    fn poll_approval(&self, py: Python<'_>) -> PyResult<bool> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || {
+            inner
+                .lock()
+                .map_err(|_| ClientError::InvalidState)?
+                .poll_approval()
+        })
+        .map_err(map_client_error)
+    }
+
+    fn review_pending(&self, py: Python<'_>, approval: Py<PyAny>) -> PyResult<bool> {
+        let inner = self.inner.clone();
+        let callback = PythonApproval {
+            callback: approval,
+            errors: self.errors.clone(),
+        };
+        let result = py.allow_threads(move || {
+            inner
+                .lock()
+                .map_err(|_| ClientError::InvalidState)?
+                .review_pending(&callback)
+        });
+        if let Some(error) = self.errors.take() {
+            return Err(error);
+        }
+        result.map_err(map_client_error)
+    }
+
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || {
+            inner.lock().map_err(|_| ClientError::InvalidState)?.close();
+            Ok::<(), ClientError>(())
+        })
+        .map_err(map_client_error)
+    }
+
+    fn __repr__(&self) -> &'static str {
+        "PrivateSessionV04(<private-owner>)"
+    }
+}
+
+#[pyclass(name = "_PrivatePublicationV04", module = "savana_core", frozen)]
+struct PyPrivatePublicationV04 {
+    inner: savana_client::private_v04::PublicationReceipt,
+}
+#[pymethods]
+impl PyPrivatePublicationV04 {
+    #[getter]
+    fn task_id<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, self.inner.metadata().task().as_bytes())
+    }
+    #[getter]
+    fn run_id<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, self.inner.metadata().run().as_bytes())
+    }
+    #[getter]
+    fn root_digest<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, self.inner.metadata().root().as_bytes())
+    }
+    #[getter]
+    fn release_id<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, self.inner.metadata().release().as_bytes())
+    }
+    #[getter]
+    fn payload_digest<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, self.inner.metadata().payload_digest().as_bytes())
+    }
+    #[getter]
+    fn destination_digest<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, self.inner.metadata().destination_digest().as_bytes())
+    }
+    #[getter]
+    fn approval_digest<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, self.inner.metadata().approval_digest().as_bytes())
+    }
+    #[getter]
+    fn receipt_digest<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, self.inner.metadata().receipt_digest().as_bytes())
+    }
+    #[getter]
+    fn audit_digest<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, self.inner.metadata().audit_digest().as_bytes())
+    }
+    #[getter]
+    fn commit_digest<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, self.inner.metadata().commit_digest().as_bytes())
+    }
+    fn matches_payload(&self, payload: &[u8]) -> bool {
+        self.inner.matches_payload(payload)
+    }
+    fn __repr__(&self) -> &'static str {
+        "PrivatePublicationReceipt(<owner-only metadata>)"
     }
 }
 
@@ -737,6 +1036,124 @@ impl PyConnectorDescriptor {
     }
 }
 
+#[pyclass(name = "TaskAuthorizationDraft", module = "savana_core", frozen)]
+struct PyTaskAuthorizationDraft {
+    inner: savana_client::TaskAuthorizationDraft,
+}
+
+#[pymethods]
+impl PyTaskAuthorizationDraft {
+    #[staticmethod]
+    fn from_canonical_bytes(bytes: &[u8]) -> PyResult<Self> {
+        savana_client::TaskAuthorizationDraft::from_canonical_bytes(bytes)
+            .map(|inner| Self { inner })
+            .map_err(map_client_error)
+    }
+    fn __repr__(&self) -> &'static str {
+        "TaskAuthorizationDraft(<untrusted, redacted>)"
+    }
+}
+
+#[pyclass(name = "TaskAuthorizationContext", module = "savana_core", frozen)]
+struct PyTaskAuthorizationContext {
+    inner: savana_client::TaskAuthorizationContext,
+}
+
+#[pymethods]
+impl PyTaskAuthorizationContext {
+    #[getter]
+    fn source_input_digest<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, self.inner.source_input_digest().as_bytes())
+    }
+    #[getter]
+    fn pending_requests<'py>(&self, py: Python<'py>) -> Vec<Bound<'py, PyBytes>> {
+        self.inner
+            .pending_requests()
+            .iter()
+            .map(|d| PyBytes::new_bound(py, d.as_bytes()))
+            .collect()
+    }
+    #[getter]
+    fn authorization_identity<'py>(&self, py: Python<'py>) -> Option<(Bound<'py, PyBytes>, u64)> {
+        self.inner
+            .authorization_identity()
+            .map(|(id, revision)| (PyBytes::new_bound(py, id.as_bytes()), revision))
+    }
+    fn tools_json(&self) -> PyResult<String> {
+        self.inner
+            .tools_json()
+            .map_err(|_| map_client_error(ClientError::InvalidRequest))
+    }
+    /// Owner/operator-only metadata; never put this in a model prompt.
+    fn private_binding_json(&self) -> PyResult<String> {
+        self.inner
+            .private_binding_json()
+            .map_err(|_| map_client_error(ClientError::InvalidRequest))
+    }
+    fn final_result_resource<'py>(
+        &self,
+        py: Python<'py>,
+        operation: u16,
+        descriptor: &[u8],
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let bytes = descriptor
+            .try_into()
+            .map_err(|_| map_client_error(ClientError::InvalidRequest))?;
+        let resource = self
+            .inner
+            .final_result_resource(
+                operation,
+                savana_kernel_protocol::v2::Digest32V2::new(bytes),
+            )
+            .map_err(|_| map_client_error(ClientError::InvalidRequest))?;
+        Ok(PyBytes::new_bound(py, resource.as_bytes()))
+    }
+    fn draft(
+        &self,
+        authorization_id: &[u8],
+        clauses_json: &[u8],
+    ) -> PyResult<PyTaskAuthorizationDraft> {
+        let id = authorization_id
+            .try_into()
+            .map_err(|_| map_client_error(ClientError::InvalidRequest))?;
+        let draft = self
+            .inner
+            .draft_from_json(
+                savana_kernel_protocol::v2::Digest32V2::new(id),
+                clauses_json,
+            )
+            .map_err(|_| map_client_error(ClientError::InvalidRequest))?;
+        let bytes = savana_kernel_protocol::v2::encode_task_authorization_draft_v2(&draft)
+            .map_err(|_| map_client_error(ClientError::InvalidRequest))?;
+        savana_client::TaskAuthorizationDraft::from_canonical_bytes(&bytes)
+            .map(|inner| PyTaskAuthorizationDraft { inner })
+            .map_err(map_client_error)
+    }
+    fn __repr__(&self) -> &'static str {
+        "TaskAuthorizationContext(<metadata, redacted>)"
+    }
+}
+
+#[pyclass(name = "TaskAuthorizationReceipt", module = "savana_core", frozen)]
+struct PyTaskAuthorizationReceipt {
+    inner: savana_client::TaskAuthorizationReceipt,
+}
+
+#[pymethods]
+impl PyTaskAuthorizationReceipt {
+    #[getter]
+    fn request_digest<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, self.inner.request_digest())
+    }
+    #[getter]
+    fn authorization_digest<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, self.inner.authorization_digest())
+    }
+    fn __repr__(&self) -> &'static str {
+        "TaskAuthorizationReceipt(<observation>)"
+    }
+}
+
 #[pyclass(name = "RunLimits", module = "savana_core", frozen)]
 struct PyRunLimits {
     inner: ClientRunLimits,
@@ -966,7 +1383,7 @@ fn debug_response(
 fn debug_authentication_html<T: minicbor::Encode<()>>(purpose: &str, capability: T) -> Vec<u8> {
     let capability = URL_SAFE_NO_PAD.encode(minicbor::to_vec(capability).unwrap_or_default());
     format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Savana authentication</title></head><body><main data-purpose=\"{purpose}\" data-pre-authentication=\"{capability}\"><h1>Hardware authentication required</h1><button id=\"savana-authenticate\" type=\"button\">Use security key</button><p id=\"savana-status\">The opaque capability is held only in this page.</p></main><script src=\"/v2/savana-ui.js\" defer></script></body></html>"
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Savana authentication</title></head><body><main data-purpose=\"{purpose}\" data-pre-authentication=\"{capability}\"><h1>User verification required</h1><button id=\"savana-authenticate\" type=\"button\">Use passkey or security key</button><p id=\"savana-status\">The opaque capability is held only in this page.</p></main><script src=\"/v2/savana-ui.js\" defer></script></body></html>"
     )
     .into_bytes()
 }
@@ -1256,6 +1673,113 @@ impl PySession {
             }
         });
         Self::finish_operation(result, self.ingress_callback_errors.as_ref())
+    }
+
+    fn task_authorization_context(&self, py: Python<'_>) -> PyResult<PyTaskAuthorizationContext> {
+        let inner = self.inner.clone();
+        let result = py.allow_threads(move || {
+            let mut state = Self::try_state(inner.as_ref())?;
+            match &mut *state {
+                SessionState::Live(session) => session
+                    .task_authorization_context()
+                    .map(|inner| PyTaskAuthorizationContext { inner }),
+                #[cfg(debug_assertions)]
+                SessionState::Debug(_) => Err(ClientError::InvalidState),
+            }
+        });
+        Self::finish(result)
+    }
+
+    fn establish_task_authorization(
+        &self,
+        py: Python<'_>,
+        draft: &PyTaskAuthorizationDraft,
+    ) -> PyResult<PyTaskAuthorizationReceipt> {
+        let draft = draft.inner.clone();
+        let inner = self.inner.clone();
+        let result = py.allow_threads(move || {
+            let mut state = Self::try_state(inner.as_ref())?;
+            match &mut *state {
+                SessionState::Live(session) => session
+                    .establish_task_authorization(&draft)
+                    .map(|inner| PyTaskAuthorizationReceipt { inner }),
+                #[cfg(debug_assertions)]
+                SessionState::Debug(_) => Err(ClientError::InvalidState),
+            }
+        });
+        Self::finish(result)
+    }
+
+    fn approve_task_authorization(
+        &self,
+        py: Python<'_>,
+        draft: &PyTaskAuthorizationDraft,
+        approval: Py<PyAny>,
+    ) -> PyResult<PyTaskAuthorizationReceipt> {
+        let draft = draft.inner.clone();
+        let errors = Arc::new(CallbackErrors::default());
+        let callback = PythonApproval {
+            callback: approval,
+            errors: errors.clone(),
+        };
+        let inner = self.inner.clone();
+        let result = py.allow_threads(move || {
+            let mut state = Self::try_state(inner.as_ref())?;
+            match &mut *state {
+                SessionState::Live(session) => session
+                    .approve_task_authorization(&draft, &callback)
+                    .map(|inner| PyTaskAuthorizationReceipt { inner }),
+                #[cfg(debug_assertions)]
+                SessionState::Debug(_) => Err(ClientError::InvalidState),
+            }
+        });
+        Self::finish_operation(result, errors.as_ref())
+    }
+
+    fn recover_task_authorization(
+        &self,
+        py: Python<'_>,
+        request_digest: &[u8],
+        approval: Py<PyAny>,
+    ) -> PyResult<PyTaskAuthorizationReceipt> {
+        let digest: [u8; 32] = request_digest
+            .try_into()
+            .map_err(|_| map_client_error(ClientError::InvalidRequest))?;
+        let errors = Arc::new(CallbackErrors::default());
+        let callback = PythonApproval {
+            callback: approval,
+            errors: errors.clone(),
+        };
+        let inner = self.inner.clone();
+        let result = py.allow_threads(move || {
+            let mut state = Self::try_state(inner.as_ref())?;
+            match &mut *state {
+                SessionState::Live(session) => session
+                    .recover_task_authorization(digest, &callback)
+                    .map(|inner| PyTaskAuthorizationReceipt { inner }),
+                #[cfg(debug_assertions)]
+                SessionState::Debug(_) => Err(ClientError::InvalidState),
+            }
+        });
+        Self::finish_operation(result, errors.as_ref())
+    }
+
+    fn revoke_task_authorization<'py>(
+        &self,
+        py: Python<'py>,
+        draft: &PyTaskAuthorizationDraft,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let draft = draft.inner.clone();
+        let inner = self.inner.clone();
+        let result = py.allow_threads(move || {
+            let mut state = Self::try_state(inner.as_ref())?;
+            match &mut *state {
+                SessionState::Live(session) => session.revoke_task_authorization(&draft),
+                #[cfg(debug_assertions)]
+                SessionState::Debug(_) => Err(ClientError::InvalidState),
+            }
+        });
+        Self::finish(result).map(|digest| PyBytes::new_bound(py, &digest))
     }
 
     fn read_view(&self, py: Python<'_>, handle: &PyHandle) -> PyResult<PyMaskedView> {
@@ -1717,6 +2241,9 @@ fn _debug_callback_error_isolation(py: Python<'_>) -> PyResult<(String, bool, bo
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyOwnerIngress>()?;
+    m.add_class::<PyPrivateSessionV04>()?;
+    m.add_class::<PyPrivatePublicationV04>()?;
     m.add("SavanaError", m.py().get_type_bound::<SavanaError>())?;
     m.add("AuthError", m.py().get_type_bound::<AuthError>())?;
     m.add("ApprovalDenied", m.py().get_type_bound::<ApprovalDenied>())?;
@@ -1731,6 +2258,9 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyApprovalRequest>()?;
     m.add_class::<PyExecutionResult>()?;
     m.add_class::<PyConnectorDescriptor>()?;
+    m.add_class::<PyTaskAuthorizationDraft>()?;
+    m.add_class::<PyTaskAuthorizationContext>()?;
+    m.add_class::<PyTaskAuthorizationReceipt>()?;
     m.add_class::<PyRunLimits>()?;
     m.add_class::<PyAgentEvent>()?;
     #[cfg(debug_assertions)]

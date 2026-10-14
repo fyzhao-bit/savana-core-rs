@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""A stand-in for the `aws` CLI, enough of it for `AwsHosts`: an "instance"
+is a local stand-in machine (create.sh's container, image
+savana-lab-sshd:24.04) set up the way EC2 and cloud-init set up Canonical's
+Ubuntu image from the user data `AwsHost` sends: the SSH host key it gives,
+an `ubuntu` login user with passwordless sudo and the login key it gives,
+sshd on 127.0.0.1:22. So the AWS path (keys made per instance, the pinned
+first connection, sudo, termination) runs for real, without an account.
+Put this directory first on PATH under the name `aws` (a symlink)."""
+import json
+import subprocess
+import sys
+
+NAME = "savana-lab-aws-instance"
+
+
+def docker(*argv, input=None):
+    return subprocess.run(["docker", *argv], input=input, check=True, capture_output=True, text=True).stdout
+
+
+def user_data(path):
+    """The cloud-config AwsHost writes: the host key pair and the login key."""
+    lines = open(path).read().splitlines()
+    start = lines.index("  ed25519_private: |") + 1
+    private = []
+    for line in lines[start:]:
+        if not line.startswith("    "):
+            break
+        private.append(line[4:])
+    public = next(line.split(": ", 1)[1] for line in lines if line.startswith("  ed25519_public: "))
+    login = lines[lines.index("ssh_authorized_keys:") + 1].split("- ", 1)[1]
+    return "\n".join(private) + "\n", public + "\n", login + "\n"
+
+
+def run_instances(argv):
+    private, public, login = user_data(argv[argv.index("--user-data") + 1].removeprefix("file://"))
+    subprocess.run(["docker", "rm", "-f", NAME], capture_output=True)
+    docker("run", "-d", "--name", NAME, "--privileged", "--network", "host", "--cgroupns=host",
+           "-v", "/sys/fs/cgroup:/sys/fs/cgroup:rw", "--tmpfs", "/run", "--tmpfs", "/run/lock", "--tmpfs", "/tmp",
+           "savana-lab-sshd:24.04")
+    for _ in range(60):
+        state = subprocess.run(["docker", "exec", NAME, "systemctl", "is-system-running"],
+                               capture_output=True, text=True).stdout.strip()
+        if state in ("running", "degraded"):
+            break
+        subprocess.run(["sleep", "1"])
+    setup = ("set -e; umask 077; cat > /etc/ssh/ssh_host_ed25519_key; "
+             "printf 'Port 22\\nListenAddress 127.0.0.1\\nPasswordAuthentication no\\nKbdInteractiveAuthentication no\\n"
+             "PermitRootLogin no\\nHostKey /etc/ssh/ssh_host_ed25519_key\\n' > /etc/ssh/sshd_config.d/savana-lab.conf; "
+             "id ubuntu >/dev/null 2>&1 || useradd -m -s /bin/bash ubuntu; "
+             "echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-ubuntu")
+    docker("exec", "-i", NAME, "bash", "-c", setup, input=private)
+    docker("exec", "-i", NAME, "bash", "-c", "cat > /etc/ssh/ssh_host_ed25519_key.pub", input=public)
+    docker("exec", "-i", NAME, "bash", "-c", "install -d -m 700 -o ubuntu -g ubuntu /home/ubuntu/.ssh; "
+           "cat > /home/ubuntu/.ssh/authorized_keys; chown ubuntu: /home/ubuntu/.ssh/authorized_keys; "
+           "chmod 600 /home/ubuntu/.ssh/authorized_keys", input=login)
+    docker("exec", NAME, "systemctl", "start", "ssh")
+    print(json.dumps({"Instances": [{"InstanceId": "i-0fa4e0000000local"}]}))
+
+
+def main(argv):
+    while argv and argv[0] in ("--profile", "--region"):
+        argv = argv[2:]
+    if argv[:2] == ["ssm", "get-parameter"]:
+        print("ami-0localstandin")
+    elif argv[:2] == ["ec2", "run-instances"]:
+        run_instances(argv)
+    elif argv[:2] == ["ec2", "wait"]:
+        pass
+    elif argv[:2] == ["ec2", "describe-instances"]:
+        print(json.dumps({"Reservations": [{"Instances": [{"PublicIpAddress": "127.0.0.1",
+                                                           "PrivateIpAddress": "127.0.0.1"}]}]}))
+    elif argv[:2] == ["ec2", "terminate-instances"]:
+        subprocess.run(["docker", "rm", "-f", NAME], capture_output=True)
+        print("{}")
+    else:
+        sys.exit(f"fake aws: not supported: {' '.join(argv[:3])}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

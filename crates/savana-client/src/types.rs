@@ -22,7 +22,6 @@ pub enum ContentKind {
 }
 
 pub struct MaskedView {
-    #[allow(dead_code)] // Populated and projected by read_view in Task 4.
     pub(crate) value: AgentViewV2,
     pub(crate) continuation: Option<Handle>,
 }
@@ -125,6 +124,7 @@ pub enum ApprovalPurpose {
     ToolExecution,
     FinalRelease,
     ConnectorRegistration,
+    TaskAuthorization,
 }
 
 pub struct ApprovalRequest {

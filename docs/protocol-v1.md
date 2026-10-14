@@ -1,6 +1,10 @@
 # Savana Kernel Protocol V1
 
-Status: pre-release protocol `1.0` slice.
+Status: retired. The V1 wire types, policy engine, socket runtime and
+fixtures were removed from the tree on 2026-10-13; production has run only the
+V2 protocol. This document is kept as the historical record of the byte-level
+conventions (canonical CBOR, domain separation) that the V2 documents cite.
+Commands and paths below describe the removed implementation.
 
 This document freezes the byte-level contract implemented by
 `savana-kernel-protocol`, the signed policy and release identities consumed by

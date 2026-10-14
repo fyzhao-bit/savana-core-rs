@@ -116,6 +116,40 @@ class ApprovalRouter:
             self._cancelled = True
             self._cancel_event.set()
 
+    async def request_task_draft(self, context: Any, turn_binding: bytes) -> bytes | None:
+        """Collect data, not authority; only the SDK's later ceremony can grant it."""
+        with self._lock:
+            if self._cancelled or self._in_flight:
+                return None
+            self._in_flight = True
+        try:
+            timeout = self._timeout_seconds
+            if self._absolute_deadline is not None:
+                timeout = min(timeout, self._absolute_deadline - time.monotonic())
+            if timeout <= 0:
+                return None
+            await self._emit({
+                "protocol_version": PROTOCOL_VERSION,
+                "request_id": self._turn_request_id,
+                "type": "turn.event",
+                "event": "approval_required",
+                "purpose": "task_authorization",
+            })
+            draft = await asyncio.to_thread(
+                self._broker.request_task_draft,
+                context,
+                turn_binding,
+                int((time.time() + timeout) * 1000),
+                self._cancel_event,
+            )
+            with self._lock:
+                return draft if not self._cancelled else None
+        except Exception:  # noqa: BLE001 - missing/old/failed broker cannot authorize.
+            return None
+        finally:
+            with self._lock:
+                self._in_flight = False
+
 
 class _SessionApprovalDispatcher:
     def __init__(self) -> None:
@@ -247,9 +281,36 @@ class BridgeRuntime:
                         raise BridgeRuntimeError("cancelled")
                     record.approvals.bind(approvals)
                     try:
+                        # Pin the real application turn before input, task-scope
+                        # approval or planning. A later result cannot select the
+                        # receiver by merely being the next delivery to arrive.
+                        turn_binding = self._turn_binding(
+                            request_id, agent_id, session_id, turn_id
+                        )
+                        reservation = await asyncio.to_thread(
+                            self._receiver.reserve,
+                            turn_binding,
+                            self._remaining_turn_timeout(turn_deadline),
+                        )
                         await record.session.ingest_text(
                             text, self._sdk.ContentKind.CHAT_TEXT
                         )
+                        context = await record.session.task_authorization_context()
+                        # Resolve an uncertain earlier issuance through the SDK/UI
+                        # recovery flow, never discard it and reset consumption.
+                        if context.pending_requests:
+                            raise BridgeRuntimeError("policy_refused")
+                        clauses = await approvals.request_task_draft(context, turn_binding)
+                        if clauses is None:
+                            raise BridgeRuntimeError("approval_denied")
+                        identity = context.authorization_identity
+                        authorization_id = (
+                            identity[0] if identity is not None else secrets.token_bytes(32)
+                        )
+                        # Closed grammar, actual source/profile/revision binding and
+                        # canonicalization remain in Rust. No chat-to-policy inference.
+                        draft = context.draft(authorization_id, clauses)
+                        await record.session.approve_task_authorization(draft, approvals)
                         result = await record.session.run_agent(
                             self._sdk.IntentPrivacy.PRIVATE,
                             limits,
@@ -257,17 +318,6 @@ class BridgeRuntime:
                             self._event_callback(request_id, loop),
                         )
                         document = self._select_document(result)
-                        turn_binding = self._turn_binding(
-                            request_id, agent_id, session_id, turn_id
-                        )
-                        reservation_timeout = self._remaining_turn_timeout(
-                            turn_deadline
-                        )
-                        reservation = await asyncio.to_thread(
-                            self._receiver.reserve,
-                            turn_binding,
-                            reservation_timeout,
-                        )
                         release = await record.session.release(document, approvals)
                         if release.status == "failed_no_effect":
                             await asyncio.to_thread(

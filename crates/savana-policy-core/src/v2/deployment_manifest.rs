@@ -264,8 +264,138 @@ impl SecurityStateManifestV2 {
         Ok(())
     }
 
+    /// Bind a verified release to an externally authorized normal transaction.
+    /// This is not native installation, anti-rollback or runtime attestation.
+    pub fn validate_transaction_binding(
+        &self,
+        transaction: &super::DeploymentTransactionV2,
+    ) -> Result<(), DeploymentControlErrorV2> {
+        self.validate_for_normal_transaction()?;
+        let intent = transaction.intent().material();
+        let expected = &intent.expected_pre_state;
+        let bootstrap = &self.material.bootstrap_tcb_lock;
+        if intent.recovery_target.tag() != 1
+            || self.signed_digest != intent.desired_manifest_digest
+            || self.material.target_platform != intent.target_platform
+            || bootstrap.installation_epoch() != expected.installation_epoch()
+            || bootstrap.deploy_helper_identity() != expected.deploy_helper_identity()
+            || bootstrap.deploy_watchdog_identity() != expected.deploy_watchdog_identity()
+        {
+            return Err(DeploymentControlErrorV2::TransactionBindingMismatch);
+        }
+        Ok(())
+    }
+
+    /// Every normal-release file must have exactly one staged payload with the
+    /// signed length and digest. Staging permissions deliberately differ from
+    /// installed permissions; this checks content, not installed ACLs, native
+    /// executable identity, service semantics, or installation completion.
+    pub fn validate_staged_payloads(
+        &self,
+        staging: &super::StagingTreeV2,
+    ) -> Result<(), DeploymentControlErrorV2> {
+        self.validate_for_normal_transaction()?;
+        if self
+            .material
+            .binary_closure
+            .parser_worker_set()
+            .artifacts()
+            .len()
+            != 1
+            || self
+                .material
+                .binary_closure
+                .connector_worker_set()
+                .artifacts()
+                .len()
+                != 1
+        {
+            // The closed layout has one path for each worker role. Additional
+            // signed workers cannot be silently left unmaterialized.
+            return Err(DeploymentControlErrorV2::InvalidDeploymentTree);
+        }
+        let files: Vec<_> = self
+            .material
+            .file_tree
+            .entries()
+            .iter()
+            .filter(|e| e.artifact_identity().is_some())
+            .collect();
+        let payloads: Vec<_> = staging
+            .entries()
+            .iter()
+            .filter_map(|e| {
+                e.logical_path_id()
+                    .target_logical_path()
+                    .map(|path| (path, e))
+            })
+            .collect();
+        if files.len() != 35 || payloads.len() != files.len() {
+            return Err(DeploymentControlErrorV2::InvalidDeploymentTree);
+        }
+        for file in files {
+            let artifact = file
+                .artifact_identity()
+                .ok_or(DeploymentControlErrorV2::InvalidDeploymentTree)?;
+            let matching: Vec<_> = payloads
+                .iter()
+                .filter(|(path, _)| *path == file.logical_path_id())
+                .collect();
+            if matching.len() != 1 {
+                return Err(DeploymentControlErrorV2::InvalidDeploymentTree);
+            }
+            let payload = matching[0].1;
+            if payload.size() != artifact.byte_length() || payload.sha256() != artifact.sha256() {
+                return Err(DeploymentControlErrorV2::TransactionBindingMismatch);
+            }
+        }
+        Ok(())
+    }
+
     pub fn canonical_bytes(&self) -> &[u8] {
         &self.canonical_bytes
+    }
+
+    /// Project all 29 signed versioned domains onto a normal-update high-water
+    /// vector. Returning a candidate neither persists it nor spends a rollback
+    /// grant. Recovery/rollback needs its separate grant protocol.
+    pub fn normal_update_highwater(
+        &self,
+        current: &super::HighestEverV2,
+    ) -> Result<super::HighestEverV2, DeploymentControlErrorV2> {
+        self.validate_for_normal_transaction()?;
+        let m = &self.material;
+        let b = &m.bootstrap_tcb_lock;
+        let identities: Vec<_> = std::iter::once(&m.release)
+            .chain(m.security_state.identities())
+            .chain(m.platform_closure.identities())
+            .chain([
+                b.deployment_trust_root_set(),
+                b.activation_trust_root_set(),
+                b.release_trust_root_set(),
+                b.declassification_trust_root_set(),
+            ])
+            .collect();
+        if identities.len() != ClosedSecurityDomainV2::ALL.len() {
+            return Err(DeploymentControlErrorV2::HighestEverMismatch);
+        }
+        let mut next = current.clone();
+        for (identity, domain) in identities.into_iter().zip(ClosedSecurityDomainV2::ALL) {
+            if identity.domain() != domain
+                || identity.signer_key_epoch() < current.entry(domain).key_epoch()
+            {
+                return Err(DeploymentControlErrorV2::HighestEverMismatch);
+            }
+            next = next.with_advanced(
+                domain,
+                super::HighWaterEntryV2::new(
+                    identity.sequence(),
+                    identity.content_digest(),
+                    identity.signer_key_epoch(),
+                )?,
+            )?;
+        }
+        Ok(next)
     }
 
     pub const fn payload_digest(&self) -> Digest32V2 {

@@ -7,7 +7,7 @@
 //!
 //! Ported faithfully:
 //!   - `_gbnf_string_literal` (gbnf_generator.py:59-68): the double `json.dumps`
-//!     of a name into a GBNF terminal (see [`gbnf_string_literal`]);
+//!     of a name into a GBNF terminal (see `gbnf_string_literal`);
 //!   - `_validated_object_schema` (gbnf_generator.py:75-108): the fail-closed
 //!     JSON-Schema-root validation and its exact `ValueError` messages;
 //!   - `_argument_rules` (gbnf_generator.py:111-151): the fixed-order argument

@@ -1,5 +1,12 @@
 # Savana Core: A Capability- and Information-Flow Kernel for LLM Agent Systems
 
+> **Historical report, superseded 2026-09-05.** This August 1 snapshot is
+> retained for history. Its status, measurements and absolute security claims
+> are not assertions about the current implementation. Use the
+> [current summary](academic-summary.zh-CN.md),
+> [verification record](verification/intent-bound-execution.md) and
+> [revised paper](../paper/usenix-sec27/main.tex).
+
 **Technical Report** · Revision 1.0 · 2026-08-01
 Target audience: security architects, platform engineers, technical due diligence.
 

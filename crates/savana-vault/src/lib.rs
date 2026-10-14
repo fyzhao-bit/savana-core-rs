@@ -4,7 +4,6 @@ use std::fmt;
 
 use hmac::{Hmac, Mac as _};
 use minicbor::Encode as _;
-use savana_approvald::{ApprovalPurposeV2, ConsumedApprovalSettlementV2};
 pub use savana_kernel_protocol::v2::MaskedDocumentHandleV2;
 use savana_kernel_protocol::v2::{
     AuthorityHandleKeyV2, BootIdV2, Digest32V2, DurableReleaseIdV2, DurableRunIdV2,
@@ -21,6 +20,7 @@ pub use durable::{
 
 const VAULT_SEGMENT_DOMAIN: &[u8] = b"SAVANA_VAULT_SEGMENT_V2\0";
 const VAULT_INTERNAL_ID_DOMAIN: &[u8] = b"SAVANA_VAULT_SEGMENT_INTERNAL_ID_V2\0";
+const TOOL_RESULT_INTERNAL_ID_DOMAIN: &[u8] = b"SAVANA_VAULT_TOOL_RESULT_INTERNAL_ID_V2\0";
 const CAPABILITY_HASH_DOMAIN: &[u8] = b"SAVANA_VAULT_CAPABILITY_HASH_V2\0";
 const CAPABILITY_DERIVATION_DOMAIN: &[u8] = b"SAVANA_VAULT_CAPABILITY_DERIVATION_V2\0";
 const DISPATCH_SUBJECT_DOMAIN: &[u8] = b"SAVANA_DISPATCH_SUBJECT_V2\0";
@@ -444,29 +444,6 @@ impl VerifiedFinalReleaseApprovalV2 {
         })
     }
 
-    pub fn from_consumed_settlement(
-        settlement: ConsumedApprovalSettlementV2,
-        expected_binding_digest: Digest32V2,
-        now: UnixMillisV2,
-    ) -> Result<Self, VaultErrorV2> {
-        if settlement.purpose() != ApprovalPurposeV2::FinalRelease
-            || settlement.binding_digest() != expected_binding_digest
-            || is_zero(expected_binding_digest.as_bytes())
-            || is_zero(settlement.authenticated_principal().as_bytes())
-            || is_zero(settlement.settlement_digest().as_bytes())
-            || now.get() == 0
-            || now.get() >= settlement.expires_at().get()
-        {
-            return Err(VaultErrorV2::InvalidApproval);
-        }
-        Ok(Self {
-            binding_digest: expected_binding_digest,
-            authenticated_principal: settlement.authenticated_principal(),
-            settlement_digest: settlement.settlement_digest(),
-            expires_at: settlement.expires_at(),
-        })
-    }
-
     #[cfg(test)]
     fn new_for_test(
         binding_digest: Digest32V2,
@@ -685,6 +662,26 @@ impl VaultServiceV2 {
         material: VaultIngressMaterialV2,
         now: UnixMillisV2,
     ) -> Result<PendingVaultSegmentV2, VaultErrorV2> {
+        self.create_pending_material(material, now, false)
+    }
+
+    /// Kernel-internal result insertion, after exact executor completion proof
+    /// verification. Each commit has a separate domain-separated segment; it
+    /// never replaces the task's immutable original ingress. Not an agent API.
+    pub fn create_pending_tool_result(
+        &mut self,
+        material: VaultIngressMaterialV2,
+        now: UnixMillisV2,
+    ) -> Result<PendingVaultSegmentV2, VaultErrorV2> {
+        self.create_pending_material(material, now, true)
+    }
+
+    fn create_pending_material(
+        &mut self,
+        material: VaultIngressMaterialV2,
+        now: UnixMillisV2,
+        tool_result: bool,
+    ) -> Result<PendingVaultSegmentV2, VaultErrorV2> {
         self.accept_time(now)?;
         if now.get() >= material.expires_at.get() {
             return Err(VaultErrorV2::Expired);
@@ -694,7 +691,11 @@ impl VaultServiceV2 {
         // segment. The capability remains secret because it is derived with
         // the persisted, installation-scoped capability key.
         let internal_id = domain_hash_many(
-            VAULT_INTERNAL_ID_DOMAIN,
+            if tool_result {
+                TOOL_RESULT_INTERNAL_ID_DOMAIN
+            } else {
+                VAULT_INTERNAL_ID_DOMAIN
+            },
             &[
                 self.installation_id.as_bytes(),
                 self.active_state_manifest_digest.as_bytes(),
@@ -718,24 +719,47 @@ impl VaultServiceV2 {
             internal_id,
             &material,
         );
-        if let Some(existing) = self
-            .segments
-            .iter()
-            .find(|segment| segment.durable_task_id == material.durable_task_id)
-        {
+        if let Some(existing) = self.segments.iter_mut().find(|segment| {
+            if tool_result {
+                segment.internal_id == internal_id
+            } else {
+                // Result records are recognized by their separate, bound
+                // identity domain, without changing historical ingress IDs
+                // or rewriting the encrypted snapshot format.
+                segment.durable_task_id == material.durable_task_id
+                    && segment.internal_id
+                        != domain_hash_many(
+                            TOOL_RESULT_INTERNAL_ID_DOMAIN,
+                            &[
+                                self.installation_id.as_bytes(),
+                                self.active_state_manifest_digest.as_bytes(),
+                                segment.durable_task_id.as_bytes(),
+                                segment.durable_run_id.as_bytes(),
+                                segment.input_commit_digest.as_bytes(),
+                            ],
+                        )
+            }
+        }) {
             if existing.internal_id != internal_id
                 || existing.durable_run_id != material.durable_run_id
                 || existing.authenticated_principal != material.authenticated_principal
                 || existing.provenance_digest != material.provenance_digest
                 || existing.input_commit_digest != material.input_commit_digest
                 || existing.segment_digest != segment_digest
-                || existing.authority_digest != authority_digest
+                || (!tool_result && existing.authority_digest != authority_digest)
                 || existing.expires_at != material.expires_at
             {
                 return Err(VaultErrorV2::StateConflict);
             }
             return match existing.state {
                 VaultStateV2::PendingIngress | VaultStateV2::Live => {
+                    // A verified replay of the *same result material* may run
+                    // under a new service boot. Rotate only its local capability,
+                    // never content, provenance, expiry or result identity.
+                    if tool_result && existing.authority_digest != authority_digest {
+                        advance_revision(existing)?;
+                        existing.authority_digest = authority_digest;
+                    }
                     Ok(PendingVaultSegmentV2 { token, internal_id })
                 }
                 VaultStateV2::Expired => Err(VaultErrorV2::Expired),
@@ -773,6 +797,129 @@ impl VaultServiceV2 {
     ) -> Result<LiveVaultSegmentV2, VaultErrorV2> {
         let pending = self.create_pending_ingress(material, now)?;
         self.commit_ingress(pending, now)
+    }
+
+    /// Kernel-only restoration of a result already durably committed as Live.
+    /// The caller must resolve the commit reference from its authenticated G7
+    /// owner. This is not a browser/Agent lookup and never promotes Pending data.
+    pub fn recover_committed_tool_result(
+        &mut self,
+        task: DurableTaskIdV2,
+        run: DurableRunIdV2,
+        principal: PrincipalIdV2,
+        commit: Digest32V2,
+        expires_at: UnixMillisV2,
+        now: UnixMillisV2,
+    ) -> Result<LiveVaultSegmentV2, VaultErrorV2> {
+        self.accept_time(now)?;
+        if now.get() >= expires_at.get() {
+            return Err(VaultErrorV2::Expired);
+        }
+        let internal_id = domain_hash_many(
+            TOOL_RESULT_INTERNAL_ID_DOMAIN,
+            &[
+                self.installation_id.as_bytes(),
+                self.active_state_manifest_digest.as_bytes(),
+                task.as_bytes(),
+                run.as_bytes(),
+                commit.as_bytes(),
+            ],
+        );
+        let token = self.derive_capability(
+            b"pending-segment",
+            internal_id.as_bytes(),
+            commit.as_bytes(),
+        )?;
+        let segment = self
+            .segments
+            .iter_mut()
+            .find(|s| s.internal_id == internal_id)
+            .ok_or(VaultErrorV2::InvalidCapability)?;
+        if segment.state != VaultStateV2::Live
+            || segment.durable_task_id != task
+            || segment.durable_run_id != run
+            || segment.authenticated_principal != principal
+            || segment.input_commit_digest != commit
+            || segment.expires_at != expires_at
+        {
+            return Err(VaultErrorV2::StateConflict);
+        }
+        let authority = capability_digest(self.installation_id, &token);
+        if segment.authority_digest != authority {
+            advance_revision(segment)?;
+            segment.authority_digest = authority;
+        }
+        Ok(LiveVaultSegmentV2 { token, internal_id })
+    }
+
+    /// Kernel-only lookup of a committed tool result. Does not mint an Agent
+    /// document or accept replacement plaintext. An exact authorized retry
+    /// recovers the original release binding, never resets its state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_committed_tool_result_release(
+        &mut self,
+        task: DurableTaskIdV2,
+        run: DurableRunIdV2,
+        principal: PrincipalIdV2,
+        commit: Digest32V2,
+        expires_at: UnixMillisV2,
+        material: VaultReleaseMaterialV2,
+        now: UnixMillisV2,
+    ) -> Result<PendingVaultReleaseV2, VaultErrorV2> {
+        self.accept_time(now)?;
+        if now.get() >= expires_at.get() {
+            return Err(VaultErrorV2::Expired);
+        }
+        let internal_id = domain_hash_many(
+            TOOL_RESULT_INTERNAL_ID_DOMAIN,
+            &[
+                self.installation_id.as_bytes(),
+                self.active_state_manifest_digest.as_bytes(),
+                task.as_bytes(),
+                run.as_bytes(),
+                commit.as_bytes(),
+            ],
+        );
+        let index = self
+            .segments
+            .iter()
+            .position(|s| s.internal_id == internal_id)
+            .ok_or(VaultErrorV2::InvalidCapability)?;
+        let segment = &self.segments[index];
+        if segment.durable_task_id != task
+            || segment.durable_run_id != run
+            || segment.authenticated_principal != principal
+            || segment.input_commit_digest != commit
+            || segment.expires_at != expires_at
+            || !matches!(
+                segment.state,
+                VaultStateV2::Live | VaultStateV2::ReleaseAuthorized
+            )
+            || domain_hash_many(
+                b"SAVANA_FINAL_RELEASE_PAYLOAD_V2\0",
+                &[
+                    &(segment.sensitive_bytes.len() as u64).to_be_bytes(),
+                    &segment.sensitive_bytes,
+                ],
+            ) != material.release_payload_digest
+        {
+            return Err(VaultErrorV2::StateConflict);
+        }
+        if segment.state == VaultStateV2::ReleaseAuthorized {
+            let r = segment
+                .release
+                .as_ref()
+                .ok_or(VaultErrorV2::StateConflict)?;
+            if !release_material_matches(r.binding, material) {
+                return Err(VaultErrorV2::StateConflict);
+            }
+            return Ok(PendingVaultReleaseV2 {
+                token: self.release_capability(r.binding, r.binding_digest)?,
+                binding: r.binding,
+                binding_digest: r.binding_digest,
+            });
+        }
+        self.prepare_release_at_index(index, material, now)
     }
 
     pub fn commit_ingress(
@@ -1951,6 +2098,260 @@ mod tests {
             UnixMillisV2::new(20_000),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn durable_tool_results_are_distinct_replayable_and_cannot_replace_original_input() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.path().join("vault-state-v2.cbor");
+        let namespace = DurableVaultNamespaceV2::from_verified_installation(
+            Digest32V2::new([1; 32]),
+            Digest32V2::new([0x70; 32]),
+        )
+        .unwrap();
+        let anchor = TestRollbackAnchor::default();
+        let mut owner = DurableVaultServiceV2::open(
+            &path,
+            [0x71; 32],
+            namespace,
+            Box::new(anchor.clone()),
+            service(),
+        )
+        .unwrap();
+        let original = owner
+            .create_pending_ingress(ingress(b"original"), UnixMillisV2::new(100))
+            .unwrap();
+        owner
+            .commit_ingress(original, UnixMillisV2::new(100))
+            .unwrap();
+        let mut documents = Vec::new();
+        for seed in [7, 8] {
+            let mut result = ingress(&[seed]);
+            result.input_commit_digest = Digest32V2::new([seed; 32]);
+            let pending = owner
+                .create_pending_tool_result(result.clone(), UnixMillisV2::new(101))
+                .unwrap();
+            let live = owner
+                .commit_ingress(pending, UnixMillisV2::new(101))
+                .unwrap();
+            documents.push(
+                owner
+                    .issue_masked_document(&live, access(9), UnixMillisV2::new(101))
+                    .unwrap(),
+            );
+            let replay = owner
+                .create_pending_tool_result(result.clone(), UnixMillisV2::new(101))
+                .unwrap();
+            assert_eq!(replay.internal_id, pending.internal_id);
+            result.sensitive_bytes = Zeroizing::new(b"substituted".to_vec());
+            assert!(matches!(
+                owner.create_pending_tool_result(result, UnixMillisV2::new(101)),
+                Err(VaultErrorV2::StateConflict)
+            ));
+        }
+        assert_eq!(owner.segment_count(), 3);
+        assert!(matches!(
+            owner.create_pending_ingress(ingress(b"replacement"), UnixMillisV2::new(103)),
+            Err(VaultErrorV2::StateConflict)
+        ));
+        drop(owner);
+        let mut owner =
+            DurableVaultServiceV2::open(&path, [0x71; 32], namespace, Box::new(anchor), service())
+                .unwrap();
+        assert_eq!(owner.segment_count(), 3);
+        for (document, seed) in documents.iter().zip([7, 8]) {
+            assert_eq!(
+                owner
+                    .read_agent_bytes_for_authenticated_agent(
+                        document,
+                        BootIdV2::new([3; 32]),
+                        ServiceIdentityV2::new([8; 32]),
+                        Digest32V2::new([9; 32]),
+                        UnixMillisV2::new(104),
+                    )
+                    .unwrap()
+                    .as_slice(),
+                &[seed]
+            );
+        }
+        let replay = owner
+            .create_pending_ingress(ingress(b"original"), UnixMillisV2::new(104))
+            .unwrap();
+        assert_eq!(replay.internal_id, original.internal_id);
+    }
+
+    #[test]
+    fn committed_tool_result_recovery_reopens_without_plaintext_or_old_document_handle() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.path().join("vault-state-v2.cbor");
+        let namespace = DurableVaultNamespaceV2::from_verified_installation(
+            Digest32V2::new([1; 32]),
+            Digest32V2::new([0x70; 32]),
+        )
+        .unwrap();
+        let anchor = TestRollbackAnchor::default();
+        let mut owner = DurableVaultServiceV2::open(
+            &path,
+            [0x71; 32],
+            namespace,
+            Box::new(anchor.clone()),
+            service(),
+        )
+        .unwrap();
+        let material = ingress(b"private recovered result");
+        let pending = owner
+            .create_pending_tool_result(material.clone(), UnixMillisV2::new(100))
+            .unwrap();
+        assert!(owner
+            .recover_committed_tool_result(
+                material.durable_task_id,
+                material.durable_run_id,
+                material.authenticated_principal,
+                material.input_commit_digest,
+                material.expires_at,
+                UnixMillisV2::new(100)
+            )
+            .is_err());
+        owner
+            .commit_ingress(pending, UnixMillisV2::new(101))
+            .unwrap();
+        drop(owner);
+        let deployment = VaultServiceV2::from_verified_deployment(
+            Digest32V2::new([1; 32]),
+            Digest32V2::new([2; 32]),
+            BootIdV2::new([43; 32]),
+            128,
+        )
+        .unwrap();
+        let mut owner =
+            DurableVaultServiceV2::open(&path, [0x71; 32], namespace, Box::new(anchor), deployment)
+                .unwrap();
+        for mode in 0..5 {
+            assert!(owner
+                .recover_committed_tool_result(
+                    if mode == 0 {
+                        DurableTaskIdV2::new([55; 32])
+                    } else {
+                        material.durable_task_id
+                    },
+                    if mode == 1 {
+                        DurableRunIdV2::new([55; 32])
+                    } else {
+                        material.durable_run_id
+                    },
+                    if mode == 2 {
+                        PrincipalIdV2::new([55; 32])
+                    } else {
+                        material.authenticated_principal
+                    },
+                    if mode == 3 {
+                        Digest32V2::new([55; 32])
+                    } else {
+                        material.input_commit_digest
+                    },
+                    if mode == 4 {
+                        UnixMillisV2::new(material.expires_at.get() + 1)
+                    } else {
+                        material.expires_at
+                    },
+                    UnixMillisV2::new(102)
+                )
+                .is_err());
+        }
+        let live = owner
+            .recover_committed_tool_result(
+                material.durable_task_id,
+                material.durable_run_id,
+                material.authenticated_principal,
+                material.input_commit_digest,
+                material.expires_at,
+                UnixMillisV2::new(103),
+            )
+            .unwrap();
+        let context = VaultAccessContextV2::from_authenticated_agent(
+            BootIdV2::new([43; 32]),
+            ServiceIdentityV2::new([8; 32]),
+            Digest32V2::new([9; 32]),
+            material.durable_run_id,
+            material.expires_at,
+        )
+        .unwrap();
+        let document = owner
+            .issue_masked_document(&live, context, UnixMillisV2::new(103))
+            .unwrap();
+        assert_eq!(
+            owner
+                .read_agent_bytes_for_authenticated_agent(
+                    &document,
+                    BootIdV2::new([43; 32]),
+                    ServiceIdentityV2::new([8; 32]),
+                    Digest32V2::new([9; 32]),
+                    UnixMillisV2::new(104)
+                )
+                .unwrap()
+                .as_slice(),
+            b"private recovered result"
+        );
+        assert_eq!(owner.segment_count(), 1);
+        assert!(owner
+            .recover_committed_tool_result(
+                material.durable_task_id,
+                material.durable_run_id,
+                material.authenticated_principal,
+                material.input_commit_digest,
+                material.expires_at,
+                material.expires_at
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn exact_tool_result_replay_rotates_boot_capability_without_replacing_material() {
+        let mut owner = service();
+        let material = ingress(b"same result across boots");
+        let pending = owner
+            .create_pending_tool_result(material.clone(), UnixMillisV2::new(100))
+            .unwrap();
+        let old_live = owner
+            .commit_ingress(pending, UnixMillisV2::new(100))
+            .unwrap();
+        owner.boot_id = BootIdV2::new([43; 32]);
+        let context = VaultAccessContextV2::from_authenticated_agent(
+            owner.boot_id,
+            ServiceIdentityV2::new([8; 32]),
+            Digest32V2::new([9; 32]),
+            material.durable_run_id,
+            material.expires_at,
+        )
+        .unwrap();
+        for mode in 0..3 {
+            let mut changed = material.clone();
+            match mode {
+                0 => changed.sensitive_bytes = Zeroizing::new(b"substituted".to_vec()),
+                1 => changed.provenance_digest = Digest32V2::new([88; 32]),
+                _ => changed.expires_at = UnixMillisV2::new(material.expires_at.get() + 1),
+            }
+            assert!(owner
+                .create_pending_tool_result(changed, UnixMillisV2::new(101))
+                .is_err());
+        }
+        let replay = owner
+            .create_pending_tool_result(material, UnixMillisV2::new(101))
+            .unwrap();
+        assert_eq!(replay.internal_id, pending.internal_id);
+        assert_ne!(replay.token, pending.token);
+        assert!(owner
+            .issue_masked_document(&old_live, context, UnixMillisV2::new(101))
+            .is_err());
+        let live = owner
+            .commit_ingress(replay, UnixMillisV2::new(101))
+            .unwrap();
+        assert!(owner
+            .issue_masked_document(&live, context, UnixMillisV2::new(101))
+            .is_ok());
+        assert_eq!(owner.segments.len(), 1);
     }
 
     fn release_material(seed: u8) -> VaultReleaseMaterialV2 {

@@ -1,5 +1,5 @@
 use savana_kernel_protocol::v2::{
-    Digest32V2, Ed25519KeyIdV2, EndpointRoleV2, PeerIdentityBindingV2, ServiceIdentityV2,
+    Digest32V2, EndpointRoleV2, PeerIdentityBindingV2, ServiceIdentityV2,
 };
 use savana_platform_identity::{
     verify_native_peer_v2, BoundedIdentityStringV2, ExpectedNativePeerV2, NativePeerMeasurementV2,
@@ -18,8 +18,6 @@ pub(crate) struct VerifiedServiceEdgeV2 {
     client_identity: ServiceIdentityV2,
     server_identity: ServiceIdentityV2,
     listener_identity_digest: Digest32V2,
-    client_handshake_key_id: Ed25519KeyIdV2,
-    server_handshake_key_id: Ed25519KeyIdV2,
     expected_client: ExpectedNativePeerV2,
     active_state_manifest_digest: Digest32V2,
     deployment_generation: u64,
@@ -61,8 +59,6 @@ impl VerifiedServiceEdgeV2 {
             client_identity,
             server_identity,
             listener_identity_digest: lock.listener_identity_digest,
-            client_handshake_key_id: lock.client_handshake_key_id,
-            server_handshake_key_id: lock.server_handshake_key_id,
             expected_client: lock.expected_client.clone(),
             active_state_manifest_digest: startup.active_state_manifest_digest(),
             deployment_generation: startup.deployment_generation(),
@@ -70,10 +66,6 @@ impl VerifiedServiceEdgeV2 {
             protocol_abi_digest: startup.protocol_abi_digest(),
             edge_digest,
         })
-    }
-
-    pub(crate) const fn edge_id(&self) -> ClosedServiceEdgeIdV2 {
-        self.edge_id
     }
 
     pub(crate) const fn role(&self) -> EndpointRoleV2 {
@@ -92,28 +84,19 @@ impl VerifiedServiceEdgeV2 {
         self.listener_identity_digest
     }
 
-    pub(crate) const fn client_handshake_key_id(&self) -> Ed25519KeyIdV2 {
-        self.client_handshake_key_id
-    }
-
-    pub(crate) const fn server_handshake_key_id(&self) -> Ed25519KeyIdV2 {
-        self.server_handshake_key_id
-    }
-
+    #[cfg(test)]
     pub(crate) const fn active_state_manifest_digest(&self) -> Digest32V2 {
         self.active_state_manifest_digest
     }
 
+    #[cfg(test)]
     pub(crate) const fn deployment_generation(&self) -> u64 {
         self.deployment_generation
     }
 
+    #[cfg(test)]
     pub(crate) const fn effect_fence_epoch(&self) -> u64 {
         self.effect_fence_epoch
-    }
-
-    pub(crate) const fn protocol_abi_digest(&self) -> Digest32V2 {
-        self.protocol_abi_digest
     }
 
     pub(crate) const fn edge_digest(&self) -> Digest32V2 {
@@ -184,8 +167,6 @@ impl VerifiedServiceEdgeV2 {
             client_identity: ServiceIdentityV2::new([seed; 32]),
             server_identity: ServiceIdentityV2::new([seed.wrapping_add(1); 32]),
             listener_identity_digest: Digest32V2::new([seed.wrapping_add(2); 32]),
-            client_handshake_key_id: Ed25519KeyIdV2::new([seed.wrapping_add(3); 32]),
-            server_handshake_key_id: Ed25519KeyIdV2::new([seed.wrapping_add(4); 32]),
             expected_client: ExpectedNativePeerV2::linux(
                 role_identity,
                 501,

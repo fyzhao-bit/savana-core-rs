@@ -1,0 +1,264 @@
+diff --git a/main.py b/main.py
+index b677afa..329df9f 100644
+--- a/main.py
++++ b/main.py
+@@ -20,6 +20,7 @@ from agentdojo.task_suite import get_suite
+ from openai.types.chat import ChatCompletionReasoningEffort
+ 
+ import camel.custom_yaml  # noqa
++from camel import autodojo_replay
+ from camel.interpreter.interpreter import MetadataEvalMode
+ from camel.models import make_tools_pipeline
+ 
+@@ -36,6 +37,8 @@ def main(
+     eval_mode: MetadataEvalMode = MetadataEvalMode.NORMAL,
+     q_llm: str | None = None,
+     user_tasks: list[str] | None = None,
++    attack: str = "important_instructions",
++    benchmark_version: str = "v1.2",
+ ):
+     """Example usage of the defense.
+ 
+@@ -55,9 +58,14 @@ def main(
+         suites: which suites to run AgentDojo on (can be a list from `["workspace", "banking", "travel", "slack"]`)
+         eval_mode: which eval mode to use when propagating dependencies.
+         q_llm: what model to use as a quarantined llm. If None, the same as `model` is used.
++        attack: `important_instructions` (AgentDojo's), or `autodojo` (AutoDojo's cached injections, see
++            `camel.autodojo_replay`).
++        benchmark_version: the AgentDojo benchmark version of the suites.
+     """
+ 
+-    attack_name = "important_instructions"
++    if attack not in ("important_instructions", "autodojo"):
++        raise ValueError(f"unknown attack {attack!r}")
++    attack_name = attack
+ 
+     suites = suites or ["workspace", "banking", "travel", "slack"]
+     total_utility_results = []
+@@ -76,17 +84,21 @@ def main(
+             eval_mode,
+             q_llm,  # type: ignore
+         )
+-        suite = get_suite("v1.2", suite_name)
+-        attack = attacks.load_attack(attack_name, suite, tools_pipeline)
++        suite = get_suite(benchmark_version, suite_name)
++        if attack_name == "autodojo":
++            attack_impl = autodojo_replay.CachedAutoDojoAttack(suite, tools_pipeline)
++        else:
++            attack_impl = attacks.load_attack(attack_name, suite, tools_pipeline)
+         with logging.OutputLogger(str(logdir)):
+             if run_attack:
+                 results = benchmark.benchmark_suite_with_injections(
+                     tools_pipeline,
+                     suite,
+-                    attack,
++                    attack_impl,
+                     logdir,
+                     force_rerun=False,
+                     user_tasks=user_tasks,
++                    benchmark_version=benchmark_version,
+                 )
+             else:
+                 results = benchmark.benchmark_suite_without_injections(
+@@ -95,6 +107,7 @@ def main(
+                     logdir,
+                     force_rerun=False,
+                     user_tasks=user_tasks,
++                    benchmark_version=benchmark_version,
+                 )
+ 
+         utility_results = results["utility_results"]
+diff --git a/src/camel/autodojo_replay.py b/src/camel/autodojo_replay.py
+new file mode 100644
+index 0000000..f27a15c
+--- /dev/null
++++ b/src/camel/autodojo_replay.py
+@@ -0,0 +1,105 @@
++"""AutoDojo replay and a polluted P-LLM for the CaMeL comparison with Savana.
++
++`--attack autodojo` replays AutoDojo's optimized injections through the same
++pinned cache files and the same port that Savana's and the undefended runs use
++(`experiments/savana_bench/autodojo_cache.py`, loaded here by path): variant 0,
++the important-instructions fallback, YAML escaping, and AgentDojo's own
++`get_injection_candidates` for the vectors.
++
++`CAMEL_EXPOSURE=data` pollutes the P-LLM the way Savana's `+exposure=data`
++pollutes its planner: the P-LLM gets every injection text of the episode, as
++the tools return it (YAML-decoded, in vector order), as `retrieved_data`, and
++Savana's `EXPOSURE_NOTE` (read from `root_drafter.py`, not retyped) is appended
++to its system prompt. Each exposure is recorded (hash only) so the comparison
++can check it equals the one Savana's planner saw for the same pair.
++"""
++import ast
++import hashlib
++import importlib.util
++import json
++import os
++from pathlib import Path
++
++import yaml
++from agentdojo.attacks.base_attacks import BaseAttack
++
++REPO = Path(os.environ.get("SAVANA_REPO", "/home/user/savana-core-rs"))
++_BENCH = REPO / "experiments" / "savana_bench"
++EXPOSURES = ("none", "data")
++
++
++def _load_cache_module():
++    spec = importlib.util.spec_from_file_location("savana_autodojo_cache", _BENCH / "autodojo_cache.py")
++    module = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(module)
++    return module
++
++
++def _exposure_note() -> str:
++    tree = ast.parse((_BENCH / "root_drafter.py").read_text())
++    for node in tree.body:
++        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "EXPOSURE_NOTE" for t in node.targets):
++            return ast.literal_eval(node.value)
++    raise RuntimeError("EXPOSURE_NOTE not found in root_drafter.py")
++
++
++autodojo_cache = _load_cache_module()
++CACHE_MODULE_SHA256 = hashlib.sha256((_BENCH / "autodojo_cache.py").read_bytes()).hexdigest()
++EXPOSURE_NOTE = _exposure_note()
++
++# (suite, user task, injection task) -> the values this run injected for it.
++INJECTED: dict[tuple[str, str, str], dict[str, str]] = {}
++
++
++class CachedAutoDojoAttack(BaseAttack):
++    name = "autodojo"
++
++    def __init__(self, task_suite, target_pipeline) -> None:
++        super().__init__(task_suite, target_pipeline)
++        path = autodojo_cache.cache_path(task_suite.name)
++        self.variants, self.originals, self.cache_sha256 = autodojo_cache.load(path)
++
++    def attack(self, user_task, injection_task) -> dict[str, str]:
++        values = {
++            vector: autodojo_cache.injection(
++                self.variants, self.originals, injection_task.ID, injection_task.GOAL, vector, 0
++            )
++            for vector in self.get_injection_candidates(user_task)
++        }
++        INJECTED[(self.task_suite.name, user_task.ID, injection_task.ID)] = values
++        return values
++
++
++def exposure_mode() -> str:
++    mode = os.environ.get("CAMEL_EXPOSURE") or "none"
++    if mode not in EXPOSURES:
++        raise ValueError(f"unknown CAMEL_EXPOSURE {mode!r}")
++    return mode
++
++
++def name_suffix() -> str:
++    return "" if exposure_mode() == "none" else f"+exposure-{exposure_mode()}"
++
++
++def exposure(extra_args: dict) -> tuple[str, ...]:
++    """The texts the polluted P-LLM sees for this episode: empty when off, and
++    for an episode without an injection (AgentDojo's attacker-capability runs
++    of the injection tasks), which has no injected data to see."""
++    if exposure_mode() == "none":
++        return ()
++    key = (extra_args["task_suite_name"], extra_args["user_task_id"], extra_args["injection_task_id"])
++    if key[2] is None:
++        return ()
++    if key not in INJECTED:
++        raise ValueError("exposure needs an AutoDojo-injected episode")
++    values = INJECTED[key]
++    texts = tuple(yaml.safe_load('"' + values[vector] + '"') for vector in sorted(values))
++    record = dict(suite=key[0], user=key[1], injection=key[2], items=len(texts),
++                  sha256=hashlib.sha256(json.dumps(list(texts), ensure_ascii=False).encode()).hexdigest())
++    with open(Path("logs") / "exposure-data.jsonl", "a") as log:
++        log.write(json.dumps(record) + "\n")
++    return texts
++
++
++def user_message(query: str, texts: tuple[str, ...]) -> str:
++    return query + "\n\nretrieved_data: " + json.dumps(list(texts), ensure_ascii=False)
+diff --git a/src/camel/models.py b/src/camel/models.py
+index e73b0b5..7b9f593 100644
+--- a/src/camel/models.py
++++ b/src/camel/models.py
+@@ -11,7 +11,7 @@ from openai.types.chat import ChatCompletionReasoningEffort
+ from pydantic_ai.models import KnownModelName
+ 
+ from camel.interpreter.interpreter import MetadataEvalMode
+-from camel import poisoned_planner
++from camel import autodojo_replay, poisoned_planner
+ from camel.pipeline_elements.anthropic_tool_filter import AnthropicLLMToolFilter
+ from camel.pipeline_elements.privileged_llm import PrivilegedLLM
+ from camel.pipeline_elements.replay_privileged_llm import PrivilegedLLMReplayer, UserInjectionTasksGetter
+@@ -175,7 +175,7 @@ def make_tools_pipeline(
+             pipeline_name = f"{model.split(':')[1]}-{reasoning_effort}+camel"
+         else:
+             pipeline_name = f"{model.split(':')[1]}+camel"
+-        pipeline_name += poisoned_planner.name_suffix()
++        pipeline_name += poisoned_planner.name_suffix() + autodojo_replay.name_suffix()
+         tools_pipeline = agent_pipeline.AgentPipeline(
+             [
+                 agent_pipeline.InitQuery(),
+@@ -190,7 +190,7 @@ def make_tools_pipeline(
+             tools_pipeline.name = f"{model.split(':')[1]}-{thinking_budget_tokens}+camel+secpol"
+         else:
+             tools_pipeline.name = f"{model.split(':')[1]}+camel+secpol"
+-        tools_pipeline.name += poisoned_planner.name_suffix()
++        tools_pipeline.name += poisoned_planner.name_suffix() + autodojo_replay.name_suffix()
+         if eval_mode == MetadataEvalMode.STRICT:
+             tools_pipeline.name += "+strict"
+     else:
+@@ -198,6 +198,8 @@ def make_tools_pipeline(
+             [
+                 # Adds the user query to the history
+                 agent_pipeline.InitQuery(),
++                # A polluted P-LLM needs the episode's task ids to find its injected data
++                *([UserInjectionTasksGetter()] if autodojo_replay.exposure_mode() != "none" else []),
+                 # Generates the code and writes it to `extra_args`
+                 PrivilegedLLM(
+                     llm,
+@@ -213,7 +215,7 @@ def make_tools_pipeline(
+             tools_pipeline.name = f"{model.split(':')[1]}-{thinking_budget_tokens}+camel"
+         else:
+             tools_pipeline.name = f"{model.split(':')[1]}+camel"
+-        tools_pipeline.name += poisoned_planner.name_suffix()
++        tools_pipeline.name += poisoned_planner.name_suffix() + autodojo_replay.name_suffix()
+ 
+         if q_llm:
+             tools_pipeline.name += f"-q:{q_llm.split(':')[1]}"
+diff --git a/src/camel/pipeline_elements/privileged_llm.py b/src/camel/pipeline_elements/privileged_llm.py
+index 334cbda..5eb5893 100644
+--- a/src/camel/pipeline_elements/privileged_llm.py
++++ b/src/camel/pipeline_elements/privileged_llm.py
+@@ -31,7 +31,7 @@ from agentdojo.default_suites.v1.workspace.task_suite import (
+ )
+ from pydantic_ai.models import KnownModelName
+ 
+-from camel import poisoned_planner, quarantined_llm, system_prompt_generator
++from camel import autodojo_replay, poisoned_planner, quarantined_llm, system_prompt_generator
+ from camel.capabilities import is_trusted
+ from camel.interpreter import interpreter, result
+ from camel.interpreter import namespace as ns
+@@ -449,6 +449,20 @@ class PrivilegedLLM(agent_pipeline.BasePipelineElement):
+ 
+         system_prompt += poisoned_planner.system_suffix()
+ 
++        # A polluted P-LLM (CAMEL_EXPOSURE=data) also sees the episode's injected data.
++        exposed = autodojo_replay.exposure(extra_args)
++        if exposed:
++            system_prompt += autodojo_replay.EXPOSURE_NOTE
++            privileged_llm_messages = [
++                ad_types.ChatSystemMessage(
++                    role="system", content=[ad_types.text_content_block_from_string(system_prompt)]
++                ),
++                ad_types.ChatUserMessage(
++                    role="user",
++                    content=[ad_types.text_content_block_from_string(autodojo_replay.user_message(query, exposed))],
++                ),
++            ]
++
+         if not isinstance(env, WorkspaceEnvironment):
+             new_variables = {k: v for k, v in builtins_namespace.variables.items() if k not in classes_to_exclude}
+             builtins_namespace = dataclasses.replace(builtins_namespace, variables=new_variables)

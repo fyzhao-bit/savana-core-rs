@@ -128,6 +128,7 @@ pub(crate) trait PreparedDispatchProcessorV2: Send + Sync {
         &self,
         owner: &ExecdStateOwnerV2,
         query: ExecdQueryV2,
+        task_payload: Option<savana_kernel_protocol::v2::TaskExecutionPayloadV2>,
         now: UnixMillisV2,
         deadline: Instant,
     ) -> Result<(), ExecdProtocolServiceErrorV2>;
@@ -146,14 +147,6 @@ impl std::fmt::Debug for ExecdProtocolServiceV2 {
 }
 
 impl ExecdProtocolServiceV2 {
-    pub(crate) fn new(
-        deployment: ExecdProtocolDeploymentV2,
-        owner: ExecdStateOwnerV2,
-        processor: Box<dyn PreparedDispatchProcessorV2>,
-    ) -> Result<Self, ExecdProtocolServiceErrorV2> {
-        Self::new_inner(deployment, owner, processor, None)
-    }
-
     pub(crate) fn new_with_connector_registry(
         deployment: ExecdProtocolDeploymentV2,
         owner: ExecdStateOwnerV2,
@@ -214,16 +207,6 @@ impl ExecdProtocolServiceV2 {
     #[cfg(test)]
     pub(crate) fn active_effect_guard_count_for_test(&self) -> usize {
         self.owner.active_guard_count_for_test()
-    }
-
-    pub(crate) fn recover_prepared(
-        deployment: &ExecdProtocolDeploymentV2,
-        owner: &ExecdStateOwnerV2,
-        processor: &dyn PreparedDispatchProcessorV2,
-        now: UnixMillisV2,
-        deadline: Instant,
-    ) -> Result<(), ExecdProtocolServiceErrorV2> {
-        Self::recover_prepared_inner(deployment, owner, processor, None, now, deadline)
     }
 
     pub(crate) fn recover_prepared_with_connector_registry(
@@ -310,6 +293,7 @@ impl ExecdProtocolServiceV2 {
                             connector_dispatch_for_subject(
                                 guard,
                                 envelope.payload().core().subject(),
+                                envelope.payload().core().task_binding().is_some(),
                             )
                         })
                         .transpose()?
@@ -328,7 +312,28 @@ impl ExecdProtocolServiceV2 {
                 | ExecdJournalStateV2::EffectStarted
                 | ExecdJournalStateV2::ProviderResponseRetained
                 | ExecdJournalStateV2::ReleaseEvidencePrepared => {
-                    processor.recover(owner, query, now, deadline)?;
+                    let canonical = owner
+                        .sealed_execution_envelope(query.execution_nonce(), deadline)
+                        .map_err(ExecdProtocolServiceErrorV2::Owner)?;
+                    let envelope =
+                        savana_kernel_protocol::v2::decode_signed_sealed_execution_envelope_v2(
+                            &canonical,
+                        )
+                        .map_err(|_| ExecdProtocolServiceErrorV2::Protocol)?;
+                    let task_payload = if envelope.payload().core().task_binding().is_some() {
+                        let plaintext =
+                            open_execution_payload(envelope.payload(), deployment.seal_private_key)
+                                .map_err(|_| ExecdProtocolServiceErrorV2::Binding)?;
+                        Some(
+                            savana_kernel_protocol::v2::decode_task_execution_payload_v2(
+                                &plaintext,
+                            )
+                            .map_err(|_| ExecdProtocolServiceErrorV2::Binding)?,
+                        )
+                    } else {
+                        None
+                    };
+                    processor.recover(owner, query, task_payload, now, deadline)?;
                 }
                 ExecdJournalStateV2::CompletionAvailable
                 | ExecdJournalStateV2::FailedNoEffect
@@ -442,7 +447,13 @@ impl ExecdProtocolServiceV2 {
                 };
                 let connector = registry_guard
                     .as_ref()
-                    .map(|guard| connector_dispatch_for_subject(guard, core.subject()))
+                    .map(|guard| {
+                        connector_dispatch_for_subject(
+                            guard,
+                            core.subject(),
+                            core.task_binding().is_some(),
+                        )
+                    })
                     .transpose()?
                     .flatten();
                 let envelope = encode_signed_sealed_execution_envelope_v2(request.envelope())
@@ -503,10 +514,19 @@ impl ExecdProtocolServiceV2 {
                     request.dispatch_subject_digest(),
                 )?;
                 let status = self.status(query, deadline)?;
-                encode_query_by_execution_nonce_response_v2(&QueryByExecutionNonceResponseV2::new(
-                    status,
-                ))
-                .map_err(|_| ExecdProtocolServiceErrorV2::Protocol)
+                let no_effect = matches!(status, ExecutorStatusV2::FailedNoEffect { .. });
+                let mut response = QueryByExecutionNonceResponseV2::new(status);
+                if no_effect {
+                    let receipt = self
+                        .owner
+                        .terminal_receipt(query.execution_nonce(), deadline)
+                        .map_err(ExecdProtocolServiceErrorV2::Owner)?;
+                    response = response
+                        .with_terminal_receipt(receipt.canonical_bytes().to_vec())
+                        .map_err(|_| ExecdProtocolServiceErrorV2::Protocol)?;
+                }
+                encode_query_by_execution_nonce_response_v2(&response)
+                    .map_err(|_| ExecdProtocolServiceErrorV2::Protocol)
             }
             KernelExecutorOperationV2::AcknowledgeCommittedCompletion(request) => {
                 let query = self
@@ -565,6 +585,36 @@ impl ExecdProtocolServiceV2 {
                     payload,
                 )
                 .map_err(|_| ExecdProtocolServiceErrorV2::Protocol)?;
+                let canonical = self
+                    .owner
+                    .sealed_execution_envelope(query.execution_nonce(), deadline)
+                    .map_err(ExecdProtocolServiceErrorV2::Owner)?;
+                let envelope =
+                    savana_kernel_protocol::v2::decode_signed_sealed_execution_envelope_v2(
+                        &canonical,
+                    )
+                    .map_err(|_| ExecdProtocolServiceErrorV2::Protocol)?;
+                let response = if let Some(binding) = envelope.payload().core().task_binding() {
+                    let terminal = self
+                        .owner
+                        .terminal_receipt(query.execution_nonce(), deadline)
+                        .map_err(ExecdProtocolServiceErrorV2::Owner)?;
+                    response.with_task_outcome(
+                        savana_kernel_protocol::v2::TaskCompletionEvidenceV2::new(
+                            binding.authorization_digest(),
+                            query
+                                .prepared_request_digest()
+                                .ok_or(ExecdProtocolServiceErrorV2::Binding)?,
+                            query
+                                .retained_provider_response_digest()
+                                .ok_or(ExecdProtocolServiceErrorV2::Binding)?,
+                            terminal.canonical_bytes().to_vec(),
+                        )
+                        .map_err(|_| ExecdProtocolServiceErrorV2::Protocol)?,
+                    )
+                } else {
+                    response
+                };
                 encode_fetch_completion_response_v2(&response)
                     .map_err(|_| ExecdProtocolServiceErrorV2::Protocol)
             }
@@ -715,7 +765,7 @@ fn open_execution_payload(
         .expand(&info, key_nonce.as_mut())
         .map_err(|_| ())?;
     let cipher = ChaCha20Poly1305::new_from_slice(&key_nonce[..32]).map_err(|_| ())?;
-    cipher
+    let plaintext = cipher
         .decrypt(
             Nonce::from_slice(&key_nonce[32..]),
             Payload {
@@ -724,7 +774,30 @@ fn open_execution_payload(
             },
         )
         .map(Zeroizing::new)
-        .map_err(|_| ())
+        .map_err(|_| ())?;
+    if let Some(binding) = payload.core().task_binding() {
+        let digest = match payload.core().subject() {
+            savana_kernel_protocol::v2::DispatchSubjectV2::ToolExecution { .. } => {
+                savana_kernel_protocol::v2::presealed_tool_payload_digest_v2(
+                    &plaintext,
+                    payload.declassification_provenance_digest(),
+                )
+            }
+            savana_kernel_protocol::v2::DispatchSubjectV2::FinalRelease { .. } => {
+                savana_kernel_protocol::v2::presealed_release_payload_digest_v2(
+                    &plaintext,
+                    payload.declassification_provenance_digest(),
+                )
+            }
+        };
+        if digest != binding.presealed_payload_digest() {
+            return Err(());
+        }
+        let body = savana_kernel_protocol::v2::decode_task_execution_payload_v2(&plaintext)
+            .map_err(|_| ())?;
+        body.check_core(&payload.core()).map_err(|_| ())?;
+    }
+    Ok(plaintext)
 }
 
 pub(crate) fn hpke_x25519_key_id(public_key: [u8; 32]) -> HpkeX25519KeyIdV2 {
@@ -798,10 +871,19 @@ fn verify_query_binding(
 fn connector_dispatch_for_subject(
     guard: &ExecdConnectorRegistryGuardV2<'_>,
     subject: DispatchSubjectV2,
+    task_bound: bool,
 ) -> Result<Option<PreparedConnectorDispatchV2>, ExecdProtocolServiceErrorV2> {
     let DispatchSubjectV2::ToolExecution { binding, .. } = subject else {
         return Ok(None);
     };
+    if task_bound {
+        return Ok(Some(PreparedConnectorDispatchV2 {
+            descriptor: guard
+                .resolve_task_tool_connector(binding.tool_descriptor_digest())
+                .map_err(|_| ExecdProtocolServiceErrorV2::Binding)?,
+            active_host_allowlist: guard.active_host_allowlist().to_vec(),
+        }));
+    }
     let connector_id = binding.destination_digest();
     match guard.resolve_active_tool_connector(connector_id, binding.tool_descriptor_digest()) {
         Ok(descriptor) => Ok(Some(PreparedConnectorDispatchV2 {

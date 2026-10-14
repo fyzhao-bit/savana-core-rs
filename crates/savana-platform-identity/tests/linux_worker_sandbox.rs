@@ -1,7 +1,7 @@
 #![cfg(target_os = "linux")]
 
 use std::fs;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[test]
 fn native_wrapper_executes_only_after_landlock_seccomp_and_limits_are_available() {
@@ -58,7 +58,82 @@ fn native_wrapper_denies_unlisted_files_inside_the_worker() {
         .arg("/bin/bash")
         .arg("-c")
         .arg("if exec 3</etc/passwd; then exit 90; else exit 0; fi")
+        // The worker's file-size limit is zero: bash's refusal message must not
+        // land in a regular file (SIGXFSZ) when the harness's stderr is one.
+        .stderr(Stdio::null())
         .status()
         .unwrap();
     assert!(status.success());
+}
+
+#[test]
+fn minimum_descriptor_limit_is_preserved_after_landlock_setup() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = directory.path().join("profile.json");
+    fs::write(
+        &profile,
+        r#"{
+  "version": 2,
+  "worker_program": "/bin/bash",
+  "read_only_paths": [],
+  "memory_limit_bytes": 67108864,
+  "cpu_time_seconds": 5,
+  "output_file_limit_bytes": 0,
+  "open_file_limit": 4,
+  "process_limit": 1,
+  "deny_all_network": true
+}"#,
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_savana-worker-sandbox"))
+        .arg("--profile")
+        .arg(profile)
+        .arg("--")
+        .arg("/bin/bash")
+        .arg("-c")
+        .arg("ulimit -Sn; ulimit -Hn")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(output.stdout, b"4\n4\n");
+
+    // Granting the exact ELF loader must not grant execute to all of /usr.
+    let output = Command::new(env!("CARGO_BIN_EXE_savana-worker-sandbox"))
+        .arg("--profile")
+        .arg(directory.path().join("profile.json"))
+        .arg("--")
+        .arg("/bin/bash")
+        .arg("-c")
+        .arg("exec /bin/true")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(126), "{:?}", output);
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn network_remains_denied_after_dynamic_loader_startup() {
+    let directory = tempfile::tempdir().unwrap();
+    let profile = directory.path().join("profile.json");
+    let probe = env!("CARGO_BIN_EXE_savana-worker-sandbox-probe");
+    fs::write(
+        &profile,
+        serde_json::to_vec(&serde_json::json!({
+            "version": 2, "worker_program": probe, "read_only_paths": [],
+            "memory_limit_bytes": 67108864, "cpu_time_seconds": 5,
+            "output_file_limit_bytes": 0, "open_file_limit": 4,
+            "process_limit": 1, "deny_all_network": true
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_savana-worker-sandbox"))
+        .arg("--profile")
+        .arg(profile)
+        .arg("--")
+        .arg(probe)
+        .arg("forbidden-network")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
 }

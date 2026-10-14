@@ -167,6 +167,10 @@ impl VerifiedRustlsProviderTransportV2 {
 }
 
 impl ProviderTransportV2 for VerifiedRustlsProviderTransportV2 {
+    fn business_credential_identity(&self) -> Result<Digest32V2, ConnectorWorkerSupervisorErrorV2> {
+        Ok(self.credential_handle_identity_digest)
+    }
+
     fn verified_deployment_target(
         &self,
     ) -> Result<VerifiedProviderTargetV2, ConnectorWorkerSupervisorErrorV2> {
@@ -895,7 +899,9 @@ mod tests {
             canonical_bytes: request.canonical_bytes().to_vec(),
             canonical_url: request.target().canonical_url().as_str().to_owned(),
             tls_identity_pin: request.target().tls_identity_pin(),
-            payload_digest: request.payload_digest(),
+            payload_digest: crate::worker_supervisor::provider_request_payload_digest(
+                b"opaque credential-free request",
+            ),
             payload: b"opaque credential-free request".to_vec(),
         };
         let server = spawn_mutual_tls_server(

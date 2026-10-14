@@ -1,3 +1,7 @@
+"""Real receiver/mTLS/bridge tests; the SDK session below is a test double.
+
+These do not establish native task issuance, planner or executor-owner coverage.
+"""
 import asyncio
 import base64
 import hashlib
@@ -160,7 +164,9 @@ def _send_release(
             assert tls.selected_alpn_protocol() == ALPN
             tls.sendall(_provider_request(canonical_url, server_pin, payload))
             acknowledgement = tls.recv(128)
-            assert acknowledgement and acknowledgement[0] == 0x83
+            assert json.loads(acknowledgement) == {
+                "request_id": "fixture-release", "status": "succeeded"
+            }
 
 
 def _decode_item(encoded: bytes, offset: int = 0):
@@ -217,6 +223,24 @@ class _Session:
     async def ingest_text(self, text, content_kind) -> None:
         assert text == "current inbound text"
         assert content_kind.value == "chat_text"
+
+    async def task_authorization_context(self):
+        class Context:
+            source_input_digest = bytes([3]) * 32
+            pending_requests = []
+            authorization_identity = None
+            def tools_json(self):
+                return "[]"
+            def draft(self, authorization_id, clauses):
+                assert len(authorization_id) == 32 and clauses == b"[]"
+                return "fixture-draft"
+        return Context()
+
+    async def approve_task_authorization(self, draft, approval):
+        assert draft == "fixture-draft"
+        assert await asyncio.to_thread(
+            approval, SimpleNamespace(display="Approve exact task", purpose="task_authorization")
+        ) is True
 
     async def run_agent(self, privacy, limits, approval, events):
         assert privacy.value == "private"
@@ -300,9 +324,21 @@ async def test_only_durably_claimed_mtls_payload_becomes_assistant_text(
     payload = (
         b"released connector result" if connector_effect else b"released private answer"
     )
+    release_context = {}
+    def business_payload():
+        return json.dumps({
+            "request_id": "fixture-release",
+            "method": "POST",
+            "path": "/savana/final-release",
+            "body": {
+                "resource": "input:" + release_context["source_input_digest"],
+                "destination": release_context["release_destination"],
+                "payload": base64.urlsafe_b64encode(payload).decode().rstrip("="),
+            },
+        }, sort_keys=True, separators=(",", ":")).encode()
     deliver = lambda: _send_release(
         receiver.canonical_url,
-        payload,
+        business_payload(),
         ca_path,
         client_certificate_path,
         client_key_path,
@@ -322,21 +358,31 @@ async def test_only_durably_claimed_mtls_payload_becomes_assistant_text(
     broker_side, product_side = socket.socketpair()
     broker = WebAuthnBroker(broker_side.fileno())
     broker_requests: list[dict] = []
-    expected_approvals = 2 if connector_effect else 1
+    expected_approvals = 3 if connector_effect else 2
 
     def approve_every_call() -> None:
-        for _ in range(expected_approvals):
+        for _ in range(expected_approvals + 1):
             header = product_side.recv(4)
             length = struct.unpack(">I", header)[0]
             request = json.loads(product_side.recv(length))
             broker_requests.append(request)
-            response = json.dumps(
-                {
+            if request["type"] == "task.draft":
+                release_context.update(request)
+                response_body = {
+                    "protocol_version": 1,
+                    "type": "task.draft_result",
+                    "draft_id": request["draft_id"],
+                    "clauses_json": base64.urlsafe_b64encode(b"[]").decode().rstrip("="),
+                }
+            else:
+                response_body = {
                     "protocol_version": 1,
                     "type": "approval.decision",
                     "approval_id": request["approval_id"],
                     "approved": True,
-                },
+                }
+            response = json.dumps(
+                response_body,
                 separators=(",", ":"),
             ).encode()
             product_side.sendall(struct.pack(">I", len(response)) + response)
@@ -387,16 +433,21 @@ async def test_only_durably_claimed_mtls_payload_becomes_assistant_text(
     assert journal_at_release is not None
     journal, end = _decode_item(journal_at_release)
     assert end == len(journal_at_release)
-    assert journal[2][0] == 2  # claimed
-    assert journal[2][-1] == payload
-    assert terminals[0]["text"].encode() == journal[2][-1]
-    assert [request["purpose"] for request in broker_requests] == (
-        ["tool_execution", "final_release"]
+    assert journal[2][0] == 4  # exact-turn claimed, not the historical raw-body tag
+    assert journal[2][-1] == business_payload()
+    body = json.loads(journal[2][-1])["body"]
+    assert "application-turn:" + journal[2][2].hex() == body["destination"]
+    encoded_payload = body["payload"]
+    assert terminals[0]["text"].encode() == base64.urlsafe_b64decode(encoded_payload + "=" * (-len(encoded_payload) % 4))
+    assert [request["purpose"] for request in broker_requests if request["type"] == "approval.decide"] == (
+        ["task_authorization", "tool_execution", "final_release"]
         if connector_effect
-        else ["final_release"]
+        else ["task_authorization", "final_release"]
     )
     lifecycle = [message for message in emitted if message["type"] == "turn.event"]
     assert [message["event"] for message in lifecycle] == [
+        "approval_required",  # data-only scope collection
+        "approval_required",  # independent SDK task approval
         "planning",
         *(["approval_required"] if connector_effect else []),
         "approval_required",

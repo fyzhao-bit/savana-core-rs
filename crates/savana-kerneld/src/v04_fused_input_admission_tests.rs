@@ -1,0 +1,212 @@
+// Synthetic signer/owner fixture, not passkey or installed-system acceptance.
+fn owner_document_fixture(extra: bool, wrong_control: bool, untrusted: bool)
+    -> PlannerAuthorityFixtureV2 {
+    owner_document_fixture_with(extra,wrong_control,untrusted,
+        |inputs| serde_json::json!({"schema":3,"prompt":"send the private payload to A or B for Alice",
+            "origin":"owner_text","constants":[],"inputs":inputs}))
+}
+
+fn owner_document_fixture_with(extra: bool, wrong_control: bool, untrusted: bool,
+    document: impl Fn(Vec<serde_json::Value>) -> serde_json::Value) -> PlannerAuthorityFixtureV2 {
+    let (mut f, request) = business_proposal_fixture("A","Alice");
+    install(&mut f,&request,1);
+    choose(&mut f,1,1,true,202);
+    let mut inputs=vec![
+        serde_json::json!({"slot":vec![1;16],"text":"private payload"}),
+        serde_json::json!({"slot":vec![2;16],"text":if wrong_control {"B"}else{"A"}}),
+        serde_json::json!({"slot":vec![3;16],"text":"Alice"})];
+    if extra { inputs.push(serde_json::json!({"slot":vec![4;16],"text":"extra"})); }
+    let value=KernelValueV2::text(document(inputs).to_string()).unwrap();
+    let s=&f.authority.sessions[0];
+    let context=ProvenanceContextV2::from_authenticated_runtime(s.producer_identity,s.durable_run_id,
+        s.active_state_manifest_digest,UnixMillisV2::new(200),UnixMillisV2::new(1000)).unwrap();
+    let d=Digest32V2::new([71;32]);
+    let provenance=if untrusted {
+        ProvenanceRecordV2::planner_output(&value,context,d,Digest32V2::new([172;32]),Digest32V2::new([173;32]),&[],EffectSetV2::SEND).unwrap()
+    } else { ProvenanceRecordV2::from_verified_kernel_input(&value,context,d,Digest32V2::new([172;32]),Digest32V2::new([173;32]),Digest32V2::new([174;32]),EffectSetV2::SEND).unwrap() };
+    let handle=f.values.register_verified_value(f.run,value,provenance).unwrap().handle();
+    f.authority.sessions[0].initial_value=handle;
+    f.authority.sessions[0].owner_input_value=Some(handle);
+    f
+}
+
+fn review_proof(f:&PlannerAuthorityFixtureV2, marker:u8)
+    -> savana_policy_core::v2::VerifiedManagedAdminCommandV04 {
+    use savana_policy_core::v2::{ManagedAdminCommandV04,ManagedAdminOperationV04,VerifiedManagedAdminCommandV04};
+    let s=&f.authority.sessions[0];let key=SigningKey::from_bytes(&[73;32]);
+    let command=ManagedAdminCommandV04 { schema:1,installation:*f.authority.config.installation_id.as_bytes(),
+        store:[0x9b;32],request:[marker;32],not_before:202,expires_at:800,
+        operation:ManagedAdminOperationV04::PreparePlanningExecution { task:*s.durable_task_id.as_bytes(),
+            root:*s.task_authorization_digest.unwrap().as_bytes() }};
+    VerifiedManagedAdminCommandV04::verify(&command.canonical_bytes().unwrap(),
+        &key.sign(&command.signing_digest().unwrap()).to_bytes(),&key.verifying_key(),
+        f.authority.config.installation_id,Digest32V2::new([0x9b;32])).unwrap()
+}
+
+#[test]
+fn fused_owner_inputs_reach_real_pin_and_unsigned_recipe_without_execution_grant() {
+    use savana_policy_core::v2::ManagedAdminResultV04;
+    let mut f=owner_document_fixture(false,false,false);
+    let task=f.authority.sessions[0].durable_task_id;
+    let root=f.authority.sessions[0].task_authorization_digest.unwrap();
+    let proof=review_proof(&f,74);
+    let before=disk(&f);
+    let receipt=f.authority.prepare_owner_execution_review_v04(&proof,*task.as_bytes(),*root.as_bytes(),
+        &mut f.values,UnixMillisV2::new(203)).unwrap();
+    assert_ne!(disk(&f),before);
+    let ManagedAdminResultV04::PlanningExecutionPrepared { run,approval,.. }=receipt.result() else {panic!("review receipt")};
+    assert_eq!(run,f.authority.sessions[0].durable_run_id.as_bytes());
+    assert_eq!(approval.bindings.len(),1);
+    assert_eq!(approval.recipe_schema,2);
+    let p=f.authority.policy.as_ref().unwrap();
+    assert!(p.durable.fused_inputs_pinned_v04(task).unwrap());
+    assert!(p.durable.active_fused_plan_v04(task,UnixMillisV2::new(204)).unwrap().recipe_deadline().is_none());
+    assert!(p.durable.recover_fused_executions_v04(task).unwrap().is_empty());
+    let frozen=disk(&f);
+    assert!(p.durable.managed_admin_receipt_v04(&proof).unwrap().is_some());
+    assert_eq!(disk(&f),frozen);
+    // A new review request resolves original durable values, never re-pins.
+    let proof2=review_proof(&f,75);
+    let again=f.authority.prepare_owner_execution_review_v04(&proof2,*task.as_bytes(),*root.as_bytes(),
+        &mut f.values,UnixMillisV2::new(204)).unwrap();
+    let ManagedAdminResultV04::PlanningExecutionPrepared { approval:a,.. }=again.result() else {panic!("review")};
+    assert_eq!(approval.inputs_digest,a.inputs_digest);
+    assert_eq!(approval.bindings[0].recipe,a.bindings[0].recipe);
+}
+
+#[test]
+fn fused_owner_input_intake_rejects_unsigned_source_extra_slots_and_wrong_root_controls() {
+    for case in 0..3 {
+        let mut f=owner_document_fixture(case==0,case==1,case==2);
+        let proof=review_proof(&f,74);
+        let task=f.authority.sessions[0].durable_task_id;
+        let root=f.authority.sessions[0].task_authorization_digest.unwrap();
+        let before=disk(&f);
+        assert!(f.authority.prepare_owner_execution_review_v04(&proof,*task.as_bytes(),*root.as_bytes(),
+            &mut f.values,UnixMillisV2::new(203)).is_err(),"case {case}");
+        assert_eq!(disk(&f),before);
+        assert!(!f.authority.policy.as_ref().unwrap().durable.fused_inputs_pinned_v04(task).unwrap());
+    }
+}
+
+#[test]
+fn fused_owner_inputs_come_from_retained_owner_document_not_the_masked_session_value() {
+    // Production private sessions start from the masked agent view (bytes).
+    // Fixed inputs may come only from the separately retained owner document.
+    let mut f=owner_document_fixture(false,false,false);
+    let owner=f.authority.sessions[0].owner_input_value.unwrap();
+    let task=f.authority.sessions[0].durable_task_id;
+    let root=f.authority.sessions[0].task_authorization_digest.unwrap();
+    f.authority.sessions[0].owner_input_value=None;
+    let before=disk(&f);
+    assert!(matches!(f.authority.prepare_owner_execution_review_v04(&review_proof(&f,76),*task.as_bytes(),
+        *root.as_bytes(),&mut f.values,UnixMillisV2::new(203)),Err(KernelAgentAuthorityErrorV2::BindingMismatch)),
+        "the session's initial value is never parsed as an owner document");
+    assert_eq!(disk(&f),before);
+    let s=&f.authority.sessions[0];
+    let masked=KernelValueV2::bytes(b"masked agent view".to_vec()).unwrap();
+    let context=ProvenanceContextV2::from_authenticated_runtime(s.producer_identity,s.durable_run_id,
+        s.active_state_manifest_digest,UnixMillisV2::new(200),UnixMillisV2::new(1000)).unwrap();
+    let provenance=ProvenanceRecordV2::planner_output(&masked,context,Digest32V2::new([71;32]),
+        Digest32V2::new([172;32]),Digest32V2::new([173;32]),&[],EffectSetV2::SEND).unwrap();
+    f.authority.sessions[0].initial_value=f.values.register_verified_value(f.run,masked,provenance).unwrap().handle();
+    f.authority.sessions[0].owner_input_value=Some(owner);
+    let receipt=f.authority.prepare_owner_execution_review_v04(&review_proof(&f,77),*task.as_bytes(),
+        *root.as_bytes(),&mut f.values,UnixMillisV2::new(203)).unwrap();
+    let savana_policy_core::v2::ManagedAdminResultV04::PlanningExecutionPrepared { approval,.. }=receipt.result()
+        else {panic!("review receipt")};
+    assert_eq!(approval.bindings.len(),1);
+    assert!(f.authority.policy.as_ref().unwrap().durable.fused_inputs_pinned_v04(task).unwrap());
+}
+
+#[test]
+fn claim_material_retains_only_a_matching_gated_owner_document_across_snapshots() {
+    use crate::v2_agent_authority::{
+        decode_prepared_claim_material, encode_prepared_claim_material, PreparedAgentClaimMaterialV2};
+    use savana_kernel_protocol::v2::{MaskedDocumentHandleV2, V2DecodeContext};
+    let f=planner_authority_fixture();
+    let s=&f.authority.sessions[0];
+    let (producer,run,manifest)=(s.producer_identity,s.durable_run_id,s.active_state_manifest_digest);
+    let masked=|| KernelValueV2::bytes(b"masked agent view".to_vec()).unwrap();
+    let text=|t:&str| KernelValueV2::text(t.to_owned()).unwrap();
+    let context=|run| ProvenanceContextV2::from_authenticated_runtime(producer,run,manifest,
+        UnixMillisV2::new(100),UnixMillisV2::new(10_000)).unwrap();
+    let d=|n| Digest32V2::new([n;32]);
+    let agent=ProvenanceRecordV2::planner_output(&masked(),context(run),d(1),d(2),d(3),&[],EffectSetV2::SEND).unwrap();
+    let gated=|v:&KernelValueV2,run| ProvenanceRecordV2::from_verified_kernel_input(v,context(run),d(4),d(5),d(6),d(7),
+        EffectSetV2::SEND).unwrap();
+    let build=|owner| PreparedAgentClaimMaterialV2::from_verified_ingress(run,producer,masked(),agent.clone(),
+        MaskedDocumentHandleV2::from_authority_entropy([0x96;32]).unwrap(),EffectSetV2::SEND,
+        s.signed_planner_policy.clone(),UnixMillisV2::new(10_000),owner);
+    let document=text("{\"schema\":1}");
+    let material=build(Some((text("{\"schema\":1}"),gated(&document,run)))).unwrap();
+    let roundtrip=|m:&PreparedAgentClaimMaterialV2| {
+        let mut encoder=minicbor::Encoder::new(Vec::new());
+        encode_prepared_claim_material(&mut encoder,m).unwrap();
+        let bytes=encoder.into_writer();
+        decode_prepared_claim_material(&mut minicbor::Decoder::new(&bytes),&mut V2DecodeContext).unwrap()
+    };
+    let restored=roundtrip(&material);
+    assert!(restored.matches_exactly(&material).unwrap());
+    assert!(restored.owner_input.is_some());
+    // Pre-retention snapshots keep decoding and simply carry no owner document.
+    let legacy=roundtrip(&build(None).unwrap());
+    assert!(legacy.owner_input.is_none());
+    assert!(!legacy.matches_exactly(&material).unwrap());
+    let other_run=DurableRunIdV2::new([0x5a;32]);
+    for owner in [
+        (text("{\"schema\":2}"),gated(&document,run)),                      // value/provenance mismatch
+        (text("{\"schema\":1}"),gated(&document,other_run)),                // another run
+        (text("private planner prompt"),ProvenanceRecordV2::planner_output(  // not GatedIngress
+            &text("private planner prompt"),context(run),d(1),d(2),d(3),&[],EffectSetV2::SEND).unwrap()),
+    ] {
+        assert!(matches!(build(Some(owner)),Err(KernelAgentAuthorityErrorV2::BindingMismatch)));
+    }
+}
+
+#[test]
+fn owner_inputs_must_be_owner_text_or_a_bound_constant_before_anything_is_pinned() {
+    // Every input is the owner's request text for every field it fills, or a
+    // constant the owner bound to exactly that field -- never a destination.
+    let operation=|f:&PlannerAuthorityFixtureV2| f.authority.policy.as_ref().unwrap().active_tools.records()[0]
+        .descriptor().unsigned().require_business_profile().unwrap().operation().to_owned();
+    let document=|prompt:&'static str,constants:Vec<(&'static str,&'static str)>,op:String| move |inputs|
+        serde_json::json!({"schema":3,"prompt":prompt,"inputs":inputs,"origin":"owner_text",
+            "constants":constants.iter().map(|(value,field)| serde_json::json!({"value":value,
+                "fields":[{"operation":op,"field":field}]})).collect::<Vec<_>>()});
+    let op=operation(&owner_document_fixture(false,false,false));
+    let accepted=[
+        document("send the private payload to A for Alice",vec![],op.clone()),
+        document("send it to A for Alice",vec![("private payload","body")],op.clone()),
+    ];
+    for (n,doc) in accepted.into_iter().enumerate() {
+        let mut f=owner_document_fixture_with(false,false,false,doc);
+        let task=f.authority.sessions[0].durable_task_id;
+        let root=f.authority.sessions[0].task_authorization_digest.unwrap();
+        f.authority.prepare_owner_execution_review_v04(&review_proof(&f,78),*task.as_bytes(),*root.as_bytes(),
+            &mut f.values,UnixMillisV2::new(203)).unwrap_or_else(|e| panic!("accepted {n}: {e:?}"));
+        assert!(f.authority.policy.as_ref().unwrap().durable.fused_inputs_pinned_v04(task).unwrap());
+    }
+    let refused=[
+        // The destination is not in the request, or not as written.
+        document("send the private payload to A",vec![],op.clone()),
+        document("send the private payload to a for alice",vec![],op.clone()),
+        document("send the private payload to A for Alicette",vec![],op.clone()),
+        // A constant never fills a destination, even bound to it.
+        document("send the private payload to A",vec![("Alice","to")],op.clone()),
+        // A constant fills only the field it is bound to.
+        document("send it to A for Alice",vec![("private payload","file")],op.clone()),
+        document("send it to A for Alice",vec![("private payload","body")],"other.tool".into()),
+    ];
+    for (n,doc) in refused.into_iter().enumerate() {
+        let mut f=owner_document_fixture_with(false,false,false,doc);
+        let task=f.authority.sessions[0].durable_task_id;
+        let root=f.authority.sessions[0].task_authorization_digest.unwrap();
+        let before=disk(&f);
+        assert!(matches!(f.authority.prepare_owner_execution_review_v04(&review_proof(&f,79),*task.as_bytes(),
+            *root.as_bytes(),&mut f.values,UnixMillisV2::new(203)),Err(KernelAgentAuthorityErrorV2::BindingMismatch)),
+            "refused {n}");
+        assert_eq!(disk(&f),before);
+        assert!(!f.authority.policy.as_ref().unwrap().durable.fused_inputs_pinned_v04(task).unwrap());
+    }
+}

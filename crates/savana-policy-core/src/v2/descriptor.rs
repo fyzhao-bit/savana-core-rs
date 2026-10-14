@@ -2,14 +2,18 @@ use std::cmp::Ordering;
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use savana_kernel_protocol::v2::{
-    ActionTemplateIdV2, Digest32V2, DisplayProjectionIdV2, Ed25519KeyIdV2, ExecutorIdentityV2,
-    ImplementationIdV2, ProjectionIdV2, RoleIdV2, ToolClassIdV2, UnixMillisV2, VersionV2,
+    decode_business_profile_v2, encode_business_profile_v2, ActionCodecProfileV2,
+    ActionTemplateIdV2, BusinessProfileV2, Digest32V2, DisplayProjectionIdV2, Ed25519KeyIdV2,
+    ExecutorIdentityV2, ImplementationIdV2, ProjectionIdV2, RoleIdV2, ToolClassIdV2, UnixMillisV2,
+    VersionV2,
 };
 use sha2::{Digest as _, Sha256};
 
+use super::connector_registry::{ConnectorRegistryStateV2, ConnectorTierV2};
 use super::{AttemptKindV2, EffectSetV2, G4Error, IdentifierV2};
 
 const TOOL_DESCRIPTOR_SCHEMA_VERSION: u16 = 2;
+const PROFILE_DESCRIPTOR_SCHEMA_VERSION: u16 = 3;
 const MAX_DESCRIPTOR_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ALLOWED_ROLES: usize = 64;
 const MAX_INTERNAL_VALIDATORS: usize = 32;
@@ -168,6 +172,7 @@ pub struct UnsignedToolDescriptorV2 {
     idempotency_contract: ExecutorIdempotencyContractV2,
     not_before: UnixMillisV2,
     expires_at: UnixMillisV2,
+    business_profile: Option<BusinessProfileV2>,
 }
 
 impl UnsignedToolDescriptorV2 {
@@ -217,6 +222,7 @@ impl UnsignedToolDescriptorV2 {
             idempotency_contract,
             not_before,
             expires_at,
+            business_profile: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -260,8 +266,10 @@ impl UnsignedToolDescriptorV2 {
     }
 
     fn validate(&self) -> Result<(), G4Error> {
-        if self.schema_version != TOOL_DESCRIPTOR_SCHEMA_VERSION
-            || is_zero(self.provider_identity_digest.as_bytes())
+        if !matches!(
+            (self.schema_version, self.business_profile.is_some()),
+            (TOOL_DESCRIPTOR_SCHEMA_VERSION, false) | (PROFILE_DESCRIPTOR_SCHEMA_VERSION, true)
+        ) || is_zero(self.provider_identity_digest.as_bytes())
             || is_zero(self.argument_schema_digest.as_bytes())
             || is_zero(self.result_schema_digest.as_bytes())
             || is_zero(self.executor_identity.as_bytes())
@@ -303,7 +311,41 @@ impl UnsignedToolDescriptorV2 {
             self.connector_retry_policy.maximum_attempts,
             self.connector_retry_policy.maximum_elapsed_ns,
         )?;
+        if let Some(profile) = &self.business_profile {
+            if !self
+                .effects
+                .contains(super::task_effect_set_v2(profile.effect()))
+                || (matches!(
+                    profile.codec(),
+                    ActionCodecProfileV2::McpToolsCallJsonV1
+                        | ActionCodecProfileV2::McpModelToolsCallJsonV1
+                        | ActionCodecProfileV2::TableComputeV1
+                ) && profile.operation() != self.provider_tool_id.as_str())
+            {
+                return Err(G4Error::InvalidDescriptor);
+            }
+        }
         Ok(())
+    }
+
+    /// Explicit schema-3 manifest material. This does not sign/activate a tool;
+    /// the existing expected-publisher verification must authenticate this entire
+    /// descriptor, including the reviewed mapping, before strict use.
+    pub fn with_business_profile(mut self, profile: BusinessProfileV2) -> Result<Self, G4Error> {
+        self.schema_version = PROFILE_DESCRIPTOR_SCHEMA_VERSION;
+        self.business_profile = Some(profile);
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn business_profile(&self) -> Option<&BusinessProfileV2> {
+        self.business_profile.as_ref()
+    }
+
+    pub fn require_business_profile(&self) -> Result<&BusinessProfileV2, G4Error> {
+        self.business_profile
+            .as_ref()
+            .ok_or(G4Error::InvalidDescriptor)
     }
 
     pub const fn registry_version(&self) -> VersionV2 {
@@ -312,6 +354,10 @@ impl UnsignedToolDescriptorV2 {
 
     pub const fn provider_tool_id(&self) -> &IdentifierV2 {
         &self.provider_tool_id
+    }
+
+    pub const fn provider_identity_digest(&self) -> Digest32V2 {
+        self.provider_identity_digest
     }
 
     pub const fn action_template(&self) -> ActionTemplateIdV2 {
@@ -381,7 +427,13 @@ impl<C> minicbor::Encode<C> for UnsignedToolDescriptorV2 {
         encoder: &mut minicbor::Encoder<W>,
         context: &mut C,
     ) -> Result<(), minicbor::encode::Error<W::Error>> {
-        encoder.array(21)?.u16(self.schema_version)?;
+        encoder
+            .array(if self.business_profile.is_some() {
+                22
+            } else {
+                21
+            })?
+            .u16(self.schema_version)?;
         self.registry_version.encode(encoder, context)?;
         self.provider_identity_digest.encode(encoder, context)?;
         self.provider_tool_id.encode(encoder, context)?;
@@ -409,6 +461,11 @@ impl<C> minicbor::Encode<C> for UnsignedToolDescriptorV2 {
         self.idempotency_contract.encode(encoder, context)?;
         self.not_before.encode(encoder, context)?;
         self.expires_at.encode(encoder, context)?;
+        if let Some(profile) = &self.business_profile {
+            let bytes = encode_business_profile_v2(profile)
+                .map_err(|_| minicbor::encode::Error::message("invalid business profile"))?;
+            encoder.bytes(&bytes)?;
+        }
         Ok(())
     }
 }
@@ -798,7 +855,12 @@ pub struct ActiveToolRecordV2 {
     registry_ordinal: u32,
     policy_activation_digest: Digest32V2,
     effective_retry_policy: BoundedConnectorRetryPolicyV2,
+    tier: ConnectorTierV2,
 }
+
+/// Registry ordinal recorded for a user-registered tool: it has no place in
+/// the deployment's signed registry.
+pub const USER_REGISTERED_TOOL_ORDINAL_V2: u32 = u32::MAX;
 
 impl ActiveToolRecordV2 {
     pub const fn descriptor(&self) -> &VerifiedToolDescriptorV2 {
@@ -815,6 +877,12 @@ impl ActiveToolRecordV2 {
 
     pub const fn effective_retry_policy(&self) -> BoundedConnectorRetryPolicyV2 {
         self.effective_retry_policy
+    }
+
+    /// Where the tool came from. Policy uses it to discriminate: a
+    /// user-registered tool always needs a per-call owner approval.
+    pub const fn tier(&self) -> ConnectorTierV2 {
+        self.tier
     }
 }
 
@@ -877,7 +945,91 @@ impl ActiveToolRegistryV2 {
                 registry_ordinal: activation.registry_ordinal,
                 policy_activation_digest: activation.policy_activation_digest,
                 effective_retry_policy,
+                tier: ConnectorTierV2::DeploymentShipped,
             });
+        }
+        Ok(Self(active))
+    }
+
+    /// The deployment's tools plus those of every active user-registered
+    /// connector in the verified chain (design R4). A user tool enters
+    /// authenticated by the chain: the owner approved its connector and the
+    /// connector-authority key signed the delta that added it, so that key is
+    /// recorded as its publisher. It must route exactly as dispatch will route
+    /// it (one descriptor, pinned connector identity, HTTPS target), it never
+    /// carries FINAL_RELEASE, it gets a single attempt, and it never shadows a
+    /// tool already active: a digest or tool class taken by a deployment tool
+    /// or by an earlier registration (chain order) leaves it inactive, so a
+    /// later registration cannot take over a class. Tools of earlier user
+    /// connectors are recomputed, not carried over, so a removed connector's
+    /// tools are gone.
+    pub fn with_user_registered(
+        &self,
+        chain: &ConnectorRegistryStateV2,
+        connector_authority_key_id: Ed25519KeyIdV2,
+    ) -> Result<Self, G4Error> {
+        if is_zero(connector_authority_key_id.as_bytes()) {
+            return Err(G4Error::InvalidDescriptor);
+        }
+        let mut active = self
+            .0
+            .iter()
+            .filter(|record| record.tier == ConnectorTierV2::DeploymentShipped)
+            .cloned()
+            .collect::<Vec<_>>();
+        for delta in chain.deltas() {
+            let Some(connector) = delta.added_descriptor() else {
+                continue;
+            };
+            if connector.tier() != ConnectorTierV2::UserRegistered
+                || !chain.contains_connector(connector.connector_id())
+                || chain.registered_connector(connector.connector_id()) != Some(connector)
+            {
+                continue;
+            }
+            for unsigned in connector.tool_descriptors() {
+                let digest = descriptor_digest_v2(unsigned)?;
+                let routed = chain
+                    .resolve_task_tool_connector(digest)
+                    .map(|c| c.connector_id());
+                if routed != Ok(connector.connector_id())
+                    || unsigned.effects().contains(EffectSetV2::FINAL_RELEASE)
+                    || active.iter().any(|record| {
+                        record.descriptor.descriptor_digest == digest
+                            || record.descriptor.unsigned.tool_class == unsigned.tool_class
+                    })
+                {
+                    continue;
+                }
+                if active.len() >= MAX_ACTIVE_TOOL_DESCRIPTORS {
+                    return Err(G4Error::DescriptorLimitExceeded);
+                }
+                let retry = unsigned.connector_retry_policy;
+                let effective_retry_policy = BoundedConnectorRetryPolicyV2::new(
+                    unsigned.idempotency_contract,
+                    1,
+                    retry.maximum_elapsed_ns,
+                )?;
+                let mut hash = Sha256::new();
+                hash.update(b"SAVANA_USER_REGISTERED_TOOL_ACTIVATION_V2\0");
+                hash.update(connector.connector_id().as_bytes());
+                hash.update(digest.as_bytes());
+                hash.update(connector_authority_key_id.as_bytes());
+                active
+                    .try_reserve(1)
+                    .map_err(|_| G4Error::AllocationFailure)?;
+                active.push(ActiveToolRecordV2 {
+                    descriptor: VerifiedToolDescriptorV2 {
+                        unsigned: unsigned.clone(),
+                        descriptor_digest: digest,
+                        publisher_key_id: connector_authority_key_id,
+                    },
+                    registry_ordinal: USER_REGISTERED_TOOL_ORDINAL_V2,
+                    policy_activation_digest: Digest32V2::new(hash.finalize().into()),
+                    effective_retry_policy,
+                    tier: ConnectorTierV2::UserRegistered,
+                });
+            }
         }
         Ok(Self(active))
     }
@@ -914,6 +1066,47 @@ impl ActiveToolRegistryV2 {
         &self.0
     }
 
+    /// Test support: the same registry with one tool's tier changed, so the
+    /// kernel's tier rules can be driven through their real G4/G5 paths.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_tier_for_test(
+        mut self,
+        descriptor_digest: Digest32V2,
+        tier: ConnectorTierV2,
+    ) -> Self {
+        for record in &mut self.0 {
+            if record.descriptor.descriptor_digest == descriptor_digest {
+                record.tier = tier;
+            }
+        }
+        self
+    }
+
+    /// Validates the *entire* draft against this active registry at the supplied
+    /// instant and role. This does not authenticate the user or grant authority;
+    /// the issuer must repeat it at settlement/install and normal dispatch still
+    /// resolves its descriptor against the current registry.
+    pub fn validate_task_draft_profiles(
+        &self,
+        draft: &savana_kernel_protocol::v2::TaskAuthorizationDraftV2,
+        role: RoleIdV2,
+        now: UnixMillisV2,
+    ) -> Result<(), G4Error> {
+        for clause in draft.clauses() {
+            for alternative in clause.alternatives() {
+                let record = self
+                    .resolve(alternative.descriptor_digest(), role, now)
+                    .ok_or(G4Error::DescriptorNotActive)?;
+                if record.descriptor().unsigned().require_business_profile()?
+                    != alternative.controls().profile()
+                {
+                    return Err(G4Error::InvalidDescriptor);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -930,8 +1123,16 @@ pub(crate) fn decode_unsigned_descriptor(
         return Err(G4Error::DescriptorLimitExceeded);
     }
     let mut decoder = minicbor::Decoder::new(bytes);
-    require_array(&mut decoder, 21)?;
+    let field_count = decoder
+        .array()
+        .map_err(|_| G4Error::NonCanonicalDescriptor)?;
     let schema_version = decoder.u16().map_err(|_| G4Error::NonCanonicalDescriptor)?;
+    if !matches!(
+        (field_count, schema_version),
+        (Some(21), TOOL_DESCRIPTOR_SCHEMA_VERSION) | (Some(22), PROFILE_DESCRIPTOR_SCHEMA_VERSION)
+    ) {
+        return Err(G4Error::NonCanonicalDescriptor);
+    }
     let registry_version = decode_version(&mut decoder)?;
     let provider_identity_digest = Digest32V2::new(decode_fixed::<32>(&mut decoder)?);
     let provider_tool_id =
@@ -981,11 +1182,23 @@ pub(crate) fn decode_unsigned_descriptor(
     let idempotency_contract = decode_idempotency_contract(&mut decoder)?;
     let not_before = UnixMillisV2::new(decoder.u64().map_err(|_| G4Error::NonCanonicalDescriptor)?);
     let expires_at = UnixMillisV2::new(decoder.u64().map_err(|_| G4Error::NonCanonicalDescriptor)?);
+    let business_profile = if schema_version == PROFILE_DESCRIPTOR_SCHEMA_VERSION {
+        Some(
+            decode_business_profile_v2(
+                decoder
+                    .bytes()
+                    .map_err(|_| G4Error::NonCanonicalDescriptor)?,
+            )
+            .map_err(|_| G4Error::InvalidDescriptor)?,
+        )
+    } else {
+        None
+    };
     if decoder.position() != bytes.len() {
         return Err(G4Error::NonCanonicalDescriptor);
     }
-    let descriptor = UnsignedToolDescriptorV2::from_verified_manifest(
-        schema_version,
+    let mut descriptor = UnsignedToolDescriptorV2::from_verified_manifest(
+        TOOL_DESCRIPTOR_SCHEMA_VERSION,
         registry_version,
         provider_identity_digest,
         provider_tool_id,
@@ -1007,6 +1220,9 @@ pub(crate) fn decode_unsigned_descriptor(
         not_before,
         expires_at,
     )?;
+    if let Some(profile) = business_profile {
+        descriptor = descriptor.with_business_profile(profile)?;
+    }
     let canonical = minicbor::to_vec(&descriptor).map_err(|_| G4Error::NonCanonicalDescriptor)?;
     if canonical != bytes {
         return Err(G4Error::NonCanonicalDescriptor);

@@ -76,3 +76,22 @@ Until those live checks pass, do not weaken the doctor, fabricate deployment
 credentials, expose approval displays or IDs to OpenClaw, share bootstrap
 tokens through configuration, or start the Gateway with a fallback model/tool
 loop.
+# Intent-bound profile deployment addendum (2026-09-05)
+
+For a **new** macOS development build, materialization now authenticates the
+single legacy build-input descriptor under its pinned publisher before doing
+anything with it, creates a fresh registry publisher distinct from the other
+generated role keys, and signs a separate schema-3 `development.final_release`
+descriptor. Its fixed POST mapping binds the materialized final-release URL,
+actual server SPKI pin and client-certificate credential identity. Compiled
+projection digests, policy activation and a single-attempt constraint are
+included. This happens before the new deployment is activated; no running state
+is migrated. Partial materialization aborts installation, not a runtime fallback.
+
+The legacy `development.draft_due_diligence_report` descriptor is re-signed
+without changing its content or inventing a profile. Its nested provider API is
+not the supported flat closed grammar, so it remains unavailable to strict task
+execution. The new release descriptor alone does **not** make the legacy agent
+workflow usable. A host-product scope broker and genuinely reviewed tool
+mappings are still deployment prerequisites. Neither this code nor its tests
+install local services, issue production credentials or certify live readiness.

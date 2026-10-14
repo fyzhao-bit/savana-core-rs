@@ -52,7 +52,7 @@ const DEFAULT_LIMIT: i64 = 50;
 ///   1. `(tool_name, attempt_type)` must be a registered pair.
 ///   2. If `provider == "cloud"`, `attempt_type` must not be cloud-blocked.
 ///   3. `attempt_counts[attempt_type]` (default 0) must be under
-///      `profile.limits[attempt_type]` (default [`DEFAULT_LIMIT`]).
+///      `profile.limits[attempt_type]` (default `DEFAULT_LIMIT`).
 pub fn validate(
     tool_name: &str,
     attempt_type: &str,

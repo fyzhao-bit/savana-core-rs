@@ -28,6 +28,9 @@ pub(crate) struct VerifiedMtlsClientCredentialsV2 {
 }
 
 impl VerifiedMtlsClientCredentialsV2 {
+    pub(crate) fn tls_config(&self) -> Arc<ClientConfig> {
+        Arc::clone(&self.tls)
+    }
     pub(crate) fn from_verified_deployment(
         root_certificate_der: Vec<u8>,
         client_certificate_der: Vec<u8>,
@@ -371,7 +374,7 @@ fn valid_path(value: &str) -> bool {
             .all(|byte| byte.is_ascii_graphic() && byte != b'#' && byte != b'?')
 }
 
-fn valid_dns_name(value: &str) -> bool {
+pub(crate) fn valid_dns_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 253
         && value.split('.').all(|label| {

@@ -1,0 +1,54 @@
+[Unit]
+Description=Savana TPM V3 first installation (prepare; no reset or migration)
+After=local-fs.target
+AssertPathExists=/etc/savana/tpm-first-install-v3.json
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/libexec/savana/savana-tpm-first-install prepare
+UMask=0077
+# Manual only. Failed/partial prepare must never be automatically repeated.
+Restart=no
+TimeoutStartSec=180s
+StateDirectory=savana/tpm-v3
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/savana/tpm-v3 /etc/savana
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=no
+DevicePolicy=closed
+DeviceAllow=/dev/tpmrm0 rw
+InaccessiblePaths=-/dev/tpm0
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+SocketBindDeny=any
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@clock @debug @module @mount @obsolete @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM
+LimitNOFILE=64
+TasksMax=1
+MemoryMax=128M
+LoadCredentialEncrypted=signing-auth:/etc/savana/credentials/tpm-v3/signing-auth.cred
+LoadCredentialEncrypted=enrollment-auth:/etc/savana/credentials/tpm-v3/enrollment-auth.cred
+LoadCredentialEncrypted=deployment-auth:/etc/savana/credentials/tpm-v3/deployment-auth.cred
+LoadCredentialEncrypted=vault-auth:/etc/savana/credentials/tpm-v3/vault-auth.cred
+LoadCredentialEncrypted=agent-auth:/etc/savana/credentials/tpm-v3/agent-auth.cred
+LoadCredentialEncrypted=g4-auth:/etc/savana/credentials/tpm-v3/g4-auth.cred
+LoadCredentialEncrypted=connector-auth:/etc/savana/credentials/tpm-v3/connector-auth.cred

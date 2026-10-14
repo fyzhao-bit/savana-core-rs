@@ -33,6 +33,93 @@ fn bytes_value_digest(byte: u8) -> Digest32V2 {
     Digest32V2::new(hasher.finalize().into())
 }
 
+#[test]
+fn result_utf8_derivation_preserves_untrusted_private_lineage_and_exact_bytes() {
+    let raw = KernelValueV2::bytes("private-é\u{301}".as_bytes().to_vec()).unwrap();
+    let parent = ProvenanceRecordV2::tool_result(
+        &raw,
+        context(1, 2),
+        ActionIntentIdV2::new([59; 32]),
+        digest(60),
+        digest(61),
+        digest(62),
+        digest(63),
+        EffectSetV2::READ,
+    )
+    .unwrap();
+    let op = DeriveOperationV2::decode_utf8();
+    assert_eq!(minicbor::to_vec(&op).unwrap(), vec![0x81, 7]);
+    let roundtrip: DeriveOperationV2 = minicbor::decode(&[0x81, 7]).unwrap();
+    assert_eq!(roundtrip, op);
+    let (text, derived) =
+        ProvenanceRecordV2::derived(context(1, 2), op, &[(&raw, &parent)], EffectSetV2::ALL)
+            .unwrap();
+    assert_eq!(text.as_text(), Some("private-é\u{301}"));
+    assert_eq!(derived.label(), parent.label());
+    assert_eq!(derived.root_evidence(), parent.root_evidence());
+    assert_eq!(derived.label().integrity(), IntegrityV2::ExternalUntrusted);
+    assert_eq!(
+        derived.label().confidentiality(),
+        ConfidentialityV2::VaultBound
+    );
+    assert_eq!(derived.label().readers(), ReaderSetV2::KERNEL);
+    assert_eq!(derived.value_digest(), value_digest_v2(&text).unwrap());
+    assert_ne!(derived.provenance_digest(), parent.provenance_digest());
+    let encoded = crate::v2::encode_provenance_record_v2(&derived).unwrap();
+    assert_eq!(
+        crate::v2::decode_provenance_record_v2(&encoded).unwrap(),
+        derived
+    );
+}
+
+#[test]
+fn result_utf8_derivation_rejects_bad_encoding_types_and_arity() {
+    for raw in [
+        KernelValueV2::bytes(vec![0xff]).unwrap(),
+        KernelValueV2::text("not bytes").unwrap(),
+    ] {
+        let p = ProvenanceRecordV2::tool_result(
+            &raw,
+            context(1, 2),
+            ActionIntentIdV2::new([59; 32]),
+            digest(60),
+            digest(61),
+            digest(62),
+            digest(63),
+            EffectSetV2::READ,
+        )
+        .unwrap();
+        assert!(ProvenanceRecordV2::derived(
+            context(1, 2),
+            DeriveOperationV2::decode_utf8(),
+            &[(&raw, &p)],
+            EffectSetV2::READ
+        )
+        .is_err());
+    }
+    let raw = KernelValueV2::bytes(b"ok".to_vec()).unwrap();
+    let p = ProvenanceRecordV2::tool_result(
+        &raw,
+        context(1, 2),
+        ActionIntentIdV2::new([59; 32]),
+        digest(60),
+        digest(61),
+        digest(62),
+        digest(63),
+        EffectSetV2::READ,
+    )
+    .unwrap();
+    for parents in [vec![], vec![(&raw, &p), (&raw, &p)]] {
+        assert!(ProvenanceRecordV2::derived(
+            context(1, 2),
+            DeriveOperationV2::decode_utf8(),
+            &parents,
+            EffectSetV2::READ
+        )
+        .is_err());
+    }
+}
+
 fn context(run: u8, manifest: u8) -> ProvenanceContextV2 {
     ProvenanceContextV2::from_authenticated_runtime(
         ProducerIdentityV2::new([0x91; 32]),
@@ -110,6 +197,59 @@ fn declassification_parent(value: &KernelValueV2) -> ProvenanceRecordV2 {
         EffectSetV2::READ.union(EffectSetV2::SEND),
     )
     .unwrap()
+}
+
+#[test]
+fn fused_model_handoff_requires_new_rule_exact_recipient_and_no_residual_pii() {
+    let purpose = ClosedDeclassificationPurposeV2::FusedModelCall;
+    let reader = digest(0xc1);
+    let transition = DeclassificationTransitionV2::BuildFusedModelEnvelope {
+        model_identity_digest: reader,
+    };
+    let set = declassification_set(
+        6,
+        purpose,
+        declassification_implementation_digest_v2(6).unwrap(),
+        Some(vec![reader]),
+        (30, 70),
+    );
+    let safe = KernelValueV2::text("registered abstract workflow").unwrap();
+    let parent = declassification_parent(&safe);
+    let make = |value: &KernelValueV2, transition, rules: &DeclassificationRuleSetV2| {
+        ProvenanceRecordV2::declassify(
+            value,
+            context(1, 2),
+            transition,
+            rules,
+            purpose.purpose_digest(),
+            digest(0xc2),
+            None,
+            &[&parent],
+            EffectSetV2::ALL,
+            50,
+        )
+    };
+    let proof = make(&safe, transition, &set).unwrap();
+    assert_eq!(proof.label().readers(), ReaderSetV2::EXTERNAL_PLANNER);
+    assert_eq!(
+        proof.judge_handoff(transition, &set),
+        HandoffJudgmentV2::Admits
+    );
+    let wrong = DeclassificationTransitionV2::BuildFusedModelEnvelope {
+        model_identity_digest: digest(0xc3),
+    };
+    assert!(make(&safe, wrong, &set).is_err());
+    assert_eq!(proof.judge_handoff(wrong, &set), HandoffJudgmentV2::Refuses);
+    let legacy = declassification_set(
+        2,
+        ClosedDeclassificationPurposeV2::PlannerCall,
+        declassification_implementation_digest_v2(2).unwrap(),
+        None,
+        (30, 70),
+    );
+    assert!(make(&safe, transition, &legacy).is_err());
+    let pii = KernelValueV2::text("customer@example.com").unwrap();
+    assert!(make(&pii, transition, &set).is_err());
 }
 
 fn final_release_set(reader: Digest32V2, max_age_ms: u64) -> DeclassificationRuleSetV2 {
@@ -496,6 +636,54 @@ fn final_release_consent_validation_is_pure_across_gate_failure_and_retry() {
     )
     .unwrap();
     assert_eq!(first, replay);
+}
+
+#[test]
+fn final_release_to_a_sink_the_deployment_rule_does_not_name_is_refused() {
+    // Release readers come only from the deployment's declassification
+    // authority rule set. Connector registration signs registry deltas, never
+    // rules, so a connector added at runtime is not a release sink: G3 refuses
+    // it even when an exact consent names it, while the signed sink passes.
+    let safe = KernelValueV2::text("approved release".to_owned()).unwrap();
+    let parent = declassification_parent(&safe);
+    let (signed_sink, registered_sink) = (digest(0xe1), digest(0xf1));
+    let token_set = digest(0xe2);
+    let set = final_release_set(signed_sink, 30);
+    let purpose = ClosedDeclassificationPurposeV2::FinalRelease.purpose_digest();
+    let consent = |sink| {
+        VerifiedFinalReleaseSettlementV2::from_consumed_exact_settlement(
+            digest(0xe7),
+            DurableReleaseIdV2::new([0xe4; 32]),
+            digest(0xe3),
+            sink,
+            token_set,
+            digest(2),
+            UnixMillisV2::new(30),
+            UnixMillisV2::new(70),
+        )
+        .unwrap()
+    };
+    let release = |sink, consent: &VerifiedFinalReleaseSettlementV2| {
+        ProvenanceRecordV2::declassify(
+            &safe,
+            context(1, 2),
+            DeclassificationTransitionV2::BuildFinalRelease {
+                sink_identity_digest: sink,
+            },
+            &set,
+            purpose,
+            token_set,
+            Some(consent),
+            &[&parent],
+            EffectSetV2::ALL,
+            50,
+        )
+    };
+    assert_eq!(
+        release(registered_sink, &consent(registered_sink)),
+        Err(G3Error::ReaderNotAuthorized)
+    );
+    assert!(release(signed_sink, &consent(signed_sink)).is_ok());
 }
 
 #[test]
@@ -1257,4 +1445,307 @@ fn a_declassification_with_a_null_binding_is_refused() {
         EffectSetV2::READ,
     )
     .is_ok());
+}
+
+fn tool_result_bytes(json: &[u8]) -> (KernelValueV2, ProvenanceRecordV2) {
+    let raw = KernelValueV2::bytes(json.to_vec()).unwrap();
+    let provenance = ProvenanceRecordV2::tool_result(
+        &raw,
+        context(1, 2),
+        ActionIntentIdV2::new([59; 32]),
+        digest(60),
+        digest(61),
+        digest(62),
+        digest(63),
+        EffectSetV2::READ,
+    )
+    .unwrap();
+    (raw, provenance)
+}
+
+fn path(segments: &[&str]) -> Vec<String> {
+    segments.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn result_json_path_extracts_scalars_and_keeps_untrusted_provenance() {
+    let json =
+        br#"{"result":{"event":{"participants":["a@x.com","b@y.com"],"count":2,"public":true}}}"#;
+    let (raw, parent) = tool_result_bytes(json);
+    // A text scalar reached through objects and an array index.
+    let op = DeriveOperationV2::select_result_json_path_v04(
+        path(&["result", "event", "participants", "0"]),
+        256,
+    )
+    .unwrap();
+    // Encoded shape: [tag 9, [segments...], max_bytes]; decode is byte-stable.
+    let encoded = minicbor::to_vec(&op).unwrap();
+    assert_eq!(encoded[0], 0x83);
+    assert_eq!(encoded[1], 9);
+    assert_eq!(minicbor::decode::<DeriveOperationV2>(&encoded).unwrap(), op);
+    let (value, derived) =
+        ProvenanceRecordV2::derived(context(1, 2), op, &[(&raw, &parent)], EffectSetV2::READ)
+            .unwrap();
+    assert_eq!(value.as_text(), Some("a@x.com"));
+    // Projection is not endorsement: the value stays exactly as untrusted as the result.
+    assert_eq!(derived.label().integrity(), IntegrityV2::ExternalUntrusted);
+    assert_eq!(
+        derived.label().confidentiality(),
+        ConfidentialityV2::VaultBound
+    );
+    assert_eq!(derived.label().readers(), ReaderSetV2::KERNEL);
+    assert_eq!(derived.value_digest(), value_digest_v2(&value).unwrap());
+    // Even offered every effect, an extracted value keeps only READ: it can be
+    // read, never authorize a write (UNTRUSTED_EFFECT_CEILING_V2).
+    let (_, widened) = ProvenanceRecordV2::derived(
+        context(1, 2),
+        DeriveOperationV2::select_result_json_path_v04(
+            path(&["result", "event", "participants", "0"]),
+            256,
+        )
+        .unwrap(),
+        &[(&raw, &parent)],
+        EffectSetV2::ALL,
+    )
+    .unwrap();
+    assert_eq!(widened.label().effects(), EffectSetV2::READ);
+
+    let integer =
+        DeriveOperationV2::select_result_json_path_v04(path(&["result", "event", "count"]), 16)
+            .unwrap();
+    let (count, _) = ProvenanceRecordV2::derived(
+        context(1, 2),
+        integer,
+        &[(&raw, &parent)],
+        EffectSetV2::READ,
+    )
+    .unwrap();
+    assert!(matches!(
+        count.scalar_ref(),
+        Some(crate::v2::value::KernelScalarRefV2::I64(2))
+    ));
+
+    let boolean =
+        DeriveOperationV2::select_result_json_path_v04(path(&["result", "event", "public"]), 16)
+            .unwrap();
+    let (flag, _) = ProvenanceRecordV2::derived(
+        context(1, 2),
+        boolean,
+        &[(&raw, &parent)],
+        EffectSetV2::READ,
+    )
+    .unwrap();
+    assert!(matches!(
+        flag.scalar_ref(),
+        Some(crate::v2::value::KernelScalarRefV2::Bool(true))
+    ));
+}
+
+#[test]
+fn a_signed_candidate_member_is_endorsed_and_nothing_else_is() {
+    use savana_kernel_protocol::v2::ResultCandidatesV2;
+    let set = |members: &[&str]| ResultCandidatesV2::new(path(members)).unwrap();
+    let json =
+        br#"{"result":{"event":{"participants":["a@x.com","b@y.com"],"organizer":"z@evil.com"}}}"#;
+    let (raw, parent) = tool_result_bytes(json);
+    let first = path(&["result", "event", "participants", "0"]);
+    let people = path(&["result", "event", "participants"]);
+    let both = set(&["a@x.com", "b@y.com"]);
+    let (value, endorsed) = ProvenanceRecordV2::result_candidate_member_v04(
+        context(1, 2),
+        first.clone(),
+        256,
+        false,
+        &both,
+        (&raw, &parent),
+        EffectSetV2::ALL,
+    )
+    .unwrap();
+    assert_eq!(value.as_text(), Some("a@x.com"));
+    // Only integrity rises: still vault-bound, kernel-read, and no more than
+    // the result's effects however many are offered.
+    assert_eq!(endorsed.label().integrity(), IntegrityV2::UserAuthorized);
+    assert_eq!(
+        endorsed.label().confidentiality(),
+        ConfidentialityV2::VaultBound
+    );
+    assert_eq!(endorsed.label().readers(), ReaderSetV2::KERNEL);
+    assert_eq!(endorsed.label().effects(), EffectSetV2::READ);
+    // The record commits to the set it was checked against.
+    assert!(endorsed.root_evidence().as_slice().contains(&both.digest()));
+    // A list: every item must be a member.
+    let (list, _) = ProvenanceRecordV2::result_candidate_member_v04(
+        context(1, 2),
+        people.clone(),
+        256,
+        true,
+        &both,
+        (&raw, &parent),
+        EffectSetV2::READ,
+    )
+    .unwrap();
+    assert_eq!(list.text_list(), Some(vec!["a@x.com", "b@y.com"]));
+    for (p, list, candidates) in [
+        (path(&["result", "event", "organizer"]), false, both.clone()),
+        (people.clone(), true, set(&["a@x.com"])),
+        (first.clone(), false, set(&["A@x.com", "b@y.com"])),
+    ] {
+        assert!(ProvenanceRecordV2::result_candidate_member_v04(
+            context(1, 2),
+            p,
+            256,
+            list,
+            &candidates,
+            (&raw, &parent),
+            EffectSetV2::READ,
+        )
+        .is_err());
+    }
+    // Another set is another provenance.
+    let (_, other) = ProvenanceRecordV2::result_candidate_member_v04(
+        context(1, 2),
+        first.clone(),
+        256,
+        false,
+        &set(&["a@x.com", "b@y.com", "c@z.com"]),
+        (&raw, &parent),
+        EffectSetV2::READ,
+    )
+    .unwrap();
+    assert_ne!(other.provenance_digest(), endorsed.provenance_digest());
+    // The operation names the set and round-trips; a plain derivation never
+    // mints it, so only the constructor above (which checks membership) can.
+    let op =
+        DeriveOperationV2::select_result_json_member_v04(first, 256, false, both.digest()).unwrap();
+    let encoded = minicbor::to_vec(&op).unwrap();
+    assert_eq!((encoded[0], encoded[1]), (0x85, 11));
+    assert_eq!(minicbor::decode::<DeriveOperationV2>(&encoded).unwrap(), op);
+    assert!(
+        ProvenanceRecordV2::derived(context(1, 2), op, &[(&raw, &parent)], EffectSetV2::READ)
+            .is_err()
+    );
+    // The record survives its own encoding.
+    let bytes = crate::v2::encode_provenance_record_v2(&endorsed).unwrap();
+    assert_eq!(
+        crate::v2::decode_provenance_record_v2(&bytes).unwrap(),
+        endorsed
+    );
+}
+
+#[test]
+fn result_json_path_fails_closed_on_non_scalar_missing_and_oversize() {
+    let json = br#"{"a":{"b":"value"},"list":[1,2],"n":123,"big":18446744073709551615,"f":1.5}"#;
+    let (raw, parent) = tool_result_bytes(json);
+    let cases = [
+        (path(&["a"]), 256u16),         // object node, not scalar
+        (path(&["list"]), 256),         // array node, not scalar
+        (path(&["a", "missing"]), 256), // absent path
+        (path(&["a", "b"]), 3),         // "value" exceeds max_bytes
+        (path(&["big"]), 32),           // > i64::MAX
+        (path(&["f"]), 32),             // float rejected
+    ];
+    for (p, max) in cases {
+        let op = DeriveOperationV2::select_result_json_path_v04(p.clone(), max).unwrap();
+        assert!(
+            ProvenanceRecordV2::derived(context(1, 2), op, &[(&raw, &parent)], EffectSetV2::READ)
+                .is_err(),
+            "expected failure for {p:?} max {max}"
+        );
+    }
+    // Wrong parent kind (text, not bytes) and wrong arity both fail.
+    let text = KernelValueV2::text("not bytes").unwrap();
+    let op = DeriveOperationV2::select_result_json_path_v04(path(&["n"]), 32).unwrap();
+    assert!(
+        ProvenanceRecordV2::derived(context(1, 2), op, &[(&text, &parent)], EffectSetV2::READ)
+            .is_err()
+    );
+    let op = DeriveOperationV2::select_result_json_path_v04(path(&["n"]), 32).unwrap();
+    assert!(ProvenanceRecordV2::derived(context(1, 2), op, &[], EffectSetV2::READ).is_err());
+}
+
+#[test]
+fn result_json_path_construction_and_decode_bounds() {
+    // Empty path selects the whole document (must still be a scalar there).
+    assert!(DeriveOperationV2::select_result_json_path_v04(vec![], 8).is_ok());
+    // Zero max_bytes, an over-long segment, and too many segments are rejected.
+    assert!(DeriveOperationV2::select_result_json_path_v04(path(&["x"]), 0).is_err());
+    assert!(DeriveOperationV2::select_result_json_path_v04(vec!["x".repeat(129)], 8).is_err());
+    let too_deep: Vec<String> = (0..17).map(|i| i.to_string()).collect();
+    assert!(DeriveOperationV2::select_result_json_path_v04(too_deep, 8).is_err());
+    // A decoder must reject an out-of-grammar segment even if the array length is fine.
+    let mut bad = minicbor::Encoder::new(Vec::new());
+    bad.array(3)
+        .unwrap()
+        .u16(9)
+        .unwrap()
+        .array(1)
+        .unwrap()
+        .str(&"x".repeat(200))
+        .unwrap();
+    bad.u16(8).unwrap();
+    assert!(minicbor::decode::<DeriveOperationV2>(&bad.into_writer()).is_err());
+}
+
+#[test]
+fn result_json_path_extractor_rejects_duplicate_keys() {
+    use savana_continuation_core::planning_observation::{select_scalar, ScalarSelectionV04};
+    assert_eq!(
+        select_scalar(br#"{"k":"v"}"#, &path(&["k"]), 8).unwrap(),
+        ScalarSelectionV04::Text("v".to_string())
+    );
+    // A duplicate key means the two parsers could disagree on which value wins.
+    assert!(select_scalar(br#"{"k":"a","k":"b"}"#, &path(&["k"]), 8).is_err());
+    // Array indices must be canonical decimal.
+    assert_eq!(
+        select_scalar(br#"[10,20,30]"#, &path(&["2"]), 8).unwrap(),
+        ScalarSelectionV04::Unsigned(30)
+    );
+    assert!(select_scalar(br#"[10,20]"#, &path(&["00"]), 8).is_err());
+}
+
+#[test]
+fn result_json_path_decodes_a_nested_tool_output_string_with_json_step() {
+    use savana_continuation_core::planning_observation::{
+        select_scalar, ScalarSelectionV04, DECODE_JSON_TEXT_SEGMENT,
+    };
+    assert_eq!(DECODE_JSON_TEXT_SEGMENT, "$json");
+    // The recorded result is the whole MCP response; the tool's own output is
+    // canonical JSON text inside result.content[0].text.
+    let inner = r#"[{"filename":"team-building-activities.docx","id_":"3"}]"#;
+    let response = serde_json::json!({
+        "id": "r", "jsonrpc": "2.0",
+        "result": {"content": [{"text": inner, "type": "text"}], "isError": false,
+                   "structuredContent": {"savana_status": "succeeded"}}
+    })
+    .to_string();
+    let id_path = path(&["result", "content", "0", "text", "$json", "0", "id_"]);
+    assert_eq!(
+        select_scalar(response.as_bytes(), &id_path, 16).unwrap(),
+        ScalarSelectionV04::Text("3".to_string())
+    );
+    // Without the step the path stops at the string and cannot reach the field.
+    let plain = path(&["result", "content", "0", "text", "0", "id_"]);
+    assert!(select_scalar(response.as_bytes(), &plain, 16).is_err());
+    // On an object, `$json` is an ordinary key: it never shadows a real key.
+    assert_eq!(
+        select_scalar(br#"{"$json":"k"}"#, &path(&["$json"]), 8).unwrap(),
+        ScalarSelectionV04::Text("k".to_string())
+    );
+    // Only a string decodes; a number or an array cannot.
+    assert!(select_scalar(br#"{"n":5}"#, &path(&["n", "$json"]), 8).is_err());
+    assert!(select_scalar(br#"[[1]]"#, &path(&["0", "$json"]), 8).is_err());
+    // The nested text is parsed just as strictly: duplicate keys, non-JSON text,
+    // and a non-scalar target are refused; the byte bound still applies.
+    let dup = serde_json::json!({"t": r#"{"a":"x","a":"y"}"#}).to_string();
+    assert!(select_scalar(dup.as_bytes(), &path(&["t", "$json", "a"]), 8).is_err());
+    let prose = serde_json::json!({"t": "not json"}).to_string();
+    assert!(select_scalar(prose.as_bytes(), &path(&["t", "$json"]), 8).is_err());
+    assert!(select_scalar(
+        response.as_bytes(),
+        &path(&["result", "content", "0", "text", "$json", "0"]),
+        64
+    )
+    .is_err());
+    let long = path(&["result", "content", "0", "text", "$json", "0", "filename"]);
+    assert!(select_scalar(response.as_bytes(), &long, 4).is_err());
 }

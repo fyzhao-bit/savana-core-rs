@@ -41,9 +41,21 @@ serde_json.workspace = true
 signal-hook.workspace = true
 
 [dev-dependencies]
+savana-continuation-core = { path = "../savana-continuation-core" }
 tempfile = "=3.23.0"
+savana-approvald = { path = "../savana-approvald", features = ["test-support"] }
+
+[[test]]
+name = "planner_privacy_e2e"
+path = "tests/planner_privacy_e2e.rs"
+required-features = ["test-support"]
 
 [[test]]
 name = "macos_startup"
 path = "tests/macos_startup.rs"
 required-features = ["macos-development-authority"]
+
+[[example]]
+name = "structured_plan_eval"
+path = "examples/structured_plan_eval.rs"
+required-features = ["test-support"]

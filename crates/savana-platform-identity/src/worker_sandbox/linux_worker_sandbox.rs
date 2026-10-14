@@ -5,6 +5,7 @@ use std::fs::OpenOptions;
 use std::io;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
 use nix::libc;
@@ -78,6 +79,11 @@ pub(super) fn enter_and_exec(
     close_untrusted_descriptors()?;
     apply_resource_limits(&profile)?;
     install_landlock(worker, &profile.read_only_paths)?;
+    // Rule construction needs both a ruleset and a path descriptor in addition
+    // to stdin/stdout/stderr. Drop those temporary descriptors before applying
+    // the worker's final limit, which may legitimately be only four. No worker
+    // executes until this limit and seccomp have both been installed.
+    apply_open_file_limit(profile.open_file_limit)?;
     install_seccomp()?;
     exec_worker(worker, worker_arguments)
 }
@@ -108,7 +114,6 @@ fn apply_resource_limits(
         (libc::RLIMIT_AS, profile.memory_limit_bytes),
         (libc::RLIMIT_CPU, profile.cpu_time_seconds),
         (libc::RLIMIT_FSIZE, profile.output_file_limit_bytes),
-        (libc::RLIMIT_NOFILE, profile.open_file_limit),
         (libc::RLIMIT_NPROC, profile.process_limit),
         (libc::RLIMIT_CORE, 0),
     ] {
@@ -121,6 +126,19 @@ fn apply_resource_limits(
         if unsafe { libc::setrlimit(resource, &limit) } != 0 {
             return Err(WorkerSandboxErrorV2::SandboxUnavailable);
         }
+    }
+    Ok(())
+}
+
+fn apply_open_file_limit(value: u64) -> Result<(), WorkerSandboxErrorV2> {
+    let limit = libc::rlimit {
+        rlim_cur: value,
+        rlim_max: value,
+    };
+    // SAFETY: limit is initialized; failure aborts before exec, just as the
+    // other resource limits do. This does not increase the requested limit.
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+        return Err(WorkerSandboxErrorV2::SandboxUnavailable);
     }
     Ok(())
 }
@@ -154,6 +172,10 @@ fn install_landlock(
         worker,
         LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE,
     )?;
+    // ELF startup also executes the system interpreter. Permit the exact
+    // root-owned glibc loader for the supported architecture, never EXECUTE
+    // on an entire runtime directory or a caller-selected interpreter.
+    add_system_loader_rule(ruleset.0)?;
     for path in default_runtime_read_paths()
         .into_iter()
         .chain(configured_read_paths.iter().cloned())
@@ -231,9 +253,17 @@ fn add_landlock_path_rule(
         .read(true)
         .open(path)
         .map_err(|_| WorkerSandboxErrorV2::SandboxUnavailable)?;
+    add_landlock_descriptor_rule(ruleset_fd, file.as_raw_fd(), allowed_access)
+}
+
+fn add_landlock_descriptor_rule(
+    ruleset_fd: i32,
+    parent_fd: i32,
+    allowed_access: u64,
+) -> Result<(), WorkerSandboxErrorV2> {
     let attributes = LandlockPathBeneathAttr {
         allowed_access,
-        parent_fd: file.as_raw_fd(),
+        parent_fd,
         reserved: 0,
     };
     // SAFETY: both file descriptors remain live across the syscall and the
@@ -258,6 +288,35 @@ fn default_runtime_read_paths() -> Vec<PathBuf> {
         .into_iter()
         .map(PathBuf::from)
         .collect()
+}
+
+fn add_system_loader_rule(ruleset_fd: i32) -> Result<(), WorkerSandboxErrorV2> {
+    #[cfg(target_arch = "x86_64")]
+    let path = Path::new("/lib64/ld-linux-x86-64.so.2");
+    #[cfg(target_arch = "aarch64")]
+    let path = Path::new("/lib/ld-linux-aarch64.so.1");
+    let file = match OpenOptions::new().read(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(WorkerSandboxErrorV2::SandboxUnavailable),
+    };
+    let metadata = file
+        .metadata()
+        .map_err(|_| WorkerSandboxErrorV2::SandboxUnavailable)?;
+    if !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.gid() != 0
+        || metadata.mode() & 0o022 != 0
+        || metadata.mode() & 0o111 == 0
+    {
+        return Err(WorkerSandboxErrorV2::SandboxUnavailable);
+    }
+    // Bind the rule to this verified descriptor, not a second pathname lookup.
+    add_landlock_descriptor_rule(
+        ruleset_fd,
+        file.as_raw_fd(),
+        LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE,
+    )
 }
 
 fn install_seccomp() -> Result<(), WorkerSandboxErrorV2> {

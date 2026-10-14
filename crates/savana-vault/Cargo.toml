@@ -10,7 +10,6 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-savana-approvald = { path = "../savana-approvald" }
 savana-kernel-protocol = { path = "../savana-kernel-protocol" }
 thiserror.workspace = true
 aes-gcm.workspace = true

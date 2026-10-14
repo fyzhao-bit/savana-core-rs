@@ -1,0 +1,15 @@
+[Unit]
+Description=Savana isolated TPM authority endpoint
+
+[Socket]
+ListenStream=/run/savana-tpm/authority-v3.sock
+FileDescriptorName=tpm-authority-v3
+SocketUser=root
+SocketGroup=savana-kernel
+SocketMode=0660
+DirectoryMode=0755
+RemoveOnStop=yes
+Service=savana-tpm-authority-v3.service
+
+[Install]
+WantedBy=savana-kernel.target

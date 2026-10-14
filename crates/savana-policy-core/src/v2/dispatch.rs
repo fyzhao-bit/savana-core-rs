@@ -426,9 +426,13 @@ pub struct DispatchCoreV2 {
     pub(crate) executor_key_id: HpkeX25519KeyIdV2,
     pub(crate) executor_connector_registry_digest: Digest32V2,
     pub(crate) expires_at: UnixMillisV2,
+    pub(crate) task_binding: Option<savana_kernel_protocol::v2::DispatchTaskBindingV2>,
 }
 
 impl DispatchCoreV2 {
+    pub const fn task_binding(&self) -> Option<savana_kernel_protocol::v2::DispatchTaskBindingV2> {
+        self.task_binding
+    }
     pub const fn installation_id(&self) -> Digest32V2 {
         self.installation_id
     }
@@ -488,7 +492,9 @@ impl<C> minicbor::Encode<C> for DispatchCoreV2 {
         encoder: &mut minicbor::Encoder<W>,
         context: &mut C,
     ) -> Result<(), minicbor::encode::Error<W::Error>> {
-        encoder.array(14)?.u16(2)?;
+        encoder
+            .array(if self.task_binding.is_some() { 15 } else { 14 })?
+            .u16(if self.task_binding.is_some() { 3 } else { 2 })?;
         self.installation_id.encode(encoder, context)?;
         self.active_state_manifest_digest.encode(encoder, context)?;
         encoder
@@ -504,6 +510,9 @@ impl<C> minicbor::Encode<C> for DispatchCoreV2 {
         self.executor_connector_registry_digest
             .encode(encoder, context)?;
         self.expires_at.encode(encoder, context)?;
+        if let Some(binding) = self.task_binding {
+            binding.encode(encoder, context)?;
+        }
         Ok(())
     }
 }
@@ -660,6 +669,7 @@ impl KernelDispatchJournalV2 {
         Ok(projection)
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_tool_or_replay(
         &mut self,
         record: &ActionIntentRecordV2,
@@ -695,10 +705,36 @@ impl KernelDispatchJournalV2 {
         sealed_envelope_digest: Digest32V2,
         connector_registry_digest: Digest32V2,
     ) -> Result<DispatchPreparationV2, G4Error> {
+        if ticket.action_intent_id != record.action_intent_id
+            || ticket.semantic_binding_digest != record.semantic_binding_digest
+        {
+            return Err(G4Error::StateConflict);
+        }
         if let Some(existing) = self.entries.iter().find(|entry| {
             entry.core.subject.tool_action_intent_id() == Some(record.action_intent_id)
         }) {
-            if existing.consumed_ticket_digest != ticket.ticket_digest
+            let replay_approval = match (decision, approval) {
+                (G5DecisionBranchV2::Permit, None) => None,
+                (G5DecisionBranchV2::RequireApproval, Some(a))
+                    if a.action_intent_id == record.action_intent_id
+                        && a.active_state_manifest_digest
+                            == record.active_state_manifest_digest
+                        && a.approval_binding_digest
+                            == super::intent::tool_approval_binding_digest_v2(
+                                record.action_intent_id,
+                                record.semantic_binding_digest,
+                                record.active_state_manifest_digest,
+                            )? =>
+                {
+                    Some(a.settlement_digest)
+                }
+                _ => return Err(G4Error::StateConflict),
+            };
+            if !matches!(&existing.core.subject, DispatchSubjectV2::ToolExecution {binding,approval_settlement_digest,..}
+                if binding == record.binding() && *approval_settlement_digest == replay_approval)
+                || existing.core.durable_task_id != record.durable_task_id
+                || existing.core.durable_run_id != record.durable_run_id
+                || existing.consumed_ticket_digest != ticket.ticket_digest
                 || existing.sealed_envelope_digest != sealed_envelope_digest
                 || existing.core.installation_id != authority.installation_id
                 || existing.core.active_state_manifest_digest
@@ -775,6 +811,7 @@ impl KernelDispatchJournalV2 {
             executor_key_id: authority.executor_key_id,
             executor_connector_registry_digest: connector_registry_digest,
             expires_at: authority.expires_at,
+            task_binding: None,
         };
         let core_digest = dispatch_core_digest(&core)?;
         self.entries
@@ -796,6 +833,7 @@ impl KernelDispatchJournalV2 {
         Ok(result)
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_final_release_or_replay(
         &mut self,
         record: &VerifiedFinalReleaseDispatchV2,
@@ -828,6 +866,14 @@ impl KernelDispatchJournalV2 {
         sealed_envelope_digest: Digest32V2,
         connector_registry_digest: Digest32V2,
     ) -> Result<DispatchPreparationV2, G4Error> {
+        if ticket.durable_release_id != record.durable_release_id
+            || ticket.binding_digest != record.binding_digest
+            || approval.durable_release_id != record.durable_release_id
+            || approval.binding_digest != record.binding_digest
+            || approval.active_state_manifest_digest != record.active_state_manifest_digest
+        {
+            return Err(G4Error::StateConflict);
+        }
         if let Some(existing) = self.entries.iter().find(|entry| {
             entry.core.subject.durable_release_id() == Some(record.durable_release_id)
         }) {
@@ -838,7 +884,9 @@ impl KernelDispatchJournalV2 {
                     approval_settlement_digest,
                 } if binding == record.binding
                     && approval_settlement_digest == approval.settlement_digest
-            ) || existing.consumed_ticket_digest != ticket.ticket_digest
+            ) || existing.core.durable_task_id != record.durable_task_id
+                || existing.core.durable_run_id != record.durable_run_id
+                || existing.consumed_ticket_digest != ticket.ticket_digest
                 || existing.sealed_envelope_digest != sealed_envelope_digest
                 || existing.core.installation_id != authority.installation_id
                 || existing.core.active_state_manifest_digest
@@ -909,6 +957,7 @@ impl KernelDispatchJournalV2 {
             executor_key_id: authority.executor_key_id,
             executor_connector_registry_digest: connector_registry_digest,
             expires_at: authority.expires_at,
+            task_binding: None,
         };
         let core_digest = dispatch_core_digest(&core)?;
         let quota_subject =
@@ -1055,6 +1104,27 @@ impl SignedExecutorDispositionReceiptV2 {
         })
     }
 
+    /// Reconcile a historical terminal fact, never grant another execution.
+    /// A dispatch deadline limits starting effects, not receipt delivery.
+    pub(crate) fn verify_terminal_for_entry(
+        &self,
+        entry: &KernelDispatchJournalEntryV2,
+        expected_key_id: Ed25519KeyIdV2,
+        public_key: [u8; 32],
+        now: UnixMillisV2,
+    ) -> Result<VerifiedExecutorDispositionV2, G4Error> {
+        let payload = decode_receipt_payload(&self.canonical_payload)?;
+        if payload.issued_at.get() > now.get()
+            || !matches!(
+                payload.kind,
+                ExecutorDispositionKindV2::KnownSuccess | ExecutorDispositionKindV2::FailedNoEffect
+            )
+        {
+            return Err(G4Error::StateConflict);
+        }
+        self.verify_stored_for_entry(entry, expected_key_id, public_key)
+    }
+
     pub(crate) fn verify_stored_for_entry(
         &self,
         entry: &KernelDispatchJournalEntryV2,
@@ -1143,17 +1213,6 @@ struct ExecutorDispositionReceiptPayloadV2 {
 }
 
 impl VerifiedExecutorDispositionV2 {
-    #[cfg(test)]
-    pub(crate) fn effect_started_for_test(entry: &KernelDispatchJournalEntryV2, seed: u8) -> Self {
-        Self {
-            execution_nonce: entry.core.execution_nonce,
-            dispatch_core_digest: entry.core_digest,
-            dispatch_subject_digest: entry.core.dispatch_subject_digest,
-            evidence_digest: Digest32V2::new([seed; 32]),
-            disposition: AuthenticatedEffectDispositionV2::effect_started_for_test(),
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn effect_started_from_preparation_for_test(
         preparation: DispatchPreparationV2,
@@ -1319,7 +1378,7 @@ fn decode_fixed<const N: usize>(decoder: &mut minicbor::Decoder<'_>) -> Result<[
         .map_err(|_| G4Error::StateConflict)
 }
 
-fn preparation(
+pub(crate) fn preparation(
     entry: &KernelDispatchJournalEntryV2,
     kind: DispatchPreparationKindV2,
 ) -> DispatchPreparationV2 {

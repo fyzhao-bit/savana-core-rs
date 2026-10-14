@@ -166,10 +166,6 @@ pub(crate) struct ConnectorRegistryMutationV2 {
 }
 
 impl ConnectorRegistryMutationV2 {
-    pub(crate) fn canonical_delta(&self) -> &[u8] {
-        &self.canonical_delta
-    }
-
     pub(crate) const fn signed_delta_digest(&self) -> Digest32V2 {
         self.signed_delta_digest
     }
@@ -184,10 +180,6 @@ impl ConnectorRegistryMutationV2 {
 
     pub(crate) const fn connector_id(&self) -> Digest32V2 {
         self.connector_id
-    }
-
-    pub(crate) const fn is_add(&self) -> bool {
-        self.add
     }
 }
 
@@ -222,14 +214,6 @@ pub(crate) struct ConnectorRegistrySnapshotV2 {
 impl ConnectorRegistrySnapshotV2 {
     pub(crate) fn canonical_bytes(&self) -> &[u8] {
         &self.canonical_bytes
-    }
-
-    pub(crate) const fn head_digest(&self) -> Digest32V2 {
-        self.head_digest
-    }
-
-    pub(crate) const fn sequence(&self) -> u64 {
-        self.sequence
     }
 }
 
@@ -1234,19 +1218,6 @@ impl KernelConnectorAuthorityV2 {
         self.persist_state(&candidate, current.head_digest(), None)?;
         self.state = candidate;
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn shared_registry_for_test(&self) -> SharedVerifiedConnectorRegistryV2 {
-        self.shared_registry.clone()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn replace_shared_registry_for_test(
-        &mut self,
-        shared_registry: SharedVerifiedConnectorRegistryV2,
-    ) {
-        self.shared_registry = shared_registry;
     }
 
     #[cfg(test)]

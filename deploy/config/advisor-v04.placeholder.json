@@ -1,0 +1,15 @@
+{
+  "schema": "savana-advisor-placeholder-v04",
+  "enabled": false,
+  "provider": "google-cloud-self-hosted",
+  "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+  "project_id": null,
+  "region": null,
+  "endpoint": null,
+  "model_revision": null,
+  "image_digest": null,
+  "input_policy": "kernel-approved-frozen-review-view-only",
+  "raw_private_data_allowed": false,
+  "business_credentials_allowed": false,
+  "note": "Declarative placeholder only; no runtime loader or live cloud deployment."
+}

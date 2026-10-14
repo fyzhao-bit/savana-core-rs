@@ -237,7 +237,7 @@ impl Session {
         result
     }
 
-    fn ingress_mutation(
+    pub(crate) fn ingress_mutation(
         &self,
         route: BrowserRoute,
         request: IngressBrowserRequestV2,

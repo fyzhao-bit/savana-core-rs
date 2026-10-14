@@ -32,6 +32,9 @@ Every inherited listener is rechecked again by the owning daemon before
 readiness. Kerneld verifies both role-separated UDS listeners from their edge
 locks; approvald verifies its agent and ingress UDS listeners against the
 corresponding client service groups and its admin listener as root-only.
+The opt-in `kernel_approval` blocks add a fifth Approvald descriptor for Kerneld
+only, together with a separate client signing credential and exact native peer
+verification. See the [Linux private approval wiring contract](../../docs/verification/kernel-approval-linux-v04.md).
 
 Systemd encrypted credentials currently support integration deployment only.
 They do not satisfy the production claim for non-exportable signing,
@@ -44,7 +47,20 @@ integration build with the explicit
 `savana-policy-core/filesystem-integration-authority` Cargo feature only for
 local/server UI wiring tests. A normal debug build also rejects this adapter.
 
+The [Linux file-backed integration authoring tool](../../docs/verification/linux-file-backed-integration.md)
+can sign measured Linux service/edge locks for that explicit debug profile.
+It does not yet provision a complete installation, and a signed manifest alone
+does not pass the separate signed-ledger startup check.
+
 ## Native Linux worker sandbox
+
+Cross-UID process measurements now require the separate, fixed-path native
+identity broker and its exact directional executable allowlist. Ordinary service
+capability sets and `ProtectProc` are unchanged. This is an additional privileged
+TCB component, not a native hardware authority. See
+[the broker provisioning and acceptance contract](../../docs/verification/linux-identity-broker-v2.md).
+
+## Worker execution
 
 Install the `savana-worker-sandbox` binary from `savana-platform-identity` as
 the measured sandbox program used by ingressd and execd. The three profiles

@@ -386,6 +386,69 @@ fn effect_authorizing_set_covers_every_effect_except_read() {
 }
 
 #[test]
+fn deployment_write_tool_must_declare_intent_flow_confinement() {
+    use crate::v2::validator::{
+        deployment_requires_intent_flow_confinement, EFFECT_STATE_CHANGING_V2,
+    };
+    use crate::v2::EffectSetV2;
+
+    let confinement = InternalValidatorDeclarationV2::new(
+        InternalValidatorImplementationKindV2::IntentFlowConfinement.implementation_id(),
+        VersionV2::new(1, 0, 0),
+        Digest32V2::new([7; 32]),
+    );
+    let other = InternalValidatorDeclarationV2::new(
+        InternalValidatorImplementationKindV2::ProjectionBindingIntegrity.implementation_id(),
+        VersionV2::new(1, 0, 0),
+        Digest32V2::new([9; 32]),
+    );
+
+    // The state-changing set is the authorizing set without final release.
+    assert!(!EFFECT_STATE_CHANGING_V2.contains(EffectSetV2::FINAL_RELEASE));
+    assert!(!EFFECT_STATE_CHANGING_V2.contains(EffectSetV2::READ));
+
+    // Reads and the final-release tool ship with no validator.
+    assert!(deployment_requires_intent_flow_confinement(
+        EffectSetV2::READ,
+        &[]
+    ));
+    assert!(deployment_requires_intent_flow_confinement(
+        EffectSetV2::FINAL_RELEASE,
+        &[]
+    ));
+
+    // Every state-changing effect needs the confinement validator; a different
+    // validator (or none) is refused, the confinement one (even alongside
+    // another) is accepted.
+    for effect in [
+        EffectSetV2::CREATE,
+        EffectSetV2::UPDATE,
+        EffectSetV2::DELETE,
+        EffectSetV2::SEND,
+        EffectSetV2::EXECUTE,
+    ] {
+        assert!(!deployment_requires_intent_flow_confinement(effect, &[]));
+        assert!(!deployment_requires_intent_flow_confinement(
+            effect,
+            std::slice::from_ref(&other)
+        ));
+        assert!(deployment_requires_intent_flow_confinement(
+            effect,
+            std::slice::from_ref(&confinement)
+        ));
+        assert!(deployment_requires_intent_flow_confinement(
+            effect,
+            &[other, confinement]
+        ));
+        // A write that also reads still needs it.
+        assert!(!deployment_requires_intent_flow_confinement(
+            effect.union(EffectSetV2::READ),
+            &[]
+        ));
+    }
+}
+
+#[test]
 fn intent_flow_confinement_has_its_own_closed_implementation_id() {
     // The kind must be distinct from the five pre-existing validators and must
     // keep implementation id 6; `savana-kerneld`'s startup decoder maps that
@@ -503,4 +566,57 @@ fn binding_validators_deny_and_flow_confinement_escalates() {
         InternalValidatorImplementationKindV2::IntentFlowConfinement.failure_branch(),
         B::RequireApproval
     );
+}
+
+#[test]
+fn address_confinement_is_fail_closed_for_every_effect() {
+    use crate::v2::validator::address_flow_is_confined;
+    use crate::v2::IntegrityV2::{ExternalUntrusted as U, UserAuthorized as A};
+    use savana_kernel_protocol::v2::*;
+
+    // A read profile whose address is the destination field.
+    let read = BusinessProfileV2::new(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        "web.get",
+        Digest32V2::new([30; 32]),
+        Digest32V2::new([31; 32]),
+        TaskEffectV2::Read,
+        BusinessMagnitudeV2::FixedCount(1),
+        vec![
+            BusinessFieldV2::new(
+                "body",
+                BusinessFieldRoleV2::Payload,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+            BusinessFieldV2::new(
+                "query",
+                BusinessFieldRoleV2::Resource,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+            BusinessFieldV2::new(
+                "url",
+                BusinessFieldRoleV2::Destination,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let p = Some(&read);
+    // Fetched content may fill a query term or a payload of a read...
+    assert!(address_flow_is_confined(
+        p,
+        [("query", U), ("body", U), ("url", A)].into_iter()
+    ));
+    // ...but never the address the read goes to.
+    assert!(!address_flow_is_confined(p, [("url", U)].into_iter()));
+    // An argument the signed profile does not name is treated as an address.
+    assert!(!address_flow_is_confined(p, [("cc", U)].into_iter()));
+    assert!(address_flow_is_confined(p, [("cc", A)].into_iter()));
+    // A descriptor without a business profile names no non-address field:
+    // every untrusted argument escalates.
+    assert!(!address_flow_is_confined(None, [("query", U)].into_iter()));
+    assert!(address_flow_is_confined(None, [("query", A)].into_iter()));
 }

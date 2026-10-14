@@ -18,9 +18,13 @@ libsavana-ner = { path = "../libsavana-ner" }
 minicbor.workspace = true
 savana-client = { path = "../savana-client" }
 savana-kernel-protocol = { path = "../savana-kernel-protocol" }
+savana-leak-gate = { path = "../savana-leak-gate" }
 savana-openclaw-release = { path = "../savana-openclaw-release" }
 zeroize.workspace = true
 # abi3-py312: build ONE stable-ABI wheel (cp312-abi3) per platform — forward-
 # compatible with 3.13+, and (crucially) needs no per-interpreter match, so the
 # manylinux container build doesn't have to locate a specific `python3`.
 pyo3 = { version = "0.22", features = ["extension-module", "abi3-py312"] }
+
+[build-dependencies]
+pyo3-build-config = "=0.22.6"

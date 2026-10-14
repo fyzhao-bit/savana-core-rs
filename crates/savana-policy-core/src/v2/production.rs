@@ -18,7 +18,7 @@ use super::{
     ArgumentNameV2, AttemptKindV2, ConnectorRegistryStateV2, G3Error, G4Error, G5Error,
     G5PolicyDispositionV2, KernelValueV2, OntologyExprV2, ValidatorBuildManifestIdentityV2,
     VerifiedInternalValidatorImplementationV2, VerifiedInternalValidatorRegistryV2,
-    VerifiedOntologySetV2, VerifiedQuotaLimitV2,
+    VerifiedQuotaLimitV2,
 };
 
 /// Shared access to one verified connector chain and its current standing-policy
@@ -120,7 +120,6 @@ impl VerifiedOntologyEvaluationV2 {
         expression: &OntologyExprV2,
         arguments: Vec<(ArgumentNameV2, &KernelValueV2)>,
         ontology: Vec<((NamespaceIdV2, EntityIdV2), &KernelValueV2)>,
-        sets: Vec<VerifiedOntologySetV2>,
         role: RoleIdV2,
         tool: ToolClassIdV2,
         attempt_kind: AttemptKindV2,
@@ -130,7 +129,6 @@ impl VerifiedOntologyEvaluationV2 {
         let context = OntologyEvaluationContextV2::new(
             arguments,
             ontology,
-            sets,
             role,
             tool,
             attempt_kind,
@@ -466,6 +464,7 @@ impl VerifiedFinalReleaseSettlementV2 {
 /// is represented only by its digest and cannot be replayed as a capability.
 #[derive(Debug, Clone)]
 pub struct KernelPreparedDispatchV2 {
+    task_binding: super::TaskDispatchBindingV2,
     preparation: DispatchPreparationV2,
     core: DispatchCoreV2,
     consumed_ticket_digest: Digest32V2,
@@ -478,8 +477,10 @@ impl KernelPreparedDispatchV2 {
         core: DispatchCoreV2,
         consumed_ticket_digest: Digest32V2,
         sealed_envelope_digest: Digest32V2,
+        task_binding: super::TaskDispatchBindingV2,
     ) -> Self {
         Self {
+            task_binding,
             preparation,
             core,
             consumed_ticket_digest,
@@ -489,6 +490,10 @@ impl KernelPreparedDispatchV2 {
 
     pub const fn preparation(&self) -> DispatchPreparationV2 {
         self.preparation
+    }
+
+    pub const fn task_binding(&self) -> &super::TaskDispatchBindingV2 {
+        &self.task_binding
     }
 
     pub const fn core(&self) -> &DispatchCoreV2 {

@@ -65,9 +65,9 @@ use crate::v2_state_owner::{StateOwnerCommitV2, StateOwnerErrorV2};
 use crate::v2_value_owner::{KernelValueErrorV2, KernelValueOwnerV2};
 
 const REQUIRED_AGENT_KERNEL_ROUTES_V2: usize = 27;
-const REQUIRED_INGRESS_KERNEL_ROUTES_V2: usize = 12;
+const REQUIRED_INGRESS_KERNEL_ROUTES_V2: usize = 16;
 const IMPLEMENTED_AGENT_KERNEL_ROUTES_V2: usize = 27;
-const IMPLEMENTED_INGRESS_KERNEL_ROUTES_V2: usize = 12;
+const IMPLEMENTED_INGRESS_KERNEL_ROUTES_V2: usize = 16;
 
 pub(crate) trait KernelIngressCommitSinkV2: Send + 'static {
     #[allow(clippy::too_many_arguments)]
@@ -116,6 +116,16 @@ pub(crate) trait KernelIngressCommitSinkV2: Send + 'static {
         now: UnixMillisV2,
     ) -> Result<savana_vault::AuthorizedVaultReleaseV2, StableCode>;
 
+    fn prepare_fused_result_release(
+        &mut self,
+        _candidate: &savana_policy_core::v2::FusedFinalResultCandidateV04,
+        _principal: PrincipalIdV2,
+        _material: savana_vault::VaultReleaseMaterialV2,
+        _now: UnixMillisV2,
+    ) -> Result<savana_vault::PendingVaultReleaseV2, StableCode> {
+        Err(StableCode::KernelUnavailable)
+    }
+
     fn mark_release_dispatch_prepared(
         &mut self,
         authorized: savana_vault::AuthorizedVaultReleaseV2,
@@ -146,6 +156,20 @@ pub(crate) trait KernelIngressCommitSinkV2: Send + 'static {
         now: UnixMillisV2,
     ) -> Result<(), StableCode>;
 
+    #[allow(clippy::too_many_arguments)]
+    fn commit_recovered_release(
+        &mut self,
+        _release: savana_kernel_protocol::v2::DurableReleaseIdV2,
+        _nonce: savana_kernel_protocol::v2::Nonce32V2,
+        _core: Digest32V2,
+        _subject: Digest32V2,
+        _receipt: Digest32V2,
+        _audit: Digest32V2,
+        _now: UnixMillisV2,
+    ) -> Result<(), StableCode> {
+        Err(StableCode::KernelUnavailable)
+    }
+
     fn mark_release_indeterminate(
         &mut self,
         prepared: savana_vault::VaultDispatchPreparedV2,
@@ -164,6 +188,19 @@ pub(crate) trait KernelIngressCommitSinkV2: Send + 'static {
         expires_at: UnixMillisV2,
         now: UnixMillisV2,
     ) -> Result<MaskedDocumentHandleV2, StableCode>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn recover_tool_result(
+        &mut self,
+        _task: DurableTaskIdV2,
+        _run: savana_kernel_protocol::v2::DurableRunIdV2,
+        _principal: PrincipalIdV2,
+        _commit: Digest32V2,
+        _expires_at: UnixMillisV2,
+        _now: UnixMillisV2,
+    ) -> Result<MaskedDocumentHandleV2, StableCode> {
+        Err(StableCode::KernelUnavailable)
+    }
 }
 
 pub(crate) struct CoreKernelRuntimeServicesV2 {
@@ -562,6 +599,7 @@ impl CoreKernelRuntimeServicesV2 {
                         deployment_generation,
                     )
                     .map_err(|error| map_connector_authority_error_for_tag(73, error))?;
+                agent_authority.refresh_user_registered_tools();
                 agent_authority
                     .synchronize_executor_connector_registry(
                         active_state_manifest_digest,
@@ -619,6 +657,7 @@ impl CoreKernelRuntimeServicesV2 {
                         now,
                     )
                     .map_err(|error| map_connector_authority_error_for_tag(75, error))?;
+                agent_authority.refresh_user_registered_tools();
                 agent_authority
                     .synchronize_executor_connector_registry(
                         active_state_manifest_digest,
@@ -661,6 +700,7 @@ impl CoreKernelRuntimeServicesV2 {
         typed_body(canonical)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_finalize_input_prepared(
         &mut self,
         request: savana_kernel_protocol::v2::FinalizeInputRequestV2,
@@ -1041,6 +1081,7 @@ impl CoreKernelRuntimeServicesV2 {
                         &self.values,
                         caller_identity,
                         active_state_manifest_digest,
+                        deployment_generation,
                         now,
                     )
                     .map_err(map_agent_authority_error)?;
@@ -1401,23 +1442,56 @@ impl CoreKernelRuntimeServicesV2 {
                             .ok_or(StableCode::KernelUnavailable)?
                             .finalized_for_verified_approval(record_index)
                             .map_err(map_ingress_authority_error)?;
-                        let material = self
-                            .ingress_commit_sink
-                            .as_mut()
+                        let source = finalized.input_commitment();
+                        let recovered = self
+                            .agent_authority
+                            .as_ref()
                             .ok_or(StableCode::KernelUnavailable)?
-                            .commit(
+                            .ingress_material_is_committed(
                                 durable_task_id,
                                 principal,
-                                finalized,
+                                source,
                                 active_state_manifest_digest,
-                                deployment_generation,
-                                now,
-                            )?;
+                            )
+                            .map_err(map_agent_authority_error)?;
+                        // A retry after the durable agent handoff must retain
+                        // the original document, provenance and expiry. Calling
+                        // the sink again would mint different claim material.
+                        if !recovered {
+                            let material = self
+                                .ingress_commit_sink
+                                .as_mut()
+                                .ok_or(StableCode::KernelUnavailable)?
+                                .commit(
+                                    durable_task_id,
+                                    principal,
+                                    finalized,
+                                    active_state_manifest_digest,
+                                    deployment_generation,
+                                    now,
+                                )?;
+                            self.agent_authority
+                                .as_mut()
+                                .ok_or(StableCode::KernelUnavailable)?
+                                .mark_ingress_committed(
+                                    durable_task_id,
+                                    principal,
+                                    source,
+                                    material,
+                                )
+                                .map_err(map_agent_authority_error)?;
+                        }
                         self.agent_authority
                             .as_mut()
                             .ok_or(StableCode::KernelUnavailable)?
-                            .mark_ingress_committed(durable_task_id, principal, material)
-                            .map_err(map_agent_authority_error)?;
+                            .activate_committed_task_authorization(
+                                durable_task_id,
+                                principal,
+                                active_state_manifest_digest,
+                                deployment_generation,
+                                now,
+                            )
+                            .map_err(map_task_authority_error)?;
                         self.ingress_authority
                             .as_mut()
                             .ok_or(StableCode::KernelUnavailable)?
@@ -1429,6 +1503,229 @@ impl CoreKernelRuntimeServicesV2 {
                 encode_commit_input_settlement_response_v2(&CommitInputSettlementResponseV2::new(
                     state,
                 ))
+            }
+            KernelIngressOperationV2::EstablishTaskAuthorization(request) => {
+                let proof = self
+                    .input
+                    .authenticate_task_draft_submission(
+                        request.session(),
+                        request.draft(),
+                        active_state_manifest_digest,
+                        deployment_generation,
+                        now,
+                    )
+                    .map_err(map_input_error)?;
+                let response = self
+                    .agent_authority
+                    .as_mut()
+                    .ok_or(StableCode::KernelUnavailable)?
+                    .establish_task_authorization(&request, &proof, now)
+                    .map_err(|e| match e {
+                        crate::v2_task_authority::TaskAuthorityErrorV2::Unavailable => {
+                            StableCode::KernelUnavailable
+                        }
+                        _ => StableCode::PolicyDenied,
+                    })?;
+                savana_kernel_protocol::v2::encode_establish_task_authorization_response_v2(
+                    &response,
+                )
+            }
+            KernelIngressOperationV2::OpenPrivateSessionV04(request) => {
+                let subject = self
+                    .input
+                    .authenticate_task_context(
+                        &request,
+                        active_state_manifest_digest,
+                        deployment_generation,
+                        now,
+                    )
+                    .map_err(map_input_error)?;
+                let transfer = self
+                    .agent_authority
+                    .as_mut()
+                    .ok_or(StableCode::KernelUnavailable)?
+                    .open_private_session_v04(&subject, now)
+                    .map_err(map_agent_authority_error)?;
+                savana_kernel_protocol::v2::encode_private_session_begin_v04(transfer)
+            }
+            KernelIngressOperationV2::GetTaskAuthorizationContext(request) => {
+                let subject = self
+                    .input
+                    .authenticate_task_context(
+                        &request,
+                        active_state_manifest_digest,
+                        deployment_generation,
+                        now,
+                    )
+                    .map_err(map_input_error)?;
+                let context = self
+                    .agent_authority
+                    .as_ref()
+                    .ok_or(StableCode::KernelUnavailable)?
+                    .task_authorization_context(&subject, now)
+                    .map_err(map_task_authority_error)?;
+                savana_kernel_protocol::v2::encode_task_authorization_context_v2(&context)
+            }
+            KernelIngressOperationV2::RecoverTaskAuthorization(request) => {
+                use savana_kernel_protocol::v2::{
+                    EstablishTaskAuthorizationResponseV2,
+                    PrepareTaskAuthorizationApprovalResponseV2,
+                    RecoverTaskAuthorizationResponseV2 as R,
+                };
+                let agent = self
+                    .agent_authority
+                    .as_ref()
+                    .ok_or(StableCode::KernelUnavailable)?;
+                let pending = agent
+                    .recover_task_issuance_record(request.request_digest())
+                    .map_err(map_task_authority_error)?;
+                let proof = self
+                    .input
+                    .authenticate_task_recovery(
+                        request.authorization(),
+                        &pending,
+                        active_state_manifest_digest,
+                        deployment_generation,
+                        now,
+                    )
+                    .map_err(map_input_error)?;
+                agent
+                    .validate_task_issuance_recovery(&pending, now)
+                    .map_err(map_task_authority_error)?;
+                let response = if let Some(digest) = pending.installed_digest() {
+                    // Observation only: never invoke issuance or task activation.
+                    R::Installed(
+                        EstablishTaskAuthorizationResponseV2::new(pending.request_digest(), digest)
+                            .map_err(|_| StableCode::KernelUnavailable)?,
+                    )
+                } else {
+                    let (envelope, display) =
+                        match (pending.envelope(), pending.display_authentication()) {
+                            (Some(e), Some(d)) => (e.clone(), d.clone()),
+                            (None, None) => {
+                                let (e, d) = self
+                                    .ingress_authority
+                                    .as_ref()
+                                    .ok_or(StableCode::KernelUnavailable)?
+                                    .prepare_task_authorization_display(
+                                        pending.draft(),
+                                        &proof,
+                                        now,
+                                    )
+                                    .map_err(map_ingress_authority_error)?;
+                                self.agent_authority
+                                    .as_mut()
+                                    .ok_or(StableCode::KernelUnavailable)?
+                                    .attach_task_approval(
+                                        pending.request_digest(),
+                                        e.clone(),
+                                        d.clone(),
+                                        active_state_manifest_digest,
+                                        deployment_generation,
+                                        now,
+                                    )
+                                    .map_err(map_task_authority_error)?;
+                                (e, d)
+                            }
+                            _ => return Err(StableCode::KernelUnavailable),
+                        };
+                    R::Approval(
+                        PrepareTaskAuthorizationApprovalResponseV2::new(
+                            pending.request_digest(),
+                            envelope,
+                            display,
+                        )
+                        .map_err(|_| StableCode::KernelUnavailable)?,
+                    )
+                };
+                savana_kernel_protocol::v2::encode_recover_task_authorization_response_v2(&response)
+            }
+            KernelIngressOperationV2::RevokeTaskAuthorization(request) => {
+                let proof = self
+                    .input
+                    .authenticate_task_draft_submission(
+                        request.session(),
+                        request.draft(),
+                        active_state_manifest_digest,
+                        deployment_generation,
+                        now,
+                    )
+                    .map_err(map_input_error)?;
+                let response = self
+                    .agent_authority
+                    .as_mut()
+                    .ok_or(StableCode::KernelUnavailable)?
+                    .revoke_task_authorization(&request, &proof, now)
+                    .map_err(map_task_authority_error)?;
+                savana_kernel_protocol::v2::encode_revoke_task_authorization_response_v2(&response)
+            }
+            KernelIngressOperationV2::PrepareTaskAuthorizationApproval(request) => {
+                let proof = self
+                    .input
+                    .authenticate_task_draft_submission(
+                        request.session(),
+                        request.draft(),
+                        active_state_manifest_digest,
+                        deployment_generation,
+                        now,
+                    )
+                    .map_err(map_input_error)?;
+                let pending = self
+                    .agent_authority
+                    .as_mut()
+                    .ok_or(StableCode::KernelUnavailable)?
+                    .prepare_task_approval(&request, &proof, now)
+                    .map_err(map_task_authority_error)?;
+                let (envelope, display) =
+                    match (pending.envelope(), pending.display_authentication()) {
+                        (Some(e), Some(d)) => (e.clone(), d.clone()),
+                        (None, None) => {
+                            let (e, d) = self
+                                .ingress_authority
+                                .as_ref()
+                                .ok_or(StableCode::KernelUnavailable)?
+                                .prepare_task_authorization_display(pending.draft(), &proof, now)
+                                .map_err(map_ingress_authority_error)?;
+                            self.agent_authority
+                                .as_mut()
+                                .ok_or(StableCode::KernelUnavailable)?
+                                .attach_task_approval(
+                                    pending.request_digest(),
+                                    e.clone(),
+                                    d.clone(),
+                                    active_state_manifest_digest,
+                                    deployment_generation,
+                                    now,
+                                )
+                                .map_err(map_task_authority_error)?;
+                            (e, d)
+                        }
+                        _ => return Err(StableCode::KernelUnavailable),
+                    };
+                savana_kernel_protocol::v2::encode_prepare_task_authorization_approval_response_v2(
+                    &savana_kernel_protocol::v2::PrepareTaskAuthorizationApprovalResponseV2::new(
+                        pending.request_digest(),
+                        envelope,
+                        display,
+                    )
+                    .map_err(|_| StableCode::KernelUnavailable)?,
+                )
+            }
+            KernelIngressOperationV2::CommitTaskAuthorizationApproval(request) => {
+                let response = self
+                    .agent_authority
+                    .as_mut()
+                    .ok_or(StableCode::KernelUnavailable)?
+                    .commit_task_approval(
+                        &request,
+                        active_state_manifest_digest,
+                        deployment_generation,
+                        now,
+                    )
+                    .map_err(map_task_authority_error)?;
+                savana_kernel_protocol::v2::encode_establish_task_authorization_response_v2(
+                    &response,
+                )
             }
             KernelIngressOperationV2::AbortInput(request) => {
                 let state = self.input.abort(request).map_err(map_input_error)?;
@@ -1512,6 +1809,44 @@ impl CoreKernelRuntimeServicesV2 {
 }
 
 impl KernelRuntimeServicesV2 for CoreKernelRuntimeServicesV2 {
+    fn tick_fused_planning(&mut self) -> Result<(), StableCode> {
+        if !self.readiness.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let Some(authority) = self.agent_authority.as_mut() else {
+            return Ok(());
+        };
+        // Read real wall time inside the owner, not when a tick entered its queue.
+        let mut failed_clock = false;
+        let result = authority.tick_private_workflows_v04(
+            &mut self.values,
+            self.ingress_commit_sink
+                .as_deref_mut()
+                .map(|s| s as &mut dyn KernelIngressCommitSinkV2),
+            || match crate::v04_managed_admin::now() {
+                Ok(now) => now,
+                Err(_) => {
+                    failed_clock = true;
+                    UnixMillisV2::new(0)
+                }
+            },
+        );
+        if failed_clock {
+            Err(StableCode::KernelUnavailable)
+        } else {
+            result
+        }
+    }
+    fn managed_admin(
+        &mut self,
+        submission: crate::v04_managed_admin::AdminSubmissionV04,
+    ) -> Result<savana_policy_core::v2::ManagedAdminReceiptV04, StableCode> {
+        self.agent_authority
+            .as_mut()
+            .ok_or(StableCode::KernelUnavailable)?
+            .apply_managed_admin(submission, &mut self.values)
+    }
+
     fn execute(
         &mut self,
         request: KernelRuntimeRequestV2,
@@ -1575,6 +1910,17 @@ fn prepare_finalize_terminal_response(
         })?;
     }
     response.commit_staged_suite_one()
+}
+
+const fn map_task_authority_error(
+    error: crate::v2_task_authority::TaskAuthorityErrorV2,
+) -> StableCode {
+    match error {
+        crate::v2_task_authority::TaskAuthorityErrorV2::Unavailable => {
+            StableCode::KernelUnavailable
+        }
+        _ => StableCode::PolicyDenied,
+    }
 }
 
 const fn map_input_error(error: KernelInputErrorV2) -> StableCode {
@@ -1682,8 +2028,7 @@ mod tests {
         decode_finalize_input_response_v2, decode_kernel_agent_health_response_v2,
         decode_kernel_ingress_health_response_v2, derive_ed25519_key_id_v2,
         encode_kernel_ingress_operation_v2, encode_kernel_service_application_request_v2,
-        encode_kernel_service_request_envelope_v2, input_channel_begin_digest_v2,
-        input_channel_step_digest_v2, input_chunk_digest_v2,
+        input_channel_begin_digest_v2, input_channel_step_digest_v2, input_chunk_digest_v2,
         kernel_service_public_error_is_allowed_v2, AbortInputRequestV2, AppendInputChunkRequestV2,
         BeginInputRequestV2, BootIdV2, ContentKindV2, Digest32V2, DirectInputChannelV2,
         EndpointRoleV2, FinalizeInputRequestV2, IngressUiAuthorizationHandleV2,
@@ -1692,9 +2037,9 @@ mod tests {
         KernelAgentOperationV2, KernelIngressHealthRequestV2, KernelIngressOperationV2,
         KernelServiceApplicationRequestV2, KernelServiceApplicationResponseBodyV2,
         KernelServiceApplicationResponseV2, KernelServiceHandshakeEdgeV2, KernelServiceOperationV2,
-        KernelServiceRequestEnvelopeV2, Nonce32V2, PeerIdentityBindingV2, PublicServiceStateV2,
-        PublicStableCodeV2, RequestIdV2, ServiceIdentityV2, UnixMillisV2, V2ClientHandshake,
-        V2ClientTransportSession, V2ServerHandshake, VersionV2, ZeroizingBytesV2,
+        Nonce32V2, PeerIdentityBindingV2, PublicServiceStateV2, PublicStableCodeV2, RequestIdV2,
+        ServiceIdentityV2, UnixMillisV2, V2ClientHandshake, V2ClientTransportSession,
+        V2ServerHandshake, VersionV2, ZeroizingBytesV2,
     };
     use savana_policy_core::v2::{
         declassification_implementation_digest_v2, ClosedDeclassificationPurposeV2,
@@ -2222,7 +2567,6 @@ mod tests {
         let shared = Arc::new(Mutex::new(services));
         let owner =
             KernelRuntimeOwnerV2::spawn(4, SharedCoreServicesV2(Arc::clone(&shared))).unwrap();
-        let signing_key = SigningKey::from_bytes(&[0xb4; 32]);
         let dispatcher = KernelServiceDispatcherV2::spawn(
             KernelServiceDeploymentV2::from_verified_startup(
                 BootIdV2::new([0xe6; 32]),
@@ -2231,8 +2575,6 @@ mod tests {
                 7,
             )
             .unwrap(),
-            derive_ed25519_key_id_v2(signing_key.verifying_key().to_bytes()),
-            signing_key,
             owner,
         )
         .unwrap();
@@ -2488,6 +2830,259 @@ mod tests {
     }
 
     #[test]
+    fn core_structured_task_handler_binds_finalized_input_and_returns_exact_retry_receipt() {
+        use crate::v2_agent_authority::tests::{planner_active_tools, task_issuer_agent_fixture};
+        use crate::v2_task_authority::tests::{draft, issuer, owner};
+        use savana_kernel_protocol::v2::{
+            decode_establish_task_authorization_response_v2, EstablishTaskAuthorizationRequestV2,
+            Nonce32V2,
+        };
+        let (input, session, commitment) =
+            crate::v2_input_owner::tests::finalized_task_input_fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let mut services = CoreKernelRuntimeServicesV2::new(4, 4096, 4, 32).unwrap();
+        services.input = input;
+        services
+            .install_agent_security(task_issuer_agent_fixture(owner(dir.path()), issuer()))
+            .unwrap();
+        let d = draft(&planner_active_tools(), commitment, 1, "Alice");
+        let request =
+            EstablishTaskAuthorizationRequestV2::new(session, d, Nonce32V2::new([88; 32])).unwrap();
+        let mut execute = |request: EstablishTaskAuthorizationRequestV2, id: u8| {
+            services.execute_operation(
+                RequestIdV2::new([id; 16]),
+                KernelServiceOperationV2::ingress(
+                    KernelIngressOperationV2::EstablishTaskAuthorization(request),
+                ),
+                UnixMillisV2::new(200),
+                Digest32V2::new([0x35; 32]),
+                7,
+                9,
+                ServiceIdentityV2::new([67; 32]),
+            )
+        };
+        let wrong = EstablishTaskAuthorizationRequestV2::new(
+            session,
+            draft(
+                &planner_active_tools(),
+                Digest32V2::new([89; 32]),
+                1,
+                "Alice",
+            ),
+            Nonce32V2::new([88; 32]),
+        )
+        .unwrap();
+        assert!(execute(wrong, 1).is_err());
+        let first = execute(request.clone(), 2).unwrap();
+        let second = execute(request, 3).unwrap();
+        assert_eq!(first.as_bytes(), second.as_bytes());
+        assert!(decode_establish_task_authorization_response_v2(first.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn core_task_approval_preparation_returns_the_same_persisted_display_pair() {
+        use crate::v2_agent_authority::tests::{planner_active_tools, task_issuer_agent_fixture};
+        use crate::v2_task_authority::tests::{draft, ingress, issuer, owner};
+        use savana_kernel_protocol::v2::{
+            decode_prepare_task_authorization_approval_response_v2, Nonce32V2,
+            PrepareTaskAuthorizationApprovalRequestV2,
+        };
+        let (input, session, commitment) =
+            crate::v2_input_owner::tests::finalized_task_input_fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let mut services = CoreKernelRuntimeServicesV2::new(4, 4096, 4, 32).unwrap();
+        services.input = input;
+        services.ingress_authority = Some(ingress(true));
+        services
+            .install_agent_security(task_issuer_agent_fixture(owner(dir.path()), issuer()))
+            .unwrap();
+        let request = PrepareTaskAuthorizationApprovalRequestV2::new(
+            session,
+            draft(&planner_active_tools(), commitment, 1, "Alice"),
+            Nonce32V2::new([88; 32]),
+        )
+        .unwrap();
+        let mut execute = |id: u8| {
+            services.execute_operation(
+                RequestIdV2::new([id; 16]),
+                KernelServiceOperationV2::ingress(
+                    KernelIngressOperationV2::PrepareTaskAuthorizationApproval(request.clone()),
+                ),
+                UnixMillisV2::new(200),
+                Digest32V2::new([0x35; 32]),
+                7,
+                9,
+                ServiceIdentityV2::new([67; 32]),
+            )
+        };
+        let first = execute(1).unwrap();
+        let retry = execute(2).unwrap();
+        assert_eq!(first.as_bytes(), retry.as_bytes());
+        let decoded =
+            decode_prepare_task_authorization_approval_response_v2(first.as_bytes()).unwrap();
+        assert_eq!(
+            decoded
+                .envelope()
+                .unverified_material()
+                .unwrap()
+                .display_text(),
+            &request.draft().render_approval_text().unwrap()
+        );
+    }
+
+    #[test]
+    fn fresh_authenticated_task_recovery_reuses_durable_issuance_without_new_input_or_grant() {
+        use crate::v2_agent_authority::tests::{
+            planner_active_tools, task_issuer_agent_fixture, TestG4StateAnchorV2,
+        };
+        use crate::v2_input_owner::tests::{
+            finalized_task_input_fixture, fresh_task_recovery_authentication,
+        };
+        use crate::v2_task_authority::tests::{draft, ingress, issuer};
+        use savana_kernel_protocol::v2::*;
+        use savana_policy_core::v2::{
+            DurableG4StateV2, DurableStateNamespaceV2, RollbackProtectedStateAnchorV2,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        for approved_draft in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let anchor = TestG4StateAnchorV2::default();
+            let open = || {
+                DurableG4StateV2::open(
+                    &dir.path().join("kernel-g4-state-v2.cbor"),
+                    [72; 32],
+                    DurableStateNamespaceV2::from_verified_installation(
+                        Digest32V2::new([0x30; 32]),
+                        Digest32V2::new([73; 32]),
+                    )
+                    .unwrap(),
+                    Box::new(anchor.clone()),
+                )
+                .unwrap()
+            };
+            let new_services = |owner| {
+                let mut s = CoreKernelRuntimeServicesV2::new(8, 4096, 8, 32).unwrap();
+                s.ingress_authority = Some(ingress(true));
+                s.install_agent_security(task_issuer_agent_fixture(owner, issuer()))
+                    .unwrap();
+                s
+            };
+            let execute = |s: &mut CoreKernelRuntimeServicesV2, operation, time| {
+                s.execute_operation(
+                    RequestIdV2::new([80; 16]),
+                    KernelServiceOperationV2::ingress(operation),
+                    UnixMillisV2::new(time),
+                    Digest32V2::new([0x35; 32]),
+                    7,
+                    9,
+                    ServiceIdentityV2::new([67; 32]),
+                )
+            };
+            let mut services = new_services(open());
+            let (input, session, commitment) = finalized_task_input_fixture();
+            services.input = input;
+            let request = EstablishTaskAuthorizationRequestV2::new(
+                session,
+                draft(&planner_active_tools(), commitment, 1, "Alice"),
+                Nonce32V2::new([88; 32]),
+            )
+            .unwrap();
+            let first = execute(
+                &mut services,
+                if approved_draft {
+                    KernelIngressOperationV2::PrepareTaskAuthorizationApproval(request)
+                } else {
+                    KernelIngressOperationV2::EstablishTaskAuthorization(request)
+                },
+                200,
+            )
+            .unwrap();
+            let expected = if approved_draft {
+                RecoverTaskAuthorizationResponseV2::Approval(
+                    decode_prepare_task_authorization_approval_response_v2(first.as_bytes())
+                        .unwrap(),
+                )
+            } else {
+                RecoverTaskAuthorizationResponseV2::Installed(
+                    decode_establish_task_authorization_response_v2(first.as_bytes()).unwrap(),
+                )
+            };
+            let id = match &expected {
+                RecoverTaskAuthorizationResponseV2::Approval(p) => p.request_digest(),
+                RecoverTaskAuthorizationResponseV2::Installed(p) => p.request_digest(),
+            };
+            let before = anchor.current_head().unwrap();
+            drop(services); // Input/session handles and browser state really disappear.
+            let mut recovered = new_services(open());
+            assert_eq!(recovered.input.retained_plaintext_bytes(), 0);
+            for (i, bad_principal, bad_task, bad_id, time) in [
+                (90, true, false, false, 201),
+                (91, false, true, false, 201),
+                (92, false, false, true, 201),
+                (93, false, false, false, 500),
+            ] {
+                let auth = fresh_task_recovery_authentication(
+                    &mut recovered.input,
+                    i,
+                    bad_principal,
+                    bad_task,
+                );
+                let req = RecoverTaskAuthorizationRequestV2::new(
+                    auth,
+                    if bad_id {
+                        Digest32V2::new([99; 32])
+                    } else {
+                        id
+                    },
+                )
+                .unwrap();
+                assert!(execute(
+                    &mut recovered,
+                    KernelIngressOperationV2::RecoverTaskAuthorization(req),
+                    time
+                )
+                .is_err());
+            }
+            let auth = fresh_task_recovery_authentication(&mut recovered.input, 94, false, false);
+            let req = RecoverTaskAuthorizationRequestV2::new(auth, id).unwrap();
+            for _ in 0..2 {
+                let response = execute(
+                    &mut recovered,
+                    KernelIngressOperationV2::RecoverTaskAuthorization(req),
+                    202,
+                )
+                .unwrap();
+                assert_eq!(
+                    response.as_bytes(),
+                    encode_recover_task_authorization_response_v2(&expected).unwrap()
+                );
+                assert_eq!(anchor.current_head().unwrap(), before, "recovery must not sign/install another grant, reset counters, or rewrite the existing display");
+            }
+            if !approved_draft {
+                drop(recovered);
+                let mut owner = open();
+                owner
+                    .revoke_task_authorization(DurableTaskIdV2::new([0x2f; 32]))
+                    .unwrap();
+                drop(owner);
+                let revoked_head = anchor.current_head().unwrap();
+                let mut recovered = new_services(open());
+                let auth =
+                    fresh_task_recovery_authentication(&mut recovered.input, 95, false, false);
+                let req = RecoverTaskAuthorizationRequestV2::new(auth, id).unwrap();
+                assert!(execute(
+                    &mut recovered,
+                    KernelIngressOperationV2::RecoverTaskAuthorization(req),
+                    203
+                )
+                .is_err());
+                assert_eq!(anchor.current_head().unwrap(), revoked_head);
+            }
+        }
+    }
+
+    #[test]
     fn finalize_gate_refusal_preserves_retryable_session_and_exact_bytes() {
         for refused_mode in [
             ApprovalRuleModeV2::NoRule,
@@ -2663,11 +3258,183 @@ mod tests {
     }
 
     #[test]
+    fn task_context_uses_finalized_source_and_fresh_auth_without_issuing_authority() {
+        use crate::v2_agent_authority::tests::{planner_active_tools, task_issuer_agent_fixture};
+        use crate::v2_input_owner::tests::{
+            finalized_task_input_fixture, fresh_task_recovery_authentication,
+        };
+        use crate::v2_task_authority::tests::{draft, issuer, owner};
+        use savana_kernel_protocol::v2::*;
+        let (input, session, commitment) = finalized_task_input_fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let mut services = CoreKernelRuntimeServicesV2::new(8, 4096, 8, 32).unwrap();
+        services.input = input;
+        services
+            .install_agent_security(task_issuer_agent_fixture(owner(dir.path()), issuer()))
+            .unwrap();
+        let auth = IngressUiAuthorizationHandleV2::from_authority_entropy([0x41; 32]).unwrap();
+        let manifest = Digest32V2::new([0x35; 32]);
+        let read = |services: &mut CoreKernelRuntimeServicesV2, auth, session, time| {
+            services.execute_operation(
+                RequestIdV2::new([88; 16]),
+                KernelServiceOperationV2::ingress(
+                    KernelIngressOperationV2::GetTaskAuthorizationContext(
+                        GetTaskAuthorizationContextRequestV2::new(auth, session),
+                    ),
+                ),
+                UnixMillisV2::new(time),
+                manifest,
+                7,
+                9,
+                ServiceIdentityV2::new([67; 32]),
+            )
+        };
+        // No finalized source and no durable history: fail rather than inventing one.
+        assert!(read(&mut services, auth, None, 200).is_err());
+        let context = decode_task_authorization_context_v2(
+            read(&mut services, auth, Some(session), 200)
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(context.source_input_digest(), commitment);
+        assert_eq!(context.authorization_identity(), None);
+        assert!(context.pending_requests().is_empty());
+        assert_eq!(context.tools().len(), planner_active_tools().len());
+        let proposal = draft(&planner_active_tools(), commitment, 1, "Alice");
+        let built = context
+            .draft(proposal.authorization_id(), proposal.clauses().to_vec())
+            .unwrap();
+        assert_eq!(built.principal(), proposal.principal());
+        assert_eq!(built.source_input_digest(), commitment);
+        let proof = services
+            .input
+            .authenticate_task_draft_submission(
+                session,
+                &built,
+                manifest,
+                7,
+                UnixMillisV2::new(200),
+            )
+            .unwrap();
+        assert!(!proof.is_recovery());
+        assert!(read(&mut services, auth, Some(session), 1000).is_err());
+        let new_auth = fresh_task_recovery_authentication(&mut services.input, 90, false, false);
+        assert!(read(&mut services, new_auth, Some(session), 201).is_err());
+        let request = PrepareTaskAuthorizationApprovalRequestV2::new(
+            session,
+            built,
+            Nonce32V2::new([89; 32]),
+        )
+        .unwrap();
+        let pending = services
+            .agent_authority
+            .as_mut()
+            .unwrap()
+            .prepare_task_approval(&request, &proof, UnixMillisV2::new(200))
+            .unwrap();
+        let observed = decode_task_authorization_context_v2(
+            read(&mut services, new_auth, None, 201).unwrap().as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(observed.source_input_digest(), commitment);
+        assert_eq!(observed.pending_requests(), &[pending.request_digest()]);
+        assert_eq!(
+            observed.authorization_identity(),
+            Some((proposal.authorization_id(), 1))
+        );
+        assert!(services
+            .agent_authority
+            .as_ref()
+            .unwrap()
+            .recover_task_issuance_record(pending.request_digest())
+            .unwrap()
+            .installed_digest()
+            .is_none());
+        for (entropy, principal, task) in [(91, true, false), (92, false, true)] {
+            let wrong =
+                fresh_task_recovery_authentication(&mut services.input, entropy, principal, task);
+            assert!(read(&mut services, wrong, None, 201).is_err());
+        }
+    }
+
+    #[test]
+    fn recovery_of_persisted_draft_without_display_requires_new_task_approval() {
+        use crate::v2_agent_authority::tests::{planner_active_tools, task_issuer_agent_fixture};
+        use crate::v2_input_owner::tests::{
+            finalized_task_input_fixture, fresh_task_recovery_authentication,
+        };
+        use crate::v2_task_authority::tests::{draft, ingress, issuer, owner};
+        use savana_kernel_protocol::v2::*;
+        let registry = planner_active_tools();
+        let (input, session, commitment) = finalized_task_input_fixture();
+        let draft = draft(&registry, commitment, 1, "Alice");
+        let proof = input
+            .authenticate_task_draft_submission(
+                session,
+                &draft,
+                Digest32V2::new([0x35; 32]),
+                7,
+                UnixMillisV2::new(200),
+            )
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut durable = owner(dir.path());
+        let issuer = issuer();
+        let request_digest = Digest32V2::new([88; 32]);
+        issuer
+            .prepare(
+                &mut durable,
+                &registry,
+                RoleIdV2::new(1),
+                &proof,
+                draft.clone(),
+                request_digest,
+                UnixMillisV2::new(200),
+            )
+            .unwrap();
+        drop(input);
+        let mut services = CoreKernelRuntimeServicesV2::new(8, 4096, 8, 32).unwrap();
+        services.ingress_authority = Some(ingress(true));
+        services
+            .install_agent_security(task_issuer_agent_fixture(durable, issuer))
+            .unwrap();
+        let auth = fresh_task_recovery_authentication(&mut services.input, 90, false, false);
+        let request = RecoverTaskAuthorizationRequestV2::new(auth, request_digest).unwrap();
+        let response = services
+            .execute_operation(
+                RequestIdV2::new([80; 16]),
+                KernelServiceOperationV2::ingress(
+                    KernelIngressOperationV2::RecoverTaskAuthorization(request),
+                ),
+                UnixMillisV2::new(201),
+                Digest32V2::new([0x35; 32]),
+                7,
+                9,
+                ServiceIdentityV2::new([67; 32]),
+            )
+            .unwrap();
+        let RecoverTaskAuthorizationResponseV2::Approval(prepared) =
+            decode_recover_task_authorization_response_v2(response.as_bytes()).unwrap()
+        else {
+            panic!("recovery must not install a grant without task approval");
+        };
+        let agent = services.agent_authority.as_ref().unwrap();
+        let pending = agent.recover_task_issuance_record(request_digest).unwrap();
+        assert_eq!(pending.draft(), &draft);
+        assert_eq!(pending.envelope(), Some(prepared.envelope()));
+        assert_eq!(pending.installed_digest(), None);
+        assert_eq!(
+            prepared.envelope().unverified_material().unwrap().purpose(),
+            ApprovalPurposeV2::TaskAuthorization
+        );
+    }
+
+    #[test]
     fn finalize_response_construction_failure_is_atomic_across_real_dispatch() {
         for failure in [
             KernelResponseFailurePointV2::TypedWrapper,
             KernelResponseFailurePointV2::ApplicationWrapper,
-            KernelResponseFailurePointV2::SignedEnvelope,
             KernelResponseFailurePointV2::SuiteOneSeal,
         ] {
             let mut services = CoreKernelRuntimeServicesV2::new(4, 4096, 4, 32).unwrap();
@@ -2757,7 +3524,6 @@ mod tests {
             let shared = Arc::new(Mutex::new(services));
             let owner =
                 KernelRuntimeOwnerV2::spawn(4, SharedCoreServicesV2(Arc::clone(&shared))).unwrap();
-            let signing_key = SigningKey::from_bytes(&[0xe5; 32]);
             let dispatcher = KernelServiceDispatcherV2::spawn(
                 KernelServiceDeploymentV2::from_verified_startup(
                     BootIdV2::new([0xe6; 32]),
@@ -2766,8 +3532,6 @@ mod tests {
                     7,
                 )
                 .unwrap(),
-                derive_ed25519_key_id_v2(signing_key.verifying_key().to_bytes()),
-                signing_key,
                 owner,
             )
             .unwrap();
@@ -2791,36 +3555,7 @@ mod tests {
                 .unwrap()
             };
 
-            let failure_result = if failure == KernelResponseFailurePointV2::SignedEnvelope {
-                let canonical = encode_kernel_service_request_envelope_v2(
-                    &KernelServiceRequestEnvelopeV2::from_authenticated_connection(
-                        EndpointRoleV2::IngressKernel,
-                        RequestIdV2::new([0xe9; 16]),
-                        BootIdV2::new([0xe8; 32]),
-                        BootIdV2::new([0xe6; 32]),
-                        caller,
-                        ServiceIdentityV2::new([0xe7; 32]),
-                        manifest,
-                        7,
-                        UnixMillisV2::new(1_000),
-                        KernelServiceOperationV2::ingress(KernelIngressOperationV2::FinalizeInput(
-                            finalize_request.clone(),
-                        )),
-                    )
-                    .unwrap(),
-                )
-                .unwrap();
-                dispatcher
-                    .dispatch_one_signed_with_failure_for_test(
-                        peer.clone(),
-                        V2GenerationLease::for_dispatch_test(manifest, 7),
-                        &canonical,
-                        UnixMillisV2::new(120),
-                        Instant::now() + Duration::from_secs(1),
-                        failure,
-                    )
-                    .map(|_| ())
-            } else if failure == KernelResponseFailurePointV2::SuiteOneSeal {
+            let failure_result = if failure == KernelResponseFailurePointV2::SuiteOneSeal {
                 let request = application_request(RequestIdV2::new([0xe9; 16]));
                 let (response_session, mut client_session) = suite_one_response_session(&request);
                 let result = dispatcher
@@ -3421,7 +4156,6 @@ mod tests {
             Ok(KernelServiceResponseBodyV2::from_typed_handler(vec![0x80]).unwrap())
         })
         .unwrap();
-        let signing_key = SigningKey::from_bytes(&[0xb4; 32]);
         let dispatcher = Arc::new(
             KernelServiceDispatcherV2::spawn(
                 KernelServiceDeploymentV2::from_verified_startup(
@@ -3431,8 +4165,6 @@ mod tests {
                     7,
                 )
                 .unwrap(),
-                derive_ed25519_key_id_v2(signing_key.verifying_key().to_bytes()),
-                signing_key,
                 owner,
             )
             .unwrap(),
@@ -4131,7 +4863,6 @@ mod tests {
             )
             .unwrap();
         let owner = KernelRuntimeOwnerV2::spawn(4, services).unwrap();
-        let signing_key = SigningKey::from_bytes(&[0x52; 32]);
         let dispatcher = KernelServiceDispatcherV2::spawn(
             KernelServiceDeploymentV2::from_verified_startup(
                 BootIdV2::new([0x53; 32]),
@@ -4140,8 +4871,6 @@ mod tests {
                 7,
             )
             .unwrap(),
-            derive_ed25519_key_id_v2(signing_key.verifying_key().to_bytes()),
-            signing_key,
             owner,
         )
         .unwrap();

@@ -1,0 +1,10 @@
+[Unit]
+Description=Savana experiment real passkey channel
+[Socket]
+ListenStream=/run/savana-experiment-auth/owner.sock
+SocketUser=root
+SocketGroup=savana-experiment
+SocketMode=0660
+DirectoryMode=0711
+FileDescriptorName=savana-experiment-auth
+Service=savana-experiment-auth.service

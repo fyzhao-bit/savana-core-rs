@@ -1,7 +1,6 @@
 use minicbor::Encode as _;
 use savana_kernel_protocol::v2::{
-    Digest32V2, DurableTaskIdV2, EntityIdV2, NamespaceIdV2, OntologySetIdV2, PrincipalIdV2,
-    RoleIdV2, ToolClassIdV2,
+    Digest32V2, DurableTaskIdV2, EntityIdV2, NamespaceIdV2, PrincipalIdV2, RoleIdV2, ToolClassIdV2,
 };
 
 use super::{value::KernelScalarRefV2, ArgumentNameV2, FieldNameV2, KernelValueV2};
@@ -327,41 +326,6 @@ impl<C> minicbor::Encode<C> for OntologyOperandV2 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ManifestOntologySetRefV2 {
-    namespace: NamespaceIdV2,
-    set: OntologySetIdV2,
-    set_digest: Digest32V2,
-}
-
-impl ManifestOntologySetRefV2 {
-    pub(crate) const fn new(
-        namespace: NamespaceIdV2,
-        set: OntologySetIdV2,
-        set_digest: Digest32V2,
-    ) -> Self {
-        Self {
-            namespace,
-            set,
-            set_digest,
-        }
-    }
-}
-
-impl<C> minicbor::Encode<C> for ManifestOntologySetRefV2 {
-    fn encode<W: minicbor::encode::Write>(
-        &self,
-        encoder: &mut minicbor::Encoder<W>,
-        context: &mut C,
-    ) -> Result<(), minicbor::encode::Error<W::Error>> {
-        encoder.array(3)?;
-        self.namespace.encode(encoder, context)?;
-        self.set.encode(encoder, context)?;
-        self.set_digest.encode(encoder, context)?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OntologyExprV2 {
     kind: OntologyExprKindV2,
     depth: u16,
@@ -372,8 +336,6 @@ pub struct OntologyExprV2 {
 enum OntologyExprKindV2 {
     Eq(OntologyOperandV2, OntologyOperandV2),
     Ne(OntologyOperandV2, OntologyOperandV2),
-    In(OntologyOperandV2, ManifestOntologySetRefV2),
-    NotIn(OntologyOperandV2, ManifestOntologySetRefV2),
     All(Vec<OntologyExprV2>),
     Any(Vec<OntologyExprV2>),
 }
@@ -385,17 +347,6 @@ impl OntologyExprV2 {
 
     pub const fn ne(left: OntologyOperandV2, right: OntologyOperandV2) -> Self {
         Self::leaf(OntologyExprKindV2::Ne(left, right))
-    }
-
-    pub(crate) const fn in_set(operand: OntologyOperandV2, set: ManifestOntologySetRefV2) -> Self {
-        Self::leaf(OntologyExprKindV2::In(operand, set))
-    }
-
-    pub(crate) const fn not_in_set(
-        operand: OntologyOperandV2,
-        set: ManifestOntologySetRefV2,
-    ) -> Self {
-        Self::leaf(OntologyExprKindV2::NotIn(operand, set))
     }
 
     pub fn all(children: Vec<Self>) -> Result<Self, G4Error> {
@@ -465,16 +416,6 @@ impl<C> minicbor::Encode<C> for OntologyExprV2 {
                 left.encode(encoder, context)?;
                 right.encode(encoder, context)?;
             }
-            OntologyExprKindV2::In(operand, set) => {
-                encoder.array(3)?.u16(3)?;
-                operand.encode(encoder, context)?;
-                set.encode(encoder, context)?;
-            }
-            OntologyExprKindV2::NotIn(operand, set) => {
-                encoder.array(3)?.u16(4)?;
-                operand.encode(encoder, context)?;
-                set.encode(encoder, context)?;
-            }
             OntologyExprKindV2::All(children) => {
                 encode_children(5, children, encoder, context)?;
             }
@@ -512,40 +453,9 @@ impl OntologyEvaluationV2 {
     }
 }
 
-pub struct VerifiedOntologySetV2 {
-    namespace: NamespaceIdV2,
-    set: OntologySetIdV2,
-    digest: Digest32V2,
-    members: Vec<OntologyScalarV2>,
-}
-
-impl VerifiedOntologySetV2 {
-    pub(crate) fn new(
-        namespace: NamespaceIdV2,
-        set: OntologySetIdV2,
-        digest: Digest32V2,
-        members: Vec<OntologyScalarV2>,
-    ) -> Result<Self, G4Error> {
-        if members.len() > 65_536
-            || members
-                .windows(2)
-                .any(|pair| scalar_order(&pair[0], &pair[1]) != std::cmp::Ordering::Less)
-        {
-            return Err(G4Error::NonCanonicalOrder);
-        }
-        Ok(Self {
-            namespace,
-            set,
-            digest,
-            members,
-        })
-    }
-}
-
 pub(crate) struct OntologyEvaluationContextV2<'value> {
     arguments: Vec<(ArgumentNameV2, &'value KernelValueV2)>,
     ontology: Vec<((NamespaceIdV2, EntityIdV2), &'value KernelValueV2)>,
-    sets: Vec<VerifiedOntologySetV2>,
     role: RoleIdV2,
     tool: ToolClassIdV2,
     attempt_kind: AttemptKindV2,
@@ -558,7 +468,6 @@ impl<'value> OntologyEvaluationContextV2<'value> {
     pub(crate) fn new(
         arguments: Vec<(ArgumentNameV2, &'value KernelValueV2)>,
         ontology: Vec<((NamespaceIdV2, EntityIdV2), &'value KernelValueV2)>,
-        sets: Vec<VerifiedOntologySetV2>,
         role: RoleIdV2,
         tool: ToolClassIdV2,
         attempt_kind: AttemptKindV2,
@@ -569,16 +478,12 @@ impl<'value> OntologyEvaluationContextV2<'value> {
             .windows(2)
             .any(|pair| pair[0].0.as_str().as_bytes() >= pair[1].0.as_str().as_bytes())
             || ontology.windows(2).any(|pair| pair[0].0 >= pair[1].0)
-            || sets
-                .windows(2)
-                .any(|pair| (pair[0].namespace, pair[0].set) >= (pair[1].namespace, pair[1].set))
         {
             return Err(G4Error::EvaluationInputOrder);
         }
         Ok(Self {
             arguments,
             ontology,
-            sets,
             role,
             tool,
             attempt_kind,
@@ -630,20 +535,6 @@ impl<'value> OntologyEvaluationContextV2<'value> {
             OntologyOperandV2::Literal(value) => Ok(RuntimeScalarV2::from_scalar(value)),
         }
     }
-
-    fn resolve_set(
-        &self,
-        reference: &ManifestOntologySetRefV2,
-    ) -> Result<&VerifiedOntologySetV2, G4Error> {
-        self.sets
-            .iter()
-            .find(|set| {
-                set.namespace == reference.namespace
-                    && set.set == reference.set
-                    && set.digest == reference.set_digest
-            })
-            .ok_or(G4Error::EvaluationError)
-    }
 }
 
 impl OntologyExprV2 {
@@ -666,13 +557,6 @@ impl OntologyExprV2 {
             OntologyExprKindV2::Ne(left, right) => Ok(invert(compare_operands(
                 context.resolve(left)?,
                 context.resolve(right)?,
-            )?)),
-            OntologyExprKindV2::In(operand, reference) => {
-                evaluate_membership(context.resolve(operand)?, context.resolve_set(reference)?)
-            }
-            OntologyExprKindV2::NotIn(operand, reference) => Ok(invert(evaluate_membership(
-                context.resolve(operand)?,
-                context.resolve_set(reference)?,
             )?)),
             OntologyExprKindV2::All(children) => evaluate_all(children, context),
             OntologyExprKindV2::Any(children) => evaluate_any(children, context),
@@ -737,21 +621,6 @@ fn compare_operands(
     })
 }
 
-fn evaluate_membership(
-    value: RuntimeScalarV2<'_>,
-    set: &VerifiedOntologySetV2,
-) -> Result<OntologyEvaluationV2, G4Error> {
-    let contains = set
-        .members
-        .iter()
-        .any(|member| RuntimeScalarV2::from_scalar(member) == value);
-    Ok(if contains {
-        OntologyEvaluationV2::Match
-    } else {
-        OntologyEvaluationV2::NoMatch
-    })
-}
-
 fn evaluate_all(
     children: &[OntologyExprV2],
     context: &OntologyEvaluationContextV2<'_>,
@@ -795,35 +664,6 @@ const fn invert(value: OntologyEvaluationV2) -> OntologyEvaluationV2 {
         OntologyEvaluationV2::Match => OntologyEvaluationV2::NoMatch,
         OntologyEvaluationV2::NoMatch => OntologyEvaluationV2::Match,
         OntologyEvaluationV2::EvaluationError => OntologyEvaluationV2::EvaluationError,
-    }
-}
-
-fn scalar_order(left: &OntologyScalarV2, right: &OntologyScalarV2) -> std::cmp::Ordering {
-    scalar_tag(left)
-        .cmp(&scalar_tag(right))
-        .then_with(|| match (&left.0, &right.0) {
-            (OntologyScalarKindV2::Null, OntologyScalarKindV2::Null) => std::cmp::Ordering::Equal,
-            (OntologyScalarKindV2::Bool(left), OntologyScalarKindV2::Bool(right)) => {
-                left.cmp(right)
-            }
-            (OntologyScalarKindV2::I64(left), OntologyScalarKindV2::I64(right)) => left.cmp(right),
-            (OntologyScalarKindV2::Text(left), OntologyScalarKindV2::Text(right)) => {
-                left.as_bytes().cmp(right.as_bytes())
-            }
-            (OntologyScalarKindV2::Digest(left), OntologyScalarKindV2::Digest(right)) => {
-                left.as_bytes().cmp(right.as_bytes())
-            }
-            _ => std::cmp::Ordering::Equal,
-        })
-}
-
-const fn scalar_tag(value: &OntologyScalarV2) -> u16 {
-    match value.0 {
-        OntologyScalarKindV2::Null => 0,
-        OntologyScalarKindV2::Bool(_) => 1,
-        OntologyScalarKindV2::I64(_) => 2,
-        OntologyScalarKindV2::Text(_) => 3,
-        OntologyScalarKindV2::Digest(_) => 4,
     }
 }
 

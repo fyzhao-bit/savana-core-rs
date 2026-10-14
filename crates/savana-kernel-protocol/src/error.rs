@@ -242,22 +242,6 @@ impl ProtocolError {
             Self::stable(StableCode::ProtocolMalformedCbor)
         }
     }
-
-    pub(crate) fn io(error: std::io::Error) -> Self {
-        match error.kind() {
-            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
-                Self::stable(StableCode::DeadlineExceeded)
-            }
-            _ => Self::stable(StableCode::ProtocolIo),
-        }
-    }
-
-    pub(crate) fn from_read(error: std::io::Error) -> Self {
-        match error.kind() {
-            std::io::ErrorKind::UnexpectedEof => Self::stable(StableCode::ProtocolTruncatedFrame),
-            _ => Self::io(error),
-        }
-    }
 }
 
 impl fmt::Display for ProtocolError {

@@ -79,6 +79,69 @@ pub struct VerifiedEnrollmentAttestationV2 {
     pub signature_counter: u32,
 }
 
+/// Registration authorized by a one-use enrollment grant, with no hardware
+/// provenance claim. Fields cannot be supplied by the browser/state-owner API.
+#[derive(Debug, Clone, Copy)]
+pub struct VerifiedPasskeyRegistrationV04 {
+    pub(crate) aaguid: [u8; 16],
+    pub(crate) public_key: [u8; 65],
+    pub(crate) signature_counter: u32,
+    pub(crate) backup_eligible: bool,
+}
+
+/// The passkey profile requests `attestation: none`. This validates the complete
+/// registration transcript but deliberately does not claim hardware attestation.
+pub fn verify_passkey_registration_v04(
+    credential_id: &[u8],
+    client_data_json: &[u8],
+    attestation_object: &[u8],
+    challenge: Nonce32V2,
+) -> Result<VerifiedPasskeyRegistrationV04, ApprovalErrorV2> {
+    if credential_id.is_empty()
+        || credential_id.len() > 4096
+        || client_data_json.is_empty()
+        || client_data_json.len() > 64 * 1024
+        || attestation_object.is_empty()
+        || attestation_object.len() > 512 * 1024
+        || challenge.as_bytes() == &[0; 32]
+    {
+        return Err(ApprovalErrorV2::InvalidCredential);
+    }
+    verify_client_data(client_data_json, challenge)?;
+    let malformed = |_| ApprovalErrorV2::InvalidAuthenticatorData;
+    let mut d = minicbor::Decoder::new(attestation_object);
+    if d.map().map_err(malformed)? != Some(3) {
+        return Err(ApprovalErrorV2::InvalidAuthenticatorData);
+    }
+    let mut fmt = None;
+    let mut auth = None;
+    let mut statement = false;
+    for _ in 0..3 {
+        match d.str().map_err(malformed)? {
+            "fmt" if fmt.is_none() => fmt = Some(d.str().map_err(malformed)?),
+            "authData" if auth.is_none() => auth = Some(d.bytes().map_err(malformed)?),
+            "attStmt" if !statement => {
+                if d.map().map_err(malformed)? != Some(0) {
+                    return Err(ApprovalErrorV2::InvalidAuthenticatorData);
+                }
+                statement = true;
+            }
+            _ => return Err(ApprovalErrorV2::InvalidAuthenticatorData),
+        }
+    }
+    if fmt != Some("none") || !statement || d.position() != attestation_object.len() {
+        return Err(ApprovalErrorV2::InvalidAuthenticatorData);
+    }
+    let auth = auth.ok_or(ApprovalErrorV2::InvalidAuthenticatorData)?;
+    let credential = parse_authenticator_data_for_assurance(auth, credential_id, true)?;
+    Ok(VerifiedPasskeyRegistrationV04 {
+        aaguid: credential.aaguid,
+        public_key: credential.public_key,
+        signature_counter: credential.signature_counter,
+        backup_eligible: auth[32] & FLAG_BACKUP_ELIGIBLE != 0,
+    })
+}
+
 pub fn verify_enrollment_attestation_v2(
     credential_id: &[u8],
     client_data_json: &[u8],
@@ -253,6 +316,14 @@ fn parse_authenticator_data(
     bytes: &[u8],
     expected_credential_id: &[u8],
 ) -> Result<ParsedAuthenticatorDataV2, ApprovalErrorV2> {
+    parse_authenticator_data_for_assurance(bytes, expected_credential_id, false)
+}
+
+fn parse_authenticator_data_for_assurance(
+    bytes: &[u8],
+    expected_credential_id: &[u8],
+    passkey: bool,
+) -> Result<ParsedAuthenticatorDataV2, ApprovalErrorV2> {
     if bytes.len() < 55 || &bytes[..32] != Sha256::digest(RP_ID).as_slice() {
         return Err(ApprovalErrorV2::InvalidAuthenticatorData);
     }
@@ -261,8 +332,9 @@ fn parse_authenticator_data(
         || flags & FLAG_USER_VERIFIED == 0
         || flags & FLAG_ATTESTED_CREDENTIAL_DATA == 0
         || flags & FLAG_EXTENSION_DATA != 0
-        || flags & FLAG_BACKUP_ELIGIBLE != 0
-        || flags & FLAG_BACKUP_STATE != 0
+        || (!passkey && flags & (FLAG_BACKUP_ELIGIBLE | FLAG_BACKUP_STATE) != 0)
+        || (flags & FLAG_BACKUP_STATE != 0 && flags & FLAG_BACKUP_ELIGIBLE == 0)
+        || flags & 0x22 != 0
     {
         return Err(ApprovalErrorV2::InvalidAuthenticatorData);
     }
@@ -271,13 +343,13 @@ fn parse_authenticator_data(
             .try_into()
             .map_err(|_| ApprovalErrorV2::InvalidAuthenticatorData)?,
     );
-    if signature_counter == 0 {
+    if !passkey && signature_counter == 0 {
         return Err(ApprovalErrorV2::CounterReplay);
     }
     let aaguid: [u8; 16] = bytes[37..53]
         .try_into()
         .map_err(|_| ApprovalErrorV2::InvalidAuthenticatorData)?;
-    if aaguid == [0; 16] {
+    if !passkey && aaguid == [0; 16] {
         return Err(ApprovalErrorV2::InvalidAuthenticatorData);
     }
     let credential_length = usize::from(u16::from_be_bytes(

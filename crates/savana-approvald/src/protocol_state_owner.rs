@@ -43,6 +43,15 @@ pub enum ProtocolApprovalStateOwnerErrorV2 {
 }
 
 enum CommandV2 {
+    RegisterPasskey {
+        enrollment: EnrollmentHandleV2,
+        credential_digest: Digest32V2,
+        verified: crate::VerifiedPasskeyRegistrationV04,
+    },
+    PrivateSessionV04 {
+        digest: Digest32V2,
+        now: UnixMillisV2,
+    },
     LoadCredential {
         credential_digest: Digest32V2,
         principal: PrincipalIdV2,
@@ -116,6 +125,7 @@ enum CommandV2 {
 }
 
 enum ResponseV2 {
+    PrivateSessionV04(Option<ProtocolSignedUiAuthenticationSettlementV2>),
     Digest(Digest32V2),
     ApprovalPair(Digest32V2, Digest32V2, ApprovalPurposeV2),
     ApprovalSettlement(ProtocolSignedApprovalSettlementV2),
@@ -343,6 +353,19 @@ impl ProtocolApprovalStateOwnerV2 {
         }
     }
 
+    pub fn private_session_authentication_v04(
+        &self,
+        digest: Digest32V2,
+        now: UnixMillisV2,
+        deadline: Instant,
+    ) -> Result<Option<ProtocolSignedUiAuthenticationSettlementV2>, ProtocolApprovalStateOwnerErrorV2>
+    {
+        match self.request(CommandV2::PrivateSessionV04 { digest, now }, deadline)? {
+            ResponseV2::PrivateSessionV04(s) => Ok(s),
+            _ => Err(ProtocolApprovalStateOwnerErrorV2::Unavailable),
+        }
+    }
+
     pub fn ui_authentication_challenge(
         &self,
         envelope_digest: Digest32V2,
@@ -435,6 +458,26 @@ impl ProtocolApprovalStateOwnerV2 {
                 aaguid,
                 p256_sec1_public_key,
                 signature_counter,
+            },
+            deadline,
+        )? {
+            ResponseV2::CredentialState(state) => Ok(state),
+            _ => Err(ProtocolApprovalStateOwnerErrorV2::Unavailable),
+        }
+    }
+
+    pub fn register_enrolled_passkey(
+        &self,
+        enrollment: EnrollmentHandleV2,
+        credential_digest: Digest32V2,
+        verified: crate::VerifiedPasskeyRegistrationV04,
+        deadline: Instant,
+    ) -> Result<CredentialPublicStateV2, ProtocolApprovalStateOwnerErrorV2> {
+        match self.request(
+            CommandV2::RegisterPasskey {
+                enrollment,
+                credential_digest,
+                verified,
             },
             deadline,
         )? {
@@ -555,6 +598,9 @@ fn execute(
     command: CommandV2,
 ) -> Result<ResponseV2, ProtocolApprovalStateOwnerErrorV2> {
     let response = match command {
+        CommandV2::PrivateSessionV04 { digest, now } => {
+            ResponseV2::PrivateSessionV04(durable.private_session_authentication_v04(digest, now)?)
+        }
         CommandV2::LoadCredential {
             credential_digest,
             principal,
@@ -650,6 +696,15 @@ fn execute(
             aaguid,
             p256_sec1_public_key,
             signature_counter,
+        )?),
+        CommandV2::RegisterPasskey {
+            enrollment,
+            credential_digest,
+            verified,
+        } => ResponseV2::CredentialState(durable.register_enrolled_passkey(
+            enrollment,
+            credential_digest,
+            verified,
         )?),
         CommandV2::RevokeCredential {
             credential_digest,

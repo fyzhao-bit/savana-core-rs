@@ -1039,6 +1039,10 @@ impl StagingEntryV2 {
         self.size
     }
 
+    pub const fn sha256(&self) -> Digest32V2 {
+        self.sha256
+    }
+
     fn validate(&self) -> Result<(), DeploymentControlErrorV2> {
         if is_zero(self.acl_digest.as_bytes()) || is_zero(self.xattr_digest.as_bytes()) {
             return Err(DeploymentControlErrorV2::InvalidDeploymentTree);

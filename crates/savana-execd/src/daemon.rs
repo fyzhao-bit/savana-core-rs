@@ -39,7 +39,7 @@ mod implementation {
     };
     use savana_policy_core::v2::{
         listener_identity_digest_v2, BoundedConnectorHostV2, BoundedConnectorUrlV2,
-        ClosedServiceEdgeIdV2, ClosedServiceIdV2, DurableStateNamespaceV2,
+        ClosedServiceEdgeIdV2, ClosedServiceIdV2, ConnectorDescriptorV2, DurableStateNamespaceV2,
         FilesystemServiceObservationConfigV2, G4Error, RollbackProtectedStateAnchorV2,
         RollbackProtectedStateHeadV2, VerifiedDaemonStartupV2,
     };
@@ -83,8 +83,6 @@ mod implementation {
     #[cfg(target_os = "macos")]
     const KERNEL_ENVELOPE_PUBLIC_KEY_PATH_V2: &str =
         "/Library/Application Support/Savana/Development/config/execd/keys/kerneld-envelope-v2.pub";
-    #[cfg(target_os = "linux")]
-    const SYSTEMD_CREDENTIAL_DIRECTORY_V2: &str = "/run/credentials/savana-execd.service";
     #[cfg(target_os = "macos")]
     const SYSTEMD_CREDENTIAL_DIRECTORY_V2: &str =
         "/Library/Application Support/Savana/Development/credentials/execd";
@@ -149,6 +147,10 @@ mod implementation {
         provider: ProviderDtoV2,
         #[serde(default)]
         final_release_provider: Option<ProviderDtoV2>,
+        /// Canonical deployment-shipped connectors (lowercase hex), bound to
+        /// the connector genesis digest exactly as kerneld verifies them.
+        #[serde(default)]
+        deployment_shipped_connectors: Vec<String>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -259,18 +261,24 @@ mod implementation {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn run(config_path: &Path) -> Result<(), ExecdDaemonErrorV2> {
-        let loaded = load_verified_startup(config_path)?;
+        let loaded = startup_step(
+            "deployment-and-credentials",
+            load_verified_startup(config_path),
+        )?;
         let self_lock = loaded
             .startup
             .service_lock(ClosedServiceIdV2::Execd)
             .ok_or(ExecdDaemonErrorV2::DeploymentUnavailable)?;
         #[cfg(target_os = "linux")]
-        let _self_process = savana_platform_identity::pin_current_linux_service_v2(
-            self_lock.uid,
-            self_lock.gid,
-            *self_lock.executable_digest.as_bytes(),
-        )
-        .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
+        let _self_process = startup_step(
+            "self-identity",
+            savana_platform_identity::pin_current_linux_service_v2(
+                self_lock.uid,
+                self_lock.gid,
+                *self_lock.executable_digest.as_bytes(),
+            )
+            .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable),
+        )?;
         #[cfg(target_os = "macos")]
         let _self_process = savana_platform_identity::pin_current_macos_service_v2(
             self_lock.uid,
@@ -284,7 +292,10 @@ mod implementation {
             .edge_lock(ClosedServiceEdgeIdV2::KernelExecutor)
             .ok_or(ExecdDaemonErrorV2::DeploymentUnavailable)?
             .clone();
-        let listener = take_verified_listener(&loaded.startup)?;
+        let listener = startup_step(
+            "inherited-listener",
+            take_verified_listener(&loaded.startup),
+        )?;
         let boot_id = BootIdV2::new(loaded.keys.boot_id);
         let handshake_edge = loaded
             .startup
@@ -358,6 +369,29 @@ mod implementation {
                 Ok(canonical)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        if loaded.bootstrap.deployment_shipped_connectors.len() > 64 {
+            return Err(ExecdDaemonErrorV2::DeploymentUnavailable);
+        }
+        let shipped = loaded
+            .bootstrap
+            .deployment_shipped_connectors
+            .iter()
+            .map(|value| {
+                if !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    return Err(ExecdDaemonErrorV2::DeploymentUnavailable);
+                }
+                decode_hex_bounded(value, 65_536)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let shipped = ConnectorDescriptorV2::verified_deployment_set(
+            connector_genesis,
+            &shipped,
+            &connector_hosts,
+        )
+        .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
         let connector_trust = ExecdConnectorRegistryTrustV2::from_authenticated_deployment(
             loaded.startup.installation_id(),
             loaded.startup.active_state_manifest_digest(),
@@ -366,7 +400,7 @@ mod implementation {
             connector_authority_key_id,
             connector_authority_public_key,
             connector_hosts,
-            vec![],
+            shipped,
         )
         .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
         let connector_store_id = Digest32V2::new(decode_hex_32(
@@ -444,7 +478,10 @@ mod implementation {
             128,
         )
         .map_err(|_| ExecdDaemonErrorV2::DurableStateUnavailable)?;
-        let processor = build_connector_runtime(&loaded, executor_identity)?;
+        let processor = startup_step(
+            "connector-runtime",
+            build_connector_runtime(&loaded, executor_identity),
+        )?;
         let now = current_unix_millis()?;
         ExecdProtocolServiceV2::recover_prepared_with_connector_registry(
             &protocol_deployment,
@@ -472,7 +509,19 @@ mod implementation {
             )
             .map_err(|_| ExecdDaemonErrorV2::EndpointUnavailable)?,
         );
+        #[cfg(target_os = "linux")]
+        savana_platform_identity::notify_linux_service_ready_v2()
+            .map_err(|_| ExecdDaemonErrorV2::EndpointUnavailable)?;
         serve(listener, edge.expected_client, server)
+    }
+
+    fn startup_step<T>(
+        stage: &'static str,
+        result: Result<T, ExecdDaemonErrorV2>,
+    ) -> Result<T, ExecdDaemonErrorV2> {
+        result.inspect_err(|_| {
+            eprintln!("executor startup stage failed: {stage}");
+        })
     }
 
     fn build_connector_runtime(
@@ -489,6 +538,16 @@ mod implementation {
         let no_network_digest = Digest32V2::new(decode_hex_32(&worker.no_network_profile_digest)?);
         let credential_absence_digest =
             Digest32V2::new(decode_hex_32(&worker.credential_absence_profile_digest)?);
+        // Linux deployment artifacts are installer-owned, not writable by the
+        // executor's isolated runtime UID. Keep the exact root:root check.
+        #[cfg(target_os = "linux")]
+        let artifact_owner = {
+            // The deployment must still name the executor's service lock.
+            let _ = &service;
+            (0, 0)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let artifact_owner = (service.uid, service.gid);
         let launcher = VerifiedConnectorSandboxProgramV2::from_verified_manifest(
             worker.sandbox_program_path.clone(),
             Digest32V2::new(decode_hex_32(&worker.sandbox_program_digest)?),
@@ -498,8 +557,8 @@ mod implementation {
             no_network_digest,
             worker.credential_absence_profile_path.clone(),
             credential_absence_digest,
-            service.uid,
-            service.gid,
+            artifact_owner.0,
+            artifact_owner.1,
         )
         .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
         let provider = &loaded.bootstrap.provider;
@@ -1055,6 +1114,7 @@ mod implementation {
         })
     }
 
+    #[cfg(target_os = "macos")]
     fn credential_path(name: &str) -> Result<PathBuf, ExecdDaemonErrorV2> {
         if name.is_empty()
             || name.contains('/')
@@ -1082,6 +1142,21 @@ mod implementation {
         Ok(directory.join(name))
     }
 
+    #[cfg(target_os = "linux")]
+    fn read_exact_credential(name: &str) -> Result<[u8; 32], ExecdDaemonErrorV2> {
+        let bytes = savana_platform_identity::read_linux_service_credential_v2(
+            savana_platform_identity::LinuxCredentialServiceV2::Executor,
+            name,
+            32,
+        )
+        .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)?;
+        bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)
+    }
+
+    #[cfg(target_os = "macos")]
     fn read_exact_credential(name: &str) -> Result<[u8; 32], ExecdDaemonErrorV2> {
         let path = credential_path(name)?;
         #[cfg(target_os = "linux")]
@@ -1093,6 +1168,18 @@ mod implementation {
             .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)
     }
 
+    #[cfg(target_os = "linux")]
+    fn read_variable_credential(name: &str, maximum: usize) -> Result<Vec<u8>, ExecdDaemonErrorV2> {
+        savana_platform_identity::read_linux_service_credential_v2(
+            savana_platform_identity::LinuxCredentialServiceV2::Executor,
+            name,
+            maximum,
+        )
+        .map(|bytes| bytes.to_vec())
+        .map_err(|_| ExecdDaemonErrorV2::DeploymentUnavailable)
+    }
+
+    #[cfg(target_os = "macos")]
     fn read_variable_credential(name: &str, maximum: usize) -> Result<Vec<u8>, ExecdDaemonErrorV2> {
         let path = credential_path(name)?;
         let metadata =
@@ -1534,6 +1621,7 @@ mod implementation {
                     credential_handle_identity_digest: "34".repeat(32),
                 },
                 final_release_provider: None,
+                deployment_shipped_connectors: Vec::new(),
             };
             assert!(verify_runtime_paths(&bootstrap).is_ok());
             bootstrap.journal_path = "/var/lib/savana/execd/renamed.cbor".into();

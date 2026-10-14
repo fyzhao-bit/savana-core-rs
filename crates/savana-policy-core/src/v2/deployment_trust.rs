@@ -660,6 +660,7 @@ impl VerifiedDaemonStartupV2 {
         approvald_boot_id: BootIdV2,
     ) -> Result<KernelServiceHandshakeEdgeV2, DeploymentTrustErrorV2> {
         let client_service = match role {
+            EndpointRoleV2::KernelApproval => ClosedServiceIdV2::Kerneld,
             EndpointRoleV2::AgentApproval => ClosedServiceIdV2::Agentd,
             EndpointRoleV2::IngressApproval => ClosedServiceIdV2::Ingressd,
             _ => return Err(DeploymentTrustErrorV2::EdgeLockMismatch),

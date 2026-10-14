@@ -23,7 +23,6 @@ pub(crate) enum EffectGateOperationKindV2 {
     PlannerExchange,
     ExecutionDispatch,
     ReleaseDispatch,
-    KernelRecovery,
 }
 
 #[derive(Debug)]
@@ -200,40 +199,6 @@ impl EffectGateCoordinatorV2 {
             operation,
             operation_id,
         })
-    }
-
-    pub(crate) fn fence(&self, deadline: Instant) -> Result<(), EffectGateErrorV2> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| EffectGateErrorV2::Unavailable)?;
-        if state.poisoned {
-            return Err(EffectGateErrorV2::Unavailable);
-        }
-        if state.closing {
-            return Err(EffectGateErrorV2::Fenced);
-        }
-        state.closing = true;
-        while state.active_count != 0 {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(EffectGateErrorV2::DeadlineExceeded);
-            }
-            let waited = self
-                .drained
-                .wait_timeout(state, remaining)
-                .map_err(|_| EffectGateErrorV2::Unavailable)?;
-            state = waited.0;
-            if waited.1.timed_out() && state.active_count != 0 {
-                return Err(EffectGateErrorV2::DeadlineExceeded);
-            }
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn closing_for_test(&self) -> bool {
-        self.state.lock().map(|state| state.closing).unwrap_or(true)
     }
 }
 
@@ -416,7 +381,7 @@ impl Drop for EffectGateGuardV2 {
 mod tests {
     use std::fs::{File, OpenOptions};
     use std::process::Command;
-    use std::sync::{mpsc, Arc};
+    use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -445,7 +410,7 @@ mod tests {
             .unwrap();
         let second = coordinator
             .acquire(
-                EffectGateOperationKindV2::KernelRecovery,
+                EffectGateOperationKindV2::ExecutionDispatch,
                 Digest32V2::new([2; 32]),
                 Instant::now() + Duration::from_secs(1),
             )
@@ -496,56 +461,6 @@ mod tests {
     }
 
     #[test]
-    fn fence_intent_prevents_new_holders_from_barging_and_drains_existing_holders() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("effect-gate-v2");
-        let file = create_read_only_gate(&path);
-        let coordinator =
-            Arc::new(EffectGateCoordinatorV2::from_shared_only_descriptor(file).unwrap());
-        let active = coordinator
-            .acquire(
-                EffectGateOperationKindV2::PlannerExchange,
-                Digest32V2::new([1; 32]),
-                Instant::now() + Duration::from_secs(1),
-            )
-            .unwrap();
-        let (started_tx, started_rx) = mpsc::channel();
-        let fenced = Arc::clone(&coordinator);
-        let closer = thread::spawn(move || {
-            started_tx.send(()).unwrap();
-            fenced.fence(Instant::now() + Duration::from_secs(5))
-        });
-        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while !coordinator.closing_for_test() && Instant::now() < deadline {
-            thread::yield_now();
-        }
-
-        assert_eq!(
-            coordinator
-                .acquire(
-                    EffectGateOperationKindV2::KernelRecovery,
-                    Digest32V2::new([2; 32]),
-                    Instant::now() + Duration::from_secs(1),
-                )
-                .unwrap_err(),
-            EffectGateErrorV2::Fenced
-        );
-        drop(active);
-        assert_eq!(closer.join().unwrap(), Ok(()));
-        assert_eq!(
-            coordinator
-                .acquire(
-                    EffectGateOperationKindV2::PlannerExchange,
-                    Digest32V2::new([3; 32]),
-                    Instant::now() + Duration::from_secs(1),
-                )
-                .unwrap_err(),
-            EffectGateErrorV2::Fenced
-        );
-    }
-
-    #[test]
     fn poisoned_coordinator_state_fails_closed() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("effect-gate-v2");
@@ -563,7 +478,7 @@ mod tests {
         assert_eq!(
             coordinator
                 .acquire(
-                    EffectGateOperationKindV2::KernelRecovery,
+                    EffectGateOperationKindV2::ExecutionDispatch,
                     Digest32V2::new([1; 32]),
                     Instant::now() + Duration::from_secs(1),
                 )
@@ -590,7 +505,7 @@ mod tests {
         assert_eq!(
             coordinator
                 .acquire(
-                    EffectGateOperationKindV2::KernelRecovery,
+                    EffectGateOperationKindV2::ExecutionDispatch,
                     operation_id,
                     Instant::now() + Duration::from_secs(1),
                 )

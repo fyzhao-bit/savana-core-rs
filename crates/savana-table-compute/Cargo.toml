@@ -1,0 +1,19 @@
+[package]
+name = "savana-table-compute"
+version = "0.1.0"
+description = "The deterministic dojo.compute.table function, byte-exact with experiments/savana_bench/dojo_compute.py"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+unicode-normalization.workspace = true
+
+[dev-dependencies]
+# Only the differential driver (examples/compute_diff.rs) reads JSON lines.
+serde_json.workspace = true

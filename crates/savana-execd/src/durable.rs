@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{Read as _, Write as _};
@@ -129,7 +130,9 @@ pub struct DurableExecdServiceV2 {
     previous_state_digest: Digest32V2,
     current_head: ExecdStateHeadV2,
     rollback_anchor: Box<dyn ExecdRollbackAnchorV2>,
+    /// Fully validated when loaded and on every commit; never mutated in place.
     service: ExecdServiceV2,
+    service_digest: Digest32V2,
     poisoned: bool,
     lock: JournalLockV2,
 }
@@ -205,6 +208,7 @@ impl DurableExecdServiceV2 {
                     )
                 }
             };
+        let service_digest = service_state_digest(&service)?;
         Ok(Self {
             path: path.to_owned(),
             anchored_path,
@@ -215,6 +219,7 @@ impl DurableExecdServiceV2 {
             current_head,
             rollback_anchor,
             service,
+            service_digest,
             poisoned: false,
             lock,
         })
@@ -411,11 +416,11 @@ impl DurableExecdServiceV2 {
         operation: impl FnOnce(&mut ExecdServiceV2) -> Result<T, ExecdErrorV2>,
     ) -> Result<T, ExecdErrorV2> {
         self.ensure_usable()?;
-        let before = service_state_digest(&self.service)?;
         let mut next = self.service.clone();
         let result = operation(&mut next)?;
-        if service_state_digest(&next)? != before {
-            self.commit(next)?;
+        let next_digest = service_state_digest(&next)?;
+        if next_digest != self.service_digest {
+            self.commit(next, next_digest)?;
         }
         Ok(result)
     }
@@ -428,13 +433,17 @@ impl DurableExecdServiceV2 {
         }
     }
 
-    fn commit(&mut self, next: ExecdServiceV2) -> Result<(), ExecdErrorV2> {
+    fn commit(
+        &mut self,
+        next: ExecdServiceV2,
+        next_digest: Digest32V2,
+    ) -> Result<(), ExecdErrorV2> {
         let sequence = self
             .sequence
             .checked_add(1)
             .ok_or(ExecdErrorV2::DurableState)?;
         let previous_state_digest = self.current_head.state_digest;
-        validate_service(&next)?;
+        validate_service_change(&self.service, &next)?;
         let bytes = encode_encrypted_snapshot(
             sequence,
             previous_state_digest,
@@ -458,6 +467,7 @@ impl DurableExecdServiceV2 {
                     return Err(ExecdErrorV2::CommitUncertain);
                 }
                 self.service = next;
+                self.service_digest = next_digest;
                 self.sequence = sequence;
                 self.previous_state_digest = previous_state_digest;
                 self.current_head = next_head;
@@ -573,12 +583,14 @@ fn encode_encrypted_envelope(
     Ok(bytes)
 }
 
+/// Encodes `service` as persisted. Callers persist only a state that
+/// `validate_service` (on load) or `validate_service_change` (on commit)
+/// accepted; the digest used for change detection encodes any state.
 fn encode_snapshot_payload(
     sequence: u64,
     previous_state_digest: Digest32V2,
     service: &ExecdServiceV2,
 ) -> Result<Zeroizing<Vec<u8>>, ExecdErrorV2> {
-    validate_service(service)?;
     let mut encoder = minicbor::Encoder::new(Vec::new());
     encoder
         .array(4)
@@ -592,56 +604,64 @@ fn encode_snapshot_payload(
         .array(service.entries.len() as u64)
         .map_err(|_| ExecdErrorV2::AllocationFailure)?;
     for entry in &service.entries {
-        encoder
-            .array(14)
-            .and_then(|encoder| encoder.bytes(&entry.canonical_envelope))
-            .map_err(|_| ExecdErrorV2::AllocationFailure)?;
-        entry
-            .exact_envelope_digest
-            .encode(&mut encoder, &mut ())
-            .map_err(|_| ExecdErrorV2::AllocationFailure)?;
-        encoder
-            .u16(state_tag(entry.state))
-            .map_err(|_| ExecdErrorV2::AllocationFailure)?;
-        encode_optional_digest(&mut encoder, entry.provider_attempt_predecessor_digest)?;
-        encode_optional_digest(&mut encoder, entry.prepared_request_digest)?;
-        encode_optional_effect_receipt(&mut encoder, entry.effect_started_receipt.as_ref())?;
-        encode_optional_bytes(
-            &mut encoder,
-            entry
-                .retained_provider_response
-                .as_ref()
-                .map(|bytes| bytes.as_slice()),
-        )?;
-        encode_optional_bytes(
-            &mut encoder,
-            entry
-                .completion
-                .as_ref()
-                .map(StoredExecutorCompletionV2::canonical_payload),
-        )?;
-        encode_optional_receipt(&mut encoder, entry.terminal_receipt.as_ref())?;
-        encoder
-            .u16(entry.payload.kind.tag())
-            .map_err(|_| ExecdErrorV2::AllocationFailure)?;
-        encode_optional_failure_class(&mut encoder, entry.failure_class)?;
-        encode_optional_digest(&mut encoder, entry.release_evidence_prepared_digest)?;
-        encode_optional_bytes(
-            &mut encoder,
-            entry
-                .release_provider_evidence
-                .as_ref()
-                .map(|bytes| bytes.as_slice()),
-        )?;
-        encode_optional_bytes(
-            &mut encoder,
-            entry
-                .release_audit_evidence
-                .as_ref()
-                .map(|bytes| bytes.as_slice()),
-        )?;
+        encode_entry(&mut encoder, entry)?;
     }
     Ok(Zeroizing::new(encoder.into_writer()))
+}
+
+fn encode_entry(
+    encoder: &mut minicbor::Encoder<Vec<u8>>,
+    entry: &ExecdJournalEntryV2,
+) -> Result<(), ExecdErrorV2> {
+    encoder
+        .array(14)
+        .and_then(|encoder| encoder.bytes(&entry.canonical_envelope))
+        .map_err(|_| ExecdErrorV2::AllocationFailure)?;
+    entry
+        .exact_envelope_digest
+        .encode(encoder, &mut ())
+        .map_err(|_| ExecdErrorV2::AllocationFailure)?;
+    encoder
+        .u16(state_tag(entry.state))
+        .map_err(|_| ExecdErrorV2::AllocationFailure)?;
+    encode_optional_digest(encoder, entry.provider_attempt_predecessor_digest)?;
+    encode_optional_digest(encoder, entry.prepared_request_digest)?;
+    encode_optional_effect_receipt(encoder, entry.effect_started_receipt.as_ref())?;
+    encode_optional_bytes(
+        encoder,
+        entry
+            .retained_provider_response
+            .as_ref()
+            .map(|bytes| bytes.as_slice()),
+    )?;
+    encode_optional_bytes(
+        encoder,
+        entry
+            .completion
+            .as_ref()
+            .map(StoredExecutorCompletionV2::canonical_payload),
+    )?;
+    encode_optional_receipt(encoder, entry.terminal_receipt.as_ref())?;
+    encoder
+        .u16(entry.payload.kind.tag())
+        .map_err(|_| ExecdErrorV2::AllocationFailure)?;
+    encode_optional_failure_class(encoder, entry.failure_class)?;
+    encode_optional_digest(encoder, entry.release_evidence_prepared_digest)?;
+    encode_optional_bytes(
+        encoder,
+        entry
+            .release_provider_evidence
+            .as_ref()
+            .map(|bytes| bytes.as_slice()),
+    )?;
+    encode_optional_bytes(
+        encoder,
+        entry
+            .release_audit_evidence
+            .as_ref()
+            .map(|bytes| bytes.as_slice()),
+    )?;
+    Ok(())
 }
 
 fn decode_snapshot_payload(
@@ -750,35 +770,124 @@ fn validate_service(service: &ExecdServiceV2) -> Result<(), ExecdErrorV2> {
         }) {
             return Err(ExecdErrorV2::NonceRebinding);
         }
-        let verified =
-            verify_persisted_dispatch_envelope(&entry.canonical_envelope, &service.deployment)?;
-        if verified.payload.execution_nonce != entry.payload.execution_nonce
-            || verified.exact_envelope_digest != entry.exact_envelope_digest
-        {
-            return Err(ExecdErrorV2::DurableState);
-        }
-        validate_entry_state(entry)?;
-        validate_effect_receipt_for_entry(
-            entry,
-            entry.effect_started_receipt.as_ref(),
-            &service.deployment,
-        )?;
-        let terminal_kind = match entry.state {
-            ExecdJournalStateV2::CompletionAvailable | ExecdJournalStateV2::Acknowledged => {
-                Some(ExecutorReceiptKindV2::KnownSuccess)
-            }
-            ExecdJournalStateV2::FailedNoEffect => Some(ExecutorReceiptKindV2::FailedNoEffect),
-            ExecdJournalStateV2::Indeterminate => Some(ExecutorReceiptKindV2::Indeterminate),
-            _ => None,
-        };
-        validate_receipt_for_entry(
-            entry,
-            entry.terminal_receipt.as_ref(),
-            terminal_kind,
-            &service.deployment,
-        )?;
+        validate_entry(entry, &service.deployment)?;
     }
     Ok(())
+}
+
+/// `validate_service` for a state derived from `previous`, which was itself
+/// fully validated when it was loaded or committed. Every entry's shape and
+/// uniqueness are checked; the signatures an entry carries are verified again
+/// only if the entry is new, or differs in any persisted byte or in its
+/// envelope payload from the verified entry with the same envelope digest.
+/// A commit then costs work proportional to what it changed, not to the
+/// length of the journal's history.
+pub(super) fn validate_service_change(
+    previous: &ExecdServiceV2,
+    next: &ExecdServiceV2,
+) -> Result<(), ExecdErrorV2> {
+    if !same_deployment(&previous.deployment, &next.deployment) {
+        return validate_service(next);
+    }
+    if next.entries.len() > MAX_ENTRIES {
+        return Err(ExecdErrorV2::Capacity);
+    }
+    let mut nonces = HashSet::new();
+    let mut digests = HashSet::new();
+    let mut verified = HashMap::new();
+    nonces
+        .try_reserve(next.entries.len())
+        .and_then(|()| digests.try_reserve(next.entries.len()))
+        .and_then(|()| verified.try_reserve(previous.entries.len()))
+        .map_err(|_| ExecdErrorV2::AllocationFailure)?;
+    verified.extend(
+        previous
+            .entries
+            .iter()
+            .map(|entry| (*entry.exact_envelope_digest.as_bytes(), entry)),
+    );
+    for entry in &next.entries {
+        if !nonces.insert(*entry.payload.execution_nonce.as_bytes())
+            || !digests.insert(*entry.exact_envelope_digest.as_bytes())
+        {
+            return Err(ExecdErrorV2::NonceRebinding);
+        }
+        match verified.get(entry.exact_envelope_digest.as_bytes()) {
+            Some(known) if same_entry(known, entry)? => validate_entry_state(entry)?,
+            _ => validate_entry(entry, &next.deployment)?,
+        }
+    }
+    Ok(())
+}
+
+fn validate_entry(
+    entry: &ExecdJournalEntryV2,
+    deployment: &VerifiedExecdDeploymentV2,
+) -> Result<(), ExecdErrorV2> {
+    #[cfg(test)]
+    FULL_ENTRY_VALIDATIONS.with(|count| count.set(count.get() + 1));
+    let verified = verify_persisted_dispatch_envelope(&entry.canonical_envelope, deployment)?;
+    if verified.payload.execution_nonce != entry.payload.execution_nonce
+        || verified.exact_envelope_digest != entry.exact_envelope_digest
+    {
+        return Err(ExecdErrorV2::DurableState);
+    }
+    validate_entry_state(entry)?;
+    validate_effect_receipt_for_entry(entry, entry.effect_started_receipt.as_ref(), deployment)?;
+    let terminal_kind = match entry.state {
+        ExecdJournalStateV2::CompletionAvailable | ExecdJournalStateV2::Acknowledged => {
+            Some(ExecutorReceiptKindV2::KnownSuccess)
+        }
+        ExecdJournalStateV2::FailedNoEffect => Some(ExecutorReceiptKindV2::FailedNoEffect),
+        ExecdJournalStateV2::Indeterminate => Some(ExecutorReceiptKindV2::Indeterminate),
+        _ => None,
+    };
+    validate_receipt_for_entry(
+        entry,
+        entry.terminal_receipt.as_ref(),
+        terminal_kind,
+        deployment,
+    )
+}
+
+#[cfg(test)]
+thread_local! {
+    static FULL_ENTRY_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Entries whose envelope and receipt signatures were verified on this thread.
+#[cfg(test)]
+pub(super) fn full_entry_validations_for_test() -> usize {
+    FULL_ENTRY_VALIDATIONS.with(std::cell::Cell::get)
+}
+
+fn same_deployment(left: &VerifiedExecdDeploymentV2, right: &VerifiedExecdDeploymentV2) -> bool {
+    left.installation_id == right.installation_id
+        && left.active_state_manifest_digest == right.active_state_manifest_digest
+        && left.deployment_generation == right.deployment_generation
+        && left.effect_fence_epoch == right.effect_fence_epoch
+        && left.executor_identity_digest == right.executor_identity_digest
+        && left.kernel_envelope_key_id == right.kernel_envelope_key_id
+        && left.kernel_envelope_verifying_key == right.kernel_envelope_verifying_key
+        && left.effect_receipt_key_id == right.effect_receipt_key_id
+        && left.effect_receipt_signing_key.verifying_key()
+            == right.effect_receipt_signing_key.verifying_key()
+}
+
+fn same_entry(
+    left: &ExecdJournalEntryV2,
+    right: &ExecdJournalEntryV2,
+) -> Result<bool, ExecdErrorV2> {
+    if left.payload != right.payload {
+        return Ok(false);
+    }
+    let mut left_bytes = minicbor::Encoder::new(Vec::new());
+    let mut right_bytes = minicbor::Encoder::new(Vec::new());
+    encode_entry(&mut left_bytes, left)?;
+    encode_entry(&mut right_bytes, right)?;
+    let left_bytes = Zeroizing::new(left_bytes.into_writer());
+    let right_bytes = Zeroizing::new(right_bytes.into_writer());
+    Ok(left_bytes.as_slice() == right_bytes.as_slice())
 }
 
 fn validate_entry_state(entry: &ExecdJournalEntryV2) -> Result<(), ExecdErrorV2> {

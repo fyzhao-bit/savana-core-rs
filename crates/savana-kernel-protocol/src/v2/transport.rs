@@ -207,6 +207,7 @@ impl KernelServiceHandshakeEdgeV2 {
                 | EndpointRoleV2::AgentApproval
                 | EndpointRoleV2::IngressApproval
                 | EndpointRoleV2::ApprovalAdmin
+                | EndpointRoleV2::KernelApproval
         ) || self.active_state_manifest_sequence == 0
             || self.deployment_generation == 0
             || self.effect_fence_epoch == 0
@@ -951,6 +952,7 @@ impl V2ServerTransportSession {
         Ok(record)
     }
 
+    #[allow(clippy::result_large_err)]
     /// Stages the endpoint-fixed response while consuming the live session.
     /// The resulting capability can be committed once or rolled back to the
     /// session; callers cannot prepare multiple records under the same nonce.

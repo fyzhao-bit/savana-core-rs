@@ -1,0 +1,14 @@
+# Explicit opt-in experiment listener. No TCP model fallback.
+[Unit]
+Description=Savana private experiment model TLS socket
+
+[Socket]
+ListenStream=/run/savana-model/fused-v04.sock
+SocketUser=root
+SocketGroup=savana-kernel
+SocketMode=0660
+DirectoryMode=0711
+FileDescriptorName=savana-fused-model-v04
+Service=savana-protected-experiment.service
+RemoveOnStop=no
+

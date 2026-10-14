@@ -1,71 +1,18 @@
-use ed25519_dalek::{Signer as _, SigningKey};
-use minicbor::Encode as _;
 use savana_kernel_protocol::v2::{
-    derive_ed25519_key_id_v2, encode_read_agent_view_response_v2, AgentViewV2, BoundedAgentTextV2,
-    ClosedRedactionClassV2, Digest32V2, Ed25519KeyIdV2, Ed25519SignatureV2, PlaceholderViewV2,
-    ReadAgentViewResponseV2, UnixMillisV2,
+    encode_read_agent_view_response_v2, AgentViewV2, BoundedAgentTextV2, ClosedRedactionClassV2,
+    Digest32V2, PlaceholderViewV2, ReadAgentViewResponseV2, UnixMillisV2,
 };
 use savana_policy_core::v2::{
     ClosedDeclassificationPurposeV2, DeclassificationRuleSetV2, DeclassificationTransitionV2,
-    DispatchSubjectV2, HandoffJudgmentV2, KernelPreparedDispatchV2, KernelValueV2,
-    ProvenanceRecordV2,
+    HandoffJudgmentV2, KernelValueV2, ProvenanceRecordV2,
 };
 use sha2::{Digest as _, Sha256};
-use zeroize::Zeroizing;
 
 use crate::v2_input_owner::FinalizedKernelInputV2;
-use crate::DaemonError;
 
-const SEALED_EXECUTION_ENVELOPE_DOMAIN: &[u8] = b"SAVANA_SEALED_EXECUTION_ENVELOPE_V2\0";
 const MASKED_AGENT_VIEW_RECORD_TAG_V2: u16 = 0;
 const MAX_AGENT_VIEW_RESPONSE_BYTES_V2: usize = 8 * 1024 * 1024;
 const MASKED_SUBSTITUTION_SET_DOMAIN_V2: &[u8] = b"SAVANA_MASKED_SUBSTITUTION_SET_V2\0";
-
-pub(crate) struct KernelTaskSigningIdentityV2 {
-    key_id: Ed25519KeyIdV2,
-    signing_key: SigningKey,
-}
-
-impl std::fmt::Debug for KernelTaskSigningIdentityV2 {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("KernelTaskSigningIdentityV2(<redacted>)")
-    }
-}
-
-impl KernelTaskSigningIdentityV2 {
-    pub(crate) fn from_seed(key_id: Ed25519KeyIdV2, seed: [u8; 32]) -> Result<Self, DaemonError> {
-        let seed = Zeroizing::new(seed);
-        if is_zero(key_id.as_bytes()) || is_zero(seed.as_ref()) {
-            return Err(v2_runtime_error());
-        }
-        let signing_key = SigningKey::from_bytes(&seed);
-        if derive_ed25519_key_id_v2(signing_key.verifying_key().to_bytes()) != key_id {
-            return Err(v2_runtime_error());
-        }
-        Ok(Self {
-            key_id,
-            signing_key,
-        })
-    }
-
-    pub(crate) fn public_key(&self) -> [u8; 32] {
-        self.signing_key.verifying_key().to_bytes()
-    }
-
-    pub(crate) fn sign_statement(
-        &self,
-        statement: savana_agentd::KernelTaskStatementV2,
-    ) -> Result<savana_agentd::SignedKernelTaskStatementV2, DaemonError> {
-        let signing_bytes = statement.signing_bytes().map_err(|_| v2_runtime_error())?;
-        let signature = self.signing_key.sign(&signing_bytes).to_bytes();
-        savana_agentd::SignedKernelTaskStatementV2::from_kernel_signature(
-            statement,
-            self.key_id,
-            Ed25519SignatureV2::new(signature),
-        )
-        .map_err(|_| v2_runtime_error())
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum KernelIngressPipelineErrorV2 {
@@ -86,6 +33,9 @@ pub(crate) struct AcceptedKernelIngressV2 {
     agent_value: KernelValueV2,
     provenance: ProvenanceRecordV2,
     live_vault_segment: savana_vault::LiveVaultSegmentV2,
+    /// Consented owner document with its GatedIngress provenance, only for
+    /// kernel-internal fused input derivation. Never an agent or model view.
+    owner_input: Option<(KernelValueV2, ProvenanceRecordV2)>,
 }
 
 impl std::fmt::Debug for AcceptedKernelIngressV2 {
@@ -99,16 +49,18 @@ impl std::fmt::Debug for AcceptedKernelIngressV2 {
 }
 
 impl AcceptedKernelIngressV2 {
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) const fn gated_input(&self) -> &savana_input_runtime::GatedPlannerInputV2 {
         &self.gated_input
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) const fn provenance(&self) -> &savana_policy_core::v2::ProvenanceRecordV2 {
         &self.provenance
     }
 
-    pub(crate) const fn live_vault_segment(&self) -> &savana_vault::LiveVaultSegmentV2 {
-        &self.live_vault_segment
+    pub(crate) fn take_owner_input(&mut self) -> Option<(KernelValueV2, ProvenanceRecordV2)> {
+        self.owner_input.take()
     }
 
     pub(crate) fn into_parts(
@@ -128,6 +80,7 @@ impl AcceptedKernelIngressV2 {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn accept_ingress_into_kernel(
     input_runtime: &savana_input_runtime::InputRuntimeV2,
@@ -200,6 +153,7 @@ pub(crate) fn accept_ingress_into_kernel(
         agent_value: normalized_value,
         provenance,
         live_vault_segment,
+        owner_input: None,
     })
 }
 
@@ -338,6 +292,7 @@ pub(crate) fn accept_finalized_input_into_kernel(
         agent_value: masked_value,
         provenance: masked_provenance,
         live_vault_segment,
+        owner_input: Some((normalized_value, provenance)),
     })
 }
 
@@ -452,232 +407,8 @@ fn masked_substitution_set_digest(
     Ok(digest)
 }
 
-pub(crate) struct KernelDispatchSigningIdentityV2 {
-    key_id: Ed25519KeyIdV2,
-    signing_key: SigningKey,
-}
-
-impl std::fmt::Debug for KernelDispatchSigningIdentityV2 {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("KernelDispatchSigningIdentityV2(<redacted>)")
-    }
-}
-
-impl KernelDispatchSigningIdentityV2 {
-    pub(crate) fn from_seed(key_id: Ed25519KeyIdV2, seed: [u8; 32]) -> Result<Self, DaemonError> {
-        let seed = Zeroizing::new(seed);
-        if is_zero(key_id.as_bytes()) || is_zero(seed.as_ref()) {
-            return Err(v2_runtime_error());
-        }
-        let signing_key = SigningKey::from_bytes(&seed);
-        if derive_ed25519_key_id_v2(signing_key.verifying_key().to_bytes()) != key_id {
-            return Err(v2_runtime_error());
-        }
-        Ok(Self {
-            key_id,
-            signing_key,
-        })
-    }
-
-    pub(crate) fn public_key(&self) -> [u8; 32] {
-        self.signing_key.verifying_key().to_bytes()
-    }
-
-    pub(crate) fn sign_prepared_dispatch(
-        &self,
-        prepared: &KernelPreparedDispatchV2,
-        issued_at: UnixMillisV2,
-        effect_gate_lease_digest: Digest32V2,
-        ledger_projection_digest: Digest32V2,
-    ) -> Result<SignedKernelDispatchEnvelopeV2, DaemonError> {
-        let core = prepared.core();
-        if issued_at.get() == 0
-            || issued_at.get() >= core.expires_at().get()
-            || is_zero(effect_gate_lease_digest.as_bytes())
-            || is_zero(ledger_projection_digest.as_bytes())
-        {
-            return Err(v2_runtime_error());
-        }
-        let kind_tag = match core.subject() {
-            DispatchSubjectV2::ToolExecution { .. } => 1,
-            DispatchSubjectV2::FinalRelease { .. } => 2,
-        };
-        let mut payload = minicbor::Encoder::new(Vec::new());
-        payload
-            .array(15)
-            .and_then(|encoder| encoder.u16(2))
-            .map_err(|_| v2_runtime_error())?;
-        core.installation_id()
-            .encode(&mut payload, &mut ())
-            .map_err(|_| v2_runtime_error())?;
-        core.active_state_manifest_digest()
-            .encode(&mut payload, &mut ())
-            .map_err(|_| v2_runtime_error())?;
-        payload
-            .u64(core.deployment_generation())
-            .and_then(|encoder| encoder.u64(core.effect_fence_epoch()))
-            .map_err(|_| v2_runtime_error())?;
-        Digest32V2::new(*core.executor_identity().as_bytes())
-            .encode(&mut payload, &mut ())
-            .map_err(|_| v2_runtime_error())?;
-        payload.u16(kind_tag).map_err(|_| v2_runtime_error())?;
-        core.execution_nonce()
-            .encode(&mut payload, &mut ())
-            .map_err(|_| v2_runtime_error())?;
-        prepared
-            .preparation()
-            .dispatch_core_digest()
-            .encode(&mut payload, &mut ())
-            .map_err(|_| v2_runtime_error())?;
-        core.dispatch_subject_digest()
-            .encode(&mut payload, &mut ())
-            .map_err(|_| v2_runtime_error())?;
-        prepared
-            .sealed_envelope_digest()
-            .encode(&mut payload, &mut ())
-            .map_err(|_| v2_runtime_error())?;
-        payload
-            .u64(issued_at.get())
-            .and_then(|encoder| encoder.u64(core.expires_at().get()))
-            .map_err(|_| v2_runtime_error())?;
-        effect_gate_lease_digest
-            .encode(&mut payload, &mut ())
-            .map_err(|_| v2_runtime_error())?;
-        ledger_projection_digest
-            .encode(&mut payload, &mut ())
-            .map_err(|_| v2_runtime_error())?;
-
-        let canonical_payload = payload.into_writer();
-        let payload_digest: [u8; 32] = Sha256::digest(&canonical_payload).into();
-        let mut signature_input =
-            Vec::with_capacity(SEALED_EXECUTION_ENVELOPE_DOMAIN.len() + payload_digest.len());
-        signature_input.extend_from_slice(SEALED_EXECUTION_ENVELOPE_DOMAIN);
-        signature_input.extend_from_slice(&payload_digest);
-        let signature = self.signing_key.sign(&signature_input).to_bytes();
-
-        let mut envelope = minicbor::Encoder::new(Vec::new());
-        envelope
-            .array(3)
-            .and_then(|encoder| encoder.bytes(&canonical_payload))
-            .map_err(|_| v2_runtime_error())?;
-        self.key_id
-            .encode(&mut envelope, &mut ())
-            .map_err(|_| v2_runtime_error())?;
-        envelope.bytes(&signature).map_err(|_| v2_runtime_error())?;
-        let canonical_bytes = envelope.into_writer();
-        let envelope_digest = Digest32V2::new(Sha256::digest(&canonical_bytes).into());
-        Ok(SignedKernelDispatchEnvelopeV2 {
-            canonical_bytes,
-            envelope_digest,
-        })
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct SignedKernelDispatchEnvelopeV2 {
-    canonical_bytes: Vec<u8>,
-    envelope_digest: Digest32V2,
-}
-
-impl std::fmt::Debug for SignedKernelDispatchEnvelopeV2 {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("SignedKernelDispatchEnvelopeV2")
-            .field("envelope_digest", &self.envelope_digest)
-            .finish_non_exhaustive()
-    }
-}
-
-impl SignedKernelDispatchEnvelopeV2 {
-    pub(crate) fn canonical_bytes(&self) -> &[u8] {
-        &self.canonical_bytes
-    }
-
-    pub(crate) const fn envelope_digest(&self) -> Digest32V2 {
-        self.envelope_digest
-    }
-}
-
-pub(crate) fn prepare_vault_release_commit(
-    prepared: &KernelPreparedDispatchV2,
-) -> Result<savana_vault::KernelPreparedReleaseDispatchV2, DaemonError> {
-    let binding = match prepared.core().subject() {
-        DispatchSubjectV2::FinalRelease { binding, .. } => *binding,
-        DispatchSubjectV2::ToolExecution { .. } => return Err(v2_runtime_error()),
-    };
-    savana_vault::KernelPreparedReleaseDispatchV2::from_verified_kernel_commit(
-        binding,
-        prepared.consumed_ticket_digest(),
-        prepared.preparation().execution_nonce(),
-        prepared.preparation().dispatch_core_digest(),
-        prepared.preparation().dispatch_subject_digest(),
-    )
-    .map_err(|_| v2_runtime_error())
-}
-
-pub(crate) fn verify_tool_approval_settlement(
-    settlement: savana_approvald::ConsumedApprovalSettlementV2,
-    action_intent_id: savana_kernel_protocol::v2::ActionIntentIdV2,
-    semantic_binding_digest: Digest32V2,
-    active_state_manifest_digest: Digest32V2,
-    now: UnixMillisV2,
-) -> Result<savana_policy_core::v2::VerifiedToolApprovalSettlementV2, DaemonError> {
-    let approval_binding_digest = savana_policy_core::v2::tool_approval_binding_digest_v2(
-        action_intent_id,
-        semantic_binding_digest,
-        active_state_manifest_digest,
-    )
-    .map_err(|_| v2_runtime_error())?;
-    if settlement.purpose() != savana_approvald::ApprovalPurposeV2::ToolExecution
-        || settlement.binding_digest() != approval_binding_digest
-        || settlement.expires_at().get() <= now.get()
-    {
-        return Err(v2_runtime_error());
-    }
-    savana_policy_core::v2::VerifiedToolApprovalSettlementV2::from_consumed_exact_settlement(
-        settlement.settlement_digest(),
-        action_intent_id,
-        approval_binding_digest,
-        active_state_manifest_digest,
-    )
-    .map_err(|_| v2_runtime_error())
-}
-
-pub(crate) fn verify_final_release_approval_settlement(
-    settlement: savana_approvald::ConsumedApprovalSettlementV2,
-    authorized_release: savana_vault::AuthorizedVaultReleaseV2,
-    active_state_manifest_digest: Digest32V2,
-    now: UnixMillisV2,
-) -> Result<savana_policy_core::v2::VerifiedFinalReleaseSettlementV2, DaemonError> {
-    let binding = authorized_release.binding();
-    let binding_digest = binding.semantic_digest().ok_or_else(v2_runtime_error)?;
-    if settlement.purpose() != savana_approvald::ApprovalPurposeV2::FinalRelease
-        || settlement.binding_digest() != binding_digest
-        || settlement.settlement_digest() != authorized_release.approval_settlement_digest()
-        || authorized_release.binding_digest() != binding_digest
-        || settlement.expires_at().get() <= now.get()
-    {
-        return Err(v2_runtime_error());
-    }
-    savana_policy_core::v2::VerifiedFinalReleaseSettlementV2::from_consumed_exact_settlement(
-        settlement.settlement_digest(),
-        binding.durable_release_id(),
-        binding_digest,
-        binding.destination_digest(),
-        binding.token_set_digest(),
-        active_state_manifest_digest,
-        settlement.issued_at(),
-        settlement.expires_at(),
-    )
-    .map_err(|_| v2_runtime_error())
-}
-
 fn is_zero(bytes: &[u8]) -> bool {
     bytes.iter().all(|byte| *byte == 0)
-}
-
-fn v2_runtime_error() -> DaemonError {
-    DaemonError::stable(savana_kernel_protocol::StableCode::KernelUnavailable)
 }
 
 #[cfg(test)]
@@ -723,10 +454,81 @@ mod tests {
         VaultRollbackAnchorV2, VaultServiceV2, VaultStateHeadV2,
     };
 
-    use super::{
-        accept_finalized_input_into_kernel, accept_ingress_into_kernel,
-        prepare_vault_release_commit, KernelDispatchSigningIdentityV2, KernelTaskSigningIdentityV2,
-    };
+    use super::{accept_finalized_input_into_kernel, accept_ingress_into_kernel, is_zero};
+    use crate::DaemonError;
+    use savana_kernel_protocol::v2::Ed25519SignatureV2;
+    use savana_policy_core::v2::{DispatchSubjectV2, KernelPreparedDispatchV2};
+    use zeroize::Zeroizing;
+
+    /// The kernel side of agentd's task-statement verifier, which production
+    /// has not wired: only this crate's tests sign statements.
+    struct KernelTaskSigningIdentityV2 {
+        key_id: Ed25519KeyIdV2,
+        signing_key: SigningKey,
+    }
+
+    impl std::fmt::Debug for KernelTaskSigningIdentityV2 {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("KernelTaskSigningIdentityV2(<redacted>)")
+        }
+    }
+
+    impl KernelTaskSigningIdentityV2 {
+        fn from_seed(key_id: Ed25519KeyIdV2, seed: [u8; 32]) -> Result<Self, DaemonError> {
+            let seed = Zeroizing::new(seed);
+            if is_zero(key_id.as_bytes()) || is_zero(seed.as_ref()) {
+                return Err(v2_runtime_error());
+            }
+            let signing_key = SigningKey::from_bytes(&seed);
+            if derive_ed25519_key_id_v2(signing_key.verifying_key().to_bytes()) != key_id {
+                return Err(v2_runtime_error());
+            }
+            Ok(Self {
+                key_id,
+                signing_key,
+            })
+        }
+
+        fn public_key(&self) -> [u8; 32] {
+            self.signing_key.verifying_key().to_bytes()
+        }
+
+        fn sign_statement(
+            &self,
+            statement: savana_agentd::KernelTaskStatementV2,
+        ) -> Result<savana_agentd::SignedKernelTaskStatementV2, DaemonError> {
+            let signing_bytes = statement.signing_bytes().map_err(|_| v2_runtime_error())?;
+            let signature = self.signing_key.sign(&signing_bytes).to_bytes();
+            savana_agentd::SignedKernelTaskStatementV2::from_kernel_signature(
+                statement,
+                self.key_id,
+                Ed25519SignatureV2::new(signature),
+            )
+            .map_err(|_| v2_runtime_error())
+        }
+    }
+
+    fn prepare_vault_release_commit(
+        prepared: &KernelPreparedDispatchV2,
+    ) -> Result<savana_vault::KernelPreparedReleaseDispatchV2, DaemonError> {
+        let binding = match prepared.core().subject() {
+            DispatchSubjectV2::FinalRelease { binding, .. } => *binding,
+            DispatchSubjectV2::ToolExecution { .. } => return Err(v2_runtime_error()),
+        };
+        savana_vault::KernelPreparedReleaseDispatchV2::from_verified_kernel_commit(
+            binding,
+            prepared.consumed_ticket_digest(),
+            prepared.preparation().execution_nonce(),
+            prepared.preparation().dispatch_core_digest(),
+            prepared.preparation().dispatch_subject_digest(),
+        )
+        .map_err(|_| v2_runtime_error())
+    }
+
+    fn v2_runtime_error() -> DaemonError {
+        DaemonError::stable(savana_kernel_protocol::StableCode::KernelUnavailable)
+    }
+
     use crate::v2_input_owner::{KernelInputOwnerV2, KernelVerifiedUiAuthorizationV2};
 
     #[derive(Clone)]
@@ -1049,7 +851,7 @@ mod tests {
 
         assert_eq!(accepted.gated_input().protected_values().len(), 1);
         assert_eq!(accepted.provenance().root_evidence().as_slice().len(), 3);
-        assert!(format!("{:?}", accepted.live_vault_segment()).contains("<opaque>"));
+        assert!(format!("{:?}", &accepted.live_vault_segment).contains("<opaque>"));
         assert_eq!(vault.segment_count(), 1);
         let encrypted = std::fs::read(vault_path).unwrap();
         assert!(!encrypted
@@ -1057,11 +859,19 @@ mod tests {
             .any(|window| window == b"alice@example.com"));
     }
 
-    #[test]
-    fn finalized_kernel_owned_input_flows_through_g1_g2_g3_and_vault() {
+    /// Commit `content` as the owner's chat input, then accept it into the
+    /// kernel: G1/G2 masking, the G3 leak check on the masked view, the vault.
+    fn accept_finalized_chat_input(
+        content: &[u8],
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        DurableVaultServiceV2,
+        Result<super::AcceptedKernelIngressV2, super::KernelIngressPipelineErrorV2>,
+    ) {
         let installation = Digest32V2::new([0x30; 32]);
         let manifest = Digest32V2::new([0x35; 32]);
-        let content = b"send to alice@example.com".to_vec();
+        let content = content.to_vec();
         let content_digest = Digest32V2::new(Sha256::digest(&content).into());
         let mut input_owner = KernelInputOwnerV2::new(4, 4096).unwrap();
         let ui_authorization =
@@ -1176,8 +986,15 @@ mod tests {
             savana_policy_core::v2::EffectSetV2::SEND,
             UnixMillisV2::new(35),
             UnixMillisV2::new(400),
-        )
-        .unwrap();
+        );
+        (directory, vault_path, vault, accepted)
+    }
+
+    #[test]
+    fn finalized_kernel_owned_input_flows_through_g1_g2_g3_and_vault() {
+        let (_directory, vault_path, mut vault, accepted) =
+            accept_finalized_chat_input(b"send to alice@example.com");
+        let accepted = accepted.unwrap();
 
         assert_eq!(accepted.gated_input().protected_values().len(), 1);
         assert_eq!(accepted.provenance().root_evidence().as_slice().len(), 9);
@@ -1192,7 +1009,7 @@ mod tests {
         .unwrap();
         let document = vault
             .issue_masked_document(
-                accepted.live_vault_segment(),
+                &accepted.live_vault_segment,
                 agent_context,
                 UnixMillisV2::new(36),
             )
@@ -1217,6 +1034,24 @@ mod tests {
         assert!(!encrypted
             .windows(b"alice@example.com".len())
             .any(|window| window == b"alice@example.com"));
+    }
+
+    #[test]
+    fn an_account_number_whose_masking_exposes_another_number_still_commits() {
+        // AgentDojo banking user_task_15: the mobile-number pattern claims
+        // `13301240023` inside the landlord's account number. Masked once,
+        // `1215421872` followed a placeholder, the G3 leak check found it as
+        // residual PII, and the owner's input could never be committed.
+        let (_directory, _vault_path, _vault, accepted) =
+            accept_finalized_chat_input(b"send the rent to CA133012400231215421872");
+        let accepted = accepted.unwrap();
+        assert_eq!(accepted.gated_input().protected_values().len(), 2);
+        let masked = accepted.gated_input().masked_agent_input().unwrap();
+        assert!(masked
+            .text()
+            .starts_with("send the rent to CA[SAVANA_REDACTED_"));
+        assert!(!masked.text().contains("1215421872"));
+        assert!(!masked.text().contains("13301240023"));
     }
 
     #[test]
@@ -1285,47 +1120,194 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let prepared = policy
-            .prepare_verified_final_release_dispatch(
-                &release,
-                VerifiedQuotaLimitV2::from_verified_policy(
-                    1,
-                    Digest32V2::new([0x26; 32]),
-                    DispatchQuotaSubjectV2::final_release(binding.release_quota_subject_digest()),
-                )
-                .unwrap(),
-                &VerifiedFinalReleaseSettlementV2::from_consumed_exact_settlement(
-                    Digest32V2::new([0x27; 32]),
-                    release_id,
-                    binding.semantic_digest().unwrap(),
+        // This is a policy/dispatch-admission component test, not the native
+        // release producer or a provider-wire test. The old no-task prepare
+        // entry point deliberately refuses new work; install a real signed
+        // fixture root and construct its checked match/endorsements instead.
+        let task_request =
+            |policy: &mut DurableG4StateV2, wrong_destination: bool, wrong_evidence: bool| {
+                use savana_kernel_protocol::v2::{
+                    sign_task_authorization_v2, ActionAlternativeV2, ActionCodecProfileV2,
+                    ActionContentV2, MagnitudeUnitV2, TaskAuthorizationClauseV2,
+                    TaskAuthorizationV2, TaskEffectV2, TaskEvidenceKindV2,
+                };
+                use savana_policy_core::v2::{
+                    checked_control_endorsements_v2, ControlEvidenceV2, ControlSelectionV2,
+                    TaskDispatchAuthorizationV2, TaskMatchContextV2, VerifiedTaskAuthorizationV2,
+                };
+                let issuer = SigningKey::from_bytes(&[0x61; 32]);
+                let task_id = DurableTaskIdV2::new([0x24; 32]);
+                let principal = PrincipalIdV2::new([0x62; 32]);
+                let action = ActionAlternativeV2::new(
+                    Digest32V2::new([0x63; 32]),
+                    ActionCodecProfileV2::FixedJsonPostV1,
+                    TaskEffectV2::FinalRelease,
+                    binding.vault_segment_digest(),
                     binding.destination_digest(),
-                    binding.token_set_digest(),
-                    manifest,
-                    UnixMillisV2::new(10),
-                    UnixMillisV2::new(100),
+                    Digest32V2::new([0x64; 32]),
+                    MagnitudeUnitV2::Bytes,
                 )
-                .unwrap(),
-                ResolvedFinalReleaseTicketV2::from_resolved_kernel_ticket(
-                    Digest32V2::new([0x28; 32]),
-                    release_id,
-                    binding.semantic_digest().unwrap(),
+                .unwrap();
+                let other_action = ActionAlternativeV2::new(
+                    action.tool_descriptor_digest(),
+                    action.codec_profile(),
+                    action.effect(),
+                    action.resource_digest(),
+                    Digest32V2::new([0x71; 32]),
+                    action.parameters_digest(),
+                    action.magnitude_unit(),
                 )
-                .unwrap(),
-                VerifiedEffectGateLeaseV2::from_authenticated_ledger(
+                .unwrap();
+                let root = TaskAuthorizationV2::new(
+                    Digest32V2::new([0x65; 32]),
+                    principal,
+                    task_id,
+                    1,
                     installation,
                     manifest,
-                    7,
-                    9,
-                    false,
-                    executor,
-                    HpkeX25519KeyIdV2::new([0x29; 32]),
-                    &connector_registry,
+                    UnixMillisV2::new(1),
                     UnixMillisV2::new(10_000),
+                    TaskEvidenceKindV2::AuthenticatedStructuredInput,
+                    Digest32V2::new([0x66; 32]),
+                    Digest32V2::new([0x67; 32]),
+                    vec![TaskAuthorizationClauseV2::new(
+                        1,
+                        vec![action.clone(), other_action.clone()],
+                        1,
+                        1,
+                        1,
+                        vec![],
+                        false,
+                    )
+                    .unwrap()],
                 )
-                .unwrap(),
-                Digest32V2::new([0x2b; 32]),
-            )
-            .unwrap();
+                .unwrap();
+                let signed_root = sign_task_authorization_v2(root, &issuer).unwrap();
+                let root = VerifiedTaskAuthorizationV2::verify(
+                    &signed_root,
+                    &issuer.verifying_key(),
+                    principal,
+                    task_id,
+                    installation,
+                    manifest,
+                    UnixMillisV2::new(10),
+                )
+                .unwrap();
+                policy.install_verified_task_authorization(root).unwrap();
+                let state = policy.task_authorization_state(task_id).unwrap();
+                let root = state.authorization();
+                let content = ActionContentV2::new(
+                    root.material().authorization_id(),
+                    1,
+                    1,
+                    u64::from(wrong_destination),
+                    if wrong_destination {
+                        other_action
+                    } else {
+                        action
+                    },
+                    1,
+                    binding.release_payload_digest(),
+                    if wrong_evidence {
+                        Digest32V2::new([0x72; 32])
+                    } else {
+                        binding.evidence_digest()
+                    },
+                    Digest32V2::new([0x68; 32]),
+                    root.candidate_domain(1, UnixMillisV2::new(10))
+                        .unwrap()
+                        .digest(),
+                    state.digest(),
+                    state.revision(),
+                )
+                .unwrap();
+                let current = TaskMatchContextV2 {
+                    current_authorization: Some(root),
+                    pre_state_digest: state.digest(),
+                    pre_state_revision: state.revision(),
+                    deployment_generation: 7,
+                    now: UnixMillisV2::new(10),
+                };
+                let matched = root.match_action(&content, &current).unwrap();
+                let selections =
+                    ControlSelectionV2::from_match(&matched, Digest32V2::new([0x69; 32])).unwrap();
+                let endorsements = checked_control_endorsements_v2(
+                    &matched,
+                    &selections,
+                    ControlEvidenceV2::ExplicitAlternative,
+                    &current,
+                )
+                .unwrap();
+                TaskDispatchAuthorizationV2::new(matched, endorsements)
+            };
+        let prepare =
+            |policy: &mut DurableG4StateV2,
+             task_request: &savana_policy_core::v2::TaskDispatchAuthorizationV2| {
+                policy.prepare_task_bound_final_release_dispatch(
+                    &release,
+                    VerifiedQuotaLimitV2::from_verified_policy(
+                        1,
+                        Digest32V2::new([0x26; 32]),
+                        DispatchQuotaSubjectV2::final_release(
+                            binding.release_quota_subject_digest(),
+                        ),
+                    )
+                    .unwrap(),
+                    &VerifiedFinalReleaseSettlementV2::from_consumed_exact_settlement(
+                        Digest32V2::new([0x27; 32]),
+                        release_id,
+                        binding.semantic_digest().unwrap(),
+                        binding.destination_digest(),
+                        binding.token_set_digest(),
+                        manifest,
+                        UnixMillisV2::new(10),
+                        UnixMillisV2::new(100),
+                    )
+                    .unwrap(),
+                    ResolvedFinalReleaseTicketV2::from_resolved_kernel_ticket(
+                        Digest32V2::new([0x28; 32]),
+                        release_id,
+                        binding.semantic_digest().unwrap(),
+                    )
+                    .unwrap(),
+                    VerifiedEffectGateLeaseV2::from_authenticated_ledger(
+                        installation,
+                        manifest,
+                        7,
+                        9,
+                        false,
+                        executor,
+                        HpkeX25519KeyIdV2::new([0x29; 32]),
+                        &connector_registry,
+                        UnixMillisV2::new(10_000),
+                    )
+                    .unwrap(),
+                    Digest32V2::new([0x2b; 32]),
+                    task_request,
+                    UnixMillisV2::new(10),
+                )
+            };
+        for (wrong_destination, wrong_evidence) in [(true, false), (false, true)] {
+            let request = task_request(&mut policy, wrong_destination, wrong_evidence);
+            assert!(prepare(&mut policy, &request).is_err());
+            assert_eq!(
+                policy
+                    .task_authorization_state(DurableTaskIdV2::new([0x24; 32]))
+                    .unwrap()
+                    .clause_consumption(1),
+                Some((0, 0))
+            );
+        }
+        let request = task_request(&mut policy, false, false);
+        let prepared = prepare(&mut policy, &request).unwrap();
+
+        assert_eq!(
+            policy
+                .task_authorization_state(DurableTaskIdV2::new([0x24; 32]))
+                .unwrap()
+                .clause_consumption(1),
+            Some((1, 1))
+        );
 
         let envelope_signing_key = SigningKey::from_bytes(&envelope_seed);
         let protocol_core = crate::v2_agent_authority::protocol_dispatch_core(&prepared).unwrap();
@@ -1500,15 +1482,10 @@ mod tests {
     }
 
     #[test]
-    fn signing_identities_reject_key_ids_not_derived_from_the_seed() {
+    fn the_task_signing_identity_rejects_a_key_id_not_derived_from_its_seed() {
         assert!(KernelTaskSigningIdentityV2::from_seed(
             Ed25519KeyIdV2::new([0x61; 32]),
             [0x62; 32],
-        )
-        .is_err());
-        assert!(KernelDispatchSigningIdentityV2::from_seed(
-            Ed25519KeyIdV2::new([0x63; 32]),
-            [0x64; 32],
         )
         .is_err());
     }

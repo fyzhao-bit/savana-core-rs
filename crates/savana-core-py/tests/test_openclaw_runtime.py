@@ -48,6 +48,28 @@ class FakeHandle:
         return "Handle(<opaque:document>)"
 
 
+class FakeTaskContext:
+    source_input_digest = bytes([3]) * 32
+    authorization_identity = None
+    pending_requests = []
+
+    def tools_json(self):
+        return "[]"
+
+    def draft(self, authorization_id, clauses_json):
+        assert len(authorization_id) == 32
+        assert clauses_json == b"[]"
+        return "unsigned-draft"
+
+
+class FakeDraftBroker:
+    def request_task_draft(self, context, turn_binding, deadline_unix_ms, cancel_event):
+        assert len(turn_binding) == 32
+        assert deadline_unix_ms > int(time.time() * 1000)
+        assert not cancel_event.is_set()
+        return b"[]"
+
+
 class FakeSession:
     def __init__(self, calls, release_status="succeeded", delay=0):
         self.calls = calls
@@ -70,6 +92,15 @@ class FakeSession:
     async def ingest_text(self, text, content_kind):
         await self._enter(("ingest", text, content_kind.value))
         self._leave()
+
+    async def task_authorization_context(self):
+        self.calls.append("task_context")
+        return FakeTaskContext()
+
+    async def approve_task_authorization(self, draft, approval):
+        assert draft == "unsigned-draft"
+        self.calls.append("approve_task")
+        return SimpleNamespace(request_digest=bytes([4]) * 32)
 
     async def run_agent(self, privacy, limits, approval, events):
         await self._enter(("run", privacy.value, limits.values))
@@ -144,7 +175,7 @@ class FakeReceiver:
         self.calls.append(("close",))
 
 
-async def make_runtime(*, sessions, receiver=None, emit=None, webauthn="webauthn"):
+async def make_runtime(*, sessions, receiver=None, emit=None, webauthn=None):
     calls = []
     client = FakeClient(sessions)
     receiver = receiver or FakeReceiver()
@@ -157,7 +188,7 @@ async def make_runtime(*, sessions, receiver=None, emit=None, webauthn="webauthn
         client=client,
         identity="identity",
         bootstrap_source=FakeBootstrapSource(),
-        webauthn=webauthn,
+        webauthn=webauthn if webauthn is not None else FakeDraftBroker(),
         receiver=receiver,
         sdk=FakeSdk,
         max_steps=8,
@@ -168,6 +199,42 @@ async def make_runtime(*, sessions, receiver=None, emit=None, webauthn="webauthn
         emit=emit or default_emit,
     )
     return runtime, client, receiver, emitted, calls
+
+
+@pytest.mark.asyncio
+async def test_receiver_turn_is_reserved_before_any_task_input_or_planning():
+    order = []
+    class Receiver(FakeReceiver):
+        def reserve(self, binding, timeout):
+            order.append(("reserve", binding))
+            return super().reserve(binding, timeout)
+    class Session(FakeSession):
+        async def ingest_text(self, text, kind):
+            order.append(("ingest", text))
+            await super().ingest_text(text, kind)
+        async def run_agent(self, *args):
+            order.append(("plan", None))
+            return await super().run_agent(*args)
+    receiver = Receiver()
+    runtime, _, _, _, _ = await make_runtime(sessions=[Session([])], receiver=receiver)
+    expected = runtime._turn_binding(2, "agent", "session", "turn")
+    result = await runtime.run_turn(2, "agent", "session", "turn", "request")
+    assert order == [("reserve", expected), ("ingest", "request"), ("plan", None)]
+    await result.complete()
+    await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_receiver_reservation_failure_prevents_input_and_planning():
+    class Receiver(FakeReceiver):
+        def reserve(self, binding, timeout):
+            raise RuntimeError("no receiver")
+    session = FakeSession([])
+    runtime, _, _, _, _ = await make_runtime(sessions=[session], receiver=Receiver())
+    with pytest.raises(BridgeRuntimeError):
+        await runtime.run_turn(2, "agent", "session", "turn", "request")
+    assert session.calls == []
+    await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -186,9 +253,13 @@ async def test_real_turn_shape_reuses_session_and_completes_only_after_emission(
     assert len(client.calls) == 1
     assert session_calls == [
         ("ingest", "first request", "chat_text"),
+        "task_context",
+        "approve_task",
         ("run", "private", (8, 2, 2.0)),
         ("release", "Handle(<opaque:document>)"),
         ("ingest", "second request", "chat_text"),
+        "task_context",
+        "approve_task",
         ("run", "private", (8, 2, 2.0)),
         ("release", "Handle(<opaque:document>)"),
     ]
@@ -201,6 +272,58 @@ async def test_real_turn_shape_reuses_session_and_completes_only_after_emission(
     assert all(0 < timeout <= 0.25 for timeout in wait_timeouts)
     await runtime.shutdown()
     assert session.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["denied", "invalid_draft", "pending", "issuer_refused"])
+async def test_task_scope_failure_never_enters_planner_or_release(failure):
+    class Context(FakeTaskContext):
+        pending_requests = [bytes([8]) * 32] if failure == "pending" else []
+        def draft(self, *args):
+            if failure == "invalid_draft":
+                raise ValueError("closed Rust grammar refused")
+            return super().draft(*args)
+    class Session(FakeSession):
+        async def task_authorization_context(self):
+            self.calls.append("task_context")
+            return Context()
+        async def approve_task_authorization(self, *args):
+            if failure == "issuer_refused":
+                raise BridgeRuntimeError("approval_denied")
+            return await super().approve_task_authorization(*args)
+    class Broker(FakeDraftBroker):
+        def request_task_draft(self, *args):
+            return None if failure == "denied" else super().request_task_draft(*args)
+    session = Session([])
+    runtime, _, receiver, _, _ = await make_runtime(sessions=[session], webauthn=Broker())
+    with pytest.raises(BridgeRuntimeError):
+        await runtime.run_turn(2, "agent", "session", "turn", "request")
+    assert not any(isinstance(c, tuple) and c[0] in {"run", "release"} for c in session.calls)
+    assert not any(c[0] == "wait" for c in receiver.calls)
+    await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_task_scope_uses_exact_reserved_turn_and_existing_authorization_identity():
+    observed = []
+    class Context(FakeTaskContext):
+        authorization_identity = (bytes([7]) * 32, 2)
+        def draft(self, authorization_id, clauses):
+            observed.append(("draft", authorization_id))
+            return super().draft(authorization_id, clauses)
+    class Session(FakeSession):
+        async def task_authorization_context(self):
+            return Context()
+    class Broker(FakeDraftBroker):
+        def request_task_draft(self, context, turn, *args):
+            observed.append(("turn", turn))
+            return super().request_task_draft(context, turn, *args)
+    runtime, _, _, _, _ = await make_runtime(sessions=[Session([])], webauthn=Broker())
+    expected_turn = runtime._turn_binding(2, "agent", "session", "turn")
+    result = await runtime.run_turn(2, "agent", "session", "turn", "request")
+    assert observed == [("turn", expected_turn), ("draft", bytes([7]) * 32)]
+    await result.complete()
+    await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -342,7 +465,7 @@ async def test_approval_router_cancellation_wakes_an_in_flight_broker():
 
 @pytest.mark.asyncio
 async def test_every_sdk_approval_callback_uses_broker_and_denial_stops_loop():
-    class Broker:
+    class Broker(FakeDraftBroker):
         def __init__(self, decisions):
             self.decisions = iter(decisions)
             self.calls = []
@@ -357,6 +480,14 @@ async def test_every_sdk_approval_callback_uses_broker_and_denial_stops_loop():
             return None
 
     class ApprovingSession(FakeSession):
+        async def approve_task_authorization(self, draft, approval):
+            self.calls.append("approve_task")
+            if not await asyncio.to_thread(
+                approval, SimpleNamespace(display="Exact task scope", purpose="task_authorization")
+            ):
+                raise BridgeRuntimeError("approval_denied")
+            return SimpleNamespace(request_digest=bytes([4]) * 32)
+
         async def run_agent(self, privacy, limits, approval, events):
             self.calls.append("run")
             for index in range(2):
@@ -378,7 +509,7 @@ async def test_every_sdk_approval_callback_uses_broker_and_denial_stops_loop():
                 raise BridgeRuntimeError("approval_denied")
             return SimpleNamespace(status="succeeded", outputs=[], failure_class=None)
 
-    approved_broker = Broker([True, True, True])
+    approved_broker = Broker([True, True, True, True])
     approved_session = ApprovingSession([])
     runtime, _, _, _, _ = await make_runtime(
         sessions=[approved_session], webauthn=approved_broker
@@ -386,13 +517,14 @@ async def test_every_sdk_approval_callback_uses_broker_and_denial_stops_loop():
     released = await runtime.run_turn(20, "agent", "session", "turn", "request")
     await released.complete()
     assert [call[1] for call in approved_broker.calls] == [
+        "task_authorization",
         "tool_execution",
         "tool_execution",
         "final_release",
     ]
     await runtime.shutdown()
 
-    denied_broker = Broker([True, False])
+    denied_broker = Broker([True, True, False])
     denied_session = ApprovingSession([])
     runtime, _, _, _, _ = await make_runtime(
         sessions=[denied_session], webauthn=denied_broker
@@ -400,12 +532,13 @@ async def test_every_sdk_approval_callback_uses_broker_and_denial_stops_loop():
     with pytest.raises(BridgeRuntimeError) as failure:
         await runtime.run_turn(21, "agent", "session", "turn", "request")
     assert failure.value.code == "approval_denied"
-    assert denied_session.calls == [("ingest", "request", "chat_text"), "run"]
-    assert len(denied_broker.calls) == 2
+    assert denied_session.calls == [("ingest", "request", "chat_text"), "task_context", "approve_task", "run"]
+    assert len(denied_broker.calls) == 3
     await runtime.shutdown()
 
 
-def test_approval_broker_uses_fresh_correlated_decisions_for_every_call():
+@pytest.mark.parametrize("purpose", ["tool_execution", "task_authorization"])
+def test_approval_broker_uses_fresh_correlated_decisions_for_every_call(purpose):
     bridge, product = socket.socketpair()
     broker = WebAuthnBroker(bridge.fileno())
     observed = []
@@ -432,7 +565,7 @@ def test_approval_broker_uses_fresh_correlated_decisions_for_every_call():
         decisions = [
             broker.decide_approval(
                 f"Approve call {index}",
-                "tool_execution",
+                purpose,
                 int(time.time() * 1000) + 5_000,
             )
             for index in range(3)
@@ -441,6 +574,7 @@ def test_approval_broker_uses_fresh_correlated_decisions_for_every_call():
         assert len({request["approval_id"] for request in observed}) == 3
         assert all(len(request["approval_id"]) == 43 for request in observed)
         assert all(request["type"] == "approval.decide" for request in observed)
+        assert all(request["purpose"] == purpose for request in observed)
     finally:
         thread.join(timeout=1)
         broker.close()
@@ -483,6 +617,59 @@ def test_approval_broker_rejects_invalid_requests_and_uncorrelated_responses():
             broker.decide_approval("Approve", "tool_execution", now + 5_000)
         thread.join(timeout=1)
     finally:
+        broker.close()
+        bridge.close()
+        product.close()
+
+
+@pytest.mark.parametrize("case", ["data", "denied", "wrong_id", "extra", "boolean_version", "bad_base64"])
+def test_task_draft_broker_is_correlated_data_only(case):
+    bridge, product = socket.socketpair()
+    broker = WebAuthnBroker(bridge.fileno())
+    observed = []
+    def product_side():
+        length = struct.unpack(">I", product.recv(4))[0]
+        request = json.loads(product.recv(length))
+        observed.append(request)
+        response = {
+            "protocol_version": 1,
+            "type": "task.draft_result",
+            "draft_id": request["draft_id"],
+            "clauses_json": base64.urlsafe_b64encode(b"[]").decode().rstrip("="),
+        }
+        if case == "denied":
+            response["clauses_json"] = None
+        elif case == "wrong_id":
+            response["draft_id"] = "x" * 43
+        elif case == "extra":
+            response["approved"] = True
+        elif case == "boolean_version":
+            response["protocol_version"] = True
+        elif case == "bad_base64":
+            response["clauses_json"] = "***"
+        encoded = json.dumps(response).encode()
+        product.sendall(struct.pack(">I", len(encoded)) + encoded)
+    thread = threading.Thread(target=product_side)
+    thread.start()
+    try:
+        def call():
+            return broker.request_task_draft(
+                FakeTaskContext(), bytes([9]) * 32, int(time.time() * 1000) + 5_000
+            )
+        if case in {"data", "denied"}:
+            assert call() == (b"[]" if case == "data" else None)
+        else:
+            with pytest.raises(AuthBrokerError):
+                call()
+        assert observed[0]["type"] == "task.draft"
+        assert observed[0]["release_destination"] == "application-turn:" + "09" * 32
+        assert observed[0]["source_input_digest"] == "03" * 32
+        assert set(observed[0]) == {
+            "protocol_version", "type", "draft_id", "source_input_digest",
+            "release_destination", "tools_json", "next_revision", "deadline_unix_ms",
+        }
+    finally:
+        thread.join(timeout=1)
         broker.close()
         bridge.close()
         product.close()

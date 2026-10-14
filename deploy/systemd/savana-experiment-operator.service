@@ -1,0 +1,32 @@
+[Unit]
+Description=Savana independently signed finite experiment provisioning
+Requires=savana-experiment-operator.socket
+After=savana-kerneld.service
+
+[Service]
+Type=exec
+User=root
+Group=root
+Sockets=savana-experiment-operator.socket
+Environment=PYTHONPATH=/opt/savana-protected/python:/opt/savana-protected/experiments
+Environment=PYTHONNOUSERSITE=1 PYTHONSAFEPATH=1
+ExecStart=/opt/savana-bench-venv/bin/python -m savana_bench.protected_operator
+LoadCredentialEncrypted=managed-admin-v04.seed:/etc/savana/credentials/experiment-operator/managed-admin-v04.seed.cred
+StateDirectory=savana-experiment-operator
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+InaccessiblePaths=-/var/lib/savana -/etc/savana/credentials
+ReadWritePaths=/var/lib/savana-experiment-operator
+UMask=0077
+LimitCORE=0
+MemoryMax=512M
+TasksMax=16
+Restart=no

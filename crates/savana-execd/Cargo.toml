@@ -13,11 +13,13 @@ workspace = true
 default = []
 macos-development-authority = ["savana-policy-core/macos-development-authority"]
 openclaw-release-test-support = []
+intent-bound-test-support = []
 
 [dependencies]
 savana-kernel-protocol = { path = "../savana-kernel-protocol" }
 savana-platform-identity = { path = "../savana-platform-identity" }
 savana-policy-core = { path = "../savana-policy-core" }
+savana-table-compute = { path = "../savana-table-compute" }
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true

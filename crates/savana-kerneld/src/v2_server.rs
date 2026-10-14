@@ -19,6 +19,9 @@ const POLL_INTERVAL_V2: Duration = Duration::from_millis(25);
 
 pub(crate) trait V2VerifiedSuccessorPublisher {
     fn publish_next_verified_successor(&self) -> Result<(), StableCode>;
+    fn tick_private_workflows(&self) -> Result<(), StableCode> {
+        Ok(())
+    }
 }
 
 fn publish_requested_v2_successor(
@@ -44,6 +47,7 @@ const fn production_worker_roles_v2() -> [EndpointRoleV2; 4] {
 pub(crate) fn run_kerneld_v2_workers(
     agent: KerneldV2EndpointListener,
     ingress: KerneldV2EndpointListener,
+    admin: Option<crate::v04_managed_admin::AdminEndpointV04>,
     runtime: &V2GenerationRuntime,
     readiness: KernelReadinessAuthorityV2,
     lifecycle: &mut dyn ServerLifecycle,
@@ -59,7 +63,7 @@ pub(crate) fn run_kerneld_v2_workers(
     let failed = Arc::new(AtomicBool::new(false));
     let mut workers = Vec::new();
     workers
-        .try_reserve_exact(WORKERS_PER_ENDPOINT_V2 * 2)
+        .try_reserve_exact(WORKERS_PER_ENDPOINT_V2 * 2 + usize::from(admin.is_some()))
         .map_err(|_| StableCode::KernelUnavailable)?;
     spawn_endpoint_workers("agent", agent, &shutdown, &failed, &mut workers)?;
     if let Err(error) = spawn_endpoint_workers("ingress", ingress, &shutdown, &failed, &mut workers)
@@ -67,6 +71,31 @@ pub(crate) fn run_kerneld_v2_workers(
         shutdown.store(true, Ordering::Release);
         join_workers(workers)?;
         return Err(error);
+    }
+    if let Some(admin) = admin {
+        let stopped = Arc::clone(&shutdown);
+        let broken = Arc::clone(&failed);
+        match thread::Builder::new()
+            .name("savana-managed-admin-v04".into())
+            .spawn(move || {
+                while !stopped.load(Ordering::Acquire) {
+                    match admin.poll() {
+                        Ok(true) => {}
+                        Ok(false) => thread::sleep(POLL_INTERVAL_V2),
+                        Err(()) => {
+                            broken.store(true, Ordering::Release);
+                            break;
+                        }
+                    }
+                }
+            }) {
+            Ok(worker) => workers.push(worker),
+            Err(_) => {
+                shutdown.store(true, Ordering::Release);
+                join_workers(workers)?;
+                return Err(StableCode::KernelUnavailable);
+            }
+        }
     }
     if lifecycle.workers_started().is_err()
         || readiness.publish_ready().is_err()
@@ -77,6 +106,13 @@ pub(crate) fn run_kerneld_v2_workers(
         return Err(StableCode::KernelUnavailable);
     }
 
+    #[cfg(target_os = "linux")]
+    if savana_platform_identity::notify_linux_service_ready_v2().is_err() {
+        shutdown.store(true, Ordering::Release);
+        join_workers(workers)?;
+        return Err(StableCode::KernelUnavailable);
+    }
+    let mut next_private_tick = Instant::now();
     loop {
         if failed.load(Ordering::Acquire) {
             shutdown.store(true, Ordering::Release);
@@ -88,6 +124,15 @@ pub(crate) fn run_kerneld_v2_workers(
                 break;
             }
             Ok(false) => {
+                if Instant::now() >= next_private_tick {
+                    if successor_publisher.tick_private_workflows().is_err() {
+                        failed.store(true, Ordering::Release);
+                        shutdown.store(true, Ordering::Release);
+                        break;
+                    }
+                    // Never catch up missed timer ticks after a slow owner call.
+                    next_private_tick = Instant::now() + Duration::from_millis(100);
+                }
                 if publish_requested_v2_successor(lifecycle, successor_publisher).is_err() {
                     failed.store(true, Ordering::Release);
                     shutdown.store(true, Ordering::Release);

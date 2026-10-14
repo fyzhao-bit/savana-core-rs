@@ -16,6 +16,9 @@ CORE_TYPES = {
     "Identity",
     "Client",
     "Session",
+    "TaskAuthorizationDraft",
+    "TaskAuthorizationReceipt",
+    "TaskAuthorizationContext",
     "Handle",
     "MaskedView",
     "Plan",
@@ -36,6 +39,11 @@ CORE_TYPES = {
 SESSION_METHODS = {
     "ingest_text",
     "ingest_file",
+    "establish_task_authorization",
+    "approve_task_authorization",
+    "revoke_task_authorization",
+    "recover_task_authorization",
+    "task_authorization_context",
     "read_view",
     "run_planner",
     "execute",
@@ -49,10 +57,12 @@ SESSION_METHODS = {
 }
 
 # These are value construction/control helpers, not Identity/Client/Session
-# business workflows, so they are inventoried separately from the fixed 15.
+# business workflows, so they are inventoried separately from the 20 workflows.
 SUPPORTING_VALUE_METHODS = {
     savana.ConnectorDescriptor: {"load"},
     savana.RunLimits: {"cancel"},
+    savana.TaskAuthorizationDraft: {"from_canonical_bytes"},
+    savana.TaskAuthorizationContext: {"tools_json", "draft"},
 }
 
 
@@ -62,6 +72,18 @@ def public_methods(cls):
         for name in vars(cls)
         if not name.startswith("_") and callable(getattr(cls, name))
     }
+
+
+def test_task_authorization_data_cannot_construct_authority_or_bypass_validation():
+    for malformed in (b"", b"\x80", b"\x81\x01", b"\x9f\xff"):
+        with pytest.raises(savana.SavanaError):
+            savana.TaskAuthorizationDraft.from_canonical_bytes(malformed)
+    with pytest.raises(TypeError):
+        savana.TaskAuthorizationReceipt()
+    with pytest.raises(TypeError):
+        savana.TaskAuthorizationContext()
+    assert not hasattr(savana.TaskAuthorizationDraft, "sign")
+    assert not hasattr(savana.TaskAuthorizationReceipt, "authorize")
 
 
 def scripted_session(*, delay_seconds=0.0):
@@ -76,12 +98,29 @@ def transport_session(*, delay_seconds=0.0):
     )
 
 
+@pytest.mark.asyncio
+async def test_recovery_never_uses_debug_authority_or_accepts_malformed_identity():
+    session = scripted_session()
+    calls = []
+    with pytest.raises(savana.SavanaError):
+        await session.task_authorization_context()
+
+    async def approval(request):
+        calls.append(request)
+        return True
+
+    for digest in (b"", b"short", b"\x01" * 33, b"\x00" * 32, b"\x01" * 32):
+        with pytest.raises(savana.SavanaError):
+            await session.recover_task_authorization(digest, approval)
+    assert calls == []
+
+
 def test_public_surface_is_exactly_the_approved_types_and_business_methods():
     assert set(savana.__all__) == CORE_TYPES
     assert public_methods(savana.Identity) == {"load"}
     assert public_methods(savana.Client) == {"session", "enroll"}
     assert public_methods(savana.Session) == SESSION_METHODS
-    assert 1 + 2 + len(SESSION_METHODS) == 15
+    assert 1 + 2 + len(SESSION_METHODS) == 20
     for value_type, methods in SUPPORTING_VALUE_METHODS.items():
         assert public_methods(value_type) == methods
     assert "fetch" not in vars(savana.Session)

@@ -78,6 +78,12 @@ impl BrowserContentType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserRoute {
+    IngressPrivateSessionV04,
+    PrivateSessionBeginV04,
+    PrivateSessionFinishV04,
+    PrivateSessionPollV04,
+    PrivateSessionPublicationV04,
+    PrivateApprovalAcceptV04,
     ApprovalEnrollmentBootstrap,
     ApprovalUiAuthenticationAccept,
     ApprovalUiAuthenticationBegin,
@@ -93,6 +99,12 @@ pub enum BrowserRoute {
     IngressInputChunk,
     IngressInputFinalize,
     IngressInputAbort,
+    IngressTaskEstablish,
+    IngressTaskApprovalPrepare,
+    IngressTaskApprovalCommit,
+    IngressTaskRevoke,
+    IngressTaskRecover,
+    IngressTaskContext,
     AgentUiAuthenticationComplete,
     AgentView,
     AgentAction,
@@ -108,6 +120,12 @@ impl BrowserRoute {
 
     const fn path(self) -> &'static str {
         match self {
+            Self::IngressPrivateSessionV04 => "/v04/session/open",
+            Self::PrivateSessionBeginV04 => "/v04/session/begin",
+            Self::PrivateSessionFinishV04 => "/v04/session/finish",
+            Self::PrivateSessionPollV04 => "/v04/session/poll",
+            Self::PrivateSessionPublicationV04 => "/v04/session/publication",
+            Self::PrivateApprovalAcceptV04 => "/v04/private-approval/accept",
             Self::ApprovalEnrollmentBootstrap => "/v2/enrollment/bootstrap",
             Self::ApprovalUiAuthenticationAccept => "/v2/ui-auth/accept",
             Self::ApprovalUiAuthenticationBegin => "/v2/ui-auth/begin",
@@ -123,6 +141,12 @@ impl BrowserRoute {
             Self::IngressInputChunk => "/v2/input/chunk",
             Self::IngressInputFinalize => "/v2/input/finalize",
             Self::IngressInputAbort => "/v2/input/abort",
+            Self::IngressTaskEstablish => "/v2/task/establish",
+            Self::IngressTaskApprovalPrepare => "/v2/task/approval/prepare",
+            Self::IngressTaskApprovalCommit => "/v2/task/approval/commit",
+            Self::IngressTaskRevoke => "/v2/task/revoke",
+            Self::IngressTaskRecover => "/v2/task/recover",
+            Self::IngressTaskContext => "/v2/task/context",
             Self::AgentUiAuthenticationComplete => "/v2/ui-auth/complete",
             Self::AgentView => "/v2/agent/view",
             Self::AgentAction => "/v2/agent/action",
@@ -131,6 +155,11 @@ impl BrowserRoute {
 
     const fn service(self) -> BrowserService {
         match self {
+            Self::PrivateSessionBeginV04
+            | Self::PrivateSessionFinishV04
+            | Self::PrivateSessionPollV04
+            | Self::PrivateSessionPublicationV04
+            | Self::PrivateApprovalAcceptV04 => BrowserService::Approval,
             Self::ApprovalEnrollmentBootstrap
             | Self::ApprovalUiAuthenticationAccept
             | Self::ApprovalUiAuthenticationBegin
@@ -145,7 +174,14 @@ impl BrowserRoute {
             | Self::IngressInputBegin
             | Self::IngressInputChunk
             | Self::IngressInputFinalize
-            | Self::IngressInputAbort => BrowserService::Ingress,
+            | Self::IngressInputAbort
+            | Self::IngressTaskEstablish
+            | Self::IngressTaskApprovalPrepare
+            | Self::IngressTaskApprovalCommit
+            | Self::IngressTaskRevoke
+            | Self::IngressTaskRecover
+            | Self::IngressTaskContext
+            | Self::IngressPrivateSessionV04 => BrowserService::Ingress,
             Self::AgentUiAuthenticationComplete | Self::AgentView | Self::AgentAction => {
                 BrowserService::Agent
             }
@@ -154,6 +190,7 @@ impl BrowserRoute {
 
     const fn request_content_type(self) -> BrowserContentType {
         match self {
+            Self::PrivateApprovalAcceptV04 => BrowserContentType::FormUrlEncoded,
             Self::ApprovalEnrollmentBootstrap => BrowserContentType::None,
             Self::ApprovalUiAuthenticationAccept
             | Self::IngressBootstrapAccept
@@ -165,6 +202,7 @@ impl BrowserRoute {
 
     pub(crate) const fn response_content_type(self) -> BrowserContentType {
         match self {
+            Self::PrivateApprovalAcceptV04 => BrowserContentType::Html,
             Self::ApprovalEnrollmentBootstrap
             | Self::ApprovalUiAuthenticationAccept
             | Self::IngressBootstrapAccept
@@ -176,6 +214,11 @@ impl BrowserRoute {
 
     const fn permits_origin(self, origin: BrowserOrigin) -> bool {
         match self {
+            Self::PrivateSessionBeginV04
+            | Self::PrivateSessionFinishV04
+            | Self::PrivateSessionPollV04
+            | Self::PrivateSessionPublicationV04
+            | Self::PrivateApprovalAcceptV04 => matches!(origin, BrowserOrigin::Approval),
             Self::ApprovalEnrollmentBootstrap => matches!(origin, BrowserOrigin::None),
             Self::ApprovalUiAuthenticationAccept => matches!(
                 origin,
@@ -197,7 +240,14 @@ impl BrowserRoute {
             Self::IngressInputBegin
             | Self::IngressInputChunk
             | Self::IngressInputFinalize
-            | Self::IngressInputAbort => matches!(origin, BrowserOrigin::Ingress),
+            | Self::IngressInputAbort
+            | Self::IngressTaskEstablish
+            | Self::IngressTaskApprovalPrepare
+            | Self::IngressTaskApprovalCommit
+            | Self::IngressTaskRevoke
+            | Self::IngressTaskRecover
+            | Self::IngressTaskContext
+            | Self::IngressPrivateSessionV04 => matches!(origin, BrowserOrigin::Ingress),
             Self::AgentView | Self::AgentAction => matches!(origin, BrowserOrigin::Agent),
         }
     }

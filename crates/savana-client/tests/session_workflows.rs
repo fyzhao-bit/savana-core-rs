@@ -1363,3 +1363,307 @@ fn unexpected_first_finalize_response_closes_locally_without_abort() {
         SavanaError::InvalidResponse
     ));
 }
+fn task_ready_sdk_fixture() -> (
+    Session,
+    Arc<ScriptedTransport>,
+    savana_client::TaskAuthorizationDraft,
+    Digest32V2,
+) {
+    let nonces = Arc::new(FixedNonces::new());
+    let (mut session, transport, _) = authenticated_session_with_dependencies(
+        successful_ingress_responses(1),
+        Arc::new(RecordingWebAuthn::default()),
+        nonces.clone(),
+    );
+    session
+        .ingest_text("task source", ContentKind::PlainText)
+        .unwrap();
+    transport.take_requests();
+    let draft = support::task5::task_authorization_draft();
+    let nonce = [*nonces.0.lock().unwrap(); 32];
+    let mut h = Sha256::new();
+    h.update(b"SAVANA_TASK_ISSUANCE_REQUEST_V2_SCHEMA1\0");
+    for b in [
+        draft.installation_digest().as_bytes(),
+        draft.task().as_bytes(),
+        draft.principal().as_bytes(),
+        &nonce,
+    ] {
+        h.update((b.len() as u64).to_be_bytes());
+        h.update(b);
+    }
+    let draft = savana_client::TaskAuthorizationDraft::from_canonical_bytes(
+        &savana_kernel_protocol::v2::encode_task_authorization_draft_v2(&draft).unwrap(),
+    )
+    .unwrap();
+    (
+        session,
+        transport,
+        draft,
+        Digest32V2::new(h.finalize().into()),
+    )
+}
+
+#[test]
+fn task_context_sdk_returns_only_kernel_metadata_without_issuing_or_approving() {
+    use savana_kernel_protocol::v2::*;
+    let (mut session, transport, _, _) = task_ready_sdk_fixture();
+    let d = support::task5::task_authorization_draft();
+    let a = &d.clauses()[0].alternatives()[0];
+    let context = TaskAuthorizationContextV2::new(
+        d.principal(),
+        d.task(),
+        d.installation_digest(),
+        d.manifest_digest(),
+        d.deployment_generation(),
+        d.source_input_digest(),
+        d.not_before(),
+        d.expires_at(),
+        Some((d.authorization_id(), 2)),
+        vec![TaskAuthorizationToolContextV2::new(
+            a.descriptor_digest(),
+            "mail.allowed".into(),
+            a.controls().profile().clone(),
+        )
+        .unwrap()],
+        vec![Digest32V2::new([0xec; 32])],
+    )
+    .unwrap();
+    transport.extend_responses(vec![cbor_response(
+        encode_task_authorization_context_v2(&context).unwrap(),
+    )]);
+    let observed = session.task_authorization_context().unwrap();
+    assert_eq!(observed, context);
+    let requests = transport.take_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].route,
+        savana_client::BrowserRoute::IngressTaskContext
+    );
+    assert!(matches!(
+        decode_ingress_browser_request_v2(&requests[0].body).unwrap(),
+        IngressBrowserRequestV2::GetTaskAuthorizationContext { .. }
+    ));
+    transport.extend_responses(vec![cbor_response(vec![0xff])]);
+    assert!(matches!(
+        session.task_authorization_context(),
+        Err(savana_client::SavanaError::InvalidResponse)
+    ));
+    transport.take_requests();
+    assert!(session.task_authorization_context().is_err());
+    assert!(transport.take_requests().is_empty());
+}
+
+#[test]
+fn task_contract_sdk_establish_and_revoke_are_exact_ingress_operations() {
+    let (mut session, transport, draft, request_digest) = task_ready_sdk_fixture();
+    let authorization_digest = Digest32V2::new([0xea; 32]);
+    transport.extend_responses(vec![
+        cbor_response(
+            encode_ingress_browser_mutation_response_v2(
+                IngressBrowserMutationResponseV2::TaskAuthorizationEstablished {
+                    request_digest,
+                    authorization_digest,
+                },
+            )
+            .unwrap(),
+        ),
+        cbor_response(
+            encode_ingress_browser_mutation_response_v2(
+                IngressBrowserMutationResponseV2::TaskAuthorizationRevoked {
+                    authorization_digest,
+                },
+            )
+            .unwrap(),
+        ),
+    ]);
+    let receipt = session.establish_task_authorization(&draft).unwrap();
+    assert_eq!(
+        receipt.authorization_digest(),
+        authorization_digest.as_bytes()
+    );
+    assert_eq!(
+        session.revoke_task_authorization(&draft).unwrap(),
+        *authorization_digest.as_bytes()
+    );
+    let requests = transport.take_requests();
+    assert_eq!(
+        requests.iter().map(|r| r.route).collect::<Vec<_>>(),
+        [
+            BrowserRoute::IngressTaskEstablish,
+            BrowserRoute::IngressTaskRevoke
+        ]
+    );
+    for request in &requests {
+        assert_eq!(request.origin, savana_client::BrowserOrigin::Ingress);
+    }
+    match decode_ingress_browser_request_v2(&requests[0].body).unwrap() {
+        IngressBrowserRequestV2::EstablishTaskAuthorization { draft: sent, .. } => assert_eq!(
+            savana_kernel_protocol::v2::encode_task_authorization_draft_v2(&sent).unwrap(),
+            draft.canonical_bytes()
+        ),
+        _ => panic!("wrong task operation"),
+    }
+}
+
+#[test]
+fn task_recovery_sdk_uses_fresh_authentication_and_no_input_or_new_issuance() {
+    for (pending, decision, wrong_receipt) in [
+        (false, true, false),
+        (true, true, false),
+        (true, false, false),
+        (false, true, true),
+    ] {
+        let request_digest = Digest32V2::new([0xe8; 32]);
+        let authorization_digest = Digest32V2::new([0xe9; 32]);
+        // Keep only the real SDK's existing follow-up authentication flow; no
+        // begin/chunk/finalize response is supplied to this recovery fixture.
+        let mut responses = successful_ingress_responses(1);
+        responses.truncate(6);
+        let receipt = || {
+            cbor_response(
+                encode_ingress_browser_mutation_response_v2(
+                    IngressBrowserMutationResponseV2::TaskAuthorizationEstablished {
+                        request_digest: if wrong_receipt {
+                            Digest32V2::new([0xef; 32])
+                        } else {
+                            request_digest
+                        },
+                        authorization_digest,
+                    },
+                )
+                .unwrap(),
+            )
+        };
+        if pending {
+            responses.push(cbor_response(encode_ingress_browser_mutation_response_v2(IngressBrowserMutationResponseV2::TaskAuthorizationOpenApproval {
+                request_digest, transfer: ApprovalDisplayAuthenticationTransferCapabilityV2::from_authority_entropy([0xeb;32]).unwrap(),
+            }).unwrap()));
+            responses.extend(support::task5::approval_responses(
+                ApprovalPurposeV2::TaskAuthorization,
+                if decision {
+                    ApprovalDecisionBrowserFinishResponseV2::Approved
+                } else {
+                    ApprovalDecisionBrowserFinishResponseV2::Denied
+                },
+            ));
+        }
+        responses.push(receipt());
+        let (mut session, transport, _) = authenticated_session_with_dependencies(
+            responses,
+            Arc::new(RecordingWebAuthn::default()),
+            Arc::new(FixedNonces::new()),
+        );
+        transport.take_requests();
+        let callback = support::task5::RecordingDecision::new(decision);
+        let result = session.recover_task_authorization(*request_digest.as_bytes(), &callback);
+        assert_eq!(result.is_ok(), decision && !wrong_receipt);
+        if let Ok(receipt) = result {
+            assert_eq!(
+                receipt.authorization_digest(),
+                authorization_digest.as_bytes()
+            );
+        }
+        let requests = transport.take_requests();
+        assert!(requests
+            .iter()
+            .any(|r| r.route == BrowserRoute::IngressUiAuthenticationComplete));
+        assert!(requests.iter().all(|r| !matches!(
+            r.route,
+            BrowserRoute::IngressInputBegin
+                | BrowserRoute::IngressInputChunk
+                | BrowserRoute::IngressInputFinalize
+                | BrowserRoute::IngressTaskEstablish
+                | BrowserRoute::IngressTaskApprovalPrepare
+        )));
+        let recovery = requests
+            .iter()
+            .filter(|r| r.route == BrowserRoute::IngressTaskRecover)
+            .collect::<Vec<_>>();
+        assert_eq!(recovery.len(), 1);
+        assert!(
+            matches!(decode_ingress_browser_request_v2(&recovery[0].body).unwrap(), IngressBrowserRequestV2::RecoverTaskAuthorization { request_digest: d, .. } if d == request_digest)
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.route == BrowserRoute::IngressTaskApprovalCommit)
+                .count(),
+            usize::from(pending && decision)
+        );
+    }
+}
+
+#[test]
+fn task_contract_sdk_requires_dedicated_ceremony_and_exact_receipt() {
+    for (purpose, decision, wrong_receipt) in [
+        (ApprovalPurposeV2::TaskAuthorization, true, false),
+        (ApprovalPurposeV2::TaskAuthorization, false, false),
+        (ApprovalPurposeV2::ToolExecution, true, false),
+        (ApprovalPurposeV2::TaskAuthorization, true, true),
+    ] {
+        let (mut session, transport, draft, request_digest) = task_ready_sdk_fixture();
+        let transfer =
+            ApprovalDisplayAuthenticationTransferCapabilityV2::from_authority_entropy([0xeb; 32])
+                .unwrap();
+        let mut responses = vec![cbor_response(
+            encode_ingress_browser_mutation_response_v2(
+                IngressBrowserMutationResponseV2::TaskAuthorizationOpenApproval {
+                    request_digest,
+                    transfer,
+                },
+            )
+            .unwrap(),
+        )];
+        responses.extend(support::task5::approval_responses(
+            purpose,
+            if decision {
+                ApprovalDecisionBrowserFinishResponseV2::Approved
+            } else {
+                ApprovalDecisionBrowserFinishResponseV2::Denied
+            },
+        ));
+        responses.push(cbor_response(
+            encode_ingress_browser_mutation_response_v2(
+                IngressBrowserMutationResponseV2::TaskAuthorizationEstablished {
+                    request_digest: if wrong_receipt {
+                        Digest32V2::new([0xef; 32])
+                    } else {
+                        request_digest
+                    },
+                    authorization_digest: Digest32V2::new([0xec; 32]),
+                },
+            )
+            .unwrap(),
+        ));
+        transport.extend_responses(responses);
+        let callback = support::task5::RecordingDecision::new(decision);
+        let result = session.approve_task_authorization(&draft, &callback);
+        let expected_success =
+            decision && purpose == ApprovalPurposeV2::TaskAuthorization && !wrong_receipt;
+        assert_eq!(result.is_ok(), expected_success);
+        let requests = transport.take_requests();
+        let commits = requests
+            .iter()
+            .filter(|r| r.route == BrowserRoute::IngressTaskApprovalCommit)
+            .count();
+        assert_eq!(
+            commits,
+            usize::from(decision && purpose == ApprovalPurposeV2::TaskAuthorization)
+        );
+        assert_eq!(requests[1].origin, savana_client::BrowserOrigin::Ingress);
+        if purpose == ApprovalPurposeV2::TaskAuthorization {
+            assert_eq!(
+                callback.requests.lock().unwrap()[0].1,
+                ApprovalPurpose::TaskAuthorization
+            );
+        }
+        if wrong_receipt {
+            assert!(matches!(
+                session.establish_task_authorization(&draft),
+                Err(SavanaError::InvalidState)
+            ));
+            assert!(transport.take_requests().is_empty());
+        }
+    }
+}

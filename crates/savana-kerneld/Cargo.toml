@@ -11,10 +11,13 @@ workspace = true
 
 [features]
 default = []
+# Explicit debug-only B profile. Never selected when TPM initialization fails.
+linux-file-backed-integration = ["savana-policy-core/filesystem-integration-authority"]
 test-support = [
     "savana-agentd/test-support",
     "savana-ingressd/test-support",
     "savana-policy-core/test-support",
+    "savana-execd/intent-bound-test-support",
 ]
 macos-development-authority = [
     "savana-agentd/macos-development-authority",
@@ -52,6 +55,7 @@ chacha20poly1305.workspace = true
 base64.workspace = true
 
 [dev-dependencies]
+savana-continuation-core = { path = "../savana-continuation-core" }
 tempfile = "=3.23.0"
 savana-policy-core = { path = "../savana-policy-core", features = ["test-support"] }
 
@@ -61,28 +65,8 @@ path = "src/bin/savana-development-build-inputs.rs"
 required-features = ["macos-development-authority"]
 
 [[test]]
-name = "production_state_machine"
-path = "tests/production_state_machine.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "policy_protocol"
-path = "tests/policy_protocol.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "policy_rollover"
-path = "tests/policy_rollover.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "policy_fail_stop"
-path = "tests/policy_fail_stop.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "policy_attack_matrix"
-path = "tests/policy_attack_matrix.rs"
+name = "v2_declassification_rollover"
+path = "tests/v2_declassification_rollover.rs"
 required-features = ["test-support"]
 
 [[test]]

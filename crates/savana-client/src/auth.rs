@@ -448,6 +448,7 @@ pub(crate) fn extract_main_data_attributes(
         "<meta charset=\"utf-8\"><title>Savana authentication</title>";
     const AUTHENTICATION_CONTENT: &str = "<h1>Hardware authentication required</h1><button id=\"savana-authenticate\" type=\"button\">Use security key</button><p id=\"savana-status\">The opaque capability is held only in this page.</p>";
     const AGENT_HEAD: &str = "<meta charset=\"utf-8\"><title>Savana agent</title>";
+    const PASSKEY_AUTHENTICATION_CONTENT: &str = "<h1>User verification required</h1><button id=\"savana-authenticate\" type=\"button\">Use passkey or security key</button><p id=\"savana-status\">The opaque capability is held only in this page.</p>";
     const AGENT_CONTENT: &str = "<h1>Authenticated Savana agent</h1><pre id=\"savana-agent-view\"></pre><section id=\"savana-agent-actions\"></section><pre id=\"savana-agent-result\"></pre><p id=\"savana-status\">Loading kernel view…</p>";
     let (expected_head, expected_content) = match required {
         [("data-purpose", _), ("data-pre-authentication", _)] => {
@@ -491,7 +492,10 @@ pub(crate) fn extract_main_data_attributes(
         .checked_sub(DOCUMENT_SUFFIX.len())
         .ok_or(AuthError::AuthenticationFailed)?;
     let content = &main_content_and_suffix[..content_length];
-    if content != expected_content {
+    // Both are exact pinned templates, never arbitrary browser-provided HTML.
+    if content != expected_content
+        && !(expected_head == AUTHENTICATION_HEAD && content == PASSKEY_AUTHENTICATION_CONTENT)
+    {
         return Err(AuthError::AuthenticationFailed);
     }
     Ok(values)

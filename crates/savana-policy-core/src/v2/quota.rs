@@ -399,6 +399,7 @@ impl DispatchQuotaLedgerV2 {
     const MAX_COUNTERS: usize = 65_536;
     const MAX_RESERVATIONS: usize = 65_536;
 
+    #[cfg(test)]
     pub const fn new() -> Self {
         Self {
             counters: Vec::new(),

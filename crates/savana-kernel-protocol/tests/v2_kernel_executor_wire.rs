@@ -7,11 +7,11 @@ use savana_kernel_protocol::v2::{
     BoundedConnectorRegistryDeltaV2, ConnectorRegistrySyncModeV2, ConnectorRegistrySyncPageV2,
     ConnectorRegistrySyncRequestV2, ConnectorRegistrySyncResponseV2, ConnectorRegistrySyncScopeV2,
     ConnectorRegistrySyncStatusV2, Digest32V2, DispatchCoreV2, DispatchRequestV2,
-    DispatchSubjectV2, DurableRunIdV2, DurableTaskIdV2, Ed25519KeyIdV2, Ed25519SignatureV2,
-    EndpointRoleV2, ExecutorCompletionDescriptorV2, ExecutorHealthRequestV2, ExecutorIdentityV2,
-    FetchCompletionRequestV2, FixedBytes32V2, HpkeX25519KeyIdV2, InternalStepIdV2,
-    KernelExecutorOperationV2, Nonce32V2, PlanRevisionDigestV2, PublicStableCodeV2,
-    QueryByExecutionNonceRequestV2, SealedExecutionEnvelopePayloadV2,
+    DispatchSubjectV2, DispatchTaskBindingV2, DurableRunIdV2, DurableTaskIdV2, Ed25519KeyIdV2,
+    Ed25519SignatureV2, EndpointRoleV2, ExecutorCompletionDescriptorV2, ExecutorHealthRequestV2,
+    ExecutorIdentityV2, FetchCompletionRequestV2, FixedBytes32V2, HpkeX25519KeyIdV2,
+    InternalStepIdV2, KernelExecutorOperationV2, Nonce32V2, PlanRevisionDigestV2,
+    PublicStableCodeV2, QueryByExecutionNonceRequestV2, SealedExecutionEnvelopePayloadV2,
     SignedSealedExecutionEnvelopeV2, ToolExecutionSemanticBindingV2, UnixMillisV2,
     MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTAS_V2, MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTA_BYTES_V2,
 };
@@ -160,6 +160,101 @@ fn dispatch_is_a_typed_signed_core_and_hpke_envelope() {
     let encoded = encode_kernel_executor_operation_v2(&dispatch).unwrap();
     assert_eq!(&encoded[..3], &[0x82, 0x18, 0x3c]);
     assert!(decode_kernel_executor_operation_v2(&encoded).is_ok());
+
+    let task_binding = DispatchTaskBindingV2::new(
+        Digest32V2::new([41; 32]),
+        Digest32V2::new([42; 32]),
+        Digest32V2::new([43; 32]),
+    )
+    .unwrap();
+    let bound = core.with_task_binding(task_binding);
+    // Independent subject encoding oracle: legacy uses bare 20; schema 3 uses
+    // the policy owner's one-element closed attempt-kind tuple [20].
+    let mut legacy_binding = minicbor::to_vec(binding).unwrap();
+    assert_eq!(legacy_binding.pop(), Some(20));
+    for (candidate, tail) in [(core, vec![20]), (bound, vec![0x81, 20])] {
+        use sha2::{Digest as _, Sha256};
+        let mut expected = minicbor::Encoder::new(Vec::new());
+        expected
+            .array(4)
+            .unwrap()
+            .u16(1)
+            .unwrap()
+            .bytes(&[21; 32])
+            .unwrap();
+        expected.writer_mut().extend_from_slice(&legacy_binding);
+        expected.writer_mut().extend_from_slice(&tail);
+        expected.null().unwrap();
+        let digest: [u8; 32] = Sha256::new()
+            .chain_update(b"SAVANA_DISPATCH_SUBJECT_V2\0")
+            .chain_update(expected.into_writer())
+            .finalize()
+            .into();
+        assert_eq!(*candidate.dispatch_subject_digest().as_bytes(), digest);
+        assert_eq!(
+            candidate.computed_subject_digest().unwrap(),
+            candidate.dispatch_subject_digest()
+        );
+    }
+    assert_eq!(
+        core.dispatch_subject_digest(),
+        subject.semantic_digest().unwrap()
+    );
+    assert_ne!(
+        bound.dispatch_subject_digest(),
+        core.dispatch_subject_digest()
+    );
+    assert_ne!(
+        core.semantic_digest().unwrap(),
+        bound.semantic_digest().unwrap()
+    );
+    assert_eq!(core.task_binding(), None);
+    for changed in [[44, 42, 43], [41, 44, 43], [41, 42, 44]] {
+        let b = DispatchTaskBindingV2::new(
+            Digest32V2::new([changed[0]; 32]),
+            Digest32V2::new([changed[1]; 32]),
+            Digest32V2::new([changed[2]; 32]),
+        )
+        .unwrap();
+        assert_ne!(
+            bound.semantic_digest().unwrap(),
+            core.with_task_binding(b).semantic_digest().unwrap()
+        );
+    }
+    assert!(DispatchTaskBindingV2::new(
+        Digest32V2::new([0; 32]),
+        Digest32V2::new([42; 32]),
+        Digest32V2::new([43; 32])
+    )
+    .is_err());
+    let envelope = SignedSealedExecutionEnvelopeV2::from_parts(
+        SealedExecutionEnvelopePayloadV2::new(
+            bound,
+            Digest32V2::new([32; 32]),
+            FixedBytes32V2::new([33; 32]),
+            BoundedCiphertextV2::new(vec![34; 64]).unwrap(),
+        )
+        .unwrap(),
+        Ed25519KeyIdV2::new([35; 32]),
+        Ed25519SignatureV2::new([36; 64]),
+    )
+    .unwrap();
+    let encoded = encode_kernel_executor_operation_v2(&KernelExecutorOperationV2::Dispatch(
+        DispatchRequestV2::new(envelope),
+    ))
+    .unwrap();
+    let decoded = decode_kernel_executor_operation_v2(&encoded).unwrap();
+    assert_eq!(
+        encode_kernel_executor_operation_v2(&decoded).unwrap(),
+        encoded
+    );
+    let KernelExecutorOperationV2::Dispatch(decoded) = decoded else {
+        panic!("wrong operation")
+    };
+    assert_eq!(
+        decoded.envelope().payload().core().task_binding(),
+        Some(task_binding)
+    );
 
     assert!(DispatchCoreV2::new(
         Digest32V2::new([22; 32]),

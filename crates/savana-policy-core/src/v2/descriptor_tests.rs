@@ -15,6 +15,282 @@ use super::{
     VerifiedToolRegistryV2,
 };
 
+fn business_profile() -> savana_kernel_protocol::v2::BusinessProfileV2 {
+    use savana_kernel_protocol::v2::*;
+    BusinessProfileV2::new(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        "mail.send",
+        Digest32V2::new([30; 32]),
+        Digest32V2::new([31; 32]),
+        TaskEffectV2::Send,
+        BusinessMagnitudeV2::FixedCount(1),
+        vec![
+            BusinessFieldV2::new(
+                "body",
+                BusinessFieldRoleV2::Payload,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+            BusinessFieldV2::new(
+                "file",
+                BusinessFieldRoleV2::Resource,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+            BusinessFieldV2::new(
+                "to",
+                BusinessFieldRoleV2::Destination,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap()
+}
+
+#[test]
+fn business_profile_descriptor_is_explicit_signed_and_legacy_has_no_default() {
+    let old = descriptor(VersionV2::new(4, 5, 6), vec![RoleIdV2::new(1)], vec![]);
+    let legacy_bytes = minicbor::to_vec(&old).unwrap();
+    assert_eq!(old.business_profile(), None);
+    assert!(old.require_business_profile().is_err());
+    let new = old
+        .clone()
+        .with_business_profile(business_profile())
+        .unwrap();
+    assert_ne!(
+        descriptor_digest_v2(&old).unwrap(),
+        descriptor_digest_v2(&new).unwrap()
+    );
+    assert_eq!(minicbor::to_vec(&old).unwrap(), legacy_bytes);
+    let canonical = minicbor::to_vec(&new).unwrap();
+    assert_eq!(&canonical[..2], &[0x96, 0x03]);
+    assert_eq!(super::decode_unsigned_descriptor(&canonical).unwrap(), new);
+    assert_eq!(
+        super::decode_unsigned_descriptor(&legacy_bytes).unwrap(),
+        old
+    );
+    let key = SigningKey::from_bytes(&[0x41; 32]);
+    let key_id = Ed25519KeyIdV2::new([0x42; 32]);
+    let publisher = VerifiedRegistryPublisherV2::new_for_test(
+        key_id,
+        key.verifying_key().to_bytes(),
+        UnixMillisV2::new(100),
+        UnixMillisV2::new(1_000),
+    )
+    .unwrap();
+    let sign = |value: &UnsignedToolDescriptorV2| {
+        let mut message = b"SAVANA_TOOL_DESCRIPTOR_SIGNATURE_V2\0".to_vec();
+        message.extend_from_slice(descriptor_digest_v2(value).unwrap().as_bytes());
+        key.sign(&message).to_bytes()
+    };
+    let signed = SignedToolDescriptorV2::new_for_test(canonical.clone(), key_id, sign(&new));
+    assert_eq!(
+        signed
+            .verify(&publisher, VersionV2::new(4, 5, 6), UnixMillisV2::new(500))
+            .unwrap()
+            .unsigned()
+            .require_business_profile()
+            .unwrap(),
+        &business_profile()
+    );
+    let unsigned_extension = SignedToolDescriptorV2::new_for_test(canonical, key_id, sign(&old));
+    assert_eq!(
+        unsigned_extension
+            .verify(&publisher, VersionV2::new(4, 5, 6), UnixMillisV2::new(500))
+            .unwrap_err(),
+        G4Error::InvalidDescriptorSignature
+    );
+    let p = business_profile();
+    let changed_credential = savana_kernel_protocol::v2::BusinessProfileV2::new(
+        p.codec(),
+        p.operation(),
+        p.target_identity(),
+        Digest32V2::new([32; 32]),
+        p.effect(),
+        p.magnitude_rule(),
+        p.fields().to_vec(),
+    )
+    .unwrap();
+    let changed = old
+        .clone()
+        .with_business_profile(changed_credential)
+        .unwrap();
+    let tampered = SignedToolDescriptorV2::new_for_test(
+        minicbor::to_vec(changed).unwrap(),
+        key_id,
+        sign(&new),
+    );
+    assert_eq!(
+        tampered
+            .verify(&publisher, VersionV2::new(4, 5, 6), UnixMillisV2::new(500))
+            .unwrap_err(),
+        G4Error::InvalidDescriptorSignature
+    );
+    assert_eq!(
+        signed
+            .verify(&publisher, VersionV2::new(4, 5, 6), UnixMillisV2::new(900))
+            .unwrap_err(),
+        G4Error::DescriptorNotActive
+    );
+}
+
+#[test]
+fn business_profile_descriptor_refuses_tool_and_effect_mismatch() {
+    use savana_kernel_protocol::v2::{BusinessProfileV2, TaskEffectV2};
+    let old = descriptor(VersionV2::new(4, 5, 6), vec![RoleIdV2::new(1)], vec![]);
+    let p = business_profile();
+    for (operation, effect) in [
+        ("other.tool", TaskEffectV2::Send),
+        ("mail.send", TaskEffectV2::Delete),
+    ] {
+        let invalid = BusinessProfileV2::new(
+            p.codec(),
+            operation,
+            p.target_identity(),
+            p.credential_identity(),
+            effect,
+            p.magnitude_rule(),
+            p.fields().to_vec(),
+        )
+        .unwrap();
+        assert_eq!(
+            old.clone().with_business_profile(invalid).unwrap_err(),
+            G4Error::InvalidDescriptor
+        );
+    }
+}
+
+#[test]
+fn task_draft_profiles_must_match_every_current_active_descriptor() {
+    use savana_kernel_protocol::v2::*;
+    let version = VersionV2::new(4, 5, 6);
+    let key = SigningKey::from_bytes(&[55; 32]);
+    let key_id = Ed25519KeyIdV2::new([56; 32]);
+    let publisher = VerifiedRegistryPublisherV2::new_for_test(
+        key_id,
+        key.verifying_key().to_bytes(),
+        UnixMillisV2::new(1),
+        UnixMillisV2::new(2000),
+    )
+    .unwrap();
+    let old = descriptor(version, vec![RoleIdV2::new(1)], vec![]);
+    let new = old
+        .clone()
+        .with_business_profile(business_profile())
+        .unwrap();
+    let sign = |value: &UnsignedToolDescriptorV2| {
+        let digest = descriptor_digest_v2(value).unwrap();
+        let mut msg = b"SAVANA_TOOL_DESCRIPTOR_SIGNATURE_V2\0".to_vec();
+        msg.extend_from_slice(digest.as_bytes());
+        SignedToolDescriptorV2::new_for_test(
+            minicbor::to_vec(value).unwrap(),
+            key_id,
+            key.sign(&msg).to_bytes(),
+        )
+        .verify(&publisher, version, UnixMillisV2::new(500))
+        .unwrap()
+    };
+    let make_registry = |value: &UnsignedToolDescriptorV2| {
+        let verified = sign(value);
+        let digest = verified.descriptor_digest();
+        ActiveToolRegistryV2::intersect(
+            &VerifiedToolRegistryV2::new_for_test(version, vec![verified.clone()]).unwrap(),
+            &VerifiedPolicyToolSetV2::new_for_test(vec![
+                VerifiedPolicyToolActivationV2::new_for_test(digest, 0, Digest32V2::new([57; 32])),
+            ])
+            .unwrap(),
+            &VerifiedManifestToolConstraintSetV2::new_for_test(vec![
+                VerifiedManifestToolConstraintV2::new_for_test(
+                    digest,
+                    2,
+                    500_000_000,
+                    verified.unsigned().internal_validators().to_vec(),
+                ),
+            ])
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let active = make_registry(&new);
+    assert_eq!(active.len(), 1);
+    let make_draft = |digest, profile: &BusinessProfileV2| {
+        let controls = BusinessControlsV2::from_fields(
+            profile,
+            vec![
+                ("file".into(), BusinessValueV2::Text("A".into())),
+                ("to".into(), BusinessValueV2::Text("Alice".into())),
+            ],
+        )
+        .unwrap();
+        TaskAuthorizationDraftV2::new(
+            Digest32V2::new([58; 32]),
+            PrincipalIdV2::new([59; 32]),
+            DurableTaskIdV2::new([60; 32]),
+            1,
+            Digest32V2::new([61; 32]),
+            Digest32V2::new([62; 32]),
+            1,
+            UnixMillisV2::new(100),
+            UnixMillisV2::new(1000),
+            Digest32V2::new([63; 32]),
+            vec![TaskAuthorizationDraftClauseV2::new(
+                1,
+                vec![TaskAuthorizationDraftAlternativeV2::new(digest, controls).unwrap()],
+                1,
+                2,
+                2,
+                vec![],
+                false,
+            )
+            .unwrap()],
+        )
+        .unwrap()
+    };
+    let digest = descriptor_digest_v2(&new).unwrap();
+    let valid = make_draft(digest, &business_profile());
+    active
+        .validate_task_draft_profiles(&valid, RoleIdV2::new(1), UnixMillisV2::new(500))
+        .unwrap();
+    for (role, now) in [(9, 500), (1, 900), (1, 1)] {
+        assert!(active
+            .validate_task_draft_profiles(&valid, RoleIdV2::new(role), UnixMillisV2::new(now))
+            .is_err());
+    }
+    let p = business_profile();
+    let fake = BusinessProfileV2::new(
+        p.codec(),
+        p.operation(),
+        p.target_identity(),
+        Digest32V2::new([99; 32]),
+        p.effect(),
+        p.magnitude_rule(),
+        p.fields().to_vec(),
+    )
+    .unwrap();
+    assert!(active
+        .validate_task_draft_profiles(
+            &make_draft(digest, &fake),
+            RoleIdV2::new(1),
+            UnixMillisV2::new(500)
+        )
+        .is_err());
+    assert!(active
+        .validate_task_draft_profiles(
+            &make_draft(Digest32V2::new([98; 32]), &p),
+            RoleIdV2::new(1),
+            UnixMillisV2::new(500)
+        )
+        .is_err());
+    assert!(make_registry(&old)
+        .validate_task_draft_profiles(
+            &make_draft(descriptor_digest_v2(&old).unwrap(), &p),
+            RoleIdV2::new(1),
+            UnixMillisV2::new(500)
+        )
+        .is_err());
+}
+
 #[test]
 fn attempt_and_idempotency_contract_tags_are_exact() {
     assert_eq!(
@@ -242,6 +518,121 @@ fn active_registry_is_the_exact_policy_registry_intersection() {
     assert!(active
         .resolve(first_digest, RoleIdV2::new(1), UnixMillisV2::new(900))
         .is_none());
+}
+
+#[test]
+fn shipped_write_descriptor_with_confinement_validates_and_activates_at_g5() {
+    use crate::v2::{
+        activate_internal_validator_registry, deployment_requires_intent_flow_confinement,
+        AttemptKindV2, BoundedConnectorRetryPolicyV2, EffectSetV2, ExecutorIdempotencyContractV2,
+        InternalValidatorBuildV2, InternalValidatorImplementationKindV2,
+    };
+    use savana_kernel_protocol::v2::{
+        ActionCodecProfileV2, ActionTemplateIdV2, BusinessFieldRoleV2, BusinessFieldTypeV2,
+        BusinessFieldV2, BusinessMagnitudeV2, BusinessProfileV2, DisplayProjectionIdV2,
+        ExecutorIdentityV2, TaskEffectV2, ToolClassIdV2,
+    };
+
+    // Exactly the append_to_file business profile the deployment generator
+    // builds: file_id the owner-fixed resource, content the (result-derived)
+    // parameter, body/to synthetic payload/destination sentinels; effect Update.
+    let field = |name, role| BusinessFieldV2::new(name, role, BusinessFieldTypeV2::Text).unwrap();
+    let profile = BusinessProfileV2::new(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        "dojo.file.append",
+        Digest32V2::new([30; 32]),
+        Digest32V2::new([31; 32]),
+        TaskEffectV2::Update,
+        BusinessMagnitudeV2::FixedCount(1),
+        vec![
+            field("body", BusinessFieldRoleV2::Payload),
+            field("content", BusinessFieldRoleV2::Parameter),
+            field("file_id", BusinessFieldRoleV2::Resource),
+            field("to", BusinessFieldRoleV2::Destination),
+        ],
+    )
+    .unwrap();
+
+    let kind = InternalValidatorImplementationKindV2::IntentFlowConfinement;
+    let build_digest = Digest32V2::new([6; 32]);
+    let confinement = InternalValidatorDeclarationV2::new(
+        kind.implementation_id(),
+        VersionV2::new(1, 0, 0),
+        build_digest,
+    );
+    let build = |validators: Vec<InternalValidatorDeclarationV2>| {
+        UnsignedToolDescriptorV2::from_verified_manifest(
+            2,
+            VersionV2::new(2, 0, 0),
+            Digest32V2::new([12; 32]),
+            IdentifierV2::new("dojo.file.append").unwrap(),
+            ActionTemplateIdV2::new(102),
+            ToolClassIdV2::new(202),
+            profile.digest(),
+            Digest32V2::new([13; 32]),
+            vec![RoleIdV2::new(1)],
+            EffectSetV2::UPDATE,
+            AttemptKindV2::ToolWrite,
+            BoundedConnectorRetryPolicyV2::new(
+                ExecutorIdempotencyContractV2::ConnectorNonIdempotentSingleAttempt,
+                1,
+                0,
+            )
+            .unwrap(),
+            validators,
+            ExecutorIdentityV2::new([14; 32]),
+            ProjectionIdV2::new(1),
+            Digest32V2::new([15; 32]),
+            DisplayProjectionIdV2::new(1),
+            Digest32V2::new([16; 32]),
+            ExecutorIdempotencyContractV2::ConnectorNonIdempotentSingleAttempt,
+            UnixMillisV2::new(1),
+            UnixMillisV2::new(u64::MAX),
+        )
+        .and_then(|descriptor| descriptor.with_business_profile(profile.clone()))
+    };
+
+    // Core validate() stays permissive: an UPDATE descriptor is well-formed even
+    // without the validator, so existing write descriptors keep working. It is
+    // the deployment rule, not validate(), that requires confinement.
+    let bare = build(vec![]).unwrap();
+    assert!(!deployment_requires_intent_flow_confinement(
+        EffectSetV2::UPDATE,
+        bare.internal_validators()
+    ));
+
+    // The generator ships it WITH confinement; validate() also accepts that.
+    let write = build(vec![confinement]).unwrap();
+    assert!(deployment_requires_intent_flow_confinement(
+        EffectSetV2::UPDATE,
+        write.internal_validators()
+    ));
+
+    // The validator build registers, and the descriptor's declaration activates
+    // against it at G5. Identity (id, version, build digest) must match exactly.
+    let registry = activate_internal_validator_registry(vec![InternalValidatorBuildV2::new(
+        kind,
+        kind.implementation_id(),
+        VersionV2::new(1, 0, 0),
+        build_digest,
+    )])
+    .unwrap();
+    registry
+        .activate_exact(write.internal_validators())
+        .unwrap();
+
+    // A build with a different digest cannot activate the same declaration:
+    // the constraint and the registry build must carry the generator's digest.
+    let mismatched = activate_internal_validator_registry(vec![InternalValidatorBuildV2::new(
+        kind,
+        kind.implementation_id(),
+        VersionV2::new(1, 0, 0),
+        Digest32V2::new([9; 32]),
+    )])
+    .unwrap();
+    assert!(mismatched
+        .activate_exact(write.internal_validators())
+        .is_err());
 }
 
 fn validator(id: u32) -> InternalValidatorDeclarationV2 {

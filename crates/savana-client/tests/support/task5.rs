@@ -122,7 +122,7 @@ pub fn html_response(body: Vec<u8>) -> Result<BrowserResponse, SavanaError> {
 pub fn authentication_html<T: minicbor::Encode<()>>(purpose: &str, capability: T) -> Vec<u8> {
     let capability = URL_SAFE_NO_PAD.encode(minicbor::to_vec(capability).unwrap());
     format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Savana authentication</title></head><body><main data-purpose=\"{purpose}\" data-pre-authentication=\"{capability}\"><h1>Hardware authentication required</h1><button id=\"savana-authenticate\" type=\"button\">Use security key</button><p id=\"savana-status\">The opaque capability is held only in this page.</p></main><script src=\"/v2/savana-ui.js\" defer></script></body></html>"
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Savana authentication</title></head><body><main data-purpose=\"{purpose}\" data-pre-authentication=\"{capability}\"><h1>User verification required</h1><button id=\"savana-authenticate\" type=\"button\">Use passkey or security key</button><p id=\"savana-status\">The opaque capability is held only in this page.</p></main><script src=\"/v2/savana-ui.js\" defer></script></body></html>"
     )
     .into_bytes()
 }
@@ -271,4 +271,68 @@ pub fn approval_responses(
         ),
         cbor_response(encode_approval_decision_browser_finish_response_v2(finish).unwrap()),
     ]
+}
+pub fn task_authorization_draft() -> savana_kernel_protocol::v2::TaskAuthorizationDraftV2 {
+    use savana_kernel_protocol::v2::*;
+    let d = |n| Digest32V2::new([n; 32]);
+    let profile = BusinessProfileV2::new(
+        ActionCodecProfileV2::McpToolsCallJsonV1,
+        "mail.send",
+        d(1),
+        d(2),
+        TaskEffectV2::Send,
+        BusinessMagnitudeV2::FixedCount(1),
+        vec![
+            BusinessFieldV2::new(
+                "body",
+                BusinessFieldRoleV2::Payload,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+            BusinessFieldV2::new(
+                "file",
+                BusinessFieldRoleV2::Resource,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+            BusinessFieldV2::new(
+                "to",
+                BusinessFieldRoleV2::Destination,
+                BusinessFieldTypeV2::Text,
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let controls = BusinessControlsV2::from_fields(
+        &profile,
+        vec![
+            ("file".into(), BusinessValueV2::Text("A".into())),
+            ("to".into(), BusinessValueV2::Text("Alice".into())),
+        ],
+    )
+    .unwrap();
+    TaskAuthorizationDraftV2::new(
+        d(3),
+        PrincipalIdV2::new([4; 32]),
+        DurableTaskIdV2::new([5; 32]),
+        1,
+        d(6),
+        d(7),
+        1,
+        UnixMillisV2::new(1),
+        UnixMillisV2::new(100),
+        d(8),
+        vec![TaskAuthorizationDraftClauseV2::new(
+            1,
+            vec![TaskAuthorizationDraftAlternativeV2::new(d(9), controls).unwrap()],
+            1,
+            1,
+            1,
+            vec![],
+            false,
+        )
+        .unwrap()],
+    )
+    .unwrap()
 }

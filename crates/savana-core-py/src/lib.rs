@@ -16,6 +16,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 mod client;
+mod managed_admin;
 mod release_receiver;
 
 /// Report the crate version. Retained as a trivial import-sanity probe.
@@ -69,6 +70,93 @@ fn detect_strict(py: Python<'_>, text: &str, assets: &str) -> PyResult<Vec<Py<Py
 #[pyo3(signature = (body, vault))]
 fn leak_gate(body: Option<&str>, vault: Vec<(String, String)>) -> bool {
     body_pipeline::leak_gate(body, &vault)
+}
+
+/// The kernel's own definition of sensitive spans
+/// ([`savana_leak_gate::pii_spans`], the one the ingress masker and the
+/// declassification gate share), for a caller that must mask text before a
+/// model sees it. Returns `(start, end, class)` per span in Python string
+/// (code point) offsets, ordered and non-overlapping; `class` is
+/// `"credential"`, `"personal_data"` or `"protected_reference"`.
+#[pyfunction]
+fn pii_spans(text: &str) -> Vec<(usize, usize, &'static str)> {
+    savana_leak_gate::pii_spans(text)
+        .into_iter()
+        .map(|span| {
+            let class = match span.class {
+                savana_leak_gate::PiiClassV2::Credential => "credential",
+                savana_leak_gate::PiiClassV2::PersonalData => "personal_data",
+                savana_leak_gate::PiiClassV2::ProtectedReference => "protected_reference",
+            };
+            let start = text[..span.start].chars().count();
+            (
+                start,
+                start + text[span.start..span.end].chars().count(),
+                class,
+            )
+        })
+        .collect()
+}
+
+/// One model call's masking table: the leak gate's own
+/// ([`savana_leak_gate::masking::MaskTable`]), the one the kernel's executor
+/// masks a model-codec call with. A caller that mirrors the executor masks a
+/// request's argument texts with ONE table, in the request's canonical order
+/// (field names sorted, list items in order, deployment-fixed fields left
+/// alone), and puts a reply's content texts back with `unmask`. `mask` raises
+/// `ValueError` with the stable code where the executor fails closed. The
+/// value-blind planner view masks the owner's request with the same table.
+#[pyclass(module = "savana_core")]
+struct ModelMask {
+    table: savana_leak_gate::masking::MaskTable,
+}
+
+#[pymethods]
+impl ModelMask {
+    #[new]
+    fn new() -> Self {
+        Self {
+            table: savana_leak_gate::masking::MaskTable::default(),
+        }
+    }
+
+    fn mask(&mut self, text: &str) -> PyResult<String> {
+        self.table
+            .mask(text)
+            .map_err(|error| PyValueError::new_err(error.code()))
+    }
+
+    fn unmask(&self, text: &str) -> String {
+        self.table.unmask(text)
+    }
+
+    /// `(placeholder, value)` pairs in order of first appearance, for the
+    /// owner's side only (binding a planner's placeholders back).
+    fn bindings(&self) -> Vec<(String, String)> {
+        self.table
+            .bindings()
+            .map(|(placeholder, value)| (placeholder.to_owned(), value.to_owned()))
+            .collect()
+    }
+
+    fn __len__(&self) -> usize {
+        self.table.len()
+    }
+}
+
+/// Hex SHA-256 identity of the leak gate's pattern set
+/// ([`savana_leak_gate::pattern_set_digest`]), so evidence can bind WHICH
+/// definition masked a text.
+#[pyfunction]
+fn leak_gate_patterns_sha256() -> String {
+    use std::fmt::Write as _;
+    savana_leak_gate::pattern_set_digest().iter().fold(
+        String::with_capacity(64),
+        |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        },
+    )
 }
 
 /// Parse Python source-name strings into [`Source`]s, mirroring the
@@ -549,10 +637,14 @@ fn mask_pages(
 #[pymodule]
 fn savana_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     client::register(m)?;
+    managed_admin::register(m)?;
     release_receiver::register(m)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(detect_strict, m)?)?;
     m.add_function(wrap_pyfunction!(leak_gate, m)?)?;
+    m.add_function(wrap_pyfunction!(pii_spans, m)?)?;
+    m.add_function(wrap_pyfunction!(leak_gate_patterns_sha256, m)?)?;
+    m.add_class::<ModelMask>()?;
     m.add_function(wrap_pyfunction!(mask_pages, m)?)?;
     m.add_function(wrap_pyfunction!(capabilities_combine, m)?)?;
     m.add_function(wrap_pyfunction!(capability_is_public, m)?)?;

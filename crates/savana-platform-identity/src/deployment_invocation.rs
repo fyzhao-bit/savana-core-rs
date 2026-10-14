@@ -19,6 +19,12 @@ use crate::NativeIdentityErrorV2;
 const TRANSACTION_DESCRIPTOR_LEAF_V2: &str = "DeploymentTransactionV2.cbor";
 const MAX_TRANSACTION_DESCRIPTOR_BYTES_V2: u64 = 1_048_576;
 
+#[cfg(target_os = "linux")]
+#[path = "linux_staging_v3.rs"]
+mod staging_v3;
+#[cfg(target_os = "linux")]
+pub use staging_v3::{LinuxMeasuredStagingTreeV3, MeasuredStagingEntryV3};
+
 pub fn harden_root_deployment_process_v2() -> Result<(), NativeIdentityErrorV2> {
     if rustix::process::geteuid().as_raw() != 0 {
         return Err(NativeIdentityErrorV2::InvalidDeploymentInvocation);
@@ -500,7 +506,7 @@ fn read_fixed_descriptor(
     let descriptor = openat(
         staged,
         leaf,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty(),
     )
     .map_err(|_| NativeIdentityErrorV2::UnsafeDeploymentSpool)?;

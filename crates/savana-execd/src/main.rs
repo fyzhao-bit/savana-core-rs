@@ -36,7 +36,14 @@ fn development_config_path(path: &Path) -> bool {
 
 fn main() {
     let exit_code = match parse_args(std::env::args_os()) {
-        Ok(path) => savana_execd::run(&path).map_or(1, |()| 0),
+        Ok(path) => match savana_execd::run(&path) {
+            Ok(()) => 0,
+            Err(error) => {
+                // Closed error enum only: never print configuration or secrets.
+                eprintln!("executor startup/serving failed: {error}");
+                1
+            }
+        },
         Err(_) => 64,
     };
     std::process::exit(exit_code);

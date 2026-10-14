@@ -1,0 +1,16 @@
+[Unit]
+Description=Savana private root-only managed administration v0.4
+
+[Socket]
+ListenStream=/run/savana/kerneld/admin/managed-v04.sock
+FileDescriptorName=savana-managed-admin-v04
+SocketUser=root
+SocketGroup=root
+SocketMode=0600
+# kerneld runs unprivileged and needs to inspect socket metadata, not connect.
+DirectoryMode=0711
+Service=savana-kerneld.service
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

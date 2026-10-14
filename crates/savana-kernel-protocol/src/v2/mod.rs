@@ -1,4 +1,6 @@
 mod application;
+mod authentication_assurance;
+pub use authentication_assurance::AuthenticationAssuranceV04;
 mod approval_service;
 mod bindings;
 mod browser;
@@ -7,9 +9,37 @@ mod browser_approval;
 mod browser_assets;
 mod browser_enrollment;
 mod browser_ingress;
+mod business_json;
+mod business_request;
+mod business_unicode;
+mod final_release_business;
+pub use business_request::{
+    condition_holds_v2, decode_business_controls_v2, decode_business_profile_v2,
+    decode_result_derived_controls_v2, encode_business_controls_v2, encode_business_profile_v2,
+    encode_result_derived_controls_v2, BusinessCodecErrorV2, BusinessControlsV2,
+    BusinessFieldRoleV2, BusinessFieldTypeV2, BusinessFieldV2, BusinessMagnitudeV2,
+    BusinessProfileV2, BusinessRequestV2, BusinessResponseDispositionV2, BusinessValueV2,
+    ResultCandidatesV2, ResultComputeOpV2, ResultComputeV2, ResultDerivedControlV2,
+    CONDITION_ALWAYS_V2, CONDITION_SKIPPED_TEXT_V2, MAX_BUSINESS_JSON_BYTES_V2,
+    MAX_BUSINESS_PROFILE_BYTES_V2, MAX_PARAMETER_TEXT_BYTES_V2, MAX_RESULT_CANDIDATES_V2,
+    MAX_RESULT_CANDIDATE_BYTES_V2, MAX_TEXT_LIST_ITEMS_V2, TABLE_COMPUTE_FIELDS_V2,
+};
+pub use final_release_business::{
+    decode_final_release_delivery_v2, decode_final_result_release_delivery_v04,
+    final_release_business_profile_v2, final_release_business_request_v2,
+    final_result_release_business_profile_v04, final_result_release_business_request_v04,
+    fused_final_result_resource_v04, FinalReleaseDeliveryV2, FinalResultReleaseDeliveryV04,
+    MAX_FINAL_RELEASE_BUSINESS_PAYLOAD_BYTES_V2,
+};
 mod cbor;
 mod effect_gate_projection;
 mod handles;
+pub use handles::TaskAuthorizationApprovalRecordHandleV2;
+pub use handles::{PrivateSessionBrowserCapabilityV04, PrivateSessionTransferV04};
+mod private_session_v04;
+pub use private_session_v04::*;
+mod private_publication_v04;
+pub use private_publication_v04::*;
 mod http;
 mod jarvis;
 mod kernel_agent;
@@ -18,12 +48,68 @@ mod kernel_connector;
 mod kernel_executor;
 mod kernel_executor_success;
 mod kernel_ingress;
+pub use kernel_ingress::{
+    decode_establish_task_authorization_response_v2,
+    encode_establish_task_authorization_response_v2, EstablishTaskAuthorizationRequestV2,
+    EstablishTaskAuthorizationResponseV2, GetTaskAuthorizationContextRequestV2,
+};
+pub use kernel_ingress::{
+    decode_prepare_task_authorization_approval_response_v2,
+    encode_prepare_task_authorization_approval_response_v2,
+    CommitTaskAuthorizationApprovalRequestV2, PrepareTaskAuthorizationApprovalRequestV2,
+    PrepareTaskAuthorizationApprovalResponseV2,
+};
+pub use kernel_ingress::{
+    decode_recover_task_authorization_response_v2, decode_revoke_task_authorization_response_v2,
+    encode_recover_task_authorization_response_v2, encode_revoke_task_authorization_response_v2,
+    RecoverTaskAuthorizationRequestV2, RecoverTaskAuthorizationResponseV2,
+    RevokeTaskAuthorizationRequestV2, RevokeTaskAuthorizationResponseV2,
+};
 mod kernel_service;
 mod kernel_success;
 mod primitives;
 mod service;
 mod signed;
+pub use signed::TaskAuthorizationChangeV2;
+mod task_action_approval;
+mod task_action_display;
+pub use task_action_display::{render_task_action_display_v2, MAX_TASK_ACTION_DISPLAY_BYTES_V2};
+mod task_authorization;
+mod task_completion;
+mod task_execution_payload;
+pub use task_action_approval::{
+    decode_signed_task_action_approval_v2, decode_task_action_approval_v2,
+    encode_signed_task_action_approval_v2, encode_task_action_approval_v2,
+    sign_task_action_approval_v2, verify_task_action_approval_v2, SignedTaskActionApprovalV2,
+    TaskActionApprovalBindingV2, TaskActionApprovalContextV2, TaskActionApprovalDecisionV2,
+    TaskActionApprovalV2, VerifiedTaskActionApprovalV2, MAX_TASK_ACTION_APPROVAL_BYTES_V2,
+};
+pub use task_completion::{task_completion_evidence_digest_v2, TaskCompletionEvidenceV2};
+pub use task_execution_payload::{
+    business_target_identity_v2, decode_task_execution_payload_v2,
+    encode_task_execution_payload_v2, presealed_release_payload_digest_v2,
+    presealed_tool_payload_digest_v2, TaskExecutionPayloadV2, MAX_TASK_EXECUTION_PAYLOAD_BYTES_V2,
+};
+#[cfg(test)]
+mod task_action_approval_tests;
+#[cfg(test)]
+mod task_authorization_tests;
 mod transport;
+
+pub use task_authorization::{
+    action_content_digest_v2, decode_action_content_v2, decode_signed_task_authorization_v2,
+    decode_task_authorization_context_v2, decode_task_authorization_draft_v2,
+    decode_task_authorization_v2, encode_action_content_v2, encode_signed_task_authorization_v2,
+    encode_task_authorization_context_v2, encode_task_authorization_draft_v2,
+    encode_task_authorization_v2, sign_task_authorization_v2, task_authorization_digest_v2,
+    task_authorization_draft_digest_v2, verify_task_authorization_v2, ActionAlternativeV2,
+    ActionCodecProfileV2, ActionContentV2, MagnitudeUnitV2, SignedTaskAuthorizationV2,
+    TaskAuthorizationClauseV2, TaskAuthorizationContextV2, TaskAuthorizationDraftAlternativeV2,
+    TaskAuthorizationDraftClauseV2, TaskAuthorizationDraftV2, TaskAuthorizationToolContextV2,
+    TaskAuthorizationV2, TaskEffectV2, TaskEvidenceKindV2, MAX_ACTION_ALTERNATIVES_V2,
+    MAX_TASK_AUTHORIZATION_BYTES_V2, MAX_TASK_AUTHORIZATION_CLAUSES_V2,
+    MAX_TASK_AUTHORIZATION_DRAFT_BYTES_V2, MAX_TASK_PREDECESSORS_V2,
+};
 
 pub use application::{
     decode_kernel_service_application_request_v2, decode_kernel_service_application_response_v2,
@@ -160,8 +246,9 @@ pub use http::{
     read_fixed_http_request_v2, render_agent_ui_authentication_form_v2, render_agent_workspace_v2,
     render_approval_display_authentication_form_v2, render_ingress_bootstrap_form_v2,
     render_ingress_ui_authentication_form_v2, render_ingress_workspace_v2,
-    write_fixed_http_response_v2, ContinueJarvisBootstrapRequestV2, FixedHttpErrorV2,
-    FixedHttpRequestV2, FixedHttpRouteV2, FixedHttpServiceV2, MAX_HTTP_BODY_BYTES_V2,
+    render_private_approval_landing_v04, write_fixed_http_response_v2,
+    ContinueJarvisBootstrapRequestV2, FixedHttpErrorV2, FixedHttpRequestV2, FixedHttpRouteV2,
+    FixedHttpServiceV2, MAX_HTTP_BODY_BYTES_V2,
 };
 pub use jarvis::{
     AgentControlHealthResponseV2, AgentControlOperationV2, BootstrapKindV2, CancelTaskRequestV2,
@@ -244,11 +331,11 @@ pub use kernel_executor::{
     kernel_executor_operation_tags_v2, AcknowledgeCommittedCompletionRequestV2,
     BoundedCiphertextV2, ConnectorRegistrySyncModeV2, ConnectorRegistrySyncPageV2,
     ConnectorRegistrySyncRequestV2, ConnectorRegistrySyncScopeV2, DispatchCoreV2,
-    DispatchRequestV2, DispatchSubjectV2, ExecutorCompletionDescriptorV2, ExecutorHealthRequestV2,
-    FetchCompletionRequestV2, KernelExecutorOperationV2, QueryByExecutionNonceRequestV2,
-    SealedExecutionEnvelopePayloadV2, SignedSealedExecutionEnvelopeV2,
-    ToolExecutionSemanticBindingV2, MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTAS_V2,
-    MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTA_BYTES_V2,
+    DispatchRequestV2, DispatchSubjectV2, DispatchTaskBindingV2, ExecutorCompletionDescriptorV2,
+    ExecutorHealthRequestV2, FetchCompletionRequestV2, KernelExecutorOperationV2,
+    QueryByExecutionNonceRequestV2, SealedExecutionEnvelopePayloadV2,
+    SignedSealedExecutionEnvelopeV2, ToolExecutionSemanticBindingV2,
+    MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTAS_V2, MAX_CONNECTOR_REGISTRY_SYNC_PAGE_DELTA_BYTES_V2,
 };
 pub use kernel_executor_success::{
     decode_acknowledge_committed_completion_response_v2,

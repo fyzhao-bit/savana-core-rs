@@ -745,6 +745,20 @@ fn select_extraction_rule<'rules>(
 /// here and refused there. Both sides now call the same function, so they agree
 /// by construction. The gate's differential asserts the exact property this
 /// relies on: spans are found precisely when redaction would rewrite something.
+///
+/// One look is not always enough. The gate's table applies in sequence, and a
+/// region an earlier pattern claims can hide the rest of a longer run: in
+/// `CA133012400231215421872` the mobile-number pattern claims `13301240023`,
+/// and only once that is masked does `1215421872` follow a non-word character,
+/// where the telephone pattern matches it. The kernel refuses such a view as
+/// residual PII (`redact_pii(masked) != masked`), so the owner's input could
+/// never be committed. The spans are therefore closed under masking: mask with
+/// stand-ins of the placeholders' exact shape, look again, widen the regions
+/// over whatever the gate still finds, and stop when the masked text is a fixed
+/// point of the verifier's own check. No pattern matches inside a placeholder
+/// whatever its letters (`masked_placeholder_tokens_are_not_residual_pii`), so
+/// the stand-ins' result is the placeholders' result. A region only ever
+/// grows; no fixed point within `MAX_MASKING_ROUNDS` fails closed.
 fn detect_protected_spans(value: &str) -> Result<Vec<DetectedSpanV2>, InputRuntimeError> {
     let mut spans = Vec::new();
     let found = savana_leak_gate::pii_spans(value);
@@ -760,7 +774,107 @@ fn detect_protected_spans(value: &str) -> Result<Vec<DetectedSpanV2>, InputRunti
             class: DetectionClassV2::from_gate(span.class),
         });
     }
-    canonicalize_spans(spans)
+    let mut spans = canonicalize_spans(spans)?;
+    for _ in 0..MAX_MASKING_ROUNDS {
+        let (masked, tokens) = mask_with_stand_ins(value, &spans)?;
+        if savana_leak_gate::redact_pii(&masked) == masked {
+            return Ok(spans);
+        }
+        let covered = covered_bytes(&spans);
+        for residual in savana_leak_gate::pii_spans(&masked) {
+            spans.push(DetectedSpanV2 {
+                start: original_start(&tokens, residual.start),
+                end: original_end(&tokens, residual.end),
+                class: DetectionClassV2::from_gate(residual.class),
+            });
+        }
+        spans = canonicalize_spans(spans)?;
+        if covered_bytes(&spans) <= covered {
+            break;
+        }
+    }
+    Err(InputRuntimeError::InputLimitExceeded)
+}
+
+const MAX_MASKING_ROUNDS: usize = 8;
+
+/// Where a stand-in sits in the masked text and which original bytes it hides.
+struct StandIn {
+    masked_start: usize,
+    masked_end: usize,
+    original_start: usize,
+    original_end: usize,
+}
+
+/// `value` with every span replaced by a placeholder-shaped stand-in.
+fn mask_with_stand_ins(
+    value: &str,
+    spans: &[DetectedSpanV2],
+) -> Result<(String, Vec<StandIn>), InputRuntimeError> {
+    let mut masked = String::new();
+    masked
+        .try_reserve(value.len())
+        .map_err(|_| InputRuntimeError::AllocationFailure)?;
+    let mut tokens = Vec::new();
+    tokens
+        .try_reserve_exact(spans.len())
+        .map_err(|_| InputRuntimeError::AllocationFailure)?;
+    let mut cursor = 0_usize;
+    for (ordinal, span) in spans.iter().enumerate() {
+        masked.push_str(
+            value
+                .get(cursor..span.start)
+                .ok_or(InputRuntimeError::ForbiddenUnicode)?,
+        );
+        let token = placeholder_token(ordinal, PlannerSlotRefV2([0; 16]))?;
+        tokens.push(StandIn {
+            masked_start: masked.len(),
+            masked_end: masked.len() + token.len(),
+            original_start: span.start,
+            original_end: span.end,
+        });
+        masked.push_str(&token);
+        cursor = span.end;
+    }
+    masked.push_str(
+        value
+            .get(cursor..)
+            .ok_or(InputRuntimeError::ForbiddenUnicode)?,
+    );
+    if masked.len() > MAX_INPUT_BYTES {
+        return Err(InputRuntimeError::InputLimitExceeded);
+    }
+    Ok((masked, tokens))
+}
+
+/// The original offset a residual region starting at masked offset `at`
+/// starts from: inside a stand-in, the start of what it hides.
+fn original_start(tokens: &[StandIn], at: usize) -> usize {
+    match tokens
+        .partition_point(|t| t.masked_start <= at)
+        .checked_sub(1)
+    {
+        None => at,
+        Some(i) if at < tokens[i].masked_end => tokens[i].original_start,
+        Some(i) => tokens[i].original_end + (at - tokens[i].masked_end),
+    }
+}
+
+/// The original offset a residual region ending (exclusively) at masked offset
+/// `at` ends at: inside a stand-in, the end of what it hides.
+fn original_end(tokens: &[StandIn], at: usize) -> usize {
+    match tokens
+        .partition_point(|t| t.masked_start < at)
+        .checked_sub(1)
+    {
+        None => at,
+        Some(i) if at <= tokens[i].masked_end => tokens[i].original_end,
+        Some(i) => tokens[i].original_end + (at - tokens[i].masked_end),
+    }
+}
+
+fn covered_bytes(spans: &[DetectedSpanV2]) -> usize {
+    spans.iter().map(|span| span.end - span.start).sum()
 }
 
 fn canonicalize_spans(
@@ -1375,6 +1489,65 @@ mod tests {
         let token = placeholder_token(0, reference).unwrap();
 
         assert_eq!(savana_leak_gate::redact_pii(&token), token);
+    }
+
+    #[test]
+    fn masking_continues_until_the_verifier_finds_nothing_left() {
+        // The mobile-number pattern claims `13301240023` inside the account
+        // number; masking it leaves `1215421872` after a non-word character,
+        // where the telephone pattern matches. One look would hand the kernel
+        // a view it refuses as residual PII.
+        let text = "Send the rent to CA133012400231215421872 and tell me.";
+        assert_eq!(savana_leak_gate::pii_spans(text).len(), 1);
+        let gated = runtime()
+            .process(InputChannelV2::ChatText, text, UnixMillisV2::new(200))
+            .unwrap();
+        let hidden: Vec<&str> = gated
+            .protected_values()
+            .iter()
+            .map(|value| &text[value.start..value.end])
+            .collect();
+        assert_eq!(hidden, ["13301240023", "1215421872"]);
+        let masked = gated.masked_agent_input().unwrap();
+        assert_eq!(savana_leak_gate::redact_pii(masked.text()), masked.text());
+        assert!(masked
+            .text()
+            .starts_with("Send the rent to CA[SAVANA_REDACTED_"));
+        assert!(masked.text().ends_with("] and tell me."));
+        assert_eq!(gated.planner_envelope().slots().len(), 2);
+    }
+
+    #[test]
+    fn residual_regions_map_back_over_the_stand_ins_they_touch() {
+        let spans = [
+            DetectedSpanV2 {
+                start: 2,
+                end: 5,
+                class: DetectionClassV2::PersonalData,
+            },
+            DetectedSpanV2 {
+                start: 9,
+                end: 10,
+                class: DetectionClassV2::PersonalData,
+            },
+        ];
+        let (masked, tokens) = mask_with_stand_ins("ab123cdef4gh", &spans).unwrap();
+        let first = &tokens[0];
+        let second = &tokens[1];
+        assert_eq!(&masked[..2], "ab");
+        assert_eq!(&masked[first.masked_end..second.masked_start], "cdef");
+        assert_eq!(&masked[second.masked_end..], "gh");
+        // Literal text before, between and after the stand-ins maps to itself.
+        assert_eq!(original_start(&tokens, 1), 1);
+        assert_eq!(original_start(&tokens, first.masked_end + 1), 6);
+        assert_eq!(original_end(&tokens, second.masked_end + 2), 12);
+        // A region that reaches into a stand-in covers all it hides.
+        assert_eq!(original_start(&tokens, first.masked_start + 3), 2);
+        assert_eq!(original_end(&tokens, first.masked_start + 3), 5);
+        assert_eq!(original_end(&tokens, second.masked_end), 10);
+        // A region that stops right at a stand-in does not take it in.
+        assert_eq!(original_end(&tokens, first.masked_start), 2);
+        assert_eq!(original_start(&tokens, first.masked_end), 5);
     }
 
     #[test]

@@ -24,6 +24,10 @@ impl ScriptedTransport {
     pub fn take_requests(&self) -> Vec<BrowserRequest> {
         std::mem::take(&mut *self.requests.lock().expect("request lock poisoned"))
     }
+
+    pub fn extend_responses(&self, responses: Vec<Result<BrowserResponse, SavanaError>>) {
+        self.responses.lock().unwrap().extend(responses);
+    }
 }
 
 impl BrowserTransport for ScriptedTransport {

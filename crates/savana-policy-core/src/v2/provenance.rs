@@ -54,15 +54,64 @@ pub struct DeriveOperationV2(DeriveOperationKindV2);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum DeriveOperationKindV2 {
+    OwnerInputTextV04([u8; 16]),
+    DecodeUtf8,
     ConcatenateText,
     NormalizeNfc,
     SelectObjectField(ArgumentNameV2),
     AssembleList,
     AssembleObject(Vec<ArgumentNameV2>),
     PolicyConstant(PolicyConstantIdV2),
+    /// Kernel-internal strict scalar projection from a prior operation's
+    /// verified result bytes, for an owner-signed result-derived control. The
+    /// path grammar matches signed observations; the node must be a single
+    /// scalar. Not reachable from the agent wire (no `map_operation` entry).
+    SelectResultJsonPathV04 {
+        path: Vec<String>,
+        max_bytes: u16,
+    },
+    /// The same projection for a typed edge: either a bounded list of texts
+    /// (`list`) or one text with an owner-signed deterministic computation
+    /// applied (`compute`). Exactly one of the two; plain edges keep tag 9.
+    SelectResultJsonEdgeV04 {
+        path: Vec<String>,
+        max_bytes: u16,
+        list: bool,
+        compute: Option<savana_continuation_core::planning_observation::ResultComputeV04>,
+    },
+    /// A trusted-set edge's value, endorsed because it is a member of the
+    /// owner-signed candidate set this digest names (for a list, every item).
+    /// Only `ProvenanceRecordV2::result_candidate_member_v04`, which checks
+    /// membership, produces it; `derived` refuses it, and the agent wire has
+    /// no entry for it.
+    SelectResultJsonMemberV04 {
+        path: Vec<String>,
+        max_bytes: u16,
+        list: bool,
+        candidates: Digest32V2,
+    },
+}
+
+const MAX_RESULT_PATH_SEGMENTS_V04: usize = 16;
+const MAX_RESULT_PATH_SEGMENT_BYTES_V04: usize = 128;
+
+fn valid_result_path(path: &[String]) -> bool {
+    path.len() <= MAX_RESULT_PATH_SEGMENTS_V04
+        && path.iter().all(|segment| {
+            !segment.is_empty()
+                && segment.len() <= MAX_RESULT_PATH_SEGMENT_BYTES_V04
+                && !segment.chars().any(char::is_control)
+        })
 }
 
 impl DeriveOperationV2 {
+    /// Host-private deterministic selection from already owned ingress text.
+    pub const fn owner_input_text_v04(slot: [u8; 16]) -> Self {
+        Self(DeriveOperationKindV2::OwnerInputTextV04(slot))
+    }
+    pub const fn decode_utf8() -> Self {
+        Self(DeriveOperationKindV2::DecodeUtf8)
+    }
     pub const fn concatenate_text() -> Self {
         Self(DeriveOperationKindV2::ConcatenateText)
     }
@@ -95,14 +144,67 @@ impl DeriveOperationV2 {
         Self(DeriveOperationKindV2::PolicyConstant(constant_id))
     }
 
+    pub fn select_result_json_path_v04(path: Vec<String>, max_bytes: u16) -> Result<Self, G3Error> {
+        if !valid_result_path(&path) || max_bytes == 0 {
+            return Err(G3Error::DeriveTypeMismatch);
+        }
+        Ok(Self(DeriveOperationKindV2::SelectResultJsonPathV04 {
+            path,
+            max_bytes,
+        }))
+    }
+
+    pub fn select_result_json_edge_v04(
+        path: Vec<String>,
+        max_bytes: u16,
+        list: bool,
+        compute: Option<savana_continuation_core::planning_observation::ResultComputeV04>,
+    ) -> Result<Self, G3Error> {
+        if !valid_result_path(&path)
+            || max_bytes == 0
+            || list == compute.is_some()
+            || compute.is_some_and(|c| !c.valid())
+        {
+            return Err(G3Error::DeriveTypeMismatch);
+        }
+        Ok(Self(DeriveOperationKindV2::SelectResultJsonEdgeV04 {
+            path,
+            max_bytes,
+            list,
+            compute,
+        }))
+    }
+
+    pub fn select_result_json_member_v04(
+        path: Vec<String>,
+        max_bytes: u16,
+        list: bool,
+        candidates: Digest32V2,
+    ) -> Result<Self, G3Error> {
+        if !valid_result_path(&path) || max_bytes == 0 || candidates == Digest32V2::new([0; 32]) {
+            return Err(G3Error::DeriveTypeMismatch);
+        }
+        Ok(Self(DeriveOperationKindV2::SelectResultJsonMemberV04 {
+            path,
+            max_bytes,
+            list,
+            candidates,
+        }))
+    }
+
     pub const fn tag(&self) -> u16 {
         match &self.0 {
+            DeriveOperationKindV2::OwnerInputTextV04(_) => 8,
+            DeriveOperationKindV2::DecodeUtf8 => 7,
             DeriveOperationKindV2::ConcatenateText => 1,
             DeriveOperationKindV2::NormalizeNfc => 2,
             DeriveOperationKindV2::SelectObjectField(_) => 3,
             DeriveOperationKindV2::AssembleList => 4,
             DeriveOperationKindV2::AssembleObject(_) => 5,
             DeriveOperationKindV2::PolicyConstant(_) => 6,
+            DeriveOperationKindV2::SelectResultJsonPathV04 { .. } => 9,
+            DeriveOperationKindV2::SelectResultJsonEdgeV04 { .. } => 10,
+            DeriveOperationKindV2::SelectResultJsonMemberV04 { .. } => 11,
         }
     }
 
@@ -111,6 +213,23 @@ impl DeriveOperationV2 {
         parents: &[(&KernelValueV2, &ProvenanceRecordV2)],
     ) -> Result<KernelValueV2, G3Error> {
         match &self.0 {
+            DeriveOperationKindV2::OwnerInputTextV04(slot) => {
+                let [(value, _)] = parents else {
+                    return Err(G3Error::DeriveArityMismatch);
+                };
+                super::fused_input_document::FusedInputDocumentV04::select(
+                    value.as_text().ok_or(G3Error::DeriveTypeMismatch)?,
+                    *slot,
+                )
+            }
+            DeriveOperationKindV2::DecodeUtf8 => {
+                let [(value, _)] = parents else {
+                    return Err(G3Error::DeriveArityMismatch);
+                };
+                let bytes = value.as_bytes_value().ok_or(G3Error::DeriveTypeMismatch)?;
+                let text = std::str::from_utf8(bytes).map_err(|_| G3Error::DeriveTypeMismatch)?;
+                KernelValueV2::text(text)
+            }
             DeriveOperationKindV2::ConcatenateText => {
                 require_nonempty(parents)?;
                 let total_length = parents.iter().try_fold(0_usize, |length, (value, _)| {
@@ -183,6 +302,63 @@ impl DeriveOperationV2 {
                 }
                 value.try_clone_internal()
             }
+            DeriveOperationKindV2::SelectResultJsonPathV04 { path, max_bytes } => {
+                use savana_continuation_core::planning_observation::{
+                    select_scalar, ScalarSelectionV04,
+                };
+                let [(value, _)] = parents else {
+                    return Err(G3Error::DeriveArityMismatch);
+                };
+                let bytes = value.as_bytes_value().ok_or(G3Error::DeriveTypeMismatch)?;
+                match select_scalar(bytes, path, *max_bytes)
+                    .map_err(|_| G3Error::DeriveFieldMissing)?
+                {
+                    ScalarSelectionV04::Text(text) => KernelValueV2::text(text),
+                    ScalarSelectionV04::Boolean(flag) => Ok(KernelValueV2::boolean(flag)),
+                    ScalarSelectionV04::Unsigned(number) => i64::try_from(number)
+                        .map(KernelValueV2::integer)
+                        .map_err(|_| G3Error::DeriveTypeMismatch),
+                }
+            }
+            DeriveOperationKindV2::SelectResultJsonEdgeV04 {
+                path,
+                max_bytes,
+                list,
+                compute,
+            } => {
+                use savana_continuation_core::planning_observation::{
+                    select_scalar, select_text_list, ScalarSelectionV04,
+                };
+                let [(value, _)] = parents else {
+                    return Err(G3Error::DeriveArityMismatch);
+                };
+                let bytes = value.as_bytes_value().ok_or(G3Error::DeriveTypeMismatch)?;
+                if *list {
+                    let items = select_text_list(bytes, path, *max_bytes)
+                        .map_err(|_| G3Error::DeriveFieldMissing)?;
+                    let values = items
+                        .into_iter()
+                        .map(KernelValueV2::text)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return KernelValueV2::list(values);
+                }
+                let compute = compute.ok_or(G3Error::DeriveTypeMismatch)?;
+                let ScalarSelectionV04::Text(text) = select_scalar(bytes, path, *max_bytes)
+                    .map_err(|_| G3Error::DeriveFieldMissing)?
+                else {
+                    return Err(G3Error::DeriveTypeMismatch);
+                };
+                let computed = compute.apply(&text).ok_or(G3Error::DeriveTypeMismatch)?;
+                if computed.len() > usize::from(*max_bytes) {
+                    return Err(G3Error::DeriveTypeMismatch);
+                }
+                KernelValueV2::text(computed)
+            }
+            // Endorsement needs the set itself, which only the member
+            // constructor holds: never minted by a plain derivation.
+            DeriveOperationKindV2::SelectResultJsonMemberV04 { .. } => {
+                Err(G3Error::DeriveTypeMismatch)
+            }
         }
     }
 }
@@ -194,6 +370,12 @@ impl<C> minicbor::Encode<C> for DeriveOperationV2 {
         context: &mut C,
     ) -> Result<(), minicbor::encode::Error<W::Error>> {
         match &self.0 {
+            DeriveOperationKindV2::OwnerInputTextV04(slot) => {
+                encoder.array(2)?.u16(8)?.bytes(slot)?;
+            }
+            DeriveOperationKindV2::DecodeUtf8 => {
+                encoder.array(1)?.u16(7)?;
+            }
             DeriveOperationKindV2::ConcatenateText => {
                 encoder.array(1)?.u16(1)?;
             }
@@ -217,6 +399,49 @@ impl<C> minicbor::Encode<C> for DeriveOperationV2 {
                 encoder.array(2)?.u16(6)?;
                 constant_id.encode(encoder, context)?;
             }
+            DeriveOperationKindV2::SelectResultJsonPathV04 { path, max_bytes } => {
+                encoder.array(3)?.u16(9)?.array(path.len() as u64)?;
+                for segment in path {
+                    encoder.str(segment)?;
+                }
+                encoder.u16(*max_bytes)?;
+            }
+            DeriveOperationKindV2::SelectResultJsonEdgeV04 {
+                path,
+                max_bytes,
+                list,
+                compute,
+            } => {
+                encoder.array(5)?.u16(10)?.array(path.len() as u64)?;
+                for segment in path {
+                    encoder.str(segment)?;
+                }
+                encoder.u16(*max_bytes)?.bool(*list)?;
+                match compute {
+                    Some(compute) => {
+                        encoder
+                            .array(2)?
+                            .u16(compute.op.code())?
+                            .i64(compute.amount)?;
+                    }
+                    None => {
+                        encoder.null()?;
+                    }
+                }
+            }
+            DeriveOperationKindV2::SelectResultJsonMemberV04 {
+                path,
+                max_bytes,
+                list,
+                candidates,
+            } => {
+                encoder.array(5)?.u16(11)?.array(path.len() as u64)?;
+                for segment in path {
+                    encoder.str(segment)?;
+                }
+                encoder.u16(*max_bytes)?.bool(*list)?;
+                candidates.encode(encoder, context)?;
+            }
         }
         Ok(())
     }
@@ -233,6 +458,13 @@ impl<'bytes, C> minicbor::Decode<'bytes, C> for DeriveOperationV2 {
         })?;
         let tag = decoder.u16()?;
         match (length, tag) {
+            (2, 8) => Ok(Self::owner_input_text_v04(
+                decoder
+                    .bytes()?
+                    .try_into()
+                    .map_err(|_| minicbor::decode::Error::message("invalid owner input slot"))?,
+            )),
+            (1, 7) => Ok(Self::decode_utf8()),
             (1, 1) => Ok(Self::concatenate_text()),
             (1, 2) => Ok(Self::normalize_nfc()),
             (2, 3) => Ok(Self::select_object_field(minicbor::Decode::decode(
@@ -255,15 +487,90 @@ impl<'bytes, C> minicbor::Decode<'bytes, C> for DeriveOperationV2 {
             (2, 6) => Ok(Self::policy_constant(minicbor::Decode::decode(
                 decoder, context,
             )?)),
+            (3, 9) => {
+                let path = decode_result_path(decoder, position)?;
+                let max_bytes = decoder.u16()?;
+                Self::select_result_json_path_v04(path, max_bytes).map_err(|_| {
+                    minicbor::decode::Error::message("invalid result path derive").at(position)
+                })
+            }
+            (5, 10) => {
+                use savana_continuation_core::planning_observation::{
+                    ComputeOpV04, ResultComputeV04,
+                };
+                let path = decode_result_path(decoder, position)?;
+                let max_bytes = decoder.u16()?;
+                let list = decoder.bool()?;
+                let compute = if decoder.datatype()? == minicbor::data::Type::Null {
+                    decoder.null()?;
+                    None
+                } else {
+                    if decoder.array()? != Some(2) {
+                        return Err(
+                            minicbor::decode::Error::message("invalid computation").at(position)
+                        );
+                    }
+                    let op = ComputeOpV04::from_code(decoder.u16()?).ok_or_else(|| {
+                        minicbor::decode::Error::message("unknown computation").at(position)
+                    })?;
+                    Some(ResultComputeV04 {
+                        op,
+                        amount: decoder.i64()?,
+                    })
+                };
+                Self::select_result_json_edge_v04(path, max_bytes, list, compute).map_err(|_| {
+                    minicbor::decode::Error::message("invalid result edge derive").at(position)
+                })
+            }
+            (5, 11) => {
+                let path = decode_result_path(decoder, position)?;
+                let max_bytes = decoder.u16()?;
+                let list = decoder.bool()?;
+                let candidates = Digest32V2::new(decoder.bytes()?.try_into().map_err(|_| {
+                    minicbor::decode::Error::message("invalid candidate set digest").at(position)
+                })?);
+                Self::select_result_json_member_v04(path, max_bytes, list, candidates).map_err(
+                    |_| {
+                        minicbor::decode::Error::message("invalid result member derive")
+                            .at(position)
+                    },
+                )
+            }
             _ => Err(minicbor::decode::Error::message("unknown derive operation").at(position)),
         }
     }
+}
+
+fn decode_result_path(
+    decoder: &mut minicbor::Decoder<'_>,
+    position: usize,
+) -> Result<Vec<String>, minicbor::decode::Error> {
+    let count = decode_bounded_array(decoder, MAX_RESULT_PATH_SEGMENTS_V04, position)?;
+    let mut path = Vec::new();
+    path.try_reserve_exact(count).map_err(|_| {
+        minicbor::decode::Error::message("derive path allocation failed").at(position)
+    })?;
+    for _ in 0..count {
+        let segment = decoder.str()?;
+        if segment.is_empty() || segment.len() > MAX_RESULT_PATH_SEGMENT_BYTES_V04 {
+            return Err(
+                minicbor::decode::Error::message("invalid result path segment").at(position),
+            );
+        }
+        path.push(segment.to_owned());
+    }
+    Ok(path)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeclassificationTransitionV2 {
     MaskTokenizeAndLeakCheck,
     BuildPlannerEnvelope,
+    /// Fused advisor/planner publication to one specifically admitted model.
+    /// Legacy planner rules cannot authorize this transition.
+    BuildFusedModelEnvelope {
+        model_identity_digest: Digest32V2,
+    },
     BuildApprovalDisplay,
     /// Hands the value to ONE exact executor, named by its identity digest.
     ///
@@ -300,6 +607,7 @@ impl DeclassificationTransitionV2 {
             Self::BuildApprovalDisplay => 3,
             Self::BuildExecutionEnvelope { .. } => 4,
             Self::BuildFinalRelease { .. } => 5,
+            Self::BuildFusedModelEnvelope { .. } => 6,
         }
     }
 
@@ -317,9 +625,9 @@ impl DeclassificationTransitionV2 {
     /// recipient is entitled to, under any transition.
     const fn leak_gate_duty(self) -> LeakGateDutyV2 {
         match self {
-            Self::MaskTokenizeAndLeakCheck | Self::BuildPlannerEnvelope => {
-                LeakGateDutyV2::BlocklistAndNoResidualPii
-            }
+            Self::MaskTokenizeAndLeakCheck
+            | Self::BuildPlannerEnvelope
+            | Self::BuildFusedModelEnvelope { .. } => LeakGateDutyV2::BlocklistAndNoResidualPii,
             Self::BuildApprovalDisplay
             | Self::BuildExecutionEnvelope { .. }
             | Self::BuildFinalRelease { .. } => LeakGateDutyV2::BlocklistOnly,
@@ -329,7 +637,7 @@ impl DeclassificationTransitionV2 {
     const fn target(self) -> (ConfidentialityV2, ReaderSetV2) {
         match self {
             Self::MaskTokenizeAndLeakCheck => (ConfidentialityV2::AgentMasked, ReaderSetV2::AGENT),
-            Self::BuildPlannerEnvelope => (
+            Self::BuildPlannerEnvelope | Self::BuildFusedModelEnvelope { .. } => (
                 ConfidentialityV2::PlannerAbstract,
                 ReaderSetV2::EXTERNAL_PLANNER,
             ),
@@ -358,6 +666,9 @@ impl DeclassificationTransitionV2 {
             }
             | Self::BuildFinalRelease {
                 sink_identity_digest: identity,
+            }
+            | Self::BuildFusedModelEnvelope {
+                model_identity_digest: identity,
             } => Some(identity),
             Self::MaskTokenizeAndLeakCheck
             | Self::BuildPlannerEnvelope
@@ -576,6 +887,15 @@ pub struct ProvenanceContextV2 {
 }
 
 impl ProvenanceContextV2 {
+    pub(super) fn restrict_expiry(self, expires_at: UnixMillisV2) -> Result<Self, G3Error> {
+        Self::from_authenticated_runtime(
+            self.producer_identity,
+            self.run_internal_id,
+            self.active_state_manifest_digest,
+            self.created_at,
+            UnixMillisV2::new(self.expires_at.get().min(expires_at.get())),
+        )
+    }
     pub fn from_authenticated_runtime(
         producer_identity: ProducerIdentityV2,
         run_internal_id: DurableRunIdV2,
@@ -723,6 +1043,7 @@ impl ProvenanceRecordV2 {
         )
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn policy_constant(
         value: &KernelValueV2,
@@ -777,6 +1098,68 @@ impl ProvenanceRecordV2 {
             context,
             &provenance_parents,
             vec![],
+            label,
+        )?;
+        Ok((value, provenance))
+    }
+
+    /// A trusted-set origin: the value at an owner-signed path of a verified
+    /// tool result, endorsed as the owner's choice because it is, byte for
+    /// byte, a member of the candidate set the owner signed for that edge (for
+    /// a list, every item). The record commits to the set's digest; the label
+    /// keeps the parent's confidentiality, readers and effects and raises only
+    /// an untrusted parent's integrity to the owner's, so G5's flow facts no
+    /// longer treat it as data's choice. A value outside the set is refused
+    /// here: the caller derives it the plain way, as untrusted data, and G5
+    /// still asks the owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn result_candidate_member_v04(
+        context: ProvenanceContextV2,
+        path: Vec<String>,
+        max_bytes: u16,
+        list: bool,
+        candidates: &savana_kernel_protocol::v2::ResultCandidatesV2,
+        parent: (&KernelValueV2, &Self),
+        policy_allowed_effects: EffectSetV2,
+    ) -> Result<(KernelValueV2, Self), G3Error> {
+        let parents = [parent];
+        validate_parent_contexts(&parents, &context)?;
+        validate_parent_values(&parents)?;
+        let plain = if list {
+            DeriveOperationV2::select_result_json_edge_v04(path.clone(), max_bytes, true, None)?
+        } else {
+            DeriveOperationV2::select_result_json_path_v04(path.clone(), max_bytes)?
+        };
+        let value = plain.execute(&parents)?;
+        let member = match (list, value.as_text(), value.text_list()) {
+            (false, Some(text), _) => candidates.contains(text),
+            (true, _, Some(items)) => items.iter().all(|item| candidates.contains(item)),
+            _ => false,
+        };
+        if !member {
+            return Err(G3Error::DeriveTypeMismatch);
+        }
+        let digest = candidates.digest();
+        let operation =
+            DeriveOperationV2::select_result_json_member_v04(path, max_bytes, list, digest)?;
+        let parent_label = parent.1.label;
+        let integrity = match parent_label.integrity() {
+            IntegrityV2::ExternalUntrusted => IntegrityV2::UserAuthorized,
+            kept => kept,
+        };
+        let label = SecurityLabelV2::from_verified_source(
+            integrity,
+            parent_label.confidentiality(),
+            parent_label.readers(),
+            parent_label.effects().intersection(policy_allowed_effects),
+        );
+        let value_digest = value_digest_v2(&value)?;
+        let provenance = Self::build(
+            SourceKindV2::Derived { operation },
+            value_digest,
+            context,
+            &[parent.1],
+            vec![digest],
             label,
         )?;
         Ok((value, provenance))
@@ -1030,6 +1413,7 @@ impl ProvenanceRecordV2 {
         )
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn recovered_execution(
         value: &KernelValueV2,

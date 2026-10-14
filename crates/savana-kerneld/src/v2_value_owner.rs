@@ -48,6 +48,14 @@ pub(crate) struct PreparedVerifiedRunAdmissionV2 {
     initial_handle: ValueHandleV2,
     initial_commitment: Digest32V2,
     initial_value_digest: Digest32V2,
+    owner_input: Option<PreparedOwnerInputV2>,
+}
+
+/// Reserved slot for the consented owner document of a private session.
+struct PreparedOwnerInputV2 {
+    handle: ValueHandleV2,
+    commitment: Digest32V2,
+    value_digest: Digest32V2,
 }
 
 impl PreparedVerifiedRunAdmissionV2 {
@@ -74,6 +82,8 @@ struct RunRecordV2 {
 
 struct ValueRecordV2 {
     commitment: Digest32V2,
+    // Authorization uses the process-local commitment; G4 uses stable identity.
+    identity: ValueInternalIdV2,
     run_commitment: Digest32V2,
     value: KernelValueV2,
     provenance: ProvenanceRecordV2,
@@ -83,7 +93,6 @@ struct ValueRecordV2 {
 pub(crate) struct KernelResolvedG4ValueV2<'value> {
     // Carried so a resolved value names the run it was resolved under. G4
     // callers bind the run through the action intent record instead.
-    #[allow(dead_code)]
     durable_run_id: DurableRunIdV2,
     active_state_manifest_digest: Digest32V2,
     value_internal_id: ValueInternalIdV2,
@@ -92,7 +101,6 @@ pub(crate) struct KernelResolvedG4ValueV2<'value> {
 }
 
 impl KernelResolvedG4ValueV2<'_> {
-    #[allow(dead_code)]
     pub(crate) const fn durable_run_id(&self) -> DurableRunIdV2 {
         self.durable_run_id
     }
@@ -229,6 +237,7 @@ impl KernelValueOwnerV2 {
         let commitment = handle.authority_commitment(&self.handle_key);
         self.push_value(ValueRecordV2 {
             commitment,
+            identity: ValueInternalIdV2::new(*commitment.as_bytes()),
             run_commitment,
             value,
             provenance,
@@ -295,7 +304,105 @@ impl KernelValueOwnerV2 {
             initial_handle,
             initial_commitment,
             initial_value_digest,
+            owner_input: None,
         })
+    }
+
+    /// A later owner login of the same private task lets its run continue up
+    /// to the new login's bound. Every value keeps its own provenance
+    /// lifetime, so nothing produced under the earlier login lives longer.
+    pub(crate) fn extend_private_run_v04(
+        &mut self,
+        run: RunHandleV2,
+        durable_run_id: DurableRunIdV2,
+        now: UnixMillisV2,
+        expires_at: UnixMillisV2,
+    ) -> Result<(), KernelValueErrorV2> {
+        let commitment = run.authority_commitment(&self.handle_key);
+        let record = self
+            .runs
+            .iter_mut()
+            .find(|record| record.commitment == commitment)
+            .ok_or(KernelValueErrorV2::InvalidReference)?;
+        if record.durable_run_id != durable_run_id {
+            return Err(KernelValueErrorV2::WrongRun);
+        }
+        if now.get() == 0 || now.get() >= expires_at.get() {
+            return Err(KernelValueErrorV2::Expired);
+        }
+        record.expires_at = expires_at;
+        Ok(())
+    }
+
+    /// Reserve the owner document beside the run's initial value. Only a
+    /// GatedIngress value of the same producer, run and manifest qualifies;
+    /// all failure happens here, before the run is committed.
+    pub(crate) fn prepare_owner_input_v04(
+        &mut self,
+        admission: &mut PreparedVerifiedRunAdmissionV2,
+        value: &KernelValueV2,
+        provenance: &ProvenanceRecordV2,
+    ) -> Result<(), KernelValueErrorV2> {
+        let run = &admission.run_record;
+        let value_digest = value_digest_v2(value).map_err(map_g3_error)?;
+        if admission.owner_input.is_some()
+            || !matches!(
+                provenance.source_kind(),
+                savana_policy_core::v2::SourceKindV2::GatedIngress { .. }
+            )
+            || provenance.value_digest() != value_digest
+            || provenance.producer_identity() != run.producer_identity
+            || provenance.run_internal_id() != run.durable_run_id
+            || provenance.active_state_manifest_digest() != run.active_state_manifest_digest
+        {
+            return Err(KernelValueErrorV2::WrongRun);
+        }
+        if self.values.len() + 2 > self.maximum_values {
+            return Err(KernelValueErrorV2::LimitExceeded);
+        }
+        self.values
+            .try_reserve(2)
+            .map_err(|_| KernelValueErrorV2::Unavailable)?;
+        let handle = self.mint_random_value_handle()?;
+        admission.owner_input = Some(PreparedOwnerInputV2 {
+            handle,
+            commitment: handle.authority_commitment(&self.handle_key),
+            value_digest,
+        });
+        Ok(())
+    }
+
+    /// Commit a run prepared with `prepare_owner_input_v04`. An owner value
+    /// that does not match its reservation is dropped, never substituted.
+    pub(crate) fn commit_verified_run_admission_with_owner_input_v04(
+        &mut self,
+        mut admission: PreparedVerifiedRunAdmissionV2,
+        initial_value: KernelValueV2,
+        provenance: ProvenanceRecordV2,
+        owner_input: Option<(KernelValueV2, ProvenanceRecordV2)>,
+    ) -> (RunHandleV2, KernelDerivedValueV2, Option<ValueHandleV2>) {
+        let reserved = admission.owner_input.take();
+        let run_commitment = admission.run_record.commitment;
+        let (run, initial) =
+            self.commit_verified_run_admission(admission, initial_value, provenance);
+        let owner = match (reserved, owner_input) {
+            (Some(reserved), Some((value, provenance)))
+                if value_digest_v2(&value).is_ok_and(|d| d == reserved.value_digest)
+                    && provenance.value_digest() == reserved.value_digest =>
+            {
+                self.values.push(ValueRecordV2 {
+                    commitment: reserved.commitment,
+                    identity: ValueInternalIdV2::new(*reserved.commitment.as_bytes()),
+                    run_commitment,
+                    value,
+                    provenance,
+                    derive_request_digest: None,
+                });
+                Some(reserved.handle)
+            }
+            _ => None,
+        };
+        (run, initial, owner)
     }
 
     pub(crate) fn commit_verified_run_admission(
@@ -310,12 +417,83 @@ impl KernelValueOwnerV2 {
         self.runs.push(admission.run_record);
         self.values.push(ValueRecordV2 {
             commitment: admission.initial_commitment,
+            identity: ValueInternalIdV2::new(*admission.initial_commitment.as_bytes()),
             run_commitment,
             value: initial_value,
             provenance,
             derive_request_digest: None,
         });
         (run_handle, initial)
+    }
+
+    /// Private intake: select only bytes inside the exact, previously consented
+    /// owner document. No caller-provided value/provenance or new authority.
+    pub(crate) fn derive_owner_input_text_v04(
+        &mut self,
+        run: RunHandleV2,
+        initial: ValueHandleV2,
+        slot: [u8; 16],
+        now: UnixMillisV2,
+    ) -> Result<KernelDerivedValueV2, KernelValueErrorV2> {
+        let parent = self.resolve_g4_value(run, initial, now)?;
+        if !matches!(
+            parent.provenance().source_kind(),
+            savana_policy_core::v2::SourceKindV2::GatedIngress { .. }
+        ) {
+            return Err(KernelValueErrorV2::PolicyDenied);
+        }
+        let mut hash = Sha256::new();
+        hash.update(b"SAVANA_OWNER_INPUT_SELECTION_V04\0");
+        hash.update(parent.value_internal_id().as_bytes());
+        hash.update(parent.provenance().provenance_digest().as_bytes());
+        hash.update(slot);
+        let request = Digest32V2::new(hash.finalize().into());
+        let handle = self.derived_handle(request)?;
+        if let Some(prior) = self
+            .values
+            .iter()
+            .find(|v| v.derive_request_digest == Some(request))
+        {
+            if prior.run_commitment != run.authority_commitment(&self.handle_key)
+                || prior.commitment != handle.authority_commitment(&self.handle_key)
+            {
+                return Err(KernelValueErrorV2::StateConflict);
+            }
+            return Ok(KernelDerivedValueV2 {
+                handle,
+                value_digest: prior.provenance.value_digest(),
+            });
+        }
+        let p = parent.provenance();
+        let context = ProvenanceContextV2::from_authenticated_runtime(
+            p.producer_identity(),
+            p.run_internal_id(),
+            p.active_state_manifest_digest(),
+            now,
+            p.expires_at(),
+        )
+        .map_err(map_g3_error)?;
+        let (value, provenance) = ProvenanceRecordV2::derived(
+            context,
+            DeriveOperationV2::owner_input_text_v04(slot),
+            &[(parent.value(), p)],
+            p.label().effects(),
+        )
+        .map_err(map_g3_error)?;
+        let value_digest = provenance.value_digest();
+        let commitment = handle.authority_commitment(&self.handle_key);
+        self.push_value(ValueRecordV2 {
+            commitment,
+            identity: ValueInternalIdV2::new(*commitment.as_bytes()),
+            run_commitment: run.authority_commitment(&self.handle_key),
+            value,
+            provenance,
+            derive_request_digest: Some(request),
+        })?;
+        Ok(KernelDerivedValueV2 {
+            handle,
+            value_digest,
+        })
     }
 
     pub(crate) fn derive(
@@ -397,6 +575,7 @@ impl KernelValueOwnerV2 {
         let value_digest = provenance.value_digest();
         self.push_value(ValueRecordV2 {
             commitment: deterministic_commitment,
+            identity: ValueInternalIdV2::new(*deterministic_commitment.as_bytes()),
             run_commitment,
             value,
             provenance,
@@ -460,10 +639,92 @@ impl KernelValueOwnerV2 {
         Ok(KernelResolvedG4ValueV2 {
             durable_run_id: run.durable_run_id,
             active_state_manifest_digest: run.active_state_manifest_digest,
-            value_internal_id: ValueInternalIdV2::new(*value.commitment.as_bytes()),
+            value_internal_id: value.identity,
             value: &value.value,
             provenance: &value.provenance,
         })
+    }
+
+    /// Restore only an authenticated durable-owner result into an already
+    /// authenticated run. All validation/capacity checks precede any mutation.
+    pub(crate) fn restore_fused_inputs(
+        &mut self,
+        run: RunHandleV2,
+        snapshot: &savana_policy_core::v2::RecoveredFusedInputsV04,
+        now: UnixMillisV2,
+    ) -> Result<Vec<([u8; 16], ValueHandleV2)>, KernelValueErrorV2> {
+        let run_commitment = run.authority_commitment(&self.handle_key);
+        let record = self
+            .runs
+            .iter()
+            .find(|r| r.commitment == run_commitment)
+            .ok_or(KernelValueErrorV2::InvalidReference)?;
+        if record.durable_run_id != snapshot.run()
+            || record.active_state_manifest_digest != snapshot.manifest()
+        {
+            return Err(KernelValueErrorV2::WrongRun);
+        }
+        if now.get() == 0 || now.get() >= record.expires_at.get() {
+            return Err(KernelValueErrorV2::Expired);
+        }
+        let mut pending = Vec::new();
+        let mut bindings = Vec::new();
+        for input in snapshot.inputs() {
+            let p = input.provenance();
+            if now.get() < p.created_at().get() || now.get() >= p.expires_at().get() {
+                return Err(KernelValueErrorV2::Expired);
+            }
+            let mut mac =
+                <Hmac<Sha256> as hmac::Mac>::new_from_slice(self.derived_mint_key.as_ref())
+                    .map_err(|_| KernelValueErrorV2::Unavailable)?;
+            mac.update(b"SAVANA_RESTORED_FUSED_VALUE_HANDLE_V04\0");
+            mac.update(run_commitment.as_bytes());
+            mac.update(input.identity().as_bytes());
+            let mut token: [u8; 32] = mac.finalize().into_bytes().into();
+            let handle = ValueHandleV2::from_authority_entropy(token)
+                .ok_or(KernelValueErrorV2::Unavailable)?;
+            token.zeroize();
+            let commitment = handle.authority_commitment(&self.handle_key);
+            if let Some(old) = self.values.iter().find(|v| v.commitment == commitment) {
+                if old.run_commitment != run_commitment
+                    || old.identity != input.identity()
+                    || old.provenance != *p
+                    || value_digest_v2(&old.value).ok() != Some(p.value_digest())
+                {
+                    return Err(KernelValueErrorV2::StateConflict);
+                }
+            } else {
+                // A different handle with this stable identity is safe only if
+                // it names exactly the original owned bytes and provenance.
+                if self.values.iter().any(|v| {
+                    v.identity == input.identity()
+                        && (v.run_commitment != run_commitment
+                            || value_digest_v2(&v.value).ok() != Some(p.value_digest())
+                            || v.provenance != *p)
+                }) {
+                    return Err(KernelValueErrorV2::StateConflict);
+                }
+                pending.push(ValueRecordV2 {
+                    commitment,
+                    identity: input.identity(),
+                    run_commitment,
+                    value: input
+                        .copy_value()
+                        .map_err(|_| KernelValueErrorV2::Unavailable)?,
+                    provenance: p.clone(),
+                    derive_request_digest: None,
+                });
+            }
+            bindings.push((input.slot(), handle));
+        }
+        if self.values.len() + pending.len() > self.maximum_values {
+            return Err(KernelValueErrorV2::LimitExceeded);
+        }
+        self.values
+            .try_reserve(pending.len())
+            .map_err(|_| KernelValueErrorV2::Unavailable)?;
+        self.values.extend(pending);
+        Ok(bindings)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -535,6 +796,7 @@ impl KernelValueOwnerV2 {
         let commitment = handle.authority_commitment(&self.handle_key);
         self.push_value(ValueRecordV2 {
             commitment,
+            identity: ValueInternalIdV2::new(*commitment.as_bytes()),
             run_commitment,
             value,
             provenance,

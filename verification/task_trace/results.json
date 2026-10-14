@@ -1,0 +1,2388 @@
+{
+  "baseline": [
+    {
+      "bounds": {
+        "candidates": [
+          0,
+          1,
+          2,
+          3,
+          5
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0,
+                1
+              ]
+            ],
+            "attempts": [
+              1
+            ],
+            "magnitude": [
+              1
+            ],
+            "predecessors": [
+              []
+            ],
+            "refund_no_effect": false
+          }
+        ],
+        "name": "relation",
+        "preflight_failure": true,
+        "recovery": false,
+        "revoke": false,
+        "slots": [
+          0
+        ]
+      },
+      "coverage": [
+        "ack",
+        "approve",
+        "certify:success",
+        "emit:lost",
+        "emit:success",
+        "fence",
+        "issue",
+        "no_effect",
+        "replay",
+        "reserve",
+        "retain:success",
+        "settle:no_effect",
+        "settle:success",
+        "settle:unknown",
+        "started",
+        "terminal_first_success",
+        "unknown"
+      ],
+      "event_edges": {
+        "ack": 4,
+        "approve": 30,
+        "certify": 4,
+        "emit": 8,
+        "fence": 2,
+        "issue": 1,
+        "no_effect": 2,
+        "replay": 50,
+        "reserve": 2,
+        "retain": 4,
+        "settle": 32,
+        "started": 14,
+        "unknown": 8
+      },
+      "max_shortest_path": 10,
+      "missing_positive_witnesses": [],
+      "mutant": null,
+      "scenario": "relation",
+      "states": 57,
+      "status": "exhausted",
+      "transitions": 161
+    },
+    {
+      "bounds": {
+        "candidates": [
+          0
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0
+              ]
+            ],
+            "attempts": [
+              1
+            ],
+            "magnitude": [
+              1
+            ],
+            "predecessors": [
+              []
+            ],
+            "refund_no_effect": false
+          }
+        ],
+        "name": "race",
+        "preflight_failure": true,
+        "recovery": false,
+        "revoke": false,
+        "slots": [
+          0,
+          0
+        ]
+      },
+      "coverage": [
+        "ack",
+        "approve",
+        "certify:success",
+        "emit:lost",
+        "emit:success",
+        "fence",
+        "issue",
+        "no_effect",
+        "replay",
+        "reserve",
+        "retain:success",
+        "settle:no_effect",
+        "settle:success",
+        "settle:unknown",
+        "started",
+        "terminal_first_success",
+        "unknown"
+      ],
+      "event_edges": {
+        "ack": 18,
+        "approve": 198,
+        "certify": 14,
+        "emit": 28,
+        "fence": 6,
+        "issue": 1,
+        "no_effect": 6,
+        "replay": 190,
+        "reserve": 4,
+        "retain": 14,
+        "settle": 128,
+        "started": 42,
+        "unknown": 28
+      },
+      "max_shortest_path": 11,
+      "missing_positive_witnesses": [],
+      "mutant": null,
+      "scenario": "race",
+      "states": 195,
+      "status": "exhausted",
+      "transitions": 677
+    },
+    {
+      "bounds": {
+        "candidates": [
+          0
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0
+              ]
+            ],
+            "attempts": [
+              2
+            ],
+            "magnitude": [
+              2
+            ],
+            "predecessors": [
+              []
+            ],
+            "refund_no_effect": false
+          }
+        ],
+        "name": "stale",
+        "preflight_failure": true,
+        "recovery": false,
+        "revoke": false,
+        "slots": [
+          0,
+          0
+        ]
+      },
+      "coverage": [
+        "ack",
+        "approve",
+        "certify:success",
+        "emit:lost",
+        "emit:success",
+        "fence",
+        "issue",
+        "no_effect",
+        "replay",
+        "reserve",
+        "retain:success",
+        "retry_after_proven_no_effect",
+        "settle:no_effect",
+        "settle:success",
+        "settle:unknown",
+        "started",
+        "terminal_first_success",
+        "unknown"
+      ],
+      "event_edges": {
+        "ack": 416,
+        "approve": 198,
+        "certify": 344,
+        "emit": 688,
+        "fence": 146,
+        "issue": 1,
+        "no_effect": 146,
+        "replay": 4562,
+        "reserve": 54,
+        "retain": 344,
+        "settle": 3040,
+        "started": 1022,
+        "unknown": 688
+      },
+      "max_shortest_path": 19,
+      "missing_positive_witnesses": [],
+      "mutant": null,
+      "scenario": "stale",
+      "states": 2381,
+      "status": "exhausted",
+      "transitions": 11649
+    },
+    {
+      "bounds": {
+        "candidates": [
+          0,
+          1
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "attempts": [
+              1,
+              1
+            ],
+            "magnitude": [
+              1,
+              1
+            ],
+            "predecessors": [
+              [],
+              [
+                0
+              ]
+            ],
+            "refund_no_effect": false
+          }
+        ],
+        "name": "dependency",
+        "preflight_failure": true,
+        "recovery": false,
+        "revoke": false,
+        "slots": [
+          0,
+          1
+        ]
+      },
+      "coverage": [
+        "ack",
+        "approve",
+        "certify:success",
+        "dependent_successor_admitted",
+        "emit:lost",
+        "emit:success",
+        "fence",
+        "issue",
+        "no_effect",
+        "replay",
+        "reserve",
+        "retain:success",
+        "settle:no_effect",
+        "settle:success",
+        "settle:unknown",
+        "started",
+        "terminal_first_success",
+        "unknown"
+      ],
+      "event_edges": {
+        "ack": 74,
+        "approve": 366,
+        "certify": 20,
+        "emit": 40,
+        "fence": 9,
+        "issue": 1,
+        "no_effect": 9,
+        "replay": 365,
+        "reserve": 7,
+        "retain": 20,
+        "settle": 276,
+        "started": 63,
+        "unknown": 40
+      },
+      "max_shortest_path": 19,
+      "missing_positive_witnesses": [],
+      "mutant": null,
+      "scenario": "dependency",
+      "states": 275,
+      "status": "exhausted",
+      "transitions": 1290
+    },
+    {
+      "bounds": {
+        "candidates": [
+          0,
+          1,
+          4
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "attempts": [
+              1,
+              1
+            ],
+            "magnitude": [
+              1,
+              1
+            ],
+            "predecessors": [
+              [],
+              [
+                0
+              ]
+            ],
+            "refund_no_effect": false
+          },
+          {
+            "alternatives": [
+              [
+                4
+              ],
+              [
+                1
+              ]
+            ],
+            "attempts": [
+              1,
+              1
+            ],
+            "magnitude": [
+              1,
+              1
+            ],
+            "predecessors": [
+              [],
+              [
+                0
+              ]
+            ],
+            "refund_no_effect": false
+          }
+        ],
+        "name": "epoch",
+        "preflight_failure": true,
+        "recovery": false,
+        "revoke": false,
+        "slots": [
+          0,
+          1
+        ]
+      },
+      "coverage": [
+        "ack",
+        "amend",
+        "amend_after_consumption",
+        "approve",
+        "certify:success",
+        "dependent_successor_admitted",
+        "emit:lost",
+        "emit:success",
+        "fence",
+        "issue",
+        "no_effect",
+        "replay",
+        "reserve",
+        "retain:success",
+        "settle:no_effect",
+        "settle:success",
+        "settle:unknown",
+        "started",
+        "terminal_first_success",
+        "unknown"
+      ],
+      "event_edges": {
+        "ack": 255,
+        "amend": 351,
+        "approve": 2955,
+        "certify": 87,
+        "emit": 174,
+        "fence": 39,
+        "issue": 1,
+        "no_effect": 39,
+        "replay": 1455,
+        "reserve": 19,
+        "retain": 87,
+        "settle": 1068,
+        "started": 273,
+        "unknown": 174
+      },
+      "max_shortest_path": 20,
+      "missing_positive_witnesses": [],
+      "mutant": null,
+      "scenario": "epoch",
+      "states": 1221,
+      "status": "exhausted",
+      "transitions": 6977
+    },
+    {
+      "bounds": {
+        "candidates": [
+          0,
+          1,
+          4
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "attempts": [
+              1,
+              1
+            ],
+            "magnitude": [
+              1,
+              1
+            ],
+            "predecessors": [
+              [],
+              [
+                0
+              ]
+            ],
+            "refund_no_effect": false
+          },
+          {
+            "alternatives": [
+              [
+                4
+              ],
+              [
+                1
+              ]
+            ],
+            "attempts": [
+              1,
+              1
+            ],
+            "magnitude": [
+              1,
+              1
+            ],
+            "predecessors": [
+              [],
+              [
+                0
+              ]
+            ],
+            "refund_no_effect": false
+          },
+          {
+            "alternatives": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "attempts": [
+              1,
+              1
+            ],
+            "magnitude": [
+              1,
+              1
+            ],
+            "predecessors": [
+              [],
+              [
+                0
+              ]
+            ],
+            "refund_no_effect": false
+          }
+        ],
+        "name": "epoch_aba",
+        "preflight_failure": true,
+        "recovery": false,
+        "revoke": false,
+        "slots": [
+          0,
+          1
+        ]
+      },
+      "coverage": [
+        "ack",
+        "amend",
+        "amend_after_consumption",
+        "approve",
+        "certify:success",
+        "dependent_successor_admitted",
+        "emit:lost",
+        "emit:success",
+        "fence",
+        "issue",
+        "no_effect",
+        "replay",
+        "reserve",
+        "retain:success",
+        "settle:no_effect",
+        "settle:success",
+        "settle:unknown",
+        "started",
+        "terminal_first_success",
+        "unknown"
+      ],
+      "event_edges": {
+        "ack": 534,
+        "amend": 1220,
+        "approve": 7020,
+        "certify": 198,
+        "emit": 396,
+        "fence": 90,
+        "issue": 1,
+        "no_effect": 90,
+        "replay": 3210,
+        "reserve": 33,
+        "retain": 198,
+        "settle": 2328,
+        "started": 630,
+        "unknown": 396
+      },
+      "max_shortest_path": 21,
+      "missing_positive_witnesses": [],
+      "mutant": null,
+      "scenario": "epoch_aba",
+      "states": 2776,
+      "status": "exhausted",
+      "transitions": 16344
+    },
+    {
+      "bounds": {
+        "candidates": [
+          0,
+          1
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "attempts": [
+              1,
+              1
+            ],
+            "magnitude": [
+              1,
+              1
+            ],
+            "predecessors": [
+              [],
+              [
+                0
+              ]
+            ],
+            "refund_no_effect": false
+          },
+          {
+            "alternatives": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "attempts": [
+              2,
+              2
+            ],
+            "magnitude": [
+              2,
+              2
+            ],
+            "predecessors": [
+              [],
+              [
+                0
+              ]
+            ],
+            "refund_no_effect": false
+          }
+        ],
+        "name": "amendment",
+        "preflight_failure": true,
+        "recovery": false,
+        "revoke": false,
+        "slots": [
+          0,
+          1
+        ]
+      },
+      "coverage": [
+        "ack",
+        "amend",
+        "amend_after_consumption",
+        "approve",
+        "certify:success",
+        "dependent_successor_admitted",
+        "emit:lost",
+        "emit:success",
+        "fence",
+        "issue",
+        "no_effect",
+        "replay",
+        "reserve",
+        "retain:success",
+        "settle:no_effect",
+        "settle:success",
+        "settle:unknown",
+        "started",
+        "terminal_first_success",
+        "unknown"
+      ],
+      "event_edges": {
+        "ack": 288,
+        "amend": 274,
+        "approve": 1326,
+        "certify": 76,
+        "emit": 152,
+        "fence": 35,
+        "issue": 1,
+        "no_effect": 35,
+        "replay": 1395,
+        "reserve": 20,
+        "retain": 76,
+        "settle": 1056,
+        "started": 245,
+        "unknown": 152
+      },
+      "max_shortest_path": 20,
+      "missing_positive_witnesses": [],
+      "mutant": null,
+      "scenario": "amendment",
+      "states": 1030,
+      "status": "exhausted",
+      "transitions": 5131
+    },
+    {
+      "bounds": {
+        "candidates": [
+          0
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0
+              ]
+            ],
+            "attempts": [
+              2
+            ],
+            "magnitude": [
+              1
+            ],
+            "predecessors": [
+              []
+            ],
+            "refund_no_effect": true
+          }
+        ],
+        "name": "recovery",
+        "preflight_failure": true,
+        "recovery": true,
+        "revoke": false,
+        "slots": [
+          0,
+          0
+        ]
+      },
+      "coverage": [
+        "ack",
+        "approve",
+        "certify:success",
+        "emit:lost",
+        "emit:success",
+        "executor_crash",
+        "executor_reopen",
+        "fence",
+        "issue",
+        "no_effect",
+        "policy_crash",
+        "policy_reopen",
+        "replay",
+        "reserve",
+        "retain:success",
+        "retained_success_survives_executor_reopen",
+        "retry_after_proven_no_effect",
+        "settle:no_effect",
+        "settle:success",
+        "settle:unknown",
+        "started",
+        "terminal_first_success",
+        "unknown"
+      ],
+      "event_edges": {
+        "ack": 44,
+        "approve": 566,
+        "certify": 36,
+        "emit": 72,
+        "executor_crash": 756,
+        "executor_reopen": 648,
+        "fence": 16,
+        "issue": 1,
+        "no_effect": 16,
+        "policy_crash": 702,
+        "policy_reopen": 702,
+        "replay": 838,
+        "reserve": 12,
+        "retain": 36,
+        "settle": 624,
+        "started": 168,
+        "unknown": 180
+      },
+      "max_shortest_path": 16,
+      "missing_positive_witnesses": [],
+      "mutant": null,
+      "scenario": "recovery",
+      "states": 1405,
+      "status": "exhausted",
+      "transitions": 5417
+    },
+    {
+      "bounds": {
+        "candidates": [
+          0
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0
+              ]
+            ],
+            "attempts": [
+              2
+            ],
+            "magnitude": [
+              1
+            ],
+            "predecessors": [
+              []
+            ],
+            "refund_no_effect": true
+          }
+        ],
+        "name": "retry_limit",
+        "preflight_failure": true,
+        "recovery": false,
+        "revoke": false,
+        "slots": [
+          0,
+          0,
+          0
+        ]
+      },
+      "coverage": [
+        "ack",
+        "approve",
+        "certify:success",
+        "emit:lost",
+        "emit:success",
+        "fence",
+        "issue",
+        "no_effect",
+        "replay",
+        "reserve",
+        "retain:success",
+        "retry_after_proven_no_effect",
+        "settle:no_effect",
+        "settle:success",
+        "settle:unknown",
+        "started",
+        "terminal_first_success",
+        "unknown"
+      ],
+      "event_edges": {
+        "ack": 201,
+        "approve": 3132,
+        "certify": 141,
+        "emit": 282,
+        "fence": 57,
+        "issue": 1,
+        "no_effect": 57,
+        "replay": 2859,
+        "reserve": 36,
+        "retain": 141,
+        "settle": 2238,
+        "started": 399,
+        "unknown": 282
+      },
+      "max_shortest_path": 15,
+      "missing_positive_witnesses": [],
+      "mutant": null,
+      "scenario": "retry_limit",
+      "states": 1998,
+      "status": "exhausted",
+      "transitions": 9826
+    },
+    {
+      "bounds": {
+        "candidates": [
+          0
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0
+              ]
+            ],
+            "attempts": [
+              1
+            ],
+            "magnitude": [
+              1
+            ],
+            "predecessors": [
+              []
+            ],
+            "refund_no_effect": false
+          }
+        ],
+        "name": "lost_fence",
+        "preflight_failure": false,
+        "recovery": true,
+        "revoke": false,
+        "slots": [
+          0
+        ]
+      },
+      "coverage": [
+        "ack",
+        "approve",
+        "certify:success",
+        "emit:lost",
+        "emit:success",
+        "executor_crash",
+        "executor_reopen",
+        "fence",
+        "issue",
+        "policy_crash",
+        "policy_reopen",
+        "replay",
+        "reserve",
+        "retain:success",
+        "retained_success_survives_executor_reopen",
+        "settle:success",
+        "settle:unknown",
+        "started",
+        "terminal_first_success",
+        "unknown"
+      ],
+      "event_edges": {
+        "ack": 4,
+        "approve": 4,
+        "certify": 4,
+        "emit": 8,
+        "executor_crash": 78,
+        "executor_reopen": 66,
+        "fence": 2,
+        "issue": 1,
+        "policy_crash": 72,
+        "policy_reopen": 72,
+        "replay": 68,
+        "reserve": 2,
+        "retain": 4,
+        "settle": 44,
+        "started": 21,
+        "unknown": 20
+      },
+      "max_shortest_path": 12,
+      "missing_positive_witnesses": [],
+      "mutant": null,
+      "scenario": "lost_fence",
+      "states": 145,
+      "status": "exhausted",
+      "transitions": 470
+    },
+    {
+      "bounds": {
+        "candidates": [
+          0
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0
+              ]
+            ],
+            "attempts": [
+              1
+            ],
+            "magnitude": [
+              1
+            ],
+            "predecessors": [
+              []
+            ],
+            "refund_no_effect": false
+          }
+        ],
+        "name": "revocation",
+        "preflight_failure": true,
+        "recovery": true,
+        "revoke": true,
+        "slots": [
+          0
+        ]
+      },
+      "coverage": [
+        "ack",
+        "already_reserved_attempt_after_revocation",
+        "approve",
+        "certify:success",
+        "emit:lost",
+        "emit:success",
+        "executor_crash",
+        "executor_reopen",
+        "fence",
+        "issue",
+        "no_effect",
+        "policy_crash",
+        "policy_reopen",
+        "replay",
+        "reserve",
+        "retain:success",
+        "retained_success_survives_executor_reopen",
+        "revoke",
+        "settle:no_effect",
+        "settle:success",
+        "settle:unknown",
+        "started",
+        "terminal_first_success",
+        "unknown"
+      ],
+      "event_edges": {
+        "ack": 8,
+        "approve": 4,
+        "certify": 8,
+        "emit": 16,
+        "executor_crash": 164,
+        "executor_reopen": 140,
+        "fence": 4,
+        "issue": 1,
+        "no_effect": 4,
+        "policy_crash": 152,
+        "policy_reopen": 152,
+        "replay": 144,
+        "reserve": 2,
+        "retain": 8,
+        "revoke": 76,
+        "settle": 96,
+        "started": 42,
+        "unknown": 40
+      },
+      "max_shortest_path": 13,
+      "missing_positive_witnesses": [],
+      "mutant": null,
+      "scenario": "revocation",
+      "states": 305,
+      "status": "exhausted",
+      "transitions": 1061
+    }
+  ],
+  "claim": "finite model-to-spec safety exploration, not Rust refinement or empirical security evaluation",
+  "complete_requested_run": true,
+  "mutants": [
+    {
+      "bounds": {
+        "candidates": [
+          0,
+          1,
+          2,
+          3,
+          5
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0,
+                1
+              ]
+            ],
+            "attempts": [
+              1
+            ],
+            "magnitude": [
+              1
+            ],
+            "predecessors": [
+              []
+            ],
+            "refund_no_effect": false
+          }
+        ],
+        "name": "relation",
+        "preflight_failure": true,
+        "recovery": false,
+        "revoke": false,
+        "slots": [
+          0
+        ]
+      },
+      "coverage": [
+        "issue"
+      ],
+      "event_edges": {
+        "issue": 2
+      },
+      "expected_invariant": "S1",
+      "invariant": "S1",
+      "max_shortest_path": 1,
+      "mutant": "action_as_task_authority",
+      "reason": "task authority requires an authenticated task-purpose root",
+      "scenario": "relation",
+      "shortest_counterexample": [
+        {
+          "kind": "issue",
+          "origin": "action"
+        }
+      ],
+      "states": 2,
+      "status": "counterexample",
+      "transitions": 2
+    },
+    {
+      "bounds": {
+        "candidates": [
+          0,
+          1,
+          2,
+          3,
+          5
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0,
+                1
+              ]
+            ],
+            "attempts": [
+              1
+            ],
+            "magnitude": [
+              1
+            ],
+            "predecessors": [
+              []
+            ],
+            "refund_no_effect": false
+          }
+        ],
+        "name": "relation",
+        "preflight_failure": true,
+        "recovery": false,
+        "revoke": false,
+        "slots": [
+          0
+        ]
+      },
+      "coverage": [
+        "approve",
+        "issue",
+        "reserve"
+      ],
+      "event_edges": {
+        "approve": 20,
+        "issue": 1,
+        "reserve": 3
+      },
+      "expected_invariant": "S2",
+      "invariant": "S2",
+      "max_shortest_path": 3,
+      "mutant": "cartesian_membership",
+      "reason": "action is not one complete authorized alternative",
+      "scenario": "relation",
+      "shortest_counterexample": [
+        {
+          "kind": "issue",
+          "origin": "task"
+        },
+        {
+          "action": 2,
+          "kind": "approve",
+          "origin": "action",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Bob",
+            "resource": "A"
+          },
+          "version": 1
+        },
+        {
+          "action": 2,
+          "kind": "reserve",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Bob",
+            "resource": "A"
+          },
+          "version": 1
+        }
+      ],
+      "states": 9,
+      "status": "counterexample",
+      "transitions": 24
+    },
+    {
+      "bounds": {
+        "candidates": [
+          0
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0
+              ]
+            ],
+            "attempts": [
+              1
+            ],
+            "magnitude": [
+              1
+            ],
+            "predecessors": [
+              []
+            ],
+            "refund_no_effect": false
+          }
+        ],
+        "name": "race",
+        "preflight_failure": true,
+        "recovery": false,
+        "revoke": false,
+        "slots": [
+          0,
+          0
+        ]
+      },
+      "coverage": [
+        "approve",
+        "emit:lost",
+        "emit:success",
+        "fence",
+        "issue",
+        "no_effect",
+        "replay",
+        "reserve",
+        "settle:no_effect",
+        "started"
+      ],
+      "event_edges": {
+        "approve": 14,
+        "emit": 2,
+        "fence": 4,
+        "issue": 1,
+        "no_effect": 4,
+        "replay": 6,
+        "reserve": 5,
+        "settle": 1,
+        "started": 1
+      },
+      "expected_invariant": "S3",
+      "invariant": "S3",
+      "max_shortest_path": 5,
+      "mutant": "split_check_commit",
+      "reason": "historical task consumption exceeds the authorized bound",
+      "scenario": "race",
+      "shortest_counterexample": [
+        {
+          "kind": "issue",
+          "origin": "task"
+        },
+        {
+          "action": 0,
+          "kind": "approve",
+          "origin": "action",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        },
+        {
+          "action": 0,
+          "kind": "approve",
+          "origin": "action",
+          "request": 1,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        },
+        {
+          "action": 0,
+          "kind": "reserve",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        },
+        {
+          "action": 0,
+          "kind": "reserve",
+          "request": 1,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        }
+      ],
+      "states": 23,
+      "status": "counterexample",
+      "transitions": 38
+    },
+    {
+      "bounds": {
+        "candidates": [
+          0
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0
+              ]
+            ],
+            "attempts": [
+              2
+            ],
+            "magnitude": [
+              2
+            ],
+            "predecessors": [
+              []
+            ],
+            "refund_no_effect": false
+          }
+        ],
+        "name": "stale",
+        "preflight_failure": true,
+        "recovery": false,
+        "revoke": false,
+        "slots": [
+          0,
+          0
+        ]
+      },
+      "coverage": [
+        "approve",
+        "emit:lost",
+        "emit:success",
+        "fence",
+        "issue",
+        "no_effect",
+        "replay",
+        "reserve",
+        "settle:no_effect",
+        "started"
+      ],
+      "event_edges": {
+        "approve": 14,
+        "emit": 2,
+        "fence": 4,
+        "issue": 1,
+        "no_effect": 4,
+        "replay": 6,
+        "reserve": 6,
+        "settle": 1,
+        "started": 1
+      },
+      "expected_invariant": "S2",
+      "invariant": "S2",
+      "max_shortest_path": 5,
+      "mutant": "stale_approval",
+      "reason": "approval does not bind this action and current pre-state",
+      "scenario": "stale",
+      "shortest_counterexample": [
+        {
+          "kind": "issue",
+          "origin": "task"
+        },
+        {
+          "action": 0,
+          "kind": "approve",
+          "origin": "action",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        },
+        {
+          "action": 0,
+          "kind": "approve",
+          "origin": "action",
+          "request": 1,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        },
+        {
+          "action": 0,
+          "kind": "reserve",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        },
+        {
+          "action": 0,
+          "kind": "reserve",
+          "request": 1,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        }
+      ],
+      "states": 24,
+      "status": "counterexample",
+      "transitions": 39
+    },
+    {
+      "bounds": {
+        "candidates": [
+          0,
+          1,
+          2,
+          3,
+          5
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0,
+                1
+              ]
+            ],
+            "attempts": [
+              1
+            ],
+            "magnitude": [
+              1
+            ],
+            "predecessors": [
+              []
+            ],
+            "refund_no_effect": false
+          }
+        ],
+        "name": "relation",
+        "preflight_failure": true,
+        "recovery": false,
+        "revoke": false,
+        "slots": [
+          0
+        ]
+      },
+      "coverage": [
+        "approve",
+        "fence",
+        "issue",
+        "replay",
+        "reserve"
+      ],
+      "event_edges": {
+        "approve": 30,
+        "fence": 2,
+        "issue": 1,
+        "replay": 1,
+        "reserve": 2
+      },
+      "expected_invariant": "S2",
+      "invariant": "S2",
+      "max_shortest_path": 4,
+      "mutant": "unchecked_request",
+      "reason": "actual request differs from the reserved request/profile",
+      "scenario": "relation",
+      "shortest_counterexample": [
+        {
+          "kind": "issue",
+          "origin": "task"
+        },
+        {
+          "action": 0,
+          "kind": "approve",
+          "origin": "action",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        },
+        {
+          "action": 0,
+          "kind": "reserve",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        },
+        {
+          "action": 2,
+          "kind": "fence",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Bob",
+            "resource": "A"
+          }
+        }
+      ],
+      "states": 10,
+      "status": "counterexample",
+      "transitions": 36
+    },
+    {
+      "bounds": {
+        "candidates": [
+          0,
+          1
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "attempts": [
+              1,
+              1
+            ],
+            "magnitude": [
+              1,
+              1
+            ],
+            "predecessors": [
+              [],
+              [
+                0
+              ]
+            ],
+            "refund_no_effect": false
+          }
+        ],
+        "name": "dependency",
+        "preflight_failure": true,
+        "recovery": false,
+        "revoke": false,
+        "slots": [
+          0,
+          1
+        ]
+      },
+      "coverage": [
+        "approve",
+        "fence",
+        "issue",
+        "no_effect",
+        "replay",
+        "reserve"
+      ],
+      "event_edges": {
+        "approve": 20,
+        "fence": 1,
+        "issue": 1,
+        "no_effect": 1,
+        "replay": 1,
+        "reserve": 1,
+        "settle": 1
+      },
+      "expected_invariant": "S5",
+      "invariant": "S5",
+      "max_shortest_path": 4,
+      "mutant": "worker_asserted_success",
+      "reason": "worker assertion is not retained, exact-execution outcome evidence",
+      "scenario": "dependency",
+      "shortest_counterexample": [
+        {
+          "kind": "issue",
+          "origin": "task"
+        },
+        {
+          "action": 0,
+          "kind": "approve",
+          "origin": "action",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        },
+        {
+          "action": 0,
+          "kind": "reserve",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        },
+        {
+          "kind": "settle",
+          "origin": "worker",
+          "outcome": "success",
+          "request": 0
+        }
+      ],
+      "states": 13,
+      "status": "counterexample",
+      "transitions": 26
+    },
+    {
+      "bounds": {
+        "candidates": [
+          0,
+          1,
+          4
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "attempts": [
+              1,
+              1
+            ],
+            "magnitude": [
+              1,
+              1
+            ],
+            "predecessors": [
+              [],
+              [
+                0
+              ]
+            ],
+            "refund_no_effect": false
+          },
+          {
+            "alternatives": [
+              [
+                4
+              ],
+              [
+                1
+              ]
+            ],
+            "attempts": [
+              1,
+              1
+            ],
+            "magnitude": [
+              1,
+              1
+            ],
+            "predecessors": [
+              [],
+              [
+                0
+              ]
+            ],
+            "refund_no_effect": false
+          }
+        ],
+        "name": "epoch",
+        "preflight_failure": true,
+        "recovery": false,
+        "revoke": false,
+        "slots": [
+          0,
+          1
+        ]
+      },
+      "coverage": [
+        "ack",
+        "amend",
+        "amend_after_consumption",
+        "approve",
+        "certify:success",
+        "dependent_successor_admitted",
+        "emit:lost",
+        "emit:success",
+        "fence",
+        "issue",
+        "no_effect",
+        "replay",
+        "reserve",
+        "retain:success",
+        "settle:no_effect",
+        "settle:success",
+        "settle:unknown",
+        "started",
+        "terminal_first_success",
+        "unknown"
+      ],
+      "event_edges": {
+        "ack": 26,
+        "amend": 205,
+        "approve": 2247,
+        "certify": 63,
+        "emit": 126,
+        "fence": 27,
+        "issue": 1,
+        "no_effect": 27,
+        "replay": 619,
+        "reserve": 14,
+        "retain": 63,
+        "settle": 340,
+        "started": 189,
+        "unknown": 126
+      },
+      "expected_invariant": "S4",
+      "invariant": "S4",
+      "max_shortest_path": 11,
+      "mutant": "old_epoch_dependency",
+      "reason": "predecessor has no verified success in the current semantic epoch",
+      "scenario": "epoch",
+      "shortest_counterexample": [
+        {
+          "kind": "issue",
+          "origin": "task"
+        },
+        {
+          "action": 0,
+          "kind": "approve",
+          "origin": "action",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        },
+        {
+          "action": 0,
+          "kind": "reserve",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        },
+        {
+          "kind": "amend",
+          "origin": "task"
+        },
+        {
+          "action": 0,
+          "kind": "fence",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          }
+        },
+        {
+          "action": 0,
+          "kind": "emit",
+          "outcome": "success",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          }
+        },
+        {
+          "kind": "retain",
+          "outcome": "success",
+          "request": 0
+        },
+        {
+          "kind": "certify",
+          "outcome": "success",
+          "request": 0
+        },
+        {
+          "kind": "settle",
+          "outcome": "success",
+          "request": 0
+        },
+        {
+          "action": 1,
+          "kind": "approve",
+          "origin": "action",
+          "request": 1,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Bob",
+            "resource": "B"
+          },
+          "version": 4
+        },
+        {
+          "action": 1,
+          "kind": "reserve",
+          "request": 1,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Bob",
+            "resource": "B"
+          },
+          "version": 4
+        }
+      ],
+      "states": 839,
+      "status": "counterexample",
+      "transitions": 4073
+    },
+    {
+      "bounds": {
+        "candidates": [
+          0
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0
+              ]
+            ],
+            "attempts": [
+              1
+            ],
+            "magnitude": [
+              1
+            ],
+            "predecessors": [
+              []
+            ],
+            "refund_no_effect": false
+          }
+        ],
+        "name": "lost_fence",
+        "preflight_failure": false,
+        "recovery": true,
+        "revoke": false,
+        "slots": [
+          0
+        ]
+      },
+      "coverage": [
+        "ack",
+        "approve",
+        "certify:success",
+        "emit:lost",
+        "emit:success",
+        "executor_crash",
+        "executor_reopen",
+        "fence",
+        "issue",
+        "policy_crash",
+        "policy_reopen",
+        "replay",
+        "reserve",
+        "retain:success",
+        "retained_success_survives_executor_reopen",
+        "settle:success",
+        "settle:unknown",
+        "started",
+        "terminal_first_success",
+        "unknown"
+      ],
+      "event_edges": {
+        "ack": 1,
+        "approve": 4,
+        "certify": 4,
+        "emit": 9,
+        "executor_crash": 41,
+        "executor_reopen": 23,
+        "fence": 9,
+        "issue": 1,
+        "policy_crash": 39,
+        "policy_reopen": 25,
+        "replay": 36,
+        "reserve": 2,
+        "retain": 4,
+        "settle": 12,
+        "started": 11,
+        "unknown": 8
+      },
+      "expected_invariant": "S6",
+      "invariant": "S6",
+      "max_shortest_path": 9,
+      "mutant": "volatile_attempt_fence",
+      "reason": "one reserved execution emitted twice across recovery",
+      "scenario": "lost_fence",
+      "shortest_counterexample": [
+        {
+          "kind": "issue",
+          "origin": "task"
+        },
+        {
+          "action": 0,
+          "kind": "approve",
+          "origin": "action",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        },
+        {
+          "action": 0,
+          "kind": "reserve",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        },
+        {
+          "action": 0,
+          "kind": "fence",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          }
+        },
+        {
+          "action": 0,
+          "kind": "emit",
+          "outcome": "success",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          }
+        },
+        {
+          "kind": "executor_crash"
+        },
+        {
+          "kind": "executor_reopen"
+        },
+        {
+          "action": 0,
+          "kind": "fence",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          }
+        },
+        {
+          "action": 0,
+          "kind": "emit",
+          "outcome": "success",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          }
+        }
+      ],
+      "states": 94,
+      "status": "counterexample",
+      "transitions": 229
+    },
+    {
+      "bounds": {
+        "candidates": [
+          0
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0
+              ]
+            ],
+            "attempts": [
+              2
+            ],
+            "magnitude": [
+              1
+            ],
+            "predecessors": [
+              []
+            ],
+            "refund_no_effect": true
+          }
+        ],
+        "name": "recovery",
+        "preflight_failure": true,
+        "recovery": true,
+        "revoke": false,
+        "slots": [
+          0,
+          0
+        ]
+      },
+      "coverage": [
+        "approve",
+        "certify:success",
+        "emit:lost",
+        "emit:success",
+        "executor_crash",
+        "executor_reopen",
+        "fence",
+        "issue",
+        "no_effect",
+        "policy_crash",
+        "policy_reopen",
+        "replay",
+        "reserve",
+        "retain:success",
+        "settle:no_effect",
+        "started",
+        "unknown"
+      ],
+      "event_edges": {
+        "approve": 56,
+        "certify": 1,
+        "emit": 20,
+        "executor_crash": 48,
+        "executor_reopen": 21,
+        "fence": 12,
+        "issue": 1,
+        "no_effect": 12,
+        "policy_crash": 48,
+        "policy_reopen": 21,
+        "replay": 41,
+        "reserve": 8,
+        "retain": 5,
+        "settle": 11,
+        "started": 16,
+        "unknown": 3
+      },
+      "expected_invariant": "S3",
+      "invariant": "S3",
+      "max_shortest_path": 7,
+      "mutant": "refund_unknown",
+      "reason": "durable counters disagree with non-erasable reservation/refund history",
+      "scenario": "recovery",
+      "shortest_counterexample": [
+        {
+          "kind": "issue",
+          "origin": "task"
+        },
+        {
+          "action": 0,
+          "kind": "approve",
+          "origin": "action",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        },
+        {
+          "action": 0,
+          "kind": "reserve",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        },
+        {
+          "action": 0,
+          "kind": "fence",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          }
+        },
+        {
+          "action": 0,
+          "kind": "emit",
+          "outcome": "lost",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          }
+        },
+        {
+          "kind": "unknown",
+          "request": 0
+        },
+        {
+          "kind": "settle",
+          "outcome": "unknown",
+          "request": 0
+        }
+      ],
+      "states": 150,
+      "status": "counterexample",
+      "transitions": 324
+    },
+    {
+      "bounds": {
+        "candidates": [
+          0,
+          1
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "attempts": [
+              1,
+              1
+            ],
+            "magnitude": [
+              1,
+              1
+            ],
+            "predecessors": [
+              [],
+              [
+                0
+              ]
+            ],
+            "refund_no_effect": false
+          },
+          {
+            "alternatives": [
+              [
+                0
+              ],
+              [
+                1
+              ]
+            ],
+            "attempts": [
+              2,
+              2
+            ],
+            "magnitude": [
+              2,
+              2
+            ],
+            "predecessors": [
+              [],
+              [
+                0
+              ]
+            ],
+            "refund_no_effect": false
+          }
+        ],
+        "name": "amendment",
+        "preflight_failure": true,
+        "recovery": false,
+        "revoke": false,
+        "slots": [
+          0,
+          1
+        ]
+      },
+      "coverage": [
+        "amend",
+        "approve",
+        "issue",
+        "reserve"
+      ],
+      "event_edges": {
+        "amend": 6,
+        "approve": 44,
+        "issue": 1,
+        "reserve": 2
+      },
+      "expected_invariant": "S3",
+      "invariant": "S3",
+      "max_shortest_path": 4,
+      "mutant": "reset_amendment_charges",
+      "reason": "durable counters disagree with non-erasable reservation/refund history",
+      "scenario": "amendment",
+      "shortest_counterexample": [
+        {
+          "kind": "issue",
+          "origin": "task"
+        },
+        {
+          "action": 0,
+          "kind": "approve",
+          "origin": "action",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        },
+        {
+          "action": 0,
+          "kind": "reserve",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        },
+        {
+          "kind": "amend",
+          "origin": "task"
+        }
+      ],
+      "states": 27,
+      "status": "counterexample",
+      "transitions": 53
+    },
+    {
+      "bounds": {
+        "candidates": [
+          0
+        ],
+        "contracts": [
+          {
+            "alternatives": [
+              [
+                0
+              ]
+            ],
+            "attempts": [
+              2
+            ],
+            "magnitude": [
+              1
+            ],
+            "predecessors": [
+              []
+            ],
+            "refund_no_effect": true
+          }
+        ],
+        "name": "recovery",
+        "preflight_failure": true,
+        "recovery": true,
+        "revoke": false,
+        "slots": [
+          0,
+          0
+        ]
+      },
+      "coverage": [
+        "approve",
+        "certify:success",
+        "emit:lost",
+        "emit:success",
+        "executor_crash",
+        "executor_reopen",
+        "fence",
+        "issue",
+        "no_effect",
+        "policy_crash",
+        "policy_reopen",
+        "replay",
+        "reserve",
+        "retain:success",
+        "retry_after_proven_no_effect",
+        "settle:no_effect",
+        "settle:success",
+        "settle:unknown",
+        "started",
+        "terminal_first_success",
+        "unknown"
+      ],
+      "event_edges": {
+        "ack": 1,
+        "approve": 98,
+        "certify": 2,
+        "emit": 44,
+        "executor_crash": 90,
+        "executor_reopen": 44,
+        "fence": 12,
+        "issue": 1,
+        "no_effect": 12,
+        "policy_crash": 90,
+        "policy_reopen": 44,
+        "replay": 83,
+        "reserve": 10,
+        "retain": 10,
+        "settle": 25,
+        "started": 35,
+        "unknown": 14
+      },
+      "expected_invariant": "S7",
+      "invariant": "S7",
+      "max_shortest_path": 8,
+      "mutant": "cleanup_before_commit",
+      "reason": "cleanup precedes durable policy outcome commit",
+      "scenario": "recovery",
+      "shortest_counterexample": [
+        {
+          "kind": "issue",
+          "origin": "task"
+        },
+        {
+          "action": 0,
+          "kind": "approve",
+          "origin": "action",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        },
+        {
+          "action": 0,
+          "kind": "reserve",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          },
+          "version": 1
+        },
+        {
+          "action": 0,
+          "kind": "fence",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          }
+        },
+        {
+          "action": 0,
+          "kind": "emit",
+          "outcome": "success",
+          "request": 0,
+          "request_tuple": {
+            "profile": 0,
+            "recipient": "Alice",
+            "resource": "A"
+          }
+        },
+        {
+          "kind": "retain",
+          "outcome": "success",
+          "request": 0
+        },
+        {
+          "kind": "certify",
+          "outcome": "success",
+          "request": 0
+        },
+        {
+          "kind": "ack",
+          "request": 0
+        }
+      ],
+      "states": 255,
+      "status": "counterexample",
+      "transitions": 615
+    }
+  ],
+  "schema": 1,
+  "sources_sha256": {
+    "__init__.py": "2b7aa31cecd2fc7ae68f0f38cce75ecc54b65af673916aca8b2fe13c61c98220",
+    "check.py": "e25632198499946c4b1a040b86a33e6879156697e5453d93092c75702357c5b6",
+    "domain.py": "7db5b15cba6b0a0bfd39e12e8603d99ddd3b572aafbffc5939480f068a195828",
+    "model.py": "cc916deedf1aea79b643b5ce4e22f7db0cd411b8b19b0e9ef5b684f19e3f9496",
+    "spec.py": "2c4efd4a3907ec5f74ef42124b3e9d254ed8a5b272ec72f8e8c3675a54fa16ed",
+    "test_check.py": "3fb14358cd98ac6ab8a441ebb2004fc1bc046862060b8838bafe3bd73d277d88"
+  }
+}

@@ -451,6 +451,113 @@ impl SuiteOneIngressKernelClientV2 {
             .map_err(|_| IngressKernelClientErrorV2::Unavailable)
     }
 
+    pub fn establish_task_authorization(
+        &self,
+        request: savana_kernel_protocol::v2::EstablishTaskAuthorizationRequestV2,
+        deadline: UnixMillisV2,
+    ) -> Result<
+        savana_kernel_protocol::v2::EstablishTaskAuthorizationResponseV2,
+        IngressKernelClientErrorV2,
+    > {
+        let body = self.exchange(
+            KernelIngressOperationV2::EstablishTaskAuthorization(request),
+            deadline,
+        )?;
+        savana_kernel_protocol::v2::decode_establish_task_authorization_response_v2(&body)
+            .map_err(|_| IngressKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn prepare_task_authorization_approval(
+        &self,
+        request: savana_kernel_protocol::v2::PrepareTaskAuthorizationApprovalRequestV2,
+        deadline: UnixMillisV2,
+    ) -> Result<
+        savana_kernel_protocol::v2::PrepareTaskAuthorizationApprovalResponseV2,
+        IngressKernelClientErrorV2,
+    > {
+        let body = self.exchange(
+            KernelIngressOperationV2::PrepareTaskAuthorizationApproval(request),
+            deadline,
+        )?;
+        savana_kernel_protocol::v2::decode_prepare_task_authorization_approval_response_v2(&body)
+            .map_err(|_| IngressKernelClientErrorV2::Unavailable)
+    }
+    pub fn commit_task_authorization_approval(
+        &self,
+        request: savana_kernel_protocol::v2::CommitTaskAuthorizationApprovalRequestV2,
+        deadline: UnixMillisV2,
+    ) -> Result<
+        savana_kernel_protocol::v2::EstablishTaskAuthorizationResponseV2,
+        IngressKernelClientErrorV2,
+    > {
+        let body = self.exchange(
+            KernelIngressOperationV2::CommitTaskAuthorizationApproval(request),
+            deadline,
+        )?;
+        savana_kernel_protocol::v2::decode_establish_task_authorization_response_v2(&body)
+            .map_err(|_| IngressKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn revoke_task_authorization(
+        &self,
+        request: savana_kernel_protocol::v2::RevokeTaskAuthorizationRequestV2,
+        deadline: UnixMillisV2,
+    ) -> Result<
+        savana_kernel_protocol::v2::RevokeTaskAuthorizationResponseV2,
+        IngressKernelClientErrorV2,
+    > {
+        let body = self.exchange(
+            KernelIngressOperationV2::RevokeTaskAuthorization(request),
+            deadline,
+        )?;
+        savana_kernel_protocol::v2::decode_revoke_task_authorization_response_v2(&body)
+            .map_err(|_| IngressKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn recover_task_authorization(
+        &self,
+        request: savana_kernel_protocol::v2::RecoverTaskAuthorizationRequestV2,
+        deadline: UnixMillisV2,
+    ) -> Result<
+        savana_kernel_protocol::v2::RecoverTaskAuthorizationResponseV2,
+        IngressKernelClientErrorV2,
+    > {
+        let body = self.exchange(
+            KernelIngressOperationV2::RecoverTaskAuthorization(request),
+            deadline,
+        )?;
+        savana_kernel_protocol::v2::decode_recover_task_authorization_response_v2(&body)
+            .map_err(|_| IngressKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn open_private_session_v04(
+        &self,
+        request: savana_kernel_protocol::v2::GetTaskAuthorizationContextRequestV2,
+        deadline: UnixMillisV2,
+    ) -> Result<savana_kernel_protocol::v2::PrivateSessionTransferV04, IngressKernelClientErrorV2>
+    {
+        let body = self.exchange(
+            KernelIngressOperationV2::OpenPrivateSessionV04(request),
+            deadline,
+        )?;
+        savana_kernel_protocol::v2::decode_private_session_begin_v04(&body)
+            .map_err(|_| IngressKernelClientErrorV2::Unavailable)
+    }
+
+    pub fn task_authorization_context(
+        &self,
+        request: savana_kernel_protocol::v2::GetTaskAuthorizationContextRequestV2,
+        deadline: UnixMillisV2,
+    ) -> Result<savana_kernel_protocol::v2::TaskAuthorizationContextV2, IngressKernelClientErrorV2>
+    {
+        let body = self.exchange(
+            KernelIngressOperationV2::GetTaskAuthorizationContext(request),
+            deadline,
+        )?;
+        savana_kernel_protocol::v2::decode_task_authorization_context_v2(&body)
+            .map_err(|_| IngressKernelClientErrorV2::Unavailable)
+    }
+
     pub fn begin_input(
         &self,
         request: BeginInputRequestV2,

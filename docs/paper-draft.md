@@ -1,5 +1,12 @@
 # Savana: An Information-Flow Kernel for Agentic Language-Model Systems
 
+> **Historical draft, superseded 2026-09-05.** This August 1 text is retained
+> for design history, not as the current implementation or security claim.
+> Its absolute claims and then-open integration gaps must not be reused as
+> current evidence. Use the [revised paper](../paper/usenix-sec27/main.tex),
+> [current summary](academic-summary.zh-CN.md) and
+> [claim-to-code map](verification/intent-bound-claims.md).
+
 **Paper draft** · Revision 1.0 · 2026-08-01
 Target venues: USENIX Security, IEEE S&P, OSDI/SOSP (systems track).
 Status: draft for internal review. §7 marks which evaluation components exist

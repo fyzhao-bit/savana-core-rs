@@ -1,0 +1,11 @@
+[Unit]
+Description=Savana finite experiment operator socket
+
+[Socket]
+ListenStream=/run/savana-experiment-operator/operator.sock
+SocketUser=root
+SocketGroup=savana-experiment
+SocketMode=0660
+DirectoryMode=0711
+FileDescriptorName=savana-experiment-operator
+RemoveOnStop=no

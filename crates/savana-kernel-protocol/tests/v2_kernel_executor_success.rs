@@ -117,6 +117,47 @@ fn final_release_payload_must_match_all_descriptor_digests() {
     let encoded = encode_fetch_completion_response_v2(&response).unwrap();
     assert!(decode_fetch_completion_response_v2(&encoded).is_ok());
 
+    use savana_kernel_protocol::v2::TaskCompletionEvidenceV2;
+    let evidence = TaskCompletionEvidenceV2::new(
+        Digest32V2::new([31; 32]),
+        Digest32V2::new([32; 32]),
+        Digest32V2::new([33; 32]),
+        vec![34; 300],
+    )
+    .unwrap();
+    let evidence_digest = evidence.evidence_digest(descriptor).unwrap();
+    for field in 0..3 {
+        let mut hashes = [
+            Digest32V2::new([31; 32]),
+            Digest32V2::new([32; 32]),
+            Digest32V2::new([33; 32]),
+        ];
+        hashes[field] = Digest32V2::new([99; 32]);
+        let changed =
+            TaskCompletionEvidenceV2::new(hashes[0], hashes[1], hashes[2], vec![34; 300]).unwrap();
+        assert_ne!(
+            changed.evidence_digest(descriptor).unwrap(),
+            evidence_digest
+        );
+    }
+    let response = response.with_task_outcome(evidence.clone());
+    let encoded = encode_fetch_completion_response_v2(&response).unwrap();
+    assert_eq!(
+        decode_fetch_completion_response_v2(&encoded)
+            .unwrap()
+            .task_outcome(),
+        Some(&evidence)
+    );
+    for end in 0..encoded.len() {
+        assert!(decode_fetch_completion_response_v2(&encoded[..end]).is_err());
+    }
+    let mut trailing = encoded.clone();
+    trailing.push(0);
+    assert!(decode_fetch_completion_response_v2(&trailing).is_err());
+    let mut unknown = encoded;
+    unknown[0] = 0x89;
+    assert!(decode_fetch_completion_response_v2(&unknown).is_err());
+
     let bad_descriptor = ExecutorCompletionDescriptorV2::final_release_receipt(
         durable_release_id,
         Digest32V2::new([99; 32]),
@@ -169,4 +210,40 @@ fn final_release_payload_must_match_all_descriptor_digests() {
         ExecutorCompletionPayloadV2::tool_result(vec![1]).unwrap(),
     )
     .is_err());
+}
+
+#[test]
+fn query_terminal_receipt_is_bounded_versioned_and_does_not_make_status_authority() {
+    use savana_kernel_protocol::v2::*;
+    let status = ExecutorStatusV2::FailedNoEffect {
+        class: ExecutorFailureClassV2::EnvelopeRejectedBeforeEffect,
+    };
+    let legacy = QueryByExecutionNonceResponseV2::new(status.clone());
+    let bytes = encode_query_by_execution_nonce_response_v2(&legacy).unwrap();
+    assert!(decode_query_by_execution_nonce_response_v2(&bytes)
+        .unwrap()
+        .terminal_receipt()
+        .is_none());
+    let response = legacy.with_terminal_receipt(vec![17; 300]).unwrap();
+    let encoded = encode_query_by_execution_nonce_response_v2(&response).unwrap();
+    assert_eq!(
+        decode_query_by_execution_nonce_response_v2(&encoded).unwrap(),
+        response
+    );
+    for end in 0..encoded.len() {
+        assert!(decode_query_by_execution_nonce_response_v2(&encoded[..end]).is_err());
+    }
+    let mut trailing = encoded;
+    trailing.push(0);
+    assert!(decode_query_by_execution_nonce_response_v2(&trailing).is_err());
+    for bytes in [vec![], vec![1; 1025]] {
+        assert!(QueryByExecutionNonceResponseV2::new(status.clone())
+            .with_terminal_receipt(bytes)
+            .is_err());
+    }
+    assert!(
+        QueryByExecutionNonceResponseV2::new(ExecutorStatusV2::Prepared)
+            .with_terminal_receipt(vec![1; 300])
+            .is_err()
+    );
 }

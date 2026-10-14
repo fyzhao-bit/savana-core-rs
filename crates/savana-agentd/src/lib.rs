@@ -5,15 +5,14 @@ compile_error!("macos-development-authority is forbidden in release builds");
 #[cfg(all(feature = "test-support", not(debug_assertions)))]
 compile_error!("test-support cannot be enabled in a release build");
 
-#[allow(dead_code)] // Wired by the production agentd runtime owner.
 mod effect_gate;
-#[allow(dead_code)] // Wired by the production planner/kernel client.
-mod effect_gated_kernel;
 
 mod agent_control;
 mod browser_authority;
 mod daemon;
 mod durable;
+#[cfg(unix)]
+mod fused_model_transport;
 mod kernel_authority;
 mod kernel_client;
 mod mapper_client;
@@ -21,6 +20,8 @@ mod planner_catalog;
 mod planner_client;
 pub mod planner_privacy;
 mod private_model_transport;
+#[cfg(unix)]
+pub use fused_model_transport::{fused_model_recipient_v04, UnixMtlsFusedModelTransportV04};
 mod state_owner;
 
 use std::collections::HashSet;

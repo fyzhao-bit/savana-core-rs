@@ -1,0 +1,17 @@
+[Unit]
+Description=Savana approvald private kernel role socket
+Requires=systemd-tmpfiles-setup.service
+After=systemd-tmpfiles-setup.service
+
+[Socket]
+ListenStream=/run/savana/approvald/kerneld/approvald.sock
+FileDescriptorName=savana-kernel-approval
+SocketUser=savana-approval
+SocketGroup=savana-kernel
+SocketMode=0660
+DirectoryMode=0710
+Service=savana-approvald.service
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

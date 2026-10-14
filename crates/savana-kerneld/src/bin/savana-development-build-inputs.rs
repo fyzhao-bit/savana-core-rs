@@ -24,6 +24,8 @@ use savana_policy_core::v2::{
 };
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
+#[path = "support/protected_experiment_profile.rs"]
+mod protected_experiment_profile;
 
 const INSTALL_ROOT: &str = "/Library/Application Support/Savana/Development";
 const EFFECT_PROJECTION_SIGNATURE_DOMAIN: &[u8] = b"SAVANA_EFFECT_LEDGER_PROJECTION_SIGNATURE_V2\0";
@@ -52,7 +54,15 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let mut arguments = std::env::args_os().skip(1);
-    let output = arguments.next().map(PathBuf::from).ok_or_else(|| {
+    let first = arguments.next().ok_or("missing output directory")?;
+    if first == "--protected-experiment-profile" {
+        let stage = arguments.next().map(PathBuf::from).ok_or("missing stage")?;
+        if arguments.next().is_some() {
+            return Err("unexpected argument".into());
+        }
+        return protected_experiment_profile::materialize(&stage);
+    }
+    let output = Some(PathBuf::from(first)).ok_or_else(|| {
         "usage: savana-development-build-inputs <absolute-empty-directory>".to_owned()
     })?;
     if arguments.next().is_some() || !output.is_absolute() {
@@ -302,6 +312,8 @@ fn run() -> Result<(), String> {
         "ui_settlement_public_key": placeholder_hex,
         "ingress_settlement_key_id": placeholder_hex,
         "ingress_settlement_public_key": placeholder_hex,
+        "task_authorization_key_id": placeholder_hex,
+        "task_authorization_public_key": placeholder_hex,
         "agentd_boot_id": placeholder_hex,
         "approvald_boot_id": placeholder_hex,
         "machine_boot_id": placeholder_hex,
@@ -414,6 +426,8 @@ fn run() -> Result<(), String> {
         "rollback_anchor_path": format!("{INSTALL_ROOT}/state/approvald/approval-anchor-v2.cbor"),
         "store_id": hex(approval_store_id),
         "kernel_envelope_public_key_path": format!("{INSTALL_ROOT}/config/approvald/keys/kerneld-envelope-v2.pub"),
+        "kernel_authority_envelope_key_id": placeholder_hex,
+        "kernel_authority_envelope_public_key": placeholder_hex,
         "kernel_correlation_public_key_path": format!("{INSTALL_ROOT}/config/approvald/keys/kerneld-correlation-v2.pub"),
         "kernel_correlation_key_id": placeholder_hex,
         "settlement_key_id": placeholder_hex,
@@ -689,6 +703,23 @@ fn signed_input_assets(
     signing_key: &SigningKey,
     signing_key_id: Ed25519KeyIdV2,
 ) -> Result<Vec<u8>, String> {
+    signed_input_assets_for_profile(signing_key, signing_key_id, None)
+}
+
+/// `protected` carries the protected experiment's complete ordered action
+/// templates (every shipped tool, including final release). The planner
+/// envelope may only name these, so it must list exactly what the deployment
+/// generator registered, never a fixed subset.
+fn signed_input_assets_for_profile(
+    signing_key: &SigningKey,
+    signing_key_id: Ed25519KeyIdV2,
+    protected: Option<&[u32]>,
+) -> Result<Vec<u8>, String> {
+    if protected.is_some_and(|t| {
+        t.is_empty() || t[0] != ACTION_TEMPLATE || t.windows(2).any(|w| w[0] >= w[1])
+    }) {
+        return Err("protected action templates".into());
+    }
     let mut payload = minicbor::Encoder::new(Vec::new());
     payload
         .array(7)
@@ -713,13 +744,22 @@ fn signed_input_assets(
         .and_then(|encoder| encoder.array(1))
         .and_then(|encoder| encoder.array(6))
         .and_then(|encoder| encoder.u32(1))
-        .and_then(|encoder| encoder.str("summarize"))
+        .and_then(|encoder| {
+            encoder.str(if protected.is_some() {
+                "\"inputs\":"
+            } else {
+                "summarize"
+            })
+        })
         .and_then(|encoder| encoder.u16(3))
         .and_then(|encoder| encoder.u32(1))
-        .and_then(|encoder| encoder.array(1))
+        .and_then(|encoder| encoder.array(protected.map_or(1, |t| t.len() as u64)))
         .and_then(|encoder| encoder.u32(ACTION_TEMPLATE))
-        .and_then(|encoder| encoder.null())
         .map_err(|_| "input runtime asset encoding failed".to_owned())?;
+    for template in protected.map_or(&[][..], |t| &t[1..]) {
+        payload.u32(*template).map_err(|_| "template encoding")?;
+    }
+    payload.null().map_err(|_| "asset encoding")?;
     let payload = payload.into_writer();
     let digest = domain_digest(INPUT_ASSET_DIGEST_DOMAIN, &payload);
     let mut signature_input = Vec::from(INPUT_ASSET_SIGNATURE_DOMAIN);

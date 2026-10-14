@@ -243,12 +243,19 @@ impl ReleaseReceiver {
         {
             return Err(ReleaseReceiverError::InvalidRequest);
         }
-        let wire_digest = *request.wire_digest();
+        let delivery =
+            savana_kernel_protocol::v2::decode_final_release_delivery_v2(request.payload())
+                .map_err(|_| ReleaseReceiverError::InvalidRequest)?;
         self.reservations
             .claim_next(now_unix_ms, request)
             .map_err(ReleaseReceiverError::Reservation)?;
-        let acknowledgement = encode_acknowledgement(&wire_digest)?;
-        tls.write_all(&acknowledgement)
+        // Only a durably claimed exact-turn request gets a success response.
+        // The strict codec limits this correlation ID to ASCII identifiers.
+        let acknowledgement = format!(
+            "{{\"request_id\":\"{}\",\"status\":\"succeeded\"}}",
+            delivery.request_id()
+        );
+        tls.write_all(acknowledgement.as_bytes())
             .and_then(|()| tls.flush())
             .map_err(|_| ReleaseReceiverError::Transport)?;
         tls.conn.send_close_notify();
@@ -293,17 +300,6 @@ fn read_request(
             Err(ReleaseRequestError::NonCanonical) => {}
         }
     }
-}
-
-fn encode_acknowledgement(wire_digest: &[u8; 32]) -> Result<Vec<u8>, ReleaseReceiverError> {
-    let mut encoder = minicbor::Encoder::new(Vec::new());
-    encoder
-        .array(3)
-        .and_then(|encoder| encoder.u16(2))
-        .and_then(|encoder| encoder.u16(1))
-        .and_then(|encoder| encoder.bytes(wire_digest))
-        .map_err(|_| ReleaseReceiverError::Transport)?;
-    Ok(encoder.into_writer())
 }
 
 fn certificate_spki_der(certificate: &[u8]) -> Option<&[u8]> {
