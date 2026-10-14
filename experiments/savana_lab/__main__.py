@@ -9,6 +9,9 @@
     python -m savana_lab report u9c --compare u9b
     python -m savana_lab why u9c travel user_task_13
     python -m savana_lab episode u9c travel user_task_13 --model-calls
+    python -m savana_lab quick travel user_task_13 --preset u9 --set planner=deepseek-v4-pro
+                                                             # one task here: no host, NOT evidence
+    python -m savana_lab quick-check u9b                     # how closely quick follows the host
 
 Model keys are read from each provider's environment variable
 ($DEEPSEEK_API_KEY, $OPENAI_API_KEY, ...; savana_bench.chat_models), never
@@ -17,11 +20,13 @@ from an argument.
 from __future__ import annotations
 
 import argparse
+from dataclasses import fields, replace
 import json
 from pathlib import Path
 import sys
 import time
 
+from .artifacts import ArtifactError
 from .config import PRESETS, Config, ConfigError
 from .driver import LabError
 from .lab import Lab
@@ -49,9 +54,7 @@ def main(argv=None):
     for name in ("plan", "run"):
         sub = commands.add_parser(name, help="show a run's batches" if name == "plan" else "create and start a run")
         sub.add_argument("name")
-        arm = sub.add_mutually_exclusive_group(required=True)
-        arm.add_argument("--preset", choices=sorted(PRESETS))
-        arm.add_argument("--template", help="a plan template, e.g. 'drafted+drafts=3:{suite}:{items}'")
+        _arm(sub)
         sub.add_argument("--suites", help="comma-separated suites (default: all four, 97 tasks)")
         sub.add_argument("--tasks", type=Path, help="a file of '<suite> <item>' lines instead of whole suites")
         if name == "plan":
@@ -90,15 +93,46 @@ def main(argv=None):
         sub.add_argument("suite")
         sub.add_argument("task")
     episode.add_argument("--model-calls", action="store_true")
+    quick = commands.add_parser("quick", help="try one task in this process: no host, NOT experiment evidence")
+    quick.add_argument("suite")
+    quick.add_argument("task", help="user_task_N or user_task_N+injection_task_M")
+    _arm(quick)
+    quick.add_argument("--model-calls", action="store_true", help="also print what each model was shown and said")
+    quick.add_argument("--example", type=Path, help="the structured-planning example (default: stored artifacts')")
+    quick_check = commands.add_parser("quick-check", help="replay host runs through quick's execution and compare")
+    quick_check.add_argument("names", nargs="+")
 
     args = parser.parse_args(argv)
     lab = Lab(**{k: v for k, v in dict(results=args.results, workdir=args.workdir, python=args.python).items()
                  if v is not None})
     try:
         return COMMANDS[args.command](lab, args) or 0
-    except (LabError, ConfigError, LookupError) as error:
+    except (LabError, ArtifactError, ConfigError, LookupError) as error:
         print(f"savana_lab: {error}", file=sys.stderr)
         return 1
+
+
+def _arm(sub):
+    arm = sub.add_mutually_exclusive_group(required=True)
+    arm.add_argument("--preset", choices=sorted(PRESETS))
+    arm.add_argument("--template", help="a plan template, e.g. 'drafted+drafts=3:{suite}:{items}'")
+    sub.add_argument("--set", action="append", default=[], metavar="OPTION=VALUE",
+                     help="change one option of the preset or template (repeatable), e.g. planner=deepseek-v4-pro")
+
+
+def _config(args):
+    """The preset or template, with each --set applied (checked like any Config)."""
+    config = PRESETS[args.preset] if args.preset else Config.from_template(args.template)
+    types = {f.name: f.type for f in fields(Config)}
+    for item in args.set:
+        name, equals, value = item.partition("=")
+        if not equals or name not in types:
+            raise ConfigError(name or item, f"--set takes OPTION=VALUE with OPTION one of {', '.join(types)}")
+        try:
+            config = replace(config, **{name: int(value) if types[name] in (int, "int") else value})
+        except ValueError:
+            raise ConfigError(name, f"{value!r} is not a number") from None
+    return config
 
 
 def _driving(sub):
@@ -107,7 +141,7 @@ def _driving(sub):
 
 
 def _plan(args):
-    config = PRESETS[args.preset] if args.preset else Config.from_template(args.template)
+    config = _config(args)
     if args.tasks:
         tasks = [tuple(line.split()) for line in args.tasks.read_text().splitlines() if line.strip()]
     else:
@@ -233,7 +267,25 @@ def cmd_episode(lab, args):
     if not args.model_calls:
         print(episode.why())
         return
-    for call in episode.model_calls():
+    _print_calls(episode.model_calls())
+
+
+def cmd_quick(lab, args):
+    from .quick import quick
+    result = quick(_config(args), args.suite, args.task, lab=lab, example=args.example)
+    print(result)
+    if args.model_calls:
+        print()
+        _print_calls(result.model_calls())
+
+
+def cmd_quick_check(lab, args):
+    from .quick_check import check
+    print(check(*args.names, lab=lab))
+
+
+def _print_calls(calls):
+    for call in calls:
         head = " ".join(f"{k}={v}" for k, v in call.items() if k not in ("shown", "reply"))
         print(f"[{head}]")
         if "shown" in call:
@@ -243,7 +295,7 @@ def cmd_episode(lab, args):
         print()
 
 
-COMMANDS = {name[4:]: function for name, function in globals().items() if name.startswith("cmd_")}
+COMMANDS = {name[4:].replace("_", "-"): function for name, function in globals().items() if name.startswith("cmd_")}
 
 if __name__ == "__main__":
     sys.exit(main())

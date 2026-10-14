@@ -79,6 +79,8 @@ python3 -m savana_lab resume u9c --background         # 续跑：验证过的批
 python3 -m savana_lab report u9c --compare u9b
 python3 -m savana_lab why u9c travel user_task_13
 python3 -m savana_lab episode u9c travel user_task_13 --model-calls
+python3 -m savana_lab quick travel user_task_13 --preset u9      # 不起主机试一题（不是实验证据）
+python3 -m savana_lab quick-check u9b                             # quick 和主机记录逐项对比
 ```
 
 以前用 bash 跑出来的结果（u9b、u8s 等）也能用 `report`、`why`、`episode` 读，按 `<名字>-<场景>-<序号>` 找批次。
@@ -110,9 +112,79 @@ python3 -m savana_lab run floor-x --template 'drafted+author=fixed+attack=autodo
   改为取自上机的那个 wheel；以前取的是工作区里的。用新路径重验 U9b 的一批，结果和原来的验证结果逐字相同。
 - **单实例。** 用锁保证同一时间只有一个驱动在跑（主机名只有一个）。停止用 `stop`。驱动收到 SIGTERM 时，
   先记一条"已停止"再退出。
-- **密钥。** 只从本机的环境变量 `DEEPSEEK_API_KEY` 读取，后台驱动也是继承这个环境变量。送进主机只经
+- **密钥。** 只从本机的环境变量读取（每家一个，见下面"换模型"），后台驱动也是继承这些环境变量。送进主机只经
   `configure-model` 的标准输入，不出现在任何命令的参数或传给主机的环境变量里，也不写进文件；日志写入前也会把它替换掉。
   测试检查了每一条命令的参数和环境变量。
+
+## 换模型
+
+四个角色各自按名字选模型：起草程序的规划模型（`planner`，结构化规划的排序也用它）、抽取模型（`extractor`）、
+内核的执行模型（`executor`）。名字在 `savana_bench/chat_models.py` 里登记，每个名字对应一个兼容 OpenAI
+chat-completions 的接口：主机、路径、接口自己的模型 id、用哪家的密钥、该接口需要的额外字段。
+
+```python
+cfg = replace(sl.U9, planner="deepseek-v4-pro", extractor="qwen-plus", executor="gpt-4.1-mini")
+```
+
+命令行用 `--set`：`python3 -m savana_lab run u9p --preset u9 --set planner=deepseek-v4-pro`。
+
+- **加一个模型**：在 `ENDPOINTS` 里加一项再提交。主机上的 runner 和离线验证器读的都是暂存版本里的这个文件，
+  所以验证器能用同一项重新算出每个请求的摘要。
+- **请求字节不变**：所有请求体都由 `chat_body` 生成。DeepSeek 的请求和以前逐字节相同，U9b 记录的每个请求摘要都能重算出来；
+  执行模型发出的请求和 SDK 的 `DeepSeekModel` 逐字节相同（`test_chat_models.py`）。
+- **密钥**：每家一个，本机从各自的环境变量读：`DEEPSEEK_API_KEY`、`OPENAI_API_KEY`、`DASHSCOPE_API_KEY`。
+  只用到 DeepSeek 时，送进主机的仍是原来那个裸密钥；用到别家时，改送一个 `{provider: key}` 的紧凑 JSON。
+  走的路径和以前一样：标准输入，再到加密的 systemd credential。不进参数、文件或日志。
+  只有用到 DeepSeek 时，驱动才会去查 DeepSeek 余额。
+- **实测**：`m1lab` 用 `executor=deepseek-v4-pro` 跑 banking 8 题，6/8，逐题和 U9b 相同；运行清单里记下了执行模型。
+
+## 快速试（不起主机）
+
+调提示词、换模型、改审查规则的时候，不必每次都起一台主机跑一整批。`quick` 在本进程里跑一道题，几秒到十几秒出结果：
+
+```python
+r = sl.quick(sl.U9, "travel", "user_task_13")      # 也可以是 "user_task_3+injection_task_1"
+print(r)                                            # 结论、每份草稿、排序、owner、每次工具调用、最终回答
+for call in r.model_calls(): print(call)            # 每个模型看到了什么、答了什么
+```
+
+```bash
+python3 -m savana_lab quick travel user_task_13 --preset u9 --set planner=deepseek-v4-pro --model-calls
+```
+
+**这不是实验证据。** 没有主机、内核和验证器，输出第一行就写着 NOT experiment evidence。
+
+和主机上相同的部分：
+- 起草、审查、结构化规划直接调用 runner 自己的函数（`draft_reviewed`、`structured_contract`），模型也相同。
+- 通过审查的程序在本进程里对 AgentDojo 环境逐步执行，经过同样的 provider 适配器。
+- 每一步的派生值按内核的规则从实际结果里提取。内核在准备任何一步之前，都会把整份程序里来源结果已有的派生值重新提取一遍，
+  其中一个提取不了，后面的步骤就都不跑（`recover_inputs`），quick 也照这个规则停。
+- 每一步都按默认处置方式问 owner，用的是同一套逐次调用规则（`benchmark_consent.judge_call`）。
+- 计算步和条件不成立的步由执行器本地回答，用的是同一份参考实现。
+- 最后由官方 oracle 判定。
+
+没有模拟的部分：内核自己的其余检查（编译、prepare、G5 底线、意图流校验器）和 owner 对内核展示内容的核对。
+这些检查只会拦下调用，不会多出调用。另外，同一个模型下一次的回答也可能不同。
+
+**和主机差多少：`quick-check`。** 把主机跑过的回合按记录回放一遍：用记录下的合约，抽取模型按当时的回答原样作答，
+逐项比较每次工具调用的参数和回复、本地回答、owner 的拒绝、结论和 oracle 判定。比较前先去掉 AgentDojo
+自身的不确定性：`create_file` 写入的当前时间，以及日历参与者的集合顺序。
+
+```bash
+python3 -m savana_lab quick-check u9b u9lab u9lab3 m1lab
+```
+
+实测（2026-10-14）：
+- **现在的架构**（U9b 和三次实验室运行）：执行过的 116 个回合，114 个逐项相同。
+  另外 2 个是主机上的内核先停了，quick 没有模拟，效用判定相同：
+  - slack 20：内核没有去取一个由数据选出的网址，quick 里是 owner 拒绝；
+  - workspace 19：内核没有发起最后的发布，quick 里发布了，但 oracle 判定为不成功。
+- **较早的运行**（U8S、U8SX、U7S/U7D/U7X）：执行过的 357 个回合，313 个相同。
+  - 42 个无法逐项比，因为那以后架构改过：计算步和条件不成立的步，以前由 provider 回答，现在由执行器本地回答（K2、K4）；
+  - 2 个是内核先停，效用和攻击判定相同；
+  - 其中 205 个注入回合，攻击是否成功的判定全部相同。
+- 回放时发现并补进 quick 的一条内核规则：上面说的整份程序重新提取。
+  它的来历：workspace 34 第一步搜索结果为空，第四步的 `file_id` 提取不了，主机上第二步也就没有跑。
 
 ## 记录放在哪里
 
@@ -175,8 +247,4 @@ python3 -m savana_lab run floor-x --template 'drafted+author=fixed+attack=autodo
 
 ## 还没做
 
-- 模型可替换：现在 runner 内部写死了 DeepSeek 客户端。
-- 不起主机的"快速试"模式。
 - 本机 Docker 以外的主机，比如 AWS 或 SSH。
-
-这几项都要改 runner 本身，会改变实验记录的格式，所以单独做。

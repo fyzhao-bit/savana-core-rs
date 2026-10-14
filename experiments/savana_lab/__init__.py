@@ -7,6 +7,9 @@
     rep = sl.report("u9c")
     print(rep.utility()); print(rep.compare("u9b")); print(rep.why("travel", "user_task_13"))
 
+    print(sl.quick(sl.U9, "travel", "user_task_13"))  # one task in this process, in seconds:
+                                                      # no host, no kernel, NOT experiment evidence
+
 Each batch still runs on a brand-new host with the kernel installed from
 the committed revision, its owner and batch authorization provisioned as
 before, and nothing counts until the offline verifier, replaying that same
@@ -15,10 +18,12 @@ revision, has passed it (README.zh-CN.md).
 from .config import PRESETS, U8S, U9, U9H, Config, ConfigError
 from .lab import Lab, Run
 from .plan import SUITES, Batch, Plan, benign, make_plan, pairs
+from .quick import QuickResult, quick
+from .quick_check import check as quick_check
 from .report import Report
 
-__all__ = ["Batch", "Config", "ConfigError", "Lab", "PRESETS", "Plan", "Report", "Run", "SUITES", "U8S", "U9",
-           "U9H", "benign", "make_plan", "pairs", "report", "run"]
+__all__ = ["Batch", "Config", "ConfigError", "Lab", "PRESETS", "Plan", "QuickResult", "Report", "Run", "SUITES",
+           "U8S", "U9", "U9H", "benign", "make_plan", "pairs", "quick", "quick_check", "report", "run"]
 
 
 def run(name, config, tasks=None, *, lab=None, background=True, deadline=None, capture=False):

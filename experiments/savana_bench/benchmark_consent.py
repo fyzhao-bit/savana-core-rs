@@ -89,6 +89,47 @@ def _chosen_by_data(step):
             if field in addressing or (step.tool, field) in OWNER_ONLY_READ_FIELDS | OWNER_ONLY_WRITE_FIELDS]
 
 
+def judge_call(step, arguments, *, directory=None, in_candidates=None, prior_results=()):
+    """The software owner's rules for one tool call's business arguments, as
+    `FiniteConsent` applies them to the kernel's display (after its strict
+    rule and its checks of the display itself); raises ValueError naming the
+    refusal. `in_candidates` maps each data-chosen field to whether the kernel
+    found its value in the set the owner signed (the set owner); `directory`
+    is the directory owner's. `savana_lab.quick` judges with it too."""
+    arguments=dict(arguments)
+    if in_candidates is not None:
+        # Whom data chose is approved only where the kernel says it is a
+        # member of the set this owner signed into that edge.
+        if not all(in_candidates.get(field) is True for field in _chosen_by_data(step)):
+            raise ValueError('consent_destination_not_in_candidates')
+    if directory is not None:
+        # A destination data chose is approved only if this owner already knows it.
+        from .owner_directory import in_directory
+        if not all(in_directory(arguments.get(field),directory) for field in _chosen_by_data(step)):
+            raise ValueError('consent_destination_not_in_directory')
+    if step.payload_from:
+        # A payload fed from an earlier result is not a root control:
+        # approve it only if it is byte-for-byte that result's text.
+        payload=_roles(step)[0]
+        prior=list(prior_results)
+        if (len(prior)<step.payload_from
+            or arguments.pop(payload,None)!=prior[step.payload_from-1].decode('utf-8')):
+            raise ValueError('consent_payload_source')
+    # A derived field is approved as the SOURCE the owner signed (the
+    # kernel-extracted value at that path), never as a planner literal;
+    # it must still be a well-formed bounded text value. On a field that
+    # only carries data (an extraction's context, a computation's input)
+    # an empty value is "nothing found", not a malformed control (v2).
+    for field,_,_,bound,form in step.edges():
+        value=arguments.pop(field,None)
+        if value=='' and _data_only(step,field):
+            continue
+        if not _derived_value_ok(value,bound,form):
+            raise ValueError('consent_derived_value')
+    if arguments!=step.value_map():
+        raise ValueError('consent_action_arguments')
+
+
 class FiniteConsent:
     """`disposition` is the deployment's signed G5 disposition. Under
     `require_approval` every step asks, in order. Under `permit` only the steps
@@ -283,39 +324,12 @@ class FiniteConsent:
                 or r['params']['name']!=step.tool or type(r['params']['arguments']) is not dict
                 or not _edges_match(d.get('derived_fields'),step)):
                 raise ValueError('consent_action_arguments')
-            arguments=dict(r['params']['arguments'])
-            if self.candidates:
-                # Whom data chose is approved only where the kernel says it is a
-                # member of the set this owner signed into that edge.
-                shown=d.get('derived_fields') or {}
-                if not all((shown.get(field) or {}).get('in_candidates') is True for field in _chosen_by_data(step)):
-                    raise ValueError('consent_destination_not_in_candidates')
-            if self.directory is not None:
-                # A destination data chose is approved only if this owner already knows it.
-                from .owner_directory import in_directory
-                if not all(in_directory(arguments.get(field),self.directory) for field in _chosen_by_data(step)):
-                    raise ValueError('consent_destination_not_in_directory')
-            if step.payload_from:
-                # A payload fed from an earlier result is not a root control:
-                # approve it only if it is byte-for-byte that result's text.
-                payload=_roles(step)[0]
-                prior=self.results() if self.results is not None else []
-                if (len(prior)<step.payload_from
-                    or arguments.pop(payload,None)!=prior[step.payload_from-1].decode('utf-8')):
-                    raise ValueError('consent_payload_source')
-            # A derived field is approved as the SOURCE the owner signed (the
-            # kernel-extracted value at that path), never as a planner literal;
-            # it must still be a well-formed bounded text value. On a field that
-            # only carries data (an extraction's context, a computation's input)
-            # an empty value is "nothing found", not a malformed control (v2).
-            for field,_,_,bound,form in step.edges():
-                value=arguments.pop(field,None)
-                if value=='' and _data_only(step,field):
-                    continue
-                if not _derived_value_ok(value,bound,form):
-                    raise ValueError('consent_derived_value')
-            if (arguments!=step.value_map()
-                or d['resource']!=r['params']['arguments'][resource]
+            shown=d.get('derived_fields') or {}
+            judge_call(step,r['params']['arguments'],directory=self.directory,
+                in_candidates=({field:(shown.get(field) or {}).get('in_candidates') is True
+                                for field in _chosen_by_data(step)} if self.candidates else None),
+                prior_results=self.results() if self.results is not None else [])
+            if (d['resource']!=r['params']['arguments'][resource]
                 or d['destination']!=r['params']['arguments'][destination]):
                 raise ValueError('consent_action_arguments')
             if self.permit:

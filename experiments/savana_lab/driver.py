@@ -26,7 +26,7 @@ from . import balance as balances
 from .batch import AttemptFailed, Batch, RunFailed
 from .config import runner_cases
 from .results import INCOMPLETE, UNVERIFIED, VERIFIED, batch_state, move_aside, rows
-from .shell import CommandFailed, Log, Shell
+from .shell import CommandFailed, Log
 from .stage import build_stage
 from .verify import VerificationFailed, summary_line
 
