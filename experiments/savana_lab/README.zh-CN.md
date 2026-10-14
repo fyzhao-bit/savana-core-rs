@@ -186,6 +186,50 @@ python3 -m savana_lab quick-check u9b u9lab u9lab3 m1lab
 - 回放时发现并补进 quick 的一条内核规则：上面说的整份程序重新提取。
   它的来历：workspace 34 第一步搜索结果为空，第四步的 `file_id` 提取不了，主机上第二步也就没有跑。
 
+## 别的机器上的主机（SSH、AWS）
+
+默认每批在本机起一个 Docker 容器当主机。也可以每批用别的机器上的一台全新机器，建运行时指定：
+
+```python
+run = sl.run("u9c", sl.U9, host=sl.AwsHosts(region="us-east-1", security_group="sg-0123"))
+run = sl.run("u9c", sl.U9, host=sl.SshHosts(create="./new-vm.sh", destroy="./drop-vm.sh",
+                                            identity="~/.ssh/lab_ed25519"))
+```
+
+```bash
+python3 -m savana_lab run u9c --preset u9 --host aws --aws-region us-east-1 --aws-security-group sg-0123
+python3 -m savana_lab run u9c --preset u9 --host ssh --ssh-create ./new-vm.sh --ssh-destroy ./drop-vm.sh \
+    --ssh-identity ~/.ssh/lab_ed25519
+python3 -m savana_lab aws-leftovers --aws-region us-east-1 [--terminate]   # 驱动被强杀后可能留下的实例
+```
+
+每批照样是一台没人用过的机器，装法和 Docker 主机完全相同：同一套到期关机、同一个一次性主机标记（标记里写明主机种类）、
+同样的载荷和安装命令。批次结束后，先导出运行记录（失败的先把能取的取回来），再销毁机器。
+主机种类记在 `run.json` 里，续跑时用同一种。每批用的是哪台机器，记在进度里，也写进结果目录的 `host.json`。
+
+**SSH**：
+- `create` 是一条在本机运行的命令，负责新建一台机器，第一行打印地址 `[user@]host[:port]`；
+  后面几行可以打印这台机器的 SSH 主机公钥（`ssh-ed25519 AAAA...`）。
+- 给了公钥，连接就钉死在这把钥匙上；没给就是首次连接时信任，并把指纹记进日志。
+- `destroy` 在批次结束后运行，地址在 `$SAVANA_LAB_HOST` 里。
+- 事先建好的一池机器也可以用：`create` 每次发下一台，`destroy` 把它退役。
+
+**AWS**：
+- 用本机 `aws` 命令行和它已配置的凭据，每批开一台 EC2。默认用 Canonical 当前的 Ubuntu 24.04 AMI，可以用 `ami` 指定别的。
+- 这台实例的 SSH 主机钥匙和登录钥匙都在本机现生成，经 user-data 交给它。所以第一次连接就已经钉住，也不用在账号里登记钥匙对。
+- 实例关机即终止：到期关机，或者开机 4 小时后（即使驱动已经不在了）。批次结束后也会立即终止。
+- 安全组要允许本机访问 22 端口。
+- 状态里如果出现 `host NOT released`，说明有实例没能终止，用 `aws-leftovers` 查看或终止。
+
+**新机器上装什么**：Ubuntu 24.04 加 systemd。Docker 镜像里装的东西（软件包和固定版本的 AgentDojo venv）机器上没有就现装，
+有就跳过。命令以 root 执行；登录用户不是 root 时走免密 sudo。密钥照旧只走标准输入：SSH 命令行里只有脚本和非机密变量。
+
+**本地替身**：`examples/local-ssh-host/` 用一个 systemd 加 sshd 的容器当"别的机器"，内容如下：
+- `create.sh` / `destroy.sh` 两个脚本，可以当写自己的 create/destroy 命令时的模板；
+- 一个替身 `fake-aws`，按 user-data 起实例，钥匙、ubuntu 用户和 sudo 都按 EC2 加 cloud-init 的方式设好。
+
+两条路径都在本机端到端跑过（见下面的实测）。
+
 ## 记录放在哪里
 
 - `<results>/_lab/<运行名>/`
@@ -247,4 +291,4 @@ python3 -m savana_lab quick-check u9b u9lab u9lab3 m1lab
 
 ## 还没做
 
-- 本机 Docker 以外的主机，比如 AWS 或 SSH。
+- 没有在真实的 AWS 账号上跑过（这里没有凭据）。第一次用时先跑一批：`--suites banking` 加一个只有一两题的 `--tasks`。

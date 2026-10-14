@@ -13,6 +13,12 @@
   从源码构建的内核二进制和 K8 逐字节相同。用新产物跑 slack 一批时，7 题都在 provider 开始监听时失败，
   验证器也验证不了这种失败。原因是 release provider 写死的端口落在临时端口范围里。
   两处都已修好（验证器、端口），修复后同一批 4/7，和 U9b 逐题相同。
+- **之后加的：**
+  - **换模型**：规划、抽取、执行三个角色都按名字选模型（`savana_bench/chat_models.py`），每家用自己的密钥。
+    DeepSeek 的请求字节不变。
+  - **快速试**：`sl.quick(...)` 不起主机，在本进程里几秒跑完一题，输出明确标注不是实验证据。
+    `quick-check` 把主机记录回放一遍，用来核对 quick 和主机差多少：U9b 执行过的 116 回合里 114 个逐项相同。
+  - **别的机器**：每批也可以用 SSH 机器或 EC2 实例当全新主机。
 
 2026-10-13 代码清理：runner 现在只运行 `drafted` / `drafted-poison` 规格
 （`protected_launch --software-benchmark --planner-experiment <spec>`，`planner_verify` 复核）。
