@@ -210,6 +210,18 @@ class PlanTests(unittest.TestCase):
         self.assertNotIn("attack", plan.batches[2].spec)
 
     @NEEDS_AGENTDOJO
+    def test_attack_pairs_of_a_delegating_task_are_cut_by_cases(self):
+        # banking user_task_12 delegates its action to data: its nine pairs
+        # are a read and an act turn each, 18 cases, more than a batch runs.
+        config = replace(U10, attack="autodojo")
+        plan = make_plan("x", config, pairs("banking", [12], range(9)))
+        self.assertEqual([len(b.items) for b in plan.batches], [3, 3, 3])
+        whole = pairs("banking", range(16), range(9))
+        plan = make_plan("x", config, whole)
+        self.assertEqual(plan.tasks(), whole)
+        self.assertEqual([len(runner_cases(b.spec)) for b in plan.batches], [9] * 12 + [8, 8, 9, 9, 9, 2])
+
+    @NEEDS_AGENTDOJO
     def test_suite_sizes_are_agentdojos(self):
         from agentdojo.task_suite.load_suites import get_suite
         from savana_bench.agentdojo_tasks import BENCHMARK

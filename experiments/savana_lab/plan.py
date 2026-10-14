@@ -96,8 +96,10 @@ def make_plan(name, config, tasks, *, max_cases=MAX_CASES):
     """Cut `tasks` ((suite, item) pairs, e.g. `benign()`) into batches of at
     most `max_cases` cases, one suite per batch, suites in SUITES order and
     tasks in the order given. A suite's tasks are split as evenly as its
-    batch count allows (16 -> 8+8, 20 -> 7+7+6). `config` is a Config, or a
-    function of the suite returning one."""
+    batch count allows (16 -> 8+8, 20 -> 7+7+6); where an item is two cases
+    (a read and an act turn, `instructions='adopt'`) and that split
+    overflows a batch, they are cut by cases instead. `config` is a Config,
+    or a function of the suite returning one."""
     if not name or not all(c.isalnum() or c in "-_." for c in name):
         raise ConfigError("name", "a run name is letters, digits and -_.")
     by_suite = {}
@@ -110,25 +112,42 @@ def make_plan(name, config, tasks, *, max_cases=MAX_CASES):
     for suite in (s for s in SUITES if s in by_suite):
         arm = config(suite) if callable(config) else config
         items = by_suite[suite]
-        count = math.ceil(len(items) / max_cases)
-        while True:
-            chunks = _even(items, count)
-            specs = [arm.spec(suite, chunk) for chunk in chunks]
-            # A case count above the item count (a read and an act turn per
-            # adopted item) can overflow a batch: cut finer.
-            if all(len(runner_cases(spec)) <= max_cases for spec in specs):
-                break
-            count += 1
-        batches += [Batch(f"{name}-{suite}-{k}", suite, tuple(chunk), spec)
-                    for k, (chunk, spec) in enumerate(zip(chunks, specs))]
+        # An item is one case, or two where the owner adopts instructions
+        # found in data: its read and act turns, which run in one batch.
+        cases = [len(runner_cases(arm.spec(suite, [item]))) for item in items]
+        cuts = _even(len(items), math.ceil(len(items) / max_cases))
+        if any(sum(cases[start:end]) > max_cases for start, end in cuts):
+            cuts = _by_cases(cases, max_cases)
+        batches += [Batch(f"{name}-{suite}-{k}", suite, tuple(items[start:end]), arm.spec(suite, items[start:end]))
+                    for k, (start, end) in enumerate(cuts)]
     return Plan(name, tuple(batches))
 
 
-def _even(items, count):
-    size, extra = divmod(len(items), count)
-    chunks, start = [], 0
+def _even(total, count):
+    """(start, end) of `count` runs over `total` items, sizes differing by at most one."""
+    size, extra = divmod(total, count)
+    cuts, start = [], 0
     for k in range(count):
         end = start + size + (k < extra)
-        chunks.append(items[start:end])
+        cuts.append((start, end))
         start = end
-    return chunks
+    return cuts
+
+
+def _by_cases(cases, max_cases):
+    """(start, end) of runs over items of `cases` cases each, in order: as few
+    runs of at most `max_cases` cases as can be, the largest as small as
+    that number of runs allows."""
+    if max(cases) > max_cases:
+        raise ConfigError("items", f"an item is {max(cases)} cases; an armed batch runs at most {max_cases}")
+
+    def fill(limit):
+        cuts, start, load = [], 0, 0
+        for k, count in enumerate(cases):
+            if load + count > limit:
+                cuts.append((start, k))
+                start, load = k, 0
+            load += count
+        return cuts + [(start, len(cases))]
+    fewest = len(fill(max_cases))
+    return fill(next(limit for limit in range(max(cases), max_cases + 1) if len(fill(limit)) <= fewest))

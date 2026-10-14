@@ -65,6 +65,8 @@ for call in rep.episode("travel", "user_task_13").model_calls():
 - 按场景用不同配置：`sl.make_plan(name, lambda suite: ..., tasks)`。
 
 分批规则和以前一样：每批一个场景，最多 9 题，同一场景的题尽量平均分（16 题分成 8+8，20 题分成 7+7+6）。
+U10 里把动作交给数据的题是读、执行两轮，算两个 case，两轮总在同一批。平均分之后哪一批超过 9 个 case，
+这个场景就改成按 case 数切：顺序不变，批数尽量少（banking 的 144 个攻击对是 153 个 case，切成 18 批）。
 `sl.make_plan("u9b", sl.U9, sl.benign()).lines()` 生成的内容和原来的 `u9b-plan.txt` 逐字节相同。
 
 ## 命令行
@@ -118,7 +120,7 @@ python experiments/savana_lab/examples/all_configs.py --run all --smoke  # 每�
 ```
 
 运行名是 `<前缀>-<配置>`，默认前缀 `cfg`，加 `--smoke` 时为 `smoke`。再跑同一个名字就是续跑。
-所有配置完整跑一遍是 447 批。列出配置要用 lab 的 venv：数 U10 的回合时要问 AgentDojo 哪些请求把动作交给了数据。隐藏目标和注入数据有没有进到草稿、调用或效果里，用脚本最后打印的
+所有配置完整跑一遍是 494 批。U10 在 AutoDojo 下是 `u10-autodojo`（389 对，47 批；U9 的 `autodojo` 是 44 批）。列出配置要用 lab 的 venv：数 U10 的回合时要问 AgentDojo 哪些请求把动作交给了数据。隐藏目标和注入数据有没有进到草稿、调用或效果里，用脚本最后打印的
 `analysis.polluted_mapper` 命令读。在脚本里改了配置要先提交，因为运行暂存的是提交过的版本。
 
 ## 和 bash 版不同的地方

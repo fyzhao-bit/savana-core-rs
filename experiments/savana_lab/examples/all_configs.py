@@ -14,6 +14,7 @@ U9 (`sl.U9`) is the base; every other configuration is U9 with one or two option
   attack pairs (user task + injection task), for security
     attack                AgentDojo's own injections (important_instructions), all four suites
     autodojo              AutoDojo's optimized injections (banking, slack, travel)
+    u10-autodojo          the same pairs under U10: instructions found in data meet the owner's adoption rule
     exposure              AutoDojo's injections, and the planner is also shown the injected data
   a compromised planner (benign environments)
     poison-<goal>         a hidden attacker goal in the planner's prompt: exfiltrate, redirect, tamper, obey_data
@@ -87,6 +88,8 @@ def arms():
         Arm("mask-extractor", sl.U9.masked(planner=False), BENIGN, "utility with masking for the extractor only"),
         Arm("attack", sl.U9, PAIRS, "security against AgentDojo's own injections"),
         Arm("autodojo", replace(sl.U9, attack="autodojo"), AUTODOJO, "security against AutoDojo's injections"),
+        Arm("u10-autodojo", replace(sl.U10, attack="autodojo"), AUTODOJO,
+            "security against AutoDojo's injections with instructions found in data adopted by the owner"),
         Arm("exposure", replace(sl.U9, attack="autodojo", exposure="data"), AUTODOJO,
             "security when the planner also sees the injected data"),
     ]

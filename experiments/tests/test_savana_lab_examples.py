@@ -40,7 +40,8 @@ class AllConfigsTests(unittest.TestCase):
         expected = {"u9": set(), "u9h": {"owner"}, "u10": {"instructions"}, "pro": {"planner"},
                     "mask": {"view", "extract"},
                     "mask-planner": {"view"}, "mask-extractor": {"extract"}, "attack": set(),
-                    "autodojo": {"attack"}, "exposure": {"attack", "exposure"}, "mapper-honest": {"mapper"},
+                    "autodojo": {"attack"}, "u10-autodojo": {"instructions", "attack"},
+                    "exposure": {"attack", "exposure"}, "mapper-honest": {"mapper"},
                     "mapper-exposure": {"mapper", "attack", "exposure"}}
         expected |= {f"poison-{goal}": {"goal"} for goal in ROOT_POISON_GOALS}
         expected |= {f"mapper-poison-{goal}": {"mapper", "goal"} for goal in ROOT_POISON_GOALS}
@@ -57,8 +58,11 @@ class AllConfigsTests(unittest.TestCase):
         self.assertEqual(sizes["u10"], 97)
         self.assertEqual(sizes["attack"], 949)
         self.assertEqual(sizes["autodojo"], 389)
+        self.assertEqual(sizes["u10-autodojo"], 389)
         self.assertEqual(sizes["mapper-exposure"], 389)
-        self.assertEqual(sum(len(plan.batches) for plan in full.values()), 447)
+        # A delegating task's pairs are two cases each: U10's AutoDojo pairs take 47 batches, U9's 44.
+        self.assertEqual((len(full[ARMS["u10-autodojo"]].batches), len(full[ARMS["autodojo"]].batches)), (47, 44))
+        self.assertEqual(sum(len(plan.batches) for plan in full.values()), 494)
         smoke = all_configs.plans(ARMS.values(), "s", ["banking"], 2)
         self.assertTrue(all(plan is not None and len(plan.batches) == 1 and len(plan.tasks()) == 2
                             for _, plan in smoke))
@@ -67,7 +71,7 @@ class AllConfigsTests(unittest.TestCase):
     def test_autodojo_has_no_workspace_tasks(self):
         planned = {arm.name: plan for arm, plan in all_configs.plans(ARMS.values(), "w", ["workspace"], 1)}
         self.assertEqual({name for name, plan in planned.items() if plan is None},
-                         {"autodojo", "exposure", "mapper-exposure"})
+                         {"autodojo", "u10-autodojo", "exposure", "mapper-exposure"})
 
     def test_the_autodojo_pairs_are_the_cached_injections(self):
         from savana_bench.autodojo_cache import SUITES as AUTODOJO_SUITES, cache_path, load
@@ -109,11 +113,11 @@ class AllConfigsTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()) as out:
             self.assertEqual(all_configs.main([]), 0)
         self.assertIn("cfg-poison-exfiltrate: a compromised planner", out.getvalue())
-        self.assertTrue(out.getvalue().endswith("447 batches in all; each runs on a brand-new host\n"))
+        self.assertTrue(out.getvalue().endswith("494 batches in all; each runs on a brand-new host\n"))
         with redirect_stdout(io.StringIO()) as out:
             self.assertEqual(all_configs.main(["--smoke"]), 0)
         self.assertIn("smoke-mapper-exposure:", out.getvalue())
-        self.assertTrue(out.getvalue().endswith("20 batches in all; each runs on a brand-new host\n"))
+        self.assertTrue(out.getvalue().endswith("21 batches in all; each runs on a brand-new host\n"))
 
     def test_an_unknown_configuration_suite_or_count_is_refused(self):
         for argv, message in ((["--run", "u9", "nope"], "unknown configuration nope"),
