@@ -99,6 +99,25 @@ python3 -m savana_lab run floor-x --template 'drafted+author=fixed+attack=autodo
 `--disposition` 和 `--unconfined-write` 经安装程序的环境变量交给部署生成器，装完会核对主机上实际生效的处置方式，
 不一致就停。`--catalog-variant` 指定的目录文件会复制一份存进运行记录，每批开跑前核对它的摘要。
 
+## 所有配置，一个脚本
+
+`examples/all_configs.py` 以 U9 为基础，每个配置只改一两个选项：
+
+- **效用**：U9、U9H、换更强的规划模型、三种打码（两个模型都打码、只打规划模型、只打抽取模型）；
+- **环境注入**：AgentDojo 官方注入（949 对）、AutoDojo（389 对）、规划器也看到注入数据；
+- **被攻破的规划器**：四个隐藏目标；
+- **被污染的私有 mapper**（mpx）：诚实对照、四个隐藏目标、看到注入数据。
+
+```bash
+python experiments/savana_lab/examples/all_configs.py                    # 列出每个配置的规格、题数、批数（不起主机）
+python experiments/savana_lab/examples/all_configs.py --quick mask       # 不起主机试一题（不是实验证据）
+python experiments/savana_lab/examples/all_configs.py --run all --smoke  # 每个配置一批（banking 两题），依次在前台跑
+```
+
+运行名是 `<前缀>-<配置>`，默认前缀 `cfg`，加 `--smoke` 时为 `smoke`。再跑同一个名字就是续跑。
+所有配置完整跑一遍是 434 批。隐藏目标和注入数据有没有进到草稿、调用或效果里，用脚本最后打印的
+`analysis.polluted_mapper` 命令读。在脚本里改了配置要先提交，因为运行暂存的是提交过的版本。
+
 ## 和 bash 版不同的地方
 
 - **验证失败就停。** 以前 `planner-export.sh` 验证失败时只打印 `VERIFY_FAILED`，驱动接着跑下一批。现在整轮在这一批停下，
