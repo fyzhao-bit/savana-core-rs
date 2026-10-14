@@ -1,0 +1,4 @@
+# The lab's own venv (python -m savana_lab setup): the offline verifier's
+# AgentDojo pin, and maturin for building the SDK wheel.
+-r ../requirements-agentdojo.txt
+maturin==1.15.0
