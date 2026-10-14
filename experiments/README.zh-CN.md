@@ -10,6 +10,9 @@
   验证器改用上机的 wheel。
 - **实测：** U9 配置的 banking 两批全部通过验证，效用 10/16（U9b 同样 16 题 11/16）；
   `stop` 和 `resume` 都按预期工作；重验 U9b 的两批，结果逐字相同。
+  从源码构建的内核二进制和 K8 逐字节相同。用新产物跑 slack 一批时，7 题都在 provider 开始监听时失败，
+  验证器也验证不了这种失败。原因是 release provider 写死的端口落在临时端口范围里。
+  两处都已修好（验证器、端口），修复后同一批 4/7，和 U9b 逐题相同。
 
 2026-10-13 代码清理：runner 现在只运行 `drafted` / `drafted-poison` 规格
 （`protected_launch --software-benchmark --planner-experiment <spec>`，`planner_verify` 复核）。
