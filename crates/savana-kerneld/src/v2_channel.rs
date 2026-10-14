@@ -254,4 +254,31 @@ mod tests {
             Err(ChannelErrorV2::Malformed)
         );
     }
+
+    #[test]
+    fn a_frame_sent_before_the_peer_closed_is_still_read() {
+        // A server writes its response and closes at once. On macOS the
+        // socket is then shut down both ways and refuses a new timeout, which
+        // must not lose the response.
+        let mut frame = b"SV2R".to_vec();
+        frame.extend_from_slice(&1_u16.to_be_bytes());
+        frame.extend_from_slice(&16_u32.to_be_bytes());
+        frame.extend_from_slice(&[7_u8; 17]);
+        let (mut sender, receiver) = UnixStream::pair().unwrap();
+        sender.write_all(&frame).unwrap();
+        drop(sender);
+        let mut channel = UnixV2FrameChannel::new(receiver);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert_eq!(channel.read_record_frame(deadline), Ok(frame.clone()));
+        // Then end of file and a failed write, without waiting for the deadline.
+        assert_eq!(
+            channel.read_record_frame(deadline),
+            Err(ChannelErrorV2::Malformed)
+        );
+        assert_eq!(
+            channel.write_record_frame(&frame, deadline),
+            Err(ChannelErrorV2::Unavailable)
+        );
+        assert!(Instant::now() < deadline);
+    }
 }

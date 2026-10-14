@@ -197,3 +197,12 @@ fn kernel_delivery_round_trips_over_suite_one_and_rejects_agent_handshake() {
         vec![true, true, true, true, true, true, true, true, true, true, true, false]
     );
 }
+
+#[test]
+fn a_deadline_is_set_after_the_peer_closed() {
+    // macOS refuses a new socket timeout once the peer has closed; the bytes
+    // the peer sent before closing must still be read.
+    let (sender, receiver) = UnixStream::pair().unwrap();
+    drop(sender);
+    assert!(set_deadline(&receiver, Instant::now() + Duration::from_secs(1)).is_ok());
+}

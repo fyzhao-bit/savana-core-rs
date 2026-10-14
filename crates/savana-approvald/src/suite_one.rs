@@ -679,3 +679,19 @@ fn record_lengths(header: &[u8]) -> Result<(usize, usize), ApprovalSuiteOneServi
     }
     Ok((header_length, ciphertext_length))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::net::UnixStream;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_deadline_is_set_after_the_peer_closed() {
+        // macOS refuses a new socket timeout once the peer has closed; the
+        // bytes the peer sent before closing must still be read.
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        drop(sender);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert!(super::set_deadline(&receiver, deadline).is_ok());
+    }
+}

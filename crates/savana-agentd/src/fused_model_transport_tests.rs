@@ -266,3 +266,19 @@ fn fused_unix_mtls_python_worker_returns_native_bound_proposal() {
         PlanChoice::RegisteredTemplate { template: 1 }
     );
 }
+
+#[test]
+fn the_workers_last_bytes_are_read_after_it_closed() {
+    // macOS refuses a new socket timeout once the peer has closed.
+    let (mut worker, agent) = UnixStream::pair().unwrap();
+    worker.write_all(b"last").unwrap();
+    drop(worker);
+    let mut stream = DeadlineStream {
+        stream: agent,
+        deadline: Instant::now() + Duration::from_secs(1),
+    };
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"last");
+    assert!(stream.write_all(b"more").is_err());
+}

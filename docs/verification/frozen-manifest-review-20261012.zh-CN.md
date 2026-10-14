@@ -285,3 +285,42 @@ tools/check-frozen-v2-core.sh && sh tools/tests/check-frozen-v2-core.sh tools/ch
 按第四节的步骤重新生成：移除已删除的 `crates/savana-kerneld/src/v2_recovery.rs`，按字典序加入 5.3 的 11 个文件，
 逐文件重算 SHA-256。清单现为 **339 个文件**；`tools/check-frozen-v2-core.sh` 逐项 OK，
 `tools/tests/check-frozen-v2-core.sh` 自测通过。此后改动任何清单文件都会让 CI 的第一步失败，需要再走一次本流程。
+
+## 六、2026-10-14 第三轮：macOS 上对端关闭之后重设套接字超时失败
+
+**现象。** `kerneld (macos-latest)` 的 `cargo test` 每次随机挂 5–12 个 `fused_compiler_tests`，每次挂的都不一样；Linux 上全部通过。
+失败位置各不相同：
+
+- `v04_fused_dispatch_tests.rs:704`：空 tick 之后磁盘状态变了；
+- `:940`：第二个 effect 没有执行；
+- `:1139`：派发意外失败；
+- `:1358` 和 `:1563`：`Unavailable`。
+
+它们的起因相同：内核到执行器的某次交换意外返回了 `Unavailable`，后面的断言再以各自的方式失败。
+
+**根因。**
+
+- XNU 在套接字两个方向都已关闭（`SS_CANTRCVMORE | SS_CANTSENDMORE`）时，对任何 `setsockopt` 都返回 EINVAL（`bsd/kern/uipc_socket.c` 的 `sosetoptlock`）。
+- Unix 流套接字的一端关闭时，`unp_disconnect` 会把两端都置成这个状态（`bsd/kern/uipc_usrreq.c`）。
+- 各帧通道每次读写之前，都用 `set_read_timeout` / `set_write_timeout` 重设剩余时间。
+- 执行器写完响应就立即关闭连接。如果执行器在内核重设读超时之前就关了，macOS 上这次重设会失败，内核于是把已经在接收缓冲区里的响应当成"服务不可用"。
+- Linux 允许这次 `setsockopt`，所以只有 macOS 会出问题；测试并行越多、负载越重，出现得越频繁。
+
+**本提交只加回归测试，修复在下一个提交。**
+
+这些测试在 Linux 上都通过。按 XNU 源码，修复之前它们在 macOS 上必然失败：对端 `drop` 之后 `setsockopt` 返回 EINVAL。先推测试，是为了让 macOS CI 先复现这一点。
+
+| 文件 | 新测试 |
+| --- | --- |
+| `crates/savana-kerneld/src/v2_channel.rs` | `a_frame_sent_before_the_peer_closed_is_still_read`：对端写完一帧就关闭，这一帧照常读出，随后读到 EOF、写入失败，都不必等到截止时间 |
+| `crates/savana-agentd/src/kernel_client.rs` | `a_deadline_is_set_after_the_peer_closed` |
+| `crates/savana-ingressd/src/kernel_client.rs` | 同名测试 |
+| `crates/savana-approvald/src/suite_one.rs` | 同名测试（新增测试模块） |
+
+清单外还加了三个同类测试：
+
+- execd `v2_service.rs` 的服务端测试；
+- approvald 客户端的测试，在 `kernel_delivery_transport_tests.rs`；
+- agentd `fused_model_transport_tests.rs` 里的 `the_workers_last_bytes_are_read_after_it_closed`。
+
+清单已按第四节的步骤重新生成。本提交改动的冻结文件有四个：`v2_channel.rs`、两个 `kernel_client.rs` 和 `suite_one.rs`，它们的哈希都已更新。`tools/check-frozen-v2-core.sh` 逐项 OK，自测也通过。
