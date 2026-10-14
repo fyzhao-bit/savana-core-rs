@@ -25,7 +25,7 @@ import time
 
 from . import balance as balances
 from .artifacts import RUST, ArtifactError, ArtifactStore, Git
-from .driver import LabError, drive, now
+from .driver import LabError, Lock, drive, now
 from .host import DockerHost
 from .plan import Plan
 from .results import ABSENT, VERIFIED, batch_state, rows
@@ -202,6 +202,8 @@ class Run:
             return drive(self.lab, self, key=key, deadline=deadline)
         if self.alive():
             raise LabError(f"run {self.name}'s driver is already running")
+        with Lock(self.lab.workdir / "driver.lock"):
+            pass   # another run's driver holds it: say so here, not only in the child's output
         argv = [sys.executable, "-m", "savana_lab", "--results", str(self.lab.results), "--workdir",
                 str(self.lab.workdir)]
         if self.lab.python is not None:
@@ -267,6 +269,7 @@ class Status:
     failure: str | None
     balance: tuple | None
     utility: dict
+    stopping: bool = False
 
     @classmethod
     def of(cls, run):
@@ -295,7 +298,8 @@ class Status:
         alive = run.alive()
         return cls(run.name, alive, batches, current if alive else None, episodes if alive else None,
                    events[-1] if events else None, failure,
-                   (balances_seen[0], balances_seen[-1]) if balances_seen else None, utility)
+                   (balances_seen[0], balances_seen[-1]) if balances_seen else None, utility,
+                   alive and (run.lab.workdir / "STOP").exists())
 
     def __str__(self):
         verified = sum(s == VERIFIED for s in self.batches.values())
@@ -304,11 +308,15 @@ class Status:
         if self.current:
             done = f" ({self.episodes[0]}/{self.episodes[1]} episodes scored)" if self.episodes else ""
             lines.append(f"  running {self.current}{done}")
+        if self.stopping:
+            lines.append("  stop requested: the driver stops after the batch that is running")
         if self.last:
             lines.append(f"  last: {self.last['t']} {self.last['event']}"
                          + "".join(f" {k}={v}" for k, v in self.last.items() if k not in ("t", "event")))
         if self.failure:
             lines.append(f"  failed: {self.failure}")
+        elif not self.alive and self.last and self.last["event"] not in ("done", "stopped", "failed"):
+            lines.append("  the driver exited before the plan ended: resume the run")
         if self.balance:
             lines.append(f"  model balance {self.balance[0]} -> {self.balance[1]} USD")
         if self.utility:

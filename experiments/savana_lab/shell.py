@@ -28,7 +28,7 @@ class Result:
 
 
 def _show(argv):
-    shown = " ".join(argv)
+    shown = " ".join(" ".join(argv).split())
     return shown if len(shown) <= 160 else shown[:157] + "..."
 
 
