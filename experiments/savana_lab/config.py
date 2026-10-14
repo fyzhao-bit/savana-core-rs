@@ -217,6 +217,20 @@ class Config:
             if missing:
                 raise ConfigError("author", f"no registered template for {suite} {', '.join(missing)}")
 
+    def masked(self, planner=True, extractor=True):
+        """This configuration with the privacy masking on. The owner's sensitive
+        values (names, accounts, addresses, ... as the kernel's leak gate finds
+        them) reach a model only as placeholders:
+        - `planner`: the drafting model is sent the request with placeholders,
+          which the owner binds back to its own values (`view="masked"`);
+        - `extractor`: the kernel's executor masks every input of the
+          quarantined extractor and puts the values back into its reply
+          (`extract="masked"`; the host then serves the suite's `-masked`
+          catalog, which ships the model tools on the model codec).
+        A part left False keeps this configuration's own setting."""
+        return replace(self, view="masked" if planner else self.view,
+                       extract="masked" if extractor else self.extract)
+
     def models(self):
         """Every model this configuration calls (`chat_models` names)."""
         return {self.planner, self.extractor, self.executor}

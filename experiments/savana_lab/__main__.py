@@ -126,10 +126,13 @@ def _arm(sub):
     arm.add_argument("--template", help="a plan template, e.g. 'drafted+drafts=3:{suite}:{items}'")
     sub.add_argument("--set", action="append", default=[], metavar="OPTION=VALUE",
                      help="change one option of the preset or template (repeatable), e.g. planner=deepseek-v4-pro")
+    sub.add_argument("--mask", action="store_true",
+                     help="privacy masking on: the planner and the extractor see the owner's sensitive values only "
+                          "as placeholders (view=masked, extract=masked)")
 
 
 def _config(args):
-    """The preset or template, with each --set applied (checked like any Config)."""
+    """The preset or template, with each --set applied and --mask (checked like any Config)."""
     config = PRESETS[args.preset] if args.preset else Config.from_template(args.template)
     types = {f.name: f.type for f in fields(Config)}
     for item in args.set:
@@ -140,7 +143,7 @@ def _config(args):
             config = replace(config, **{name: int(value) if types[name] in (int, "int") else value})
         except ValueError:
             raise ConfigError(name, f"{value!r} is not a number") from None
-    return config
+    return config.masked() if getattr(args, "mask", False) else config
 
 
 def _hosts_options(sub):

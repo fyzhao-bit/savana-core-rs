@@ -194,7 +194,11 @@ class Episode:
         the drafting model's replies (each checked against its logged digest),
         the ordering model's view and reply, and each extraction's request and
         the value it returned (the extractor's raw reply is logged only as a
-        digest)."""
+        digest). An extraction's source result is not in its recorded request:
+        it is shown from the source step's result, and under the masked
+        extractor view (`extract="masked"`) as `source_result_before_masking`,
+        since the model received it with placeholders."""
+        source_key = "source_result_before_masking" if self.case.get("extractor_view") == "masked" else "source_result"
         calls, results = [], {}
         for e in self.events:
             if e["kind"] in ("official_tool_result", "executor_local_result"):
@@ -211,7 +215,7 @@ class Episode:
                 # SOURCE is the whole result of an earlier step (`4:computed`: step 4, a computation's input).
                 source = str(arguments.get("source", "")).split(":")[0]
                 if source.isdigit() and int(source) in results:
-                    shown["source_result"] = results[int(source)]
+                    shown[source_key] = results[int(source)]
                 calls.append(dict(model=f"extractor ({arguments.get('model')})", step=e["operation"], shown=shown,
                                   reply=results[e["operation"]]))
         return calls

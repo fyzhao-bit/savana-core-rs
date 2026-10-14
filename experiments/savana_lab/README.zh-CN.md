@@ -81,6 +81,7 @@ python3 -m savana_lab why u9c travel user_task_13
 python3 -m savana_lab episode u9c travel user_task_13 --model-calls
 python3 -m savana_lab quick travel user_task_13 --preset u9      # 不起主机试一题（不是实验证据）
 python3 -m savana_lab quick-check u9b                             # quick 和主机记录逐项对比
+python3 -m savana_lab run u9m --preset u9 --mask                  # 隐私打码打开（规划和抽取两个模型）
 ```
 
 以前用 bash 跑出来的结果（u9b、u8s 等）也能用 `report`、`why`、`episode` 读，按 `<名字>-<场景>-<序号>` 找批次。
@@ -137,6 +138,29 @@ cfg = replace(sl.U9, planner="deepseek-v4-pro", extractor="qwen-plus", executor=
   走的路径和以前一样：标准输入，再到加密的 systemd credential。不进参数、文件或日志。
   只有用到 DeepSeek 时，驱动才会去查 DeepSeek 余额。
 - **实测**：`m1lab` 用 `executor=deepseek-v4-pro` 跑 banking 8 题，6/8，逐题和 U9b 相同；运行清单里记下了执行模型。
+
+## 隐私打码
+
+一个开关：
+
+```python
+cfg = sl.U9.masked()                  # 两部分都打开
+cfg = sl.U9.masked(extractor=False)   # 只给规划模型看到的请求打码
+```
+
+```bash
+python3 -m savana_lab run u9m --preset u9 --mask
+python3 -m savana_lab quick banking user_task_3 --preset u9 --mask --model-calls
+```
+
+- **规划模型**（`view=masked`）：请求里的敏感值换成占位符再发给规划模型。敏感值包括姓名、账号、地址等，按内核的 leak gate 识别。
+  审查通过后，由 owner 把真值绑回去。
+- **抽取模型**（`extract=masked`）：内核的执行器给抽取模型的每个输入打码，在回复里再把真值放回去。
+  这时主机会换用该场景的 `-masked` 目录，在这个目录里，模型工具走 model codec。
+- **怎么看**：打码时，`model_calls()` 里抽取那一步的来源结果显示为 `source_result_before_masking`。
+  这是打码前的原文，模型实际收到的是带占位符的版本。
+- **快速试实测**（banking 3，请求里有一个 IBAN）：打码后，规划模型写出的草稿里没有这个 IBAN，发给抽取模型的输入里它也换成了 `<PERSONAL_DATA_3>`。
+  不打码时，两处都是原文。
 
 ## 快速试（不起主机）
 

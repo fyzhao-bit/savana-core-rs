@@ -36,7 +36,7 @@ class Extractor:
         self.line, self.log, self.seen = line, [], []
 
     def __call__(self, *, instruction, source, target, max_bytes=480, context="", note="", timeout=30.0):
-        self.seen.append(dict(target=target, context=context))
+        self.seen.append(dict(instruction=instruction, source=source, target=target, context=context))
         self.log.append(dict(request_sha256="0" * 64))
         return self.line
 
@@ -181,10 +181,47 @@ class QuickCheckTests(unittest.TestCase):
             recorded_contract(dict(document, schema="another-schema"))
 
 
+class MaskTests(unittest.TestCase):
+    """The privacy switch: the planner's view and the extractor's input masked."""
+
+    def test_one_switch_turns_on_both_parts_or_either(self):
+        from savana_lab.config import runner_cases
+        masked = U9.masked()
+        self.assertEqual(masked, replace(U9, view="masked", extract="masked"))
+        self.assertEqual(U9.masked(extractor=False), replace(U9, view="masked"))
+        self.assertEqual(U9.masked(planner=False), replace(U9, extract="masked"))
+        self.assertIn("+view=masked+extract=masked+", masked.template())
+        self.assertEqual(masked.catalog_suffix(), "-masked")   # the host serves the model-codec catalog
+        case, = runner_cases(masked.spec("banking", ["user_task_3"]))
+        self.assertEqual((case["planner_view"], case["extractor_view"]), ("masked", "masked"))
+
+    @NEEDS_AGENTDOJO
+    def test_the_extractor_is_sent_placeholders_and_the_display_says_so(self):
+        from savana_lab.quick import quick
+        iban = "GB29NWBK60161331926819"   # in banking user_task_3's request
+        sent = {}
+        for config in (Config(author="registered"), Config(author="registered").masked(planner=False)):
+            extractor = Extractor("10.0")
+            result = quick(config, "banking", "user_task_3", clients=dict(generator=extractor))
+            sent[config.extract] = (json.dumps(extractor.seen),
+                                    {k for c in result.model_calls() if c["model"].startswith("extractor")
+                                     for k in c["shown"]})
+        self.assertIn(iban, sent["raw"][0])
+        self.assertNotIn(iban, sent["masked"][0])
+        self.assertIn("<PERSONAL_DATA_", sent["masked"][0])
+        self.assertIn("source_result", sent["raw"][1])
+        self.assertIn("source_result_before_masking", sent["masked"][1])
+
+
 class CliTests(unittest.TestCase):
-    def args(self, *argv):
+    def args(self, *argv, mask=False):
         import argparse
-        return argparse.Namespace(preset="u9", template=None, set=list(argv))
+        return argparse.Namespace(preset="u9", template=None, set=list(argv), mask=mask)
+
+    def test_mask_is_one_switch(self):
+        self.assertEqual(_config(self.args(mask=True)), U9.masked())
+        self.assertEqual(_config(self.args("planner=deepseek-v4-pro", mask=True)),
+                         replace(U9, planner="deepseek-v4-pro").masked())
 
     def test_set_changes_one_option_of_a_preset(self):
         self.assertEqual(_config(self.args("planner=deepseek-v4-pro", "drafts=2")),
