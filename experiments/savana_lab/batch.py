@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import time
 
+from .host import HostError
 from .shell import CommandFailed
 
 VENV = "/opt/savana-bench-venv/bin/python"
@@ -54,7 +55,7 @@ class Batch:
         batch armed and the runner started."""
         try:
             self.host.fresh(stage_tar, bin_tar)
-        except CommandFailed as error:
+        except (CommandFailed, HostError) as error:
             raise AttemptFailed(f"fresh host: {error}") from None
         self.step("install", "cd /root && timeout 900 " + VENV + " /opt/savana-protected/deploy/linux/integration/"
                   "install.py --file-backed-integration --binaries /root/linux-b-bin --owner-control "

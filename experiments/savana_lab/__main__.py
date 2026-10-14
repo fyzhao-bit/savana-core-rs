@@ -12,6 +12,8 @@
     python -m savana_lab quick travel user_task_13 --preset u9 --set planner=deepseek-v4-pro
                                                              # one task here: no host, NOT evidence
     python -m savana_lab quick-check u9b                     # how closely quick follows the host
+    python -m savana_lab run u9c --preset u9 --host aws --aws-region us-east-1 --aws-security-group sg-0123
+                                                             # each batch on a new EC2 instance (or --host ssh)
 
 Model keys are read from each provider's environment variable
 ($DEEPSEEK_API_KEY, $OPENAI_API_KEY, ...; savana_bench.chat_models), never
@@ -29,6 +31,7 @@ import time
 from .artifacts import ArtifactError
 from .config import PRESETS, Config, ConfigError
 from .driver import LabError
+from .host import HostError
 from .lab import Lab
 from .plan import benign, make_plan
 from .results import ABSENT, UNVERIFIED, batch_state, move_aside, run_dirs
@@ -68,6 +71,7 @@ def main(argv=None):
             floor.add_argument("--unconfined-write", help="the write tool shipped without its intent-flow validator")
             floor.add_argument("--catalog-variant", type=Path, help="a catalog served instead of the committed one")
             floor.add_argument("--artifacts-variant", help="a counterfactual build stored as <rev>-<variant>")
+            _hosts_options(sub)
     resume = commands.add_parser("resume", help="continue a run (verified batches are skipped)")
     resume.add_argument("name")
     _driving(resume)
@@ -101,13 +105,17 @@ def main(argv=None):
     quick.add_argument("--example", type=Path, help="the structured-planning example (default: stored artifacts')")
     quick_check = commands.add_parser("quick-check", help="replay host runs through quick's execution and compare")
     quick_check.add_argument("names", nargs="+")
+    leftovers = commands.add_parser("aws-leftovers", help="EC2 instances a driver made that still exist")
+    leftovers.add_argument("--aws-region", required=True)
+    leftovers.add_argument("--aws-profile")
+    leftovers.add_argument("--terminate", action="store_true", help="terminate them")
 
     args = parser.parse_args(argv)
     lab = Lab(**{k: v for k, v in dict(results=args.results, workdir=args.workdir, python=args.python).items()
                  if v is not None})
     try:
         return COMMANDS[args.command](lab, args) or 0
-    except (LabError, ArtifactError, ConfigError, LookupError) as error:
+    except (LabError, ArtifactError, ConfigError, HostError, LookupError) as error:
         print(f"savana_lab: {error}", file=sys.stderr)
         return 1
 
@@ -133,6 +141,40 @@ def _config(args):
         except ValueError:
             raise ConfigError(name, f"{value!r} is not a number") from None
     return config
+
+
+def _hosts_options(sub):
+    group = sub.add_argument_group("where each batch's brand-new host comes from (default: a Docker container here)")
+    group.add_argument("--host", choices=("docker", "ssh", "aws"), default="docker")
+    group.add_argument("--ssh-create", metavar="COMMAND",
+                       help="makes a new machine and prints [user@]host[:port] (then, optionally, its host keys)")
+    group.add_argument("--ssh-destroy", metavar="COMMAND", help="destroys it after its batch ($SAVANA_LAB_HOST)")
+    group.add_argument("--ssh-identity", type=Path, help="the private key to log in with (never copied)")
+    group.add_argument("--ssh-user", default="root", help="when the address names none (not root: passwordless sudo)")
+    group.add_argument("--aws-region")
+    group.add_argument("--aws-security-group", help="sg-...: must let this machine reach port 22")
+    group.add_argument("--aws-subnet")
+    group.add_argument("--aws-instance-type", default="c7i.xlarge")
+    group.add_argument("--aws-ami", help="default: Canonical's current Ubuntu 24.04")
+    group.add_argument("--aws-profile")
+    group.add_argument("--aws-volume-gb", type=int, default=40)
+    group.add_argument("--aws-private-ip", action="store_true", help="connect to the private address (a VPN or VPC)")
+
+
+def _hosts(args):
+    from .remote import AwsHosts, SshHosts
+    if args.host == "ssh":
+        if not (args.ssh_create and args.ssh_destroy):
+            raise ConfigError("host", "--host ssh needs --ssh-create and --ssh-destroy: every batch gets a new machine")
+        return SshHosts(create=args.ssh_create, destroy=args.ssh_destroy, user=args.ssh_user,
+                        identity=str(args.ssh_identity) if args.ssh_identity else None)
+    if args.host == "aws":
+        if not (args.aws_region and args.aws_security_group):
+            raise ConfigError("host", "--host aws needs --aws-region and --aws-security-group")
+        return AwsHosts(region=args.aws_region, security_group=args.aws_security_group, subnet=args.aws_subnet,
+                        instance_type=args.aws_instance_type, ami=args.aws_ami, profile=args.aws_profile,
+                        volume_gb=args.aws_volume_gb, public_ip=not args.aws_private_ip)
+    return None
 
 
 def _driving(sub):
@@ -187,7 +229,7 @@ def cmd_plan(lab, args):
 def cmd_run(lab, args):
     run = lab.create(_plan(args), capture=args.capture, strace=args.strace, disposition=args.disposition,
                      unconfined_write=args.unconfined_write, catalog_variant=args.catalog_variant,
-                     artifacts_variant=args.artifacts_variant)
+                     artifacts_variant=args.artifacts_variant, host=_hosts(args))
     return _start(run, args)
 
 
@@ -282,6 +324,14 @@ def cmd_quick(lab, args):
 def cmd_quick_check(lab, args):
     from .quick_check import check
     print(check(*args.names, lab=lab))
+
+
+def cmd_aws_leftovers(lab, args):
+    from .remote import aws_leftovers
+    found = aws_leftovers(lab.shell(), region=args.aws_region, profile=args.aws_profile, terminate=args.terminate)
+    for instance, state, label in found:
+        print(f"{instance} {state:10s} {label}")
+    print(f"{len(found)} instance(s)" + (" terminated" if args.terminate and found else ""))
 
 
 def _print_calls(calls):

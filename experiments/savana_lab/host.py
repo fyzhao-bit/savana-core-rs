@@ -1,8 +1,21 @@
-"""A brand-new disposable host per batch: a privileged Docker container with
-systemd as PID 1 (docs/verification/local-container-experiment-20260930.md).
+"""A brand-new disposable host per batch.
+
+Here the host is a privileged Docker container with systemd as PID 1 on this
+machine (docs/verification/local-container-experiment-20260930.md); a host
+on another machine, over SSH or as an EC2 instance, is `remote.py`'s. Every
+host is set up the same way (`provision`): the expiry guard and the
+disposable-host marker the installer requires, then the staged tree and the
+kernel binaries.
 
 Every command a host runs is the one the earlier shell drivers ran
 (fresh-host.sh, planner-attempt.sh), issued from Python.
+
+What a batch needs of its host (`Batch`, the driver): `prepare(repo)` once
+per batch on this machine, `fresh(stage_tar, bin_tar)` (a brand-new host,
+set up; returns its expiry deadline), `exec`, `detach`, `put`, `copy_out`,
+`alive`, `describe()` (what it was, for the record) and `release()` after
+the batch (a remote host is destroyed then; this one is kept until the next
+batch replaces it, as before).
 """
 from __future__ import annotations
 
@@ -26,13 +39,38 @@ class HostError(RuntimeError):
     pass
 
 
+def utc_now():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def provision(host, stage_tar, bin_tar, *, kind, what="container"):
+    """fresh-host.sh's setup of a booted host: rshared root, the absolute
+    expiry guard, the disposable-host marker (naming the kind of host), the
+    payload. Returns the expiry deadline."""
+    deadline = (host.now() + EXPIRY).strftime("%Y-%m-%d %H:%M:%S UTC")
+    host.exec(EXPIRY_SCRIPT.replace("@DEADLINE@", deadline).replace("@HOST@", kind).replace("@WHAT@", what))
+    host.put(stage_tar, "/root/stage-opt.tar")
+    host.put(bin_tar, "/root/linux-b-bin.tar")
+    host.exec("set -e; cd /opt && tar -xf /root/stage-opt.tar && cd /root && tar -xf /root/linux-b-bin.tar"
+              " && chown -R root:root /opt/savana-protected /root/linux-b-bin && chmod 700 /root/linux-b-bin")
+    host.exec("findmnt -n -o PROPAGATION /; systemctl is-active savana-acceptance-expiry.timer; "
+              "systemctl list-timers --no-legend savana-acceptance-expiry.timer | cut -c1-40")
+    host.shell.log.write(f"deadline {deadline}")
+    return deadline
+
+
 class DockerHost:
-    def __init__(self, shell, *, workdir, name=NAME, image=IMAGE, ca_dir=CA_DIR, sleep=time.sleep,
-                 now=lambda: datetime.datetime.now(datetime.timezone.utc)):
+    kind = "docker"
+
+    def __init__(self, shell, *, workdir, name=NAME, image=IMAGE, ca_dir=CA_DIR, sleep=time.sleep, now=utc_now):
         self.shell, self.workdir, self.name, self.image = shell, Path(workdir), name, image
         self.ca_dir, self.sleep, self.now = Path(ca_dir), sleep, now
 
     # -- the machine the hosts run on -------------------------------------
+    def prepare(self, repo):
+        self.ensure_daemon()
+        self.ensure_image(repo)
+
     def ensure_daemon(self, wait=60):
         if self.shell.run(["docker", "info"], check=False, quiet=True).code == 0:
             return
@@ -76,16 +114,17 @@ class DockerHost:
                 break
             self.sleep(1)
         self.shell.log.write(f"systemd: {state}")
-        deadline = (self.now() + EXPIRY).strftime("%Y-%m-%d %H:%M:%S UTC")
-        self.exec(EXPIRY_SCRIPT.replace("@DEADLINE@", deadline))
-        self.shell.run(["docker", "cp", str(stage_tar), f"{self.name}:/root/stage-opt.tar"])
-        self.shell.run(["docker", "cp", str(bin_tar), f"{self.name}:/root/linux-b-bin.tar"])
-        self.exec("set -e; cd /opt && tar -xf /root/stage-opt.tar && cd /root && tar -xf /root/linux-b-bin.tar"
-                  " && chown -R root:root /opt/savana-protected /root/linux-b-bin && chmod 700 /root/linux-b-bin")
-        self.exec("findmnt -n -o PROPAGATION /; systemctl is-active savana-acceptance-expiry.timer; "
-                  "systemctl list-timers --no-legend savana-acceptance-expiry.timer | cut -c1-40")
-        self.shell.log.write(f"deadline {deadline}")
-        return deadline
+        return provision(self, stage_tar, bin_tar, kind="docker-privileged-container-on-ephemeral-session-vm")
+
+    def put(self, local, remote):
+        self.shell.run(["docker", "cp", str(local), f"{self.name}:{remote}"])
+
+    def describe(self):
+        return dict(kind=self.kind, container=self.name, image=self.image)
+
+    def release(self):
+        """Kept until the next batch's `fresh` replaces it (it powers itself off at its deadline)."""
+        return None
 
     def exec(self, script, *, env=None, input=None, timeout=600, check=True, quiet=False):
         """`bash -c script` on the host; `env` adds variables to that one
@@ -121,10 +160,10 @@ class DockerHost:
 EXPIRY_SCRIPT = r"""set -e
 mount --make-rshared /
 umask 077
-printf '[Unit]\nDescription=Disposable Savana B test host expiry (container poweroff)\n[Service]\nType=oneshot\nExecStart=/usr/bin/systemctl poweroff --no-block\n' > /etc/systemd/system/savana-acceptance-expiry.service
-printf '[Unit]\nDescription=Absolute expiry for the disposable Savana B test container\n[Timer]\nOnCalendar=@DEADLINE@\nPersistent=false\nAccuracySec=1s\n' > /etc/systemd/system/savana-acceptance-expiry.timer
+printf '[Unit]\nDescription=Disposable Savana B test host expiry (@WHAT@ poweroff)\n[Service]\nType=oneshot\nExecStart=/usr/bin/systemctl poweroff --no-block\n' > /etc/systemd/system/savana-acceptance-expiry.service
+printf '[Unit]\nDescription=Absolute expiry for the disposable Savana B test @WHAT@\n[Timer]\nOnCalendar=@DEADLINE@\nPersistent=false\nAccuracySec=1s\n' > /etc/systemd/system/savana-acceptance-expiry.timer
 chmod 0644 /etc/systemd/system/savana-acceptance-expiry.*
 systemctl daemon-reload && systemctl start savana-acceptance-expiry.timer
-printf 'profile=file-backed-integration\nhost=docker-privileged-container-on-ephemeral-session-vm\ncreated=%s\n' "$(date -u +%FT%TZ)" > /run/savana-file-backed-disposable
+printf 'profile=file-backed-integration\nhost=@HOST@\ncreated=%s\n' "$(date -u +%FT%TZ)" > /run/savana-file-backed-disposable
 chmod 0600 /run/savana-file-backed-disposable
 """

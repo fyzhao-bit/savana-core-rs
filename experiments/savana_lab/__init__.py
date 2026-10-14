@@ -19,19 +19,23 @@ from .config import PRESETS, U8S, U9, U9H, Config, ConfigError
 from .lab import Lab, Run
 from .plan import SUITES, Batch, Plan, benign, make_plan, pairs
 from .quick import QuickResult, quick
+from .remote import AwsHosts, DockerHosts, SshHosts
 from .quick_check import check as quick_check
 from .report import Report
 
-__all__ = ["Batch", "Config", "ConfigError", "Lab", "PRESETS", "Plan", "QuickResult", "Report", "Run", "SUITES",
-           "U8S", "U9", "U9H", "benign", "make_plan", "pairs", "quick", "quick_check", "report", "run"]
+__all__ = ["AwsHosts", "Batch", "Config", "ConfigError", "DockerHosts", "Lab", "PRESETS", "Plan", "QuickResult",
+           "Report", "Run", "SUITES", "SshHosts", "U8S", "U9", "U9H", "benign", "make_plan", "pairs", "quick",
+           "quick_check", "report", "run"]
 
 
-def run(name, config, tasks=None, *, lab=None, background=True, deadline=None, capture=False):
+def run(name, config, tasks=None, *, lab=None, background=True, deadline=None, capture=False, host=None):
     """Create run `name` of `config` over `tasks` (default: every benign
     task, `benign()`) and start it; returns the Run. With `background`
-    (the default) the driver is a detached process and this returns at once."""
+    (the default) the driver is a detached process and this returns at once.
+    `host`: where each batch's brand-new host comes from (DockerHosts() here
+    by default, SshHosts(...), AwsHosts(...))."""
     lab = lab or Lab()
-    handle = lab.create(make_plan(name, config, benign() if tasks is None else tasks), capture=capture)
+    handle = lab.create(make_plan(name, config, benign() if tasks is None else tasks), capture=capture, host=host)
     handle.start(background=background, deadline=deadline)
     return handle
 

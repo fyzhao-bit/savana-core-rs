@@ -25,6 +25,7 @@ import signal
 from . import balance as balances
 from .batch import AttemptFailed, Batch, RunFailed
 from .config import runner_cases
+from .host import HostError
 from .results import INCOMPLETE, UNVERIFIED, VERIFIED, batch_state, move_aside, rows
 from .shell import CommandFailed, Log
 from .stage import build_stage
@@ -167,11 +168,10 @@ def _drive(lab, run, keys, deadline, clock, sleep, log, progress, started):
                 return "stopped"
         batch_log = Log(run.next_log(batch.name), secrets=secrets, echo=False)
         shell = lab.shell(batch_log)
-        host = lab.host(shell)
+        host = lab.host(shell, meta.get("host"), label=batch.name)
         runner, runner_started = None, False
         try:
-            host.ensure_daemon()
-            host.ensure_image(lab.repo)
+            host.prepare(lab.repo)
             variant = run.dir / "catalog-variant.json" if meta.get("catalog_variant_sha256") else None
             if variant is not None and hashlib.sha256(variant.read_bytes()).hexdigest() != meta["catalog_variant_sha256"]:
                 raise ValueError("the run's catalog variant changed since the run was created")
@@ -183,12 +183,17 @@ def _drive(lab, run, keys, deadline, clock, sleep, log, progress, started):
             runner = Batch(host, key=material, capture=meta.get("capture", False), strace=meta.get("strace", False),
                            disposition=meta.get("disposition"), unconfined_write=meta.get("unconfined_write"),
                            sleep=sleep, clock=clock)
-            runner.attempt(batch.spec, tar, artifacts.bin_tar)
+            try:
+                runner.attempt(batch.spec, tar, artifacts.bin_tar)
+            finally:
+                progress.emit("host", batch=batch.name, **host.describe())
             runner_started = True
             progress.emit("runner_started", batch=batch.name)
             run_id = runner.wait(progress=lambda done: progress.emit("episodes", batch=batch.name, done=done,
                                                                      of=cases))
             run_dir = runner.export(run_id, lab.results / batch.name)
+            # Which host ran it, next to its evidence.
+            (lab.results / batch.name / "host.json").write_text(json.dumps(host.describe(), indent=1) + "\n")
             progress.emit("exported", batch=batch.name, run_id=run_id)
             value = lab.verifier(shell).verify(lab.results / batch.name, run_dir, stage_rev, artifacts.wheel)
             progress.emit("verified", batch=batch.name, summary=summary_line(value))
@@ -205,14 +210,36 @@ def _drive(lab, run, keys, deadline, clock, sleep, log, progress, started):
                                   error=f"every episode failed at setup ({', '.join(errors)}): the batch is verified "
                                         "but measured nothing; find the cause, then `rerun` it")
                     return "failed"
-        except (AttemptFailed, RunFailed, VerificationFailed, CommandFailed, OSError, ValueError) as error:
+        except (AttemptFailed, RunFailed, VerificationFailed, CommandFailed, HostError, OSError,
+                ValueError) as error:
             progress.emit("failed", batch=batch.name, error=f"{type(error).__name__}: {error}")
-            if runner_started and not (lab.results / batch.name).exists():
-                try:
-                    runner.salvage(lab.results / batch.name)
-                    progress.emit("salvaged", batch=batch.name)
-                except (CommandFailed, OSError) as lost:
-                    progress.emit("salvage_failed", batch=batch.name, error=str(lost))
+            if runner_started:
+                _salvage(lab, batch, runner, progress)
             return "failed"
+        except Interrupted:
+            # Stopped by a signal mid-batch: keep what the run left before its host goes.
+            if runner_started:
+                _salvage(lab, batch, runner, progress)
+            raise
+        finally:
+            # A remote host is destroyed now (its run exported or salvaged); this machine's is kept.
+            try:
+                released = host.release()
+            except (CommandFailed, HostError, OSError) as error:
+                released = dict(error=f"{type(error).__name__}: {error}")
+            if released is not None:
+                progress.emit("host_released", batch=batch.name, **released)
     progress.emit("done", run=run.name)
     return "done"
+
+
+def _salvage(lab, batch, runner, progress):
+    """What a run that did not finish left on its host, unless already exported:
+    the batch counts as incomplete and is moved aside before it runs again."""
+    if (lab.results / batch.name).exists():
+        return
+    try:
+        runner.salvage(lab.results / batch.name)
+        progress.emit("salvaged", batch=batch.name)
+    except (CommandFailed, HostError, OSError) as lost:
+        progress.emit("salvage_failed", batch=batch.name, error=str(lost))

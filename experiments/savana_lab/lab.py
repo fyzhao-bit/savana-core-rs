@@ -27,7 +27,7 @@ import time
 from . import balance as balances
 from .artifacts import RUST, ArtifactError, ArtifactStore, Git
 from .driver import LabError, Lock, drive, now
-from .host import NAME as HOST_NAME, DockerHost
+from .host import NAME as HOST_NAME
 from .plan import Plan
 from .results import ABSENT, VERIFIED, batch_state, rows
 from .shell import Log, Shell
@@ -64,8 +64,10 @@ class Lab:
     def git(self, shell=None):
         return Git(shell or self.shell(), self.repo)
 
-    def host(self, shell):
-        return DockerHost(shell, workdir=self.workdir)
+    def host(self, shell, spec=None, label="batch"):
+        """The host for one batch: `spec` is the run's (DockerHosts() by default)."""
+        from .remote import make_host
+        return make_host(spec, shell=shell, workdir=self.workdir, label=label)
 
     def verifier(self, shell):
         return Verifier(shell, self.git(shell), self.workdir, self.verify_python())
@@ -99,10 +101,15 @@ class Lab:
 
     # -- runs ------------------------------------------------------------
     def create(self, plan, *, capture=False, strace=False, disposition=None, unconfined_write=None,
-               catalog_variant=None, artifacts_variant=None):
+               catalog_variant=None, artifacts_variant=None, host=None):
         """Record a new run of `plan`, staging HEAD with stored artifacts built
         from HEAD's Rust sources. Creating a run that exists with the same
         plan returns it (running it resumes it).
+
+        `host` says where each batch's brand-new host comes from:
+        DockerHosts() on this machine (the default), SshHosts(...) or
+        AwsHosts(...) (`remote.py`). It is recorded with the run, so a
+        resumed run gets the same kind of host.
 
         The floor experiment's options: `disposition` ("require_approval" or
         "permit") and `unconfined_write` (the one write tool shipped without
@@ -125,6 +132,12 @@ class Lab:
                            "(a run stages a commit, and its verifier replays that commit)")
         if disposition not in (None, "require_approval", "permit"):
             raise LabError("disposition is require_approval or permit")
+        from .host import HostError
+        from .remote import spec_record
+        try:
+            hosts = spec_record(host)
+        except (HostError, TypeError) as error:
+            raise LabError(str(error)) from None
         stage_rev = git.head()
         artifacts = self.store().for_stage(git, stage_rev, artifacts_variant)
         run.dir.mkdir(parents=True)
@@ -137,7 +150,7 @@ class Lab:
         meta = dict(name=plan.name, created=now(), stage_rev=stage_rev, results=str(self.results),
                     artifacts=dict(rev=artifacts.rev, variant=artifacts.variant, sha256=artifacts.digests()),
                     capture=capture, strace=strace, disposition=disposition, unconfined_write=unconfined_write,
-                    **floor, plan=plan.to_json())
+                    **floor, host=hosts, plan=plan.to_json())
         (run.dir / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
         return run
 
@@ -280,17 +293,26 @@ class Status:
     utility: dict
     stopping: bool = False
     setup_failures: dict = field(default_factory=dict)
+    host: dict | None = None
+    unreleased: list = field(default_factory=list)
 
     @classmethod
     def of(cls, run):
         events = list(run.progress())
         batches = {b.name: batch_state(run.lab.results, b.name) for b in run.plan.batches}
-        current = episodes = failure = None
-        setup = {}
+        current = episodes = failure = host = None
+        setup, unreleased = {}, []
         balances_seen = [e["usd"] for e in events if e["event"] == "balance" and e.get("usd") is not None]
         for event in events:
             if event["event"] == "batch_started":
-                current, episodes = event["batch"], (0, event["cases"])
+                current, episodes, host = event["batch"], (0, event["cases"]), None
+            elif event["event"] == "host" and event["batch"] == current:
+                host = event
+            elif event["event"] == "host_released" and (event.get("error") or False in (
+                    event.get("destroyed"), event.get("terminated"))):
+                # A remote host still there costs money: say so until someone looks.
+                unreleased.append(f"{event['batch']}: {event.get('instance') or event.get('address')} "
+                                  f"({event.get('error') or 'destroy failed'})")
             elif event["event"] == "episodes" and event["batch"] == current:
                 episodes = (event["done"], event["of"])
             elif event["event"] in ("verified", "failed") and event.get("batch") == current:
@@ -312,7 +334,7 @@ class Status:
         return cls(run.name, alive, batches, current if alive else None, episodes if alive else None,
                    events[-1] if events else None, failure,
                    (balances_seen[0], balances_seen[-1]) if balances_seen else None, utility,
-                   alive and (run.lab.workdir / "STOP").exists(), setup)
+                   alive and (run.lab.workdir / "STOP").exists(), setup, host if alive else None, unreleased)
 
     def __str__(self):
         verified = sum(s == VERIFIED for s in self.batches.values())
@@ -320,7 +342,13 @@ class Status:
                  f"{'running' if self.alive else 'not running'}"]
         if self.current:
             done = f" ({self.episodes[0]}/{self.episodes[1]} episodes scored)" if self.episodes else ""
-            lines.append(f"  running {self.current}{done}")
+            where = ""
+            if self.host and self.host.get("kind") != "docker":
+                where = " on " + " ".join(str(self.host[k]) for k in ("kind", "instance", "address")
+                                          if self.host.get(k))
+            lines.append(f"  running {self.current}{done}{where}")
+        for item in self.unreleased:
+            lines.append(f"  host NOT released: {item}; check it (python -m savana_lab aws-leftovers ...)")
         if self.stopping:
             lines.append("  stop requested: the driver stops after the batch that is running")
         if self.last:
