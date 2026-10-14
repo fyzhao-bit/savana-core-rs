@@ -21,12 +21,13 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import time
 
 from . import balance as balances
 from .artifacts import RUST, ArtifactError, ArtifactStore, Git
 from .driver import LabError, Lock, drive, now
-from .host import DockerHost
+from .host import NAME as HOST_NAME, DockerHost
 from .plan import Plan
 from .results import ABSENT, VERIFIED, batch_state, rows
 from .shell import Log, Shell
@@ -74,6 +75,10 @@ class Lab:
 
     def store(self):
         return ArtifactStore(self.workdir / "artifacts")
+
+    def lock_path(self):
+        """One driver per machine, whatever its workdir: every host has the same name."""
+        return Path(tempfile.gettempdir()) / f"savana-lab-{HOST_NAME}.lock"
 
     def verify_python(self):
         python = self.python or self.workdir / "venv" / "bin" / "python"
@@ -202,7 +207,7 @@ class Run:
             return drive(self.lab, self, key=key, deadline=deadline)
         if self.alive():
             raise LabError(f"run {self.name}'s driver is already running")
-        with Lock(self.lab.workdir / "driver.lock"):
+        with Lock(self.lab.lock_path()):
             pass   # another run's driver holds it: say so here, not only in the child's output
         argv = [sys.executable, "-m", "savana_lab", "--results", str(self.lab.results), "--workdir",
                 str(self.lab.workdir)]

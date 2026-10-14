@@ -174,7 +174,7 @@ class Recorder:
     def __init__(self, replies=()):
         self.calls, self.replies, self.log = [], list(replies), Log()
 
-    def run(self, argv, *, input=None, env=None, cwd=None, timeout=None, check=True, quiet=False):
+    def run(self, argv, *, input=None, env=None, cwd=None, timeout=None, check=True, quiet=False, stream=False):
         argv = [str(a) for a in argv]
         self.calls.append(dict(argv=argv, input=input, env=env))
         joined = " ".join(argv)
@@ -271,6 +271,17 @@ class BatchTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "provisioned"):
             batch.attempt("drafted:banking:user_task_0", "/w/s.tar", "/w/b.tar")
 
+    def test_a_long_command_streams_its_lines_and_is_stopped_at_its_timeout(self):
+        from savana_lab.shell import Shell
+        with tempfile.TemporaryDirectory() as root:
+            log = Log(Path(root) / "build.log", secrets=["sk-secret"])
+            result = Shell(log).run(["python3", "-c", "import sys; print('one'); print('sk-secret', file=sys.stderr)"],
+                                    stream=True)
+            self.assertEqual(result.out.splitlines(), ["one", "[redacted]"])
+            self.assertNotIn("sk-secret", (Path(root) / "build.log").read_text())
+            with self.assertRaisesRegex(CommandFailed, "timeout"):
+                Shell(log).run(["python3", "-c", "import time; time.sleep(30)"], stream=True, timeout=1)
+
     def test_a_log_never_holds_a_secret(self):
         with tempfile.TemporaryDirectory() as root:
             log = Log(Path(root) / "x.log", secrets=["sk-secret"])
@@ -317,6 +328,9 @@ class FakeLab(Lab):
 
     def shell(self, log=None):
         return Recorder(host_replies(["9 finished"]))
+
+    def lock_path(self):
+        return self.workdir / "driver.lock"
 
     def balance(self, key):
         return self.balance_value
@@ -429,9 +443,9 @@ class DriverTests(unittest.TestCase):
 
     def test_one_driver_at_a_time(self):
         lab = FakeLab(self.root.name)
-        with Lock(lab.workdir / "driver.lock"):
+        with Lock(lab.lock_path()):
             with self.assertRaises(LabError):
-                with Lock(lab.workdir / "driver.lock"):
+                with Lock(lab.lock_path()):
                     pass
 
     def test_no_key_no_run(self):

@@ -100,7 +100,7 @@ def drive(lab, run, *, key=None, deadline=None, clock=None, sleep=None):
     def interrupt(signum, _frame):
         raise Interrupted(signal.Signals(signum).name)
 
-    with Lock(lab.workdir / "driver.lock"):
+    with Lock(lab.lock_path()):
         previous = {s: signal.signal(s, interrupt) for s in (signal.SIGTERM, signal.SIGHUP)}
         try:
             return _drive(lab, run, key, deadline, clock, sleep, log, progress, started)

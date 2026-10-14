@@ -1,5 +1,16 @@
 # Savana 实验：组件、官方任务基线与产品评测分开报告
 
+2026-10-14 实验改用 Python 驱动（[`savana_lab`](savana_lab/README.zh-CN.md)）：
+- **做什么：** 以前只存在于会话草稿区的那组 bash 脚本，现在是仓库里带测试的 Python 包。
+  起主机、暂存、安装、配置、授权批次、开跑、等待、导出、离线验证都在里面；配置、分批、进度、
+  逐题对比、失败原因、模型原话都是 Python 对象。
+  例如：`sl.run("u9c", sl.U9)`、`sl.report("u9c").compare("u9b")`。
+- **不变：** 每批一台新主机、最多 9 题；主机上的命令和顺序不变；验证器用同一版本的代码重放。
+- **变了：** 验证失败就停（以前只打一行 `VERIFY_FAILED` 接着跑），安装失败就停；跑到一半失败时先导出证据；
+  验证器改用上机的 wheel。
+- **实测：** U9 配置的 banking 两批全部通过验证，效用 10/16（U9b 同样 16 题 11/16）；
+  `stop` 和 `resume` 都按预期工作；重验 U9b 的两批，结果逐字相同。
+
 2026-10-13 代码清理：runner 现在只运行 `drafted` / `drafted-poison` 规格
 （`protected_launch --software-benchmark --planner-experiment <spec>`，`planner_verify` 复核）。
 默认 runner（`agentdojo-protected` / `verify-protected`）、预审合同目录与 `honest` / `poisoned` /

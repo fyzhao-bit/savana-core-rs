@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import subprocess
+import threading
 import time
 
 
@@ -61,11 +62,14 @@ class Shell:
     def __init__(self, log=None):
         self.log = log or Log()
 
-    def run(self, argv, *, input=None, env=None, cwd=None, timeout=None, check=True, quiet=False):
+    def run(self, argv, *, input=None, env=None, cwd=None, timeout=None, check=True, quiet=False, stream=False):
         """Run `argv`; `input` (str or bytes) goes to its stdin. Output is
-        captured as text and logged unless `quiet`."""
+        captured as text and logged unless `quiet`; with `stream` (a long
+        build) each line is logged as it comes, stderr merged into stdout."""
         argv = [str(a) for a in argv]
         self.log.write(f"$ {_show(argv)}")
+        if stream:
+            return self._stream(argv, env=env, cwd=cwd, timeout=timeout, check=check)
         data = input.encode() if isinstance(input, str) else input
         try:
             done = subprocess.run(argv, input=data, stdin=None if data is not None else subprocess.DEVNULL,
@@ -81,6 +85,31 @@ class Shell:
         if check and result.code != 0:
             raise CommandFailed(argv, result.code, self.log.redact(result.out), self.log.redact(result.err))
         return result
+
+    def _stream(self, argv, *, env, cwd, timeout, check):
+        process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, env=_env(env), cwd=cwd)
+        expired = threading.Event()
+        timer = threading.Timer(timeout, lambda: (expired.set(), process.kill())) if timeout else None
+        if timer is not None:
+            timer.start()
+        lines = []
+        try:
+            for raw in process.stdout:
+                line = raw.decode(errors="replace").rstrip("\n")
+                lines.append(line)
+                self.log.write(line)
+            code = process.wait()
+        finally:
+            if timer is not None:
+                timer.cancel()
+            process.stdout.close()
+        out = self.log.redact("\n".join(lines))
+        if expired.is_set():
+            raise CommandFailed(argv, "timeout", out, f"timed out after {timeout}s")
+        if check and code != 0:
+            raise CommandFailed(argv, code, out, "")
+        return Result(code, out, "")
 
     def pipe(self, first, second, *, cwd=None, timeout=None):
         """`first | second`, both checked (a tar stream out of the host)."""

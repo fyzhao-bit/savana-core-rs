@@ -152,7 +152,7 @@ class ArtifactStore:
         # Kernel binaries: the integration profile, workspace packages cleaned
         # first, with a build receipt of every source hash.
         shell.run(["python3", repo / "deploy/linux/integration/build.py", "--output", partial / "linux-b-bin",
-                   *offline_flag], cwd=repo, timeout=5400)
+                   *offline_flag], cwd=repo, timeout=5400, stream=True)
         shell.run(["tar", "-cf", partial / "linux-b-bin.tar", "-C", partial, "linux-b-bin.build.json",
                    "linux-b-bin"])
         shutil.rmtree(partial / "linux-b-bin")
@@ -160,7 +160,7 @@ class ArtifactStore:
         # The SDK wheel: abi3 (Python >= 3.12), release, locked.
         started = time.monotonic()
         shell.run([python, "-m", "maturin", "build", "--release", "--locked", *offline_flag, "--interpreter",
-                   python, "-o", partial / "wheel"], cwd=repo / "crates/savana-core-py", timeout=5400,
+                   python, "-o", partial / "wheel"], cwd=repo / "crates/savana-core-py", timeout=5400, stream=True,
                   env=dict(CARGO_TARGET_DIR=str(target_dir), CARGO_BUILD_JOBS=str(jobs)))
         wheels = sorted((partial / "wheel").glob("*.whl"))
         if len(wheels) != 1:
@@ -171,7 +171,7 @@ class ArtifactStore:
         # The structured-planning example (agentd's test-support feature).
         started = time.monotonic()
         shell.run(["cargo", "build", f"-j{jobs}", "--locked", *offline_flag, "-p", "savana-agentd", "--features",
-                   "test-support", "--example", "structured_plan_eval"], cwd=repo, timeout=5400,
+                   "test-support", "--example", "structured_plan_eval"], cwd=repo, timeout=5400, stream=True,
                   env=dict(CARGO_INCREMENTAL="0"))
         shutil.copyfile(repo / "target/debug/examples/structured_plan_eval", partial / "structured_plan_eval")
         (partial / "structured_plan_eval").chmod(0o755)
