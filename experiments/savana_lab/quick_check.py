@@ -158,6 +158,10 @@ def check(*names, lab=None):
         found = events(lab.results, batch)
         cases = next(e for e in found if e["kind"] == "manifest")["cases"]
         for index, case in enumerate(cases):
+            if case.get("instructions"):
+                # An act turn continues on its read turn's environment; quick runs one turn from the start.
+                result.tally["instructions found in data: two turns (not replayed)"] += 1
+                continue
             local = [e for e in found if e.get("episode") == index and e["kind"] != "episode_score"]
             row = next(e for e in found if e["kind"] == "episode_score" and e.get("episode") == index)
             compared = compare_episode(case, local, row)

@@ -589,6 +589,26 @@ class ReportTests(unittest.TestCase):
                                    "report", "new", "--compare", "old"]), 0)
         self.assertIn("new vs old: +1 -1", out.getvalue())
 
+    def test_a_task_run_as_two_turns_counts_once_by_its_act_turn(self):
+        # instructions=adopt (U6, U10): a read turn, then an act turn scored as the whole task.
+        turns = [dict(row("slack", 18, False), instructions="read"), dict(row("slack", 18, True), instructions="act"),
+                 row("slack", 1, False)]
+        events = ([dict(kind="manifest", cases=[{k: r[k] for k in ("suite", "user", "injection", "instructions")
+                                                  if k in r} for r in turns])]
+                  + [dict(kind="episode_score", episode=i, outcome=r["outcome"], utility=r["utility"])
+                     for i, r in enumerate(turns)])
+        write_run(self.lab.results, "two-slack-0", turns, events=events)
+        report = self.lab.report("two")
+        self.assertEqual(report.utility().total(), (1, 2))
+        self.assertEqual(sum(report.outcomes().values()), 2)
+        self.assertEqual(report.episode("slack", "user_task_18").case["instructions"], "act")
+        self.assertEqual(report.episode("slack", "user_task_18", turn="read").index, 0)
+        why = report.why("slack", "user_task_18")
+        self.assertIn("(two-slack-0, episode 0, read turn): outcome published, utility False", why)
+        self.assertIn("(two-slack-0, episode 1, act turn): outcome published, utility True", why)
+        with self.assertRaises(LookupError):
+            report.episode("slack", "user_task_1", turn="act")
+
 
 class StageTests(unittest.TestCase):
     def test_a_stage_is_the_committed_tree_with_one_suites_catalog(self):

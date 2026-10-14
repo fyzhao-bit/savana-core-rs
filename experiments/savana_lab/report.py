@@ -21,7 +21,7 @@ import json
 import re
 
 from .plan import SUITES
-from .results import VERIFIED, batch_state, events, rows
+from .results import VERIFIED, batch_state, events, rows, task_rows
 
 BATCH = re.compile(r"(?P<run>.+)-(?P<suite>banking|slack|travel|workspace)-(?P<k>[0-9]+)")
 
@@ -61,11 +61,13 @@ class Report:
         return {b: batch_state(self.lab.results, b) for b in self.batches}
 
     def rows(self):
-        """Every episode row of the verified batches, with its batch name."""
+        """Every task's row of the verified batches, with its batch name: a
+        task run as a read turn and an act turn counts once, by its act turn
+        (`results.task_rows`)."""
         out = []
         for batch, state in self.states().items():
             if state == VERIFIED:
-                out += [dict(row, batch=batch) for row in rows(self.lab.results, batch)]
+                out += [dict(row, batch=batch) for row in task_rows(rows(self.lab.results, batch))]
         return out
 
     def utility(self):
@@ -89,22 +91,37 @@ class Report:
                           only_mine=sorted(set(mine) - set(theirs), key=_order),
                           only_theirs=sorted(set(theirs) - set(mine), key=_order))
 
-    def episode(self, suite, task):
-        """The episode of one task (`user_task_N` or `user_task_N+injection_task_M`)."""
+    def episodes(self, suite, task):
+        """The episodes of one task (`user_task_N` or `user_task_N+injection_task_M`)
+        in the first batch that has it: one, or a read turn and its act turn
+        (`+instructions=adopt`)."""
         wanted = _task(suite, task)
         for batch in self.batches:
             found = events(self.lab.results, batch)
             if not found:
                 continue
             cases = next(e for e in found if e["kind"] == "manifest")["cases"]
-            for index, case in enumerate(cases):
-                if (case["suite"], case["user"], case.get("injection")) == wanted:
-                    local = [e for e in found if e.get("episode") == index]
-                    return Episode(batch, index, case, local, self.states()[batch] == VERIFIED)
+            matches = [index for index, case in enumerate(cases)
+                       if (case["suite"], case["user"], case.get("injection")) == wanted]
+            if matches:
+                verified = self.states()[batch] == VERIFIED
+                return [Episode(batch, index, cases[index], [e for e in found if e.get("episode") == index],
+                                verified) for index in matches]
         raise LookupError(f"{suite} {task} is in none of {self.name}'s batches")
 
+    def episode(self, suite, task, turn=None):
+        """The episode of one task; for a task run as two turns, `turn` "read"
+        or "act" (default: the act turn, the one scored as the task)."""
+        found = self.episodes(suite, task)
+        if turn is not None:
+            found = [e for e in found if e.case.get("instructions") == turn]
+            if not found:
+                raise LookupError(f"{suite} {task} has no {turn} turn in {self.name}")
+        return found[-1]
+
     def why(self, suite, task):
-        return self.episode(suite, task).why()
+        """What happened to one task: each of its turns, in order."""
+        return "\n".join(episode.why() for episode in self.episodes(suite, task))
 
 
 def _order(key):
@@ -223,7 +240,8 @@ class Episode:
     def why(self):
         s, case = self.score, self.case
         task = case["user"] + (f"+{case['injection']}" if case.get("injection") else "")
-        lines = [f"{case['suite']} {task} ({self.batch}, episode {self.index}"
+        turn = f", {case['instructions']} turn" if case.get("instructions") else ""
+        lines = [f"{case['suite']} {task} ({self.batch}, episode {self.index}{turn}"
                  f"{'' if self.verified else ', batch NOT verified'}): outcome {s.get('outcome')}, "
                  f"utility {s.get('utility')}"]
         for key in ("stage", "refusal", "error_type", "error_errno", "error_code"):

@@ -29,7 +29,7 @@ from .artifacts import RUST, ArtifactError, ArtifactStore, Git
 from .driver import LabError, Lock, drive, now
 from .host import NAME as HOST_NAME
 from .plan import Plan
-from .results import ABSENT, VERIFIED, batch_state, rows
+from .results import ABSENT, VERIFIED, batch_state, rows, task_rows
 from .shell import Log, Shell
 from .verify import Verifier
 
@@ -327,7 +327,7 @@ class Status:
         for name, state in batches.items():
             if state != VERIFIED:
                 continue
-            for row in rows(run.lab.results, name):
+            for row in task_rows(rows(run.lab.results, name)):
                 ok, total = utility.get(row["suite"], (0, 0))
                 utility[row["suite"]] = (ok + (row.get("utility") is True), total + 1)
         alive = run.alive()

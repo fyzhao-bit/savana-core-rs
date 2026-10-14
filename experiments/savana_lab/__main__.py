@@ -97,6 +97,8 @@ def main(argv=None):
         sub.add_argument("suite")
         sub.add_argument("task")
     episode.add_argument("--model-calls", action="store_true")
+    episode.add_argument("--turn", choices=("read", "act"),
+                         help="a task run as a read and an act turn (instructions=adopt): which (default: act)")
     quick = commands.add_parser("quick", help="try one task in this process: no host, NOT experiment evidence")
     quick.add_argument("suite")
     quick.add_argument("task", help="user_task_N or user_task_N+injection_task_M")
@@ -308,7 +310,7 @@ def cmd_why(lab, args):
 
 
 def cmd_episode(lab, args):
-    episode = lab.report(args.name).episode(args.suite, args.task)
+    episode = lab.report(args.name).episode(args.suite, args.task, turn=args.turn)
     if not args.model_calls:
         print(episode.why())
         return

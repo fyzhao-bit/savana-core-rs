@@ -65,6 +65,14 @@ def rows(results, name):
     return json.loads((runs[0] / "summary.json").read_text())["rows"]
 
 
+def task_rows(rows):
+    """The rows that are tasks. A task whose request hands its action to data
+    (`+instructions=adopt`) runs as a read turn and an act turn; the act turn
+    is scored as the whole task (from before the read turn, with both turns'
+    calls), so the read turn's row is not a task of its own."""
+    return [row for row in rows if row.get("instructions") != "read"]
+
+
 def events(results, name):
     runs = run_dirs(Path(results) / name)
     if len(runs) != 1:
