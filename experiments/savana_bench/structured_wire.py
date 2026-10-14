@@ -659,7 +659,8 @@ class OneShotServer:
     which agentd reports as an unavailable endpoint; nothing is retried and no
     exception text is kept."""
 
-    def __init__(self, *, context, client_pin, host, path, handler, address=("127.0.0.1", 0), timeout=40.0):
+    def __init__(self, *, context, client_pin, host, path, handler, address=("127.0.0.1", 0), timeout=40.0,
+                 avoid=()):
         if type(client_pin) is not bytes or len(client_pin) != 32 or not callable(handler):
             raise ValueError("server_binding")
         self.context, self.client_pin, self.path, self.handler = context, client_pin, path, handler
@@ -667,14 +668,24 @@ class OneShotServer:
         self.host = host
         self.connections = self.served = self.rejected = 0
         self._stop = threading.Event()
-        self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            self.listener.bind(address)
-            self.listener.listen(8)
-            self.listener.settimeout(.2)
-        except BaseException:
-            self.listener.close()
-            raise
+        # An ephemeral port can be one a provider of the same deployment listens
+        # on (its release provider's port lies in the ephemeral range): then
+        # every episode's provider would fail to bind. Take another one.
+        for _ in range(16):
+            self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                self.listener.bind(address)
+                if self.listener.getsockname()[1] in avoid:
+                    self.listener.close()
+                    continue
+                self.listener.listen(8)
+                self.listener.settimeout(.2)
+                break
+            except BaseException:
+                self.listener.close()
+                raise
+        else:
+            raise OSError("no listening port outside the deployment's")
         self.address = self.listener.getsockname()
         self.authority = host if self.address[1] == 443 else f"{host}:{self.address[1]}"
         self._thread = threading.Thread(target=self._serve, name="savana-structured-" + path.strip("/"), daemon=True)

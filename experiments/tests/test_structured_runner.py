@@ -6,6 +6,7 @@ job is played in process by the codecs test_structured_example checks against
 agentd itself. Never kernel, model or benchmark evidence."""
 import copy
 import hashlib
+import importlib.util
 import json
 import unittest
 
@@ -236,6 +237,43 @@ class VerifierTests(unittest.TestCase):
         # A program the conversion takes is never recorded as refused by it.
         with self.assertRaisesRegex(ValueError, "structured_mapper_evidence"):
             _drafted_contract(the_case, [local[0], refused], row)
+
+
+@unittest.skipUnless(importlib.util.find_spec("agentdojo"), "install the explicit AgentDojo test extra")
+class SetupFailureTests(unittest.TestCase):
+    def test_a_setup_failure_before_the_plan_is_authored_verifies_with_no_effects(self):
+        # The runner's record when the episode's provider listeners cannot start
+        # (planned, but never authored, submitted or run): the verifier
+        # accepts it, and only while nothing went further.
+        from types import SimpleNamespace
+        from savana_bench.agentdojo_tasks import register_drafted
+        from savana_bench.planner_verify import verify_episode
+        from savana_bench.protected_agentdojo import official_case, score_outcome
+        the_case, local, planned = episode(model(forward))
+        self.assertEqual(planned["outcome"], "planned")
+        suite, task, injection, contract, values, env = official_case(the_case, register_drafted(planned["contract"]))
+        state = env.model_dump(mode="json")
+        local = local + [dict(kind="episode_input", episode=0, contract=contract.document(), injections=values,
+                              environment=state),
+                         dict(kind="episode_environment", episode=0, environment=state)]
+        observed = score_outcome(suite=suite, task=task, injection=injection, contract=contract, before=env,
+                                 after=env.model_copy(deep=True), provider=SimpleNamespace(audit=[]), outcome=None)
+        row = dict(the_case, attempted=True, outcome="setup_failed", status="unknown", stage="structured_planning",
+                   drafts=1, plan_deviates_from_reviewed=None, utility=None, attacker_success=None,
+                   observed_utility=observed[0], observed_attacker_success=observed[1], environment_changed=False,
+                   provider_attempts=0, unauthorized_provider_attempts=0, owner_releases=0, error_type="OSError",
+                   error_errno=98)
+        verify_episode(None, local, the_case, row, None, set())
+        for kind in ("plan_submitted", "admission_stage_started", "benchmark_consent", "episode_binding",
+                     "native_execution_prepared"):
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "plan_author_evidence"):
+                verify_episode(None, local + [dict(kind=kind, episode=0)], the_case, row, None, set())
+        # Any outcome past setup still needs its plan's author on record.
+        with self.assertRaisesRegex(ValueError, "plan_author_evidence"):
+            verify_episode(None, local, the_case, dict(row, outcome="owner_refused"), None, set())
+        # And the environment it started with is the one it ended with.
+        with self.assertRaisesRegex(ValueError, "environment_change_claim"):
+            verify_episode(None, local, the_case, dict(row, environment_changed=True), None, set())
 
 
 if __name__ == "__main__":

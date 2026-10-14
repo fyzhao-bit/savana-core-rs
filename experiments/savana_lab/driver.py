@@ -25,7 +25,7 @@ import signal
 from . import balance as balances
 from .batch import AttemptFailed, Batch, RunFailed
 from .config import runner_cases
-from .results import INCOMPLETE, UNVERIFIED, VERIFIED, batch_state, move_aside
+from .results import INCOMPLETE, UNVERIFIED, VERIFIED, batch_state, move_aside, rows
 from .shell import CommandFailed, Log, Shell
 from .stage import build_stage
 from .verify import VerificationFailed, summary_line
@@ -168,6 +168,19 @@ def _drive(lab, run, key, deadline, clock, sleep, log, progress, started):
             progress.emit("exported", batch=batch.name, run_id=run_id)
             value = lab.verifier(shell).verify(lab.results / batch.name, run_dir, stage_rev, artifacts.wheel)
             progress.emit("verified", batch=batch.name, summary=summary_line(value))
+            # Episodes that never got past setup measured nothing about the
+            # planner or the kernel; a batch of nothing else is an
+            # infrastructure failure, and the next batch would likely repeat it.
+            setup = [r for r in rows(lab.results, batch.name) if r["outcome"] == "setup_failed"]
+            if setup:
+                errors = sorted({f"{r.get('error_type')}" + (f" errno {r['error_errno']}" if r.get("error_errno")
+                                                            else "") for r in setup})
+                progress.emit("setup_failures", batch=batch.name, count=len(setup), of=cases, errors=errors)
+                if len(setup) == cases:
+                    progress.emit("failed", batch=batch.name,
+                                  error=f"every episode failed at setup ({', '.join(errors)}): the batch is verified "
+                                        "but measured nothing; find the cause, then `rerun` it")
+                    return "failed"
         except (AttemptFailed, RunFailed, VerificationFailed, CommandFailed, OSError, ValueError) as error:
             progress.emit("failed", batch=batch.name, error=f"{type(error).__name__}: {error}")
             if runner_started and not (lab.results / batch.name).exists():

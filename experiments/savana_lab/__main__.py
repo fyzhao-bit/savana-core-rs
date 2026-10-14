@@ -24,7 +24,7 @@ from .config import PRESETS, Config, ConfigError
 from .driver import LabError
 from .lab import Lab
 from .plan import benign, make_plan
-from .results import UNVERIFIED, INCOMPLETE, batch_state, move_aside, run_dirs
+from .results import ABSENT, UNVERIFIED, batch_state, move_aside, run_dirs
 
 
 def main(argv=None):
@@ -76,7 +76,7 @@ def main(argv=None):
     verify.add_argument("batch")
     verify.add_argument("--rev", help="staged revision (a batch of a savana_lab run knows its own)")
     verify.add_argument("--wheel", type=Path, help="staged wheel (likewise)")
-    rerun = commands.add_parser("rerun", help="move a batch aside so the next resume runs it again")
+    rerun = commands.add_parser("rerun", help="move a batch to _superseded/ so the next resume runs it again")
     rerun.add_argument("batch")
     report = commands.add_parser("report", help="utility of one or more runs")
     report.add_argument("names", nargs="+")
@@ -209,9 +209,9 @@ def cmd_verify(lab, args):
 
 def cmd_rerun(lab, args):
     state = batch_state(lab.results, args.batch)
-    if state not in (UNVERIFIED, INCOMPLETE):
-        raise LabError(f"{args.batch} is {state}: only an unverified or incomplete batch is moved aside")
-    print(move_aside(lab.results, args.batch))
+    if state == ABSENT:
+        raise LabError(f"{args.batch} has no results to move aside")
+    print(move_aside(lab.results, args.batch, folder="_superseded"))
 
 
 def cmd_report(lab, args):

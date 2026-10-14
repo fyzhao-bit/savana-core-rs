@@ -658,7 +658,10 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                 # episode, sent only the anonymised graph. One agentd example
                 # (one node-id issuer) serves the whole batch.
                 structural = DeepSeekStructuralPlanner(key, max_calls=len(structured_cases), model=planner_model)
-                structured = StructuredSession(structured_example, structural)
+                # Its endpoints listen for the whole batch: never on a port an
+                # episode's providers bind.
+                structured = StructuredSession(structured_example, structural, avoid_ports={
+                    config[name]["address"][1] for name in ("provider", "release_provider")})
             del key
             broker = WebAuthnBroker(auth_fd, timeout_seconds=120)
             worker = ModelWorker(config["model_worker"], model, audit, listener_fd=model_listener_fd)
@@ -939,6 +942,9 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         row["outcome"] = "no_publication"
                 except Exception as error:
                     row["error_type"] = type(error).__name__
+                    if isinstance(error, OSError) and type(error.errno) is int:
+                        # Which system call failure (EADDRINUSE, ENOSPC, ...): a number, no text.
+                        row["error_errno"] = error.errno
                     code = safe_error_code(error)
                     if code is not None:
                         row["error_code"] = code

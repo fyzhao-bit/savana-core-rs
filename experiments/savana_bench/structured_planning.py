@@ -670,13 +670,14 @@ class StructuredSession:
     the planner's endpoints, and ONE agentd example process (agentd's single
     long-lived node-id issuer) for every job of the batch."""
 
-    def __init__(self, example, planner, *, ceiling="private_only"):
+    def __init__(self, example, planner, *, ceiling="private_only", avoid_ports=()):
         self.planner, self._mapper, self.example, self.servers = planner, None, None, []
         self.pki = EphemeralPki([MAPPER_HOST, PLANNER_HOST])
         try:
             for host, path, handler in ((MAPPER_HOST, MAPPER_PATH, self._map), (PLANNER_HOST, PLANNER_PATH, planner)):
                 self.servers.append(OneShotServer(context=self.pki.server_context(host), client_pin=self.pki.client_pin,
-                                                  host=host, path=path, handler=handler).start())
+                                                  host=host, path=path, handler=handler,
+                                                  avoid=frozenset(avoid_ports)).start())
 
             def endpoint(host, server):
                 return dict(host=host, address="%s:%d" % server.address,

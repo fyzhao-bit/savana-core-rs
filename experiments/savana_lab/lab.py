@@ -275,12 +275,14 @@ class Status:
     balance: tuple | None
     utility: dict
     stopping: bool = False
+    setup_failures: dict = field(default_factory=dict)
 
     @classmethod
     def of(cls, run):
         events = list(run.progress())
         batches = {b.name: batch_state(run.lab.results, b.name) for b in run.plan.batches}
         current = episodes = failure = None
+        setup = {}
         balances_seen = [e["usd"] for e in events if e["event"] == "balance" and e.get("usd") is not None]
         for event in events:
             if event["event"] == "batch_started":
@@ -289,6 +291,8 @@ class Status:
                 episodes = (event["done"], event["of"])
             elif event["event"] in ("verified", "failed") and event.get("batch") == current:
                 current = episodes = None
+            if event["event"] == "setup_failures":
+                setup[event["batch"]] = f"{event['count']}/{event['of']} ({', '.join(event['errors'])})"
             if event["event"] == "failed":
                 failure = f"{event.get('batch')}: {event['error']}"
             elif event["event"] == "run_started":
@@ -304,7 +308,7 @@ class Status:
         return cls(run.name, alive, batches, current if alive else None, episodes if alive else None,
                    events[-1] if events else None, failure,
                    (balances_seen[0], balances_seen[-1]) if balances_seen else None, utility,
-                   alive and (run.lab.workdir / "STOP").exists())
+                   alive and (run.lab.workdir / "STOP").exists(), setup)
 
     def __str__(self):
         verified = sum(s == VERIFIED for s in self.batches.values())
@@ -329,6 +333,9 @@ class Status:
             total = sum(v[1] for v in self.utility.values())
             parts = ", ".join(f"{s} {v[0]}/{v[1]}" for s, v in sorted(self.utility.items()))
             lines.append(f"  utility so far (verified batches): {ok}/{total} ({parts})")
+        if self.setup_failures:
+            lines.append("  episodes that failed at setup (they measured nothing): "
+                         + "; ".join(f"{b} {v}" for b, v in self.setup_failures.items()))
         others = {s for s in self.batches.values() if s not in (VERIFIED, ABSENT)}
         if others:
             lines.append("  not verified: " + ", ".join(f"{n} ({s})" for n, s in self.batches.items()

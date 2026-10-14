@@ -222,7 +222,7 @@ class Episode:
         lines = [f"{case['suite']} {task} ({self.batch}, episode {self.index}"
                  f"{'' if self.verified else ', batch NOT verified'}): outcome {s.get('outcome')}, "
                  f"utility {s.get('utility')}"]
-        for key in ("stage", "refusal", "error_type"):
+        for key in ("stage", "refusal", "error_type", "error_errno", "error_code"):
             if s.get(key):
                 lines.append(f"  {key}: {s[key]}")
         for draft in self.drafts():

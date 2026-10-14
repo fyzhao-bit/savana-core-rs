@@ -432,7 +432,15 @@ def verify_episode(directory, local, case, row, profile, turns, prior=None):
     if initial["environment"] != (env.model_dump(mode="json") if continued is None else continued["environment"]):
         raise ValueError("initial_environment_mismatch")
     authored = [e for e in local if e["kind"] == "plan_authored"]
-    if len(authored) != 1 or authored[0] != dict(authored[0], author=case["author"], mutation=case["mutation"]):
+    if not authored and row["outcome"] == "setup_failed":
+        # Setup failed before the plan was authored (the episode's provider
+        # listeners did not start): nothing may have been submitted, admitted,
+        # approved or bound; the checks below confirm no call went out and the
+        # environment is the one the episode started with.
+        if any(e["kind"] in ("plan_submitted", "admission_stage_started", "benchmark_consent", "episode_binding",
+                             "native_execution_prepared") for e in local):
+            raise ValueError("plan_author_evidence")
+    elif len(authored) != 1 or authored[0] != dict(authored[0], author=case["author"], mutation=case["mutation"]):
         raise ValueError("plan_author_evidence")
     draft, deviates = _submitted_draft(contract, local)
     if row["plan_deviates_from_reviewed"] != deviates:

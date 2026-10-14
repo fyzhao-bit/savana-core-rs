@@ -233,6 +233,31 @@ class EndpointTests(unittest.TestCase):
         self.assertTrue(self.server.settled())
         self.assertEqual((self.server.served, self.seen), (1, [body]))
 
+    def test_a_port_a_provider_listens_on_is_never_taken(self):
+        # The release provider's fixed port lies in the ephemeral range: a
+        # server that drew it closes that listener and takes another port.
+        from unittest import mock
+        from savana_bench import structured_wire
+        created = []
+
+        class Socket(socket.socket):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                created.append(self)
+
+            def getsockname(self):
+                name = super().getsockname()
+                return (name[0], 43191) if self is created[0] else name
+        with mock.patch.object(structured_wire.socket, "socket", Socket):
+            server = OneShotServer(context=self.pki.server_context(self.HOST), client_pin=self.pki.client_pin,
+                                   host=self.HOST, path=PLANNER_PATH, handler=lambda body: body, avoid={43191})
+        try:
+            self.assertEqual(len(created), 2)
+            self.assertEqual(created[0].fileno(), -1)
+            self.assertNotEqual(server.address[1], 43191)
+        finally:
+            server.close()
+
     def test_any_other_request_or_client_gets_no_reply(self):
         body = b"\x84\x02"
         exact = request_header(PLANNER_PATH, self.server.authority, len(body))

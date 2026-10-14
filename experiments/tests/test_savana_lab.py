@@ -369,11 +369,14 @@ class DriverTests(unittest.TestCase):
         self.plan = make_plan("t", U9, [("banking", "user_task_0"), ("slack", "user_task_0"),
                                         ("travel", "user_task_0")])
 
-    def drive(self, lab, run, **options):
+    def drive(self, lab, run, outcome="published", **options):
         exported = []
 
         def export(batch, run_id, out):
-            write_run(out.parent, out.name, [row(out.name.split("-")[1], 0, True)], verified=False)
+            episode = row(out.name.split("-")[1], 0, outcome == "published", outcome=outcome)
+            if outcome == "setup_failed":
+                episode.update(error_type="OSError", error_errno=98)
+            write_run(out.parent, out.name, [episode], verified=False)
             exported.append(out.name)
             return out / "r1"
 
@@ -440,6 +443,15 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.drive(lab, late, clock=clock(400), deadline=1000)[0], "stopped")
         self.assertEqual(len(lab.ran), 4)
         self.assertIn("deadline", [e for e in late.progress()][-1]["reason"])
+
+    def test_a_batch_that_measured_nothing_stops_the_run(self):
+        lab = FakeLab(self.root.name)
+        run = create(lab, make_plan("s", U9, [("banking", "user_task_0"), ("slack", "user_task_0")]))
+        self.assertEqual(self.drive(lab, run, outcome="setup_failed")[0], "failed")
+        self.assertEqual(len(lab.ran), 1)
+        status = str(run.status())
+        self.assertIn("every episode failed at setup (OSError errno 98)", status)
+        self.assertIn("s-banking-0 1/1 (OSError errno 98)", status)
 
     def test_one_driver_at_a_time(self):
         lab = FakeLab(self.root.name)
