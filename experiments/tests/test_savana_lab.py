@@ -288,7 +288,9 @@ class BatchTests(unittest.TestCase):
         from savana_lab.shell import Shell
         with tempfile.TemporaryDirectory() as root:
             log = Log(Path(root) / "build.log", secrets=["sk-secret"])
-            result = Shell(log).run(["python3", "-c", "import sys; print('one'); print('sk-secret', file=sys.stderr)"],
+            # stdout flushed first: on a pipe it is block-buffered, so the order is otherwise the stderr line first.
+            result = Shell(log).run(["python3", "-c",
+                                     "import sys; print('one', flush=True); print('sk-secret', file=sys.stderr)"],
                                     stream=True)
             self.assertEqual(result.out.splitlines(), ["one", "[redacted]"])
             self.assertNotIn("sk-secret", (Path(root) / "build.log").read_text())
