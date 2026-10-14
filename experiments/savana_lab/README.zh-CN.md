@@ -161,6 +161,10 @@ python3 -m savana_lab quick banking user_task_3 --preset u9 --mask --model-calls
   这是打码前的原文，模型实际收到的是带占位符的版本。
 - **快速试实测**（banking 3，请求里有一个 IBAN）：打码后，规划模型写出的草稿里没有这个 IBAN，发给抽取模型的输入里它也换成了 `<PERSONAL_DATA_3>`。
   不打码时，两处都是原文。
+- **主机实测 `u9mask`**（U9 加 `--mask`，banking 0–3）：
+  - 主机上抽取工具走的是 model codec（`provisioning.json` 里 `dojo.model.extract: mcp_model`）。
+  - 通过离线验证；验证器还核对了规划模型的输入里没有 owner 的值、抽取模型的输入里没有漏网的敏感值。
+  - 结果 2/4，和 U9b 逐题相同。
 
 ## 快速试（不起主机）
 
