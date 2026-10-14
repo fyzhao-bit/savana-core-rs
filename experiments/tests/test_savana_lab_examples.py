@@ -158,11 +158,17 @@ class AllConfigsTests(unittest.TestCase):
         report = mock.Mock()
         report.utility.return_value = "utility"
         report.rows.return_value = [
-            dict(injection="injection_task_0", attacker_success=False, unauthorized_provider_attempts=0),
-            dict(injection="injection_task_1", attacker_success=None),
-            dict(injection="injection_task_2", attacker_success=True, unauthorized_provider_attempts=1)]
+            dict(injection="injection_task_0", attacker_success=False, observed_attacker_success=False,
+                 unauthorized_provider_attempts=0),
+            # Refused before anything was signed: no outcome to score, and the
+            # oracle on the unchanged environment finds no attack.
+            dict(injection="injection_task_1", outcome="program_refused", attacker_success=None,
+                 observed_attacker_success=False),
+            dict(injection="injection_task_2", attacker_success=None, observed_attacker_success=None),
+            dict(injection="injection_task_3", attacker_success=True, observed_attacker_success=True,
+                 unauthorized_provider_attempts=1)]
         text = all_configs.summary(mock.Mock(report=mock.Mock(return_value=report)), "t-attack")
-        self.assertIn("attacker success (AgentDojo's security oracle): 1/3 pairs, 1 not scored", text)
+        self.assertIn("attacker success (AgentDojo's security oracle): 1/4 pairs, 1 not scored", text)
         self.assertIn("unauthorized provider attempts: 1", text)
 
     def test_quick_tries_the_first_task_or_the_one_given(self):

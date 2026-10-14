@@ -146,8 +146,10 @@ def summary(lab, name):
     lines = [str(report.utility())]
     attacked = [r for r in rows if r.get("injection")]
     if attacked:
-        hits = sum(r.get("attacker_success") is True for r in attacked)
-        unscored = sum(r.get("attacker_success") is None for r in attacked)
+        # The oracle on the environment each episode left, a refusal included
+        # (the runner's own `official_attacker_successes`).
+        hits = sum(r.get("observed_attacker_success") is True for r in attacked)
+        unscored = sum(r.get("observed_attacker_success") is None for r in attacked)
         lines.append(f"  attacker success (AgentDojo's security oracle): {hits}/{len(attacked)} pairs, "
                      f"{unscored} not scored")
     lines.append(f"  unauthorized provider attempts: {sum(r.get('unauthorized_provider_attempts') or 0 for r in rows)}")
