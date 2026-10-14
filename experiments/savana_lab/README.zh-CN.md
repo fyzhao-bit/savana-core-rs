@@ -289,6 +289,18 @@ python3 -m savana_lab aws-leftovers --aws-region us-east-1 [--terminate]   # 驱
 修复后（`u9lab3`）同一批 slack 7 题通过验证，4/7，和 U9b 同一批逐题相同。
 失败的那批原样挪到了 `_superseded/`，没有删除。
 
+**别的机器上的主机**（本地替身，`examples/local-ssh-host/`）：
+- **SSH，单台主机**：一台全新机器从创建到装机完成 69 秒，其中现装软件包和 AgentDojo venv 约一分钟。
+  主机钥匙钉住，标记写明 `host=ssh-disposable-machine`，批次结束后机器销毁。
+- **AWS 路径，单台主机**（替身 aws 命令行）：96 秒。以 `ubuntu` 登录，经 sudo 用 root 执行。
+  主机钥匙由本机生成、经 user-data 交过去，第一次连接就钉住。批次结束后实例终止。
+- **真跑 `u9ssh`**：U9 配置，banking 0–3，SSH 主机。
+  - 通过离线验证，2/4，和 U9b 逐题相同；`quick-check` 4/4 相同。
+  - 用时：主机就绪并开跑 1 分 48 秒（含现装运行环境），4 题 2 分 48 秒，验证 4 秒，销毁 3 秒。
+- **真跑 `u9awsfake`**：U9 配置，banking 1–2，走 AWS 路径（替身 aws 命令行）。
+  通过验证，2/2，和 U9b 相同。这一批包括经 sudo 把密钥送进 `configure-model` 的标准输入。
+- 两次运行的日志、结果目录和主机目录里都没有出现密钥。
+
 ## 还没做
 
 - 没有在真实的 AWS 账号上跑过（这里没有凭据）。第一次用时先跑一批：`--suites banking` 加一个只有一两题的 `--tasks`。
