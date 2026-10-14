@@ -229,15 +229,29 @@ impl DeadlineStream {
             .ok_or_else(|| std::io::ErrorKind::TimedOut.into())
     }
 }
+// macOS refuses socket options with EINVAL once the peer has closed (the
+// socket is then shut down both ways); Linux accepts them. Such a socket
+// cannot block, so it needs no timer, and the worker's last bytes are read.
+fn armed(result: std::io::Result<()>) -> std::io::Result<()> {
+    match result {
+        Err(error)
+            if error.raw_os_error().is_some()
+                && error.kind() == std::io::ErrorKind::InvalidInput =>
+        {
+            Ok(())
+        }
+        result => result,
+    }
+}
 impl Read for DeadlineStream {
     fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
-        self.stream.set_read_timeout(Some(self.remaining()?))?;
+        armed(self.stream.set_read_timeout(Some(self.remaining()?)))?;
         self.stream.read(b)
     }
 }
 impl Write for DeadlineStream {
     fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        self.stream.set_write_timeout(Some(self.remaining()?))?;
+        armed(self.stream.set_write_timeout(Some(self.remaining()?)))?;
         self.stream.write(b)
     }
     fn flush(&mut self) -> std::io::Result<()> {

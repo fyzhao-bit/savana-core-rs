@@ -815,10 +815,21 @@ fn set_deadline(stream: &UnixStream, deadline: Instant) -> Result<(), IngressKer
     if remaining.is_zero() {
         return Err(IngressKernelClientErrorV2::DeadlineExceeded);
     }
-    stream
+    match stream
         .set_read_timeout(Some(remaining))
         .and_then(|()| stream.set_write_timeout(Some(remaining)))
-        .map_err(|_| IngressKernelClientErrorV2::Unavailable)
+    {
+        Err(error) if shut_down_both_ways(&error) => Ok(()),
+        result => result.map_err(|_| IngressKernelClientErrorV2::Unavailable),
+    }
+}
+
+/// macOS refuses socket options with EINVAL once the peer has closed (the
+/// socket is then shut down both ways); Linux accepts them. Such a socket
+/// cannot block, so it needs no timer, and the bytes the peer sent before
+/// closing are still read.
+fn shut_down_both_ways(error: &std::io::Error) -> bool {
+    error.raw_os_error().is_some() && error.kind() == std::io::ErrorKind::InvalidInput
 }
 
 fn map_io_error(error: std::io::Error) -> IngressKernelClientErrorV2 {

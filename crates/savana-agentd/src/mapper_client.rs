@@ -755,6 +755,8 @@ mod tests {
 
     #[test]
     fn blocked_measured_address_is_bounded_by_the_absolute_deadline() {
+        let timeouts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handed = Arc::clone(&timeouts);
         let endpoint = MapperEndpointDeploymentV2::for_test_addresses(
             "provider.example".to_owned(),
             443,
@@ -762,7 +764,8 @@ mod tests {
             server_pin(),
         )
         .unwrap()
-        .with_test_connector(|_, timeout| {
+        .with_test_connector(move |_, timeout| {
+            handed.lock().unwrap().push(timeout);
             thread::sleep(timeout);
             Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
@@ -780,7 +783,13 @@ mod tests {
             ),
             Err(super::AgentMapperClientErrorV2::DeadlineExceeded)
         );
-        assert!(started.elapsed() < Duration::from_millis(200));
+        // The blocked connect gets only the time left before the deadline and
+        // is not retried after it. The wall-clock bound is loose because a
+        // loaded runner can oversleep the 75 ms by far more than the work.
+        let timeouts = timeouts.lock().unwrap();
+        assert_eq!(timeouts.len(), 1);
+        assert!(timeouts[0] <= Duration::from_millis(75));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

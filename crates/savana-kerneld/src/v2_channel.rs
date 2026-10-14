@@ -67,11 +67,23 @@ impl UnixV2FrameChannel {
             return Err(ChannelErrorV2::DeadlineExceeded);
         }
         let stream = self.stream()?;
-        stream
+        match stream
             .set_read_timeout(Some(remaining))
             .and_then(|_| stream.set_write_timeout(Some(remaining)))
-            .map_err(|_| ChannelErrorV2::Unavailable)
+        {
+            Err(error) if shut_down_both_ways(&error) => Ok(()),
+            result => result.map_err(|_| ChannelErrorV2::Unavailable),
+        }
     }
+}
+
+/// macOS refuses every socket option with EINVAL once the peer has closed,
+/// because the socket is then shut down both ways; Linux accepts the option.
+/// Such a socket cannot block: a read returns the bytes the peer sent before
+/// closing and then end of file, and a write fails. So no timer is needed,
+/// and the peer's last frame (an executor's response) is still read.
+fn shut_down_both_ways(error: &std::io::Error) -> bool {
+    error.raw_os_error().is_some() && error.kind() == std::io::ErrorKind::InvalidInput
 }
 
 impl V2FrameChannel for UnixV2FrameChannel {

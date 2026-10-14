@@ -558,10 +558,21 @@ fn set_deadline(
     if remaining.is_zero() {
         return Err(ApprovalSuiteOneServiceErrorV2::DeadlineExceeded);
     }
-    stream
+    match stream
         .set_read_timeout(Some(remaining))
         .and_then(|_| stream.set_write_timeout(Some(remaining)))
-        .map_err(|_| ApprovalSuiteOneServiceErrorV2::Unavailable)
+    {
+        Err(error) if shut_down_both_ways(&error) => Ok(()),
+        result => result.map_err(|_| ApprovalSuiteOneServiceErrorV2::Unavailable),
+    }
+}
+
+/// macOS refuses socket options with EINVAL once the peer has closed (the
+/// socket is then shut down both ways); Linux accepts them. Such a socket
+/// cannot block, so it needs no timer, and the bytes the peer sent before
+/// closing are still read.
+fn shut_down_both_ways(error: &std::io::Error) -> bool {
+    error.raw_os_error().is_some() && error.kind() == std::io::ErrorKind::InvalidInput
 }
 
 fn read_handshake_frame(

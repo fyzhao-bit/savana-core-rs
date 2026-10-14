@@ -306,9 +306,9 @@ tools/check-frozen-v2-core.sh && sh tools/tests/check-frozen-v2-core.sh tools/ch
 - 执行器写完响应就立即关闭连接。如果执行器在内核重设读超时之前就关了，macOS 上这次重设会失败，内核于是把已经在接收缓冲区里的响应当成"服务不可用"。
 - Linux 允许这次 `setsockopt`，所以只有 macOS 会出问题；测试并行越多、负载越重，出现得越频繁。
 
-**本提交只加回归测试，修复在下一个提交。**
+### 6.1 回归测试（`a259b72`）
 
-这些测试在 Linux 上都通过。按 XNU 源码，修复之前它们在 macOS 上必然失败：对端 `drop` 之后 `setsockopt` 返回 EINVAL。先推测试，是为了让 macOS CI 先复现这一点。
+测试先于修复单独提交，目的是让 macOS CI 在修复之前先把失败复现出来。这些测试在 Linux 上都通过。按 XNU 源码，修复之前它们在 macOS 上必然失败，因为对端 `drop` 之后 `setsockopt` 会返回 EINVAL。
 
 | 文件 | 新测试 |
 | --- | --- |
@@ -323,4 +323,42 @@ tools/check-frozen-v2-core.sh && sh tools/tests/check-frozen-v2-core.sh tools/ch
 - approvald 客户端的测试，在 `kernel_delivery_transport_tests.rs`；
 - agentd `fused_model_transport_tests.rs` 里的 `the_workers_last_bytes_are_read_after_it_closed`。
 
-清单已按第四节的步骤重新生成。本提交改动的冻结文件有四个：`v2_channel.rs`、两个 `kernel_client.rs` 和 `suite_one.rs`，它们的哈希都已更新。`tools/check-frozen-v2-core.sh` 逐项 OK，自测也通过。
+清单已按第四节的步骤重新生成。这个提交改动了四个冻结文件：`v2_channel.rs`、两个 `kernel_client.rs` 和 `suite_one.rs`，它们的哈希都已更新。`tools/check-frozen-v2-core.sh` 逐项 OK，自测也通过。
+
+**macOS CI 复现了失败**（`a259b72`，ci run 38513286194）。
+
+`kerneld (macos-latest)` 在第一个跑到的 crate（agentd）就失败了，失败的正是两个新测试：
+
+- `kernel_client::tests::a_deadline_is_set_after_the_peer_closed`：`set_deadline` 返回了错误；
+- `fused_model_transport::tests::the_workers_last_bytes_are_read_after_it_closed`：`Os { code: 22, kind: InvalidInput, message: "Invalid argument" }`。
+
+也就是说，对端关闭之后，macOS 的 `setsockopt` 返回 EINVAL（错误码 22，Rust 映射为 `InvalidInput`），和上面的根因一致。`cargo test` 遇到第一个失败的 crate 就停止，所以其余 crate 的新测试这次没有跑到。
+
+### 6.2 修复（本提交）
+
+**判断方法。** 重设超时时，如果操作系统返回 EINVAL，就认定套接字已经两向关闭。判断条件是：Rust 把错误映射成 `InvalidInput`，并且错误带系统错误码。
+
+- Rust 对零时长报的 `InvalidInput` 不带系统错误码，而且零时长在这之前已经按 `DeadlineExceeded` 单独处理了。
+- 对于大小正确的 `timeval`，XNU 和 Linux 只会因为两向关闭这一种情况返回 EINVAL；数值越界时返回的是 EDOM。
+
+**处理方式。** 两向关闭的套接字不会阻塞：读的时候先返回缓冲区里已有的字节，然后是 EOF；写会立即失败。所以这时不需要定时器，对端发出的最后一帧照常读出来。其他错误仍然报 `Unavailable`。改完之后，macOS 和 Linux 的行为一致，没有放宽任何截止时间。
+
+| 文件 | 改了什么 |
+| --- | --- |
+| `crates/savana-kerneld/src/v2_channel.rs` | 帧通道的 `set_deadline`：遇到两向关闭不再报 `Unavailable`（`shut_down_both_ways`）。内核与执行器之间、内核与各服务之间的帧都经过这里 |
+| `crates/savana-agentd/src/kernel_client.rs` | agentd 到 kerneld 客户端的 `set_deadline`，改法同上 |
+| `crates/savana-ingressd/src/kernel_client.rs` | ingressd 到 kerneld 客户端的 `set_deadline`，改法同上 |
+| `crates/savana-approvald/src/client.rs` | approvald Suite-1 客户端的 `set_deadline`，改法同上 |
+| `crates/savana-approvald/src/suite_one.rs` | approvald Suite-1 服务端的 `set_deadline`，改法同上 |
+| `crates/savana-agentd/src/mapper_client.rs` | 只改测试 `blocked_measured_address_is_bounded_by_the_absolute_deadline`。原来断言截止时间 75 ms 的调用在 200 ms 内返回，而负载重的 macOS runner 上 `sleep` 可能多睡远超这个余量，这个测试以前在 macOS 上挂过。现在直接检查它保证的东西：阻塞的连接只被调用一次，拿到的超时不超过截止前剩下的时间。墙钟上限放宽到 1 s |
+
+清单外有两处也做了同样的修改：
+
+- execd Suite-1 服务端 `crates/savana-execd/src/v2_service.rs` 的 `set_deadline`；
+- agentd `crates/savana-agentd/src/fused_model_transport.rs` 的 `DeadlineStream`。它在每次读写前都重设超时，这里用 `armed` 处理。
+
+清单再次按第四节重新生成。这次有六个冻结文件的哈希变了，就是上表里的六个文件。`tools/check-frozen-v2-core.sh` 逐项 OK，自测也通过。
+
+本地 Linux 上，五个 crate 都跑了 `cargo test --all-features`：53 个测试二进制，603 个测试通过，0 个失败；全工作区 `cargo clippy --all-targets --all-features -D warnings` 无告警。
+
+本地顺带发现了一个与本次无关、早已存在的问题：kerneld 的 `v2_core_services::tests::finalize_deadline_cancellation_wins_at_real_precommit_and_preserves_closed_error` 单独运行时必然失败，在 1 s 的 `recv_timeout` 处超时；HEAD 上同样如此。整套一起跑时它会通过，CI 跑的是整套，所以不受影响。这里没有修，另作跟进。
