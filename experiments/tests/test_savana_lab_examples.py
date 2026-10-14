@@ -37,7 +37,8 @@ def changed(config):
 
 class AllConfigsTests(unittest.TestCase):
     def test_each_configuration_is_u9_with_these_options_changed(self):
-        expected = {"u9": set(), "u9h": {"owner"}, "pro": {"planner"}, "mask": {"view", "extract"},
+        expected = {"u9": set(), "u9h": {"owner"}, "u10": {"instructions"}, "pro": {"planner"},
+                    "mask": {"view", "extract"},
                     "mask-planner": {"view"}, "mask-extractor": {"extract"}, "attack": set(),
                     "autodojo": {"attack"}, "exposure": {"attack", "exposure"}, "mapper-honest": {"mapper"},
                     "mapper-exposure": {"mapper", "attack", "exposure"}}
@@ -47,19 +48,22 @@ class AllConfigsTests(unittest.TestCase):
         self.assertEqual(ARMS["mask"].config.view, "masked")
         self.assertEqual(ARMS["mapper-honest"].config.mapper, "service")
 
+    @NEEDS_AGENTDOJO
     def test_every_plan_is_one_the_runner_accepts(self):
         # make_plan checks each batch's spec with savana_lab's rules and then the runner's own parser.
         full = dict(all_configs.plans(ARMS.values(), "t", list(SUITES), None))
         sizes = {arm.name: len(plan.tasks()) for arm, plan in full.items()}
         self.assertEqual(sizes["u9"], 97)
+        self.assertEqual(sizes["u10"], 97)
         self.assertEqual(sizes["attack"], 949)
         self.assertEqual(sizes["autodojo"], 389)
         self.assertEqual(sizes["mapper-exposure"], 389)
-        self.assertEqual(sum(len(plan.batches) for plan in full.values()), 434)
+        self.assertEqual(sum(len(plan.batches) for plan in full.values()), 447)
         smoke = all_configs.plans(ARMS.values(), "s", ["banking"], 2)
         self.assertTrue(all(plan is not None and len(plan.batches) == 1 and len(plan.tasks()) == 2
                             for _, plan in smoke))
 
+    @NEEDS_AGENTDOJO
     def test_autodojo_has_no_workspace_tasks(self):
         planned = {arm.name: plan for arm, plan in all_configs.plans(ARMS.values(), "w", ["workspace"], 1)}
         self.assertEqual({name for name, plan in planned.items() if plan is None},
@@ -80,6 +84,7 @@ class AllConfigsTests(unittest.TestCase):
             self.assertEqual(sorted(get_suite(BENCHMARK, suite).injection_tasks),
                              sorted(f"injection_task_{n}" for n in numbers))
 
+    @NEEDS_AGENTDOJO
     def test_the_analysis_prefixes_select_only_their_own_runs(self):
         # analysis.polluted_mapper reads the batches `<prefix>-*` (`<prefix>-<goal>-*` for a goal).
         batches = [b.name for _, plan in all_configs.plans(ARMS.values(), "p", list(SUITES), None)
@@ -99,15 +104,16 @@ class AllConfigsTests(unittest.TestCase):
                        "--baseline-data-prefix p-exposure", "--baseline-honest-prefix p-u9"):
             self.assertIn(option, hint)
 
+    @NEEDS_AGENTDOJO   # counting U10's cases asks AgentDojo which requests delegate to data
     def test_the_listing_needs_no_host(self):
         with redirect_stdout(io.StringIO()) as out:
             self.assertEqual(all_configs.main([]), 0)
         self.assertIn("cfg-poison-exfiltrate: a compromised planner", out.getvalue())
-        self.assertTrue(out.getvalue().endswith("434 batches in all; each runs on a brand-new host\n"))
+        self.assertTrue(out.getvalue().endswith("447 batches in all; each runs on a brand-new host\n"))
         with redirect_stdout(io.StringIO()) as out:
             self.assertEqual(all_configs.main(["--smoke"]), 0)
         self.assertIn("smoke-mapper-exposure:", out.getvalue())
-        self.assertTrue(out.getvalue().endswith("19 batches in all; each runs on a brand-new host\n"))
+        self.assertTrue(out.getvalue().endswith("20 batches in all; each runs on a brand-new host\n"))
 
     def test_an_unknown_configuration_suite_or_count_is_refused(self):
         for argv, message in ((["--run", "u9", "nope"], "unknown configuration nope"),

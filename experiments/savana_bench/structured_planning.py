@@ -587,16 +587,22 @@ def lower_plan(conversion, steps):
 
 
 def review(program, *, suite, user, extractor_model="deepseek-flash", derived_destinations=False, calc=False,
-           final_answer=False):
-    """The owner's fixed review of a (lowered) program -> DraftedContract."""
+           final_answer=False, prompt=None, read_only=False, destination_candidates=None):
+    """The owner's fixed review of a (lowered) program -> DraftedContract:
+    the same review its draft passed. `prompt` is the turn's request, the
+    owner's text a literal may come from (default: the task's own request;
+    for instructions found in data, the read turn's or the act turn's with
+    the adopted text, `adopted_instructions`); `read_only` refuses any write
+    (a read turn); `destination_candidates` are the set owner's members."""
     from agentdojo.task_suite.load_suites import get_suite
     from .agentdojo_tasks import BENCHMARK
     from .drafted_tasks import review_program
     official = get_suite(BENCHMARK, suite)
     return review_program(suite=suite, suite_tools={t.name for t in official.tools}, task_id=user,
-                          prompt=official.get_user_task_by_id(user).PROMPT, program=program,
-                          extractor_model=extractor_model, derived_destinations=derived_destinations, calc=calc,
-                          final_answer=final_answer)
+                          prompt=official.get_user_task_by_id(user).PROMPT if prompt is None else prompt,
+                          program=program, extractor_model=extractor_model,
+                          derived_destinations=derived_destinations, read_only=read_only,
+                          destination_candidates=destination_candidates, calc=calc, final_answer=final_answer)
 
 
 def sentinels(program, prompt, catalog):
@@ -688,11 +694,14 @@ class StructuredSession:
 
 
 def plan_program(session, mapper, *, job_id, suite, user, extractor_model="deepseek-flash",
-                 derived_destinations=False, calc=False, final_answer=False):
+                 derived_destinations=False, calc=False, final_answer=False, prompt=None, read_only=False,
+                 destination_candidates=None):
     """mapper -> agentd -> planner -> lowering -> the owner's review, as one
     record. `outcome` is "planned" (with the lowered program and its
     contract), or the stage that refused: "mapper_failed", "planner_invalid"
-    or "lowering_failed". Never raises for a refusal."""
+    or "lowering_failed". Never raises for a refusal. The review is the one
+    the accepted program passed (`review`: the turn's request, read-only for
+    a read turn, the set owner's candidates)."""
     from .drafted_tasks import ProgramRefused
     reply = session.run(mapper, job_id=job_id)
     record = dict(job=job_id, status=reply.get("status"), error=reply.get("error"), salt=mapper.salt.hex(),
@@ -715,7 +724,8 @@ def plan_program(session, mapper, *, job_id, suite, user, extractor_model="deeps
     record.update(order=order, order_changed=order != sorted(order), lowered=lowered)
     try:
         contract = review(lowered, suite=suite, user=user, extractor_model=extractor_model,
-                          derived_destinations=derived_destinations, calc=calc, final_answer=final_answer)
+                          derived_destinations=derived_destinations, calc=calc, final_answer=final_answer,
+                          prompt=prompt, read_only=read_only, destination_candidates=destination_candidates)
     except ProgramRefused as error:
         return dict(record, outcome="lowering_failed", lowering_error="review_" + str(error))
     return dict(record, outcome="planned", contract=contract)

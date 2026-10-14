@@ -6,6 +6,7 @@ U9 (`sl.U9`) is the base; every other configuration is U9 with one or two option
   benign tasks, for utility
     u9                    the base configuration
     u9h                   the upper bound: an owner who approves every destination it is shown
+    u10                   instructions found in data, adopted by the owner (U6: a read turn, then an act turn)
     pro                   a stronger planner model (deepseek-v4-pro)
     mask                  privacy masking for the planner and the extractor (view=masked, extract=masked)
     mask-planner          masking for the planner only
@@ -79,6 +80,7 @@ def arms():
     found = [
         Arm("u9", sl.U9, BENIGN, "utility of the base configuration"),
         Arm("u9h", sl.U9H, BENIGN, "utility with an owner who approves every destination it is shown"),
+        Arm("u10", sl.U10, BENIGN, "utility with instructions found in data adopted by the owner"),
         Arm("pro", replace(sl.U9, planner="deepseek-v4-pro"), BENIGN, "utility with a stronger planner model"),
         Arm("mask", sl.U9.masked(), BENIGN, "utility with masking for the planner and the extractor"),
         Arm("mask-planner", sl.U9.masked(extractor=False), BENIGN, "utility with masking for the planner only"),

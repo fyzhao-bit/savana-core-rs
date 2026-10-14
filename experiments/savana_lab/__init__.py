@@ -15,7 +15,7 @@ the committed revision, its owner and batch authorization provisioned as
 before, and nothing counts until the offline verifier, replaying that same
 revision, has passed it (README.zh-CN.md).
 """
-from .config import PRESETS, U8S, U9, U9H, Config, ConfigError
+from .config import PRESETS, U8S, U9, U9H, U10, Config, ConfigError
 from .lab import Lab, Run
 from .plan import SUITES, Batch, Plan, benign, make_plan, pairs
 from .quick import QuickResult, quick
@@ -24,7 +24,7 @@ from .quick_check import check as quick_check
 from .report import Report
 
 __all__ = ["AwsHosts", "Batch", "Config", "ConfigError", "DockerHosts", "Lab", "PRESETS", "Plan", "QuickResult",
-           "Report", "Run", "SUITES", "SshHosts", "U8S", "U9", "U9H", "benign", "make_plan", "pairs", "quick",
+           "Report", "Run", "SUITES", "SshHosts", "U8S", "U9", "U9H", "U10", "benign", "make_plan", "pairs", "quick",
            "quick_check", "report", "run"]
 
 

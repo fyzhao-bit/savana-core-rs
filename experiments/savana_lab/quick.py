@@ -121,7 +121,8 @@ def quick(config, suite, task, *, lab=None, keys=None, example=None, clients=Non
             from savana_bench.structured_planning import StructuredSession
             session = StructuredSession(example or _example(lab), clients["structural"])
             drafted = structured_contract(case, drafted, structured=session, structural=clients["structural"],
-                                          draft_program=draft_program, emit=emit, row=row, job_id="quick-0")
+                                          draft_program=draft_program, emit=emit, row=row, job_id="quick-0",
+                                          request=request)
     except (ProgramRefused, StructuredError, RuntimeError) as error:
         # Refused or failed before anything would be signed: nothing ran.
         outcome = row["outcome"] if row["outcome"] != "not_attempted" else "author_failed"

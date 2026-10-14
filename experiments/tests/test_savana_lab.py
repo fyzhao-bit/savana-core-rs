@@ -18,7 +18,7 @@ from dataclasses import replace
 from unittest import mock
 
 from savana_bench.planner_experiment import experiment_cases
-from savana_lab import U8S, U9, U9H, Config, ConfigError, Lab, benign, make_plan, pairs
+from savana_lab import U8S, U9, U9H, U10, Config, ConfigError, Lab, benign, make_plan, pairs
 from savana_lab import driver as driver_module
 from savana_lab.__main__ import main
 from savana_lab.artifacts import Artifacts, ArtifactStore
@@ -143,6 +143,44 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(ours, theirs, spec)
             checked += 1
         self.assertGreater(checked, 1000)
+
+    @NEEDS_AGENTDOJO
+    def test_the_instructions_rule_agrees_with_the_runner(self):
+        """instructions='adopt' with every planner, mapper, owner and view: check() and the runner agree
+        (the runner asks AgentDojo which requests delegate their action to data)."""
+        values = dict(drafts=(1, 3), author=tuple(a for a in CHOICES["author"] if a != "fixed"),
+                      mapper=(None, *CHOICES["mapper"]), owner=CHOICES["owner"], review=CHOICES["review"],
+                      view=CHOICES["view"], instructions=CHOICES["instructions"])
+        keys, adopted = list(values), 0
+        for combination in itertools.product(*values.values()):
+            options = dict(zip(keys, combination))
+            try:
+                Config(**options).check("banking", ["user_task_12"])
+                ours = True
+            except ConfigError:
+                ours = False
+            spec = ("drafted+" + "+".join(f"{k}={v}" for k, v in options.items() if v is not None)
+                    + ":banking:user_task_12")
+            try:
+                experiment_cases(spec)
+                theirs = True
+            except ValueError:
+                theirs = False
+            self.assertEqual(ours, theirs, spec)
+            adopted += ours and options["instructions"] == "adopt"
+        self.assertGreater(adopted, 0)
+
+    @NEEDS_AGENTDOJO
+    def test_u10_is_u9_with_instructions_found_in_data_adopted(self):
+        self.assertEqual(U10, replace(U9, instructions="adopt"))
+        self.assertEqual(U10.template(), U9_TEMPLATE.replace(":{suite}", "+instructions=adopt:{suite}"))
+        self.assertEqual([c.get("instructions") for c in runner_cases(U10.spec("banking", ["user_task_11",
+                                                                                         "user_task_12"]))],
+                         [None, "read", "act"])
+        # A delegating task is two cases; every batch of the 97 still fits an armed batch.
+        plan = make_plan("u10", U10, benign())
+        self.assertEqual(len(plan.batches), 13)
+        self.assertTrue(all(len(runner_cases(b.spec)) <= 9 for b in plan.batches))
 
     def test_a_spec_is_safe_to_write_into_a_unit(self):
         with self.assertRaises(ConfigError):

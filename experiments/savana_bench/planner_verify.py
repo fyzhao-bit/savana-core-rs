@@ -207,7 +207,8 @@ def _drafted_contract(case, local, row, prior=None):
     if row["outcome"] == "program_refused":
         raise ValueError("program_refusal_mismatch")
     if case.get("root_author") == "structured":
-        return _structured_contract(case, local, row, register_drafted(contract))
+        return _structured_contract(case, local, row, register_drafted(contract), prompt=request,
+                                    read_only=turn == "read")
     if row["outcome"] in STRUCTURED_REFUSALS:
         raise ValueError("structured_outcome")
     return register_drafted(contract)
@@ -231,7 +232,7 @@ def _service_unanswered(case, local):
         raise ValueError("structured_service_evidence")
 
 
-def _structured_contract(case, local, row, contract):
+def _structured_contract(case, local, row, contract, *, prompt, read_only=False):
     """agentd's structured planning of the accepted program, re-derived from
     the evidence: the conversion (the mapper request's digest and the exact
     workflow agentd took) from the reviewed program, the recorded salt and
@@ -240,10 +241,14 @@ def _structured_contract(case, local, row, contract):
     prompt the pure function of it (its digest) and its reply the recorded
     order; no owner literal, leak-gate value, tool name or description in any
     planner byte; and the lowering and the owner's review of the lowered
-    program. Returns the lowered contract, or None for a recorded refusal
-    (nothing signed)."""
-    from agentdojo.task_suite.load_suites import get_suite
-    from .agentdojo_tasks import BENCHMARK, register_drafted
+    program. `prompt` is the turn's request the draft was reviewed against
+    (`turn_request`: for an act turn, recomputed from its read turn's
+    evidence); the scan for owner values and the review of the lowered
+    program use it too, as the draft's review did (read-only for a read turn,
+    with the set owner's candidates).
+    Returns the lowered contract, or None for a recorded refusal (nothing
+    signed)."""
+    from .agentdojo_tasks import register_drafted
     from .drafted_tasks import ProgramRefused
     from .structured_planning import (EVIDENCE, OP, PLANNER_CODES, ProgramMapper, ServiceMapper, StructuredError,
                                       eval_catalog, exposure, job_limits, lower_plan, order_reply, planner_body,
@@ -304,7 +309,6 @@ def _structured_contract(case, local, row, contract):
     planner_bytes = bytes.fromhex(event["planner_request"])
     request = decode_structural_request(planner_bytes)
     labels, view = planner_view(request)
-    prompt = get_suite(BENCHMARK, case["suite"]).get_user_task_by_id(case["user"]).PROMPT
     if exposure((planner_bytes, view.encode()), sentinels(program, prompt, catalog)):
         raise ValueError("structured_planner_exposure")
     if len(calls) > 1 or any(call["request_sha256"] != hashlib.sha256(planner_bytes).hexdigest()
@@ -364,7 +368,8 @@ def _structured_contract(case, local, row, contract):
     try:
         reviewed = review(lowered, suite=case["suite"], user=case["user"], extractor_model=case["extractor_model"],
                           derived_destinations=case.get("review") == "derived", calc=case.get("compute") == "calc",
-                          final_answer=case.get("answer") == "final")
+                          final_answer=case.get("answer") == "final", prompt=prompt, read_only=read_only,
+                          destination_candidates=destination_candidates(case))
     except ProgramRefused as error:
         if outcome != "lowering_failed" or event["lowering_error"] != "review_" + str(error):
             raise ValueError("structured_review") from None

@@ -171,11 +171,12 @@ class Config:
         if self.actions == "ask" and (self.drafts < 2 or fixed):
             raise ConfigError("actions", "actions='ask' asks for a later draft: drafts >= 2 and a planner "
                                          "that drafts")
-        if self.instructions == "adopt" and (self.author != "deepseek" or self.owner not in ("directory", "set")
+        if self.instructions == "adopt" and (fixed or self.owner not in ("directory", "set")
                                              or self.goal is not None or self.exposure != "none"
                                              or self.view != "request"):
-            raise ConfigError("instructions", "instructions='adopt' needs author='deepseek', owner 'directory' "
-                                              "or 'set', view='request', no goal and no exposure")
+            raise ConfigError("instructions", "instructions='adopt' needs a planner that drafts (author "
+                                              "'deepseek', or 'structured' with mapper 'deepseek' or 'service'), "
+                                              "owner 'directory' or 'set', view='request', no goal and no exposure")
         if suite is not None or items is not None:
             self._check_tasks(suite, list(items or ()))
 
@@ -286,4 +287,7 @@ def runner_cases(spec):
 U8S = Config(drafts=3, actions="ask", review="derived", owner="directory", author="structured", mapper="deepseek")
 U9 = replace(U8S, compute="calc", answer="final")
 U9H = replace(U9, owner="approve")
-PRESETS = dict(u8s=U8S, u9=U9, u9h=U9H)
+# U9 with instructions found in data adopted by the owner (U6), now that
+# structured planning reviews each turn against that turn's own request.
+U10 = replace(U9, instructions="adopt")
+PRESETS = dict(u8s=U8S, u9=U9, u9h=U9H, u10=U10)

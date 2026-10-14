@@ -84,6 +84,9 @@ python3 -m savana_lab quick-check u9b                             # quick 和主
 python3 -m savana_lab run u9m --preset u9 --mask                  # 隐私打码打开（规划和抽取两个模型）
 ```
 
+`--preset` 可选 `u8s`、`u9`、`u9h`、`u10`。U10 是 U9 加 `instructions=adopt`：请求把动作交给数据里的指令时
+（"照待办清单做"），先读一轮，owner 采纳后再签执行轮（U6，见 `UTILITY-IMPROVEMENTS-20261012.zh-CN.md` 的 U10 一节）。
+
 以前用 bash 跑出来的结果（u9b、u8s 等）也能用 `report`、`why`、`episode` 读，按 `<名字>-<场景>-<序号>` 找批次。
 
 底线实验（`planner-attempt-floor.sh` 那一套）的部署变体也能在建运行时指定：
@@ -103,7 +106,7 @@ python3 -m savana_lab run floor-x --template 'drafted+author=fixed+attack=autodo
 
 `examples/all_configs.py` 以 U9 为基础，每个配置只改一两个选项：
 
-- **效用**：U9、U9H、换更强的规划模型、三种打码（两个模型都打码、只打规划模型、只打抽取模型）；
+- **效用**：U9、U9H、U10（采纳数据里的指令）、换更强的规划模型、三种打码（两个模型都打码、只打规划模型、只打抽取模型）；
 - **环境注入**：AgentDojo 官方注入（949 对）、AutoDojo（389 对）、规划器也看到注入数据；
 - **被攻破的规划器**：四个隐藏目标；
 - **被污染的私有 mapper**（mpx）：诚实对照、四个隐藏目标、看到注入数据。
@@ -115,7 +118,7 @@ python experiments/savana_lab/examples/all_configs.py --run all --smoke  # 每�
 ```
 
 运行名是 `<前缀>-<配置>`，默认前缀 `cfg`，加 `--smoke` 时为 `smoke`。再跑同一个名字就是续跑。
-所有配置完整跑一遍是 434 批。隐藏目标和注入数据有没有进到草稿、调用或效果里，用脚本最后打印的
+所有配置完整跑一遍是 447 批。列出配置要用 lab 的 venv：数 U10 的回合时要问 AgentDojo 哪些请求把动作交给了数据。隐藏目标和注入数据有没有进到草稿、调用或效果里，用脚本最后打印的
 `analysis.polluted_mapper` 命令读。在脚本里改了配置要先提交，因为运行暂存的是提交过的版本。
 
 ## 和 bash 版不同的地方

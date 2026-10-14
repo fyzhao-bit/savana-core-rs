@@ -153,7 +153,8 @@ def drafted_options(kind):
     but the request asks for an action (see ACTIONS; needs a later draft).
     `+instructions=adopt` runs a request that delegates its action to
     instructions in data as a read turn and an act turn (see INSTRUCTIONS;
-    needs the directory owner, who decides adoption).
+    needs a drafting planner, structured or not, and the directory owner,
+    who decides adoption).
     `+compute=calc` lets a compute step do exact arithmetic and has the answer
     state a computed number as given (see COMPUTES; needs a drafting planner).
     `+answer=final` appends the owner's final answer where a program would not
@@ -282,10 +283,12 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
     if actions not in (None, *ACTIONS) or (actions == "ask" and (
             max_drafts < 2 or author in ("fixed", "registered") or mapper == "template")):
         raise ValueError("planner_experiment_spec")
-    # Instructions found in data: a drafting planner that sees only the
-    # request, and the directory owner, who decides what to adopt.
+    # Instructions found in data: a planner that drafts each turn from that
+    # turn's request alone (directly, or through structured planning, whose
+    # review of the lowered program uses the same request), and the directory
+    # owner, who decides what to adopt.
     if instructions not in (None, *INSTRUCTIONS) or (instructions == "adopt" and (
-            author != "deepseek" or owner not in ("directory", "set") or goal is not None
+            not drafting or owner not in ("directory", "set") or goal is not None
             or exposure != EXPOSURES[0]
             or planner_view != VIEWS[0])):
         raise ValueError("planner_experiment_spec")
@@ -657,15 +660,18 @@ def draft_reviewed(case, *, official, request, bindings, drafter, emit, row, ins
     return accepted
 
 
-def structured_contract(case, drafted, *, structured, structural, draft_program, emit, row, job_id):
+def structured_contract(case, drafted, *, structured, structural, draft_program, emit, row, job_id, request=None,
+                        instructions_turn=None):
     """agentd's structured planning of one accepted draft (`drafted`; None
     with `+mapper=service`, which drafts inside agentd's mapper call through
     `draft_program`): the private mapper is the reviewed program (with
     `+mapper=service` the mapper plans it with the drafting model when agentd
     asks), the third-party planner may only reorder it, and the lowered
-    program must pass the same review again; still nothing is signed.
-    Returns the lowered program's contract, or raises. The runner and
-    `savana_lab.quick` both plan through here."""
+    program must pass the same review again: against the turn's `request`
+    (default: the task's own), read-only for a read turn, with the set
+    owner's candidates. Still nothing is signed. Returns the lowered
+    program's contract, or raises. The runner and `savana_lab.quick` both
+    plan through here."""
     from .agentdojo_tasks import register_drafted
     from .structured_planning import (ProgramMapper, ServiceMapper, StructuredError, conversion_refused,
                                       eval_catalog, evidence, job_limits, plan_program)
@@ -697,7 +703,9 @@ def structured_contract(case, drafted, *, structured, structural, draft_program,
                            extractor_model=case["extractor_model"],
                            derived_destinations=case.get("review") == "derived",
                            calc=case.get("compute") == "calc",
-                           final_answer=case.get("answer") == "final")
+                           final_answer=case.get("answer") == "final",
+                           prompt=request, read_only=instructions_turn == "read",
+                           destination_candidates=destination_candidates(case))
     emit("structured_planned", **evidence(planned, structural.log[calls:]))
     failure = getattr(mapper, "failure", None)
     if failure is not None and not isinstance(failure, (StructuredError, WireError)):
@@ -879,7 +887,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         if case["root_author"] == "structured":
                             drafted = structured_contract(case, drafted, structured=structured, structural=structural,
                                                           draft_program=draft_program, row=row,
-                                                          job_id=f"episode-{index}",
+                                                          job_id=f"episode-{index}", request=request,
+                                                          instructions_turn=instructions_turn,
                                                           emit=lambda kind, **data: audit.emit(kind, episode=index,
                                                                                                **data))
                     suite, task, injection, contract, values, env = official_case(case, drafted)

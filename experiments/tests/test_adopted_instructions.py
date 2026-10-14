@@ -208,6 +208,95 @@ class VerifierTests(unittest.TestCase):
             _drafted_contract(_act_case(), [], dict(outcome="instructions_not_adopted"), prior)
 
 
+class StructuredTests(unittest.TestCase):
+    """U10: both turns through structured planning. The lowered program is
+    reviewed again, and that review must be the one its draft passed: the
+    turn's own request (the adopted text is owner text in the act turn),
+    read-only in the read turn, the set owner's candidates."""
+    SPEC = ("drafted+drafts=3+actions=ask+review=derived+owner=directory+author=structured+mapper={}"
+            "+instructions=adopt:banking:user_task_12")
+
+    def setUp(self):
+        from savana_bench.structured_planning import ProgramMapper, eval_catalog, evidence, plan_program, review
+        from tests.test_structured_runner import FakeAgentd, forward, model
+        self.mapper = lambda text: ProgramMapper(json.loads(text), eval_catalog(SUITE), source="drafted")
+        self.plan = lambda text, **kw: plan_program(FakeAgentd(self.planner), self.mapper(text), job_id="episode-1",
+                                                    suite=SUITE, user=USER, derived_destinations=True, **kw)
+        self.review, self.evidence = review, evidence
+        self.planner = model(forward)
+
+    def test_a_planner_that_drafts_through_structured_planning_may_adopt(self):
+        for mapper in ("deepseek", "service"):
+            read, act = experiment_cases(self.SPEC.format(mapper))
+            self.assertEqual((read["instructions"], act["instructions"], act["root_author"]),
+                             ("read", "act", "structured"))
+        # A registered template is one fixed text: it cannot carry out what the owner adopted.
+        for spec in ("drafted+review=derived+owner=directory+author=structured+mapper=template"
+                     "+instructions=adopt:banking:user_task_12",
+                     "drafted+review=derived+owner=directory+author=registered+instructions=adopt:banking:user_task_12"):
+            with self.assertRaises(ValueError, msg=spec):
+                experiment_cases(spec)
+
+    def test_the_lowered_program_is_reviewed_against_the_turns_request(self):
+        # The lowered program is the act turn's draft: refused against the
+        # task's own request ("100" is the landlord's number), accepted against
+        # the act turn's, as the draft itself was.
+        with self.assertRaises(ProgramRefused) as caught:
+            self.review(parse_program_text(ACT), suite=SUITE, user=USER, derived_destinations=True)
+        self.assertEqual(str(caught.exception), "compute_amount")
+        request = act_turn_request(_prompt(), NOTICE)
+        lowered = self.review(parse_program_text(ACT), suite=SUITE, user=USER, derived_destinations=True,
+                              prompt=request)
+        self.assertEqual(lowered.document(), _review(ACT, request).document())
+        self.assertEqual(self.plan(ACT)["lowering_error"], "review_compute_amount")
+        self.assertEqual(self.plan(ACT, prompt=request)["outcome"], "planned")
+
+    def test_a_read_turns_lowered_program_may_not_write(self):
+        request = read_turn_request(_prompt())
+        self.assertEqual(self.plan(READ, prompt=request, read_only=True)["outcome"], "planned")
+        refused = self.plan(READ_AND_PAY, prompt=request, read_only=True)
+        self.assertEqual((refused["outcome"], refused["lowering_error"]), ("lowering_failed", "review_read_turn_writes"))
+
+    def test_the_set_owners_candidates_are_signed_again(self):
+        from savana_bench.planner_experiment import destination_candidates
+        request = act_turn_request(_prompt(), NOTICE)
+        candidates = destination_candidates(dict(suite=SUITE, owner="set"))
+        drafted = review_program(suite=SUITE, suite_tools=SUITE_TOOLS[SUITE], task_id=USER, prompt=request,
+                                 program=parse_program_text(ACT), derived_destinations=True,
+                                 destination_candidates=candidates)
+        lowered = self.review(parse_program_text(ACT), suite=SUITE, user=USER, derived_destinations=True,
+                              prompt=request, destination_candidates=candidates)
+        self.assertEqual(lowered.document(), drafted.document())
+        self.assertNotEqual(lowered.document(), _review(ACT, request).document())
+
+    def _act_episode(self, recorded_prompt):
+        """An act turn's evidence: its draft, and its structured planning as a
+        runner that reviewed the lowered program against `recorded_prompt`."""
+        _read, act = experiment_cases(self.SPEC.format("deepseek"))
+        request = act_turn_request(_prompt(), NOTICE)
+        reviewed = _review(ACT, request)
+        calls = len(self.planner.log)
+        planned = self.plan(reviewed.program, prompt=recorded_prompt)
+        event = json.loads(canonical(dict(kind="structured_planned", episode=1,
+                                          **self.evidence(planned, self.planner.log[calls:]))))
+        return act, _act_drafts(request, [ACT]) + [event], planned
+
+    def test_a_structured_act_turn_is_verified_against_its_adopted_request(self):
+        act, local, planned = self._act_episode(act_turn_request(_prompt(), NOTICE))
+        self.assertEqual(planned["outcome"], "planned")
+        contract = _drafted_contract(act, local, dict(drafts=1, outcome="published"), _read_evidence(NOTICE))
+        self.assertEqual(len(contract.steps()), 3)
+
+    def test_a_refusal_the_act_turns_review_would_not_give_is_not_accepted(self):
+        # A runner that reviewed the lowered program against the task's own
+        # request recorded a refusal; the act turn's review accepts it.
+        act, local, planned = self._act_episode(None)
+        self.assertEqual(planned["lowering_error"], "review_compute_amount")
+        with self.assertRaisesRegex(ValueError, "structured_review"):
+            _drafted_contract(act, local, dict(drafts=1, outcome="lowering_failed"), _read_evidence(NOTICE))
+
+
+
 class RunLoopTests(unittest.TestCase):
     def test_the_turn_kind_is_bound_once_in_the_run_loop(self):
         """Whether an episode is a read or an act turn decides whether the
