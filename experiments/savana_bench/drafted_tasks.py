@@ -45,6 +45,7 @@ import re
 import unicodedata
 
 from .agentdojo_provider import canonical
+from .chat_models import MODEL_NAMES
 from .agentdojo_tasks import (BENCHMARK, CALENDAR_YEAR, GENERATED_ITEMS, GENERATED_TEXT,
                               GENERATOR_MODEL, LIST, PACKAGE_VERSION, Step, catalog_tool, edge_document,
                               upstream_for)
@@ -92,7 +93,8 @@ MAX_DECLARED = 32
 # The longest owner constant (a restated value or an extraction label).
 MAX_CONSTANT_BYTES = 128
 # Models the owner may name for the quarantined extractor (a signed constant).
-EXTRACTOR_MODELS = (GENERATOR_MODEL, "deepseek-v4-pro")
+# Any registered model (`chat_models`), the generator's own first.
+EXTRACTOR_MODELS = (GENERATOR_MODEL, *(name for name in MODEL_NAMES if name != GENERATOR_MODEL))
 # Read parameters the planner may choose itself (a search term, a count): a read
 # has no effect, and its result reaches a write only through a signed edge. A
 # URL is excluded: fetching an address is itself an outbound channel.

@@ -43,15 +43,13 @@ import argparse
 import copy
 import hashlib
 import heapq
-import http.client
 import json
 import os
 from pathlib import Path
-import ssl
-import time
 from typing import NamedTuple
 
 from .agentdojo_provider import canonical
+from .chat_models import ChatClient, chat_body
 from .dojo_catalog import STATE_CHANGING_READS
 from .drafted_tasks import MAX_STEPS
 from .structured_wire import (
@@ -467,11 +465,8 @@ def planner_view(request):
 def planner_body(request, *, model):
     """The exact HTTP body the planner model is sent, from the graph alone."""
     labels, view = planner_view(request)
-    return labels, json.dumps(dict(model=model, messages=[dict(role="system", content=PLANNER_SYSTEM),
-                                                          dict(role="user", content=view)],
-                                   temperature=0, max_tokens=512, thinking={"type": "disabled"}, stream=False,
-                                   response_format={"type": "json_object"}), ensure_ascii=False,
-                              allow_nan=False).encode()
+    return labels, chat_body(model, [dict(role="system", content=PLANNER_SYSTEM), dict(role="user", content=view)],
+                             max_tokens=512, json_object=True)
 
 
 def order_reply(content, labels):
@@ -492,18 +487,17 @@ def order_reply(content, labels):
 
 
 class DeepSeekStructuralPlanner:
-    """The third-party structural planner on DeepSeek. It is sent the
-    anonymised graph only (`planner_body`). Explicit in-memory credential;
-    one call per request, no retry, redirect or fallback; a hard call budget;
-    a 25 s timeout inside agentd's 30 s exchange. `connect(timeout)` returns
-    an HTTPS connection (tests pass a fake)."""
+    """The third-party structural planner on the model `model` names
+    (`chat_models`). It is sent the anonymised graph only (`planner_body`).
+    Explicit in-memory credential; one call per request, no retry, redirect or
+    fallback; a hard call budget; a 25 s timeout inside agentd's 30 s
+    exchange. `connect(timeout)` returns an HTTPS connection (tests pass a fake)."""
 
     def __init__(self, api_key, *, max_calls, model="deepseek-flash", timeout=25.0, connect=None):
         if not isinstance(api_key, str) or not api_key or type(max_calls) is not int or max_calls < 1:
             raise ValueError("structural_planner_configuration")
-        self._key, self._model, self._timeout, self._max_calls = api_key, model, timeout, max_calls
-        self._connect = connect or (lambda timeout: http.client.HTTPSConnection(
-            "api.deepseek.com", timeout=timeout, context=ssl.create_default_context()))
+        self._client = ChatClient(model, api_key, connect=connect)
+        self._model, self._timeout, self._max_calls = model, timeout, max_calls
         self.calls = self.prompt_tokens = self.completion_tokens = 0
         self.log = []
 
@@ -515,44 +509,25 @@ class DeepSeekStructuralPlanner:
         return self._model
 
     def close(self):
-        self._key = ""
+        self._client.close()
 
     def __call__(self, body):
         request = decode_structural_request(body)
         labels, prompt = planner_body(request, model=self._model)
-        if not self._key or self.calls >= self._max_calls:
+        if not self._client.open or self.calls >= self._max_calls:
             raise RuntimeError("structural_planner_budget")
         self.calls += 1
         entry = dict(request_sha256=hashlib.sha256(body).hexdigest(),
                      prompt_sha256=hashlib.sha256(prompt).hexdigest(), content=None, usage=None)
         self.log.append(entry)
-        deadline = time.monotonic() + self._timeout
-        connection = self._connect(self._timeout)
         try:
-            connection.request("POST", "/chat/completions", body=prompt,
-                               headers={"Authorization": "Bearer " + self._key, "Content-Type": "application/json"})
-            response = connection.getresponse()
-            raw = response.read(65537)
-            if response.status != 200 or len(raw) > 65536 or time.monotonic() > deadline:
-                raise ValueError("provider_status")
-            value = json.loads(raw)
-            if value.get("model") != self._model:
-                raise ValueError("provider_model")
-            choice, = value["choices"]
-            if choice["finish_reason"] != "stop" or choice["message"].get("tool_calls"):
-                raise ValueError("provider_incomplete")
-            content = choice["message"]["content"]
-            if not isinstance(content, str) or len(content.encode()) > 4096:
-                raise ValueError("provider_size")
-            usage = value.get("usage") or {}
-            self.prompt_tokens += int(usage.get("prompt_tokens", 0))
-            self.completion_tokens += int(usage.get("completion_tokens", 0))
-            entry.update(content=content, usage={k: usage.get(k) for k in ("prompt_tokens", "completion_tokens")})
+            content, usage, _finish = self._client.complete(prompt, timeout=self._timeout, max_content=4096)
+            self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
+            self.completion_tokens += int(usage.get("completion_tokens") or 0)
+            entry.update(content=content, usage=usage)
         except Exception:
             # No retry: ordering has no effect, so a lost reply only loses this case.
             raise RuntimeError("structural_planner_failed_or_unknown") from None
-        finally:
-            connection.close()
         return order_reply(content, labels)
 
 

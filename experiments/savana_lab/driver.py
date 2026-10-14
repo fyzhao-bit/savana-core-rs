@@ -30,7 +30,24 @@ from .shell import CommandFailed, Log, Shell
 from .stage import build_stage
 from .verify import VerificationFailed, summary_line
 
-KEY_VARIABLE = "DEEPSEEK_API_KEY"
+
+
+def model_keys(plan, environ=None):
+    """{provider: key} for every model the plan's configurations call, each
+    from its provider's environment variable (chat_models.KEY_VARIABLES)."""
+    from savana_bench.chat_models import KEY_VARIABLES, provider
+    environ = os.environ if environ is None else environ
+    models = set().union(*(batch.config().models() for batch in plan.batches))
+    keys, missing = {}, []
+    for name in sorted(models):
+        variable = KEY_VARIABLES.get(provider(name), provider(name).upper().replace("-", "_") + "_API_KEY")
+        if environ.get(variable):
+            keys[provider(name)] = environ[variable]
+        else:
+            missing.append(f"${variable} (for {name})")
+    if missing:
+        raise LabError("the run's models need " + ", ".join(sorted(set(missing))) + "; it is not set")
+    return keys
 
 
 class LabError(RuntimeError):
@@ -84,16 +101,18 @@ class Lock:
         self.handle.close()
 
 
-def drive(lab, run, *, key=None, deadline=None, clock=None, sleep=None):
+def drive(lab, run, *, keys=None, deadline=None, clock=None, sleep=None):
     """Run `run`'s plan to its end, a stop, a low balance or a failure.
-    Returns the final progress event's name: done, stopped or failed."""
+    Returns the final progress event's name: done, stopped or failed. `keys`
+    ({provider: key}) default to the environment (`model_keys`)."""
     import time
+    from savana_bench.chat_models import key_material
     clock = clock or time.monotonic
     sleep = sleep or time.sleep
-    key = key if key is not None else os.environ.get(KEY_VARIABLE, "")
-    if not key:
-        raise LabError(f"the model key is read from ${KEY_VARIABLE}; it is not set")
-    log = Log(run.dir / "driver.log", secrets=[key], echo=lab.echo)
+    keys = model_keys(run.plan) if keys is None else keys
+    material = key_material(keys)
+    secrets = [material, *keys.values()]
+    log = Log(run.dir / "driver.log", secrets=secrets, echo=lab.echo)
     progress = Progress(run.dir / "progress.jsonl", log)
     started = clock()
 
@@ -103,7 +122,7 @@ def drive(lab, run, *, key=None, deadline=None, clock=None, sleep=None):
     with Lock(lab.lock_path()):
         previous = {s: signal.signal(s, interrupt) for s in (signal.SIGTERM, signal.SIGHUP)}
         try:
-            return _drive(lab, run, key, deadline, clock, sleep, log, progress, started)
+            return _drive(lab, run, keys, deadline, clock, sleep, log, progress, started)
         except Interrupted as signal_name:
             progress.emit("stopped", reason=f"signal {signal_name}")
             return "stopped"
@@ -112,7 +131,10 @@ def drive(lab, run, *, key=None, deadline=None, clock=None, sleep=None):
                 signal.signal(s, handler)
 
 
-def _drive(lab, run, key, deadline, clock, sleep, log, progress, started):
+def _drive(lab, run, keys, deadline, clock, sleep, log, progress, started):
+    from savana_bench.chat_models import key_material
+    material = key_material(keys)
+    secrets = [material, *keys.values()]
     meta = run.meta()
     stage_rev, artifacts = meta["stage_rev"], lab.artifacts_for(run)
     progress.emit("run_started", run=run.name, stage=stage_rev[:12], artifacts=artifacts.rev[:12],
@@ -136,12 +158,14 @@ def _drive(lab, run, key, deadline, clock, sleep, log, progress, started):
         if state == INCOMPLETE:
             moved = move_aside(lab.results, batch.name)
             progress.emit("moved_aside", batch=batch.name, to=str(moved.relative_to(lab.results)))
-        status = lab.balance(key)
-        progress.emit("balance", state=status[0], usd=status[1])
-        if not balances.enough(status):
-            progress.emit("stopped", reason="model balance low or unavailable")
-            return "stopped"
-        batch_log = Log(run.next_log(batch.name), secrets=[key], echo=False)
+        if "deepseek" in keys:
+            # Only DeepSeek's balance can be read; another provider's run goes on its own limits.
+            status = lab.balance(keys["deepseek"])
+            progress.emit("balance", state=status[0], usd=status[1])
+            if not balances.enough(status):
+                progress.emit("stopped", reason="model balance low or unavailable")
+                return "stopped"
+        batch_log = Log(run.next_log(batch.name), secrets=secrets, echo=False)
         shell = lab.shell(batch_log)
         host = lab.host(shell)
         runner, runner_started = None, False
@@ -156,7 +180,7 @@ def _drive(lab, run, key, deadline, clock, sleep, log, progress, started):
             batch_log.write(staged)
             cases = len(runner_cases(batch.spec))
             progress.emit("batch_started", batch=batch.name, suite=batch.suite, cases=cases, spec=batch.spec)
-            runner = Batch(host, key=key, capture=meta.get("capture", False), strace=meta.get("strace", False),
+            runner = Batch(host, key=material, capture=meta.get("capture", False), strace=meta.get("strace", False),
                            disposition=meta.get("disposition"), unconfined_write=meta.get("unconfined_write"),
                            sleep=sleep, clock=clock)
             runner.attempt(batch.spec, tar, artifacts.bin_tar)

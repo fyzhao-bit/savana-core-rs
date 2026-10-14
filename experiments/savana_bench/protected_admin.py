@@ -85,7 +85,10 @@ def status():
 
 def install_model_key(data, *, transient=False):
     if Path(KEY).exists() or Path(KEY).is_symlink():raise ValueError('existing_model_credential_requires_explicit_rotation')
-    if type(data) is not bytes or not 1<=len(data)<=256 or any(x<33 or x>126 for x in data):raise ValueError('invalid_model_key')
+    # One provider's key, or {provider: key} as compact JSON (`chat_models.parse_keys`).
+    from .chat_models import parse_keys
+    if type(data) is not bytes:raise ValueError('invalid_model_key')
+    parse_keys(data)
     command=['systemd-creds','encrypt','--with-key=host','--name=deepseek-api-key','-',KEY]
     if transient:
         command=['systemd-run','--quiet','--wait','--pipe','--collect',
@@ -106,7 +109,8 @@ def configure_key(fd):
             raise ValueError('private_key_fd_required')
         if stat.S_ISREG(meta.st_mode) and (meta.st_uid!=0 or meta.st_mode&0o077):
             raise ValueError('private_root_key_file_required')
-        data=os.read(fd,257).strip()
+        from .chat_models import KEY_BYTES
+        data=os.read(fd,KEY_BYTES+1).strip()
     install_model_key(data)
     del data
     Path(KEY).chmod(0o600)

@@ -109,8 +109,9 @@ def open_model_credential():
         owner_only = meta.st_uid in (0, os.geteuid()) and not meta.st_mode & 0o077
         exact_acl = (meta.st_uid == 0 and meta.st_gid == 0 and meta.st_nlink == 1
             and stat.S_IMODE(meta.st_mode) == 0o440 and _credential_acl_grants_only(fd, os.geteuid()))
+        from .chat_models import KEY_BYTES
         if (not stat.S_ISREG(meta.st_mode) or not (owner_only or exact_acl)
-                or not 1 <= meta.st_size <= 256):
+                or not 1 <= meta.st_size <= KEY_BYTES):
             raise ValueError('private_model_credential_required')
         return fd
     except BaseException:

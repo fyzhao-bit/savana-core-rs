@@ -55,6 +55,19 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(U9.template(), U9_TEMPLATE)
         self.assertEqual(Config.from_template(U9_TEMPLATE), U9)
 
+    def test_any_registered_model_in_any_role(self):
+        config = replace(U9, planner="gpt-4.1-mini", extractor="qwen-plus", executor="deepseek-v4-pro")
+        self.assertTrue(config.template().endswith("+answer=final+executor=deepseek-v4-pro:{suite}:{items}"))
+        self.assertEqual(Config.from_template(config.template()), config)
+        self.assertEqual(config.models(), {"gpt-4.1-mini", "qwen-plus", "deepseek-v4-pro"})
+        case, = runner_cases(config.spec("banking", ["user_task_0"]))
+        self.assertEqual((case["planner_model"], case["extractor_model"], case["executor_model"]),
+                         ("gpt-4.1-mini", "qwen-plus", "deepseek-v4-pro"))
+        self.assertNotIn("executor_model", runner_cases(U9.spec("banking", ["user_task_0"]))[0])
+        with self.assertRaises(ConfigError) as caught:
+            replace(U9, planner="gpt-9").check()
+        self.assertEqual(caught.exception.field, "planner")
+
     def test_every_historical_template_round_trips(self):
         for template in HISTORICAL:
             with self.subTest(template=template):
@@ -369,7 +382,7 @@ class DriverTests(unittest.TestCase):
         self.plan = make_plan("t", U9, [("banking", "user_task_0"), ("slack", "user_task_0"),
                                         ("travel", "user_task_0")])
 
-    def drive(self, lab, run, outcome="published", **options):
+    def drive(self, lab, run, outcome="published", keys=None, **options):
         exported = []
 
         def export(batch, run_id, out):
@@ -383,7 +396,7 @@ class DriverTests(unittest.TestCase):
         with mock.patch.object(driver_module, "build_stage", return_value=("/w/stage.tar", "staged")), \
                 mock.patch.object(Batch, "attempt", lambda *a: lab.ran.append(a[1])), \
                 mock.patch.object(Batch, "export", export):
-            result = drive(lab, run, key="sk-k", sleep=lambda _: None, **options)
+            result = drive(lab, run, keys=keys or {"deepseek": "sk-k"}, sleep=lambda _: None, **options)
         return result, exported
 
     def events(self, run):
@@ -464,6 +477,23 @@ class DriverTests(unittest.TestCase):
         lab = FakeLab(self.root.name)
         with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": ""}), self.assertRaises(LabError):
             drive(lab, create(lab, self.plan))
+
+    def test_each_provider_key_comes_from_its_own_variable(self):
+        from savana_lab.driver import model_keys
+        plan = make_plan("m", replace(U9, planner="gpt-4.1-mini", executor="qwen-plus"), [("banking", "user_task_0")])
+        with self.assertRaisesRegex(LabError, r"\$DASHSCOPE_API_KEY \(for qwen-plus\), \$OPENAI_API_KEY"):
+            model_keys(plan, {"DEEPSEEK_API_KEY": "sk-d"})
+        keys = model_keys(plan, {"DEEPSEEK_API_KEY": "sk-d", "OPENAI_API_KEY": "sk-o", "DASHSCOPE_API_KEY": "sk-q"})
+        self.assertEqual(keys, {"deepseek": "sk-d", "openai": "sk-o", "dashscope": "sk-q"})
+        self.assertEqual(model_keys(self.plan, {"DEEPSEEK_API_KEY": "sk-d", "OPENAI_API_KEY": "sk-o"}),
+                         {"deepseek": "sk-d"})
+
+    def test_a_run_without_deepseek_reads_no_balance(self):
+        lab = FakeLab(self.root.name, balance=("error", "URLError"))
+        run = create(lab, make_plan("o", replace(U9, planner="gpt-4.1-mini", extractor="gpt-4.1-mini",
+                                                 executor="gpt-4.1-mini"), [("banking", "user_task_0")]))
+        self.assertEqual(self.drive(lab, run, keys={"openai": "sk-o"})[0], "done")
+        self.assertNotIn("balance", [e["event"] for e in run.progress()])
 
 
 class ReportTests(unittest.TestCase):

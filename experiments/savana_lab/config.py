@@ -15,18 +15,19 @@ from dataclasses import dataclass, fields, replace
 import re
 
 from savana_bench.drafted_tasks import EXTRACTOR_MODELS
-from savana_bench.planner_experiment import (ACTIONS, ANSWERS, ATTACKS, AUTHORS, COMPUTES, EXPOSURES,
-                                             INSTRUCTIONS, MAPPERS, MAX_DRAFTS, OWNERS, PLANNER_MODELS,
+from savana_bench.planner_experiment import (ACTIONS, ANSWERS, ATTACKS, AUTHORS, COMPUTES, EXECUTOR_MODELS,
+                                             EXPOSURES, INSTRUCTIONS, MAPPERS, MAX_DRAFTS, OWNERS, PLANNER_MODELS,
                                              REVIEWS, experiment_cases)
 from savana_bench.value_blind import EXTRACTOR_VIEWS, VIEWS
 
 # The order options are written in. It is the order every U8S/U9 plan used,
 # so those plans' spec strings come out unchanged; any order parses the same.
 OPTION_ORDER = ("drafts", "planner", "view", "extract", "extractor", "actions", "review", "owner",
-                "author", "mapper", "compute", "answer", "instructions", "attack", "exposure")
+                "author", "mapper", "compute", "answer", "instructions", "attack", "exposure", "executor")
 CHOICES = dict(planner=PLANNER_MODELS, view=VIEWS, extract=EXTRACTOR_VIEWS, extractor=EXTRACTOR_MODELS,
                actions=ACTIONS, review=REVIEWS, owner=OWNERS, author=AUTHORS, mapper=MAPPERS,
-               compute=COMPUTES, answer=ANSWERS, instructions=INSTRUCTIONS, attack=ATTACKS, exposure=EXPOSURES)
+               compute=COMPUTES, answer=ANSWERS, instructions=INSTRUCTIONS, attack=ATTACKS, exposure=EXPOSURES,
+               executor=EXECUTOR_MODELS)
 # At most this many cases (episodes) per batch: an armed batch issues at most
 # nine bootstraps (`benchmark_identity.SoftwareCeremonyQueue.bootstrap`).
 MAX_CASES = 9
@@ -47,6 +48,7 @@ class ConfigError(ValueError):
 class Config:
     """One arm of an experiment. Field names are the spec's option names and
     the defaults are the runner's; see `drafted_options` for what each does.
+    The three model fields take any name `savana_bench.chat_models` registers.
     `mapper` applies only to `author="structured"`, where it defaults to the
     runner's "template". `goal` makes the planner compromised (`drafted-poison`)."""
     drafts: int = 1
@@ -64,6 +66,8 @@ class Config:
     instructions: str = INSTRUCTIONS[0]
     attack: str = ATTACKS[0]
     exposure: str = EXPOSURES[0]
+    # The kernel's executor model; `planner` also orders a structured program.
+    executor: str = EXECUTOR_MODELS[0]
     goal: str | None = None
 
     def __post_init__(self):
@@ -212,6 +216,10 @@ class Config:
                     missing.append(item)
             if missing:
                 raise ConfigError("author", f"no registered template for {suite} {', '.join(missing)}")
+
+    def models(self):
+        """Every model this configuration calls (`chat_models` names)."""
+        return {self.planner, self.extractor, self.executor}
 
     def catalog_suffix(self):
         """Which committed suite catalog the host serves: `-masked` ships the

@@ -10,7 +10,9 @@
     python -m savana_lab why u9c travel user_task_13
     python -m savana_lab episode u9c travel user_task_13 --model-calls
 
-The model key is read from $DEEPSEEK_API_KEY (never from an argument).
+Model keys are read from each provider's environment variable
+($DEEPSEEK_API_KEY, $OPENAI_API_KEY, ...; savana_bench.chat_models), never
+from an argument.
 """
 from __future__ import annotations
 

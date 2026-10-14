@@ -24,6 +24,7 @@ import threading
 import time
 
 from .agentdojo_provider import canonical
+from .chat_models import MODEL_NAMES
 from .agentdojo_tasks import BENCHMARK, GENERATOR_MODEL, PACKAGE_VERSION, SUITE, prepare_draft
 from .protected_agentdojo import (ModelWorker, ResearchAudit, official_case, package_sources, preflight,
                                   safe_error_code, score_outcome)
@@ -45,7 +46,10 @@ STRUCTURED_REFUSALS = ("mapper_failed", "planner_invalid", "lowering_failed")
 KERNEL_BLOCKS = ("compile_rejected", "prepare_rejected")
 
 
-PLANNER_MODELS = ("deepseek-flash", "deepseek-v4-pro")
+# Every role takes any model `chat_models` registers; its first entry is each role's default.
+PLANNER_MODELS = MODEL_NAMES
+# The kernel's executor model (the model worker's released views).
+EXECUTOR_MODELS = MODEL_NAMES
 MAX_DRAFTS = 5
 # The environment attack: AgentDojo's official important-instructions
 # template, or AutoDojo's optimized injections replayed from a pinned cache.
@@ -154,7 +158,9 @@ def drafted_options(kind):
     state a computed number as given (see COMPUTES; needs a drafting planner).
     `+answer=final` appends the owner's final answer where a program would not
     end with one (see ANSWERS; needs a drafting planner). `+owner=approve`
-    (benign cases only) approves every destination shown (see OWNERS)."""
+    (benign cases only) approves every destination shown (see OWNERS).
+    `+executor=<model>` is the kernel's executor model (`chat_models`); the
+    planner and extractor options take any registered model too."""
     from .drafted_tasks import EXTRACTOR_MODELS
     from .value_blind import EXTRACTOR_VIEWS, VIEWS
     base, *options = kind.split("+")
@@ -166,7 +172,7 @@ def drafted_options(kind):
         if not equals or key in parsed or key not in ("drafts", "planner", "view", "extract", "extractor",
                                                        "attack", "exposure", "review", "owner", "author",
                                                        "mapper", "actions", "instructions", "compute",
-                                                       "answer"):
+                                                       "answer", "executor"):
             raise ValueError("planner_experiment_spec")
         parsed[key] = value
     drafts = parsed.get("drafts", "1")
@@ -188,7 +194,8 @@ def drafted_options(kind):
             or parsed.get("actions", ACTIONS[0]) not in ACTIONS
             or parsed.get("instructions", INSTRUCTIONS[0]) not in INSTRUCTIONS
             or parsed.get("compute", COMPUTES[0]) not in COMPUTES
-            or parsed.get("answer", ANSWERS[0]) not in ANSWERS):
+            or parsed.get("answer", ANSWERS[0]) not in ANSWERS
+            or parsed.get("executor", EXECUTOR_MODELS[0]) not in EXECUTOR_MODELS):
         raise ValueError("planner_experiment_spec")
     # Only a structured spec passes `mapper`, so every other spec's options are unchanged.
     mapper = {} if author != "structured" else dict(mapper=parsed.get("mapper", MAPPERS[0]))
@@ -198,13 +205,14 @@ def drafted_options(kind):
                       **({} if "actions" not in parsed else dict(actions=parsed["actions"])),
                       **({} if "instructions" not in parsed else dict(instructions=parsed["instructions"])),
                       **({} if "compute" not in parsed else dict(compute=parsed["compute"])),
-                      **({} if "answer" not in parsed else dict(answer=parsed["answer"])))
+                      **({} if "answer" not in parsed else dict(answer=parsed["answer"])),
+                      **({} if "executor" not in parsed else dict(executor_model=parsed["executor"])))
 
 
 def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS[0], planner_view="request",
                   extractor_view="raw", extractor_model="deepseek-flash", attack=ATTACKS[0],
                   exposure=EXPOSURES[0], review=None, owner=None, author=None, mapper=None, actions=None,
-                  instructions=None, compute=None, answer=None):
+                  instructions=None, compute=None, answer=None, executor_model=None):
     """`<suite>:<item>[,<item>...]`, each item `user_task_N` (benign) or
     `user_task_N+injection_task_M` (the official important_instructions
     attack). The planner drafts each task's whole program from its request.
@@ -233,7 +241,7 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
         raise ValueError("planner_experiment_spec")
     if (type(max_drafts) is not int or not 1 <= max_drafts <= MAX_DRAFTS or planner_model not in PLANNER_MODELS
             or planner_view not in VIEWS or extractor_view not in EXTRACTOR_VIEWS
-            or extractor_model not in EXTRACTOR_MODELS):
+            or extractor_model not in EXTRACTOR_MODELS or executor_model not in (None, *EXECUTOR_MODELS)):
         raise ValueError("planner_experiment_spec")
     suite, colon, items = spec.partition(":")
     names = items.split(",") if colon else []
@@ -314,7 +322,8 @@ def drafted_cases(spec, *, goal=None, max_drafts=1, planner_model=PLANNER_MODELS
                     **({} if mapper is None else dict(mapper=mapper)),
                     **({} if actions in (None, ACTIONS[0]) else dict(actions=actions)),
                     **({} if compute in (None, COMPUTES[0]) else dict(compute=compute)),
-                    **({} if answer in (None, ANSWERS[0]) else dict(answer=answer)))
+                    **({} if answer in (None, ANSWERS[0]) else dict(answer=answer)),
+                    **({} if executor_model in (None, EXECUTOR_MODELS[0]) else dict(executor_model=executor_model)))
         if instructions == "adopt" and _delegates_to_data(suite, user):
             cases += [dict(case, instructions="read"), dict(case, instructions="act")]
         else:
@@ -545,6 +554,14 @@ def planner_directory(case):
     return case.get("owner") in ("directory", "set", "approve")
 
 
+def run_executor_model(cases):
+    """The run's one executor model (the model worker serves one profile)."""
+    models = {case.get("executor_model", EXECUTOR_MODELS[0]) for case in cases} or {EXECUTOR_MODELS[0]}
+    if len(models) != 1:
+        raise ValueError("one_executor_model_per_run")
+    return models.pop()
+
+
 def consent_mode(experiment):
     multi = str(experiment).partition(":")[0] == "drafted"
     return "finite_write_preconsent_v2" if multi else "finite_calendar_preconsent_v1"
@@ -612,7 +629,7 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                                                 for c in cases) else None),
             root_drafter_system_sha256=hashlib.sha256(ROOT_SYSTEM.encode()).hexdigest(),
             extractor_system_sha256=hashlib.sha256(EXTRACT_SYSTEM.encode()).hexdigest(),
-            executor_model="deepseek-flash", identity_profile=identity_profile,
+            executor_model=run_executor_model(cases), identity_profile=identity_profile,
             human_authentication_evaluated=False, consent_mode=consent_mode(experiment),
             comparable_to_unrestricted_baseline=False, attack=experiment_attack(cases),
             **autodojo_provenance(cases), **structured_provenance(cases, structured_example),
@@ -622,21 +639,27 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                            for p in sorted(Path(__file__).parent.glob("*.py"))})
         audit.emit("preflight", blockers=blockers, deployment_attested=False)
         if not blockers:
-            from savana.fused_deepseek import DeepSeekModel
             from savana.openclaw_bridge.auth import WebAuthnBroker
+            from .chat_models import KEY_BYTES, ChatProposer, parse_keys, provider
             if not select.select([model_key_fd], [], [], 5)[0]:
                 raise TimeoutError("model_key_unavailable")
-            key = os.read(model_key_fd, 257).decode("ascii").strip()
-            if not 1 <= len(key) <= 256:
-                raise ValueError("bounded_model_key_required")
-            model = DeepSeekModel(api_key=key, profiles={config["model_worker"]["profile"]: "deepseek-flash"}, max_calls=32)
+            # One key per provider: a bare key (DeepSeek's) or {provider: key}.
+            keys = parse_keys(os.read(model_key_fd, KEY_BYTES + 1))
+
+            def key(model_name):
+                if provider(model_name) not in keys:
+                    raise ValueError("model_key_missing")
+                return keys[provider(model_name)]
+            executor_model = run_executor_model(cases)
+            model = ChatProposer(key(executor_model), profiles={config["model_worker"]["profile"]: executor_model},
+                                 max_calls=32)
             if any(case.get("root_author") for case in cases):
                 from .root_drafter import DeepSeekRootDrafter
                 # One planner model per run; a retry is another separately
                 # recorded draft, so the budget counts every allowed draft.
                 planner_model, = {case["planner_model"] for case in cases if case.get("root_author")}
                 drafts = sum(case["max_drafts"] for case in cases if case.get("root_author"))
-                drafter = DeepSeekRootDrafter(key, max_calls=drafts, max_input_bytes=drafts * 131072,
+                drafter = DeepSeekRootDrafter(key(planner_model), max_calls=drafts, max_input_bytes=drafts * 131072,
                                               model=planner_model)
             if any(case.get("root_author") for case in cases):
                 # The reviewed generator tool's own credential use, never shared
@@ -649,20 +672,22 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                 extractor_models = {case.get("extractor_model", GENERATOR_MODEL) for case in cases}
                 if len(extractor_models) != 1:
                     raise ValueError("one_extractor_model_per_run")
-                generator = DeepSeekGenerator(key, max_calls=len(cases) * max_steps,
+                extractor_model = extractor_models.pop()
+                generator = DeepSeekGenerator(key(extractor_model), max_calls=len(cases) * max_steps,
                                               max_input_bytes=len(cases) * max_steps * 98304,
-                                              model=extractor_models.pop())
+                                              model=extractor_model)
             if structured_cases:
                 from .structured_planning import DeepSeekStructuralPlanner, StructuredSession
                 # The third-party structural planner: one call per structured
                 # episode, sent only the anonymised graph. One agentd example
                 # (one node-id issuer) serves the whole batch.
-                structural = DeepSeekStructuralPlanner(key, max_calls=len(structured_cases), model=planner_model)
+                structural = DeepSeekStructuralPlanner(key(planner_model), max_calls=len(structured_cases),
+                                                       model=planner_model)
                 # Its endpoints listen for the whole batch: never on a port an
                 # episode's providers bind.
                 structured = StructuredSession(structured_example, structural, avoid_ports={
                     config[name]["address"][1] for name in ("provider", "release_provider")})
-            del key
+            del keys, key
             broker = WebAuthnBroker(auth_fd, timeout_seconds=120)
             worker = ModelWorker(config["model_worker"], model, audit, listener_fd=model_listener_fd)
             worker.start()

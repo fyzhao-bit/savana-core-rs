@@ -324,7 +324,7 @@ class PlannerPromptTests(unittest.TestCase):
         draw.setstate(state)
         again, _ = anonymise(second.workflow, draw)
         self.assertEqual(encode_structural_request(request), encode_structural_request(again))
-        self.assertEqual(planner_body(request, model="m"), planner_body(again, model="m"))
+        self.assertEqual(planner_body(request, model="deepseek-flash"), planner_body(again, model="deepseek-flash"))
         labels, view = planner_view(request)
         self.assertEqual(sorted(labels.values()), ["n1", "n2", "n3"])
         self.assertEqual(set(json.loads(view)), {"nodes", "edges"})

@@ -7,12 +7,10 @@ kernel enforces every value's origin. The rules are stated here only so an
 honest planner can satisfy them; stating them grants nothing.
 """
 import hashlib
-import http.client
 import json
-import ssl
-import time
 import typing
 
+from .chat_models import ChatClient, chat_body
 from .dojo_catalog import CATALOG, LIST_SEPARATOR, suite_operations
 from .dojo_provider import _FORMATS as FORMATS
 from .drafted_tasks import ANSWER, CONDITION, CONDITION_NOT, EXTRACT_TOOL, MAX_CONTEXTS, MAX_STEPS
@@ -368,19 +366,19 @@ def draft_request_body(suite, prompt, *, model, goal=None, history=(), view="req
     for program_text, reason, step, field in history:
         messages.append(dict(role="assistant", content=program_text))
         messages.append(dict(role="user", content=refusal_message(reason, step, field)))
-    return json.dumps(dict(model=model, messages=messages,
-        temperature=0, max_tokens=2048, thinking={"type": "disabled"}, stream=False,
-        response_format={"type": "json_object"}), ensure_ascii=False, allow_nan=False).encode()
+    return chat_body(model, messages, max_tokens=2048, json_object=True)
 
 
 class DeepSeekRootDrafter:
-    """Explicit in-memory credential; no transport retry, redirect, proxy or
-    fallback (a review-feedback retry is a new, separately recorded draft)."""
+    """The drafting planner on the model `model` names (`chat_models`; the
+    class keeps its first provider's name). Explicit in-memory credential; no
+    transport retry, redirect, proxy or fallback (a review-feedback retry is a
+    new, separately recorded draft)."""
 
-    def __init__(self, api_key, *, max_calls=24, max_input_bytes=1048576, model="deepseek-flash"):
+    def __init__(self, api_key, *, max_calls=24, max_input_bytes=1048576, model="deepseek-flash", connect=None):
         if not isinstance(api_key, str) or not api_key or type(max_calls) is not int or max_calls < 1:
             raise ValueError("root_drafter_configuration")
-        self._key, self._model = api_key, model
+        self._client, self._model = ChatClient(model, api_key, connect=connect), model
         self._max_calls, self._max_bytes = max_calls, max_input_bytes
         self.calls = self.input_bytes = self.prompt_tokens = self.completion_tokens = 0
 
@@ -388,7 +386,7 @@ class DeepSeekRootDrafter:
         return "DeepSeekRootDrafter(<redacted>)"
 
     def close(self):
-        self._key = ""
+        self._client.close()
 
     @property
     def model(self):
@@ -403,37 +401,16 @@ class DeepSeekRootDrafter:
         request (see `draft_request_body`)."""
         body = draft_request_body(suite, prompt, model=self._model, goal=goal, history=history, view=view,
                                   exposure=exposure, directory=directory, compute=compute)
-        if not self._key or self.calls >= self._max_calls or self.input_bytes + len(body) > self._max_bytes:
+        if not self._client.open or self.calls >= self._max_calls or self.input_bytes + len(body) > self._max_bytes:
             raise RuntimeError("root_drafter_budget")
         self.calls += 1
         self.input_bytes += len(body)
-        deadline = time.monotonic() + timeout
-        connection = http.client.HTTPSConnection("api.deepseek.com", timeout=timeout,
-                                                 context=ssl.create_default_context())
         try:
-            connection.request("POST", "/chat/completions", body=body,
-                headers={"Authorization": "Bearer " + self._key, "Content-Type": "application/json"})
-            response = connection.getresponse()
-            raw = response.read(65537)
-            if response.status != 200 or len(raw) > 65536 or time.monotonic() > deadline:
-                raise ValueError("provider_status")
-            value = json.loads(raw)
-            if value.get("model") != self._model:
-                raise ValueError("provider_model")
-            choice, = value["choices"]
-            if choice["finish_reason"] != "stop" or choice["message"].get("tool_calls"):
-                raise ValueError("provider_incomplete")
-            content = choice["message"]["content"]
-            if not isinstance(content, str) or len(content.encode()) > 16384:
-                raise ValueError("provider_size")
-            usage = value.get("usage") or {}
-            self.prompt_tokens += int(usage.get("prompt_tokens", 0))
-            self.completion_tokens += int(usage.get("completion_tokens", 0))
+            content, usage, _finish = self._client.complete(body, timeout=timeout)
+            self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
+            self.completion_tokens += int(usage.get("completion_tokens") or 0)
             return content, dict(request_sha256=hashlib.sha256(body).hexdigest(),
-                                 response_sha256=hashlib.sha256(content.encode()).hexdigest(),
-                                 usage={k: usage.get(k) for k in ("prompt_tokens", "completion_tokens")})
+                                 response_sha256=hashlib.sha256(content.encode()).hexdigest(), usage=usage)
         except Exception:
             # No retry: drafting has no effect, so a lost reply only loses this case.
             raise RuntimeError("root_drafter_failed_or_unknown") from None
-        finally:
-            connection.close()

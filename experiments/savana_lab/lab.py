@@ -195,16 +195,19 @@ class Run:
         return logs / f"{batch}.{attempt}.log"
 
     # -- driving ---------------------------------------------------------
-    def start(self, *, background=False, deadline=None, key=None):
+    def start(self, *, background=False, deadline=None, keys=None):
         """Drive the plan here (returns done / stopped / failed), or in a
-        detached process that outlives this one (returns its pid). The model
-        key comes from $DEEPSEEK_API_KEY and reaches the driver through its
-        environment only."""
+        detached process that outlives this one (returns its pid). Model keys
+        come from each provider's environment variable ($DEEPSEEK_API_KEY,
+        ...) or `keys` ({provider: key}) and reach a background driver through
+        its environment only."""
+        from .driver import model_keys
+        keys = model_keys(self.plan) if keys is None else keys
         stop = self.lab.workdir / "STOP"
         if stop.exists():
             stop.unlink()
         if not background:
-            return drive(self.lab, self, key=key, deadline=deadline)
+            return drive(self.lab, self, keys=keys, deadline=deadline)
         if self.alive():
             raise LabError(f"run {self.name}'s driver is already running")
         with Lock(self.lab.lock_path()):
@@ -218,8 +221,9 @@ class Run:
             argv += ["--deadline", str(deadline)]
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join([str(self.lab.repo / "experiments"), env.get("PYTHONPATH", "")])
-        if key is not None:
-            env["DEEPSEEK_API_KEY"] = key
+        from savana_bench.chat_models import KEY_VARIABLES
+        for name, value in keys.items():
+            env[KEY_VARIABLES.get(name, name.upper().replace("-", "_") + "_API_KEY")] = value
         with open(self.dir / "driver.out", "ab") as out:
             child = subprocess.Popen(argv, cwd=self.lab.repo, env=env, stdout=out, stderr=subprocess.STDOUT,
                                      stdin=subprocess.DEVNULL, start_new_session=True)
