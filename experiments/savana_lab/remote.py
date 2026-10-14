@@ -345,8 +345,9 @@ class AwsHost(SshHost):
                 f"ResourceType=instance,Tags=[{{Key=Name,Value=savana-lab-{self.label}}},"
                 f"{{Key=savana-lab,Value={self.label}}}]", "--output", "json"]
         if self.spec.subnet:
-            argv += ["--subnet-id", self.spec.subnet]
-        argv.append("--associate-public-ip-address" if self.spec.public_ip else "--no-associate-public-ip-address")
+            # In the default VPC the default subnet gives a public address by itself.
+            argv += ["--subnet-id", self.spec.subnet,
+                     "--associate-public-ip-address" if self.spec.public_ip else "--no-associate-public-ip-address"]
         launched = json.loads(self.aws(*argv).out)
         self.instance = launched["Instances"][0]["InstanceId"]
         self.shell.log.write(f"instance {self.instance}")
@@ -363,6 +364,13 @@ class AwsHost(SshHost):
         except BaseException:
             self.release()
             raise
+
+    def _wait_for_ssh(self):
+        try:
+            super()._wait_for_ssh()
+        except HostError as error:
+            raise HostError(f"{error} (does security group {self.spec.security_group} let this machine reach "
+                            "port 22?)") from None
 
     def describe(self):
         return dict(super().describe(), instance=self.instance, region=self.spec.region,

@@ -161,8 +161,9 @@ class AwsHostTests(unittest.TestCase):
         for part in ("aws --profile lab --region us-east-1 ec2 run-instances --image-id ami-0abc",
                      "--instance-initiated-shutdown-behavior terminate", "HttpTokens=required",
                      "--security-group-ids sg-0123", "Key=savana-lab,Value=u9c-banking-0", "DeleteOnTermination=true",
-                     "--associate-public-ip-address", f"--user-data file://{host.dir / 'user-data.yaml'}"):
+                     f"--user-data file://{host.dir / 'user-data.yaml'}"):
             self.assertIn(part, launch)
+        self.assertNotIn("public-ip-address", launch)   # the default subnet decides
         user_data = (host.dir / "user-data.yaml").read_text()
         host_public = (host.dir / "host_key.pub").read_text().strip()
         self.assertTrue(user_data.startswith("#cloud-config\n"))
@@ -181,11 +182,13 @@ class AwsHostTests(unittest.TestCase):
 
     def test_an_instance_that_cannot_be_reached_is_terminated_at_once(self):
         shell = Recorder(aws_replies(self, ip=None))
-        host = self.host(shell, public_ip=True)
+        host = self.host(shell, subnet="subnet-0abc", public_ip=True)
         host.repo = Path(".")
         with self.assertRaisesRegex(HostError, "no public IP"):
             host.fresh("/w/s.tar", "/w/b.tar")
         self.assertIn("terminate-instances --instance-ids i-0123", " ".join(shell.calls[-1]["argv"]))
+        launch = next(" ".join(c["argv"]) for c in shell.calls if "run-instances" in " ".join(c["argv"]))
+        self.assertIn("--subnet-id subnet-0abc --associate-public-ip-address", launch)
         self.assertIsNone(host.release())
 
     def test_leftovers_are_found_and_terminated(self):
