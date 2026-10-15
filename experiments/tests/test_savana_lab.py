@@ -25,7 +25,7 @@ from savana_lab.artifacts import Artifacts, ArtifactStore
 from savana_lab.batch import ADMIN, Batch
 from savana_lab.config import CHOICES, runner_cases
 from savana_lab.driver import LabError, Lock, drive
-from savana_lab.host import DockerHost
+from savana_lab.host import DockerHost, HostError
 from savana_lab.plan import USER_TASKS, Plan
 from savana_lab.results import ABSENT, INCOMPLETE, UNVERIFIED, VERIFIED, batch_state
 from savana_lab.shell import CommandFailed, Log, Result
@@ -287,6 +287,21 @@ class BatchTests(unittest.TestCase):
         enroll = next(c for c in self.shell.calls if "benchmark_identity enroll" in " ".join(c["argv"]))
         self.assertEqual(enroll["env"], None)
         self.assertIn("PLANNER_SPEC=drafted:banking:user_task_0", enroll["argv"])
+
+    def test_a_user_who_cannot_reach_docker_is_told_why_at_once(self):
+        denied = Result(1, "", "permission denied while trying to connect to the Docker daemon socket at "
+                               "unix:///var/run/docker.sock\n")
+        shell = Recorder([("docker info", lambda _: denied)])
+        host = DockerHost(shell, workdir="/tmp/unused", sleep=lambda _: None, euid=lambda: 1000)
+        with self.assertRaisesRegex(HostError, "permission denied while trying to connect.*usermod -aG docker"):
+            host.ensure_daemon()
+        # No daemon of its own: only root could start one.
+        self.assertEqual([c["argv"] for c in shell.calls], [["docker", "info"]])
+        shell = Recorder([("docker info", lambda _: denied)])
+        host = DockerHost(shell, workdir="/tmp/unused", sleep=lambda _: None, euid=lambda: 0)
+        with self.assertRaisesRegex(HostError, "dockerd did not come up"):
+            host.ensure_daemon(wait=2)
+        self.assertIn(["dockerd"], [c["argv"] for c in shell.calls])
 
     def test_the_key_only_ever_travels_on_stdin(self):
         self.batch.attempt("drafted:banking:user_task_0", "/w/stage-opt.tar", "/w/linux-b-bin.tar")

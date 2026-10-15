@@ -20,6 +20,7 @@ batch replaces it, as before).
 from __future__ import annotations
 
 import datetime
+import os
 from pathlib import Path
 import shutil
 import time
@@ -62,9 +63,10 @@ def provision(host, stage_tar, bin_tar, *, kind, what="container"):
 class DockerHost:
     kind = "docker"
 
-    def __init__(self, shell, *, workdir, name=NAME, image=IMAGE, ca_dir=CA_DIR, sleep=time.sleep, now=utc_now):
+    def __init__(self, shell, *, workdir, name=NAME, image=IMAGE, ca_dir=CA_DIR, sleep=time.sleep, now=utc_now,
+                 euid=os.geteuid):
         self.shell, self.workdir, self.name, self.image = shell, Path(workdir), name, image
-        self.ca_dir, self.sleep, self.now = Path(ca_dir), sleep, now
+        self.ca_dir, self.sleep, self.now, self.euid = Path(ca_dir), sleep, now, euid
 
     # -- the machine the hosts run on -------------------------------------
     def prepare(self, repo):
@@ -72,8 +74,16 @@ class DockerHost:
         self.ensure_image(repo)
 
     def ensure_daemon(self, wait=60):
-        if self.shell.run(["docker", "info"], check=False, quiet=True).code == 0:
+        info = self.shell.run(["docker", "info"], check=False, quiet=True)
+        if info.code == 0:
             return
+        if self.euid() != 0:
+            # Only root can start a daemon of its own (a session VM without
+            # one); any other user needs the machine's, and the right to use it.
+            said = (info.err or info.out).strip().splitlines()
+            raise HostError("docker info failed" + (f" ({said[-1].strip()})" if said else "")
+                            + ": start Docker (sudo service docker start) and let this user use it "
+                              "(sudo usermod -aG docker $USER, then log in again)")
         self.shell.spawn(["dockerd"], log_path=self.workdir / "dockerd.log")
         for _ in range(wait):
             self.sleep(1)
