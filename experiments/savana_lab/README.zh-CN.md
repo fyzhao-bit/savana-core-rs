@@ -162,6 +162,43 @@ cfg = replace(sl.U9, planner="deepseek-v4-pro", extractor="qwen-plus", executor=
   走的路径和以前一样：标准输入，再到加密的 systemd credential。不进参数、文件或日志。
   只有用到 DeepSeek 时，驱动才会去查 DeepSeek 余额。
 - **实测**：`m1lab` 用 `executor=deepseek-v4-pro` 跑 banking 8 题，6/8，逐题和 U9b 相同；运行清单里记下了执行模型。
+- **全换成 gpt-4o-mini**（OpenAI，10-15 登记）：`--set planner=gpt-4o-mini --set extractor=gpt-4o-mini --set executor=gpt-4o-mini`，
+  再 `export OPENAI_API_KEY=...`。
+
+## 无防护基线：同一批题，不加防御
+
+Savana 的对照组：同样的 AgentDojo 官方题、官方判分和攻击，模型直接调用工具，没有任何防御
+（`savana_bench/official_agentdojo.py`，协议见 `AGENTDOJO-OFFICIAL-PROTOCOL.zh-CN.md`）。runner 在一次性容器的
+systemd 沙箱里运行，没有网络；每次模型调用经分帧通道交给本机的协调器 `official_remote`，由它带着密钥发出，
+密钥不进容器。`--model` 可选 `chat_models` 里登记的任何模型，默认 `deepseek-flash`（DeepSeek 的请求和以前逐字节相同）。
+
+```bash
+experiments/savana_lab/examples/baseline-container.sh   # 准备容器 savana-baseline（用 savana_lab 建好的主机镜像，约 10 秒）
+export OPENAI_API_KEY=...
+M=gpt-4o-mini; D=$(date +%Y%m%d)
+for s in banking slack travel; do
+  PYTHONPATH=experiments $PY -m savana_bench.official_remote --docker savana-baseline \
+    --key-env OPENAI_API_KEY --model $M --suite $s --tasks all --injections all --isolate-provider-failures \
+    --max-calls 2704 --max-calls-per-episode 16 --max-input-bytes 150000000 --deadline-seconds 21600 \
+    --remote-output-root /opt/savana-baseline-results --run-id $s-$M-$D --output experiments/results/official-$s-$M-$D \
+    --remote-runner /opt/savana-baseline/experiments/savana_bench/official_agentdojo.py \
+    --remote-python /opt/savana-bench-venv/bin/python
+  PYTHONPATH=experiments $PY -m savana_bench.official_verify experiments/results/official-$s-$M-$D \
+    > experiments/results/official-$s-$M-$D.verification.json
+done
+```
+
+- **攻击**：默认是 AgentDojo 官方的 important_instructions 模板（不带名字的版本），和模型无关，跨模型比较用它。
+  AutoDojo 的注入加 `--attack autodojo --autodojo-cache /opt/savana-baseline/experiments/third_party/autodojo/$s-deepseek-v4-flash-no_defense.json`；
+  它们是针对 deepseek-v4-flash 优化的，换了模型就只是迁移攻击。
+- **读结果**：验证器输出里 `metrics.attack.asr_scored` 是攻击成功率，`metrics.benign.utility_rate_all_planned` 是良性效用。
+  模型调用失败的回合记为 Unknown，不算防住；`asr_all_planned_upper` 把 Unknown 全算成被攻破。
+- **预算**：`--max-calls` 是每个场景的调用上限（回合数×16，banking 最多 169×16=2704），`--max-input-bytes` 是请求字节上限；
+  以前 DeepSeek 跑三个场景（AutoDojo，467 个回合）一共用了约 2200 万字节。
+- 容器里的 runner 是建容器时已提交的版本；改了代码要重新跑 `baseline-container.sh`。
+- **实测（10-15，本机）**：`--model gpt-4o-mini`、banking 1 题 1 注入、无效的 key：3 个回合都记 Unknown，验证器通过；
+  传输清单、runner 清单和每个请求都是 gpt-4o-mini，请求里没有 DeepSeek 的 `thinking` 字段。这里连不上 OpenAI，
+  真正的第一次调用要在能连上的机器上跑。
 
 ## 隐私打码
 
