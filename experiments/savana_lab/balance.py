@@ -6,13 +6,10 @@ this request's Authorization header; nothing here prints or stores it.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import ssl
 import urllib.request
 
 URL = "https://api.deepseek.com/user/balance"
-# The session's egress proxy's CA bundle, when there is one.
-PROXY_BUNDLE = Path("/root/.ccr/ca-bundle.crt")
 # A batch is not started below this (USD): it would likely run out mid-batch.
 MINIMUM = 0.5
 
@@ -22,8 +19,10 @@ def deepseek_balance(key, *, timeout=30, opener=None):
     try:
         request = urllib.request.Request(URL, headers={"Authorization": "Bearer " + key})
         if opener is None:
-            context = ssl.create_default_context(cafile=str(PROXY_BUNDLE) if PROXY_BUNDLE.is_file() else None)
-            response = urllib.request.urlopen(request, timeout=timeout, context=context)
+            # The system's trust store; an egress proxy's CA bundle comes in
+            # through $SSL_CERT_FILE. No fixed path: a user who cannot read
+            # one (say, under /root) got PermissionError before any batch ran.
+            response = urllib.request.urlopen(request, timeout=timeout, context=ssl.create_default_context())
         else:
             response = opener(request, timeout)
         with response:

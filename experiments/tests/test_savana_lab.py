@@ -371,6 +371,18 @@ def row(suite, n, utility, outcome="published", injection=None):
     return dict(suite=suite, user=f"user_task_{n}", injection=injection, utility=utility, outcome=outcome)
 
 
+class BalanceTests(unittest.TestCase):
+    def test_the_check_reads_no_file_outside_the_users_reach(self):
+        # It once looked for a CA bundle under /root: any other user got
+        # ("error", "PermissionError") and the run stopped before a batch.
+        from savana_lab import balance
+        reply = json.dumps(dict(is_available=True, balance_infos=[dict(currency="USD", total_balance="12.50")]))
+        with mock.patch("pathlib.Path.stat", side_effect=PermissionError(13, "Permission denied")), \
+                mock.patch("urllib.request.urlopen", return_value=io.BytesIO(reply.encode())) as urlopen:
+            self.assertEqual(balance.deepseek_balance("key"), ("ok", 12.5))
+        self.assertEqual(urlopen.call_args.args[0].get_header("Authorization"), "Bearer key")
+
+
 class ResultsTests(unittest.TestCase):
     def test_batch_states(self):
         with tempfile.TemporaryDirectory() as results:
