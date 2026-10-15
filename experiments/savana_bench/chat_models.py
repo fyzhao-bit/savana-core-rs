@@ -44,6 +44,11 @@ class Endpoint:
     # How a reply names its model: the id itself, or the id and a dated suffix.
     reply_model: str = "exact"
 
+    def named_in_reply(self, replied):
+        """Whether a reply's `model` field names this endpoint's model."""
+        return replied == self.model or (self.reply_model == "prefix" and type(replied) is str
+                                         and replied.startswith(self.model + "-"))
+
 
 _DEEPSEEK = dict(provider="deepseek", host="api.deepseek.com", extra=(("thinking", {"type": "disabled"}),))
 ENDPOINTS = {e.name: e for e in (
@@ -53,6 +58,8 @@ ENDPOINTS = {e.name: e for e in (
     # Other OpenAI-compatible APIs take the same requests without DeepSeek's field.
     Endpoint("gpt-4.1-mini", provider="openai", host="api.openai.com", path="/v1/chat/completions",
              model="gpt-4.1-mini", reply_model="prefix"),
+    Endpoint("gpt-4o-mini", provider="openai", host="api.openai.com", path="/v1/chat/completions",
+             model="gpt-4o-mini", reply_model="prefix"),
     Endpoint("qwen-plus", provider="dashscope", host="dashscope.aliyuncs.com",
              path="/compatible-mode/v1/chat/completions", model="qwen-plus"),
 )}
@@ -193,9 +200,7 @@ class ChatClient:
             raw = self._read(response, connection, max_reply, remaining)
             remaining()
             value = (strict_json if strict else json.loads)(raw)
-            replied = value.get("model")
-            if not (replied == e.model or (e.reply_model == "prefix" and type(replied) is str
-                                           and replied.startswith(e.model + "-"))):
+            if not e.named_in_reply(value.get("model")):
                 raise ValueError("provider_model")
             choice, = value["choices"]
             if choice["finish_reason"] not in finish:

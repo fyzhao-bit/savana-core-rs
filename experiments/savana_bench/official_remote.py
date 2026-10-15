@@ -5,13 +5,15 @@ repo=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(repo/'experiments'))
 from savana_bench.official_relay import OfficialRelay
 from savana_bench.official_agentdojo import encode
-from savana_bench import framed_channel
+from savana_bench import chat_models, framed_channel
 parser=argparse.ArgumentParser(description='Public AgentDojo baseline on an existing authorized AWS test host '
  'or disposable local container; no infrastructure creation.')
 parser.add_argument('--instance')
 parser.add_argument('--region')
 parser.add_argument('--docker',help='existing disposable systemd container instead of AWS SSM')
 parser.add_argument('--key-env',help='read the provider key from this environment variable (memory only)')
+parser.add_argument('--model',default='deepseek-flash',choices=chat_models.MODEL_NAMES,
+ help='the registered model (chat_models) the undefended agent runs on; its provider key goes in --key-env')
 parser.add_argument('--output',type=Path,required=True)
 parser.add_argument('--suite',default='workspace',choices=('workspace','travel','banking','slack'))
 parser.add_argument('--tasks',default='user_task_0,user_task_1,user_task_3')
@@ -43,9 +45,12 @@ if args.autodojo_cache is not None and not re.fullmatch(r'/[a-zA-Z0-9_/.-]{1,200
 state=dict(instance=args.instance,region=args.region,docker=args.docker)
 dest=args.output
 dest.mkdir(mode=0o700)
-key=(os.environ.get(args.key_env,'') if args.key_env else getpass.getpass('DeepSeek API key (local memory only): '))
+endpoint=chat_models.endpoint(args.model)
+key=(os.environ.get(args.key_env,'') if args.key_env else
+     getpass.getpass(f'{endpoint.provider} API key for {args.model} (local memory only): '))
 relay_limits=dict(max_calls=args.max_calls,max_input_bytes=args.max_input_bytes,
  isolate_failures=args.isolate_provider_failures)
+if args.model!='deepseek-flash': relay_limits['model']=args.model
 relay=(OfficialRelay(key,**relay_limits) if relay_limits!=dict(max_calls=176,max_input_bytes=3000000,isolate_failures=False)
  else OfficialRelay(key))
 del key
@@ -66,6 +71,8 @@ if runner_args!=['--suite','workspace','--tasks','user_task_0,user_task_1,user_t
  command+=runner_args
 if args.attack=='autodojo':
  command+=['--attack','autodojo','--autodojo-cache',args.autodojo_cache,'--autodojo-variant',str(args.autodojo_variant)]
+if args.model!='deepseek-flash':
+ command+=['--model',args.model]
 if args.docker:
  argv=['docker','exec','-i',args.docker,*command]
 else:
@@ -73,7 +80,8 @@ else:
   '--document-name','AWS-StartInteractiveCommand','--parameters',json.dumps({'command':['stty -echo -onlcr -icanon min 1 time 0; '+shlex.join(command)]})]
 (dest/'transport-manifest.json').write_bytes(encode(dict(instance=state['instance'],region=state['region'],
  **({'docker':state['docker']} if state['docker'] else {}),
- credentials_uploaded=False,server_network_denied=True,model_endpoint='https://api.deepseek.com/chat/completions',
+ credentials_uploaded=False,server_network_denied=True,model_endpoint=f'https://{endpoint.host}{endpoint.path}',
+ **({} if args.model=='deepseek-flash' else {'model':args.model}),
  local_relay_sha256=hashlib.sha256((repo/'experiments/savana_bench/official_relay.py').read_bytes()).hexdigest(),
  coordinator_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),max_calls=args.max_calls,
  max_input_bytes=args.max_input_bytes,max_output_tokens=2048,

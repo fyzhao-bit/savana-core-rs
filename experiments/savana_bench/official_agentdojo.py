@@ -9,9 +9,10 @@ import time
 from pathlib import Path
 
 if __package__:
-    from . import autodojo_cache, framed_channel
+    from . import autodojo_cache, chat_models, framed_channel
 else:  # Standalone deployment requires the sibling files, no legacy fallback.
     import autodojo_cache
+    import chat_models
     import framed_channel
 
 _outbound = framed_channel.Encoder(framed_channel.SERVER_PREFIX)
@@ -53,9 +54,22 @@ class Audit:
         frame(dict(kind='audit', event=row))
 
 
+def model_request(model, messages, tools):
+    """The one request the runner sends for registered model `model`
+    (`chat_models`): tools offered, no sampling, a bounded reply, no streaming,
+    and the endpoint's own fields (DeepSeek: thinking off). The relay accepts
+    nothing else."""
+    e = chat_models.endpoint(model)
+    request = dict(model=e.model, messages=messages, tools=tools, tool_choice='auto', temperature=0)
+    request[e.max_tokens_field] = 2048
+    request.update(e.extra)
+    request['stream'] = False
+    return request
+
+
 def run(output, *, suite_name='workspace', tasks=TASKS, injections=INJECTIONS,
         max_total_calls=176, max_calls_per_episode=16, attack_name='important_instructions_no_names',
-        autodojo_cache_file=None, autodojo_variant=0):
+        autodojo_cache_file=None, autodojo_variant=0, model='deepseek-flash'):
     import agentdojo
     from agentdojo.agent_pipeline.base_pipeline_element import BasePipelineElement
     from agentdojo.agent_pipeline.agent_pipeline import load_system_message
@@ -70,6 +84,7 @@ def run(output, *, suite_name='workspace', tasks=TASKS, injections=INJECTIONS,
 
     if importlib.metadata.version('agentdojo') != '0.1.35':
         raise RuntimeError('agentdojo_version_mismatch')
+    chat_models.endpoint(model)   # a registered model, or ValueError before anything runs
     output.mkdir(mode=0o700)
     audit = Audit(output / 'events.jsonl')
     suite = get_suite('v1.2.2', suite_name)
@@ -103,7 +118,7 @@ def run(output, *, suite_name='workspace', tasks=TASKS, injections=INJECTIONS,
     audit.emit('manifest', package_version='0.1.35', benchmark_version='v1.2.2', suite=suite_name,
         group='undefended', savana_protected=False, full_benchmark=False, suite_complete=suite_complete,
         cases=cases, attack=attack_name, max_model_calls_per_episode=max_calls_per_episode,
-        max_total_model_calls=max_total_calls, model='deepseek-flash', immutable_model_revision=False,
+        max_total_model_calls=max_total_calls, model=model, immutable_model_revision=False,
         platform=platform.platform(), python=sys.version, package_sources=sources,
         runner_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         channel_version=2,
@@ -123,7 +138,7 @@ def run(output, *, suite_name='workspace', tasks=TASKS, injections=INJECTIONS,
             return result, error
 
     class Pipeline(BasePipelineElement):
-        name = 'deepseek-flash-undefended'
+        name = model + '-undefended'
 
         def query(self, query, runtime, env, messages=(), extra_args=None):
             nonlocal total_calls
@@ -136,14 +151,12 @@ def run(output, *, suite_name='workspace', tasks=TASKS, injections=INJECTIONS,
             for step in range(max_calls_per_episode):
                 if total_calls >= max_total_calls:
                     raise RuntimeError('global_call_budget')
-                converted = [_message_to_openai(m, 'deepseek-flash') for m in messages]
-                # DeepSeek uses system, whereas current OpenAI adapter emits developer.
+                converted = [_message_to_openai(m, model) for m in messages]
+                # The adapter emits developer; DeepSeek needs system, and every
+                # registered chat model takes it.
                 for m in converted:
                     if m['role'] == 'developer': m['role'] = 'system'
-                request = dict(model='deepseek-flash', messages=converted,
-                    tools=[_function_to_openai(f) for f in runtime.functions.values()],
-                    tool_choice='auto', temperature=0, max_tokens=2048,
-                    thinking={'type': 'disabled'}, stream=False)
+                request = model_request(model, converted, [_function_to_openai(f) for f in runtime.functions.values()])
                 audit.emit('model_request', episode=current, step=step, call_id=total_calls, request=request)
                 frame(dict(kind='model', call_id=total_calls, request=request))
                 reply = _inbound.read(sys.stdin.buffer)
@@ -217,8 +230,10 @@ if __name__ == '__main__':
     parser.add_argument('--attack', default='important_instructions_no_names', choices=ATTACKS)
     parser.add_argument('--autodojo-cache', type=Path)
     parser.add_argument('--autodojo-variant', type=int, default=0)
+    parser.add_argument('--model', default='deepseek-flash', choices=chat_models.MODEL_NAMES)
     a = parser.parse_args()
     select = lambda v: 'all' if v == 'all' else tuple(x for x in v.split(',') if x)
     run(a.output, suite_name=a.suite, tasks=select(a.tasks), injections=select(a.injections),
         max_total_calls=a.max_total_calls, max_calls_per_episode=a.max_calls_per_episode,
-        attack_name=a.attack, autodojo_cache_file=a.autodojo_cache, autodojo_variant=a.autodojo_variant)
+        attack_name=a.attack, autodojo_cache_file=a.autodojo_cache, autodojo_variant=a.autodojo_variant,
+        model=a.model)

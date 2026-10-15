@@ -3,15 +3,26 @@ import http.client
 import json
 import ssl
 
+from .chat_models import endpoint
+
+# What every request asks for, whatever the model: tools offered, no sampling,
+# a bounded reply, no streaming.
+MAX_TOKENS = 2048
+
 
 class OfficialRelay:
-    def __init__(self, key, *, max_calls=176, max_input_bytes=3000000, isolate_failures=False,
-                 max_consecutive_failures=5):
+    """One provider's key and one registered model (`chat_models`): only that
+    model's endpoint is ever called, and only with the runner's fixed request
+    configuration."""
+
+    def __init__(self, key, *, model='deepseek-flash', max_calls=176, max_input_bytes=3000000,
+                 isolate_failures=False, max_consecutive_failures=5):
         if (type(max_calls) is not int or max_calls < 1 or type(max_input_bytes) is not int
                 or max_input_bytes < 1 or type(max_consecutive_failures) is not int
                 or max_consecutive_failures < 1):
             raise ValueError('relay_budget')
         self._key = key
+        self._endpoint = endpoint(model)
         self.calls = 0
         self.input_bytes = 0
         self.failed = False
@@ -32,10 +43,12 @@ class OfficialRelay:
         self.failed = True
 
     def call(self, request):
-        if set(request) != {'model','messages','tools','tool_choice','temperature','max_tokens','thinking','stream'}:
+        e = self._endpoint
+        extra = dict(e.extra)   # DeepSeek: thinking off
+        if set(request) != {'model','messages','tools','tool_choice','temperature',e.max_tokens_field,'stream',*extra}:
             raise ValueError('request_fields')
-        if (request['model'] != 'deepseek-flash' or request['max_tokens'] != 2048
-                or request['thinking'] != {'type':'disabled'} or request['stream'] is not False
+        if (request['model'] != e.model or request[e.max_tokens_field] != MAX_TOKENS
+                or any(request[name] != value for name, value in extra.items()) or request['stream'] is not False
                 or request['tool_choice'] != 'auto' or request['temperature'] != 0):
             raise ValueError('request_configuration')
         body = json.dumps(request, ensure_ascii=False, allow_nan=False).encode()
@@ -43,17 +56,17 @@ class OfficialRelay:
                 or self.input_bytes + len(body) > self._max_input_bytes):
             raise RuntimeError('transport_budget_or_closed')
         self.calls += 1; self.input_bytes += len(body)
-        connection = http.client.HTTPSConnection('api.deepseek.com', timeout=35, context=ssl.create_default_context())
+        connection = http.client.HTTPSConnection(e.host, e.port, timeout=35, context=ssl.create_default_context())
         try:
-            connection.request('POST', '/chat/completions', body=body,
+            connection.request('POST', e.path, body=body,
                 headers={'Authorization':'Bearer '+self._key, 'Content-Type':'application/json'})
             response = connection.getresponse()
             if response.status != 200: raise RuntimeError('provider_http_error')
             raw = response.read(262145)
             if len(raw) > 262144: raise ValueError('response_bound')
             value = json.loads(raw)
-            if value.get('model') != 'deepseek-flash': raise ValueError('model_mismatch')
-            if value['usage']['completion_tokens'] > 2048: raise ValueError('output_bound')
+            if not e.named_in_reply(value.get('model')): raise ValueError('model_mismatch')
+            if value['usage']['completion_tokens'] > MAX_TOKENS: raise ValueError('output_bound')
             self._consecutive = 0
             return value
         except Exception:

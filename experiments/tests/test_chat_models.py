@@ -59,6 +59,15 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown_model"):
             endpoint("gpt-9")
 
+    def test_gpt_4o_mini_is_openais_and_replies_as_a_dated_snapshot(self):
+        e = endpoint("gpt-4o-mini")
+        self.assertEqual((e.provider, e.host, e.path, e.model),
+                         ("openai", "api.openai.com", "/v1/chat/completions", "gpt-4o-mini"))
+        self.assertNotIn("thinking", json.loads(chat_body("gpt-4o-mini", MESSAGES, max_tokens=512, json_object=True)))
+        self.assertTrue(e.named_in_reply("gpt-4o-mini-2024-07-18"))
+        self.assertFalse(e.named_in_reply("gpt-4o-2024-08-06"))
+        self.assertFalse(endpoint("deepseek-flash").named_in_reply("deepseek-flash-2"))
+
     def test_deepseek_bodies_are_the_bytes_every_earlier_run_sent(self):
         for name in ("deepseek-flash", "deepseek-v4-pro"):
             for max_tokens, json_object in ((2048, True), (256, False)):

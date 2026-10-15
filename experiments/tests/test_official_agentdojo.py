@@ -68,6 +68,34 @@ class OfficialAuditTests(unittest.TestCase):
             self.assertEqual(relay.calls,1)
             connection.close.assert_called_once()
 
+    def test_a_relay_for_another_model_calls_only_its_endpoint(self):
+        connection=MagicMock(); response=connection.getresponse.return_value
+        response.status=200
+        response.read.return_value=json.dumps({'model':'gpt-4o-mini-2024-07-18','usage':{'completion_tokens':3},
+                                               'choices':[]}).encode()
+        openai=dict(model='gpt-4o-mini',messages=[],tools=[],tool_choice='auto',temperature=0,max_tokens=2048,
+                    stream=False)
+        with patch('savana_bench.official_relay.http.client.HTTPSConnection',return_value=connection) as factory:
+            relay=OfficialRelay('synthetic-secret',model='gpt-4o-mini')
+            with self.assertRaisesRegex(ValueError,'request_fields'): relay.call(self.request())  # DeepSeek's thinking
+            self.assertEqual(relay.call(openai)['model'],'gpt-4o-mini-2024-07-18')
+            self.assertEqual(factory.call_args.args[:2],('api.openai.com',443))
+            self.assertEqual(connection.request.call_args.args[:2],('POST','/v1/chat/completions'))
+        with self.assertRaises(ValueError): OfficialRelay('synthetic-secret',model='gpt-9')
+
+    def test_the_relay_takes_exactly_what_the_runner_sends_for_every_model(self):
+        from savana_bench.chat_models import MODEL_NAMES
+        from savana_bench.official_agentdojo import model_request
+        # DeepSeek's request is byte for byte the one every earlier run sent.
+        self.assertEqual(json.dumps(model_request('deepseek-flash',['m'],['t'])),
+                         json.dumps(dict(model='deepseek-flash',messages=['m'],tools=['t'],tool_choice='auto',
+                                         temperature=0,max_tokens=2048,thinking={'type':'disabled'},stream=False)))
+        for name in MODEL_NAMES:
+            relay=OfficialRelay('synthetic-secret',model=name); relay.close()
+            # Past every field and configuration check, stopped only by the closed relay: no network.
+            with self.assertRaisesRegex(RuntimeError,'transport_budget_or_closed'):
+                relay.call(model_request(name,[],[]))
+
     def test_call_and_byte_budget_before_network(self):
         with patch('savana_bench.official_relay.http.client.HTTPSConnection') as factory:
             relay=OfficialRelay('synthetic-secret'); relay.calls=176

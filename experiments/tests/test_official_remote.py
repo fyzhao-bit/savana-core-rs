@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import runpy
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -26,21 +27,25 @@ class FakeRelay:
 
 
 class CoordinatorTests(unittest.TestCase):
-    def run_coordinator(self,directory,program=None):
+    def run_coordinator(self,directory,program=None,extra=()):
         dest=Path(directory)/'local'
         runner=Path(__file__).resolve().parents[1]/'savana_bench'/'official_agentdojo.py'
         real_popen=subprocess.Popen
         def local_process(argv,**kwargs):
             self.assertIn('start-session',argv)
             command=json.loads(argv[-1])['command'][0]
+            self.command=command
             self.assertIn('IPAddressDeny=any',command)
             self.assertNotIn('synthetic-credential',command)
+            # The runner's own options, past its remote output directory, as the host would run them.
+            words=shlex.split(command.split('; ',1)[1])
+            options=words[words.index('--output')+2:]
             local_argv=([sys.executable,'-c',program] if program is not None else
-                        [sys.executable,str(runner),'--output',str(Path(directory)/'server')])
+                        [sys.executable,str(runner),'--output',str(Path(directory)/'server'),*options])
             return real_popen(local_argv,**kwargs)
         argv=['official_remote','--instance','i-synthetic','--region','synthetic',
               '--output',str(dest),'--run-id','synthetic-transport',
-              '--remote-runner',str(runner),'--remote-python',sys.executable]
+              '--remote-runner',str(runner),'--remote-python',sys.executable,*extra]
         with patch.object(sys,'argv',argv),patch.object(sys,'path',list(sys.path)),\
              patch('getpass.getpass',return_value='synthetic-credential'),\
              patch('savana_bench.official_relay.OfficialRelay',FakeRelay),\
@@ -60,6 +65,21 @@ class CoordinatorTests(unittest.TestCase):
             complete=json.loads((dest/'completion.json').read_bytes())
             self.assertFalse(complete['summary']['savana_protected'])
             self.assertEqual((dest/'events.jsonl').read_bytes(),(Path(directory)/'server/events.jsonl').read_bytes())
+
+    @NEEDS_AGENTDOJO
+    def test_another_model_reaches_the_runner_and_the_records(self):
+        with tempfile.TemporaryDirectory(prefix='savana-coordinator-test-') as directory:
+            dest,code=self.run_coordinator(directory,extra=('--model','gpt-4o-mini'))
+            self.assertEqual(code,0)
+            self.assertEqual(FakeRelay.instances[-1].limits['model'],'gpt-4o-mini')
+            self.assertIn('--model gpt-4o-mini',self.command)
+            transport=json.loads((dest/'transport-manifest.json').read_bytes())
+            self.assertEqual((transport['model'],transport['model_endpoint']),
+                             ('gpt-4o-mini','https://api.openai.com/v1/chat/completions'))
+            events=[json.loads(line) for line in (dest/'events.jsonl').read_bytes().splitlines()]
+            self.assertEqual(events[0]['model'],'gpt-4o-mini')
+            requests=[e['request'] for e in events if e['kind']=='model_request']
+            self.assertTrue(requests and all(r['model']=='gpt-4o-mini' and 'thinking' not in r for r in requests))
 
     def test_model_before_manifest_fails_before_provider(self):
         program='''
