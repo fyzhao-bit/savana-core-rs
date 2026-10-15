@@ -197,10 +197,12 @@ def _drive(lab, run, keys, deadline, clock, sleep, log, progress, started):
             progress.emit("exported", batch=batch.name, run_id=run_id)
             value = lab.verifier(shell).verify(lab.results / batch.name, run_dir, stage_rev, artifacts.wheel)
             progress.emit("verified", batch=batch.name, summary=summary_line(value))
-            # Episodes that never got past setup measured nothing about the
-            # planner or the kernel; a batch of nothing else is an
-            # infrastructure failure, and the next batch would likely repeat it.
-            setup = [r for r in rows(lab.results, batch.name) if r["outcome"] == "setup_failed"]
+            # Episodes that never got past setup, or whose planner's model
+            # never answered, measured nothing about the planner or the kernel;
+            # a batch of nothing else is an infrastructure failure, and the
+            # next batch would likely repeat it.
+            batch_rows = rows(lab.results, batch.name)
+            setup = [r for r in batch_rows if r["outcome"] == "setup_failed"]
             if setup:
                 errors = sorted({f"{r.get('error_type')}" + (f" errno {r['error_errno']}" if r.get("error_errno")
                                                             else "") for r in setup})
@@ -210,6 +212,12 @@ def _drive(lab, run, keys, deadline, clock, sleep, log, progress, started):
                                   error=f"every episode failed at setup ({', '.join(errors)}): the batch is verified "
                                         "but measured nothing; find the cause, then `rerun` it")
                     return "failed"
+            if batch_rows and all(r["outcome"] == "author_failed" for r in batch_rows):
+                progress.emit("failed", batch=batch.name,
+                              error="every episode's planner call failed (author_failed): the model's API did not "
+                                    "answer; the batch is verified but measured nothing; once the model answers, "
+                                    "`rerun` it")
+                return "failed"
         except (AttemptFailed, RunFailed, VerificationFailed, CommandFailed, HostError, OSError,
                 ValueError) as error:
             progress.emit("failed", batch=batch.name, error=f"{type(error).__name__}: {error}")

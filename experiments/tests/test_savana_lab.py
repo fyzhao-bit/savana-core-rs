@@ -545,6 +545,15 @@ class DriverTests(unittest.TestCase):
         self.assertIn("every episode failed at setup (OSError errno 98)", status)
         self.assertIn("s-banking-0 1/1 (OSError errno 98)", status)
 
+    def test_a_batch_whose_planner_never_answered_stops_the_run(self):
+        # Every drafting call failed (the model's API kept the requests
+        # waiting): the next batch would only repeat it.
+        lab = FakeLab(self.root.name)
+        run = create(lab, make_plan("a", U9, [("banking", "user_task_0"), ("slack", "user_task_0")]))
+        self.assertEqual(self.drive(lab, run, outcome="author_failed")[0], "failed")
+        self.assertEqual(len(lab.ran), 1)
+        self.assertIn("every episode's planner call failed (author_failed)", str(run.status()))
+
     def test_one_driver_at_a_time(self):
         lab = FakeLab(self.root.name)
         with Lock(lab.lock_path()):
