@@ -931,7 +931,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                                             directory=(owner_directory(case["suite"])
                                                        if case.get("owner") == "directory" else None),
                                             candidates=case.get("owner") == "set",
-                                            shown=case.get("owner") == "approve")
+                                            shown=case.get("owner") == "approve",
+                                            adopted=instructions_turn == "act")
 
                     def progress(stage):
                         row["stage"] = stage

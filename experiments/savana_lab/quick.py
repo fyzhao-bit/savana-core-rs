@@ -281,7 +281,8 @@ def _execute(case, drafted, generator, emit):
                     items = value if type(value) is list else [value]
                     in_candidates[field] = members is not None and all(
                         type(i) is str and i in members for i in items)
-            judge_call(step, arguments, directory=directory, in_candidates=in_candidates, prior_results=results)
+            judge_call(step, arguments, directory=directory, in_candidates=in_candidates, prior_results=results,
+                       adopted=case.get("instructions") == "act")
         except ValueError as refusal:
             emit("benchmark_consent", purpose="tool_execution", decision="refuse", clause=number + 1,
                  reason=str(refusal))

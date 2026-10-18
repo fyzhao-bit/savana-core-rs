@@ -525,6 +525,11 @@ def verify_episode(directory, local, case, row, profile, turns, prior=None):
             if not all(in_directory(arguments.get(field), entries)
                        for field in _chosen_by_data(contract.steps()[len(prior)])):
                 raise ValueError("directory_owner_approved_unknown_destination")
+        if case.get("instructions") == "act" and verdict == "authorized_tool":
+            # The owner approved this call of an act turn: adopted instructions may drive its operation.
+            from .adopted_instructions import adoptable
+            if not adoptable(contract.steps()[len(prior)].tool):
+                raise ValueError("adopted_instructions_drove_an_unadoptable_operation")
         if case.get("owner") == "set" and verdict == "authorized_tool":
             # The set owner's call went out: every value data chose for it is,
             # byte for byte, a member the owner signed into that edge.

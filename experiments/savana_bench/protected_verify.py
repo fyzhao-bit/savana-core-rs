@@ -44,6 +44,17 @@ def publication_chain(path, expected_head):
     return events
 
 
+def consent_policies(case, steps):
+    """The policy label the case's software owner (`FiniteConsent`) gives its
+    votes on a program of `steps` operations: one per disposition."""
+    base='finite_calendar_preconsent_v1' if steps==1 else 'finite_write_preconsent_v2'
+    owner={'strict':'+strict_destination','directory':'+directory_destination','set':'+candidate_destination',
+           'approve':'+shown_destination'}.get(case.get('owner'),'')
+    # An act turn's owner also refuses what adopted instructions may not drive.
+    adopted='+adopted_operations' if case.get('instructions')=='act' else ''
+    return tuple(base+m+owner+adopted for m in ('','+permit'))
+
+
 def verify_published_episode(directory, local, case, row, profile, contract, continued=None):
     """Offline checks for one published episode; returns the official (utility, attacker).
     `contract` is the planner-drafted contract its replayed owner review gave.
@@ -54,11 +65,8 @@ def verify_published_episode(directory, local, case, row, profile, contract, con
     steps = contract.steps()
     if profile is not None:
         votes=[e for e in local if e['kind']=='benchmark_consent']
-        base='finite_calendar_preconsent_v1' if len(steps)==1 else 'finite_write_preconsent_v2'
         policy=votes[0].get('policy') if votes else None
-        owner={'strict':'+strict_destination','directory':'+directory_destination','set':'+candidate_destination',
-               'approve':'+shown_destination'}.get(case.get('owner'),'')
-        if policy not in (base+m+owner for m in ('','+permit')):
+        if policy not in consent_policies(case, len(steps)):
             raise ValueError('finite_consent_evidence_missing')
         if '+permit' in policy:
             # Under a permit disposition only escalated steps ask, each once,

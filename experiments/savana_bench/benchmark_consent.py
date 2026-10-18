@@ -89,13 +89,20 @@ def _chosen_by_data(step):
             if field in addressing or (step.tool, field) in OWNER_ONLY_READ_FIELDS | OWNER_ONLY_WRITE_FIELDS]
 
 
-def judge_call(step, arguments, *, directory=None, in_candidates=None, prior_results=()):
+def judge_call(step, arguments, *, directory=None, in_candidates=None, prior_results=(), adopted=False):
     """The software owner's rules for one tool call's business arguments, as
     `FiniteConsent` applies them to the kernel's display (after its strict
     rule and its checks of the display itself); raises ValueError naming the
     refusal. `in_candidates` maps each data-chosen field to whether the kernel
     found its value in the set the owner signed (the set owner); `directory`
-    is the directory owner's. `savana_lab.quick` judges with it too."""
+    is the directory owner's. `adopted`: the call belongs to an act turn, whose
+    every write has its authority from instructions the owner adopted, and
+    such instructions never drive a delete or an account-control operation
+    (`adopted_instructions.adoptable`). `savana_lab.quick` judges with it too."""
+    if adopted:
+        from .adopted_instructions import adoptable
+        if not adoptable(step.tool):
+            raise ValueError('consent_adopted_operation')
     arguments=dict(arguments)
     if in_candidates is not None:
         # Whom data chose is approved only where the kernel says it is a
@@ -142,27 +149,30 @@ class FiniteConsent:
     value data chose is a member of the set signed into that edge. `shown`
     (benign experiments only: the upper bound of a human owner who reads each
     destination and finds it right) screens no destination data chose, as
-    the default owner does, and labels its votes so."""
+    the default owner does, and labels its votes so. `adopted` (an act turn)
+    refuses each operation adopted instructions may not drive (`judge_call`)."""
     def __init__(self, contract, principal, emit, *, disposition='require_approval', strict_destinations=False,
-                 directory=None, candidates=False, shown=False):
+                 directory=None, candidates=False, shown=False, adopted=False):
         if (contract not in all_contracts() or type(principal) is not str
             or not re.fullmatch('[0-9a-f]{64}',principal) or principal=='0'*64
             or disposition not in DISPOSITIONS or type(strict_destinations) is not bool
             or type(candidates) is not bool or (candidates and (strict_destinations or directory is not None))
             or type(shown) is not bool or (shown and (strict_destinations or directory is not None or candidates))
+            or type(adopted) is not bool
             or (directory is not None and (type(directory) is not frozenset or strict_destinations
                                            or any(type(v) is not str for v in directory)))):
             raise ValueError('finite_consent_catalog')
         self.contract,self.principal,self.emit=contract,principal,emit
         self.steps=contract.steps();self.action=0
         self.permit=disposition=='permit';self.strict=strict_destinations;self.directory=directory
-        self.candidates=candidates;self.shown=shown
+        self.candidates=candidates;self.shown=shown;self.adopted=adopted
         # Read-only contracts keep their original policy label and behavior;
         # v2 approves an empty value on a field that only carries data.
         self.policy=('finite_calendar_preconsent_v1' if len(self.steps)==1 else 'finite_write_preconsent_v2')+(
             '+permit' if self.permit else '')+('+strict_destination' if self.strict else '')+(
             '+directory_destination' if directory is not None else '')+(
-            '+candidate_destination' if candidates else '')+('+shown_destination' if shown else '')
+            '+candidate_destination' if candidates else '')+('+shown_destination' if shown else '')+(
+            '+adopted_operations' if adopted else '')
         self.stage='ingress';self.task=self.binding=self.clauses=self.authorization=None
         self.profiles=None;self.failed=False;self.results=None
 
@@ -232,7 +242,7 @@ class FiniteConsent:
         except BaseException as error:
             self.failed=True
             reason=(dict(reason=str(error)) if self.permit or self.strict or self.directory is not None
-                    or self.candidates or self.shown else {})
+                    or self.candidates or self.shown or self.adopted else {})
             if reason and purpose=='tool_execution' and getattr(self,'_asked',None) is not None:
                 reason['clause']=self._asked
             self.emit('benchmark_consent',purpose=purpose,decision='refuse',
@@ -328,7 +338,7 @@ class FiniteConsent:
             judge_call(step,r['params']['arguments'],directory=self.directory,
                 in_candidates=({field:(shown.get(field) or {}).get('in_candidates') is True
                                 for field in _chosen_by_data(step)} if self.candidates else None),
-                prior_results=self.results() if self.results is not None else [])
+                prior_results=self.results() if self.results is not None else [],adopted=self.adopted)
             if (d['resource']!=r['params']['arguments'][resource]
                 or d['destination']!=r['params']['arguments'][destination]):
                 raise ValueError('consent_action_arguments')
