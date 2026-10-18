@@ -13,6 +13,13 @@ it does receive. A deployment that ships the model tools with the model codec
 (`model_codec="mcp_model"`) has the executor mask their arguments; the
 endpoint expects exactly that masked call and records the reply with the
 call's values back, as the executor retains it.
+
+A call that does not come back succeeded ends what this episode can do: the
+executor keeps its outcome Unknown and the kernel starts nothing more for the
+task (an Unknown call blocks later steps, and with them the release). The
+endpoint records which call it was and why (`official_tool_failed`, a closed
+code from the provider), and `failed_step` tells the runner, which then stops
+waiting for a publication that cannot come.
 """
 import base64
 import hashlib
@@ -43,6 +50,7 @@ class EpisodeEndpoint:
         # names the operations the executor answered itself.
         self._seen, self._results, self._local, self._payload = {}, [], set(), None
         self._release_id, self._closed, self._failed = None, False, False
+        self._failed_step = None
 
     def exchange(self, frame):
         with self._lock:
@@ -95,7 +103,14 @@ class EpisodeEndpoint:
                 raise ValueError("reviewed_tool_request_mismatch")
             step = self.contract.steps()[number]
             response = self.provider.exchange(frame.payload)
-            if decode(response)["result"]["structuredContent"]["savana_status"] != "succeeded":
+            status = decode(response)["result"]["structuredContent"]["savana_status"]
+            if status != "succeeded":
+                # The provider's own record of this request says why (a closed code).
+                digest = hashlib.sha256(frame.payload).hexdigest()
+                row = next((r for r in reversed(self.provider.audit) if r["request_sha256"] == digest), {})
+                failed = dict(operation=number + 1, tool=step.tool, status=status, error=row.get("error"))
+                self.emit("official_tool_failed", **failed)
+                self._failed_step = failed
                 raise ValueError("official_tool_outcome_unknown")
             # The provider's reply goes back as it is; the executor retains a
             # model call's reply with the call's own values back (any other
@@ -193,6 +208,13 @@ class EpisodeEndpoint:
             return None
         local = decode(self._results[-1])
         return canonical(dict(local, id=echoed))
+
+    def failed_step(self):
+        """The call that came back not succeeded ({operation, tool, status,
+        error}), or None. Set once, and read without the endpoint's lock: the
+        runner's wait asks while a provider call may be holding it."""
+        failed = self._failed_step
+        return None if failed is None else dict(failed)
 
     def completed_results(self):
         with self._lock:

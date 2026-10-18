@@ -247,6 +247,10 @@ class Episode:
         for key in ("stage", "refusal", "error_type", "error_errno", "error_code"):
             if s.get(key):
                 lines.append(f"  {key}: {s[key]}")
+        failed = s.get("failed_step")
+        if failed:
+            lines.append(f"  failed step: {failed.get('operation')} ({failed.get('tool')}) "
+                         f"{failed.get('status')}: {failed.get('error')}")
         for draft in self.drafts():
             refusal = draft["refusal"]
             verdict = ("accepted" if refusal is None else

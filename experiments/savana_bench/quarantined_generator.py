@@ -117,12 +117,13 @@ class DeepSeekGenerator:
             content, usage, finish = self._client.complete(body, timeout=timeout, finish=("stop", "length"))
             self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
             self.completion_tokens += int(usage.get("completion_tokens") or 0)
-            line = bounded_line(content, max_bytes)
             self.log.append(dict(request_sha256=hashlib.sha256(body).hexdigest(),
                                  response_sha256=hashlib.sha256(content.encode()).hexdigest(),
                                  finish_reason=finish, usage=usage))
-            return line
         except Exception:
             # No retry: the tool call fails and the kernel keeps the step's
             # outcome Unknown; the key stays usable for the next episode.
             raise RuntimeError("generator_failed_or_unknown") from None
+        # The model answered (and its reply is logged): a reply with no usable
+        # text fails the step as just that (`generator_output_empty`).
+        return bounded_line(content, max_bytes)

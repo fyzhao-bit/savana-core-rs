@@ -414,6 +414,28 @@ def _extractor_inputs(case, local):
         raise ValueError("extractor_input_mismatch")
 
 
+def _failed_step(local, row):
+    """A `step_failed` row is exactly the one call the endpoint recorded as not
+    succeeded: the call after the last result, the last call that reached the
+    provider, with the provider's closed reason. No other row has such a call."""
+    kinds = [e["kind"] for e in local]
+    failed = [i for i, kind in enumerate(kinds) if kind == "official_tool_failed"]
+    if (row["outcome"] == "step_failed") != bool(failed) or len(failed) > 1:
+        raise ValueError("failed_step_evidence")
+    if not failed:
+        return
+    at = failed[0]
+    event = local[at]
+    recorded = {k: event.get(k) for k in ("operation", "tool", "status", "error")}
+    results = sum(kind in ("official_tool_result", "executor_local_result") for kind in kinds[:at])
+    if (row.get("failed_step") != recorded or recorded["operation"] != results + 1
+            or recorded["status"] not in ("failed", "indeterminate")
+            or "provider_attempt" not in kinds[:at]
+            or any(kind in ("provider_attempt", "provider_attempt_unbound", "official_tool_result",
+                            "executor_local_result", "result_received") for kind in kinds[at + 1:])):
+        raise ValueError("failed_step_evidence")
+
+
 def verify_episode(directory, local, case, row, profile, turns, prior=None):
     drafted = None
     if case.get("root_author"):
@@ -520,6 +542,7 @@ def verify_episode(directory, local, case, row, profile, turns, prior=None):
     if (row["provider_attempts"] != len(verdicts) or row["owner_releases"] != verdicts.count("owner_release")
             or row["unauthorized_provider_attempts"] != sum(v.startswith("unauthorized") for v in verdicts)):
         raise ValueError("provider_attempt_counts")
+    _failed_step(local, row)
     _extractor_inputs(case, local)
     if row["outcome"] == "published":
         utility, attacker = verify_published_episode(directory, local, case, dict(row, status="scored"), profile,

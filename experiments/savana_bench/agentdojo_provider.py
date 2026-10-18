@@ -6,6 +6,7 @@ authentication is provided by this in-process object. No model call or oracle.
 """
 import hashlib
 import json
+import re
 import threading
 
 MAX_BYTES = 32 * 1024
@@ -40,6 +41,21 @@ def response(request_id, status, content=None):
         "content": [] if content is None else [{"type": "text", "text": content}],
         "structuredContent": {"savana_status": status},
     }})
+
+
+def error_code(error):
+    """A closed code for why a call did not succeed, never free text (an
+    upstream message can carry data): an exception's message when it is a
+    code (lowercase words joined by '_', as the reviewed adapters and the
+    extractor raise), else its type name. `error` is the exception itself or
+    the runtime's "Type: message" text."""
+    if isinstance(error, BaseException):
+        kind, message = type(error).__name__, str(error.args[0]) if len(error.args) == 1 else ""
+    else:
+        kind, _, message = str(error).partition(": ")
+    if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", message):
+        return message
+    return kind if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", kind) else "unknown"
 
 
 def json_value(value, depth=0, budget=None):
@@ -107,10 +123,11 @@ class AgentDojoProvider:
             row = {"request_sha256": digest, "request": request,
                    "invoked": False, "status": "indeterminate"}
             self.audit.append(row)
+            # Why a call did not succeed, as a closed code (`error_code`).
             tool = self.runtime.functions.get(params["name"])
             if tool is None or set(params["arguments"]) - set(tool.parameters.model_fields):
                 result = response(request_id, "failed")
-                row["status"] = "failed"
+                row.update(status="failed", error="unknown_tool_or_argument")
             else:
                 try:
                     # Reject coercions/extra arguments before the runtime. Use
@@ -118,7 +135,7 @@ class AgentDojoProvider:
                     tool.parameters.model_validate(params["arguments"], strict=True)
                 except Exception:
                     result = response(request_id, "failed")
-                    row["status"] = "failed"
+                    row.update(status="failed", error="invalid_arguments")
                 else:
                     try:
                         row["invoked"] = True
@@ -129,6 +146,7 @@ class AgentDojoProvider:
                             # Tool implementations can mutate env then raise.
                             # Their exception is NOT evidence that no effect ran.
                             result = unknown
+                            row["error"] = error_code(error)
                         else:
                             value = json_value(value)
                             text = canonical(value).decode()
@@ -139,10 +157,12 @@ class AgentDojoProvider:
                             result = response(request_id, "succeeded", text)
                             if len(result) > MAX_BYTES:
                                 result = unknown
+                                row["error"] = "result_too_large"
                             else:
                                 row["status"] = "succeeded"
-                    except Exception:
+                    except Exception as error:
                         result = unknown
+                        row["error"] = error_code(error)
             self._seen[request_id] = digest, result
             row["response_sha256"] = hashlib.sha256(result).hexdigest()
             return result

@@ -37,8 +37,10 @@ from .protected_transport import ProviderServer, certificate_spki_pin, server_co
 SCHEMA = "savana-planner-experiment-v1"
 OPERATOR_MODE = "forward_untrusted_plan"
 IDS = ("task", "root", "observer", "application_turn", "planner", "model_profile", "not_before", "expires_at")
-# Outcomes that settle an episode. Anything else stays unknown. The last three
-# are the structured-planning stages that refused before anything was signed.
+# Outcomes that settle an episode. Anything else stays unknown (`no_publication`;
+# `step_failed`: a call came back not succeeded, which the kernel keeps Unknown).
+# The last three are the structured-planning stages that refused before
+# anything was signed.
 DEFINITIVE = ("author_failed", "sdk_codec_rejected", "compile_rejected",
               "prepare_rejected", "owner_refused", "published", "program_refused",
               "mapper_failed", "planner_invalid", "lowering_failed", "instructions_not_adopted")
@@ -963,7 +965,8 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                             expected_task=digest32(binding["task_id"]), expected_run=digest32(binding["run_id"]),
                             expected_root=digest32(binding["root_digest"]),
                             expected_destination=digest32(binding["destination_digest"]), approval=approval,
-                            receive_publication=endpoint.receive_publication, emit=observer, timeout=120)
+                            receive_publication=endpoint.receive_publication, emit=observer, timeout=120,
+                            stopped=endpoint.failed_step)
                     outcome = async_runner.run(episode())
                     session = None  # finish_private_episode closed it.
                     frozen = endpoint.freeze()
@@ -979,6 +982,12 @@ def run(*, output, config, auth_fd, model_key_fd, model_listener_fd, identity_pr
                         row.update(outcome="published", status="published", utility=utility, attacker_success=attacker)
                     elif consent.failed:
                         row.update(outcome="owner_refused", consent_stage=consent.stage)
+                    elif endpoint.failed_step() is not None:
+                        # A call came back not succeeded (an extraction the
+                        # adapter refused, an official tool that raised): the
+                        # kernel keeps it Unknown and starts nothing more, so
+                        # the wait ended there instead of at the window.
+                        row.update(outcome="step_failed", failed_step=endpoint.failed_step())
                     else:
                         row["outcome"] = "no_publication"
                 except Exception as error:

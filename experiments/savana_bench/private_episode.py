@@ -33,9 +33,16 @@ def _record(emit, event):
         raise TypeError("synchronous_durable_audit_writer_required")
 
 
+async def _end_when(stopped, window):
+    """Reschedule `window` (an asyncio.timeout) to now once `stopped()` is truthy."""
+    while not stopped():
+        await asyncio.sleep(POLL_INTERVAL)
+    window.reschedule(asyncio.get_running_loop().time())
+
+
 async def finish_private_episode(*, session, expected_task, expected_run,
         expected_root, expected_destination, approval, receive_publication,
-        emit, timeout=120.0):
+        emit, timeout=120.0, stopped=None):
     """Observe a committed release, then match bytes from its approved receiver.
 
     receive_publication is an async application transport callback, invoked with
@@ -49,6 +56,12 @@ async def finish_private_episode(*, session, expected_task, expected_run,
     the actual environment, including effects before an Unknown outcome. An
     Unknown is not proof of no effects and MUST NOT be dropped from denominators.
     The session is closed after observation, without cancelling the remote run.
+
+    `stopped`, if given, is a callable (cheap, non-blocking) that turns truthy
+    once the run can no longer publish: the caller's endpoint saw a call come
+    back not succeeded, and the kernel starts nothing more for a task with an
+    Unknown call. The wait then ends at once, exactly as a timeout would: the
+    outcome is Unknown, at the stage it was waiting in.
     """
     from savana.private_v04 import PrivateSession, PublicationReceipt
 
@@ -61,17 +74,25 @@ async def finish_private_episode(*, session, expected_task, expected_run,
         raise ValueError("explicit_approval_receiver_and_audit_required")
     if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 900:
         raise ValueError("bounded_timeout_required")
+    if stopped is not None and not callable(stopped):
+        raise ValueError("stop_signal_not_callable")
     started = time.monotonic()
     stage, status, metadata, payload = "wait_publication", "unknown", None, None
     try:
         _record(emit, {"kind": "private_wait_started", "task_id": expected_task.hex(),
               "run_id": expected_run.hex(), "root_digest": expected_root.hex(),
               "destination_digest": expected_destination.hex()})
-        async with asyncio.timeout(timeout):
-            # Within the SDK's bounded range; the kernel's own pacing is unchanged.
-            receipt = await session.wait_publication(expected_task=expected_task,
-                expected_root=expected_root, approval=approval, timeout=timeout,
-                poll_interval=POLL_INTERVAL)
+        async with asyncio.timeout(timeout) as window:
+            watch = None if stopped is None else asyncio.create_task(_end_when(stopped, window))
+            try:
+                # Within the SDK's bounded range; the kernel's own pacing is unchanged.
+                receipt = await session.wait_publication(expected_task=expected_task,
+                    expected_root=expected_root, approval=approval, timeout=timeout,
+                    poll_interval=POLL_INTERVAL)
+            finally:
+                if watch is not None:
+                    watch.cancel()
+                    await asyncio.gather(watch, return_exceptions=True)
             stage = "publication_scope"
             if (type(receipt) is not PublicationReceipt
                 or receipt.task_id != expected_task or receipt.run_id != expected_run

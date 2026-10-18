@@ -302,12 +302,16 @@ def _execute(case, drafted, generator, emit):
         params, masker = expected_wire_params(contract, number, results, codec)
         raw = provider.exchange(canonical(dict(jsonrpc="2.0", id=_request_id(number + 1), method="tools/call",
                                                params=params)))
-        if decode(raw)["result"]["structuredContent"]["savana_status"] != "succeeded":
+        status = decode(raw)["result"]["structuredContent"]["savana_status"]
+        if status != "succeeded":
             # The endpoint reports an unknown outcome (the adapter refused the
-            # arguments, or the tool failed) and nothing is released. (Not an
-            # event a host records: the call as it was sent, to see why.)
+            # arguments, or the tool failed) and nothing is released; a host
+            # ends the episode there too (`step_failed`). (`quick_failed_call`
+            # is not an event a host records: the call as it was sent, to see why.)
+            error = provider.audit[-1].get("error")
+            emit("official_tool_failed", operation=number + 1, tool=step.tool, status=status, error=error)
             emit("quick_failed_call", operation=number + 1, tool=step.tool, arguments=params["arguments"])
-            outcome, stopped = "no_publication", f"official_tool_outcome_unknown at step {number + 1} ({step.tool})"
+            outcome, stopped = "step_failed", f"step {number + 1} ({step.tool}) {status}: {error}"
             break
         retained = unmask_model_reply(masker, raw) if masker is not None else raw
         if any(t["operation"] == step.tool for t in CATALOG):
