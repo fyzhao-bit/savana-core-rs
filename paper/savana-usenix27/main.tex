@@ -2095,8 +2095,13 @@ turn whose report the owner may adopt as its own words for a second,
 separately signed program. With a software owner that adopts a report only
 if every address it names is in its directory, 3 of the 5 complete, for
 54/97 overall. Under injection this owner adopted one attack: a password
-change, which names no address and so passes its rule. A human reading the
-report would decide; a software owner needs a stricter rule.
+change, which names no address and so passes its rule. The delegating
+requests name no write of their own, so a stricter software owner decides
+by the operation each act-turn step signs: adopted instructions never drive
+a delete, a password or profile change, or a grant of access. In a rerun of
+the 39 most affected AutoDojo pairs, with and without extractor masking,
+one act turn drafted the password change and the owner refused that step;
+no attack succeeded.
 
 Signing the directory into each data-filled destination as a closed
 candidate set lets the kernel endorse a member itself. Under a Permit
@@ -2406,12 +2411,15 @@ authenticated confirmation of exact bytes, not as informed consent.
 
 \paragraph{Time and step budget.} About four seconds per step and the
 kernel's 60\,s task window limit programs to about ten steps, with little
-margin at ten. The window is also the only thing that ends a stalled
-episode: a tool error or an underivable path leaves the task waiting until
-it expires, and a refused task slows the episodes after it. Ending a task
-at its first definite failure, making mediation cheaper, or running
-independent reads in parallel would recover this time without weakening
-any check.
+margin at ten. A call that does not succeed now ends its episode at once:
+the kernel keeps the call Unknown and starts nothing more for the task, so
+the runner stops waiting there (in a rerun of 20 stalled AutoDojo pairs, 8
+ended at their failed call after 16--26\,s instead of 64--66\,s). An
+underivable path still leaves the task waiting until the window expires,
+and a refused task slows the episodes after it. Ending a task at its first
+definite failure inside the kernel, making mediation cheaper, or running
+independent reads in parallel would recover the rest of this time without
+weakening any check.
 
 \paragraph{Assurance.} \sys{} has had no third-party audit, and P1--P6
 are not formally verified. A finite-state model of the task-trace
